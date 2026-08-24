@@ -1,0 +1,67 @@
+"""Contract examples for the filesystem block-device identity owner."""
+
+use os.kernel.fs.block_device_identity_owner_v1.{
+    BlockDeviceRegionBindingV1, BlockDeviceIdentityErrorV1,
+    block_device_identity_create_v1, block_device_identity_validate_v1,
+    block_device_identity_replace_v1, block_device_identity_unmount_v1
+}
+
+fn binding(owner_id: u64, generation: u64, base_lba: u64, sectors: u64) -> BlockDeviceRegionBindingV1:
+    BlockDeviceRegionBindingV1(
+        backend_kind: 1u32, backend_owner_id: owner_id,
+        backend_generation: generation, base_lba: base_lba,
+        sector_count: sectors)
+
+describe "block device identity owner v1":
+    it "binds a create-issued seal to the exact backend and region":
+        val exact = binding(7001u64, 3u64, 2048u64, 4096u64)
+        val registration = block_device_identity_create_v1(exact).unwrap()
+        expect(block_device_identity_validate_v1(registration.seal(), exact).unwrap()).to_be(true)
+        match block_device_identity_validate_v1(
+            registration.seal(), binding(7001u64, 3u64, 2049u64, 4096u64)):
+            Err(BlockDeviceIdentityErrorV1.InvalidBinding): pass_do_nothing("expected exact-binding rejection")
+            _: fail("changed region must not validate")
+        block_device_identity_unmount_v1(registration).unwrap()
+
+    it "rejects overlapping active regions of one backend generation":
+        val first = block_device_identity_create_v1(
+            binding(7002u64, 9u64, 100u64, 50u64)).unwrap()
+        match block_device_identity_create_v1(binding(7002u64, 9u64, 149u64, 4u64)):
+            Err(BlockDeviceIdentityErrorV1.RegionConflict): pass_do_nothing("expected overlap rejection")
+            _: fail("overlapping region must be rejected")
+        block_device_identity_unmount_v1(first).unwrap()
+
+    it "requires backend generation change to use replacement":
+        val first = block_device_identity_create_v1(
+            binding(7005u64, 1u64, 10u64, 10u64)).unwrap()
+        match block_device_identity_create_v1(binding(7005u64, 2u64, 100u64, 10u64)):
+            Err(BlockDeviceIdentityErrorV1.RegionConflict): pass_do_nothing("expected generation conflict")
+            _: fail("a new backend generation must not bypass replacement")
+        block_device_identity_unmount_v1(first).unwrap()
+
+    it "invalidates old seals and copied lifecycle authority on replacement":
+        val original = binding(7003u64, 1u64, 500u64, 100u64)
+        val registration = block_device_identity_create_v1(original).unwrap()
+        val copied_registration = registration
+        val replacement = binding(7003u64, 2u64, 500u64, 100u64)
+        val next = block_device_identity_replace_v1(registration, replacement).unwrap()
+        match block_device_identity_validate_v1(copied_registration.seal(), original):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected stale prior seal")
+            _: fail("replacement must invalidate the prior seal")
+        match block_device_identity_unmount_v1(copied_registration):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected consumed lifecycle authority")
+            _: fail("copied prior close authority must be stale")
+        block_device_identity_unmount_v1(next).unwrap()
+
+    it "makes unmount single-use and invalidates observation":
+        val exact = binding(7004u64, 1u64, 900u64, 32u64)
+        val registration = block_device_identity_create_v1(exact).unwrap()
+        val copied_registration = registration
+        val seal = registration.seal()
+        block_device_identity_unmount_v1(registration).unwrap()
+        match block_device_identity_unmount_v1(copied_registration):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected single-use unmount")
+            _: fail("a copied registration must not unmount twice")
+        match block_device_identity_validate_v1(seal, exact):
+            Err(BlockDeviceIdentityErrorV1.StaleIdentity): pass_do_nothing("expected invalidated seal")
+            _: fail("unmount must invalidate the seal")
