@@ -630,3 +630,74 @@ Correcting an assumption that cost time in more than one lane here:
   (`3 compiled, 747 cached`) — see
   `stage3_native_build_and_monomorphize_segv_at_origin_main_arm64_2026-08-24.md`.
   A "nothing changed" reading from a warm build proves nothing.
+
+## 2026-08-24 (later still) — CORRECTION: the interpreted lane WORKS, and binary diffing does not
+
+Two corrections to the section above, both of which change how a compiler
+change gets verified on this host. The first is an unlock; the second is a trap.
+
+### 1. A freshly built seed runs the pure-Simple compiler end to end
+
+The section above said the deployed binary cannot compile and that
+`simple_seed lint` dies in `35.semantics/lint/raw_sffi_call.spl`. Both are true
+of the **deployed 2026-07-25 seed**. They are NOT true of a seed built from
+current source:
+
+```
+cd src/compiler_rust && cargo build --release --bin simple      # 2m08s
+target/release/simple run src/app/cli/bootstrap_main.spl native-build hello.spl
+```
+
+That **compiles, links, and the produced binary RUNS**. So this host has a
+working compile-and-run oracle for pure-Simple compiler changes, without any
+Stage-2 rebuild and without the 845s `--fresh-cache` cost. A dict fixture
+native-built this way executes and prints the right answer.
+
+The stale seed's blocker was one grammar form, not a broken tree: a multi-line
+boolean condition whose continuation line is indented to the BODY's level, e.g.
+
+```
+        if (part.starts_with("rt_") or part.starts_with("spl_")) and
+            not externs.contains(part):
+            externs.push(part)
+```
+
+The old seed reports `parse: Unexpected token: expected expression, found
+Dedent`; the current seed parses it. **Do not "fix" this by reformatting the
+sources** — a census counts **1,114 occurrences across `src/`** (top files:
+`80.driver/driver_vhdl_artifacts.spl` 41, `os/hosted/hosted_browser_renderer_process.spl`
+35, `gc_async_mut/gpu/engine2d/draw_ir_adv.spl` 26). It is an idiomatic form;
+rewriting it would be exactly the silent normalization CLAUDE.md forbids. Build
+a current seed instead.
+
+Verified end to end this way: `c9da626ec1c` was proven INERT and its replacement
+`fb7e76c489a` proven to fire, by instrumenting the gate and reading probe output
+out of the running compiler.
+
+### 2. Binary diffing is NOT a valid oracle here — do not use `cmp`
+
+**The build is not byte-reproducible.** Control experiment: same directory, same
+cold cache, pristine source vs patched source, and separately two builds whose
+source difference cannot possibly matter:
+
+| fixture | control | treatment | bytes | size |
+|---|---|---|---|---|
+| dict loop | pristine | patched | DIFFER | 71624 = 71624 |
+| **hello world** (no dict at all) | pristine | patched | **DIFFER** | 35224 = 35224 |
+
+Hello world contains no dict and is unaffected by the change under test, yet its
+bytes differ between builds. Size is stable; content is not. Build path also
+perturbs size: the identical tree built at `/tmp/wt_base` and `/tmp/wt_fix`
+produced 71616 vs 71624.
+
+So "the binary changed, therefore my fix did something" is unsound here, and so
+is the converse. Use instrumented probe output and program EXECUTION. This also
+means a byte-identical result is not automatically the warm-cache trap — check
+`hir-cache hits=` before concluding either way.
+
+### 3. `ands #0xfffffff8` does not reproduce at fixture scale
+
+Every build measured here — patched and unpatched — has **mask32 = 0**. The
+32-bit-mask defect shows up when Stage 2 compiles the compiler itself, not on a
+small dict fixture. Zero masks on a fixture is NOT evidence that a fix removed
+them, and must not be reported as such.
