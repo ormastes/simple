@@ -49,13 +49,26 @@ or `.gemini/commands` instructions. Before proceeding, confirm
 
 ### Step 2 — Update all version locations
 
-Update these 3 version sources with the new version:
+Update these **5** version sources with the new version. (Corrected 2026-08-24:
+the old table named 3 files, two of which were wrong — `src/app/cli/main_part1.spl`
+does not exist, and `src/app/cli/bootstrap_main.spl` holds no version string.
+Following it verbatim shipped a binary reporting the OLD version.)
 
 | File | What to change |
 |------|---------------|
 | `VERSION` | Entire file content: `X.Y.Z\n` |
-| `src/app/cli/main_part1.spl` | Hardcoded fallback string `"X.Y.Z"` in `get_version()` |
-| `src/app/cli/bootstrap_main.spl` | Hardcoded string `"X.Y.Z"` in `bootstrap_version()` |
+| `src/app/cli/cli_helpers.spl:17` | Hardcoded string `"X.Y.Z"` |
+| `src/app/cli/bootstrap_identity.spl:5` | Hardcoded string `"X.Y.Z"` |
+| `src/app/cli/_CliMain/args_and_os_commands.spl:79` | Hardcoded string `"X.Y.Z"` |
+| `src/app/simple_core/main.spl:18` | `val SIMPLE_CORE_VERSION_V1 = "X.Y.Z"` |
+
+Verify — this must print the NEW version 4 times and nothing else. Line numbers
+drift; the grep, not the table, is authoritative:
+
+```sh
+grep -rn '"<OLD_VERSION>"' --include='*.spl' src/    # must be empty
+grep -rn '"<NEW_VERSION>"' --include='*.spl' src/    # must list all 4 sites
+```
 
 ### Step 3 — Update CHANGELOG
 

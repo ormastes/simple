@@ -325,7 +325,7 @@ const fn avx2_f64_radix_enabled(len: usize) -> bool {
     len == AVX2_F64_RADIX_MIN_LEN
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_sort_i64_impl(values: &mut [i64]) {
     use core::arch::x86_64::{__m256i, _mm256_loadu_si256, _mm256_set1_epi64x, _mm256_storeu_si256, _mm256_xor_si256};
@@ -361,7 +361,7 @@ unsafe fn avx2_sort_i64_impl(values: &mut [i64]) {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_sort_f64_impl(values: &mut [f64]) {
     use core::arch::x86_64::{
@@ -403,7 +403,7 @@ unsafe fn avx2_sort_f64_impl(values: &mut [f64]) {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_sort_u8_impl(values: &mut [u8]) {
     use core::arch::x86_64::{__m256i, _mm256_loadu_si256, _mm256_storeu_si256};
@@ -442,32 +442,32 @@ unsafe fn avx2_sort_u8_impl(values: &mut [u8]) {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 fn avx2_sort_i64(values: &mut [i64]) {
     unsafe { avx2_sort_i64_impl(values) }
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(not(target_arch = "x86_64"))]
 fn avx2_sort_i64(values: &mut [i64]) {
     scalar_sort_i64(values);
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 fn avx2_sort_f64(values: &mut [f64]) {
     unsafe { avx2_sort_f64_impl(values) }
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(not(target_arch = "x86_64"))]
 fn avx2_sort_f64(values: &mut [f64]) {
     scalar_sort_f64(values);
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 fn avx2_sort_u8(values: &mut [u8]) {
     unsafe { avx2_sort_u8_impl(values) }
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(not(target_arch = "x86_64"))]
 fn avx2_sort_u8(values: &mut [u8]) {
     scalar_sort_u8(values);
 }
@@ -687,7 +687,7 @@ mod tests {
         assert_eq!(singleton[0].as_int(), 7);
     }
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx2_large_paths_match_scalar_results_with_scalar_numeric_fallback_and_byte_specialization() {
         if !std::arch::is_x86_feature_detected!("avx2") {
@@ -757,7 +757,7 @@ mod tests {
         assert_eq!(take_test_kernel(), Some(TestKernelPath::NeonU8Histogram));
     }
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx2_small_inputs_still_fall_back_to_scalar_kernels() {
         if !std::arch::is_x86_feature_detected!("avx2") {
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(take_test_kernel(), Some(TestKernelPath::ScalarI64));
     }
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[cfg(feature = "bench-internals")]
     #[test]
     #[ignore]
