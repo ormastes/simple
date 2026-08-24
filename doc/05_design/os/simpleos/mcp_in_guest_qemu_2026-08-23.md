@@ -13,6 +13,145 @@
 - **Context:** There is no MCP-on-SimpleOS artifact anywhere in this repo or in
   any of the 223 GitHub remote branches. This is net-new work.
 
+## STATUS UPDATE 2026-08-24 (6) — MODULE-GLOBAL INITIALIZERS NOW RUN; `tools/list` SERVES 154 TOOLS
+
+The freestanding module-initializer gap is **fixed as a general capability**,
+not worked around for MCP. Any freestanding Simple program on this lane now gets
+its module-level `val`/`var` initialized.
+
+```
+PASS — 12 assertion(s) checked, in-guest MCP answered initialize AND served a
+full 154-tool tools/list under EDK2/AAVMF real firmware via BOOTAA64.EFI on a
+FAT ESP (no -kernel, no isa-debug-exit); nonce 351a293ec531 echoed as the
+JSON-RPC id; 104 serial line(s), 1 request write(s)
+```
+rc 0. Negative control unchanged: `ERROR — nothing was checked: guest never
+printed MCP-GRAPH-ENTERING`, rc 2.
+
+### Diagnosis: emitted, never invoked, then garbage-collected
+
+Of the three possibilities — never emitted, emitted but never invoked, or
+invoked before the heap exists — it is squarely the **second**, and the evidence
+is a two-line measurement:
+
+| | count |
+|---|---|
+| `__module_init_*` symbols in the object files | **22** (incl. `__simple_call_module_inits` in `_init_all.o`) |
+| the same symbols in the linked `kernel.elf` | **0** |
+
+`inject_freestanding_module_global_init` runs unconditionally for freestanding
+targets (`native_project/compiler.rs:613-616`), so the initializers were always
+being generated. What was missing is the CALL. On hosted targets the generated
+main stub makes it — `__simple_runtime_init(); __simple_call_module_inits();
+spl_main();` (`native_project/linker.rs:846-849`) — and freestanding lanes that
+have a `crt0.S` call it from there. **This lane has neither**: Limine jumps
+straight to a Simple `_start`. With no reference, `--gc-sections` discarded the
+entire chain, and every module-level `val`/`var` sat at its zero value. Not a
+new bug: `src/os/kernel/boot/mmio.spl:75` already documents it in situ — "the
+`var _mmio_test_mode: bool = false` default above never executes" — and Step 0
+of the boot sequence hand-works-around it.
+
+### The fix, and exactly how general it is
+
+`limine_aarch64_boot_sequence()` now declares and calls the compiler's own
+`__simple_call_module_inits()`. It is a fan-out over *every linked module*, so
+this is the general capability rather than an MCP patch: the plain kernel gets
+it too (its own module globals now initialize, and its `mmio.spl` default is now
+genuinely applied, making the Step 0 workaround redundant — retained anyway, as
+belt and braces and because it must still run FIRST).
+
+**Ordering, stated because it is the hazard that bites:** the call sits after
+`mmio_disable_test_mode()` and `log_init_serial()` — an initializer is arbitrary
+Simple code, so it may touch MMIO (which would otherwise route through the fake
+test journal) and it may trap, and a trap before serial is up is an invisible
+wedge. It sits before anything that reads a module global. There is no
+allocator-ordering hazard *here* because this lane's `rt_alloc` is a bump
+allocator over a fixed physical range, live from the first instruction — **a
+lane whose allocator needs its own init must run that init before this call.**
+
+**Where the remaining generality gap lives, and it is NOT in Simple.** Every
+crt0-less freestanding lane must still make this one-line call itself. The
+systemic fix — having native-build's freestanding entry wrapper emit the call
+automatically, the way the hosted main stub already does — is a change to
+`wrap_entry_script_as_main` / the entry-closure path in `src/compiler_rust`,
+i.e. **the Rust seed, which is a different lane**. It was deliberately not
+attempted here. Knowing which side it lives on is the deliverable.
+
+### One previously-trapped symbol was newly reached; zero new externs
+
+As predicted, turning initializers on surfaced more of the runtime surface.
+Measured rather than estimated:
+
+- **New undefined symbols at link time: 0.** The linked kernel still reports 0
+  undefined; the ABI bill did not grow.
+- **Previously-trapped symbols newly REACHED at runtime: 1** — `rt_array_copy`,
+  hit by the second `tools/list`, the one that serves the full cached set. MIR
+  lowering turns `var c = arr` into `rt_array_copy(vreg)`.
+
+`rt_array_copy` is now a real implementation (shallow copy, matching
+`runtime_native.c:6960`; this lane's `RtArray` has no byte/u64-packed variants so
+the host's flag branches collapse to the i64 case). The length contract is the
+trap in it: `rt_array_new()` takes a CAPACITY and returns `len 0` with a floor of
+4, so `len` must be assigned explicitly — copying elements alone yields a
+correctly-populated buffer that every caller reads as empty.
+`rt_dict_new` was the obvious candidate for a static tool table and was **not**
+reached; it remains a trap.
+
+### Evidence
+
+Before (module globals at zero):
+```
+{"jsonrpc":"2.0","id":"...-tools","result":0}
+"serverInfo":{"name":"0","version":"0"}
+```
+After:
+```
+"serverInfo":{"name":"simple-mcp-full","version":"4.0.0"}
+tools/list #1  ->  2,025 bytes,   3 tool entries   (the `core` set)
+tools/list #2  -> 41,085 bytes, 154 tool entries   (the full cached set)
+```
+`3` on the first call is **correct by design**, not a residual defect: in `auto`
+mode the first `tools/list` serves `core` and arms a `list_changed`
+notification, and the full set comes back on the second
+(`src/app/mcp/main.spl:239-249`). The gate therefore sends `tools/list` **twice**
+and asserts the second — asserting only the first would let a kernel with
+uninitialised module globals pass, which is the very defect it must catch.
+
+### Gates after the change
+
+```
+PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64
+boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit),
+96 serial line(s) captured                                            rc 0
+
+PASS — 10 marker(s) checked in each of 2 boot paths, unified arm64 early-boot
+verified under EDK2/AAVMF pflash real firmware via Limine BOOTAA64.EFI
+`protocol: linux` ... and unchanged under legacy -kernel                rc 0
+```
+Plain kernel: 67 `[BOOT]` markers (66 + the new `MODULE-INITS-DONE`), **0
+traps**, 143 KB, still MCP-free.
+
+### A standing caution earned the hard way
+
+**A probe that exercises a symbol from a different caller than production proves
+less than it appears to.** The P9 STDOUT-PROBE was green for a full milestone
+while every Simple-level print was landing in a no-op, because the probe calls
+`print_raw` from C and production reaches `rt_print_value` from codegen. When a
+probe and production disagree about the call path, the probe is measuring
+something else. Prefer probes that enter by the production path.
+
+### Not verified by this pass
+
+- `tools/call` was not attempted; it needs the filesystem and process traps.
+- Still traps, unreached: `rt_array_sort`, `rt_dict_new`, the three numeric
+  parsers, and the 2 filesystem entries.
+- The seed-side systemic fix (auto-emitting the init call for crt0-less
+  freestanding entries) was NOT made — see above.
+- Initializer ORDER across modules is whatever `_init_all.o` fans out in; no
+  inter-module dependency ordering was tested, and a module whose initializer
+  reads another module's global could still see a zero.
+- Route B untouched, still P6-blocked. No board run.
+
 ## STATUS UPDATE 2026-08-24 (5) — M1 ACHIEVED: THE IN-GUEST MCP SERVER ANSWERS
 
 **An MCP server running inside a SimpleOS aarch64 guest, booted by real EDK2/AAVMF

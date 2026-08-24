@@ -3175,8 +3175,8 @@ SPL_P10L2_TRAP(rt_string_to_float)
 SPL_P10L2_TRAP(rt_string_to_int_lenient)
 SPL_P10L2_TRAP(rt_value_as_float)
 
-/* array primitives (2) */
-SPL_P10L2_TRAP(rt_array_copy)
+/* array primitives — rt_array_copy promoted to a real implementation below;
+ * rt_array_sort remains a trap (an ordering predicate is not a byte loop) */
 SPL_P10L2_TRAP(rt_array_sort)
 
 /* dict — a heap kind this runtime does not have (1) */
@@ -3331,6 +3331,40 @@ spl_i64 rt_index_of(spl_i64 haystack, spl_i64 needle) {
         return -1;
     }
     return rt_text_find(haystack, needle, 0);
+}
+
+/* Shallow copy of an array's backing buffer: a new array of the same length
+ * with every element copied. Matches src/runtime/runtime_native.c:6960 and
+ * simple_runtime::value::collections::rt_array_copy. This lane's RtArray has
+ * no byte/u64-packed flag variants, so the flag branches of the host version
+ * collapse to the single i64-element case.
+ *
+ * Reached because MIR lowering turns `var c = arr` into rt_array_copy(vreg)
+ * (the array-place-alias-copy fix). Promoted out of the step-2 trap block once
+ * a live boot showed the second `tools/list` — the one that serves the full
+ * cached tool set — reaching it. Returning the ORIGINAL array on a non-array
+ * input matches the host, and matters: it is what makes the alias-copy a no-op
+ * for values that are not arrays, rather than nil.
+ *
+ * NOTE the length contract: rt_array_new() takes a CAPACITY and returns an
+ * array with len 0 (and a floor of 4), so `len` must be assigned explicitly
+ * after copying — copying elements alone would produce a correctly-populated
+ * buffer that every caller reads as empty. */
+spl_i64 rt_array_copy(spl_i64 array_value) {
+    RtArray *src = rt_as_array(array_value);
+    if (!src) {
+        return array_value;
+    }
+    spl_i64 out_value = rt_array_new((spl_i64)src->len);
+    RtArray *out = rt_as_array(out_value);
+    if (!out) {
+        return out_value;
+    }
+    for (spl_u64 i = 0; i < src->len; i = i + 1) {
+        out->data[i] = src->data[i];
+    }
+    out->len = src->len;
+    return out_value;
 }
 
 spl_i64 rt_string_replace(spl_i64 value, spl_i64 old_value, spl_i64 new_value) {
@@ -3494,7 +3528,8 @@ static void *const g_p10_keepalive[] = {
     (void *)rt_string_to_float, (void *)rt_string_to_int_lenient,
     (void *)rt_string_to_lower, (void *)rt_string_to_upper,
     (void *)rt_text_find, (void *)rt_value_as_float,
-    /* array primitives (2) */
+    /* array primitives — rt_array_copy promoted to a real implementation below;
+ * rt_array_sort remains a trap (an ordering predicate is not a byte loop) */
     (void *)rt_array_copy, (void *)rt_array_sort,
     /* dict — a heap kind this runtime does not have (1) */
     (void *)rt_dict_new,

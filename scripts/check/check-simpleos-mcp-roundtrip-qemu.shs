@@ -58,6 +58,12 @@ NONCE=${MCP_NONCE:-$(od -An -tx1 -N6 /dev/urandom | tr -d ' \n')}
 [ -n "$NONCE" ] || oops "could not generate a nonce"
 
 REQ='{"jsonrpc":"2.0","id":"'$NONCE'","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"roundtrip-gate","version":"1"}}}'
+# tools/list is sent TWICE on purpose. In "auto" mode the first call serves the
+# small `core` set and arms a list_changed notification; the full cached set
+# comes back on the second (src/app/mcp/main.spl:239-249). Asserting only the
+# first would let a kernel with uninitialised module globals pass, which is
+# exactly the defect this gate must catch.
+REQ2='{"jsonrpc":"2.0","id":"'$NONCE'-tools","method":"tools/list","params":{}}'
 
 QEMU_ARGS="-M virt -cpu cortex-a72 -m 512M"
 QEMU_ARGS="$QEMU_ARGS -drive if=pflash,format=raw,file=$ART/AAVMF_CODE.fd,readonly=on"
@@ -95,10 +101,10 @@ while [ "$i" -lt 1200 ]; do
     if grep -q 'SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-ENTERING' "$OUT" 2>/dev/null; then
         k=0
         while [ "$k" -lt 4 ]; do
-            printf '%s\n' "$REQ" > "$IN"
+            printf '%s\n%s\n%s\n' "$REQ" "$REQ2" "$REQ2" > "$IN"
             WROTE=$((WROTE + 1))
             sleep 2
-            if grep -q "\"id\":\"$NONCE\"" "$OUT" 2>/dev/null; then break; fi
+            if grep -q "\"id\":\"$NONCE-tools\"" "$OUT" 2>/dev/null; then break; fi
             k=$((k + 1))
         done
         break
@@ -147,4 +153,30 @@ ASSERTED=$((ASSERTED + 1))
 grep -q '\[TRAP\]' "$OUT" && fail "a named runtime trap fired during the round trip: $(grep -m1 '\[TRAP\]' "$OUT")"
 ASSERTED=$((ASSERTED + 1))
 
-pass "$ASSERTED assertion(s) checked, in-guest MCP answered initialize under EDK2/AAVMF real firmware via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit); nonce $NONCE echoed as the JSON-RPC id; $LINES serial line(s), $WROTE request write(s)"
+# The guest must have run its module-global initializers. Without this the
+# server still answers initialize, but every module-level static reads 0 —
+# serverInfo comes back {"name":"0","version":"0"} and tools/list returns
+# `"result":0`. See the design doc's 2026-08-24 (6) update.
+grep -q 'SIMPLEOS-AARCH64-LIMINE-MODULE-INITS-DONE' "$OUT" || fail "guest never ran module-global initializers"
+ASSERTED=$((ASSERTED + 1))
+
+case "$RESP" in
+    *'"serverInfo":{"name":"0"'*) fail "serverInfo reads module-global zeros; module initializers did not take effect: $RESP" ;;
+esac
+ASSERTED=$((ASSERTED + 1))
+
+# Full tools/list: the SECOND response for the -tools id.
+TOOLS=$(grep "\"id\":\"$NONCE-tools\"" "$OUT" 2>/dev/null | sed -n 2p || true)
+[ -n "$TOOLS" ] || fail "no second tools/list response for id $NONCE-tools (the full cached set)"
+ASSERTED=$((ASSERTED + 1))
+
+case "$TOOLS" in
+    *'"result":0'*) fail "tools/list returned the module-global zero instead of a payload: $TOOLS" ;;
+esac
+ASSERTED=$((ASSERTED + 1))
+
+TOOL_COUNT=$(printf '%s' "$TOOLS" | grep -o '{"name":"' | wc -l | tr -d ' ')
+[ "$TOOL_COUNT" -ge 100 ] || fail "full tools/list carried only $TOOL_COUNT tool entries; expected the full set (>=100)"
+ASSERTED=$((ASSERTED + 1))
+
+pass "$ASSERTED assertion(s) checked, in-guest MCP answered initialize AND served a full $TOOL_COUNT-tool tools/list under EDK2/AAVMF real firmware via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit); nonce $NONCE echoed as the JSON-RPC id; $LINES serial line(s), $WROTE request write(s)"
