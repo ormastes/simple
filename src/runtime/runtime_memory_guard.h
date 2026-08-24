@@ -189,6 +189,14 @@ static int rt_mem_guard_free_sampled(void* ptr) {
 static void* rt_mem_guard_alloc_sampled(size_t size) { (void)size; return NULL; }
 static int rt_mem_guard_is_slot(void* ptr) { (void)ptr; return 0; }
 static int rt_mem_guard_free_sampled(void* ptr) { (void)ptr; return 0; }
+/* Both realloc paths -- runtime_memory.c (hosted/JIT) and runtime_native.c
+ * (native/AOT) -- call rt_mem_guard_find unconditionally; only the *result* is
+ * runtime-gated (`if (rt_mem_guard_is_slot(ptr))` / `slot ? slot->size : 0`),
+ * so the call still has to COMPILE here. Without this stub the C runtime does
+ * not build at all on Windows: `implicit declaration of function
+ * 'rt_mem_guard_find'` then `initialization of 'RtMemGuardSlot *' from 'int'`.
+ * Returning NULL is the correct answer when no allocation is ever sampled. */
+static RtMemGuardSlot* rt_mem_guard_find(void* ptr) { (void)ptr; return NULL; }
 
 #endif /* RT_MEM_GUARD_AVAILABLE */
 
