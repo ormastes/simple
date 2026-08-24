@@ -1486,3 +1486,65 @@ a new cache DIRECTORY, so nothing can be reused), and every log reads
 `1 compiled, 0 cached` for the fixtures and `750 compiled, 0 cached` for both
 Stage 2 builds. Any future confirming build must keep that property or pass
 `--fresh-cache`, or it will measure the previous binary.
+
+## 2026-08-24 (final) — MEASURED: dispatch succeeds, and this ONE guard was hiding THREE defects
+
+Both instruments landed in `79a488cceb4` and measured on an **admitted** Stage 2
+built from that exact tree with `--fresh-cache`
+(`750 compiled, 0 cached`, sha256 `10e29a5474ad5100b0b8bf8d71d99a301d64a776aa0c69d7fa250e69d119a1f3`,
+provenance `pure-simple`, `explicit-full-bootstrap-stage2-trust-root`).
+
+### Result 1 — dispatch SUCCEEDS on a self-compiled Stage 2
+
+The two-disc probe compares the incoming discriminant against the discs of
+LOCALLY constructed variants, rebuilt exactly as the dispatch sites at `:1102`
+and `:721` build them:
+
+```
+[mir-stmt-caller] before disc=2163764024 ref_expr=4119164143 ref_let=2163764024 hits_expr=no  hits_let=yes   # val a = 1
+[mir-stmt-caller] before disc=4119164143 ref_expr=4119164143 ref_let=2163764024 hits_expr=yes hits_let=no    # print(a)
+```
+
+Both hit, and the reference discs are byte-identical to the interpreter's. So
+**(b) "dispatch failed into `case _: ()`" is eliminated and (a) is confirmed** —
+this settles by measurement the question that was correctly retracted as
+unproven earlier. The disc machinery is healthy on Stage 2.
+
+### Result 2 — three distinct defects behind one message
+
+Surfacing the swallowed errors splits the single
+`0 MIR instructions` verdict into three unrelated failures:
+
+| fixture | now visible | reading |
+|---|---|---|
+| `fn main():` | **FATAL** `E-SFFI-016: missing return in non-unit function 'main'` | a **UNIT** `main` is misclassified as **non-unit**. Dispatch succeeded; the handler bailed on a fatal error that was previously never printed. |
+| `fn main() -> i64: return 7` | `0 errors recorded` + 0 instructions, `hits_expr=yes` | a genuinely **SILENT emission failure** — dispatch succeeded, nothing was recorded, nothing was emitted. |
+| `fn helper() -> i64: …` + `fn main(): print(helper())` | rc=**139**, no output at all | a **third** failure that appears only once a second function exists. |
+
+The `0 errors recorded` line is what makes rows 1 and 2 distinguishable; without
+it both look identical from outside. That is why the helper prints it instead of
+staying quiet on an empty list.
+
+### The interpreted control, per row
+
+Row 2's fixture, byte-identical, built by the seed INTERPRETING
+`src/compiler/**`: **rc=0, and the binary exits 7 — correct.** So the same source
+that Stage 2 silently drops produces correct code one engine over. The
+interpreted/self-compiled split established earlier holds per-fixture, not just
+in aggregate.
+
+### Why `E-SFFI-016` is the most actionable of the three
+
+It is a fatal, named, first-party diagnostic pointing at return-type
+classification of the entry function — `fn main():` is unit and is being read as
+non-unit. That is a concrete claim about one slot's value, in the same
+wrong-kind-of-value family as the rest of this cluster, and it is now visible to
+anyone who reruns the guard. Rows 2 and 3 need their own lanes.
+
+### Cost note
+
+Both instruments were landed in one build deliberately: a `--fresh-cache`
+Stage 2 is ~845 s of compile, and paying that twice to ask two questions would
+have been waste. Instrument 1 runs only where the process is already about to
+`rt_exit(1)`; instrument 2 is behind an env gate that is off by default. Neither
+changes behaviour on any passing path.
