@@ -74,9 +74,17 @@ pub fn enabled() -> bool {
 fn init() -> bool {
     let on = std::env::var("SIMPLE_PERF_COUNTERS").is_ok_and(|v| !v.is_empty() && v != "0");
     if on && !ATEXIT_REGISTERED.swap(true, Ordering::Relaxed) {
+        // See dispatch_profile::init -- `libc` is unix-only in Cargo.toml, so
+        // the at-exit hook is cfg-gated. Report rather than silently collect
+        // counters that would never be dumped.
+        #[cfg(unix)]
         unsafe {
             libc::atexit(dump_at_exit);
         }
+        #[cfg(not(unix))]
+        eprintln!(
+            "[simple] SIMPLE_PERF_COUNTERS ignored: the at-exit counter dump is not wired on this platform"
+        );
     }
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on

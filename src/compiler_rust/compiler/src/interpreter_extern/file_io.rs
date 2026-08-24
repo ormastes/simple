@@ -444,9 +444,17 @@ pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
     if target.as_os_str().is_empty() {
         return Ok(Value::Int(-1));
     }
+    // The `return` below used to be a bare statement, which does NOT exclude
+    // the rest of the body from compilation -- so on Windows the tail still
+    // referenced `file`, which is unbound there and resolved to the `file!`
+    // macro (E0423). Each arm is now a block, so the non-unix build contains
+    // only the early return and the unix build is byte-for-byte what it was.
     #[cfg(not(unix))]
-    return Ok(Value::Int(-1));
+    {
+        return Ok(Value::Int(-1));
+    }
     #[cfg(unix)]
+    {
     let file = {
         let parent = match target.parent() { Some(value) => value, None => Path::new(".") };
         let root = CString::new(if target.is_absolute() { "/" } else { "." }).expect("fixed path");
@@ -482,6 +490,7 @@ pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
     files.0 += 1;
     files.1.insert(handle, file);
     Ok(Value::Int(handle))
+    }
 }
 
 fn snapshot_int(args: &[Value], index: usize) -> Option<i64> {

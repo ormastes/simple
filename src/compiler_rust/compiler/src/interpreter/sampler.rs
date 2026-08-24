@@ -90,6 +90,13 @@ fn init() -> bool {
             .and_then(|v| v.parse().ok())
             .filter(|v: &i64| *v >= 100)
             .unwrap_or(10_000);
+        // SIGPROF + setitimer are POSIX-only, and `libc` is a
+        // [target.'cfg(unix)'.dependencies] entry, so this whole arming
+        // sequence must be cfg-gated or the crate does not compile on Windows.
+        // There is no Windows equivalent wired up: the sampler simply never
+        // fires there, which `render()` reports honestly as 0 samples rather
+        // than pretending to have profiled anything.
+        #[cfg(unix)]
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = on_sigprof as usize;
@@ -101,6 +108,8 @@ fn init() -> bool {
             libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
             libc::atexit(dump_at_exit);
         }
+        #[cfg(not(unix))]
+        let _ = us;
     }
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on
@@ -212,6 +221,8 @@ fn bump(table: &'static [Slot], key: *mut u8, len: usize, incl: bool) -> bool {
     false
 }
 
+// Only referenced by the cfg(unix) sigaction arming in `init`.
+#[cfg(unix)]
 extern "C" fn on_sigprof(_sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
     TOTAL_SAMPLES.fetch_add(1, Ordering::Relaxed);
     let d = DEPTH.load(Ordering::Acquire).min(STACK_CAP);
@@ -296,6 +307,8 @@ pub fn render() -> String {
     out
 }
 
+// Registered through libc::atexit, which only happens under cfg(unix).
+#[cfg(unix)]
 extern "C" fn dump_at_exit() {
     unsafe {
         let zero = libc::timeval { tv_sec: 0, tv_usec: 0 };
