@@ -351,3 +351,88 @@ the handle was **stored into** `type_` upstream. `type_: Some(` and
 **Producer NOT located** — that is the next piece of work, and it is plausibly
 the same root as `9854efed570` (`if val` binds the Option handle), whose
 lowering fix is still in flight in a sibling lane.
+
+## Running the reproducer, and two harness traps that cost this lane ~90 minutes
+
+### The reproducer is only 1 minute if the ENVIRONMENT is faithful
+
+The six-line file above reproduces both the (fixed) monomorphize fault and the
+current `aot:lower_to_mir` frontier in about a minute instead of the ~15 a full
+Stage 3 takes. The file is the easy half; the environment is the hard half, and
+getting it wrong is what made an earlier lldb replay diverge and get discarded.
+
+Rebuild the invocation from `stage3-command.transcript`, which records
+everything needed in length-prefixed form:
+
+* the **5 `host-env` vars** — `HOME`, `PATH`, `TMPDIR`, `LC_ALL`, `LANG`, where
+  `HOME`/`TMPDIR` are the per-stage `stage3-home` / `stage3-tmp` dirs;
+* **all 23 `explicit-env` records**, of which `SIMPLE_BINARY` is the one most
+  easily missed — omitting it, or using your own `HOME`, makes the run fail at
+  HIR lowering with errors the real run does not have, i.e. it diverges before
+  it can reach the fault and proves nothing;
+* `cwd`, the executable, and the argv list.
+
+Reproduce `command-snapshot.shs`'s sandbox exactly —
+`env -i HOME/PATH/TMPDIR/LC_ALL/LANG /bin/sh -c '…export explicit envs…; exec "$@"'`
+— and wrap only the executable in `lldb --batch`. Point
+`SIMPLE_MEM_SNAPSHOT_FILE`, `SIMPLE_COMPILER_PHASE_PROFILE_FILE` and
+`SIMPLE_BUILD_PROGRESS_EVENTS` at scratch paths, and give the run its own
+`--cache-dir`, `HOME` and `TMPDIR` so it cannot perturb a real lane.
+
+Useful lldb command list (`process launch`, not `run`, which aliases
+shell-expanded args): `thread backtrace all`, `register read`,
+`image lookup -va $pc`, `disassemble --pc -c 24`, `disassemble --frame`, and
+**`process save-core --style modified-memory <path>`** — the core is what let
+the Option handle be read straight out of memory. Put the same list on `-k` so
+it also runs when the process dies. `/cores` is root-owned here, so a plain
+core dump is not an option; lldb is.
+
+**Confirm the replay reaches the same phase and faults the same way before
+reading anything into the backtrace.** A replay that behaves differently is not
+evidence about the real run.
+
+This session's working scripts were `repro2_run.sh` (reproducer),
+`replay_lldb.sh` (full Stage-3 replay under lldb) and `chain.sh`
+(stage2 -> admission -> stage3) under the session scratchpad. Those paths are
+session-local and are gone; the recipe above is the durable part.
+
+### Trap 1 — the warm object cache does NOT invalidate on a source change
+
+Measured, twice: after a real edit to `statements.spl`, a normal rebuild
+produced a **byte-identical** binary (`cmp` rc=0, `3 compiled, 747 cached`).
+A deliberate syntax-error probe proved the build *does* re-parse the edited file
+("failed to parse … during discovery"), so parsing is fresh while codegen is
+served from a stale object. Only `--fresh-cache` picked the edit up
+(`750 compiled, 0 cached`, 845 s), and only then did the binary's sha256 change.
+
+Consequence: **validating a compiler-source fix on a warm cache measures the OLD
+binary**, and the natural conclusion — "my fix does nothing" — is wrong. Any
+negative result about a compiler-source change that was not taken on a cold
+cache should be re-taken before it is believed.
+
+### Trap 2 — Stage 3's silent `rc=1` is NOT a dirty git index
+
+`--resume-stage3-from-admitted` can exit **1 having printed absolutely nothing**
+(empty log, md5 `d41d8cd98f00b204e9800998ecf8427e`). The standing explanation —
+a dirty git index, "never `git add`" — is **wrong**, and a clean tree does not
+fix it.
+
+Traced through the `portable-session-exec.pl` re-exec, the last thing that runs
+is:
+
+```
+cmp -s <stage3>/source-inputs-before.txt <stage3>/recovery-threads1/source-preflight.<pid>
+```
+
+`source-inputs-before.txt` is recorded when Stage 2 is admitted. If the source
+tree has moved since (a rebase, a `reset --hard`, a landed commit), the compare
+fails and the script exits 1 with no diagnostic.
+
+* **Fix:** re-run **stage 2 -> planner-admission-v2 -> resume** on the *current*
+  tree so the snapshot matches. Do not try to clean the working tree.
+* Deleting `source-inputs-before.txt` does **not** work either, but it is still
+  worth knowing that it converts the silence into a loud
+  `ERROR — nothing was checked (required Stage-2 input missing …)`, which is how
+  the preflight was identified in the first place.
+* A dirty *worktree* is tolerated as long as it is stable across the run — the
+  gate compares its own before/after fingerprints.
