@@ -594,3 +594,15 @@ say `status=pass`. None of those three files is on the Stage-2 build path
 (`SIMPLE_NATIVE_BUILD_RUST=1` never executes `src/compiler/50.mir/**`), so the
 binary itself is sound evidence; it is simply not an *admitted* Stage 2. A
 re-run on a quiescent tree would produce the receipt.
+
+### Discriminator for the new blocker: the generator is NOT missing an arm
+
+`hc_enc_hir_type_kind` (`hir_codec.spl:5160-5378`) has **28** `case` arms: 27
+concrete ones plus the `case _` catch-all. `enum HirTypeKind`
+(`src/compiler/20.hir/hir_types.spl:507`) has **27** variants. Every variant is
+covered, so this is NOT a codec-completeness / generator gap — the match
+DISPATCHES to the catch-all for a value that one of the 27 arms should have
+matched. The next lane should treat it as a match/enum-discriminant problem in
+the Stage-2 binary (nil or otherwise erased `HirTypeKind` reaching the encoder,
+or a mis-tagged payload), not as "regenerate the codec", which the error message
+itself misleadingly suggests.
