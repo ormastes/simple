@@ -10,6 +10,7 @@ extern fn calloc(count: i64, size: i64) -> i64
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 extern fn abort()
+extern fn spl_f64_to_bits(value: f64) -> i64
 
 pub fn __simple_runtime_init() -> i64:
     return 0
@@ -46,7 +47,17 @@ pub fn rt_pool_safepoint() -> i64:
     # simple-core bootstrap execution is single-threaded.
     return 0
 
-pub fn rt_value_float(raw_bits: i64) -> i64:
+# ABI: the parameter is an f64, NOT the raw i64 bit pattern. Every backend
+# emits the call that way -- RuntimeFuncSpec::new("rt_value_float", &[F64],
+# &[I64]) in codegen/runtime_sffi.rs, and the LLVM backend builds
+# `call @rt_value_float(double ...)`. The C runtime (runtime_native.c:2484) and
+# the Rust runtime (value/sffi/value_ops.rs:19) both already take a double; this
+# pure-Simple archive was the last outlier, so an external caller passed the
+# value in v0/%xmm0 while this definition read x0/%rdi. Same defect the C
+# runtime carried until 2026-08-10, one lane over -- see
+# doc/08_tracking/bug/native_lane_prints_every_f64_as_denormal_garbage_2026-08-10.md.
+pub fn rt_value_float(value: f64) -> i64:
+    val raw_bits = spl_f64_to_bits(value)
     return (raw_bits & -8) | 2
 
 pub fn rt_value_bool(value: i64) -> i64:
