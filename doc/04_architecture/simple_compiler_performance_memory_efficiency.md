@@ -821,3 +821,11 @@ nonblank line at or above the header indentation terminates that interval;
 sibling methods must never share identifier-frequency or declaration storage.
 Diagnostic locations retain original source coordinates and may not be derived
 from trimmed text.
+
+# Feature-document index ownership
+
+The usage-index renderer owns an append-only fragment array and performs exactly
+one final join. Category lookup owns only stable integer bucket IDs; category
+membership lives in indexed nested arrays so growth never crosses a dictionary
+value-copy boundary. A parallel category-name array is the authoritative
+first-encounter ordering surface.

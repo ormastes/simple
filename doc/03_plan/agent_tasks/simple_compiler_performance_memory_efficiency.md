@@ -1721,3 +1721,15 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   and exact one-based start/end columns.
 - No manual execution was run under the user override; static semantic,
   performance, and evidence review is required before sync.
+
+# Completed tranche: linear feature usage index (2026-08-24)
+
+- Replaced growing immutable Markdown prefixes with fragments and one join.
+- Replaced dictionary-held growing arrays with stable bucket IDs and indexed
+  nested-array mutation.
+- Preserved first-category order, within-category feature order, status/ID
+  defaults, describe/test counts, output path, and Markdown schema.
+- Replaced whole-path splitting with one last-slash slice.
+- Added paired rendering/path oracles and a canonical manual.
+- No manual execution was run under the user override; static semantic,
+  performance, and fixture review is required before sync.

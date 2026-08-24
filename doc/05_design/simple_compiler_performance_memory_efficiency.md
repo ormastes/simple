@@ -1119,3 +1119,13 @@ do not end the function, while deeper nested blocks remain inside its frequency
 table. The outer driver resumes at the boundary so a sibling method establishes
 its own interval. JSON finds the declaration name in the original line, not
 `trim()`, preserving indentation in `col` and `end_col`.
+
+# Usage-index rendering design
+
+`category_to_bucket: {text: i64}`, `category_names: [text]`, and
+`category_buckets: [[FeatureFileInfo]]` are updated in one input traversal.
+Existing categories push directly through their bucket index; new categories
+append their name and first-entry bucket together. Rendering walks the two
+parallel arrays, pushes complete Markdown lines into `fragments`, and writes
+`fragments.join("")`. `extract_index_filename` slices after the final `/` and
+then applies the existing suffix rules.

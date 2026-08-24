@@ -3475,3 +3475,20 @@ line whose indentation is less than or equal to it. Each sibling is analyzed
 once in its own scope. JSON columns use the original source line rather than a
 trimmed copy, so indented declarations report exact one-based spans. No runtime
 measurement is claimed under the no-verification override.
+
+# 2026-08-24 follow-up: feature usage-index construction
+
+The feature-document usage index appended every header and row to one immutable
+Markdown text, cumulatively recopying the complete rendered prefix. It also
+stored arrays directly in a category dictionary, copied each array out, pushed,
+and wrote it back. For `R` rendered bytes and a category with `k` entries, these
+patterns risked quadratic copied payload and repeated COW bucket copies.
+
+The generator now appends independent Markdown fragments and joins once. A
+`{category: bucket_index}` map points into `[[FeatureFileInfo]]`, so repeated
+members mutate an indexed nested array directly. Category names are retained in
+first-encounter order, preserving section and within-category input order.
+Filename extraction uses one last-slash lookup rather than allocating every path
+segment. Under the native join contract, construction is linear in input
+metadata plus rendered output size, excluding file I/O. No timing/RSS
+measurement was run under the user override.
