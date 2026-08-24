@@ -167,6 +167,16 @@ current-head research reconciliation.
   generator output in temporary roots, and the combined gate includes a
   hand-edit-sensitive `hir_children.spl` comparison.
 
+## Completed canonical lint-line migrations
+
+- TYPE001/TYPE002, LEADOP001, and const-reference-default consume the one
+  request-owned line snapshot.
+- Source-taking APIs remain compatibility adapters for standalone callers.
+- Exact finding parity fixtures pin code, operation, line, and message fields.
+- Next candidate: bare-primitive rules; raw-RT
+  requires a separate lexical/import evidence snapshot because it also owns
+  byte-offset fixes and cannot be migrated mechanically.
+
 ## Completed VHDL deterministic-sort tranche
 
 - Replaced quadratic catalog text and SymbolId selection scans with stable
