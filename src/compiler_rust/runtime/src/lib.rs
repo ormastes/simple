@@ -54,6 +54,7 @@ pub mod monoio_waker;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 pub mod vulkan_graphics_runtime;
+#[cfg(feature = "metal")]
 pub mod metal_graphics_runtime;
 
 /// Stable metadata queried by the core runtime before it admits this artifact
@@ -73,7 +74,7 @@ pub extern "C" fn rt_simple_gpu_provider_backend_bits() -> i64 {
     if cfg!(feature = "vulkan") {
         bits |= 2;
     }
-    if cfg!(target_os = "macos") {
+    if cfg!(all(target_os = "macos", feature = "metal")) {
         bits |= 4;
     }
     bits
