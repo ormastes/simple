@@ -12,75 +12,96 @@ mod literals;
 mod math;
 
 impl<'a> Parser<'a> {
-    /// True when the current `unsafe`/`danger` identifier introduces a lexical
-    /// block rather than an ordinary function call. Capability headers are
-    /// syntax-only in the seed AST, but the trailing colon must be observed
-    /// before committing to the block grammar.
-    pub(crate) fn is_unsafe_block_start(&mut self) -> bool {
-        let TokenKind::Identifier { name, .. } = &self.current.kind else {
-            return false;
-        };
-        if name != "unsafe" && name != "danger" {
-            return false;
-        }
-        if self.peek_is(&TokenKind::Colon) {
-            return true;
-        }
+    pub(crate) fn unsafe_block_header_is_valid(&mut self) -> bool {
         if !self.peek_is(&TokenKind::LParen) {
             return false;
         }
-
-        let mut depth = 0usize;
-        let mut offset = 1usize;
+        let mut offset = 2usize;
+        if self.peek_nth(offset).kind == TokenKind::RParen {
+            return self.peek_nth(offset + 1).kind == TokenKind::Colon;
+        }
         loop {
-            match self.peek_nth(offset).kind {
-                TokenKind::LParen => depth += 1,
-                TokenKind::RParen => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return matches!(self.peek_nth(offset + 1).kind, TokenKind::Colon);
-                    }
-                }
-                TokenKind::Eof => return false,
-                _ => {}
+            let argument = match self.peek_nth(offset).kind {
+                TokenKind::Identifier { name, .. } if name == "reason" || name == "capabilities" => name,
+                _ => return false,
+            };
+            offset += 1;
+            if self.peek_nth(offset).kind != TokenKind::Colon {
+                return false;
             }
             offset += 1;
+            if argument == "reason" {
+                if !matches!(
+                    self.peek_nth(offset).kind,
+                    TokenKind::String(_) | TokenKind::FString(_) | TokenKind::RawString(_)
+                ) {
+                    return false;
+                }
+                offset += 1;
+            } else {
+                if self.peek_nth(offset).kind != TokenKind::LBracket {
+                    return false;
+                }
+                offset += 1;
+                if self.peek_nth(offset).kind != TokenKind::RBracket {
+                    loop {
+                        if !matches!(self.peek_nth(offset).kind, TokenKind::Identifier { .. }) {
+                            return false;
+                        }
+                        offset += 1;
+                        if self.peek_nth(offset).kind == TokenKind::RBracket {
+                            break;
+                        }
+                        if self.peek_nth(offset).kind != TokenKind::Comma {
+                            return false;
+                        }
+                        offset += 1;
+                        if self.peek_nth(offset).kind == TokenKind::RBracket {
+                            break;
+                        }
+                    }
+                }
+                offset += 1;
+            }
+            if self.peek_nth(offset).kind == TokenKind::RParen {
+                return self.peek_nth(offset + 1).kind == TokenKind::Colon;
+            }
+            if self.peek_nth(offset).kind != TokenKind::Comma {
+                return false;
+            }
+            offset += 1;
+            if self.peek_nth(offset).kind == TokenKind::RParen {
+                return self.peek_nth(offset + 1).kind == TokenKind::Colon;
+            }
         }
     }
 
-    /// Parse a lexical unsafe block in either statement or value-producing
-    /// expression position. Consuming the capability header directly avoids
-    /// constructing and then discarding a fake runtime call expression.
-    pub(crate) fn parse_unsafe_block_expression(&mut self) -> Result<Expr, ParseError> {
-        self.advance(); // `unsafe` or `danger`
-        if self.check(&TokenKind::LParen) {
-            let mut depth = 0usize;
-            loop {
-                match self.current.kind {
-                    TokenKind::LParen => depth += 1,
-                    TokenKind::RParen => {
-                        depth -= 1;
-                        self.advance();
-                        if depth == 0 {
-                            break;
-                        }
-                        continue;
-                    }
-                    TokenKind::Eof => {
-                        return Err(ParseError::unexpected_token(
-                            "closing ')' in unsafe capability header",
-                            "end of file",
-                            self.current.span,
-                        ));
-                    }
-                    _ => {}
+    pub(crate) fn parse_unsafe_block_primary(&mut self) -> Result<Expr, ParseError> {
+        self.advance();
+        if self.check(&TokenKind::Colon) {
+            self.advance();
+            return self.parse_block().map(|block| Expr::UnsafeBlock(block.statements));
+        }
+
+        self.expect(&TokenKind::LParen)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.current.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::Eof => {
+                    return Err(ParseError::unexpected_token(
+                        "')' in unsafe block header",
+                        "end of file",
+                        self.current.span,
+                    ));
                 }
-                self.advance();
+                _ => {}
             }
+            self.advance();
         }
         self.expect(&TokenKind::Colon)?;
-        let block = self.parse_block()?;
-        Ok(Expr::UnsafeBlock(block.statements))
+        self.parse_block().map(|block| Expr::UnsafeBlock(block.statements))
     }
 
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -134,16 +155,18 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Expr::Tuple(vec![]))
             }
-            TokenKind::Identifier { name, .. }
-                if (name == "unsafe" || name == "danger") && self.is_unsafe_block_start() =>
-            {
-                self.parse_unsafe_block_expression()
-            }
             TokenKind::Identifier { ref name, .. }
                 if name == "tensor"
                     && matches!(self.peek_next().kind, TokenKind::Identifier { .. }) =>
             {
                 self.parse_tensor_literal_from_ident()
+            }
+            TokenKind::Identifier { ref name, .. }
+                if (name == "unsafe" || name == "danger")
+                    && (self.peek_is(&TokenKind::Colon)
+                        || self.unsafe_block_header_is_valid()) =>
+            {
+                self.parse_unsafe_block_primary()
             }
             TokenKind::Result
             | TokenKind::Identifier { .. }

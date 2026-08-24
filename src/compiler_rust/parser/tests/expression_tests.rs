@@ -91,23 +91,41 @@ fn test_danger_block_is_unsafe_boundary_not_call() {
 }
 
 #[test]
-fn capability_scoped_unsafe_block_is_value_expression() {
-    let module =
-        parse("fn digest() -> i64:\n    val result = unsafe(capabilities: [ffi]):\n        raw_digest()\n    result\n")
-            .unwrap();
+fn unsafe_block_is_valid_in_value_position_and_calls_stay_calls() {
+    let module = parse("fn digest() -> i64:\n    val result = unsafe(capabilities: [ffi]):\n        raw_digest()\n    result\n")
+        .expect("unsafe capability block should parse as an initializer");
     let Node::Function(function) = &module.items[0] else {
-        panic!("Expected function");
+        panic!("expected function");
     };
-    let Node::Let(binding) = &function.body.statements[0] else {
-        panic!("Expected val binding");
+    let Node::Let(decl) = &function.body.statements[0] else {
+        panic!("expected value declaration");
     };
-    assert!(matches!(binding.value.as_ref(), Some(Expr::UnsafeBlock(_))));
+    assert!(matches!(decl.value.as_ref(), Some(Expr::UnsafeBlock(_))));
 
-    let ordinary_call = parse("val result = unsafe(1)").unwrap();
-    let Node::Let(binding) = &ordinary_call.items[0] else {
-        panic!("Expected val binding");
-    };
-    assert!(matches!(binding.value.as_ref(), Some(Expr::Call { .. })));
+    parse("unsafe(reason: \"ffi boundary\", capabilities: [ffi]):\n    pass\n")
+        .expect("reason plus capabilities header should parse");
+
+    for source in ["unsafe(1)", "unsafe(reason)", "danger(capabilities)"] {
+        let ordinary = parse(source).expect("ordinary contextual call should parse");
+        assert!(matches!(ordinary.items[0], Node::Expression(Expr::Call { .. })));
+    }
+
+    for source in [
+        "if unsafe(flag):\n    pass\n",
+        "while danger(ok):\n    pass\n",
+        "for x in unsafe(items):\n    pass\n",
+        "match danger(value):\n    case _: pass\n",
+    ] {
+        parse(source).expect("an enclosing construct must retain its own colon");
+    }
+
+    for source in [
+        "unsafe(,):\n    pass\n",
+        "unsafe(capabilities: [ffi raw_ptr]):\n    pass\n",
+        "unsafe(reason: \"x\" capabilities: [ffi]):\n    pass\n",
+    ] {
+        assert!(parse(source).is_err(), "malformed header unexpectedly parsed: {source}");
+    }
 }
 
 #[test]
