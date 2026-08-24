@@ -682,10 +682,13 @@ pub(package) fn fd_descriptor_commit_v1(
             return Err("descriptor-reservation-corrupt")
         _fd_finish_transaction_v1(index)
         val inherited = reserved.retained.len() as u32
-        if not _fd_unlock_v1(): return Err("serialization-unavailable")
-        return Ok(FdDescriptorCommitV1(
+        var receipt = FdDescriptorCommitV1(
             inherited_count: inherited, descriptor: -1, displaced: false,
-            displaced_close: nil))
+            complete: true, failure: "", displaced_close: nil)
+        if not _fd_unlock_v1():
+            receipt.complete = false
+            receipt.failure = "descriptor-unlock-failed"
+        return Ok(receipt)
 
     if reserved.kind == FdDescriptorTransactionKindV1.Close:
         val target = reserved.target_fd
@@ -711,11 +714,19 @@ pub(package) fn fd_descriptor_commit_v1(
             _fd_descriptor_owner_v1.quarantined = true
             _ = _fd_unlock_v1()
             return Err("ofd-release-failed")
+        val close_begin = close_result.unwrap()
         _fd_finish_transaction_v1(index)
-        if not _fd_unlock_v1(): return Err("serialization-unavailable")
-        return Ok(FdDescriptorCommitV1(
+        var receipt = FdDescriptorCommitV1(
             inherited_count: 0u32, descriptor: target, displaced: true,
-            displaced_close: Some(close_result.unwrap())))
+            complete: close_begin.complete, failure: close_begin.failure,
+            displaced_close: Some(close_begin))
+        if not _fd_unlock_v1():
+            receipt.complete = false
+            receipt.failure = if receipt.failure == "":
+                "descriptor-unlock-failed"
+            else:
+                receipt.failure + ";descriptor-unlock-failed"
+        return Ok(receipt)
 
     val target = reserved.target_fd
     val current_source = parent.descriptors[reserved.source_fds[0]]
@@ -737,10 +748,13 @@ pub(package) fn fd_descriptor_commit_v1(
             _ = _fd_unlock_v1()
             return Err("descriptor-reservation-corrupt")
         _fd_finish_transaction_v1(index)
-        if not _fd_unlock_v1(): return Err("serialization-unavailable")
-        return Ok(FdDescriptorCommitV1(
+        var receipt = FdDescriptorCommitV1(
             inherited_count: 0u32, descriptor: target, displaced: false,
-            displaced_close: nil))
+            complete: true, failure: "", displaced_close: nil)
+        if not _fd_unlock_v1():
+            receipt.complete = false
+            receipt.failure = "descriptor-unlock-failed"
+        return Ok(receipt)
     if not current_source.occupied or current_source.ofd != reserved.retained[0]:
         _ = _fd_release_retained_v1(reserved.retained)
         _ = _fd_release_transaction_reservations_v1(reserved)
@@ -775,22 +789,48 @@ pub(package) fn fd_descriptor_commit_v1(
             reservation_count: 0u32, close_reserved: false)
     _fd_descriptor_owner_v1.contexts[reserved.parent_context].mutation_generation = mutation + 1u32
     var displaced_close: OpenFileDescriptionCloseBeginV1? = nil
+    var complete = true
+    var failure = ""
     if displaced.occupied:
         val close_result = open_file_description_begin_close_v1(displaced.ofd)
         if close_result.is_err():
             _fd_descriptor_owner_v1.quarantined = true
             _ = _fd_unlock_v1()
             return Err("displaced-ofd-release-failed")
-        displaced_close = Some(close_result.unwrap())
+        val close_begin = close_result.unwrap()
+        displaced_close = Some(close_begin)
+        complete = close_begin.complete
+        failure = close_begin.failure
     if not _fd_release_transaction_reservations_v1(reserved):
         _fd_descriptor_owner_v1.quarantined = true
-        _ = _fd_unlock_v1()
-        return Err("descriptor-reservation-corrupt")
+        # The descriptor replacement and any displaced OFD release already
+        # committed. Preserve the opaque close receipt even though reservation
+        # cleanup is now committed-unknown.
+        _fd_finish_transaction_v1(index)
+        var corrupt_receipt = FdDescriptorCommitV1(
+            inherited_count: 1u32, descriptor: target,
+            displaced: displaced.occupied, complete: false,
+            failure: if failure == "":
+                "descriptor-reservation-corrupt"
+            else:
+                failure + ";descriptor-reservation-corrupt",
+            displaced_close: displaced_close)
+        if not _fd_unlock_v1():
+            corrupt_receipt.failure =
+                corrupt_receipt.failure + ";descriptor-unlock-failed"
+        return Ok(corrupt_receipt)
     _fd_finish_transaction_v1(index)
-    if not _fd_unlock_v1(): return Err("serialization-unavailable")
-    Ok(FdDescriptorCommitV1(
+    var receipt = FdDescriptorCommitV1(
         inherited_count: 1u32, descriptor: target,
-        displaced: displaced.occupied, displaced_close: displaced_close))
+        displaced: displaced.occupied, complete: complete, failure: failure,
+        displaced_close: displaced_close)
+    if not _fd_unlock_v1():
+        receipt.complete = false
+        receipt.failure = if receipt.failure == "":
+            "descriptor-unlock-failed"
+        else:
+            receipt.failure + ";descriptor-unlock-failed"
+    Ok(receipt)
 
 pub(package) fn fd_descriptor_rollback_v1(
     transaction: FdDescriptorTransactionV1
@@ -936,6 +976,8 @@ pub(package) fn fd_descriptor_context_destroy_v1(
     _fd_descriptor_owner_v1.contexts[context_index] =
         fd_empty_context_v1(generation, FD_DESCRIPTOR_LIMIT_V1)
     val close_begins: [OpenFileDescriptionCloseBeginV1] = []
+    var complete = true
+    var failure = ""
     fd = 0
     while fd < FD_DESCRIPTOR_LIMIT_V1:
         val alias = context.descriptors[fd]
@@ -951,15 +993,29 @@ pub(package) fn fd_descriptor_context_destroy_v1(
                     released_count: close_begins.len() as u32,
                     complete: false, failure: "ofd-release-failed",
                     close_begins: close_begins)
-                if not _fd_unlock_v1(): return Err("serialization-unavailable")
-                return Ok(partial)
-            close_begins.push(closed.unwrap())
+                var returned = partial
+                if not _fd_unlock_v1():
+                    returned.failure = returned.failure + ";descriptor-unlock-failed"
+                return Ok(returned)
+            val close_begin = closed.unwrap()
+            close_begins.push(close_begin)
+            if not close_begin.complete:
+                complete = false
+                failure = if failure == "":
+                    close_begin.failure
+                else:
+                    failure + ";" + close_begin.failure
         fd = fd + 1
-    val result = FdDescriptorContextDestroyV1(
+    var result = FdDescriptorContextDestroyV1(
         descriptor_count: descriptor_count,
         released_count: close_begins.len() as u32,
-        complete: true, failure: "", close_begins: close_begins)
-    if not _fd_unlock_v1(): return Err("serialization-unavailable")
+        complete: complete, failure: failure, close_begins: close_begins)
+    if not _fd_unlock_v1():
+        result.complete = false
+        result.failure = if result.failure == "":
+            "descriptor-unlock-failed"
+        else:
+            result.failure + ";descriptor-unlock-failed"
     Ok(result)
 
 pub(package) fn fd_descriptor_context_exists_v1(key: FdTaskLifecycleKeyV1) -> bool:

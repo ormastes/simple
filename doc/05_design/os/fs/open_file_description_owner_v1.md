@@ -17,7 +17,9 @@ pointer. The VFS/backend remains the owner of the referenced file object.
 
 The checked mutex serializes every state transition. Mutex creation/lock
 failure rejects the operation. Unlock failure permanently quarantines the
-whole owner because the caller cannot know whether the mutation linearized.
+whole owner. If close has already decremented the reference count or minted an
+opaque ticket, the API returns that close-begin receipt as incomplete with
+`ofd-unlock-failed`; it never replaces close ownership with a plain error.
 
 ## State and protocols
 

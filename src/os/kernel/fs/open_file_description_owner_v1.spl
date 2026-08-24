@@ -82,6 +82,8 @@ pub(package) struct OpenFileDescriptionCloseTicketV1:
 
 pub(package) struct OpenFileDescriptionCloseBeginV1:
     disposition: OpenFileDescriptionCloseDispositionV1
+    complete: bool
+    failure: text
     ticket: OpenFileDescriptionCloseTicketV1?
 
 pub(package) struct OpenFileDescriptionIoCompleteV1:
@@ -560,10 +562,13 @@ pub(package) fn open_file_description_begin_close_v1(
     slot.ref_count = slot.ref_count - 1u32
     if slot.ref_count > 0u32:
         _ofd_owner_v1.slots[index] = slot
-        val result = OpenFileDescriptionCloseBeginV1(
+        var result = OpenFileDescriptionCloseBeginV1(
             disposition: OpenFileDescriptionCloseDispositionV1.AliasReleased,
+            complete: true, failure: "",
             ticket: nil)
-        if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+        if not _ofd_unlock_v1():
+            result.complete = false
+            result.failure = "ofd-unlock-failed"
         return Ok(result)
     val closing = open_file_description_protocol_transition_v1(
         slot.state, slot.ref_count, slot.pin_count,
@@ -575,20 +580,26 @@ pub(package) fn open_file_description_begin_close_v1(
     slot.state = closing.unwrap()
     _ofd_owner_v1.slots[index] = slot
     if slot.pin_count > 0u32:
-        val result = OpenFileDescriptionCloseBeginV1(
+        var result = OpenFileDescriptionCloseBeginV1(
             disposition: OpenFileDescriptionCloseDispositionV1.WaitingForPins,
+            complete: true, failure: "",
             ticket: nil)
-        if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+        if not _ofd_unlock_v1():
+            result.complete = false
+            result.failure = "ofd-unlock-failed"
         return Ok(result)
     val issued = _ofd_issue_close_ticket_v1(index, slot)
     if issued.is_err():
         _ofd_owner_v1.slots[index].state = OpenFileDescriptionStateV1.CloseQuarantined
         _ = _ofd_unlock_v1()
         return Err(issued.unwrap_err())
-    val result = OpenFileDescriptionCloseBeginV1(
+    var result = OpenFileDescriptionCloseBeginV1(
         disposition: OpenFileDescriptionCloseDispositionV1.BackendCloseRequired,
+        complete: true, failure: "",
         ticket: Some(issued.unwrap()))
-    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    if not _ofd_unlock_v1():
+        result.complete = false
+        result.failure = "ofd-unlock-failed"
     Ok(result)
 
 fn _ofd_close_ticket_index_v1(ticket: OpenFileDescriptionCloseTicketV1) -> i32:

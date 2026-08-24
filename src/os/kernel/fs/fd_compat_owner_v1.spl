@@ -1,0 +1,660 @@
+"""Canonical pre-I/O compatibility facade for SimpleOS descriptor owners.
+
+This capsule owns boot stdio sharing and task lifecycle transactions. It does
+not call legacy fd_table, syscalls, schedulers, VFS, or backend I/O.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.fs.open_file_description_owner_v1.{
+    OpenFileDescriptionRefV1, OpenFileDescriptionAccessV1,
+    OpenFileDescriptionBackendBindingV1, OpenFileDescriptionCloseBeginV1,
+    open_file_description_create_v1
+}
+use os.kernel.fs.fd_table_descriptor_owner_support_v1.{
+    FdTaskLifecycleKeyV1, FdDescriptorTransactionV1,
+    FdDescriptorSnapshotV1, FdDescriptorContextSnapshotV1,
+    fd_task_lifecycle_key_valid_v1
+}
+use os.kernel.fs.fd_table_descriptor_owner_v1.{
+    FD_DESCRIPTOR_LIMIT_V1, fd_descriptor_context_create_v1,
+    fd_descriptor_context_exists_v1, fd_descriptor_install_v1,
+    fd_descriptor_snapshot_v1, fd_descriptor_context_snapshot_v1,
+    fd_descriptor_set_flags_v1, fd_descriptor_set_status_v1,
+    fd_descriptor_reserve_dup_lowest_v1, fd_descriptor_reserve_dup2_v1,
+    fd_descriptor_reserve_fork_v1, fd_descriptor_reserve_close_v1,
+    fd_descriptor_commit_v1, fd_descriptor_rollback_v1,
+    fd_descriptor_context_destroy_v1
+}
+
+pub val FD_COMPAT_TRANSACTION_LIMIT_V1: i32 = 64
+pub val FD_COMPAT_DESCRIPTOR_CLOEXEC_V1: u32 = 1u32
+pub val FD_COMPAT_STDIO_COUNT_V1: u32 = 3u32
+
+val _FD_COMPAT_SERIAL_BACKEND_KIND_V1: u8 = 6u8
+val _FD_COMPAT_GENERATION_MAX_V1: u32 = 0xffffffffu32
+
+pub enum FdCompatLifecycleKindV1:
+    Fork
+    Exec
+    Exit
+
+pub(package) struct FdCompatLifecycleTransactionV1:
+    slot: i32
+    generation: u32
+
+pub(package) struct FdCompatMutationReceiptV1:
+    descriptor: i32
+    complete: bool
+    failure: text
+    close_begins: [OpenFileDescriptionCloseBeginV1]
+
+pub(package) struct FdCompatLifecycleReceiptV1:
+    key: FdTaskLifecycleKeyV1
+    affected_count: u32
+    complete: bool
+    failure: text
+    close_begins: [OpenFileDescriptionCloseBeginV1]
+
+export FD_COMPAT_TRANSACTION_LIMIT_V1, FD_COMPAT_DESCRIPTOR_CLOEXEC_V1
+export FD_COMPAT_STDIO_COUNT_V1, FdCompatLifecycleKindV1
+
+pub fn fd_compat_descriptor_flags_valid_v1(flags: u32) -> bool:
+    (flags & ~FD_COMPAT_DESCRIPTOR_CLOEXEC_V1) == 0u32
+
+pub fn fd_compat_stdio_capacity_valid_v1(
+    context_limit: u32, stdio_ofd_count: u32
+) -> bool:
+    context_limit > 0u32 and stdio_ofd_count == FD_COMPAT_STDIO_COUNT_V1
+
+pub fn fd_compat_receipt_shape_valid_v1(
+    affected_count: u32, close_receipt_count: u32,
+    complete: bool, failure: text
+) -> bool:
+    if close_receipt_count > affected_count: return false
+    if complete: return failure == ""
+    failure != ""
+
+export fd_compat_descriptor_flags_valid_v1
+export fd_compat_stdio_capacity_valid_v1, fd_compat_receipt_shape_valid_v1
+
+struct FdCompatTransactionSlotV1:
+    occupied: bool
+    generation: u32
+    kind: FdCompatLifecycleKindV1
+    key: FdTaskLifecycleKeyV1
+    child_key: FdTaskLifecycleKeyV1
+    descriptor_transaction: FdDescriptorTransactionV1?
+    mutation_generation: u32
+    descriptors: [i32]
+
+struct FdCompatOwnerStateV1:
+    initialized: bool
+    quarantined: bool
+    boot_key: FdTaskLifecycleKeyV1
+    stdio: [OpenFileDescriptionRefV1]
+    bound_keys: [FdTaskLifecycleKeyV1]
+    transactions: [FdCompatTransactionSlotV1]
+
+fn _fd_compat_empty_key_v1() -> FdTaskLifecycleKeyV1:
+    FdTaskLifecycleKeyV1(task_id: 0u64, lifecycle_generation: 0u64)
+
+fn _fd_compat_empty_fds_v1() -> [i32]:
+    val fds: [i32] = []
+    fds
+
+fn _fd_compat_empty_closes_v1() -> [OpenFileDescriptionCloseBeginV1]:
+    val closes: [OpenFileDescriptionCloseBeginV1] = []
+    closes
+
+fn _fd_compat_empty_transaction_v1(generation: u32) -> FdCompatTransactionSlotV1:
+    FdCompatTransactionSlotV1(
+        occupied: false, generation: generation,
+        kind: FdCompatLifecycleKindV1.Exec,
+        key: _fd_compat_empty_key_v1(), child_key: _fd_compat_empty_key_v1(),
+        descriptor_transaction: nil, mutation_generation: 0u32,
+        descriptors: _fd_compat_empty_fds_v1())
+
+fn _fd_compat_empty_transactions_v1() -> [FdCompatTransactionSlotV1]:
+    val slots: [FdCompatTransactionSlotV1] = []
+    var i = 0
+    while i < FD_COMPAT_TRANSACTION_LIMIT_V1:
+        slots.push(_fd_compat_empty_transaction_v1(1u32))
+        i = i + 1
+    slots
+
+val _fd_compat_mutex_v1: i64 = mutex_raw_create()
+var _fd_compat_owner_v1 = FdCompatOwnerStateV1(
+    initialized: false, quarantined: false,
+    boot_key: FdTaskLifecycleKeyV1(task_id: 0u64, lifecycle_generation: 1u64),
+    stdio: [], bound_keys: [], transactions: [])
+
+fn _fd_compat_lock_v1() -> bool:
+    if _fd_compat_mutex_v1 <= 0: return false
+    if not mutex_raw_lock(_fd_compat_mutex_v1): return false
+    if _fd_compat_owner_v1.quarantined:
+        _ = mutex_raw_unlock(_fd_compat_mutex_v1)
+        return false
+    true
+
+fn _fd_compat_unlock_v1() -> bool:
+    if mutex_raw_unlock(_fd_compat_mutex_v1): return true
+    _fd_compat_owner_v1.quarantined = true
+    false
+
+fn _fd_compat_initialize_locked_v1() -> Result<(), text>:
+    if _fd_compat_owner_v1.initialized: return Ok(())
+    _fd_compat_owner_v1.transactions = _fd_compat_empty_transactions_v1()
+    val key = _fd_compat_owner_v1.boot_key
+    val created = fd_descriptor_context_create_v1(key)
+    if created.is_err():
+        _fd_compat_owner_v1.quarantined = true
+        return Err("boot-context-create-failed")
+    var fd = 0
+    while fd < 3:
+        val access = if fd == 0:
+            OpenFileDescriptionAccessV1.ReadOnly
+        else:
+            OpenFileDescriptionAccessV1.WriteOnly
+        val ofd = open_file_description_create_v1(
+            access, 0u32,
+            OpenFileDescriptionBackendBindingV1(
+                file_object_id: (fd + 1) as u64,
+                file_object_generation: 1u32,
+                backend_kind: _FD_COMPAT_SERIAL_BACKEND_KIND_V1),
+            0u64)
+        if ofd.is_err():
+            _fd_compat_owner_v1.quarantined = true
+            return Err("stdio-ofd-create-failed")
+        val ofd_ref = ofd.unwrap()
+        _fd_compat_owner_v1.stdio.push(ofd_ref)
+        val installed = fd_descriptor_install_v1(
+            key, fd, ofd_ref, 0u32)
+        if installed.is_err():
+            _fd_compat_owner_v1.quarantined = true
+            return Err("stdio-install-failed")
+        fd = fd + 1
+    _fd_compat_owner_v1.initialized = true
+    _fd_compat_owner_v1.bound_keys.push(key)
+    Ok(())
+
+pub(package) fn fd_compat_boot_init_v1() -> Result<(), text>:
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    val result = _fd_compat_initialize_locked_v1()
+    if not _fd_compat_unlock_v1(): return Err("serialization-unavailable")
+    result
+
+fn _fd_compat_key_reserved_v1(key: FdTaskLifecycleKeyV1) -> bool:
+    var i = 0
+    while i < _fd_compat_owner_v1.transactions.len():
+        val slot = _fd_compat_owner_v1.transactions[i]
+        if (slot.occupied and
+            (slot.key == key or slot.child_key == key)):
+            return true
+        i = i + 1
+    false
+
+fn _fd_compat_key_bound_v1(key: FdTaskLifecycleKeyV1) -> bool:
+    var i = 0
+    while i < _fd_compat_owner_v1.bound_keys.len():
+        if _fd_compat_owner_v1.bound_keys[i] == key: return true
+        i = i + 1
+    false
+
+fn _fd_compat_remove_bound_key_v1(key: FdTaskLifecycleKeyV1) -> bool:
+    var i = 0
+    while i < _fd_compat_owner_v1.bound_keys.len():
+        if _fd_compat_owner_v1.bound_keys[i] == key:
+            _fd_compat_owner_v1.bound_keys.remove(i)
+            return true
+        i = i + 1
+    false
+
+fn _fd_compat_mutable_key_v1(key: FdTaskLifecycleKeyV1) -> bool:
+    key != _fd_compat_owner_v1.boot_key and _fd_compat_key_bound_v1(key)
+
+fn _fd_compat_find_free_transaction_v1() -> i32:
+    var i = 0
+    while i < _fd_compat_owner_v1.transactions.len():
+        if not _fd_compat_owner_v1.transactions[i].occupied: return i
+        i = i + 1
+    -1
+
+fn _fd_compat_allocate_transaction_v1(
+    kind: FdCompatLifecycleKindV1, key: FdTaskLifecycleKeyV1,
+    child_key: FdTaskLifecycleKeyV1,
+    descriptor_transaction: FdDescriptorTransactionV1?,
+    mutation_generation: u32, descriptors: [i32]
+) -> Result<FdCompatLifecycleTransactionV1, text>:
+    val index = _fd_compat_find_free_transaction_v1()
+    if index < 0: return Err("transaction-capacity-exhausted")
+    val prior = _fd_compat_owner_v1.transactions[index]
+    if prior.generation == _FD_COMPAT_GENERATION_MAX_V1:
+        return Err("transaction-generation-exhausted")
+    val generation = prior.generation + 1u32
+    _fd_compat_owner_v1.transactions[index] = FdCompatTransactionSlotV1(
+        occupied: true, generation: generation, kind: kind,
+        key: key, child_key: child_key,
+        descriptor_transaction: descriptor_transaction,
+        mutation_generation: mutation_generation, descriptors: descriptors)
+    Ok(FdCompatLifecycleTransactionV1(slot: index, generation: generation))
+
+fn _fd_compat_transaction_index_v1(
+    transaction: FdCompatLifecycleTransactionV1
+) -> i32:
+    if (transaction.slot < 0 or
+        transaction.slot >= _fd_compat_owner_v1.transactions.len() or
+        transaction.generation == 0u32):
+        return -1
+    val stored = _fd_compat_owner_v1.transactions[transaction.slot]
+    if not stored.occupied or stored.generation != transaction.generation:
+        return -1
+    transaction.slot
+
+fn _fd_compat_finish_transaction_v1(index: i32):
+    val generation = _fd_compat_owner_v1.transactions[index].generation
+    _fd_compat_owner_v1.transactions[index] =
+        _fd_compat_empty_transaction_v1(generation)
+
+pub(package) fn fd_compat_bind_task_v1(
+    key: FdTaskLifecycleKeyV1
+) -> Result<u32, text>:
+    if not fd_task_lifecycle_key_valid_v1(key): return Err("invalid-lifecycle-key")
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    val initialized = _fd_compat_initialize_locked_v1()
+    if initialized.is_err():
+        _ = _fd_compat_unlock_v1()
+        return Err(initialized.unwrap_err())
+    if _fd_compat_key_reserved_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("task-lifecycle-reserved")
+    if _fd_compat_key_bound_v1(key):
+        val snapshot = fd_descriptor_context_snapshot_v1(key)
+        if not _fd_compat_unlock_v1(): return Err("serialization-unavailable")
+        if snapshot.is_err(): return Err(snapshot.unwrap_err())
+        return Ok(snapshot.unwrap().descriptors.len() as u32)
+    if key.task_id == 0u64:
+        _ = _fd_compat_unlock_v1()
+        return Err("reserved-boot-task-id")
+    if fd_descriptor_context_exists_v1(key):
+        _fd_compat_owner_v1.quarantined = true
+        _ = _fd_compat_unlock_v1()
+        return Err("foreign-context-collision")
+    if _fd_compat_owner_v1.bound_keys.len() >= 256:
+        _ = _fd_compat_unlock_v1()
+        return Err("task-context-capacity-exhausted")
+    val reserved = fd_descriptor_reserve_fork_v1(_fd_compat_owner_v1.boot_key, key)
+    if reserved.is_err():
+        _ = _fd_compat_unlock_v1()
+        return Err(reserved.unwrap_err())
+    val committed = fd_descriptor_commit_v1(reserved.unwrap())
+    if committed.is_err():
+        _fd_compat_owner_v1.quarantined = true
+        _ = _fd_compat_unlock_v1()
+        return Err(committed.unwrap_err())
+    val owner_receipt = committed.unwrap()
+    val inherited = owner_receipt.inherited_count
+    _fd_compat_owner_v1.bound_keys.push(key)
+    if not owner_receipt.complete:
+        _fd_compat_owner_v1.quarantined = true
+        _ = _fd_compat_unlock_v1()
+        return Err(owner_receipt.failure)
+    if not _fd_compat_unlock_v1(): return Err("serialization-unavailable")
+    Ok(inherited)
+
+pub(package) fn fd_compat_descriptor_snapshot_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32
+) -> Result<FdDescriptorSnapshotV1, text>:
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    if not _fd_compat_key_bound_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("unbound-task")
+    val result = fd_descriptor_snapshot_v1(key, fd)
+    if not _fd_compat_unlock_v1(): return Err("serialization-unavailable")
+    result
+
+pub(package) fn fd_compat_context_snapshot_v1(
+    key: FdTaskLifecycleKeyV1
+) -> Result<FdDescriptorContextSnapshotV1, text>:
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    if not _fd_compat_key_bound_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("unbound-task")
+    val result = fd_descriptor_context_snapshot_v1(key)
+    if not _fd_compat_unlock_v1(): return Err("serialization-unavailable")
+    result
+
+pub(package) fn fd_compat_set_descriptor_flags_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32, flags: u32
+) -> Result<u32, text>:
+    if not fd_compat_descriptor_flags_valid_v1(flags): return Err("invalid-descriptor-flags")
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    if not _fd_compat_mutable_key_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("immutable-or-unbound-task")
+    if _fd_compat_key_reserved_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("task-lifecycle-reserved")
+    val result = fd_descriptor_set_flags_v1(key, fd, flags)
+    if not _fd_compat_unlock_v1(): return Err("serialization-unavailable")
+    result
+
+pub(package) fn fd_compat_set_status_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32, flags: u32
+) -> Result<u32, text>:
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    if not _fd_compat_mutable_key_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("immutable-or-unbound-task")
+    if _fd_compat_key_reserved_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("task-lifecycle-reserved")
+    val result = fd_descriptor_set_status_v1(key, fd, flags)
+    if not _fd_compat_unlock_v1(): return Err("serialization-unavailable")
+    result
+
+pub(package) fn fd_compat_dup_v1(
+    key: FdTaskLifecycleKeyV1, old_fd: i32, minimum_fd: i32,
+    descriptor_flags: u32
+) -> Result<FdCompatMutationReceiptV1, text>:
+    if not fd_compat_descriptor_flags_valid_v1(descriptor_flags):
+        return Err("invalid-descriptor-flags")
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    if not _fd_compat_mutable_key_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("immutable-or-unbound-task")
+    if _fd_compat_key_reserved_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("task-lifecycle-reserved")
+    val reserved = fd_descriptor_reserve_dup_lowest_v1(
+        key, old_fd, minimum_fd, descriptor_flags)
+    if reserved.is_err():
+        _ = _fd_compat_unlock_v1()
+        return Err(reserved.unwrap_err())
+    val committed = fd_descriptor_commit_v1(reserved.unwrap())
+    if committed.is_err():
+        _fd_compat_owner_v1.quarantined = true
+        _ = _fd_compat_unlock_v1()
+        return Err(committed.unwrap_err())
+    val owner_receipt = committed.unwrap()
+    if not owner_receipt.complete: _fd_compat_owner_v1.quarantined = true
+    val result = FdCompatMutationReceiptV1(
+        descriptor: owner_receipt.descriptor,
+        complete: owner_receipt.complete, failure: owner_receipt.failure,
+        close_begins: _fd_compat_empty_closes_v1())
+    if not _fd_compat_unlock_v1():
+        return Ok(FdCompatMutationReceiptV1(
+            descriptor: result.descriptor, complete: false,
+            failure: "facade-unlock-failed", close_begins: result.close_begins))
+    Ok(result)
+
+pub(package) fn fd_compat_dup2_v1(
+    key: FdTaskLifecycleKeyV1, old_fd: i32, target_fd: i32,
+    descriptor_flags: u32
+) -> Result<FdCompatMutationReceiptV1, text>:
+    if not fd_compat_descriptor_flags_valid_v1(descriptor_flags):
+        return Err("invalid-descriptor-flags")
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    if not _fd_compat_mutable_key_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("immutable-or-unbound-task")
+    if _fd_compat_key_reserved_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("task-lifecycle-reserved")
+    val reserved = fd_descriptor_reserve_dup2_v1(
+        key, old_fd, target_fd, descriptor_flags)
+    if reserved.is_err():
+        _ = _fd_compat_unlock_v1()
+        return Err(reserved.unwrap_err())
+    val committed = fd_descriptor_commit_v1(reserved.unwrap())
+    if committed.is_err():
+        _fd_compat_owner_v1.quarantined = true
+        _ = _fd_compat_unlock_v1()
+        return Err(committed.unwrap_err())
+    val owner_receipt = committed.unwrap()
+    if not owner_receipt.complete: _fd_compat_owner_v1.quarantined = true
+    val closes = _fd_compat_empty_closes_v1()
+    if owner_receipt.displaced_close.?: closes.push(owner_receipt.displaced_close.unwrap())
+    val result = FdCompatMutationReceiptV1(
+        descriptor: owner_receipt.descriptor,
+        complete: owner_receipt.complete, failure: owner_receipt.failure,
+        close_begins: closes)
+    if not _fd_compat_unlock_v1():
+        return Ok(FdCompatMutationReceiptV1(
+            descriptor: result.descriptor, complete: false,
+            failure: "facade-unlock-failed", close_begins: result.close_begins))
+    Ok(result)
+
+pub(package) fn fd_compat_prepare_fork_v1(
+    parent_key: FdTaskLifecycleKeyV1, child_key: FdTaskLifecycleKeyV1
+) -> Result<FdCompatLifecycleTransactionV1, text>:
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    if (not _fd_compat_key_bound_v1(parent_key) or
+        parent_key == _fd_compat_owner_v1.boot_key or
+        _fd_compat_key_bound_v1(child_key) or child_key.task_id == 0u64 or
+        _fd_compat_owner_v1.bound_keys.len() >= 256):
+        _ = _fd_compat_unlock_v1()
+        return Err("invalid-fork-lifecycle")
+    if fd_descriptor_context_exists_v1(child_key):
+        _fd_compat_owner_v1.quarantined = true
+        _ = _fd_compat_unlock_v1()
+        return Err("foreign-child-context-collision")
+    if (_fd_compat_key_reserved_v1(parent_key) or
+        _fd_compat_key_reserved_v1(child_key)):
+        _ = _fd_compat_unlock_v1()
+        return Err("task-lifecycle-reserved")
+    val descriptor = fd_descriptor_reserve_fork_v1(parent_key, child_key)
+    if descriptor.is_err():
+        _ = _fd_compat_unlock_v1()
+        return Err(descriptor.unwrap_err())
+    val descriptor_transaction = descriptor.unwrap()
+    val allocated = _fd_compat_allocate_transaction_v1(
+        FdCompatLifecycleKindV1.Fork, parent_key, child_key,
+        Some(descriptor_transaction), 0u32, _fd_compat_empty_fds_v1())
+    if allocated.is_err():
+        val rolled_back = fd_descriptor_rollback_v1(descriptor_transaction)
+        if rolled_back.is_err():
+            _fd_compat_owner_v1.quarantined = true
+            _ = _fd_compat_unlock_v1()
+            return Err("fork-reservation-rollback-failed")
+    if not _fd_compat_unlock_v1():
+        if allocated.is_ok():
+            val allocated_transaction = allocated.unwrap()
+            val allocated_index = _fd_compat_transaction_index_v1(allocated_transaction)
+            val rolled_back = fd_descriptor_rollback_v1(descriptor_transaction)
+            if allocated_index >= 0: _fd_compat_finish_transaction_v1(allocated_index)
+            if rolled_back.is_err(): return Err("fork-reservation-rollback-failed")
+        return Err("serialization-unavailable")
+    allocated
+
+pub(package) fn fd_compat_prepare_exec_v1(
+    key: FdTaskLifecycleKeyV1
+) -> Result<FdCompatLifecycleTransactionV1, text>:
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    if not _fd_compat_mutable_key_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("immutable-or-unbound-task")
+    if _fd_compat_key_reserved_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("task-lifecycle-reserved")
+    val snapshot = fd_descriptor_context_snapshot_v1(key)
+    if snapshot.is_err():
+        _ = _fd_compat_unlock_v1()
+        return Err(snapshot.unwrap_err())
+    val context = snapshot.unwrap()
+    val descriptors = _fd_compat_empty_fds_v1()
+    var i = 0
+    while i < context.descriptors.len():
+        val descriptor = context.descriptors[i]
+        if (descriptor.descriptor_flags & FD_COMPAT_DESCRIPTOR_CLOEXEC_V1) != 0u32:
+            descriptors.push(descriptor.descriptor)
+        i = i + 1
+    val allocated = _fd_compat_allocate_transaction_v1(
+        FdCompatLifecycleKindV1.Exec, key, _fd_compat_empty_key_v1(), nil,
+        context.mutation_generation, descriptors)
+    if not _fd_compat_unlock_v1():
+        if allocated.is_ok():
+            val allocated_index = _fd_compat_transaction_index_v1(allocated.unwrap())
+            if allocated_index >= 0: _fd_compat_finish_transaction_v1(allocated_index)
+        return Err("serialization-unavailable")
+    allocated
+
+pub(package) fn fd_compat_prepare_exit_v1(
+    key: FdTaskLifecycleKeyV1
+) -> Result<FdCompatLifecycleTransactionV1, text>:
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    if not _fd_compat_mutable_key_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("immutable-or-unbound-task")
+    if _fd_compat_key_reserved_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("task-lifecycle-reserved")
+    if not fd_descriptor_context_exists_v1(key):
+        _ = _fd_compat_unlock_v1()
+        return Err("unknown-context")
+    val allocated = _fd_compat_allocate_transaction_v1(
+        FdCompatLifecycleKindV1.Exit, key, _fd_compat_empty_key_v1(), nil,
+        0u32, _fd_compat_empty_fds_v1())
+    if not _fd_compat_unlock_v1():
+        if allocated.is_ok():
+            val allocated_index = _fd_compat_transaction_index_v1(allocated.unwrap())
+            if allocated_index >= 0: _fd_compat_finish_transaction_v1(allocated_index)
+        return Err("serialization-unavailable")
+    allocated
+
+pub(package) fn fd_compat_commit_lifecycle_v1(
+    transaction: FdCompatLifecycleTransactionV1
+) -> Result<FdCompatLifecycleReceiptV1, text>:
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    val index = _fd_compat_transaction_index_v1(transaction)
+    if index < 0:
+        _ = _fd_compat_unlock_v1()
+        return Err("stale-transaction")
+    val reserved = _fd_compat_owner_v1.transactions[index]
+    if reserved.kind == FdCompatLifecycleKindV1.Fork:
+        val committed = fd_descriptor_commit_v1(
+            reserved.descriptor_transaction.unwrap())
+        _fd_compat_finish_transaction_v1(index)
+        if committed.is_err():
+            _fd_compat_owner_v1.quarantined = true
+            _ = _fd_compat_unlock_v1()
+            return Err(committed.unwrap_err())
+        val owner_receipt = committed.unwrap()
+        if not owner_receipt.complete: _fd_compat_owner_v1.quarantined = true
+        var receipt = FdCompatLifecycleReceiptV1(
+            key: reserved.child_key, affected_count: owner_receipt.inherited_count,
+            complete: owner_receipt.complete, failure: owner_receipt.failure,
+            close_begins: _fd_compat_empty_closes_v1())
+        _fd_compat_owner_v1.bound_keys.push(reserved.child_key)
+        if not _fd_compat_unlock_v1():
+            receipt.complete = false
+            receipt.failure = "facade-unlock-failed"
+        return Ok(receipt)
+    if reserved.kind == FdCompatLifecycleKindV1.Exit:
+        val destroyed = fd_descriptor_context_destroy_v1(reserved.key)
+        _fd_compat_finish_transaction_v1(index)
+        if destroyed.is_err():
+            _fd_compat_owner_v1.quarantined = true
+            _ = _fd_compat_unlock_v1()
+            return Err(destroyed.unwrap_err())
+        val owner_receipt = destroyed.unwrap()
+        if not _fd_compat_remove_bound_key_v1(reserved.key):
+            _fd_compat_owner_v1.quarantined = true
+            var collision_receipt = FdCompatLifecycleReceiptV1(
+                key: reserved.key, affected_count: owner_receipt.released_count,
+                complete: false, failure: if owner_receipt.failure == "":
+                    "bound-key-map-corrupt"
+                else:
+                    owner_receipt.failure + ";bound-key-map-corrupt",
+                close_begins: owner_receipt.close_begins)
+            if not _fd_compat_unlock_v1():
+                collision_receipt.failure =
+                    collision_receipt.failure + ";facade-unlock-failed"
+            return Ok(collision_receipt)
+        if not owner_receipt.complete: _fd_compat_owner_v1.quarantined = true
+        var receipt = FdCompatLifecycleReceiptV1(
+            key: reserved.key, affected_count: owner_receipt.released_count,
+            complete: owner_receipt.complete, failure: owner_receipt.failure,
+            close_begins: owner_receipt.close_begins)
+        if not _fd_compat_unlock_v1():
+            receipt.complete = false
+            receipt.failure = if receipt.failure == "":
+                "facade-unlock-failed"
+            else:
+                receipt.failure + ";facade-unlock-failed"
+        return Ok(receipt)
+
+    val current = fd_descriptor_context_snapshot_v1(reserved.key)
+    if (current.is_err() or
+        current.unwrap().mutation_generation != reserved.mutation_generation):
+        _fd_compat_finish_transaction_v1(index)
+        _fd_compat_owner_v1.quarantined = true
+        _ = _fd_compat_unlock_v1()
+        return Err("exec-context-changed")
+    val closes = _fd_compat_empty_closes_v1()
+    var i = 0
+    while i < reserved.descriptors.len():
+        val fd = reserved.descriptors[i]
+        val close_transaction = fd_descriptor_reserve_close_v1(reserved.key, fd)
+        if close_transaction.is_err():
+            _fd_compat_finish_transaction_v1(index)
+            _fd_compat_owner_v1.quarantined = true
+            var partial = FdCompatLifecycleReceiptV1(
+                key: reserved.key, affected_count: closes.len() as u32,
+                complete: false, failure: close_transaction.unwrap_err(),
+                close_begins: closes)
+            if not _fd_compat_unlock_v1():
+                partial.failure = partial.failure + ";facade-unlock-failed"
+            return Ok(partial)
+        val committed = fd_descriptor_commit_v1(close_transaction.unwrap())
+        if committed.is_err():
+            _fd_compat_finish_transaction_v1(index)
+            _fd_compat_owner_v1.quarantined = true
+            var partial = FdCompatLifecycleReceiptV1(
+                key: reserved.key, affected_count: closes.len() as u32,
+                complete: false, failure: committed.unwrap_err(),
+                close_begins: closes)
+            if not _fd_compat_unlock_v1():
+                partial.failure = partial.failure + ";facade-unlock-failed"
+            return Ok(partial)
+        val owner_receipt = committed.unwrap()
+        val begin = owner_receipt.displaced_close
+        if begin.?: closes.push(begin.unwrap())
+        if not owner_receipt.complete:
+            _fd_compat_finish_transaction_v1(index)
+            _fd_compat_owner_v1.quarantined = true
+            var partial = FdCompatLifecycleReceiptV1(
+                key: reserved.key, affected_count: closes.len() as u32,
+                complete: false, failure: owner_receipt.failure,
+                close_begins: closes)
+            if not _fd_compat_unlock_v1():
+                partial.failure = partial.failure + ";facade-unlock-failed"
+            return Ok(partial)
+        i = i + 1
+    _fd_compat_finish_transaction_v1(index)
+    var receipt = FdCompatLifecycleReceiptV1(
+        key: reserved.key, affected_count: reserved.descriptors.len() as u32,
+        complete: true, failure: "", close_begins: closes)
+    if not _fd_compat_unlock_v1():
+        receipt.complete = false
+        receipt.failure = "facade-unlock-failed"
+    Ok(receipt)
+
+pub(package) fn fd_compat_rollback_lifecycle_v1(
+    transaction: FdCompatLifecycleTransactionV1
+) -> Result<(), text>:
+    if not _fd_compat_lock_v1(): return Err("serialization-unavailable")
+    val index = _fd_compat_transaction_index_v1(transaction)
+    if index < 0:
+        _ = _fd_compat_unlock_v1()
+        return Err("stale-transaction")
+    val reserved = _fd_compat_owner_v1.transactions[index]
+    if reserved.kind == FdCompatLifecycleKindV1.Fork:
+        val rolled_back = fd_descriptor_rollback_v1(
+            reserved.descriptor_transaction.unwrap())
+        if rolled_back.is_err():
+            _fd_compat_owner_v1.quarantined = true
+            _ = _fd_compat_unlock_v1()
+            return Err(rolled_back.unwrap_err())
+    _fd_compat_finish_transaction_v1(index)
+    if not _fd_compat_unlock_v1(): return Err("serialization-unavailable")
+    Ok(())

@@ -38,8 +38,11 @@ so a child never publishes a mixed-time snapshot.
 - Dup/dup2 reserve and commit are O(1). Fork is O(MAX_FDS), which is required
   to copy its fixed descriptor set; child lookup and publication remain O(1).
 - Every mutation is checked-mutex serialized. Creation, lock, capacity,
-  generation, stale-token, and unlock failures fail closed. Unlock failure
-  permanently quarantines the owner.
+  generation, and stale-token failures fail closed. Unlock failure permanently
+  quarantines the owner. After a mutation linearizes, commit/destroy returns
+  an incomplete receipt with every created close-begin receipt instead of a
+  plain error. Reservation-cleanup corruption after descriptor replacement
+  follows the same committed-unknown receipt contract.
 
 ## Deferred adapter
 
@@ -67,6 +70,8 @@ containing every already-issued close receipt, marks the result incomplete,
 and quarantines the descriptor owner. The adapter can still finalize issued
 tickets; unreleased OFD refs may leak, but no reachable descriptor contains a
 released reference.
+An incomplete receipt may report all descriptors released when only final
+unlock/bookkeeping failed; receipt-count equality remains mandatory.
 Close reservations are exclusive because their commit removes the alias and
 its reservation counter; a competing dup, fork, or close must finish first.
 
