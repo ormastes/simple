@@ -1474,6 +1474,35 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit_store(ty, src_name, tmp)
             self.builder.emit_load(dest_name, ty, tmp)
 
+    me masked_shift_amount(ty: text, amount: text) -> text:
+        """Mask a shift count to the operand width, returning the value to shift by.
+
+        LLVM's `shl`/`lshr`/`ashr` produce POISON when the shift count is >= the
+        operand's bit width. This language instead defines an over-wide shift as
+        a MASKED count (`count & (bits - 1)`) -- which is what x86 and aarch64 do
+        in hardware, and what both the interpreter and the Cranelift JIT already
+        implement, so only the LLVM (native) lane disagreed. `1 << 64` printed a
+        different garbage value on every build (poison latched whatever register
+        was live) where every other engine printed 1.
+
+        Emitting the `and` explicitly costs nothing in practice: for a literal
+        count LLVM constant-folds it away, and for a variable count the x86/arm
+        backends drop it because the shift instruction masks anyway.
+
+        Non-integer or unknown-width `ty` is returned unchanged rather than
+        guessed at.
+        """
+        val bits_minus_one = if ty == "i64": 63
+            elif ty == "i32": 31
+            elif ty == "i16": 15
+            elif ty == "i8": 7
+            else: -1
+        if bits_minus_one < 0:
+            return amount
+        val masked = self.builder.fresh_local()
+        self.builder.emit_and(masked, ty, amount, "{bits_minus_one}")
+        masked
+
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate binary operation. Uses nsw for signed int arithmetic."""
         val dest_id = self.local_id_value(dest)
@@ -1565,16 +1594,18 @@ impl MirTextCodegen for MirToLlvm:
             case Shl:
                 val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
                 val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
-                self.builder.emit_shl(dest_name, ty, left_val, right_val)
+                val shl_amount = self.masked_shift_amount(ty, right_val)
+                self.builder.emit_shl(dest_name, ty, left_val, shl_amount)
             case Shr:
                 val left_unsigned = self.get_operand_unsigned(left)
                 val right_unsigned = self.get_operand_unsigned(right)
                 val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, left_unsigned)
                 val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, right_unsigned)
+                val shr_amount = self.masked_shift_amount(ty, right_val)
                 if left_unsigned:
-                    self.builder.emit_lshr(dest_name, ty, left_val, right_val)
+                    self.builder.emit_lshr(dest_name, ty, left_val, shr_amount)
                 else:
-                    self.builder.emit_ashr(dest_name, ty, left_val, right_val)
+                    self.builder.emit_ashr(dest_name, ty, left_val, shr_amount)
             case Eq:
                 val eq_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
                 val eq_pred = if is_float_type(eq_cmp_ty): "oeq" else: "eq"

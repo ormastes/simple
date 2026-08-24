@@ -1,10 +1,14 @@
 # Integers needing 61+ bits are corrupted: JIT everywhere, native inside containers
 
-Status: RESOLVED 2026-08-21 — Defect A and Defect B both fixed and MEASURED on
-the interpret and jit lanes; the differential corpus reports 13/13 AGREE with
-zero baselined divergences. See "Resolution (2026-08-21)" at the end of this
-file for what was actually wrong, which is NOT what the earlier "Fix (Defect
-A)" section below claimed had landed.
+Status: RESOLVED 2026-08-24 — ALL THREE LANES. Defects A and B (the int61
+truncation this file is named after) were fixed and MEASURED on interpret and
+jit on 2026-08-21; the native lane was closed 2026-08-24 by two DIFFERENT
+defects (C: f64 boxed through %rdi against a `double` ABI; D: unmasked LLVM
+shift count) — see "Native lane closed (2026-08-24)" at the END of this file.
+The differential corpus now reports 13/13 AGREE across interpret, jit and
+native with zero baselined divergences. See also "Resolution (2026-08-21)" for
+what was actually wrong on jit, which is NOT what the earlier "Fix (Defect A)"
+section below claimed had landed.
 Found 2026-08-09 by the multi-engine differential harness
 (`scripts/check/check_engine_differential.spl`) on its first run.
 Binary under test: `bin/release/x86_64-unknown-linux-gnu/simple`, sha256
@@ -398,3 +402,98 @@ shift counts at and past the word width.
   a different model to. Left alone deliberately.
 - The Cranelift and LLVM fast paths are a CALL, not an inlined range-check
   branch with the call as the slow block.
+
+## Native lane closed (2026-08-24) — and it was NOT int61 truncation
+
+The "Still owed" item above ("the native (LLVM AOT) lane was not measured") is
+now discharged. Measured at `origin/main` `dcc1e682940` from a clean worktree,
+seed sha256 `a1387e23c4f015aa`. Both remaining unbaselined divergences —
+`i64_boundary_values` and `f64_roundtrip` — are fixed, but **neither one was the
+61-bit tag truncation this file is named after.** That half is genuinely fixed:
+every `boxed_p60`/`boxed_p62`/`boxed_imax` row measured CORRECT on native before
+either change below. Keep that distinction; folding these two into the int61
+narrative would misdescribe both.
+
+`native-build` loads `src/compiler/**` as SOURCE (the build log shows
+`70.backend/backend/_MirToLlvm/core_codegen.spl` being read), so both fixes are
+pure-Simple and take effect with no bootstrap redeploy.
+
+### Defect C — f64 boxed through the wrong ABI register (`f64_roundtrip`)
+
+`box_runtime_value`'s F64/F32 arms bitcast the double to i64 and passed **that**
+to `rt_value_float`. The C runtime's parameter is a `double` — it has been since
+`native_lane_prints_every_f64_as_denormal_garbage_2026-08-10`, whose comment in
+`runtime_native.c` says in as many words "Keep this a `double`". The `.spl` side
+still carried the stale claim that the ABI was `rt_value_float(int64_t
+raw_bits)`, so under SysV x86-64 the caller put the payload in **%rdi** while the
+callee read **%xmm0**. Every f64 entering a container boxed whatever was left in
+%xmm0.
+
+Measured, bit-level, before:
+
+    movabs $0x3ff8000000000000,%rdi      # bits of 1.5 -> INTEGER register
+    call   3570 <rt_value_float>         # reads %xmm0
+
+after:
+
+    movsd  -0x1e60(%rip),%xmm0
+    call   3580 <rt_value_float>
+
+| probe | interpret | native (before) | native (after) |
+|---|---|---|---|
+| `[1.5,2.25,3.125][0]` | 1.5 | 4.07677...e+90 (stale %xmm0) | 1.5 |
+| `...[1]` | 2.25 | 0.0 | 2.25 |
+| `...[2]` | 3.125 | 0.0 | 3.125 |
+| `list_sum` | 6.875 | 4.1941340156960803e-76 | 6.875 |
+
+The garbage was diagnostic: `4.194...e-76` has the bit pattern
+`0x303030313d676962`, i.e. the ASCII bytes `big=1000` left over from the
+preceding `print`.
+
+Fix: `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` — pass the `f64`
+operand itself (and declare the FuncPtr param as `f64`) in both the F64 and F32
+arms. `bits` is retained only for the `??` fallback's legacy inline form.
+
+### Defect D — unmasked LLVM shift count (`i64_boundary_values`)
+
+LLVM's `shl`/`lshr`/`ashr` are **poison** when the shift count is >= the
+operand's bit width. This language defines an over-wide shift as a MASKED count
+(`count & (bits-1)`) — the fixture says so explicitly, x86/aarch64 mask in
+hardware, and the interpreter and Cranelift JIT already agreed. Only the LLVM
+lane disagreed, latching whatever register poison resolved to (a different
+garbage value on every build).
+
+| probe | interpret | native (before) | native (after) |
+|---|---|---|---|
+| `1 << 64` | 1 | 102404399226010 | 1 |
+| `1 << 65` | 2 | 102404399225872 | 2 |
+| `imax >> 64` | 9223372036854775807 | 102404399226017 | 9223372036854775807 |
+| `one << c` (variable) | 1 | 102404399226206 | 1 |
+| `1 << 63` (control) | -9223372036854775808 | same | same |
+| `1 << 3` (control) | 8 | 8 | 8 |
+
+Fix: new `masked_shift_amount` in
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`, applied to the
+`Shl`/`Shr` arms; twin `masked_shift_amount_ref` applied to the same defect in
+`src/compiler/70.backend/backend/llvm_lib_translate_expr.spl` (defect-class
+neighbour). Cost is nil in practice: a literal count constant-folds and a
+variable count's `and` is dropped by the x86/arm backends, which mask anyway.
+SIMD shifts route through `translate_simd_binop` and are untouched.
+
+### Evidence
+
+Full corpus, all three lanes, verbatim last two lines of
+`sh scripts/check/check-engine-differential.shs` (exit 0):
+
+```
+PASS — 13 fixture(s) compared across 3 lane(s), 0 new divergences (0 baselined, 2 lane error(s))
+PASS — 13 fixture(s) checked, unbaselined divergence(s)=0
+```
+
+`[f64_roundtrip] AGREE` and `[i64_boundary_values] AGREE`. Neither fixture was
+baselined — both genuinely agree across interpret, jit and native.
+
+The 2 lane errors are pre-existing and unrelated (`closure_runtime_facing`:
+`unresolved method call: find`; `list_index_and_get`: `unresolved method call:
+get`) — both are MIR-lowering gaps, and `list_index_and_get` was verified to fail
+identically at base `dcc1e682940` with these changes stashed.

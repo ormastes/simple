@@ -391,10 +391,11 @@ fn translate_binop_llvm(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper
         case BitAnd: llvm_build_and(builder, lhs, rhs, "and")
         case BitOr: llvm_build_or(builder, lhs, rhs, "or")
         case BitXor: llvm_build_xor(builder, lhs, rhs, "xor")
-        case Shl: llvm_build_shl(builder, lhs, rhs, "shl")
+        case Shl: llvm_build_shl(builder, lhs, masked_shift_amount_ref(ctx, builder, rhs), "shl")
         case Shr:
-            if left_is_unsigned: llvm_build_lshr(builder, lhs, rhs, "shr")
-            else: llvm_build_ashr(builder, lhs, rhs, "shr")
+            val shr_amt = masked_shift_amount_ref(ctx, builder, rhs)
+            if left_is_unsigned: llvm_build_lshr(builder, lhs, shr_amt, "shr")
+            else: llvm_build_ashr(builder, lhs, shr_amt, "shr")
 
         case Eq:
             if left_is_float:
@@ -935,6 +936,24 @@ fn is_float_type_ref(ctx: i64, ty: i64) -> bool:
 
 fn is_int_type_ref(ctx: i64, ty: i64) -> bool:
     llvm_get_type_kind(ty) == 8  # 8=Integer
+
+fn masked_shift_amount_ref(ctx: i64, builder: i64, amount: i64) -> i64:
+    """Mask a shift count to the operand width (twin of _MirToLlvm's masked_shift_amount).
+
+    LLVM's shl/lshr/ashr are POISON when the count is >= the operand's bit
+    width; this language defines an over-wide shift as a MASKED count, which is
+    what the hardware, the interpreter and the Cranelift JIT all do. A literal
+    count constant-folds and a variable count is dropped by the x86/arm
+    backends, so the `and` is free. Non-integer amounts pass through unchanged.
+    """
+    val ty = llvm_type_of(amount)
+    if not is_int_type_ref(ctx, ty):
+        return amount
+    val width = llvm_get_int_type_width(ty)
+    if width <= 1:
+        return amount
+    val mask = llvm_const_int(ty, width - 1, false)
+    llvm_build_and(builder, amount, mask, "shamt")
 
 # ============================================================================
 # Exports
