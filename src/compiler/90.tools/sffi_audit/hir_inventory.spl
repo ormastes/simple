@@ -1,0 +1,164 @@
+# Explicit resolved-HIR SFFI inventory. This module is audit-only and is not
+# invoked by the normal compiler pipeline, so its visitor and statistics have
+# zero production call-path overhead.
+
+use compiler.hir.hir_definitions.{HirExprKind}
+use compiler.hir.hir_types.{HirModule, HirSymbol, HirTypeKind, SymbolId}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_block}
+use compiler.hir.sffi_identity.{hir_type_is_sffi_raw_callable, sffi_raw_name_has_reserved_prefix}
+use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module}
+
+struct SffiHirInventoryStats:
+    resolved_extern_symbols: i64
+    raw_call_sites: i64
+    resolved_raw_call_sites: i64
+    aliased_raw_call_sites: i64
+    unresolved_prefixed_candidates: i64
+    lexically_scoped_call_sites: i64
+    missing_authority_call_sites: i64
+    distinct_called_symbols: i64
+    unavailable_method_bodies: i64
+    hir_complete: bool
+    signature_evidence_included: bool
+    verification_evidence_included: bool
+
+class SffiHirInventoryContext:
+    extern_symbol_ids: Dict<i64, bool>
+    known_callable_symbol_ids: Dict<i64, bool>
+    called_symbol_ids: Dict<i64, bool>
+    raw_call_sites: i64
+    resolved_raw_call_sites: i64
+    aliased_raw_call_sites: i64
+    unresolved_prefixed_candidates: i64
+
+    static fn create(
+        extern_symbol_ids: Dict<i64, bool>,
+        known_callable_symbol_ids: Dict<i64, bool>
+    ) -> SffiHirInventoryContext:
+        SffiHirInventoryContext(
+            extern_symbol_ids: extern_symbol_ids,
+            known_callable_symbol_ids: known_callable_symbol_ids,
+            called_symbol_ids: {},
+            raw_call_sites: 0,
+            resolved_raw_call_sites: 0,
+            aliased_raw_call_sites: 0,
+            unresolved_prefixed_candidates: 0)
+
+fn sffi_hir_inventory_visit(
+    node: HirWalkNode,
+    context: SffiHirInventoryContext
+) -> SffiHirInventoryContext:
+    match node:
+        case HirWalkNode.Expr(expr):
+            match expr.kind:
+                case HirExprKind.Call(callee, _, _):
+                    match callee.kind:
+                        case HirExprKind.NamedVar(symbol, name):
+                            val resolved = context.extern_symbol_ids.contains_key(symbol.id)
+                            val prefixed = sffi_raw_name_has_reserved_prefix(name)
+                            if resolved:
+                                context.raw_call_sites = context.raw_call_sites + 1
+                                context.called_symbol_ids[symbol.id] = true
+                                context.resolved_raw_call_sites = context.resolved_raw_call_sites + 1
+                                if not prefixed:
+                                    context.aliased_raw_call_sites = context.aliased_raw_call_sites + 1
+                            elif prefixed and not context.known_callable_symbol_ids.contains_key(symbol.id):
+                                # A prefix with no resolved callable declaration
+                                # is an ambiguity to investigate, never proof of
+                                # foreign identity.
+                                context.unresolved_prefixed_candidates = context.unresolved_prefixed_candidates + 1
+                        case _:
+                            pass
+                case _:
+                    pass
+        case _:
+            pass
+    context
+
+fn sffi_hir_missing_authority(errors: [SafetyError]) -> i64:
+    var missing = 0
+    var seen: Dict<text, bool> = {}
+    for error_ in errors:
+        var kind = ""
+        var file = ""
+        var start = -1
+        var end = -1
+        match error_:
+            case UnsafeFfiOutsideUnsafe(span):
+                kind = "ffi"
+                file = span.file
+                start = span.start
+                end = span.end
+            case RawPointerOutsideUnsafe(span):
+                kind = "raw_ptr"
+                file = span.file
+                start = span.start
+                end = span.end
+            case _:
+                pass
+        if kind != "":
+            # SafetyChecker currently revisits retained impl methods through
+            # two ownership views. Deduplicate its diagnostics by exact source
+            # range so the audit reports call sites, not traversal count.
+            val key = "{kind}\t{file}\t{start}\t{end}"
+            if not seen.contains_key(key):
+                seen[key] = true
+                missing = missing + 1
+    missing
+
+fn sffi_hir_inventory(module: HirModule) -> SffiHirInventoryStats:
+    var extern_symbol_ids: Dict<i64, bool> = {}
+    var known_callable_symbol_ids: Dict<i64, bool> = {}
+    for function_entry in module.functions:
+        val function_ = function_entry[1]
+        known_callable_symbol_ids[function_.symbol.id] = true
+        if function_.is_extern:
+            extern_symbol_ids[function_.symbol.id] = true
+    for symbol_entry in module.symbols.symbols:
+        val symbol: HirSymbol = symbol_entry[1]
+        if val symbol_type = symbol.type_:
+            match symbol_type.kind:
+                case HirTypeKind.Function(_, _, _):
+                    known_callable_symbol_ids[symbol.id.id] = true
+                case _:
+                    pass
+        if hir_type_is_sffi_raw_callable(symbol.type_):
+            extern_symbol_ids[symbol.id.id] = true
+
+    val context = SffiHirInventoryContext.create(
+        extern_symbol_ids, known_callable_symbol_ids)
+    for function_entry in module.functions:
+        walk_hir_block(function_entry[1].body, context, sffi_hir_inventory_visit)
+
+    var unavailable_method_bodies = 0
+    for class_entry in module.classes:
+        val class_ = class_entry[1]
+        for method_entry in class_.methods:
+            val method_symbol: SymbolId = method_entry[1]
+            if not module.functions.contains_key(method_symbol):
+                unavailable_method_bodies = unavailable_method_bodies + 1
+
+    val checker = SafetyChecker.create()
+    val missing = sffi_hir_missing_authority(
+        safetychecker_check_module(checker, module))
+    val scoped = if missing <= context.raw_call_sites:
+        context.raw_call_sites - missing
+    else:
+        0
+    SffiHirInventoryStats(
+        resolved_extern_symbols: extern_symbol_ids.len(),
+        raw_call_sites: context.raw_call_sites,
+        resolved_raw_call_sites: context.resolved_raw_call_sites,
+        aliased_raw_call_sites: context.aliased_raw_call_sites,
+        unresolved_prefixed_candidates: context.unresolved_prefixed_candidates,
+        lexically_scoped_call_sites: scoped,
+        missing_authority_call_sites: missing,
+        distinct_called_symbols: context.called_symbol_ids.len(),
+        unavailable_method_bodies: unavailable_method_bodies,
+        hir_complete: unavailable_method_bodies == 0 and
+            context.unresolved_prefixed_candidates == 0 and
+            missing <= context.raw_call_sites,
+        signature_evidence_included: false,
+        verification_evidence_included: false)
+
+export SffiHirInventoryStats, sffi_hir_inventory

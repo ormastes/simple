@@ -2664,3 +2664,44 @@ retains guard/return/host-probe ordering, and the complete spec passes 7/7.
 Current census is 21,267 calls (2,163 explicit, 19,104 missing), 12,111
 declarations (905 tagged, 385 minimized, 10,940 untouched), zero
 signed/admitted.
+
+## Resolved-HIR extern identity for aliases and reexports
+
+The source census cannot authoritatively recognize an imported alias whose
+spelling no longer starts with `rt_` or `spl_`. The existing safety pass also
+scans a module-local extern-name array for every named call, making its worst
+case O(calls * local externs) while still missing foreign aliases.
+
+The compiler-owned slice marks actual extern callable types with the
+existing effect field with the reserved marker
+`EffectKind.Custom("__compiler_sffi_raw_v2")`. Module surfaces already retain
+`is_extern`, and HIR type effects already round-trip through the generated
+codec, so imported aliases and reexports preserve identity without a new HIR
+field. The safety checker builds one `Dict<i64, bool>` from resolved symbol IDs
+per module and uses constant-time membership on calls. Its complexity becomes
+O(symbols + calls), with O(extern symbols) compiler-only memory and no runtime
+provider-call, allocation, copy, or dispatch change.
+
+Bodyless externs without a return arrow are represented as Unit specifically
+for callable identity; ordinary untyped safe functions retain their existing
+inference behavior. Coverage now includes a non-prefixed imported alias outside
+and inside lexical `unsafe(ffi)`, plus a safe-wrapper false-positive control.
+Execution remains unverified because the deployed `bin/simple` is the Rust
+bootstrap seed and the mandatory evidence ledger requires a fresh admitted
+Stage 4. This slice must not be described as verified or signed.
+
+`compiler.tools.sffi_audit.hir_inventory` now provides the opt-in resolved-HIR
+counter. It reports resolved extern symbols, total/resolved/aliased/prefix-
+candidate calls, distinct called symbols, lexical-authority debt, and a boolean
+`hir_complete` verdict. It deliberately reports `hir_complete: false` when
+class method bodies are unavailable from `HirModule`, preventing a partial HIR
+walk from masquerading as a whole-module census. The audit visitor is not
+called by the normal compiler pipeline and therefore adds no production
+traversal or observation allocation.
+
+The old `rt_`/`spl_` name-only fallback is no longer safety authority: an
+ordinary Simple function with such a name is not foreign. A reserved prefix
+with no resolved callable declaration remains a separate audit ambiguity and
+forces `hir_complete: false`; it is not added to the raw-call total. Separate
+`signature_evidence_included` and `verification_evidence_included` booleans are
+false because HIR identity cannot prove artifact admission.

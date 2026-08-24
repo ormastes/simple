@@ -18,10 +18,15 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 use std.spec
 use compiler.common.config.Logger
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{Module}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module}
+use compiler.tools.sffi_audit.hir_inventory.{SffiHirInventoryStats, sffi_hir_inventory}
 
 fn check_source(src: text, module_name: text) -> [SafetyError]:
     val parsed = parse_full_frontend(src, "testdata/{module_name}.spl", module_name, Logger(level: 0))
@@ -29,6 +34,46 @@ fn check_source(src: text, module_name: text) -> [SafetyError]:
     val hir = hir_lowering.lower_module(parsed)
     val checker = SafetyChecker.create()
     safetychecker_check_module(checker, hir)
+
+fn empty_sffi_inventory() -> SffiHirInventoryStats:
+    SffiHirInventoryStats(
+        resolved_extern_symbols: 0, raw_call_sites: 0,
+        resolved_raw_call_sites: 0, aliased_raw_call_sites: 0,
+        unresolved_prefixed_candidates: 0, lexically_scoped_call_sites: 0,
+        missing_authority_call_sites: 0, distinct_called_symbols: 0,
+        unavailable_method_bodies: 0, hir_complete: false,
+        signature_evidence_included: false,
+        verification_evidence_included: false)
+
+fn check_imported_source(
+    provider_src: text,
+    consumer_src: text
+) -> ([SafetyError], SffiHirInventoryStats):
+    val logger = Logger(level: 0)
+    val provider = parse_full_frontend(
+        provider_src, "ffi_provider.spl", "ffi_provider", logger)
+    val consumer = parse_full_frontend(
+        consumer_src, "ffi_consumer.spl", "ffi_consumer", logger)
+    var modules: Dict<text, Module> = {}
+    modules["ffi_provider"] = provider
+    modules["ffi_consumer"] = consumer
+    val sources = [
+        SourceFile(path: "ffi_provider.spl", content: provider_src, module_name: "ffi_provider"),
+        SourceFile(path: "ffi_consumer.spl", content: consumer_src, module_name: "ffi_consumer")
+    ]
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(surfaces):
+            var lowering = hirlowering_for_module("ffi_consumer.spl", surfaces)
+            val hir = lowering.lower_module(consumer)
+            if lowering.errors.len() > 0:
+                fail("imported SFFI fixture must lower without diagnostics")
+                return ([], empty_sffi_inventory())
+            val checker = SafetyChecker.create()
+            val errors = safetychecker_check_module(checker, hir)
+            (errors, sffi_hir_inventory(hir))
+        case Err(_):
+            fail("imported SFFI fixture surfaces must resolve")
+            ([], empty_sffi_inventory())
 
 fn count_kind(errors: [SafetyError], kind: text) -> i64:
     var n = 0
@@ -99,14 +144,14 @@ describe "safety checker unsafe boundary":
         val errors = check_source(src, "safety_ffi_outside")
         expect(count_kind(errors, "ffi")).to_equal(1)
 
-    it "warns on imported-style raw runtime call outside unsafe":
-        step("Verify: imported rt identity remains ffi-unsafe")
+    it "does not infer foreign identity from an rt-prefixed Simple function":
+        step("Verify: resolved declaration identity outranks name spelling")
         val src = "fn rt_imported_probe() -> i64:\n" +
             "    1\n" +
             "fn use_imported_raw() -> i64:\n" +
             "    rt_imported_probe()\n"
         val errors = check_source(src, "safety_imported_ffi_outside")
-        expect(count_kind(errors, "ffi")).to_equal(1)
+        expect(count_kind(errors, "ffi")).to_equal(0)
 
     it "accepts imported-style raw runtime call inside unsafe":
         step("Verify: minimal ffi boundary admits imported rt identity")
@@ -117,3 +162,50 @@ describe "safety checker unsafe boundary":
             "        rt_imported_probe()\n"
         val errors = check_source(src, "safety_imported_ffi_inside")
         expect(count_kind(errors, "ffi")).to_equal(0)
+
+    it "warns on an aliased imported extern without relying on its spelling":
+        step("Verify: resolved extern identity survives an import alias")
+        val provider = "pub extern fn device_poke(x: i64)\n"
+        val consumer = r"use ffi_provider.{device_poke as poke}" + "\n" +
+            "fn use_ffi():\n" +
+            "    poke(1)\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(errors.len()).to_equal(1)
+        expect(count_kind(errors, "ffi")).to_equal(1)
+        expect(inventory.raw_call_sites).to_equal(1)
+        expect(inventory.resolved_raw_call_sites).to_equal(1)
+        expect(inventory.aliased_raw_call_sites).to_equal(1)
+        expect(inventory.missing_authority_call_sites).to_equal(1)
+        expect(inventory.lexically_scoped_call_sites).to_equal(0)
+        expect(inventory.hir_complete).to_equal(true)
+        expect(inventory.signature_evidence_included).to_equal(false)
+        expect(inventory.verification_evidence_included).to_equal(false)
+
+    it "accepts the same aliased imported extern inside minimal unsafe":
+        step("Verify: alias identity respects the lexical ffi boundary")
+        val provider = "pub extern fn device_poke(x: i64)\n"
+        val consumer = r"use ffi_provider.{device_poke as poke}" + "\n" +
+            "fn use_ffi():\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        poke(1)\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(errors.len()).to_equal(0)
+        expect(inventory.raw_call_sites).to_equal(1)
+        expect(inventory.missing_authority_call_sites).to_equal(0)
+        expect(inventory.lexically_scoped_call_sites).to_equal(1)
+        expect(inventory.hir_complete).to_equal(true)
+
+    it "does not classify an imported safe wrapper as raw ffi":
+        step("Verify: foreign identity does not leak through safe wrappers")
+        val provider = "extern fn device_poke(x: i64) -> i64\n" +
+            "pub fn checked_poke(x: i64) -> i64:\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        device_poke(x)\n"
+        val consumer = r"use ffi_provider.{checked_poke as poke}" + "\n" +
+            "fn use_wrapper() -> i64:\n" +
+            "    poke(1)\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(errors.len()).to_equal(0)
+        expect(inventory.raw_call_sites).to_equal(0)
+        expect(inventory.resolved_extern_symbols).to_equal(0)
+        expect(inventory.hir_complete).to_equal(true)

@@ -34,6 +34,7 @@ use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.hir.sffi_identity.{sffi_raw_callable_effects}
 
 impl HirLowering:
     me prescan_composite_field_types(name: text, fields: [ParserField]):
@@ -182,7 +183,10 @@ impl HirLowering:
         else:
             self.infer_untyped_return_type(fn_decl)
         val callable_type = HirType(
-            kind: HirTypeKind.Function(param_types, return_type, []),
+            kind: HirTypeKind.Function(
+                param_types,
+                return_type,
+                sffi_raw_callable_effects(fn_decl.is_extern, fn_decl.span)),
             span: fn_decl.span
         )
         # Bare-lift: an explicit `Some(...)` tail in a `-> HirType?` function
@@ -200,7 +204,12 @@ impl HirLowering:
         callable_type
 
     me declared_surface_callable_type(callable: ModuleSurfaceCallable, owner_symbol: SymbolId?) -> HirType?:
-        if callable.type_params.len() > 0 or not callable.has_return_type:
+        if callable.type_params.len() > 0:
+            return nil
+        # A bodyless extern with no arrow has a complete Unit return contract;
+        # retaining its callable type is required for imported alias authority.
+        # Ordinary untyped functions keep the existing inference path.
+        if not callable.has_return_type and not callable.is_extern:
             return nil
         if self.registering_import_symbols:
             return nil
@@ -221,7 +230,16 @@ impl HirLowering:
                 return nil
             param_types = param_types.push(self.lower_type(callable.params[param_idx].type_))
             param_idx = param_idx + 1
-        HirType(kind: HirTypeKind.Function(param_types, self.lower_type(callable.return_type), []), span: callable.span)
+        val return_type = if callable.has_return_type:
+            self.lower_type(callable.return_type)
+        else:
+            HirType(kind: HirTypeKind.Unit, span: callable.span)
+        HirType(
+            kind: HirTypeKind.Function(
+                param_types,
+                return_type,
+                sffi_raw_callable_effects(callable.is_extern, callable.span)),
+            span: callable.span)
 
     me imported_surface_type(type_: Type, imported_module_name: text, bound_type_params: [text]) -> HirType:
         val source_name = parser_type_kind_named_name(type_.kind)
@@ -536,7 +554,7 @@ impl HirLowering:
         # `imported_surface_type`) so `C` cannot surface as `unresolved type: C`.
         # Instantiation is untouched -- monomorphization stays in plan section 9.
         # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-        if not callable.has_return_type:
+        if not callable.has_return_type and not callable.is_extern:
             return nil
         var bound_type_params: [text] = []
         for type_param in callable.type_params:
@@ -558,16 +576,20 @@ impl HirLowering:
                 param.type_, param.type_name, param.array_element_name, imported_module_name,
                 bound_type_params))
             param_idx = param_idx + 1
+        val return_type = if callable.has_return_type:
+            self.imported_surface_type_projected(
+                callable.return_type,
+                callable.return_type_name,
+                callable.return_array_element_name,
+                imported_module_name,
+                bound_type_params)
+        else:
+            HirType(kind: HirTypeKind.Unit, span: callable.span)
         HirType(
             kind: HirTypeKind.Function(
                 param_types,
-                self.imported_surface_type_projected(
-                    callable.return_type,
-                    callable.return_type_name,
-                    callable.return_array_element_name,
-                    imported_module_name,
-                    bound_type_params),
-                []),
+                return_type,
+                sffi_raw_callable_effects(callable.is_extern, callable.span)),
             span: callable.span)
 
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:

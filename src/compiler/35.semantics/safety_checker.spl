@@ -17,6 +17,7 @@ use compiler.semantics.safety_checker_transfer.{
     safetychecker_check_transfer_module_with_policy_impl
 }
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+use compiler.hir.sffi_identity.{hir_type_is_sffi_raw_callable}
 
 # ============================================================================
 # Safety Errors
@@ -78,7 +79,7 @@ struct SafetyContext:
     """Tracks whether we're currently in an unsafe context."""
     in_unsafe: bool
     errors: [SafetyError]
-    extern_fns: [text]      # module-local `extern fn` names (FFI rule)
+    extern_symbol_ids: Dict<i64, bool>  # resolved raw-call identities (FFI rule)
     class_symbol_ids: [i64] # module-local `class` symbol ids (E1047 s19 gate)
     params: [SafetyParamTrack]  # current function's trackable non-mut params
     iter_tracks: [SafetyIterTrack]  # E1048: stack of collections currently being for-iterated
@@ -90,7 +91,7 @@ struct SafetyContext:
 # ============================================================================
 
 fn safetycontext_new() -> SafetyContext:
-        SafetyContext(in_unsafe: false, errors: [], extern_fns: [], class_symbol_ids: [], params: [], iter_tracks: [], expr_depth: 0)
+        SafetyContext(in_unsafe: false, errors: [], extern_symbol_ids: {}, class_symbol_ids: [], params: [], iter_tracks: [], expr_depth: 0)
 
 
 fn safetychecker_max_expr_depth() -> i64:
@@ -114,25 +115,17 @@ fn safety_is_raw_ptr_name(name: text) -> bool:
     false
 
 
-fn safety_is_extern_fn(self: SafetyChecker, name: text) -> bool:
-    # Raw runtime/provider identities remain foreign even when imported from
-    # another module and therefore absent from this module's extern table.
-    # Prefix classification is constant-time in the short prefix and avoids
-    # a linear extern-name scan on the common generated SFFI path.
-    if name.starts_with("rt_") or name.starts_with("spl_"):
-        return true
-    for ext_name in self.context.extern_fns:
-        if ext_name == name:
-            return true
-    false
+fn safety_is_extern_fn(self: SafetyChecker, symbol: SymbolId) -> bool:
+    self.context.extern_symbol_ids.contains_key(symbol.id)
 
 
 # Shared rule application for a direct call to a named callee outside unsafe.
-fn safetychecker_flag_callee(self: SafetyChecker, callee_name: text, span: Span):
-    if safety_is_raw_ptr_name(callee_name):
-        self.context.errors = self.context.errors.push(SafetyError.RawPointerOutsideUnsafe(span))
-    elif safety_is_extern_fn(self, callee_name):
-        self.context.errors = self.context.errors.push(SafetyError.UnsafeFfiOutsideUnsafe(span))
+fn safetychecker_flag_callee(self: SafetyChecker, callee_symbol: SymbolId, callee_name: text, span: Span):
+    if safety_is_extern_fn(self, callee_symbol):
+        if safety_is_raw_ptr_name(callee_name):
+            self.context.errors = self.context.errors.push(SafetyError.RawPointerOutsideUnsafe(span))
+        else:
+            self.context.errors = self.context.errors.push(SafetyError.UnsafeFfiOutsideUnsafe(span))
 
 
 # ============================================================================
@@ -356,12 +349,22 @@ impl SafetyChecker:
 
 fn safetychecker_check_module(self: SafetyChecker, module: HirModule) -> [SafetyError]:
     """Check an entire module for safety violations."""
-    # Collect module-local extern fn names first: direct calls to these are
-    # FFI boundary crossings and must sit inside an `unsafe:` block.
+    # Build one resolved identity set per module. Imported aliases and reexports
+    # carry the reserved compiler SFFI marker on their callable type, so call checking is O(1) by
+    # symbol id instead of O(calls * module-local extern names). Local extern
+    # bodies are also admitted directly as a fail-closed fallback for an
+    # incomplete signature.
+    self.context.extern_symbol_ids = {}
     for _for_item_e in module.functions:
         val ext_func = _for_item_e[1]
         if ext_func.is_extern:
-            self.context.extern_fns = self.context.extern_fns.push(ext_func.name)
+            self.context.extern_symbol_ids[ext_func.symbol.id] = true
+    # Iterate Dict entries directly: `.keys()` materializes a full temporary
+    # array and would add avoidable peak memory to every checked module.
+    for symbol_entry in module.symbols.symbols:
+        val symbol = symbol_entry[1]
+        if hir_type_is_sffi_raw_callable(symbol.type_):
+            self.context.extern_symbol_ids[symbol.id.id] = true
 
     # Collect module-local `class` symbol ids (E1047 s19 gate): a param typed
     # Named(sym, _) whose sym is in this set is a reference type and must NOT

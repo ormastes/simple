@@ -1530,3 +1530,29 @@ it now passes 7/7 while retaining the behavioral cases and exact ordering
 checks. Current census is 21,267 calls (2,163 explicit, 19,104 missing), 12,111
 declarations (905 tagged, 385 minimized, 10,940 untouched), zero
 signed/admitted.
+
+Resolved-HIR authority is implemented locally as the active compiler slice.
+Attach the existing reserved `__compiler_sffi_raw_v2` effect only to actual
+extern callable types, preserve it through module surfaces and aliases,
+precompute a symbol-ID set once per module, and keep direct-call classification
+O(1). Unit-returning externs must retain this identity even without an explicit
+return arrow; safe wrappers must not inherit it. Accept only after the alias
+outside/inside-unsafe and wrapper-control spec runs on an admitted pure-Simple
+compiler, followed by the same compiler pipeline timing/RSS measurement. Until
+then the implementation is source-reviewed but unverified.
+
+After that acceptance, use resolved symbol identity as the authority for the
+inventory tool, retaining the source scanner as a fast lower-bound diagnostic.
+Do not reduce the 19,503-row missing baseline merely because aliases change
+spelling. Provider signing/admission remains a later independent gate; current
+signed/admitted count is zero.
+
+The opt-in HIR inventory must remain audit-only. Its acceptance gate requires
+`hir_complete == true`; missing class method bodies make the result explicitly
+incomplete. Once an admitted compiler is available, aggregate these per-module
+scalar rows into the workspace report and compare them with—not replace—the
+source lower bound until both views reconcile.
+
+Do not restore `rt_`/`spl_` spelling as foreign authority. Prefix-only,
+unresolved callable candidates are an incomplete-inventory condition; only the
+compiler-owned extern marker admits a resolved raw call.
