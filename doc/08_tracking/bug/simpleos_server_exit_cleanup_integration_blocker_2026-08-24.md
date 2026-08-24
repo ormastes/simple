@@ -185,3 +185,25 @@ must retain forged/copy-divergent owner rejection, replay, retry exhaustion,
 lost-attempt cancellation, partial cleanup, forged quarantine, duplicate exit,
 and PID-reuse cases. Runtime and QEMU evidence remain required before closing
 this blocker.
+
+## 2026-08-24 scheduler pre-exit preparation update
+
+`scheduler_pre_exit_preparation_v1.spl` now composes the committed DBD adapter
+and namespace/grant cleanup reservation under one bounded scheduler-domain
+identity. It retains the TCB lifecycle identity, requires the provider-reported
+DBD terminal receipt before namespace binding, commits namespace before grant,
+supports provider-authenticated cancellation/retry, and retains a replayable
+consumed receipt. It intentionally retains that tombstone until future
+scheduler publication/reap acknowledgment can authorize capacity release.
+Metadata transitions follow the
+explicit scheduler-owner then provider-owner lock order. Ambiguous provider
+results park the row as `Indeterminate`; they never authorize `Zombie`.
+
+The production blocker remains open. The legacy exit helpers still close FDs,
+revoke grants, and publish `Zombie` directly. The new preparation owner neither
+executes DBD commands nor covers FD/capability cleanup. The underlying DBD
+adapter also increments its attempt ordinal without an internal overflow gate;
+the scheduler wrapper prevents the overflowing retry, but other future callers
+must not bypass it until the provider owns the same guard. Fault-injection and
+QEMU evidence are intentionally absent, so this update is an unverified
+pre-Zombie prerequisite rather than completed exit wiring.
