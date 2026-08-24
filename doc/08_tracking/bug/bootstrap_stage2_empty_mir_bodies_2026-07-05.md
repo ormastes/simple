@@ -1613,3 +1613,90 @@ separate defect.
 3. Return types collapsing to `I64` on the bootstrap flat path. Real,
    pre-existing, currently masked in the interpreter, and its own lane — it will
    produce wrong ABI/return handling the moment a body does emit.
+
+## 2026-08-24 — `lower_expr` DOES run; and a `HirTypeKind` with `disc=-1` links this to the codec blocker
+
+All of the below cost **zero** builds: it uses instruments already compiled into
+the Stage 2 from `79a488cceb4`, including one (`SIMPLE_MIR_GARBAGE_EXPR_DEBUG`)
+that already existed in the tree.
+
+### 1. `lower_expr` executes and returns a valid local
+
+A **method-call** fixture (`fn main(): "abc".len()`) makes the
+`[mir-lower-expr]` traces fire — they are gated on `span_method_name != ""`, so
+they only ever fire for `MethodCall`. On Stage 2:
+
+```
+[mir-stmt-caller] before disc=4119164143 ... hits_expr=yes
+[mir-lower-expr] impl-return method=len id=1
+[mir-lower-expr] span-builder-written method=len id=1
+```
+
+So `lower_expr` is entered, `lower_expr_impl` returns, and a **valid local
+(id=1)** comes back. The failure is therefore NOT "lower_expr never runs": zero
+instructions are produced *despite* a successful lowering call.
+
+**Correction to an earlier reading in this record:** the silence between the
+statement probes under `SIMPLE_COMPILER_TRACE=1` was never evidence that nothing
+happened — those traces are MethodCall-only and the fixture was a plain `Call`.
+
+### 2. The HirExpr payload is a live enum — wild-handle misbind eliminated
+
+`SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1` runs the tree's own garbage-child detector at
+the single choke point every lowered expression passes through. It fires when
+`rt_enum_discriminant(expr.kind) < 0`. On Stage 2 it reports **0** findings. So
+the payload handed to `lower_expr` is a live boxed enum with a valid
+discriminant. (It would not catch a payload that is a *different* valid enum, so
+this eliminates the wild-handle case, not every misbind.)
+
+### 3. NEW — a `HirTypeKind` that is not an enum at all, and only on Stage 2
+
+Surfaced **only** because the swallowed-error instrument now prints what was
+recorded:
+
+```
+error: bootstrap MIR lowering (flat entry, fatal):
+       E-MIR-TYPE-Unknown: unreachable HirTypeKind disc=-1: 0
+error: bootstrap MIR lowering (flat entry, fatal):
+       E-SFFI-016: missing return in non-unit function 'main'
+```
+
+`-1` is `rt_enum_discriminant`'s **not-an-enum sentinel** (it answers
+`e ? e->discriminant : -1`). So a `HirTypeKind` reaching `lower_type` is not a
+live enum at all.
+
+Scoped precisely, same fixture both engines:
+
+| engine | `disc=-1` occurrences | result |
+|---|---|---|
+| self-compiled Stage 2 | **present** (fatal) | rc=1, 0 instructions |
+| seed interpreting `src/compiler/**` | **0** | rc=0, binary runs |
+
+### 4. This is the same condition as the codec blocker — same enum, same sentinel
+
+The other open Stage-2 blocker is
+`hir codec: no \`HirTypeKind\` arm for tag -1`, whose `-1` is a hardcoded
+sentinel meaning "the encoder's match fell through" — i.e. a `HirTypeKind` value
+that matches no variant. Here a **different consumer** (`lower_type`) of the
+**same enum type** reports `disc=-1`, i.e. not an enum at all.
+
+Two independent consumers of `HirTypeKind` both finding a non-variant value, on a
+self-compiled Stage 2 only, is a strong hint of **one root cause: `HirTypeKind`
+values are not live enums in the self-compiled binary.** Stated as a hypothesis,
+not a conclusion — nothing here proves the two share a producer.
+
+It also gives a mechanical account of E-SFFI-016 on Stage 2 that the earlier
+section could only assert: a garbage `HirTypeKind` falls to the `Unknown` arm,
+`lower_type` yields its `I64` fallback, the function reads as non-unit, and the
+missing-return branch fires.
+
+### Next discriminating step
+
+The remaining question for the emission failure is narrow: `lower_expr` returns a
+valid local, so are instructions emitted into a **builder copy that is then
+discarded** (this project's documented value-semantics/CoW hazard — every site
+here is `var b = self.builder; …; self.builder = b`), or never emitted at all?
+Probe: instruction count on `self.builder` immediately after the `lower_expr`
+call in the `Expr` pre-dispatch branch, against the function's total at
+`end_function`. `>0` then `0` proves loss; `0` then `0` proves non-emission.
+That one needs a build, and it discriminates exactly those two.
