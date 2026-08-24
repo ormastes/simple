@@ -1243,7 +1243,7 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   adapters; verification intentionally not run under the user's no-verify
   instruction.
 
-## Planned query outline snapshot tranche
+## Completed query outline snapshot tranche
 
 - Build one request-local target-file snapshot containing lines, symbols, and
   imports from one read and one split.
@@ -1251,6 +1251,9 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   keep imported-module parsing and precedence unchanged.
 - Preserve empty-file behavior, duplicate import ordering, line numbers,
   stdout, limits, and exit codes without introducing persistent cache state.
+- Add a source-snapshot projection contract and structural guards proving
+  type/signature cursor paths consume snapshot lines rather than rereading.
+- Verification intentionally not run under the user's no-verify instruction.
 
 ## Reviewed workspace JSON process tranche
 
