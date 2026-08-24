@@ -11,6 +11,7 @@ End-to-end evidence for REQ-001..REQ-025 and NFR-001..NFR-015. Static design is 
 |---|---|---|
 | Operator flow | `test/03_system/app/compiler/feature/simple_compiler_performance_memory_efficiency_spec.spl` | `doc/06_spec/03_system/app/compiler/feature/simple_compiler_performance_memory_efficiency_spec.md` |
 | Initial typed HIR facts | `test/01_unit/compiler/semantics/hir_perf_facts_spec.spl` | focused unit evidence; generated manual not yet owned |
+| Built-in collection identity (blocked) | planned focused resolver/runtime integration spec | requires tracked identity/runtime repair before driver wiring |
 | Transform integrity | `test/02_integration/compiler/optimizer_transform_integrity_spec.spl` | mirrored `doc/06_spec/02_integration/...md` |
 | Diagnostics (planned) | `test/02_integration/compiler/perf_diagnostic_contract_spec.spl` | not yet implemented |
 | Shared facts/summaries (planned) | `test/02_integration/compiler/perf_facts_summary_spec.spl` | not yet implemented |
