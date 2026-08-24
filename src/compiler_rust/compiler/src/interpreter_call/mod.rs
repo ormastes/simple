@@ -788,6 +788,19 @@ pub(crate) fn evaluate_call(
             ctx = ctx.with_note(format!("available functions: {}", names_list));
         }
 
+        // Sibling of the [mnf-debug] probe in interpreter_method/mod.rs, and
+        // the same reasoning: when this fires while the seed interprets the
+        // self-hosted compiler, the message carries no .spl location at all.
+        // The interpreted call stack names the offending compiler function.
+        // Default OFF; populated when SIMPLE_DEBUG_FIELD_ACCESS=1. See
+        // doc/08_tracking/bug/seed_val_bound_unsafe_block_parsed_as_call_2026-08-24.md
+        if std::env::var("SIMPLE_INTERP_OOB_DEBUG").is_ok() {
+            eprintln!(
+                "[fnf-debug] name={}\n[fnf-debug-spl] {}",
+                name,
+                crate::interpreter::debug_call_stack_snapshot().join(" -> ")
+            );
+        }
         return Err(CompileError::semantic_with_context(
             format!("function `{}` not found", name),
             ctx,

@@ -288,3 +288,73 @@ verdict, six times, in the `std.io_runtime` closure:
 
 That is a separate bug and is tracked on its own; it was previously unreachable
 behind this one.
+
+## 2026-08-24 (end of lane) — the full chain, and where it actually stops
+
+This record opened as "the one defect standing between this host and a locally
+built MCP server". That framing was wrong: it was the FIRST of five. Recorded
+here as an index so nobody re-derives the ordering.
+
+| # | defect | status |
+|---|---|---|
+| 1 | `arm_body` local/global collision -> `method 'len' not found on type 'i64'` | **FIXED** `ec272de6947` |
+| 2 | `val x = unsafe(...):` parsed by the seed as a call to `unsafe` | **worked around at all 3 call sites** `495af8df740`, `7ec9ae025ee` (seed defect itself OPEN) |
+| 3 | NLL reports `&mut` of a local "may still be active at return" at every return | **OPEN**, 10-line reproducer filed |
+| 4 | no MIR/HIR lowering for `(a, b) = expr` | **FIXED** `b102d597ec1` |
+| 5 | `for-in over non-array iterables ... (#143)` | **OPEN** — a known numbered feature gap, not a bug |
+
+**Where each target stands:**
+
+- The four-line `std.io_runtime` fixture in this record **still does not build.**
+  It clears defects 1, 2 and 4 and stops on defect 3.
+- `native-build src/app/mcp/main.spl` went from dying at **parse 11/61** to
+  clearing parse, HIR and MIR lowering for **all 61 modules**, and stops on
+  defect 5. No binary is produced.
+
+**Correction to `7ec9ae025ee`'s commit message.** It says the MCP build showed
+"zero borrow errors in that closure". That is not evidence of anything:
+`borrow_check()` runs AFTER `lower_to_mir` completes
+(`80.driver/driver_aot_pipeline.spl`), and every MCP run so far has died INSIDE
+`lower_to_mir`. **The borrow checker has never executed on the MCP closure.**
+MCP imports `std.io_runtime`, which pulls
+`io/process_ops.spl:229 process_read_stdout_result` — the exact function that
+produces defect 3. So the predicted chain for the next lane is:
+
+```
+clear #143  ->  defect 3 (NLL false positive) fires on the MCP build  ->  unknown beyond
+```
+
+Treat defect 3 as queued behind #143, not as absent.
+
+**#143 is broad, measured.** A probe on the error site
+(`50.mir/mir_lowering_stmts.spl:2761`) counted **32** offending `for-in`
+statements across the MCP closure — it is not one or two call sites that could
+be rewritten. The probe also showed every one of those spans is EMPTY
+(`file= line=0`): for-body spans are not populated at MIR lowering, so #143
+cannot be localized from its diagnostic without instrumenting the compiler.
+That is worth fixing alongside #143.
+
+**One negative result in this record is weaker than it reads.** The claim above
+that "there is no erasure — a control fixture with a module-global
+`var pool: [[i64]]` round-trips correctly under the same seed" is a NEGATIVE
+from a small fixture. A sibling lane established today that a minimal fixture
+and the real compiler can lower the SAME source by different paths, so a fixture
+that does not reproduce may simply not be exercising the same code. The
+positive evidence is unaffected and is what the diagnosis rests on: the arena
+was observed correct after the pushes and corrupt at the dump, and renaming the
+parser's locals eliminated the failure entirely.
+
+**Not related to the Stage-2 `is_empty()` predicate misread** reported by a
+sibling lane the same day, despite both being method-call misbehaviour:
+
+- the receiver values here (38 / 254 / 1) are **not** corrupted handles. They
+  are ordinary user data — the last match arm's body statement index — which is
+  why they varied per input;
+- the receiver is neither erased nor a field: it is an element read directly out
+  of a module-global array;
+- this lane runs the SEED INTERPRETING the pure-Simple compiler, not
+  Stage-2-compiled code, so the Stage-2 lowering path is not involved;
+- the fix is a rename, with no dispatch change of any kind.
+
+For the record, none of the code landed by this lane uses `.is_empty()`; every
+guard added is `.len()`-based.
