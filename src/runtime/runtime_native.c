@@ -36,6 +36,19 @@
 #include <io.h>
 #include <malloc.h>
 #include <windows.h>
+/* _mkdir / _rmdir live here, not in <sys/stat.h>. Without it both were
+ * implicit declarations and this whole file failed to compile on Windows --
+ * which silently dropped it from the core-C archive and left the ~68 rt_*
+ * symbols it defines undefined at the Stage 2 link. */
+#include <direct.h>
+#endif
+
+/* Deprecated in C17 and REMOVED in C23; MinGW's <stdatomic.h> no longer
+ * defines it, while glibc/libc++ still do. Defining it only when absent keeps
+ * every existing call site and every non-Windows build byte-identical.
+ * `(value)` is exactly the semantics C11 gave it for static initializers. */
+#ifndef ATOMIC_VAR_INIT
+#define ATOMIC_VAR_INIT(value) (value)
 #endif
 #if !defined(_WIN32)
 #include <dirent.h>
@@ -604,9 +617,23 @@ SPL_CORE_C_WEAK int64_t rt_atexit_check(void) {
 static int64_t rt_host_gpu_queue_now_us(void) {
     struct timespec ts;
 #if defined(_WIN32)
-    if (timespec_get(&ts, TIME_UTC) == 0) {
+    /* timespec_get/TIME_UTC are C11 and are not exposed by every MinGW
+     * <time.h> configuration (they were undeclared here). QueryPerformanceCounter
+     * is always available, and is a better fit anyway: this is a MONOTONIC
+     * elapsed-time source, which is what the POSIX branch below asks for --
+     * timespec_get(TIME_UTC) returned wall-clock time and would have jumped
+     * backwards across an NTP correction. */
+    LARGE_INTEGER counter;
+    LARGE_INTEGER frequency;
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart == 0) {
         return 0;
     }
+    if (!QueryPerformanceCounter(&counter)) {
+        return 0;
+    }
+    ts.tv_sec = (time_t)(counter.QuadPart / frequency.QuadPart);
+    ts.tv_nsec = (long)(((counter.QuadPart % frequency.QuadPart) * 1000000000LL)
+        / frequency.QuadPart);
 #else
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         return 0;
@@ -10854,10 +10881,21 @@ int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t m
     if (!path) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
+#if defined(_WIN32)
+    /* <dlfcn.h> is POSIX-only and is not included on Windows, so RTLD_* and
+     * dlopen were undeclared here. LoadLibraryA is the Win32 equivalent; it
+     * has no lazy/now distinction (imports are always resolved at load), so
+     * `mode` is accepted and ignored rather than silently changing meaning. */
+    (void)mode;
+    HMODULE handle = LoadLibraryA(path);
+    free(path);
+    return (int64_t)(intptr_t)handle;
+#else
     int flags = ((mode & 2) ? RTLD_NOW : RTLD_LAZY) | RTLD_LOCAL;
     void *handle = dlopen(path, flags);
     free(path);
     return (int64_t)(intptr_t)handle;
+#endif
 }
 
 int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t name_len) {
@@ -10866,14 +10904,26 @@ int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t n
     if (!name) return 0;
     memcpy(name, name_ptr, (size_t)name_len);
     name[name_len] = '\0';
+#if defined(_WIN32)
+    FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
+    free(name);
+    return (int64_t)(intptr_t)symbol;
+#else
     void *symbol = dlsym((void*)(intptr_t)handle, name);
     free(name);
     return (int64_t)(intptr_t)symbol;
+#endif
 }
 
 int64_t rt_host_dynlib_close(int64_t handle) {
     if (handle <= 0) return -1;
+#if defined(_WIN32)
+    /* FreeLibrary returns nonzero on SUCCESS, dlclose returns 0 on success.
+     * Normalize to dlclose's convention so callers keep one contract. */
+    return FreeLibrary((HMODULE)(intptr_t)handle) ? 0 : -1;
+#else
     return (int64_t)dlclose((void*)(intptr_t)handle);
+#endif
 }
 
 /* ================================================================
