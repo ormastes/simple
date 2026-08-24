@@ -1340,6 +1340,21 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   idempotence contracts plus a source guard against restoring the loop.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed semantic-query call-index tranche
+
+- Reuse one `OutlineSnapshot` per queried file instead of reopening and
+  splitting source inside each `calls(...)` or `implements(...)` predicate.
+- Deduplicate requested callees and build a request-local, collision-free
+  function/callee match dictionary in one source-line walk.
+- Reduce worst-case `calls(...)` work from O(S*C*N) scans and repeated line
+  arrays to expected O(N*C + S*C) lookup work; lazily skip indexing when the
+  target or an earlier predicate rejects every candidate.
+- Preserve top-level-only function recognition, indent-zero body closure,
+  duplicate-name union, raw comment/string matching, result order, and API.
+- Add direct positive/negative, duplicate declaration, closure boundary,
+  legacy exclusion, and source-topology contracts; verification intentionally
+  not run under the user's no-verify instruction.
+
 ## Completed check-tier accumulator tranche
 
 - Replace input-sized keyword, module-tier, and restricted-file copy-on-append
