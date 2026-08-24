@@ -2771,11 +2771,10 @@ output path that aliases an input is rejected without modifying the input.
 The canonical Simple SFFI owner strictly parses this bounded format and can
 compare its complete signature closure before resolving integer slots into a
 local map. Publication remains explicitly `unsafe(ffi, raw_ptr)`: a parsed
-record is not cryptographic authority, and `VersionedDynLib` still opens by
-pathname rather than consuming a platform-minted immutable handle bound to the
-artifact digest. Identity checks and symbol resolution are one-time O(n)
-admission work; cached calls retain their existing O(argument-count) path with
-no hashing, signature verification, pathname lookup, or symbol lookup added.
+record and current carrier type are still source-forgeable. Identity checks and
+symbol resolution are one-time O(n) admission work; cached calls retain their
+existing O(argument-count) path with no hashing, signature verification,
+pathname lookup, or symbol lookup added.
 
 Legacy `DynLib.call0` through `call4` and `call_n` no longer turn an invalid
 handle, unresolved symbol, or unsupported arity into integer zero. They retain
@@ -2784,3 +2783,19 @@ bridge failure, while a legitimate foreign zero remains a legitimate result.
 The valid legacy path adds one predictable handle check but already pays
 per-call `dlsym` and string lookup; performance-sensitive code must use the
 cached slot family, whose call path is unchanged.
+
+Linux exact-object admission now copies the provider into a sealed memfd,
+hashes `/proc/self/fd/<fd>`, and calls `dlopen` through that same immutable
+snapshot. A production-C sabotage harness proves writes fail and pathname
+replacement cannot substitute provider `9` for admitted provider `7`. With
+regular-file/size-drift guards and the duplicate-body check, the final harness
+is 0.32 s / 26,112 KiB. The Rust
+interpreter and native-runtime focused tests each pass 1/1 and prove preserved
+bytes plus all four seals. Snapshot copying uses a fixed 64 KiB buffer, rejects
+non-regular/symlink inputs, and caps provider bytes at 1 GiB. This is one-time
+admission work and changes no cached-call instructions.
+
+The result remains `unsafe(ffi)`: the Simple wrapper/receipt types are still
+constructible by ordinary source, and non-Linux platforms currently reject the
+sealed-loader API. Critical-safe publication still requires a loader-private,
+unforgeable token bound to provider generation.

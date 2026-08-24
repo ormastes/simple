@@ -31,6 +31,12 @@ extern fn spl_dlopen(path: text) -> i64
 extern fn spl_dlsym(handle: i64, name: text) -> i64
 @unsafe(reason: "raw dynamic library release ABI", capabilities: [ffi])
 extern fn spl_dlclose(handle: i64) -> i64
+@unsafe(reason: "copies the provider into a sealed Linux admission snapshot", capabilities: [ffi])
+extern fn spl_dynlib_snapshot_linux(path: text) -> i64
+@unsafe(reason: "closes the provider artifact admission descriptor", capabilities: [ffi])
+extern fn rt_file_close(fd: i32) -> bool
+@unsafe(reason: "hashes the exact open provider artifact through its descriptor path", capabilities: [ffi])
+extern fn rt_file_hash_sha256(path: text) -> text
 @unsafe(reason: "untyped integer-only foreign call ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 @unsafe(reason: "checked integer-only foreign call ABI", capabilities: [ffi, raw_ptr])
@@ -63,6 +69,7 @@ impl DynI64FnSlot:
             return Ok(result[1])
         Err("E-SFFI-014: foreign bridge rejected {self.symbol} with status {status}")
 
+use std.common.structural.digest.hash256.{hash256_hex_valid}
 use std.io_runtime.{env_get}
 
 # ============================================================================
@@ -72,6 +79,46 @@ use std.io_runtime.{env_get}
 class DynLib:
     handle: i64
     path: text
+
+# Linux sealed-snapshot admission result. Construction is intentionally limited
+# to `load_exact_linux`; the type remains ffi-unsafe because Simple does not yet
+# have package-private constructors or a loader-minted unforgeable token.
+class ExactArtifactDynLib:
+    lib: DynLib
+    artifact_sha256: text
+
+impl ExactArtifactDynLib:
+    @unsafe(
+        reason: "sealed Linux snapshot is hashed and loaded, but the authority token remains forgeable in ordinary Simple",
+        capabilities: [ffi],
+    )
+    static fn load_exact_linux(path: text, expected_sha256: text) -> Result<ExactArtifactDynLib, text>:
+        if platform_name() != "linux":
+            return Err("E-SFFI-020: exact artifact loading is currently supported only on Linux")
+        if not hash256_hex_valid(expected_sha256):
+            return Err("E-SFFI-004: expected provider artifact SHA-256 must be 64 lowercase hex characters")
+
+        val fd = spl_dynlib_snapshot_linux(path)
+        if fd < 0:
+            return Err("E-SFFI-001: failed to open provider artifact: {path}")
+        val fd_i32 = fd.to_i32()
+        val descriptor_path = "/proc/self/fd/{fd}"
+        val actual_sha256 = rt_file_hash_sha256(descriptor_path)
+        if actual_sha256 != expected_sha256:
+            rt_file_close(fd_i32)
+            return Err("E-SFFI-004: provider artifact SHA-256 mismatch: {path}")
+        val handle = spl_dlopen(descriptor_path)
+        val closed = rt_file_close(fd_i32)
+        if not closed:
+            if handle > 0:
+                spl_dlclose(handle)
+            return Err("E-SFFI-018: failed to close provider admission descriptor: {path}")
+        if handle <= 0:
+            return Err("E-SFFI-001: failed to load admitted provider: {path}")
+        Ok(ExactArtifactDynLib(
+            lib: DynLib(handle: handle, path: path),
+            artifact_sha256: actual_sha256,
+        ))
 
 impl DynLib:
     @unsafe(reason: "loads an unverified dynamic provider", capabilities: [ffi])

@@ -398,7 +398,8 @@ pub use cli_sffi::{
 // Re-export dynamic-loading / WFFI SFFI functions.
 #[cfg(any(unix, windows))]
 pub use wsffi_native::{
-    rt_host_dynlib_close, rt_host_dynlib_open, rt_host_dynlib_symbol, spl_dlclose, spl_dlopen, spl_dlsym,
+    rt_host_dynlib_close, rt_host_dynlib_open, rt_host_dynlib_symbol, spl_dlclose,
+    spl_dlopen, spl_dlsym, spl_dynlib_snapshot_linux,
     spl_fonts_call_init_blob, spl_fonts_call_init_path, spl_fonts_call_layout_text, spl_wffi_call_f64,
     spl_wffi_call_f64_checked, spl_wffi_call_i64, spl_wffi_call_i64_checked, spl_wffi_call_i64_with_bytes,
     spl_wffi_call_i64_with_bytes_checked, spl_wffi_try_call_i64,

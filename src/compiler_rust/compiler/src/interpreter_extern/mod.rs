@@ -2507,6 +2507,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("simple_repl_runner_init", repl::simple_repl_runner_init_fn);
     insert_simple!("spl_bits_to_f64", wsffi::spl_bits_to_f64);
     insert_simple!("spl_dlclose", wsffi::spl_dlclose);
+    insert_simple!("spl_dynlib_snapshot_linux", wsffi::spl_dynlib_snapshot_linux);
     insert_simple!("spl_dlopen", wsffi::spl_dlopen);
     insert_simple!("spl_dlsym", wsffi::spl_dlsym);
     insert_simple!("spl_f64_to_bits", wsffi::spl_f64_to_bits);

@@ -1598,10 +1598,16 @@ mutex, hash, or string lookup to each call.
   the canonical Simple SFFI owner.
 - [x] Validate the complete closure and resolve all integer slots before atomic
   publication, while retaining lexical `unsafe(ffi, raw_ptr)`.
-- [ ] Replace pathname `dlopen` with a loader-minted immutable provider handle
-  whose open object identity is bound to the admitted artifact digest.
+- [x] Replace Linux pathname `dlopen` with a sealed memfd snapshot whose exact
+  bytes are hashed and loaded through one descriptor.
 - [ ] Make the verifier-minted receipt/token unforgeable to ordinary Simple
   source and then narrow the generated wrapper's unsafe region.
 - [x] Make legacy integer calls fail closed instead of fabricating zero for an
   invalid handle, missing symbol, or unsupported arity; retain cached slots as
   the no-lookup hot path.
+- [x] Close Linux pathname replacement between artifact hashing and `dlopen` by
+  retaining one descriptor and loading through `/proc/self/fd`.
+- [x] Snapshot Linux provider bytes into a sealed immutable object before
+  hashing and loading, preventing concurrent in-place mutation.
+- [ ] Implement equivalent immutable-snapshot admission for Windows/macOS/
+  FreeBSD, or keep those dynamic providers rejected in critical mode.

@@ -16,6 +16,103 @@ use std::sync::Mutex;
 static LOADED_LIBS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Copy a provider into a sealed Linux memfd and return that descriptor.
+pub fn spl_dynlib_snapshot_linux(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "spl_dynlib_snapshot_linux requires 1 argument (path)",
+        ));
+    }
+    let path = match &args[0] {
+        Value::Str(path) => path,
+        _ => return Err(CompileError::runtime("spl_dynlib_snapshot_linux: path must be a string")),
+    };
+
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let c_path = match CString::new(path.as_str()) {
+            Ok(path) => path,
+            Err(_) => return Ok(Value::Int(-1)),
+        };
+        let source = libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        );
+        if source < 0 { return Ok(Value::Int(-1)); }
+        let mut source_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if libc::fstat(source, source_stat.as_mut_ptr()) != 0 {
+            libc::close(source);
+            return Ok(Value::Int(-1));
+        }
+        let source_stat = source_stat.assume_init();
+        if source_stat.st_mode & libc::S_IFMT != libc::S_IFREG
+            || source_stat.st_size < 0
+            || source_stat.st_size as u64 > 1_073_741_824
+        {
+            libc::close(source);
+            return Ok(Value::Int(-1));
+        }
+        let name = b"simple-sffi-provider\0";
+        let snapshot = libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr() as *const libc::c_char,
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as libc::c_int;
+        if snapshot < 0 {
+            libc::close(source);
+            return Ok(Value::Int(-1));
+        }
+        let mut buffer = [0u8; 65536];
+        let mut total = 0u64;
+        loop {
+            let got = libc::read(source, buffer.as_mut_ptr().cast(), buffer.len());
+            if got == 0 { break; }
+            if got < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
+                libc::close(source); libc::close(snapshot);
+                return Ok(Value::Int(-1));
+            }
+            if got as u64 > 1_073_741_824 - total {
+                libc::close(source); libc::close(snapshot);
+                return Ok(Value::Int(-1));
+            }
+            total += got as u64;
+            let mut offset = 0isize;
+            while offset < got {
+                let put = libc::write(
+                    snapshot,
+                    buffer.as_ptr().offset(offset).cast(),
+                    (got - offset) as usize,
+                );
+                if put < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if put <= 0 {
+                    libc::close(source); libc::close(snapshot);
+                    return Ok(Value::Int(-1));
+                }
+                offset += put;
+            }
+        }
+        let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+        if total != source_stat.st_size as u64
+            || libc::close(source) != 0
+            || libc::lseek(snapshot, 0, libc::SEEK_SET) < 0
+            || libc::fcntl(snapshot, libc::F_ADD_SEALS, seals) != 0
+        {
+            libc::close(snapshot);
+            return Ok(Value::Int(-1));
+        }
+        Ok(Value::Int(snapshot as i64))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Ok(Value::Int(-1))
+    }
+}
+
 /// Open a shared library and return its handle as i64.
 ///
 /// Callable from Simple as: `spl_dlopen(path: text) -> i64`
@@ -571,5 +668,50 @@ mod tests {
             Value::Float(v) => assert_eq!(v, 2.0),
             other => panic!("expected float result, got {other:?}"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dynlib_snapshot_is_sealed_and_preserves_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "simple-sffi-snapshot-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test"),
+        ));
+        std::fs::write(&path, b"provider-a").unwrap();
+        let path_text = std::str::from_utf8(path.as_os_str().as_bytes()).unwrap();
+        let result = spl_dynlib_snapshot_linux(&[Value::text(path_text.to_string())]).unwrap();
+        let fd = match result {
+            Value::Int(fd) if fd >= 0 => fd as libc::c_int,
+            other => panic!("expected snapshot descriptor, got {other:?}"),
+        };
+        std::fs::write(&path, b"provider-b").unwrap();
+
+        let seals = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
+        let required = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+        assert_eq!(seals & required, required);
+        let mut bytes = [0u8; 10];
+        let got = unsafe { libc::pread(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+        assert_eq!(got, bytes.len() as isize);
+        assert_eq!(&bytes, b"provider-a");
+        assert_eq!(unsafe { libc::write(fd, b"x".as_ptr().cast(), 1) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+
+        unsafe { libc::close(fd) };
+        let symlink_path = path.with_extension("symlink");
+        std::os::unix::fs::symlink(&path, &symlink_path).unwrap();
+        assert_eq!(
+            spl_dynlib_snapshot_linux(&[Value::text(symlink_path.to_string_lossy().into_owned())])
+                .unwrap(),
+            Value::Int(-1),
+        );
+        assert_eq!(
+            spl_dynlib_snapshot_linux(&[Value::text("/dev/null".to_string())]).unwrap(),
+            Value::Int(-1),
+        );
+        std::fs::remove_file(symlink_path).unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 }

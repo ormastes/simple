@@ -565,6 +565,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "spl_dlopen" => value::spl_dlopen as *const () as usize,
         "spl_dlsym" => value::spl_dlsym as *const () as usize,
         "spl_dlclose" => value::spl_dlclose as *const () as usize,
+        "spl_dynlib_snapshot_linux" => value::spl_dynlib_snapshot_linux as *const () as usize,
         "spl_wffi_call_i64" => value::spl_wffi_call_i64 as *const () as usize,
         "spl_wffi_call_f64_checked" => value::spl_wffi_call_f64_checked as *const () as usize,
         "spl_wffi_call_i64_checked" => value::spl_wffi_call_i64_checked as *const () as usize,

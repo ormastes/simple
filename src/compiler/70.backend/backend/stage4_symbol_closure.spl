@@ -462,7 +462,7 @@ pub fn stage4_runtime_native_localization_symbols(nm_output: text, object_format
     """Return the raw legacy dynload definitions to localize in runtime_native."""
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
         return Err("Unsupported Stage4 runtime-native object format '" + object_format + "'")
-    val legacy = ["spl_dlclose", "spl_dlopen", "spl_dlsym"]
+    val legacy = ["spl_dlclose", "spl_dlopen", "spl_dlsym", "spl_dynlib_snapshot_linux"]
     val required = [
         "rt_http_download", "rt_http_get", "rt_http_request", "rt_interp_cstr",
         "rt_string_data", "rt_string_new", "rt_string_new_literal",
@@ -498,7 +498,7 @@ pub fn stage4_validate_runtime_native_core_symbol_contract(nm_output: text, obje
     """Require the core dependencies and forbid exported legacy dynload owners."""
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
         return Err("Unsupported Stage4 runtime-native object format '" + object_format + "'")
-    val legacy = ["spl_dlclose", "spl_dlopen", "spl_dlsym"]
+    val legacy = ["spl_dlclose", "spl_dlopen", "spl_dlsym", "spl_dynlib_snapshot_linux"]
     val required = [
         "rt_http_download", "rt_http_get", "rt_http_request", "rt_interp_cstr",
         "rt_string_data", "rt_string_new", "rt_string_new_literal",
@@ -561,11 +561,24 @@ pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_
                 return Err("Stage4 dynamic-loader provider repeats global definition '" + symbol + "'")
             definitions[symbol] = true
 
-    if definitions.keys().len() != 3 or not definitions.has("spl_dlclose") or not definitions.has("spl_dlopen") or not definitions.has("spl_dlsym"):
+    if definitions.keys().len() != 4 or not definitions.has("spl_dlclose") or not definitions.has("spl_dlopen") or not definitions.has("spl_dlsym") or not definitions.has("spl_dynlib_snapshot_linux"):
         return Err("Stage4 dynamic-loader provider definitions differ from the exact ABI: " + definitions.keys().join(", "))
     if object_format == "coff-msvc" or object_format == "coff-mingw":
         if undefined.keys().len() != 4 or not undefined.has("FreeLibrary") or not undefined.has("GetProcAddress") or not undefined.has("LoadLibraryA") or not undefined.has("rt_interp_cstr"):
             return Err("Stage4 dynamic-loader provider undefined symbols differ from the Windows contract: " + undefined.keys().join(", "))
+    elif object_format == "elf":
+        val required = ["dlclose", "dlopen", "dlsym", "rt_interp_cstr"]
+        val linux_snapshot = ["__errno_location", "close", "fcntl", "fstat", "lseek", "open", "read", "syscall", "write"]
+        for symbol in required:
+            if not undefined.has(symbol):
+                return Err("Stage4 dynamic-loader provider is missing Unix dependency '" + symbol + "'")
+        for symbol in undefined.keys():
+            if not required.contains(symbol) and not linux_snapshot.contains(symbol) and symbol != "__stack_chk_fail":
+                return Err("Stage4 dynamic-loader provider retained forbidden ELF dependency '" + symbol + "'")
+        val linux_count = if undefined.has("open"): linux_snapshot.len() else: 0
+        for symbol in linux_snapshot:
+            if linux_count > 0 and not undefined.has(symbol):
+                return Err("Stage4 Linux snapshot provider is missing dependency '" + symbol + "'")
     elif undefined.keys().len() != 4 or not undefined.has("dlclose") or not undefined.has("dlopen") or not undefined.has("dlsym") or not undefined.has("rt_interp_cstr"):
         return Err("Stage4 dynamic-loader provider undefined symbols differ from the Unix contract: " + undefined.keys().join(", "))
     Ok(())

@@ -59,8 +59,8 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_runtime_native_object_format("plan9", false).is_err()).to_be(true)
 
         val required = "0001 T rt_http_download\n0002 T rt_http_get\n0003 T rt_http_request\n0004 T rt_interp_cstr\n0005 T rt_string_data\n0006 T rt_string_new\n0007 T rt_time_now_nanos\n0008 T rt_time_now_unix_micros\n"
-        val legacy = "0009 T spl_dlclose\n0010 T spl_dlopen\n0011 T spl_dlsym\n"
-        expect(stage4_runtime_native_localization_symbols(required + legacy, "elf").unwrap()).to_equal(["spl_dlclose", "spl_dlopen", "spl_dlsym"])
+        val legacy = "0009 T spl_dlclose\n0010 T spl_dlopen\n0011 T spl_dlsym\n0012 T spl_dynlib_snapshot_linux\n"
+        expect(stage4_runtime_native_localization_symbols(required + legacy, "elf").unwrap()).to_equal(["spl_dlclose", "spl_dlopen", "spl_dlsym", "spl_dynlib_snapshot_linux"])
         # An ABSENT legacy dynload definition is now the EXPECTED steady state:
         # runtime_native.c guards its fallback copies behind
         # SIMPLE_RUNTIME_DYNLOAD_OWNER, which runtime_compiler.spl defines on
@@ -272,11 +272,13 @@ describe "Stage4 aggregate final symbol closure":
     it "accepts exact ELF Mach-O and COFF dynamic-loader provider contracts":
         # @req: REQ-COMPILER-BACKEND-001
         step("Verify: accepts exact ELF Mach-O and COFF dynamic-loader provider contracts")
-        val elf = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
-        val macho = "0000000000000000 T _spl_dlopen\n0000000000000010 T _spl_dlsym\n0000000000000020 T _spl_dlclose\n                 U _rt_interp_cstr\n                 U _dlopen\n                 U _dlsym\n                 U _dlclose"
-        val msvc = "00000000 T spl_dlopen\n00000010 T spl_dlsym\n00000020 T spl_dlclose\n00000000 A @feat.00\n         U rt_interp_cstr\n         U __imp_LoadLibraryA\n         U __imp_GetProcAddress\n         U __imp_FreeLibrary"
-        val mingw = "00000000 T _spl_dlopen\n00000010 T _spl_dlsym\n00000020 T _spl_dlclose\n         U _rt_interp_cstr\n         U __imp__LoadLibraryA@4\n         U __imp__GetProcAddress@8\n         U __imp__FreeLibrary@4"
+        val elf = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n0000000000000030 T spl_dynlib_snapshot_linux\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
+        val linux = elf + "\n                 U __errno_location\n                 U __stack_chk_fail\n                 U close\n                 U fcntl\n                 U fstat\n                 U lseek\n                 U open\n                 U read\n                 U syscall\n                 U write"
+        val macho = "0000000000000000 T _spl_dlopen\n0000000000000010 T _spl_dlsym\n0000000000000020 T _spl_dlclose\n0000000000000030 T _spl_dynlib_snapshot_linux\n                 U _rt_interp_cstr\n                 U _dlopen\n                 U _dlsym\n                 U _dlclose"
+        val msvc = "00000000 T spl_dlopen\n00000010 T spl_dlsym\n00000020 T spl_dlclose\n00000030 T spl_dynlib_snapshot_linux\n00000000 A @feat.00\n         U rt_interp_cstr\n         U __imp_LoadLibraryA\n         U __imp_GetProcAddress\n         U __imp_FreeLibrary"
+        val mingw = "00000000 T _spl_dlopen\n00000010 T _spl_dlsym\n00000020 T _spl_dlclose\n00000030 T _spl_dynlib_snapshot_linux\n         U _rt_interp_cstr\n         U __imp__LoadLibraryA@4\n         U __imp__GetProcAddress@8\n         U __imp__FreeLibrary@4"
         expect(stage4_validate_dynload_provider_symbol_contract(elf, "elf").is_ok()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(linux, "elf").is_ok()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(macho, "macho").is_ok()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(msvc, "coff-msvc").is_ok()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(mingw, "coff-mingw").is_ok()).to_be(true)
@@ -284,15 +286,16 @@ describe "Stage4 aggregate final symbol closure":
     it "rejects incomplete extra repeated and unknown dynamic-loader provider contracts":
         # @req: REQ-COMPILER-BACKEND-001
         step("Verify: rejects incomplete extra repeated and unknown dynamic-loader provider contracts")
-        val exact = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
+        val exact = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n0000000000000030 T spl_dynlib_snapshot_linux\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
         val missing = exact.replace("0000000000000020 T spl_dlclose\n", "")
         val extra_definition = exact + "\n0000000000000030 T spl_hidden"
         val extra_undefined = exact + "\n                 U __stack_chk_fail"
         val repeated = exact + "\n0000000000000040 T spl_dlopen"
         val repeated_undefined = exact + "\n                 U dlopen"
+        val partial_linux = exact + "\n                 U open"
         val weak_undefined = exact + "\n                 w rt_hidden_dependency"
         val weak_macho_undefined = macho + "\n                 v _rt_hidden_dependency"
-        val coff = "00000000 T spl_dlopen\n00000010 T spl_dlsym\n00000020 T spl_dlclose\n00000000 A @feat.00\n         U rt_interp_cstr\n         U __imp_LoadLibraryA\n         U __imp_GetProcAddress\n         U __imp_FreeLibrary"
+        val coff = "00000000 T spl_dlopen\n00000010 T spl_dlsym\n00000020 T spl_dlclose\n00000030 T spl_dynlib_snapshot_linux\n00000000 A @feat.00\n         U rt_interp_cstr\n         U __imp_LoadLibraryA\n         U __imp_GetProcAddress\n         U __imp_FreeLibrary"
         val false_decoration = coff.replace("__imp_LoadLibraryA", "__imp_LoadLibraryA@evil")
         val wrong_arity = coff.replace("__imp_LoadLibraryA", "__imp_LoadLibraryA@8")
         val repeated_import_alias = coff + "\n         U LoadLibraryA"
@@ -301,6 +304,7 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_validate_dynload_provider_symbol_contract(extra_undefined, "elf").is_err()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(repeated, "elf").is_err()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(repeated_undefined, "elf").is_err()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(partial_linux, "elf").is_err()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(weak_undefined, "elf").is_err()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(weak_macho_undefined, "macho").is_err()).to_be(true)
         expect(stage4_validate_dynload_provider_symbol_contract(false_decoration, "coff-msvc").is_err()).to_be(true)

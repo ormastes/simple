@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+case "$(uname -s)" in
+    Linux) ;;
+    *) echo 'SKIP: exact descriptor dlopen is Linux-only'; exit 0 ;;
+esac
+command -v cc >/dev/null 2>&1 || { echo 'SKIP: C compiler unavailable'; exit 0; }
+command -v sha256sum >/dev/null 2>&1 || { echo 'SKIP: sha256sum unavailable'; exit 0; }
+
+dynamic_source="$root/src/lib/nogc_sync_mut/sffi/dynamic.spl"
+grep -q 'static fn load_exact_linux' "$dynamic_source" || {
+    echo 'FAIL: canonical SFFI owner has no exact Linux loader' >&2
+    exit 1
+}
+open_line=$(grep -n 'val fd = spl_dynlib_snapshot_linux(path)' "$dynamic_source" | cut -d: -f1)
+hash_line=$(grep -n 'val actual_sha256 = rt_file_hash_sha256(descriptor_path)' "$dynamic_source" | cut -d: -f1)
+load_line=$(grep -n 'val handle = spl_dlopen(descriptor_path)' "$dynamic_source" | cut -d: -f1)
+close_line=$(grep -n 'val closed = rt_file_close(fd)' "$dynamic_source" | cut -d: -f1)
+test "$open_line" -lt "$hash_line" && test "$hash_line" -lt "$load_line" && \
+    test "$load_line" -lt "$close_line" || {
+    echo 'FAIL: exact loader does not retain one descriptor across hash and dlopen' >&2
+    exit 1
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+sed -n '/^int64_t spl_dynlib_snapshot_linux(/,/^int64_t spl_dlopen(/p' \
+    "$root/src/runtime/runtime_dynload.c" | sed '$d' >"$work/snapshot-owner.c"
+sed -n '/^int64_t spl_dynlib_snapshot_linux(/,/^int64_t spl_dlopen(/p' \
+    "$root/src/runtime/runtime_native.c" | sed '$d' >"$work/snapshot-fallback.c"
+cmp -s "$work/snapshot-owner.c" "$work/snapshot-fallback.c" || {
+    echo 'FAIL: C owner and fallback sealed-snapshot bodies differ' >&2
+    exit 1
+}
+
+cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
+    -DSFFI_EXACT_PROBE_VALUE=7 \
+    "$root/test/harness/sffi_exact_fd_provider.c" -o "$work/provider-a.so"
+cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
+    -DSFFI_EXACT_PROBE_VALUE=9 \
+    "$root/test/harness/sffi_exact_fd_provider.c" -o "$work/provider-b.so"
+cc -std=c11 -Wall -Wextra -Werror \
+    -D_GNU_SOURCE -I"$root/src/runtime" \
+    "$root/src/runtime/runtime_dynload.c" \
+    "$root/test/harness/sffi_exact_fd_dlopen_harness.c" -ldl -o "$work/harness"
+
+cp "$work/provider-a.so" "$work/provider.so"
+opened_hash=$(sha256sum "$work/provider.so" | awk '{ print $1 }')
+replacement_hash=$(sha256sum "$work/provider-b.so" | awk '{ print $1 }')
+test "$opened_hash" != "$replacement_hash" || {
+    echo 'FAIL: sabotage providers unexpectedly have the same digest' >&2
+    exit 1
+}
+"$work/harness" "$work/provider.so" "$work/provider-b.so" 7
+
+echo 'PASS: sealed snapshot rejected writes and retained provider across pathname replacement'
