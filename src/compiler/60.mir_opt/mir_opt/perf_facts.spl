@@ -458,12 +458,16 @@ fn perf_facts_build_liveness(
         queued[current_index] = false
         visits = visits + 1
         val current_block = func.blocks[current_index]
+        # Adjacency is immutable during the solve. Resolve it once per block
+        # visit rather than repeating a dictionary lookup and array-value
+        # extraction for every local.
+        val current_successors = successors[current_block.id.id] ?? []
         var in_changed = false
         var local_pos = 0
         while local_pos < local_count:
             val bit = current_index * local_count + local_pos
             var new_out = live_out[bit]
-            for successor in (successors[current_block.id.id] ?? []):
+            for successor in current_successors:
                 val successor_index = block_index[successor.id]
                 if live_in[successor_index * local_count + local_pos]:
                     new_out = true
@@ -478,10 +482,9 @@ fn perf_facts_build_liveness(
             for predecessor in (predecessors[current_block.id.id] ?? []):
                 val predecessor_index = block_index[predecessor]
                 if not queued[predecessor_index]:
-                    if top < worklist.len():
-                        worklist[top] = predecessor_index
-                    else:
-                        worklist.push(predecessor_index)
+                    # A popped slot always exists: at most block_count unique
+                    # indices can be queued, enforced by the queued bitmap.
+                    worklist[top] = predecessor_index
                     queued[predecessor_index] = true
                     top = top + 1
     PerfLivenessBuild(live_in, live_out, true, visits, false)

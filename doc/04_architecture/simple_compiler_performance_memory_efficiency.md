@@ -91,6 +91,12 @@ entire prefix. The initial predecessor worklist follows the same rule: allocate 
 `block_count` live prefix once, fill it by index, and use a top cursor for later reuse.
 This keeps initialization O(block_count * local_count) time and storage, including at the
 four-million-cell admission boundary, without changing the fail-closed budget contract.
+Loop-invariant graph payloads must also be resolved at the widest safe scope. In
+particular, a liveness worklist visit resolves its immutable successor array once before
+the per-local bit loop; it must not repeat a dictionary lookup and array-value extraction
+for every local. Diagnostic deduplication follows the same cost discipline: preserve the
+source-order output array, but use a dictionary set for membership when candidate counts
+are input-dependent.
 
 Pass preservation is fail-closed. Until proved otherwise, a changed active pass
 invalidates CFG, dominators, and def/use. Analysis-only, remark-only, skeleton, and
