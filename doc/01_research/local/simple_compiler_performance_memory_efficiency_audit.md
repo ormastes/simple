@@ -2580,3 +2580,21 @@ line-based kernel. The content-based API remains a compatibility adapter, so
 standalone callers retain behavior while normal linting removes one full-file
 line array and its proportional text storage. Diagnostic ordering, physical
 line numbers, predicates, and levels are unchanged.
+
+### LEADOP001 canonical line snapshot
+
+The leading-operator rule also re-split every file even though its algorithm
+uses only line text, indentation, triple-quote state, and physical line number.
+Its production entrypoint now consumes the main lint driver's canonical line
+array. The source-taking public function remains a compatibility adapter and a
+focused parity fixture compares complete finding fields across both APIs while
+pinning docstring and deeper-continuation suppression. This removes another
+full-file line array from every normal lint request without retaining source
+storage beyond the synchronous call.
+
+The const-reference-default rule has the same lifecycle and is migrated in the
+same way. Its canonical-line entrypoint preserves vendored-source exclusion,
+function/body boundary detection, mutation ordering, and complete finding
+fields; the compatibility source API delegates through one split. Together,
+these changes remove two unconditional per-rule full-file arrays from normal
+linting.
