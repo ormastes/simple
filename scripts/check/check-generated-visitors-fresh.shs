@@ -1,6 +1,7 @@
 #!/bin/sh
-# check-generated-visitors-fresh.shs — the fold-style AST/HIR visitors must be
-# GENERATED, never hand-edited (hardening plan §11.5 / §11.9, lanes C3 + C4).
+# check-generated-visitors-fresh.shs — fold-style AST/HIR visitors and the HIR
+# child enumerator must be GENERATED, never hand-edited (hardening plan §11.5 /
+# §11.9, lanes C3 + C4).
 #
 # Sibling of check-compiler-schema-fresh.shs, and the same argument: a walker
 # that is hand-maintained silently skips the variant somebody added yesterday.
@@ -39,6 +40,7 @@ GEN_MAIN="src/app/compiler_schema/main.spl"
 # with fold_gen.spl's dialect table by the selftest, which fails if the
 # generator emits a file this list does not name.
 GEN_FILES="src/compiler/20.hir/generated/hir_visitor.spl
+src/compiler/20.hir/generated/hir_children.spl
 src/compiler/10.frontend/generated/ast_visitor.spl"
 
 verdict_error() {
@@ -50,7 +52,9 @@ verdict_error() {
 regen() {
     _root=$1
     _out=$2
-    ( cd "$REPO_ROOT" && SIMPLE_REPO_ROOT="$_root" "$SIMPLE_BIN" run "$GEN_MAIN" folds "$_out" ) \
+    _hir_out="$_out/src/compiler/20.hir/generated"
+    mkdir -p "$_hir_out"
+    ( cd "$REPO_ROOT" && SIMPLE_REPO_ROOT="$_root" "$SIMPLE_BIN" run "$GEN_MAIN" visitors "$_hir_out" "$_out" ) \
         > "$_out.log" 2>&1
     _rc=$?
     if [ "$_rc" -ne 0 ]; then
@@ -76,7 +80,7 @@ scan() {
     fi
     # Every emitted file must be one this script knows about; an unlisted new
     # dialect would otherwise go unchecked forever.
-    _emitted=$(cd "$_out" && find . -name '*_visitor.spl' | sed 's|^\./||' | sort)
+    _emitted=$(cd "$_out" && find . \( -name '*_visitor.spl' -o -name 'hir_children.spl' \) | sed 's|^\./||' | sort)
     _known=$(echo "$GEN_FILES" | sort)
     if [ "$_emitted" != "$_known" ]; then
         rm -rf "$_tmp"
@@ -122,6 +126,7 @@ selftest() {
         src/compiler/20.hir/hir_definitions.spl src/compiler/20.hir/hir_types.spl \
         src/compiler/10.frontend/ast.spl src/compiler/10.frontend/parser_types_expr.spl \
         src/compiler/20.hir/generated/hir_visitor.spl \
+        src/compiler/20.hir/generated/hir_children.spl \
         src/compiler/10.frontend/generated/ast_visitor.spl ) | ( cd "$_fix" && tar xf - )
 
     # 1. A freshly generated tree must PASS.
@@ -133,7 +138,7 @@ selftest() {
     [ "$_rc" -eq 0 ] || { echo "selftest FAIL: fresh fixture exit $_rc"; rm -rf "$_st"; exit 2; }
 
     # 2. A hand-edited generated file must FAIL.
-    echo "# hand edited" >> "$_fix/src/compiler/20.hir/generated/hir_visitor.spl"
+    echo "# hand edited" >> "$_fix/src/compiler/20.hir/generated/hir_children.spl"
     _r=$( scan "$_fix" ); _rc=$?
     case "$_r" in
         FAIL*) : ;;
