@@ -536,3 +536,16 @@ top-level header, indentation, body-closure, comment, and string rules. A later
 syntax-aware query engine may strengthen those semantics only as a separate API
 change; this performance layer does not broaden matches while removing repeated
 I/O and splitting plus the repeated full-file scans of `calls(...)`.
+
+### Cursor-owned textual lint search
+
+Small source lints that must find repeated candidate substrings own the original
+line plus an absolute byte cursor. A rejected candidate advances the cursor but
+must not allocate a shortened suffix or restart against a new string. Stable
+rule vocabularies own prebuilt `(semantic name, search needle)` records at the
+request boundary, outside the physical-line loop.
+
+TYPE001 is the reference contract: the cursor resumes at `match + 1` so
+overlapping textual candidates remain observable, while the boundary check uses
+the original line and absolute end position. Rule-name order remains diagnostic
+order; search order within a line does not reorder or multiply findings.
