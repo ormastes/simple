@@ -1709,3 +1709,15 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Source-level bound changes from quadratic copied character payload per hot
   token to amortized linear membership insertion. No timing/RSS claim is made
   because manual verification remains disabled by user instruction.
+
+# Completed tranche: UNUSED001 sibling scope and spans (2026-08-24)
+
+- Bounded each text-fallback function by its own header indentation.
+- Prevented sibling class methods from contributing identifier uses to one
+  another's unused-variable decision.
+- Preserved nested body lines and blank-line behavior.
+- Derived JSON columns from the original indented declaration line.
+- Added paired executable oracles and a canonical manual for sibling isolation
+  and exact one-based start/end columns.
+- No manual execution was run under the user override; static semantic,
+  performance, and evidence review is required before sync.

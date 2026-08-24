@@ -1110,3 +1110,12 @@ pair semantics.
 An existing bucket accepts a member only while its length is at most 400. The
 push that reaches 401 records the oversized state; subsequent members are not
 retained, bounding storage without changing the unconditional skip.
+
+# UNUSED001 scope and span design
+
+`_query_unused_function_end` caches the function header indentation and walks
+until the first nonblank line with indentation `<= function_indent`. Blank lines
+do not end the function, while deeper nested blocks remain inside its frequency
+table. The outer driver resumes at the boundary so a sibling method establishes
+its own interval. JSON finds the declaration name in the original line, not
+`trim()`, preserving indentation in `col` and `end_col`.

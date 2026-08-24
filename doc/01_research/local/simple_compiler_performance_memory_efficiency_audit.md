@@ -3461,3 +3461,17 @@ pair-key deduplication, cosine threshold, and final ordering are unchanged.
 Buckets saturate at 401 members, the first value that is unconditionally
 skipped, so common tokens no longer retain the remaining `N-401` indices.
 Runtime timing and RSS were not measured under the no-verification override.
+
+# 2026-08-24 follow-up: UNUSED001 method scope and spans
+
+The query lint unused-variable fallback identified indented method headers but
+ended every function only at the next nonblank module-level line. A method in a
+class therefore absorbed later sibling methods into one identifier-frequency
+table. A same-named reference in a sibling could suppress a real warning, and
+scan/storage cost grew with the remainder of the class instead of the function.
+
+Function bounds now cache header indentation and stop at the first nonblank
+line whose indentation is less than or equal to it. Each sibling is analyzed
+once in its own scope. JSON columns use the original source line rather than a
+trimmed copy, so indented declarations report exact one-based spans. No runtime
+measurement is claimed under the no-verification override.

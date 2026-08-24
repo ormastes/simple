@@ -813,3 +813,11 @@ patterns at that level enter coverage, wildcard, duplicate, and ordering facts;
 nested bodies are outside the arm-fact capsule. Diagnostic serialization takes
 explicit one-based start/end columns from the scanner rather than inventing a
 column-1 span.
+
+# Text-fallback function-scope boundary
+
+Every text-lint function fact owns one indentation-bounded source interval. A
+nonblank line at or above the header indentation terminates that interval;
+sibling methods must never share identifier-frequency or declaration storage.
+Diagnostic locations retain original source coordinates and may not be derived
+from trimmed text.

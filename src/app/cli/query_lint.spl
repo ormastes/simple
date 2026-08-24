@@ -493,15 +493,24 @@ fn _check_unused_vars_text(lines: [text], file: text, format: text) -> i64:
     count
 
 fn _query_unused_function_header(trimmed: text) -> bool:
-    trimmed.starts_with("fn ") or trimmed.starts_with("me ") or
-        trimmed.starts_with("static fn ")
+    trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or
+        trimmed.starts_with("static fn ") or
+        trimmed.starts_with("pub static fn ") or
+        trimmed.starts_with("async fn ") or
+        trimmed.starts_with("pub async fn ") or
+        trimmed.starts_with("me ") or trimmed.starts_with("pub me ")
 
 fn _query_unused_function_end(lines: [text], function_start: i64) -> i64:
+    val function_indent = _count_indent(lines[function_start])
     var function_end = function_start
     var line_index = function_start + 1
     while line_index < lines.len():
         val trimmed = lines[line_index].trim()
-        if trimmed != "" and _count_indent(lines[line_index]) == 0:
+        # A sibling method is a new function even though both are nested under
+        # the same class. Stop at every nonblank line outside this body, not
+        # only at module indentation.
+        if (trimmed != "" and
+            _count_indent(lines[line_index]) <= function_indent):
             break
         if trimmed != "": function_end = line_index
         line_index = line_index + 1
@@ -511,6 +520,7 @@ struct QueryUnusedDeclaration:
     name: text
     line_index: i64
     declaration_occurrences: i64
+    source_column: i64
 
 fn _query_word_char(character: text) -> bool:
     (character >= "a" and character <= "z") or
@@ -552,13 +562,19 @@ fn _emit_unused_in_function(
             val word = line.substring(word_start, word_pos)
             word_counts[word] = (word_counts[word] ?? 0) + 1
         var name = ""
+        var declaration_prefix = ""
         if trimmed.starts_with("val "):
             name = _extract_decl_name(trimmed.substring(4))
+            declaration_prefix = "val "
         elif trimmed.starts_with("var "):
             name = _extract_decl_name(trimmed.substring(4))
+            declaration_prefix = "var "
         if name != "" and not name.starts_with("_"):
+            val prefix_pos = _find_in_line(line, declaration_prefix)
+            val source_column = _find_in_line_from(
+                line, name, prefix_pos + declaration_prefix.len()) + 1
             declarations.push(QueryUnusedDeclaration(
-                name, line_index, _query_word_count(line, name)))
+                name, line_index, _query_word_count(line, name), source_column))
         line_index = line_index + 1
 
     var count = 0
@@ -566,9 +582,8 @@ fn _emit_unused_in_function(
         if (word_counts[declaration.name] ?? 0) > declaration.declaration_occurrences:
             continue
         val line_num = declaration.line_index + 1
-        val trimmed = lines[declaration.line_index].trim()
         if format == "json":
-            val col = _find_in_line(trimmed, declaration.name) + 1
+            val col = declaration.source_column
             val end_col = col + declaration.name.len()
             _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNUSED001\",\"message\":\"variable '{declaration.name}' is declared but never used\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[1],\"source\":\"simple-lint\"}")
         else:
