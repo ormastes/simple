@@ -76,6 +76,27 @@ authority inside one attempt-ID dispatch/dedup owner and dispatch work only for
 the single accepted start transition. This provider-local integration remains
 part of the open blocker.
 
+An attempted provider-local namespace/grant adapter was independently rejected
+in three static review cycles and removed. Its final draft marked the namespace
+lease cleanup-bound before adapter capacity/conflict admission, so failure
+could strand an Active authority with no adapter row. It also left that lease
+operational: copied leases could still authorize filesystem work after cleanup
+binding and race revocation. A correct design needs opaque, generation-bound
+cleanup reservations in both namespace and grant owners, a non-operational
+`CleanupBound` state, and one two-phase adapter transaction that either commits
+both reservations into a bounded row or rolls both back. Partial namespace-
+then-grant cleanup must retain the exact reservation identities for retry.
+
+The attempted FD adapter was rejected and removed. The legacy FD table exposes
+only task-ID contexts and no atomic, lifecycle-authenticated cleanup
+reservation. Checking context existence and later publishing a lifecycle
+binding has a PID-reuse/release TOCTOU and cannot authorize a receipt. Resume
+FD work by adding an opaque `(task_id,lifecycle_generation,context_generation)`
+reservation inside the canonical FD owner; every activate/release/reuse path
+must honor it, and failed backend close must retain that exact context. These
+remain unwired prerequisites: direct cleanup calls remain, and FD, capability,
+DBD, plus the single pre-Zombie transaction are still missing.
+
 The scheduler currently calls `posix_close_task_fds_with_backends` and
 `server_data_launch_grant_revoke_task_lifecycle_v1`, ignores unsuccessful
 cleanup, then makes `TaskState.Zombie` externally observable. The FD path can
