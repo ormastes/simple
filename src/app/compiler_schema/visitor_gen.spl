@@ -401,6 +401,19 @@ fn children_fn_name(name: text) -> text:
         return "hir_children_of_" + _base_short(name)
     "hir_children_of_" + _snake(name)
 
+fn child_frame_variant_name(name: text) -> text:
+    val base = _node_ctor(name)
+    if base != "":
+        return base
+    if name.starts_with("Hir"):
+        return name[3:]
+    name
+
+fn child_frame_expand_fn_name(name: text) -> text:
+    if _is_base_carrier(name):
+        return "hir_expand_" + _base_short(name) + "_child_frames_reverse"
+    "hir_expand_" + _snake(name) + "_child_frames_reverse"
+
 fn hash_fn_name(name: text) -> text:
     if _is_base_carrier(name):
         return "hir_hash_" + _base_short(name)
@@ -475,6 +488,35 @@ fn _recurse_lines(u: DeclUniverse, type_text: text, v: text, indent: text, mode:
         return out
     if c.cat == "prim" and mode == "hash":
         return indent + "h = _hir_mix_prim(h, " + v + ")\n"
+    ""
+
+fn _one_frame_call(type_name: text, v: text) -> text:
+    "sink.push_hir_child_frame(HirChildFrame." + child_frame_variant_name(type_name) + "(" + v + "))"
+
+fn _recurse_frame_lines_reverse(
+    u: DeclUniverse, type_text: text, v: text, indent: text, idx: i64
+) -> text:
+    """Push one field in reverse so a LIFO consumer observes schema order."""
+    val c = u.classify(type_text)
+    if c.cat == "node":
+        return indent + _one_frame_call(c.a, v) + "\n"
+    if c.cat == "list":
+        var out = indent + "var ri{idx} = " + v + ".len()\n"
+        out = out + indent + "while ri{idx} > 0:\n"
+        out = out + indent + "    ri{idx} = ri{idx} - 1\n"
+        out = out + indent + "    val it{idx} = " + v + "[ri{idx}]\n"
+        out = out + indent + "    " + _one_frame_call(c.a, "it{idx}") + "\n"
+        return out
+    if c.cat == "pair":
+        var out = indent + "var ri{idx} = " + v + ".len()\n"
+        out = out + indent + "while ri{idx} > 0:\n"
+        out = out + indent + "    ri{idx} = ri{idx} - 1\n"
+        out = out + indent + "    val (ka{idx}, kb{idx}) = " + v + "[ri{idx}]\n"
+        if c.b != "":
+            out = out + indent + "    " + _one_frame_call(c.b, "kb{idx}") + "\n"
+        if c.a != "":
+            out = out + indent + "    " + _one_frame_call(c.a, "ka{idx}") + "\n"
+        return out
     ""
 
 # ============================================================================
@@ -571,6 +613,44 @@ fn _struct_body(u: DeclUniverse, decl: NodeDecl, mode: text, indent: text) -> te
 fn _carrier_extra(u: DeclUniverse, carrier: text, mode: text, indent: text) -> text:
     """The carrier struct's own node-bearing fields (e.g. `HirExpr.type_`)."""
     _struct_body(u, u.decl_of(carrier), mode, indent)
+
+fn _enum_frame_arms_reverse(u: DeclUniverse, decl: NodeDecl, indent: text) -> text:
+    var out = ""
+    for row in decl.variants:
+        val fields = parse_payload_fields(row.payload_schema)
+        out = out + indent + "case " + row.variant + _binders(u, fields, false) + ":\n"
+        var body = ""
+        var field_index = fields.len()
+        while field_index > 0:
+            field_index = field_index - 1
+            val f = fields[field_index]
+            body = body + _recurse_frame_lines_reverse(
+                u, f.type_text, "b_" + f.binder, indent + "    ", field_index)
+        if body == "":
+            body = indent + "    hir_visit_nothing()\n"
+        out = out + body
+    out
+
+fn _struct_frame_body_reverse(u: DeclUniverse, decl: NodeDecl, indent: text) -> text:
+    var out = ""
+    var field_index = decl.fields.len()
+    while field_index > 0:
+        field_index = field_index - 1
+        val f = decl.fields[field_index]
+        if f.binder == "kind":
+            continue
+        val c = u.classify(f.type_text)
+        if c.cat != "node" and c.cat != "list" and c.cat != "pair":
+            continue
+        val guard = u.guard_of(decl, f)
+        if guard == "":
+            out = out + _recurse_frame_lines_reverse(
+                u, f.type_text, "node." + f.binder, indent, field_index)
+        else:
+            out = out + indent + "if node." + guard + ":\n"
+            out = out + _recurse_frame_lines_reverse(
+                u, f.type_text, "node." + f.binder, indent + "    ", field_index)
+    out
 
 fn _kind_name_fn(slot: text) -> text:
     """Generated kind-name fn; `type` is prefixed to avoid colliding with hir_types.spl."""
@@ -692,6 +772,19 @@ fn emit_children_file(u: DeclUniverse) -> text:
     out = out + "enum HirNode:\n"
     out = out + "    \"\"\"One HIR node of any base carrier kind.\"\"\"\n"
     out = out + "    Expr(node: HirExpr)\n    Stmt(node: HirStmt)\n    Type_(node: HirType)\n    Pattern(node: HirPattern)\n\n"
+    out = out + "enum HirChildFrame:\n"
+    out = out + "    \"\"\"One base carrier or transparent wrapper on an iterative HIR work stack.\"\"\"\n"
+    for name in emit_order(u):
+        out = out + "    " + child_frame_variant_name(name) + "(node: " + name + ")\n"
+    out = out + "\ntrait HirChildFrameSink:\n"
+    out = out + "    me push_hir_child_frame(frame: HirChildFrame)\n\n"
+    out = out + "fn hir_expand_child_frames_reverse(frame: HirChildFrame, sink: HirChildFrameSink):\n"
+    out = out + "    \"\"\"Push direct child frames in reverse schema order for LIFO traversal.\"\"\"\n"
+    out = out + "    if frame == nil:\n        return\n"
+    out = out + "    match frame:\n"
+    for name in emit_order(u):
+        out = out + "        case " + child_frame_variant_name(name) + "(node): " + child_frame_expand_fn_name(name) + "(node, sink)\n"
+    out = out + "        case _: unreachable_hir_variant(\"HirChildFrame\", \"hir_expand_child_frames_reverse\")\n\n"
     out = out + "fn _hir_extend(a: [HirNode], b: [HirNode]) -> [HirNode]:\n"
     out = out + "    var out = a\n    for it in b:\n        out = out.push(it)\n    out\n\n"
     out = out + "fn hir_children_of(node: HirNode) -> [HirNode]:\n"
@@ -707,10 +800,17 @@ fn emit_children_file(u: DeclUniverse) -> text:
     out = out + "    out\n"
     for name in emit_order(u):
         out = out + "\n" + _emit_one_children(u, name)
-    out = out + "\nexport HirNode, hir_children_of, _hir_extend\n"
+    for name in emit_order(u):
+        out = out + "\n" + _emit_one_frame_expand(u, name)
+    out = out + "\nexport HirNode, HirChildFrame, HirChildFrameSink, hir_children_of, _hir_extend\n"
+    out = out + "export hir_expand_child_frames_reverse\n"
     var names: [text] = []
     for name in emit_order(u):
         names.push(children_fn_name(name))
+    out = out + "export " + _join(names, ", ") + "\n"
+    names = []
+    for name in emit_order(u):
+        names.push(child_frame_expand_fn_name(name))
     out = out + "export " + _join(names, ", ") + "\n"
     out
 
@@ -733,6 +833,27 @@ fn _emit_one_children(u: DeclUniverse, name: text) -> text:
         return out + "    out\n"
     out = out + _struct_body(u, decl, "children", "    ")
     out + "    out\n"
+
+fn _emit_one_frame_expand(u: DeclUniverse, name: text) -> text:
+    val decl = u.decl_of(name)
+    var out = "fn " + child_frame_expand_fn_name(name) + "(node: " + name + ", sink: HirChildFrameSink):\n"
+    out = out + "    if node == nil:\n        return\n"
+    if _is_base_carrier(name):
+        val kind_enum = _kind_enum_of(name)
+        out = out + "    match node.kind:\n"
+        out = out + _enum_frame_arms_reverse(u, u.decl_of(kind_enum), "        ")
+        out = out + "        case _: unreachable_hir_variant(\"" + kind_enum + "\", \"" + child_frame_expand_fn_name(name) + "\")\n"
+        out = out + _struct_frame_body_reverse(u, u.decl_of(name), "    ")
+        return out
+    if decl.is_enum:
+        out = out + "    match node:\n"
+        out = out + _enum_frame_arms_reverse(u, decl, "        ")
+        out = out + "        case _: unreachable_hir_variant(\"" + name + "\", \"" + child_frame_expand_fn_name(name) + "\")\n"
+        return out
+    val body = _struct_frame_body_reverse(u, decl, "    ")
+    if body == "":
+        return out + "    hir_visit_nothing()\n"
+    out + body
 
 fn emit_hash_file(u: DeclUniverse) -> text:
     var out = GEN_HEADER
