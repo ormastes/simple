@@ -844,3 +844,13 @@ intrinsic selection owns a closed support allowlist; an unknown intrinsic or a
 required result without a destination is a compile-time failure, never a NOP.
 Activation requires end-to-end semantic parity and lowering coverage for every
 emitted intrinsic.
+
+# Shared lexical fact boundary
+
+Text fallback diagnostics and their code actions must consume the same lexical
+candidate fact. `query_source_mask` owns stateful code-only pattern projection
+across ordinary and triple-quoted strings plus comments; `query_lint_scan` owns
+rule-specific lookup and one-based span conversion. The legacy single-line mask
+also remains there for check-tier. Neither module may depend on the parser,
+tier-check driver, or LSP command surface. This keeps local lint work linear and
+prevents diagnostic and fix eligibility from diverging.

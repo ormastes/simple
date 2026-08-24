@@ -3523,3 +3523,20 @@ allowlist and fails loudly for unsupported intrinsics or missing destinations.
 This avoids silent miscompilation and candidate traversal in normal builds. No
 runtime, allocation, or RSS measurement was run under the no-verification
 override.
+
+# 2026-08-24 follow-up: DEPR002 lexical and span hardening
+
+The fast query lint, JSON collector, and two code-action routes matched `.new(`
+on trimmed raw text. They therefore treated comments and string payloads as
+deprecated constructor syntax, while trimming shifted JSON columns left for
+indented code. Separate raw checks could also disagree about whether a quick fix
+was available.
+
+One request-local lexical projection now tracks single-line and triple-quoted
+strings, truncates comment payload, and records the first code occurrence in
+original source coordinates. Diagnostics and code actions consume the same
+one-based column/candidate result. The shared scanner lives in a narrow,
+dependency-neutral module rather than making hot query paths import the full
+tier checker. Each source is scanned once in O(N) time with one integer result
+per physical line and no masked text construction for DEPR002. No timing,
+allocation, or RSS measurement was run under the no-verification override.

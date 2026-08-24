@@ -1746,6 +1746,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Performance review: normal builds avoid candidate traversal; no runtime/RSS
   measurements were run under the user override.
 
+# Completed tranche: DEPR002 lexical/span hardening (2026-08-24)
+
+- Extracted position-preserving string/comment masking into a small shared
+  source-fact module.
+- Routed query lint diagnostics, JSON collection, and both code-action paths
+  through one `deprecated_new_column` helper.
+- Preserved original indentation in one-based JSON start/end columns.
+- Added paired executable lexical/span fixtures and a canonical manual.
+- Performance review target: one linear byte scan per inspected line, no parser,
+  no full tier-check dependency, and no repeated prefix construction.
+- No manual execution or measurement was run under the user override.
+
 # Completed tranche: linear app feature index (2026-08-24)
 
 - Replaced growing app-index Markdown prefixes with fragments and one join.

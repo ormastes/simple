@@ -1146,3 +1146,14 @@ intrinsic selection checks a closed implemented-name set before destination
 handling and panics on unsupported, missing-destination, or unreachable lowering
 paths. Reactivation must add backend lowering and semantic differential evidence
 before restoring an Active status and witness.
+
+# DEPR002 lexical design
+
+`deprecated_new_columns(lines)` performs one request-local lexical scan and
+returns zero or the original one-based `.new(` column for every physical line.
+It tracks triple-quoted state, ordinary strings and escapes, and comments. Basic
+query lints, standalone JSON collection, and both code-action implementations
+index the same projection rather than rescanning source prefixes or trimmed
+lines. Complexity is O(source bytes) time and O(line count) result storage; the
+scanner creates no masked source copy. The single-line helper is fixture-only
+convenience over the same projection.
