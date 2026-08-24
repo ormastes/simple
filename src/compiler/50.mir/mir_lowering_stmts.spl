@@ -20,7 +20,6 @@ use compiler.mir.mir_types.{LocalId, mir_type_probe_text}  # explicit: a glob is
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
 extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr
-@unsafe(reason: "raw debug-environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 
 # Cached `SIMPLE_TRACE_DICT_ELEM` gate (-1 unknown, 0 off, 1 on). Default OFF.
@@ -34,10 +33,7 @@ var mir_for_elem_trace_state: i64 = -1
 
 fn mir_for_elem_trace_on() -> bool:
     if mir_for_elem_trace_state < 0:
-        var configured = ""
-        unsafe(capabilities: [ffi]):
-            configured = rt_env_get("SIMPLE_TRACE_DICT_ELEM")
-        if configured == "1":
+        if rt_env_get("SIMPLE_TRACE_DICT_ELEM") == "1":
             mir_for_elem_trace_state = 1
         else:
             mir_for_elem_trace_state = 0
@@ -142,10 +138,7 @@ fn mir_hir_let_init(k: HirStmtKind, fallback: HirExpr) -> HirExpr:
 # OFF, zero cost on a normal run — mirrors mir_lower_garbage_debug_enabled()
 # in _MirLoweringExpr/expr_dispatch.spl.
 fn mir_stmt_caller_debug_enabled() -> bool:
-    var configured = ""
-    unsafe(capabilities: [ffi]):
-        configured = rt_env_get("SIMPLE_MIR_STMT_CALLER_DEBUG")
-    configured == "1"
+    rt_env_get("SIMPLE_MIR_STMT_CALLER_DEBUG") == "1"
 
 var mir_stmt_caller_debug_state: i64 = -1
 
@@ -717,9 +710,23 @@ impl MirLowering:
         mir_stmt_caller_probe("before", stmt)
         self.lower_stmt_impl(stmt)
         mir_stmt_caller_probe("after", stmt)
+        # Write-back localisation (bootstrap_stage2_empty_mir_bodies_2026-07-05).
+        # `lower_expr` is PROVEN to leave `pending=N` inside lower_stmt_impl on a
+        # self-compiled Stage 2, and `end_function` is PROVEN to see 0. These two
+        # counts bracket the boundary where the work disappears:
+        #   post-impl == 0  -> `me lower_stmt_impl`'s mutations to `self` never
+        #                      reached this frame (method-return write-back).
+        #   post-impl == N and post-restore == 0 -> the restore assignment below
+        #                      is what drops it.
+        #   both == N       -> the loss is further up (lower_block/lower_function).
+        # Default OFF, retained per the log-retention policy.
+        if mir_stmt_caller_debug_enabled():
+            eprint("[mir-emit] post-impl pending=" + self.builder.instructions.len().to_text() + "\n")
         var b_restore = self.builder
         b_restore.current_span = saved_span
         self.builder = b_restore
+        if mir_stmt_caller_debug_enabled():
+            eprint("[mir-emit] post-restore pending=" + self.builder.instructions.len().to_text() + "\n")
 
     me lower_stmt_impl(stmt: HirStmt):
         """Body of lower_stmt. Only reached through the wrapper above, so the
