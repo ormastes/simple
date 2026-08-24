@@ -1408,3 +1408,81 @@ Stage 2 binary, because the interpreted lane above does not reproduce the bug at
 all. That means a ~27-minute rebuild, and the file to be probed
 (`mir_lowering_stmts.spl`) is a parallel session's live working file, so it was
 not edited here.
+
+## 2026-08-24 (later still) — the discriminant is a HASHED uint32, not an ordinal; and "dispatch succeeds" is retracted as unproven
+
+### The runtime representation rules out an ordinal off-by-one
+
+`RtCoreEnum` (`src/runtime/runtime_native.c:867-875`) stores:
+
+```c
+uint32_t enum_id;
+uint32_t discriminant;   /* <-- uint32, set from whatever codegen passes */
+int64_t  payload;
+```
+
+`rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload)` takes the
+discriminant from codegen, and `rt_enum_discriminant`
+(`runtime_native.c:7457`, the STRONG definition that overrides the `weak` one in
+`runtime.c:1504`) returns `e->discriminant`, or **-1** when
+`rt_core_as_enum(value)` is NULL.
+
+So the observed values are exactly what this representation predicts for a
+**hash-derived** discriminant, not a dense variant index:
+
+| statement kind | discriminant |
+|---|---|
+| `HirStmtKind.Expr` | 4119164143 (`0xF58574EF`) |
+| `HirStmtKind.Let` | 2163764024 |
+
+Two consequences, both load-bearing:
+
+1. **The incoming `stmt.kind` IS a well-formed enum on Stage 2 — now established,
+   not inferred.** A malformed or non-enum value returns the sentinel **-1**.
+   We never observe -1, on either engine. And the interpreter and the native
+   Stage 2 agree on the same numbers, so both engines compute the same hash for
+   the same variant.
+2. **A "variant 0 / first-variant" off-by-one cannot live in the runtime tag
+   comparison.** No ordinal index is stored anywhere in `RtCoreEnum`; there is
+   no 0 to be off by, and no zero-vs-absent conflation available at this layer.
+   Any first-variant defect has to live in the SEED's codegen for qualified
+   match arms, not in a discriminant comparison. Anyone hunting an index
+   off-by-one should start from the emitted match code, not from the tags.
+
+### RETRACTION: "Dispatch succeeds" was an inference, not a measurement
+
+The section above states that Stage 2 takes the pre-dispatch branch and that the
+failure is downstream in `lower_expr`. **That is not established.** The argument
+rested on the `Let` statement staying silent, and that argument does not hold:
+`bootstrap_reject_fatal_mir_errors` is called at
+`bootstrap_globals.spl:346` — BEFORE the flat function loop — and the
+0-instruction guard is at `:438`, with **no rejection call between them**. So a
+`self.error(...)` raised while lowering a function body is recorded and never
+printed before the guard exits.
+
+`val a = 1` producing neither instructions nor a visible error is therefore
+equally consistent with:
+
+* **(a)** dispatch succeeded, and the handler bailed via a silent `self.error`; or
+* **(b)** dispatch failed, and both the pre-check and the qualified match missed,
+  leaving `case _: ()`.
+
+Nothing measured so far separates (a) from (b). What IS established is that the
+incoming value is a well-formed enum with the correct hashed discriminant in both
+engines (above), and that the same source works interpreted and fails
+self-compiled.
+
+The two-disc probe — logging `expr_disc` / `let_disc` beside the incoming disc —
+remains the one measurement that separates them, and it still only reproduces
+inside a Stage 2 binary.
+
+### Confirming build must be `--fresh-cache`
+
+The native object cache does not invalidate on source change: a rebuild after a
+real edit can return byte-identical output with `N cached`, because discovery
+re-parses the file while codegen is reused. Every measurement on this lane is
+clean of that — each run used its own fresh `SIMPLE_CACHE_SCOPE` (a new scope is
+a new cache DIRECTORY, so nothing can be reused), and every log reads
+`1 compiled, 0 cached` for the fixtures and `750 compiled, 0 cached` for both
+Stage 2 builds. Any future confirming build must keep that property or pass
+`--fresh-cache`, or it will measure the previous binary.
