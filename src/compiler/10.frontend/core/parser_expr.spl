@@ -845,19 +845,43 @@ fn try_skip_ident_generic_args():
             # TOK_COMMA separates generic arguments.
             parser_advance()
             const_arg_needs_separator = false
+        elif (k == 62 or k == 120 or k == 144 or k == 140 or
+              k == 164 or k == 162):
+            # Tokens that CONTINUE the argument currently being scanned, so the
+            # next token is still part of the SAME type and no separator may be
+            # demanded yet: TOK_STAR(62) `T*`, TOK_AND(120) `&T`,
+            # TOK_LBRACKET(144) `[T]`, TOK_LPAREN(140) `Fn(...)`,
+            # TOK_DOT(164) `a.B`, TOK_COLON_COLON(162) `a::B`.
+            # These MUST be tested before the separator ratchet below: an armed
+            # ratchet placed first breaks `foo<T*>(x)`, `foo<a::B>(x)` and
+            # `foo<Bar.Baz>(x)` back into comparisons.
+            parser_advance()
+            const_arg_needs_separator = false
+        elif k == 145 or k == 141 or k == 130:
+            # Tokens that COMPLETE an argument: TOK_RBRACKET(145) `[T]`,
+            # TOK_RPAREN(141) `Fn(..)`, TOK_QUESTION(130) `T?`. A separator is
+            # required before another argument may start.
+            parser_advance()
+            const_arg_needs_separator = true
         elif const_arg_needs_separator:
-            # A token other than comma or a closing angle after a numeric
-            # candidate proves this was a comparison, not generic arguments.
+            # A real generic-argument list is `T (, T)*` — two COMPLETE
+            # arguments can never sit side by side without a separating comma.
+            # A token other than a comma, a closing angle, or an
+            # argument-continuing token proves this was a comparison chain.
+            #
+            # The ratchet originally armed only after a numeric literal, which
+            # left the ident-only chain `a < b or a > (c)` silently CONFIRMING
+            # as generic args: `b` and `a` were accepted as type names and `or`
+            # (TOK_OR = 56) fell inside the keyword-as-type-name range below.
+            # The Rust seed twin arms its `need_comma` after every complete
+            # `parse_type()` — which itself consumes `*`, `&`, `::`, `.` and
+            # `[...]` — so arming after idents and keyword type names here, with
+            # the continuation tokens handled above, is the parity behaviour.
             break
         elif k == 6:
-            # TOK_IDENT — type name
+            # TOK_IDENT — type name; a COMPLETE argument.
             parser_advance()
-        elif (k == 62 or k == 120 or k == 144 or k == 145 or
-              k == 130 or k == 140 or k == 141 or k == 164 or k == 162):
-            # TOK_STAR(62), TOK_AND(120), TOK_LBRACKET(144), TOK_RBRACKET(145),
-            # TOK_QUESTION(130), TOK_LPAREN(140), TOK_RPAREN(141),
-            # TOK_DOT(164), TOK_COLON_COLON(162)
-            parser_advance()
+            const_arg_needs_separator = true
         elif (k == 20 or k == 21 or k == 22 or k == 23 or k == 24 or
               k == 25 or k == 26 or k == 27 or k == 28 or k == 29 or
               k == 30 or k == 31 or k == 32 or k == 33 or k == 34 or
@@ -866,8 +890,10 @@ fn try_skip_ident_generic_args():
               k == 45 or k == 46 or k == 47 or k == 48 or k == 49 or
               k == 50 or k == 51 or k == 52 or k == 53 or k == 54 or
               k == 55 or k == 56 or k == 57 or k == 58 or k == 59):
-            # Keyword tokens (20-59) that can appear as type names (e.g. built-in types)
+            # Keyword tokens (20-59) that can appear as type names (e.g.
+            # built-in types); a COMPLETE argument, so a separator is required.
             parser_advance()
+            const_arg_needs_separator = true
         else:
             # Not a valid type-argument token — this < is a comparison
             break
