@@ -46,3 +46,25 @@ full bootstrap attempt.
 
 The repository's mandatory three-cycle bootstrap cap was reached in the GPU
 dynamic-loading lane. Do not retry this full bootstrap in the same session.
+
+## Vulkan Engine2D verification consequence
+
+The canonical readback wrapper cannot use Stage 2 directly because that
+bootstrap CLI deliberately has no `run` command. A direct Stage-2
+`native-build` of the wrapper-generated evidence program was attempted once.
+It discovered and parsed all **189/189** modules, including
+`backend_vulkan.spl`, `backend_vulkan_spirv_raster_blobs.spl`,
+`sffi_vulkan.spl`, and `sffi.dynamic.spl`, then failed while storing the first
+lowered HIR module:
+
+```text
+[bootstrap-error-count] source_idx=0 point=post-lowering count=0
+[bootstrap-error-count] source_idx=0 point=post-diagnostics count=0
+error: hir codec: no `HirTypeKind` arm for tag -1;
+       regenerate src/compiler/20.hir/generated/hir_codec.spl
+```
+
+No evidence executable was produced, so Vulkan availability, device identity,
+present, readback, and pixel parity remain **not executed**, not failed. The
+generated source and raw wrapper evidence are under
+`build/vulkan-engine2d-readback-gpu-r3/` (ignored build artifacts).
