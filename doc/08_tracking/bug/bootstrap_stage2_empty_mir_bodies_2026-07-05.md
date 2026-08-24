@@ -2335,3 +2335,63 @@ anyone expects".
 Nothing was landed as code, per the standing instruction not to land the rule fix
 without the lowering — and here the reverse is also true: part 2 alone does not fix
 Stage 2, because Stage 2 hits face 1.
+
+## 2026-08-25 — RESOLVED: a hello world COMPILES AND RUNS under Stage 2
+
+Fix landed in `3edcb8c2605`. On the Stage 2 built from it (`--fresh-cache`,
+750 compiled / 0 cached, admitted, sha256
+`08a111722d1af4872802e44aa0eeeb9f28c152d3555d3474ef4b619cae576d8d`):
+
+```
+$ printf 'fn main():\n    print("hi")\n' > h.spl
+$ <stage2> native-build --backend llvm --source . --entry h.spl -o nb
+rc=0
+$ ./nb
+hi          rc=0
+```
+
+Reproduced four ways: with the HIR cache **on** and **off**, on two different
+programs (`hi`, `hello from stage2`), each in a fresh directory. **This is the
+first time in this record's history that a Stage-2-compiled hello world has run.**
+
+### What the fix was
+
+Not the empty-MIR-body machinery this record spent its life on — that was the
+symptom. The cause was a resolution rule: `resolve_name_variants` matched a
+qualified method call on its **bare method name**, so `Array.is_empty` bound to
+whatever user `is_empty` was in the entry closure. See the preceding sections and
+the commit message.
+
+### Verified, in order
+
+| check | result |
+|---|---|
+| `cargo check --release --bin simple` | clean |
+| Stage 2 links and is **admitted** | yes (previously failed to link with the rule alone) |
+| `0 MIR instructions` guard | fires **zero** times; MIR lowering does 200 ms of real work |
+| standalone reproducer, both faces | correct, 0 unresolved |
+| genuine user `Sp.is_empty()` | still correct |
+| **hello world compiles AND runs** | **yes** |
+
+### Honest scope — what is NOT fixed
+
+`native-build` works. **`compile --format=smf` still does not**, and fails
+differently depending on the cache:
+
+* cache **on** → `hir codec: no \`HirTypeKind\` arm for tag -1`
+* cache **off** → `Bootstrap LLVM link failed: Entry point compilation failed:`
+  with **both stdout and stderr empty** — the entry-shim `cc` invocation exits
+  non-zero and reports nothing. `compile_entry_point_c`
+  (`70.backend/backend/llvm_native_link_hosted_support.spl:195-198`) also
+  `file_delete(entry_c)` **before** returning the error, destroying the input that
+  would explain it. Both are separate blockers, and the empty message plus the
+  deleted evidence is a diagnostic defect in its own right.
+
+Neither is caused by this fix: the pre-fix Stage 2 never reached either point, and
+none of the four new lowerings (`rt_len`, `rt_array_data_ptr`, `rt_string_data`,
+`rt_string_bytes`) appears anywhere in the failing logs. They are **newly
+reachable**, not newly introduced.
+
+Two known harness requirements, unchanged: macOS needs the `setsid` shim that
+strips options, and `native-build`'s discovery parser rejects the newline-block
+`fn main()` form — write `fn main():`.
