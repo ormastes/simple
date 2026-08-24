@@ -12,10 +12,14 @@ use os.kernel.net.http_route.{http_classify_request, HttpRouteKind}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.http_server.response.{
     serialize_response, serialize_response_head_for_body_length,
+    bounded_response_wire,
     response_wire_parts_fit, with_default_security_headers
 }
 use std.nogc_sync_mut.http_server.mime.{mime_from_path}
-use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, plaintext_development_capability}
+use std.nogc_sync_mut.http_server.server.{
+    SecureServerPolicy, plaintext_development_capability,
+    request_parse_error_status
+}
 use os.apps.dbd.dbd.{DbdServer}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
@@ -89,6 +93,19 @@ fn http_wire_parts_fit(parts: HttpWireParts, max_wire_bytes: u64) -> bool:
 
 fn _text_response_parts(response: HttpResponse) -> HttpWireParts:
     HttpWireParts(head: text_to_bytes_pure(serialize_response(response)), body: [])
+
+fn http_frame_rejection_wire(error: text, max_wire_bytes: u64) -> [u8]:
+    val rejected = HttpResponse(
+        status: request_parse_error_status(error),
+        headers: [], body: "ERR HTTP request rejected\n"
+    )
+    val wire = bounded_response_wire(
+        with_default_security_headers(rejected, false),
+        max_wire_bytes.to_i64()
+    )
+    if wire == "":
+        return []
+    text_to_bytes_pure(wire)
 
 fn _byte_response_parts(response: HttpResponse, body: [u8]) -> HttpWireParts:
     val head = serialize_response_head_for_body_length(response, body.len().to_i64())
@@ -260,13 +277,10 @@ class WebSocketTransportOwner:
                             if head_sent and response.body.len() > 0:
                                 val _body_sent = send_all(client, response.body)
                 else:
-                    val rejected = HttpResponse(
-                        status: HttpStatus.BadRequest,
-                        headers: [], body: "ERR incomplete request\n"
-                    )
-                    val wire = serialize_response(
-                        with_default_security_headers(rejected, false))
-                    val _ = send_all(client, text_to_bytes_pure(wire))
+                    val wire = http_frame_rejection_wire(
+                        frame.error, MAX_WIRE_RESPONSE)
+                    if wire.len() > 0u64:
+                        val _ = send_all(client, wire)
                 if not client_transferred:
                     close_fd(client.fd)
                 true
@@ -404,3 +418,4 @@ fn main() -> i64:
 
 export http_listener_requires_partial_startup_close
 export listener_requires_setup_failure_close
+export http_frame_rejection_wire

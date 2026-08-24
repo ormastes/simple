@@ -36,6 +36,18 @@ fn _http_field_name_is_host(line_bytes: [u8], colon: i64) -> bool:
         (line_bytes[2u64] == 83u8 or line_bytes[2u64] == 115u8) and
         (line_bytes[3u64] == 84u8 or line_bytes[3u64] == 116u8))
 
+fn _http_field_name_is_expect(line_bytes: [u8], colon: i64) -> bool:
+    # The filesystem server has no interim-response transport. Recognize the
+    # field without allocating a lowercase header-name copy, then fail before
+    # the owner begins waiting for a declared body.
+    return (colon == 6 and
+        (line_bytes[0u64] == 69u8 or line_bytes[0u64] == 101u8) and
+        (line_bytes[1u64] == 88u8 or line_bytes[1u64] == 120u8) and
+        (line_bytes[2u64] == 80u8 or line_bytes[2u64] == 112u8) and
+        (line_bytes[3u64] == 69u8 or line_bytes[3u64] == 101u8) and
+        (line_bytes[4u64] == 67u8 or line_bytes[4u64] == 99u8) and
+        (line_bytes[5u64] == 84u8 or line_bytes[5u64] == 116u8))
+
 fn _host_ascii_alpha_numeric(ch: text) -> bool:
     (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
         (ch >= "0" and ch <= "9")
@@ -327,6 +339,10 @@ class Http1RequestFrameOwner:
             name_index = name_index + 1
         val name = line.slice(0, colon)
         val value = line.slice(colon + 1, line.len()).trim()
+        if (self.request_version == "HTTP/1.1" and
+            _http_field_name_is_expect(line_bytes, colon)):
+            self._fail("417 Expectation Failed: interim responses are not supported")
+            return
         if _http_field_name_is_host(line_bytes, colon):
             if not _host_authority_is_valid(value):
                 self._fail("400 Invalid Host authority")

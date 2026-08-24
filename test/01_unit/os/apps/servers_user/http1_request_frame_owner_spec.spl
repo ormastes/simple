@@ -1,10 +1,15 @@
 use std.spec.{describe, it, expect}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
-use std.nogc_sync_mut.http_server.server.{SecureServerPolicy}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+use std.nogc_sync_mut.http_server.server.{
+    SecureServerPolicy, request_parse_error_status
+}
+use std.nogc_sync_mut.http_server.types.{HttpStatus}
 use os.apps.servers_user.http1_request_frame_owner.{
     frame_http1_fragments_owned_for_test,
     http1_no_progress_terminal_index_for_test
 }
+use os.apps.servers_user.main.{http_frame_rejection_wire}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -59,6 +64,33 @@ describe "SimpleOS filesystem HTTP/1 incremental framing owner":
         expect(_frame("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\nx").complete).to_equal(false)
         expect(_frame("POST / HTTP/1.1\r\nContent-Length: nope\r\n\r\n").error).to_contain("Invalid Content-Length")
         expect(_frame("POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\nxy").error).to_contain("Bytes follow")
+
+    it "rejects Expect immediately instead of waiting for a declared body":
+        val result = _frame(
+            "POST /health HTTP/1.1\r\nHost: simpleos\r\n" +
+            "Content-Length: 5\r\neXpEcT: 100-continue\r\n")
+        expect(result.complete).to_equal(false)
+        expect(result.error).to_start_with("417 Expectation Failed")
+        expect(request_parse_error_status(result.error)).to_equal(
+            HttpStatus.ExpectationFailed)
+        expect(result.scanned_bytes).to_equal(text_to_bytes_pure(
+            "POST /health HTTP/1.1\r\nHost: simpleos\r\n" +
+            "Content-Length: 5\r\neXpEcT: 100-continue\r\n").len() as i64)
+
+        expect(_frame(
+            "GET / HTTP/1.1\r\nHost: simpleos\r\nExpect: unsupported\r\n").error
+        ).to_start_with("417 Expectation Failed")
+        expect(_frame(
+            "GET / HTTP/1.0\r\nExpect: 100-continue\r\n\r\n").complete
+        ).to_equal(true)
+
+        val wire = bytes_to_string(http_frame_rejection_wire(result.error, 4096u64))
+        expect(wire).to_start_with("HTTP/1.1 417 Expectation Failed\r\n")
+        expect(wire).to_contain("Connection: close\r\n")
+        expect(wire).to_contain("Content-Length: 26\r\n")
+        expect(wire).to_contain("Content-Security-Policy:")
+        expect(wire).to_contain("X-Content-Type-Options: nosniff\r\n")
+        expect(http_frame_rejection_wire(result.error, 1u64).len()).to_equal(0u64)
 
     it "requires exactly one non-empty Host field for HTTP/1.1 only":
         expect(_frame("GET / HTTP/1.1\r\n\r\n").error).to_contain(
