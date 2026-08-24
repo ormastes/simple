@@ -3604,3 +3604,23 @@ bound is O(S + E + Q + U), including file/split storage, directory listings,
 path prefixes, and root metadata. It launches zero child processes and retains
 no grep match output. No runtime/RSS measurement was run under the
 no-verification override.
+
+# 2026-08-24 follow-up: MIR local binding index
+
+`bind_local` scanned the complete symbol array before every new binding and
+`find_local` scanned it backward for every reference. For L distinct locals and
+R references, function lowering therefore performed O(L^2 + R*L) symbol
+comparisons even though bindings are unique and updated in place.
+
+The authoritative stage-safe symbol and `LocalId` arrays remain unchanged. A
+flat open-address table now stores only integer slots into them, because staged
+native builds have a known failure mode for mutation of dictionary fields that
+carry structured values. The table grows geometrically before 70% load, giving
+expected O(1) bind/find, O(L) worst-case probing, and amortized O(1) insertion.
+It adds O(L) flat i64 storage and a transient O(L) rebuild allocation; this is a
+latency/locality trade rather than a peak-memory reduction. At the grow
+boundary, old and doubled tables briefly coexist; lambda overlay
+mutation can also trigger an O(L) COW copy of a saved table. Per-function reset
+and both temporary lambda scope overlays clear or snapshot/restore the index in
+lockstep with the authoritative arrays. No compiler execution, timing,
+allocation, or RSS measurement was run under the no-verification override.

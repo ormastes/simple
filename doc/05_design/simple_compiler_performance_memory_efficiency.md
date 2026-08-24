@@ -1198,3 +1198,21 @@ only arithmetic plus unchanged output statements.
 `CoveragePathRequest`: omission owns the built-in root list, while every user
 value passes through `dc_path_roots` as one trimmed literal path, including
 embedded spaces, with no glob expansion.
+
+# MIR local symbol index design
+
+`local_symbol_slot` linearly probes a power-of-two-sized flat slot array and
+validates every occupied slot against `local_symbol_ids`. An empty bucket proves
+a miss. `rebuild_local_symbol_index` allocates a fresh table of at least sixteen
+slots, doubles until the next insertion stays below 70% load, rehashes the
+authoritative array in encounter order, and publishes the completed table once.
+`bind_local` updates an existing value in place or appends the aligned id/value
+pair before publishing its new bucket. `find_local` retains the exact
+`LocalId(-1)` miss result. Both lambda lowering helpers snapshot and restore the
+slot array beside ids and values; the common function reset clears it.
+An absent cache beside nonempty authoritative arrays or an encountered
+out-of-range occupied slot returns the internal corruption sentinel. For those
+two detectable structural failures, lookup falls back to the former reverse
+authoritative scan and mutation rebuilds before updating, preventing a duplicate
+append. The index is otherwise protected by its lifecycle invariant; arbitrary
+in-range bucket corruption is outside this recovery contract.

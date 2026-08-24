@@ -1734,6 +1734,20 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No manual execution was run under the user override; static semantic,
   performance, and fixture review is required before sync.
 
+# Completed tranche: MIR local binding index (2026-08-24)
+
+- Retained the staged-native-safe parallel binding arrays as authority.
+- Added a flat primitive-slot open-address index with geometric growth below
+  70% load for expected constant-time bind and lookup.
+- Wired the sole constructor, common per-function reset, and both lambda scope
+  snapshot/restore sites in lockstep.
+- Added paired collision, resize, update, miss, rollback, reset, and lifecycle
+  evidence plus a canonical manual.
+- Performance target: replace O(L^2 + R*L) comparisons with expected O(L+R)
+  operations while accepting O(L) additional flat index storage.
+- No manual execution or performance/RSS measurement was run under the user
+  override.
+
 # Completed tranche: doc-coverage single-scan reporting (2026-08-24)
 
 - Replaced normal-report grep pipelines with Pure Simple recursive file facts.

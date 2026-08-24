@@ -889,3 +889,13 @@ one literal root. Normal reporting owns no shell-word, quoting, or glob language
 Normal renderers consume immutable `CoverageReportFacts` and may not invoke
 process, grep, or independent counting adapters. The bounded `--missing` listing
 remains a separate compatibility capsule.
+
+# MIR local binding index ownership
+
+`local_symbol_ids` and `local_symbol_values` remain the sole binding authority.
+`local_symbol_index_slots` is a rebuildable primitive-array cache whose occupied
+entry is an integer slot into both authoritative arrays. Negative slots are
+empty; negative symbol/local IDs remain rejected. No deletion or tombstone is
+needed. Constructor initialization, per-function reset, and each temporary
+lambda scope save/restore own all three arrays as one state capsule. A bucket is
+published only after its authoritative id/value append is complete.
