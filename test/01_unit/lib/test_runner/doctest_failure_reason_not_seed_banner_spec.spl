@@ -1,0 +1,44 @@
+# Reproduce + regression proof (2026-08-24): a failing SPL doctest block used
+# to report stderr LINE 1 as its reason. The seed binary unconditionally
+# prints a two-line "bootstrap seed only" banner on stderr, so every
+# non-zero-exit block was labelled with that banner instead of its real
+# error. In the 2026-08-24 whole-suite baseline (117 min, origin/main
+# 56fb36c972d) that was 216 of 226 reported failure reasons, leaving the
+# run's `SPL Doctest: 267 passed, 215 failed, 0 skipped` with no usable
+# diagnosis. `_dt_failure_reason` must skip the banner and the compiler's
+# warning/info noise and surface the first real line.
+use std.test_runner.doctest_runner.*
+
+val SEED_BANNER = "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool."
+val SEED_BANNER_2 = "Build and use the pure-Simple bin/simple instead."
+
+describe "doctest failure reason skips seed banner and diagnostic noise":
+    it "reports the real error, not the seed banner (the baseline defect)":
+        val stderr = SEED_BANNER + "\n" + SEED_BANNER_2 + "\nerror: undefined variable `foo`"
+        expect(_dt_failure_reason(stderr)).to_equal("error: undefined variable `foo`")
+
+    it "skips compiler warning/info lines that precede the real error":
+        val stderr = SEED_BANNER + "\n" + SEED_BANNER_2 +
+            "\nwarning: public function `skip` has 2 co-compiled definitions" +
+            "\n[WARN] Failed to load imported types" +
+            "\n[gc-warning] Higher-layer module imported in restricted context" +
+            "\n[INFO] JIT compilation failed, falling back to interpreter" +
+            "\nerror: no method named `is_done`"
+        expect(_dt_failure_reason(stderr)).to_equal("error: no method named `is_done`")
+
+    it "keeps a TIMEOUT line, which is signal rather than noise":
+        val stderr = SEED_BANNER + "\nTIMEOUT after 5000ms"
+        expect(_dt_failure_reason(stderr)).to_equal("TIMEOUT after 5000ms")
+
+    it "falls back to the first line when stderr is nothing but noise":
+        # Never invent a reason and never report nothing: an all-noise
+        # stderr still has to say something, and the banner is what there is.
+        val stderr = SEED_BANNER + "\n" + SEED_BANNER_2
+        expect(_dt_failure_reason(stderr)).to_equal(SEED_BANNER)
+
+    it "reports a fixed placeholder when stderr is empty":
+        expect(_dt_failure_reason("")).to_equal("Exit code non-zero")
+
+    it "ignores blank lines when picking the reason":
+        val stderr = "\n\n" + SEED_BANNER + "\n\nerror: boom\n"
+        expect(_dt_failure_reason(stderr)).to_equal("error: boom")

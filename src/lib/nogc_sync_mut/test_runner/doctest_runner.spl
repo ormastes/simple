@@ -349,6 +349,37 @@ fn run_md_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
 # SPL Same-File Doctest Support
 # =========================================================================
 
+# Pick the first stderr line that actually says why a doctest block failed.
+#
+# The seed binary unconditionally prints a two-line "bootstrap seed only"
+# banner on stderr, and the compiler emits `warning:` / `[WARN]` /
+# `[gc-warning]` / `[INFO]` diagnostics ahead of any real error. Naively
+# reporting stderr line 1 therefore labelled EVERY non-zero-exit block with
+# the banner: in the 2026-08-24 whole-suite baseline, 216 of 226 reported
+# failure reasons were that banner, so the run's 215 doctest failures had no
+# usable diagnosis at all. This does not change any verdict — only the text
+# shown for an already-failing block.
+fn _dt_failure_reason(stderr: text) -> text:
+    var fallback = ""
+    for raw in stderr.split("\n"):
+        val line = raw.trim()
+        if line == "":
+            continue
+        if fallback == "":
+            fallback = line
+        if line.starts_with("WARNING: this Rust-built Simple binary"):
+            continue
+        if line.starts_with("Build and use the pure-Simple"):
+            continue
+        if line.starts_with("warning:") or line.starts_with("[WARN]"):
+            continue
+        if line.starts_with("[gc-warning]") or line.starts_with("[INFO]"):
+            continue
+        return line
+    if fallback != "":
+        return fallback
+    "Exit code non-zero"
+
 fn build_spl_doctest_code(source_content: text, dt: Doctest) -> text:
     source_content + "\n\n# --- doctest from line {dt.line_number} ---\nuse std.spec.*\n" + dt.code
 
@@ -441,7 +472,7 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64) -> SdoctestFileR
                 ))
             else:
                 failed = failed + 1
-                val error_msg = if stderr != "": stderr.split("\n")[0] else: "Exit code non-zero"
+                val error_msg = _dt_failure_reason(stderr)
                 block_results.push(BlockResult(
                     block: block, status: BlockStatus.Failed,
                     duration_ms: duration_ms, stdout: stdout, stderr: stderr,
