@@ -2723,3 +2723,20 @@ copies and would regress if the cap grew. It now renders a header plus ordered
 entry fragments with one join. A direct contract pins insertion order, summary
 fields, and trailing newlines; it was not executed under the user's
 no-verification instruction.
+
+### Fixed-size PerfFacts liveness storage
+
+PerfFacts admitted dense liveness matrices only after its existing
+four-million-cell cap, but initialized the admitted matrices one `push(false)`
+at a time. The initial block worklist and queued bitmap were grown the same way.
+Because Simple array growth may copy the whole prefix when uniqueness is not
+proved, the initialization path could accumulate quadratic copying and large
+transient allocation precisely at the largest admitted inputs. The matrices and
+bitmaps now allocate their exact final sizes once; the worklist is filled by
+index and continues to reuse its fixed live prefix through the existing top
+cursor. The change preserves cell caps, fail-closed completeness, traversal
+order, visit budgets, and public facts while making initialization linear in
+the allocated cells with no growth copies. Existing branch propagation,
+budget, dangling-edge, no-liveness-allocation, and duplicate-local contracts
+cover behavior; they were not rerun under the user's no-verification
+instruction.
