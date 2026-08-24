@@ -30,6 +30,11 @@ On the same committed tree, the full production consumer measured 10.21 seconds
 and 225,032 KiB peak RSS before that fixture split, then 9.27 seconds and
 223,520 KiB afterward. This is the retained NFR-MCT-001 before/after evidence;
 the focused fixture is coverage, not the production timing oracle.
+For the runtime-API range gate, Git tree equality over both runtime roots is an
+algorithmic fast path: an unchanged range extracts and counts the tip once;
+any changed runtime root performs the full base/tip removal analysis. The
+unchanged-range scan measured 7.43 seconds before and 3.89 seconds afterward,
+with non-vacuity and mutation fixtures retained.
 The quick rules row extracts `rules.sdl` from the same committed ref before
 parsing its numeric commands. An explicit `--rules` path exists only for
 diagnostic and self-test fixtures.

@@ -205,6 +205,23 @@ evaluate() {
     ev_new_c="$TMPROOT/new_c.out"
     ev_new_reexp="$TMPROOT/new_reexp.out"
 
+    # Most pushes do not touch either runtime implementation. In that case the
+    # base and tip symbol sets are byte-identical by Git tree identity, so
+    # extracting both sides cannot discover a removal. Still extract the tip
+    # once: the guard remains non-vacuous and reports the real symbol count.
+    git -C "$ev_repo" diff --quiet "$ev_base" "$ev_new" -- \
+        src/compiler_rust/runtime/src src/runtime
+    ev_surface_diff_rc=$?
+    if [ "$ev_surface_diff_rc" -eq 0 ]; then
+        defined_symbols_rust "$ev_repo" "$ev_new" >"$ev_new_rs" 2>"$TMPROOT/new.err"
+        [ -s "$TMPROOT/new.err" ] && { EV_ERR=$(cat "$TMPROOT/new.err"); return 2; }
+        defined_symbols_c "$ev_repo" "$ev_new" >"$ev_new_c" 2>/dev/null
+        EV_CHECKED=$(cat "$ev_new_rs" "$ev_new_c" | sort -u | wc -l | tr -d ' ')
+        [ "$EV_CHECKED" -gt 0 ] || { EV_ERR="unchanged runtime surface contained no symbols"; return 2; }
+        return 0
+    fi
+    [ "$ev_surface_diff_rc" -eq 1 ] || { EV_ERR="cannot compare runtime surface trees"; return 2; }
+
     defined_symbols_rust "$ev_repo" "$ev_base" >"$ev_base_rs" 2>"$TMPROOT/base.err"
     [ -s "$TMPROOT/base.err" ] && { EV_ERR=$(cat "$TMPROOT/base.err"); return 2; }
     defined_symbols_rust "$ev_repo" "$ev_new" >"$ev_new_rs" 2>"$TMPROOT/new.err"
