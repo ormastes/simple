@@ -2675,3 +2675,16 @@ block contributes one line and a trailing newline contributes a final empty
 segment. This keeps O(bytes) time and reduces auxiliary storage from O(lines)
 to O(1) at every call site. Context and SPipe boundary fixtures were added but
 not executed under the user's no-verification instruction.
+
+### Bidirectional optimizer registry integrity
+
+The pass registry already models status, expectation, effective-pipeline
+filtering, witnesses, and run receipts. Its integrity check validated aliases
+but did not prove that each descriptor's own stable name resolved back to the
+same `PassKind`; a missing or misbound canonical dispatch row could therefore
+survive otherwise consistent metadata. The guard now fails closed on unresolved
+or wrong-kind stable names. Registry-name and positive/negative witness
+uniqueness checks now use dictionaries rather than repeated linear membership,
+keeping those uniqueness phases linear as the pass inventory expands. Negative
+missing/misbound contracts were added but not executed under the user's
+no-verification instruction.
