@@ -143,6 +143,9 @@ repeat provider-bearing lookup for the same pass.
 Machine-report renderers accumulate independently rendered records and join
 once. They must not append each record to an ever-growing output string, which
 turns report size into cumulative copying while adding no semantic value.
+This applies equally to bounded developer inventories such as SIMD recipe
+tables: bounds protect memory, but renderers still use ordered fragments and a
+single join so increasing a bound does not silently reintroduce quadratic work.
 
 ### Diagnostic model
 
