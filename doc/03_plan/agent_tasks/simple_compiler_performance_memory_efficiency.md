@@ -1277,8 +1277,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   across line checks; retain the source-taking compatibility adapter.
 - Replace per-byte stripped-source concatenation with one byte scan, unchanged
   code spans, one mask fragment per string, and a final join.
+- Replace the punctuation replacement chain plus split with one byte-indexed
+  maximal-word span collector using the exact legacy delimiter set.
 - Add guards for owner mutation, full-tier count-only storage, direct operator
-  literals, per-file pattern reuse, and span-owned string/comment masking.
+  literals, per-file pattern reuse, span-owned string/comment masking, and
+  replacement-free keyword extraction, plus direct delimiter/ordering cases.
 - Verification intentionally not run under the user's no-verify instruction.
 
 ## Reviewed workspace JSON process tranche
