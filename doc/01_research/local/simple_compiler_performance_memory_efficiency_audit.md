@@ -2547,3 +2547,21 @@ callback leaves recursive wrappers. Keep the allocating API as a compatibility
 adapter during migration. The generated-visitor freshness gate must also cover
 `hir_children.spl`; today it checks other visitor outputs but can miss drift in
 this file.
+
+The prerequisite freshness hardening is now implemented. The combined visitor
+gate regenerates both fold visitors and `hir_children.spl` into explicit temp
+destinations, compares all three declared artifacts, and mutates the child file
+in its red fixture. The dedicated HIR visitor gate also passes an explicit
+temporary fold-output root. This closes a side-effect hazard where the
+`visitors` command's omitted second output argument could write fold artifacts
+under the scanned source tree during a nominally read-only check.
+
+### TYPE001/TYPE002 canonical line snapshot
+
+The main lint driver already owns one `content.split("\n")` view, but the
+nonexistent-type/range wrapper split the same source again for every Simple
+file. The production path now passes the canonical line array into a new
+line-based kernel. The content-based API remains a compatibility adapter, so
+standalone callers retain behavior while normal linting removes one full-file
+line array and its proportional text storage. Diagnostic ordering, physical
+line numbers, predicates, and levels are unchanged.
