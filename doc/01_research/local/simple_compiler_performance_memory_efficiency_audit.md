@@ -2652,3 +2652,14 @@ leaving the separate boot-products manifest split untouched—it is different
 input with a different lifetime. Complete warning payload/order parity is
 covered using a generated RV64 bundle, but not executed under the user's
 no-verification instruction.
+
+### Allocation-free critical-file line counting
+
+CFG002 previously read every protected file and materialized
+`content.split("\n")` only to obtain its length. That is linear time but also
+linear transient storage per guarded file, with no need for the resulting line
+texts. The shrinkage path now counts newline characters in one pass and starts
+at one, exactly matching split semantics for empty content, internal blank
+lines, and trailing newlines. Complexity remains O(bytes), while auxiliary
+storage drops from O(lines) to O(1). Direct boundary coverage was added but not
+executed under the user's no-verification instruction.
