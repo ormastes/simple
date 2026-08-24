@@ -169,12 +169,14 @@ current-head research reconciliation.
 
 ## Completed canonical lint-line migrations
 
-- TYPE001/TYPE002, LEADOP001, and const-reference-default consume the one
-  request-owned line snapshot.
+- TYPE001/TYPE002, LEADOP001, const-reference-default, bare-primitive, and
+  silent-default consume the one request-owned line snapshot.
 - Source-taking APIs remain compatibility adapters for standalone callers.
 - Exact finding parity fixtures pin code, operation, line, and message fields.
-- Next candidate: bare-primitive rules; raw-RT
-  requires a separate lexical/import evidence snapshot because it also owns
+- Silent-default reuses the same lines for first-30 marker scope and finding
+  detection, eliminating its second internal split.
+- Next candidate: raw-RT requires a separate lexical/import evidence snapshot
+  because it also owns
   byte-offset fixes and cannot be migrated mechanically.
 
 ## Completed VHDL deterministic-sort tranche
