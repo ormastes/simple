@@ -2408,3 +2408,19 @@ file-write provider returns false before eviction runs, and was not laundered
 into success. Corrected totals are 21,266 raw calls, 2,134 explicit, 19,132
 missing; 12,111 declarations, 892 tagged, 383 minimized, 10,953 untouched, and
 zero signed/admitted.
+
+## Interpreter assurance-policy environment authority
+
+The interpreter's default safety-profile and warning-phase reads now share one
+tagged `rt_env_get` declaration and two lexical `unsafe(ffi)` scopes. Both reads
+remain per invocation because tests and callers intentionally reapply mutable
+policy state after initialization; caching would recreate the latch this code
+was designed to remove. Call count, normalization, warning projection, and
+raise-only policy behavior are unchanged.
+
+The five-site policy convergence specification passes 26/26. Optimizer findings
+remain 34; one paired sample changes from 3.28 s / 283,828 KiB to 3.49 s /
+283,724 KiB, with no source-level allocation, loop, lookup, or dispatch change.
+Current totals are 21,266 raw calls, 2,136 explicit, 19,130 missing; 12,111
+declarations, 893 tagged, 383 minimized, 10,952 untouched, and zero
+signed/admitted.

@@ -1397,3 +1397,10 @@ explicit, 19,132 missing); 12,111 declarations (892 tagged, 383 minimized,
 functional spec remains 5/6 because raw fixture file creation fails before the
 eviction call. Preserve that false result until the file-write provider exposes
 a typed error rather than fabricating test success.
+
+Interpreter assurance-policy follow-up scopes both mutation-visible environment
+reads without caching and tags their shared declaration. Current census: 21,266
+calls (2,136 explicit, 19,130 missing); 12,111 declarations (893 tagged, 383
+minimized, 10,952 untouched), zero signed/admitted. Five-site convergence passes
+26/26, optimizer findings remain 34, and the paired measurement is 3.28 s /
+283,828 KiB before versus 3.49 s / 283,724 KiB after.
