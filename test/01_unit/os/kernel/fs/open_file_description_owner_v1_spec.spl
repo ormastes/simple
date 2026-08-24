@@ -1,0 +1,48 @@
+"""Focused executable contract for the phase-A SimpleOS OFD owner."""
+
+# @req: REQ-OS-OFD-OWNER-V1-001
+
+use std.spec.*
+use os.kernel.fs.open_file_description_owner_v1.*
+
+describe "SimpleOS phase-A open-file-description owner":
+    it "keeps access separate from the mutable-status vocabulary":
+        expect(open_file_description_access_allows_read_v1(
+            OpenFileDescriptionAccessV1.ReadOnly)).to_be(true)
+        expect(open_file_description_access_allows_write_v1(
+            OpenFileDescriptionAccessV1.ReadOnly)).to_be(false)
+        expect(open_file_description_status_valid_v1(
+            SIMPLEOS_OFD_STATUS_NONBLOCK_V1)).to_be(true)
+        expect(open_file_description_status_valid_v1(
+            SIMPLEOS_OFD_STATUS_APPEND_V1)).to_be(true)
+
+    it "rejects unknown status bits and mismatched access before pinning":
+        expect(open_file_description_status_valid_v1(0x80000000u32)).to_be(false)
+        expect(open_file_description_access_allows_read_v1(
+            OpenFileDescriptionAccessV1.WriteOnly)).to_be(false)
+        expect(open_file_description_access_allows_write_v1(
+            OpenFileDescriptionAccessV1.ReadOnly)).to_be(false)
+        expect(open_file_description_io_allowed_v1(
+            OpenFileDescriptionAccessV1.ReadOnly,
+            OpenFileDescriptionIoKindV1.Write)).to_be(false)
+
+    it "models deferred close, backend commit, and quarantine without authority":
+        val waiting = open_file_description_protocol_transition_v1(
+            OpenFileDescriptionStateV1.Active, 0u32, 1u32,
+            OpenFileDescriptionProtocolEventV1.LastReferenceReleased)
+        expect(waiting).to_equal(Some(OpenFileDescriptionStateV1.Closing))
+        expect(open_file_description_protocol_transition_v1(
+            waiting.unwrap(), 0u32, 1u32,
+            OpenFileDescriptionProtocolEventV1.BackendCloseCommitted).is_some()
+        ).to_be(false)
+        val drained = open_file_description_protocol_transition_v1(
+            waiting.unwrap(), 0u32, 0u32,
+            OpenFileDescriptionProtocolEventV1.PinDrained).unwrap()
+        expect(open_file_description_protocol_transition_v1(
+            drained, 0u32, 0u32,
+            OpenFileDescriptionProtocolEventV1.BackendCloseCommitted)
+        ).to_equal(Some(OpenFileDescriptionStateV1.Free))
+        expect(open_file_description_protocol_transition_v1(
+            drained, 0u32, 0u32,
+            OpenFileDescriptionProtocolEventV1.BackendCloseIndeterminate)
+        ).to_equal(Some(OpenFileDescriptionStateV1.CloseQuarantined))

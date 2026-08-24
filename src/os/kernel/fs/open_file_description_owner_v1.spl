@@ -1,0 +1,673 @@
+"""Bounded owner for SimpleOS open-file descriptions.
+
+This phase-A capsule is deliberately not wired to descriptor tables or VFS.
+It owns generational identity, shared status/cursor sequencing, scoped backend
+pins, and the last-reference close protocol.  Backend bindings are opaque
+handles; no raw driver pointer crosses this boundary.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.sosix.core.operation.SosixOperationId
+use os.sosix.fs.open_file_description_sequencer.{
+    SosixOfdIoState, SosixOfdIoTicket, SosixOfdIoReservation,
+    sosix_ofd_io_state_new,
+    sosix_ofd_reserve_read, sosix_ofd_reserve_write,
+    sosix_ofd_reserve_read_at, sosix_ofd_reserve_write_at,
+    sosix_ofd_reserve_append, sosix_ofd_commit
+}
+
+pub val SIMPLEOS_OFD_LIMIT_V1: i32 = 256
+pub val SIMPLEOS_OFD_STATUS_APPEND_V1: u32 = 1024u32
+pub val SIMPLEOS_OFD_STATUS_NONBLOCK_V1: u32 = 2048u32
+pub val SIMPLEOS_OFD_MUTABLE_STATUS_MASK_V1: u32 =
+    SIMPLEOS_OFD_STATUS_APPEND_V1 | SIMPLEOS_OFD_STATUS_NONBLOCK_V1
+
+val _OFD_GENERATION_MAX_V1: u32 = 0xffffffffu32
+val _OFD_NONCE_MAX_V1: u64 = 0xffffffffffffffffu64
+
+pub enum OpenFileDescriptionAccessV1:
+    ReadOnly
+    WriteOnly
+    ReadWrite
+
+pub enum OpenFileDescriptionStateV1:
+    Free
+    Active
+    Closing
+    CloseQuarantined
+    Retired
+
+pub enum OpenFileDescriptionIoKindV1:
+    Read
+    Write
+    ReadAt
+    WriteAt
+    Append
+
+pub enum OpenFileDescriptionCloseDispositionV1:
+    AliasReleased
+    WaitingForPins
+    BackendCloseRequired
+
+pub enum OpenFileDescriptionProtocolEventV1:
+    LastReferenceReleased
+    PinDrained
+    BackendCloseCommitted
+    BackendCloseIndeterminate
+
+pub(package) struct OpenFileDescriptionRefV1:
+    slot: i32
+    generation: u32
+
+pub struct OpenFileDescriptionBackendBindingV1:
+    file_object_id: u64
+    file_object_generation: u32
+    backend_kind: u8
+
+pub(package) struct OpenFileDescriptionPinV1:
+    ref_: OpenFileDescriptionRefV1
+    nonce: u64
+
+pub(package) struct OpenFileDescriptionIoDispatchV1:
+    backend: OpenFileDescriptionBackendBindingV1
+    ticket: SosixOfdIoTicket
+
+pub(package) struct OpenFileDescriptionCloseTicketV1:
+    ref_: OpenFileDescriptionRefV1
+    nonce: u64
+
+pub(package) struct OpenFileDescriptionCloseBeginV1:
+    disposition: OpenFileDescriptionCloseDispositionV1
+    ticket: OpenFileDescriptionCloseTicketV1?
+
+pub(package) struct OpenFileDescriptionIoCompleteV1:
+    shared_offset: u64
+    close_ready: OpenFileDescriptionCloseTicketV1?
+
+pub struct OpenFileDescriptionSnapshotV1:
+    state: OpenFileDescriptionStateV1
+    access: OpenFileDescriptionAccessV1
+    status_flags: u32
+    shared_offset: u64
+    ref_count: u32
+    pin_count: u32
+
+export SIMPLEOS_OFD_LIMIT_V1, SIMPLEOS_OFD_STATUS_APPEND_V1
+export SIMPLEOS_OFD_STATUS_NONBLOCK_V1, SIMPLEOS_OFD_MUTABLE_STATUS_MASK_V1
+export OpenFileDescriptionAccessV1, OpenFileDescriptionStateV1
+export OpenFileDescriptionIoKindV1, OpenFileDescriptionCloseDispositionV1
+export OpenFileDescriptionProtocolEventV1
+export OpenFileDescriptionBackendBindingV1
+export OpenFileDescriptionSnapshotV1
+
+struct OpenFileDescriptionSlotV1:
+    state: OpenFileDescriptionStateV1
+    generation: u32
+    access: OpenFileDescriptionAccessV1
+    status_flags: u32
+    backend: OpenFileDescriptionBackendBindingV1
+    ref_count: u32
+    pin_count: u32
+    next_operation_generation: u32
+    active_pin_nonce: u64
+    active_ticket: SosixOfdIoTicket
+    io_dispatched: bool
+    close_nonce: u64
+    close_claimed: bool
+    close_dispatched: bool
+    io: SosixOfdIoState
+
+struct OpenFileDescriptionOwnerStateV1:
+    initialized: bool
+    permanently_quarantined: bool
+    nonce_counter: u64
+    slots: [OpenFileDescriptionSlotV1]
+    free_slots: [i32]
+
+fn _ofd_empty_slots_v1() -> [OpenFileDescriptionSlotV1]:
+    val empty: [OpenFileDescriptionSlotV1] = []
+    empty
+
+fn _ofd_empty_free_slots_v1() -> [i32]:
+    val empty: [i32] = []
+    empty
+
+fn _ofd_empty_backend_v1() -> OpenFileDescriptionBackendBindingV1:
+    OpenFileDescriptionBackendBindingV1(
+        file_object_id: 0u64, file_object_generation: 0u32, backend_kind: 0u8)
+
+fn _ofd_empty_ticket_v1() -> SosixOfdIoTicket:
+    SosixOfdIoTicket(
+        operation: SosixOperationId(slot: 0u32, generation: 0u32),
+        sequence: 0u64, api_id: 0u32, requested_length: 0u64,
+        file_offset: 0u64, position_kind: 0u8,
+        backend_atomic_append: false)
+
+fn _ofd_empty_slot_v1(generation: u32) -> OpenFileDescriptionSlotV1:
+    OpenFileDescriptionSlotV1(
+        state: OpenFileDescriptionStateV1.Free,
+        generation: generation,
+        access: OpenFileDescriptionAccessV1.ReadOnly,
+        status_flags: 0u32,
+        backend: _ofd_empty_backend_v1(),
+        ref_count: 0u32,
+        pin_count: 0u32,
+        next_operation_generation: 1u32,
+        active_pin_nonce: 0u64,
+        active_ticket: _ofd_empty_ticket_v1(),
+        io_dispatched: false,
+        close_nonce: 0u64,
+        close_claimed: false,
+        close_dispatched: false,
+        io: sosix_ofd_io_state_new(0u64))
+
+val _ofd_mutex_v1: i64 = mutex_raw_create()
+var _ofd_owner_v1 = OpenFileDescriptionOwnerStateV1(
+    initialized: false,
+    permanently_quarantined: false,
+    nonce_counter: 0x4f46444f574e4552u64,
+    slots: [],
+    free_slots: [])
+
+fn _ofd_ensure_initialized_v1():
+    if not _ofd_owner_v1.initialized:
+        _ofd_owner_v1.slots = _ofd_empty_slots_v1()
+        _ofd_owner_v1.free_slots = _ofd_empty_free_slots_v1()
+        _ofd_owner_v1.initialized = true
+
+fn _ofd_lock_v1() -> bool:
+    if _ofd_mutex_v1 <= 0: return false
+    if not mutex_raw_lock(_ofd_mutex_v1):
+        return false
+    # A waiter may have observed false before a prior unlock failure published
+    # quarantine. Recheck only after acquiring serialization and fail closed.
+    if _ofd_owner_v1.permanently_quarantined:
+        _ = mutex_raw_unlock(_ofd_mutex_v1)
+        return false
+    _ofd_ensure_initialized_v1()
+    true
+
+fn _ofd_unlock_v1() -> bool:
+    if mutex_raw_unlock(_ofd_mutex_v1):
+        return true
+    # Runtime contract: pthread failure and invalid-handle failure do not
+    # release ownership; the Windows provider returns true after release, and
+    # the interpreter returns true after clearing its locked bit. Thus false
+    # never means "released but unreported". A mutation may already have
+    # linearized, so suppress every future authority operation.
+    _ofd_owner_v1.permanently_quarantined = true
+    false
+
+fn _ofd_ref_index_v1(
+    ref_: OpenFileDescriptionRefV1,
+    required_state: OpenFileDescriptionStateV1
+) -> i32:
+    if (ref_.slot < 0 or ref_.slot >= _ofd_owner_v1.slots.len() or
+        ref_.generation == 0u32):
+        return -1
+    val slot = _ofd_owner_v1.slots[ref_.slot]
+    if slot.generation != ref_.generation or slot.state != required_state:
+        return -1
+    ref_.slot
+
+fn _ofd_backend_valid_v1(binding: OpenFileDescriptionBackendBindingV1) -> bool:
+    (binding.file_object_id != 0u64 and
+        binding.file_object_generation != 0u32 and binding.backend_kind != 0u8)
+
+pub fn open_file_description_status_valid_v1(flags: u32) -> bool:
+    (flags & ~SIMPLEOS_OFD_MUTABLE_STATUS_MASK_V1) == 0u32
+
+pub fn open_file_description_access_allows_read_v1(
+    access: OpenFileDescriptionAccessV1
+) -> bool:
+    (access == OpenFileDescriptionAccessV1.ReadOnly or
+        access == OpenFileDescriptionAccessV1.ReadWrite)
+
+pub fn open_file_description_access_allows_write_v1(
+    access: OpenFileDescriptionAccessV1
+) -> bool:
+    (access == OpenFileDescriptionAccessV1.WriteOnly or
+        access == OpenFileDescriptionAccessV1.ReadWrite)
+
+pub(package) fn open_file_description_create_v1(
+    access: OpenFileDescriptionAccessV1,
+    status_flags: u32,
+    backend: OpenFileDescriptionBackendBindingV1,
+    initial_offset: u64
+) -> Result<OpenFileDescriptionRefV1, text>:
+    if not open_file_description_status_valid_v1(status_flags):
+        return Err("invalid-status-flags")
+    if not _ofd_backend_valid_v1(backend):
+        return Err("invalid-backend-binding")
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+
+    var index = -1
+    var generation = 1u32
+    if _ofd_owner_v1.free_slots.len() > 0:
+        val last = _ofd_owner_v1.free_slots.len() - 1
+        index = _ofd_owner_v1.free_slots[last]
+        _ofd_owner_v1.free_slots.pop()
+        if index < 0 or index >= _ofd_owner_v1.slots.len():
+            _ofd_owner_v1.permanently_quarantined = true
+            _ = _ofd_unlock_v1()
+            return Err("free-stack-corrupt")
+        val prior = _ofd_owner_v1.slots[index]
+        if (prior.state != OpenFileDescriptionStateV1.Free or
+            prior.generation == _OFD_GENERATION_MAX_V1):
+            _ofd_owner_v1.permanently_quarantined = true
+            _ = _ofd_unlock_v1()
+            return Err("free-stack-corrupt")
+        generation = prior.generation + 1u32
+    else:
+        if _ofd_owner_v1.slots.len() >= SIMPLEOS_OFD_LIMIT_V1:
+            val unlocked = _ofd_unlock_v1()
+            return Err(if unlocked: "ofd-capacity-exhausted" else: "serialization-unavailable")
+        index = _ofd_owner_v1.slots.len()
+
+    val installed = OpenFileDescriptionSlotV1(
+        state: OpenFileDescriptionStateV1.Active,
+        generation: generation,
+        access: access,
+        status_flags: status_flags,
+        backend: backend,
+        ref_count: 1u32,
+        pin_count: 0u32,
+        next_operation_generation: 1u32,
+        active_pin_nonce: 0u64,
+        active_ticket: _ofd_empty_ticket_v1(),
+        io_dispatched: false,
+        close_nonce: 0u64,
+        close_claimed: false,
+        close_dispatched: false,
+        io: sosix_ofd_io_state_new(initial_offset))
+    if index == _ofd_owner_v1.slots.len():
+        _ofd_owner_v1.slots.push(installed)
+    else:
+        _ofd_owner_v1.slots[index] = installed
+    val ref_ = OpenFileDescriptionRefV1(slot: index, generation: generation)
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(ref_)
+
+pub(package) fn open_file_description_retain_v1(
+    ref_: OpenFileDescriptionRefV1
+) -> Result<u32, text>:
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_ref_index_v1(ref_, OpenFileDescriptionStateV1.Active)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-open-file-description")
+    val prior = _ofd_owner_v1.slots[index].ref_count
+    if prior == 0u32 or prior == 0xffffffffu32:
+        _ = _ofd_unlock_v1()
+        return Err("reference-count-exhausted")
+    _ofd_owner_v1.slots[index].ref_count = prior + 1u32
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(prior + 1u32)
+
+fn _ofd_operation_allowed_v1(
+    access: OpenFileDescriptionAccessV1,
+    kind: OpenFileDescriptionIoKindV1
+) -> bool:
+    if (kind == OpenFileDescriptionIoKindV1.Read or
+        kind == OpenFileDescriptionIoKindV1.ReadAt):
+        return open_file_description_access_allows_read_v1(access)
+    open_file_description_access_allows_write_v1(access)
+
+pub fn open_file_description_io_allowed_v1(
+    access: OpenFileDescriptionAccessV1,
+    kind: OpenFileDescriptionIoKindV1
+) -> bool:
+    _ofd_operation_allowed_v1(access, kind)
+
+pub fn open_file_description_protocol_transition_v1(
+    state: OpenFileDescriptionStateV1,
+    ref_count: u32,
+    pin_count: u32,
+    event: OpenFileDescriptionProtocolEventV1
+) -> OpenFileDescriptionStateV1?:
+    """Pure lifecycle oracle used by the owner and focused specifications."""
+    if event == OpenFileDescriptionProtocolEventV1.LastReferenceReleased:
+        if state == OpenFileDescriptionStateV1.Active and ref_count == 0u32:
+            return Some(OpenFileDescriptionStateV1.Closing)
+        return nil
+    if event == OpenFileDescriptionProtocolEventV1.PinDrained:
+        if (state == OpenFileDescriptionStateV1.Closing and
+            ref_count == 0u32 and pin_count == 0u32):
+            return Some(OpenFileDescriptionStateV1.Closing)
+        return nil
+    if event == OpenFileDescriptionProtocolEventV1.BackendCloseCommitted:
+        if (state == OpenFileDescriptionStateV1.Closing and
+            ref_count == 0u32 and pin_count == 0u32):
+            return Some(OpenFileDescriptionStateV1.Free)
+        return nil
+    if event == OpenFileDescriptionProtocolEventV1.BackendCloseIndeterminate:
+        if (state == OpenFileDescriptionStateV1.Closing and
+            ref_count == 0u32 and pin_count == 0u32):
+            return Some(OpenFileDescriptionStateV1.CloseQuarantined)
+    nil
+
+fn _ofd_reserve_io_v1(
+    slot: OpenFileDescriptionSlotV1,
+    operation: SosixOperationId,
+    kind: OpenFileDescriptionIoKindV1,
+    explicit_offset: u64,
+    requested_length: u64
+) -> SosixOfdIoReservation:
+    if kind == OpenFileDescriptionIoKindV1.Read:
+        return sosix_ofd_reserve_read(slot.io, operation, requested_length)
+    if kind == OpenFileDescriptionIoKindV1.ReadAt:
+        return sosix_ofd_reserve_read_at(
+            slot.io, operation, explicit_offset, requested_length)
+    if kind == OpenFileDescriptionIoKindV1.WriteAt:
+        return sosix_ofd_reserve_write_at(
+            slot.io, operation, explicit_offset, requested_length)
+    if (kind == OpenFileDescriptionIoKindV1.Append or
+        (kind == OpenFileDescriptionIoKindV1.Write and
+            (slot.status_flags & SIMPLEOS_OFD_STATUS_APPEND_V1) != 0u32)):
+        return sosix_ofd_reserve_append(slot.io, operation, requested_length)
+    sosix_ofd_reserve_write(slot.io, operation, requested_length)
+
+pub(package) fn open_file_description_pin_io_v1(
+    ref_: OpenFileDescriptionRefV1,
+    kind: OpenFileDescriptionIoKindV1,
+    explicit_offset: u64,
+    requested_length: u64
+) -> Result<OpenFileDescriptionPinV1, text>:
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_ref_index_v1(ref_, OpenFileDescriptionStateV1.Active)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-open-file-description")
+    val slot = _ofd_owner_v1.slots[index]
+    if not _ofd_operation_allowed_v1(slot.access, kind):
+        _ = _ofd_unlock_v1()
+        return Err("access-mode-denied")
+    if slot.pin_count != 0u32 or slot.io.active:
+        _ = _ofd_unlock_v1()
+        return Err("operation-in-flight")
+    if (slot.next_operation_generation == 0u32 or
+        slot.next_operation_generation == _OFD_GENERATION_MAX_V1 or
+        _ofd_owner_v1.nonce_counter == _OFD_NONCE_MAX_V1):
+        _ = _ofd_unlock_v1()
+        return Err("operation-identity-exhausted")
+    val operation = SosixOperationId(
+        slot: index.to_u32(), generation: slot.next_operation_generation)
+    val reserved = _ofd_reserve_io_v1(
+        slot, operation, kind, explicit_offset, requested_length)
+    if not reserved.accepted:
+        _ = _ofd_unlock_v1()
+        return Err(reserved.reason)
+    _ofd_owner_v1.nonce_counter = _ofd_owner_v1.nonce_counter + 1u64
+    var updated = slot
+    updated.io = reserved.state
+    updated.pin_count = 1u32
+    updated.active_pin_nonce = _ofd_owner_v1.nonce_counter
+    updated.active_ticket = reserved.ticket
+    updated.io_dispatched = false
+    updated.next_operation_generation = slot.next_operation_generation + 1u32
+    _ofd_owner_v1.slots[index] = updated
+    val pin = OpenFileDescriptionPinV1(
+        ref_: ref_, nonce: updated.active_pin_nonce)
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(pin)
+
+fn _ofd_pin_index_v1(pin: OpenFileDescriptionPinV1) -> i32:
+    if (pin.ref_.slot < 0 or pin.ref_.slot >= _ofd_owner_v1.slots.len() or
+        pin.ref_.generation == 0u32 or pin.nonce == 0u64):
+        return -1
+    val slot = _ofd_owner_v1.slots[pin.ref_.slot]
+    if (slot.generation != pin.ref_.generation or slot.pin_count != 1u32 or
+        slot.active_pin_nonce != pin.nonce or not slot.io.active):
+        return -1
+    pin.ref_.slot
+
+pub(package) fn open_file_description_resolve_io_dispatch_v1(
+    pin: OpenFileDescriptionPinV1
+) -> Result<OpenFileDescriptionIoDispatchV1, text>:
+    """Resolve an opaque pin to owner-retained dispatch data.
+
+    The future kernel adapter must call this immediately before dispatch and
+    must not accept a caller-provided backend identity or sequencer ticket.
+    """
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_pin_index_v1(pin)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-pin")
+    val slot = _ofd_owner_v1.slots[index]
+    if slot.io_dispatched:
+        _ = _ofd_unlock_v1()
+        return Err("dispatch-already-resolved")
+    val dispatch = OpenFileDescriptionIoDispatchV1(
+        backend: slot.backend, ticket: slot.active_ticket)
+    _ofd_owner_v1.slots[index].io_dispatched = true
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(dispatch)
+
+fn _ofd_issue_close_ticket_v1(
+    index: i32, slot: OpenFileDescriptionSlotV1
+) -> Result<OpenFileDescriptionCloseTicketV1, text>:
+    if slot.close_claimed or slot.close_nonce != 0u64:
+        return Err("close-already-claimed")
+    if _ofd_owner_v1.nonce_counter == _OFD_NONCE_MAX_V1:
+        return Err("close-identity-exhausted")
+    _ofd_owner_v1.nonce_counter = _ofd_owner_v1.nonce_counter + 1u64
+    var updated = slot
+    updated.close_claimed = true
+    updated.close_nonce = _ofd_owner_v1.nonce_counter
+    updated.close_dispatched = false
+    _ofd_owner_v1.slots[index] = updated
+    Ok(OpenFileDescriptionCloseTicketV1(
+        ref_: OpenFileDescriptionRefV1(slot: index, generation: slot.generation),
+        nonce: updated.close_nonce))
+
+pub(package) fn open_file_description_complete_io_v1(
+    pin: OpenFileDescriptionPinV1,
+    status: i32,
+    transferred: u64,
+    backend_selected_offset: u64,
+    backend_selected_offset_valid: bool
+) -> Result<OpenFileDescriptionIoCompleteV1, text>:
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_pin_index_v1(pin)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-pin")
+    var slot = _ofd_owner_v1.slots[index]
+    if not slot.io_dispatched:
+        _ = _ofd_unlock_v1()
+        return Err("dispatch-not-resolved")
+    val committed = sosix_ofd_commit(
+        slot.io, slot.active_ticket, status, transferred,
+        backend_selected_offset, backend_selected_offset_valid)
+    if not committed.accepted:
+        _ = _ofd_unlock_v1()
+        return Err(committed.reason)
+    slot.io = committed.state
+    slot.pin_count = 0u32
+    slot.active_pin_nonce = 0u64
+    slot.active_ticket = _ofd_empty_ticket_v1()
+    slot.io_dispatched = false
+    _ofd_owner_v1.slots[index] = slot
+    var close_ready: OpenFileDescriptionCloseTicketV1? = nil
+    if (slot.state == OpenFileDescriptionStateV1.Closing and
+        slot.ref_count == 0u32):
+        val issued = _ofd_issue_close_ticket_v1(index, slot)
+        if issued.is_err():
+            _ofd_owner_v1.slots[index].state =
+                OpenFileDescriptionStateV1.CloseQuarantined
+        else:
+            close_ready = Some(issued.unwrap())
+    val result = OpenFileDescriptionIoCompleteV1(
+        shared_offset: committed.state.shared_offset, close_ready: close_ready)
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(result)
+
+pub(package) fn open_file_description_set_status_v1(
+    ref_: OpenFileDescriptionRefV1, requested_flags: u32
+) -> Result<u32, text>:
+    if not open_file_description_status_valid_v1(requested_flags):
+        return Err("invalid-status-flags")
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_ref_index_v1(ref_, OpenFileDescriptionStateV1.Active)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-open-file-description")
+    # Access is a separate immutable field and cannot be changed here.
+    _ofd_owner_v1.slots[index].status_flags = requested_flags
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(requested_flags)
+
+pub(package) fn open_file_description_snapshot_v1(
+    ref_: OpenFileDescriptionRefV1
+) -> Result<OpenFileDescriptionSnapshotV1, text>:
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    if (ref_.slot < 0 or ref_.slot >= _ofd_owner_v1.slots.len() or
+        ref_.generation == 0u32):
+        _ = _ofd_unlock_v1()
+        return Err("stale-open-file-description")
+    val slot = _ofd_owner_v1.slots[ref_.slot]
+    if (slot.generation != ref_.generation or
+        slot.state == OpenFileDescriptionStateV1.Free or
+        slot.state == OpenFileDescriptionStateV1.Retired):
+        _ = _ofd_unlock_v1()
+        return Err("stale-open-file-description")
+    val snapshot = OpenFileDescriptionSnapshotV1(
+        state: slot.state, access: slot.access,
+        status_flags: slot.status_flags, shared_offset: slot.io.shared_offset,
+        ref_count: slot.ref_count, pin_count: slot.pin_count)
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(snapshot)
+
+pub(package) fn open_file_description_begin_close_v1(
+    ref_: OpenFileDescriptionRefV1
+) -> Result<OpenFileDescriptionCloseBeginV1, text>:
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_ref_index_v1(ref_, OpenFileDescriptionStateV1.Active)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-open-file-description")
+    var slot = _ofd_owner_v1.slots[index]
+    if slot.ref_count == 0u32:
+        _ofd_owner_v1.permanently_quarantined = true
+        _ = _ofd_unlock_v1()
+        return Err("reference-count-corrupt")
+    slot.ref_count = slot.ref_count - 1u32
+    if slot.ref_count > 0u32:
+        _ofd_owner_v1.slots[index] = slot
+        val result = OpenFileDescriptionCloseBeginV1(
+            disposition: OpenFileDescriptionCloseDispositionV1.AliasReleased,
+            ticket: nil)
+        if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+        return Ok(result)
+    val closing = open_file_description_protocol_transition_v1(
+        slot.state, slot.ref_count, slot.pin_count,
+        OpenFileDescriptionProtocolEventV1.LastReferenceReleased)
+    if closing == nil:
+        _ofd_owner_v1.permanently_quarantined = true
+        _ = _ofd_unlock_v1()
+        return Err("close-transition-invalid")
+    slot.state = closing.unwrap()
+    _ofd_owner_v1.slots[index] = slot
+    if slot.pin_count > 0u32:
+        val result = OpenFileDescriptionCloseBeginV1(
+            disposition: OpenFileDescriptionCloseDispositionV1.WaitingForPins,
+            ticket: nil)
+        if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+        return Ok(result)
+    val issued = _ofd_issue_close_ticket_v1(index, slot)
+    if issued.is_err():
+        _ofd_owner_v1.slots[index].state = OpenFileDescriptionStateV1.CloseQuarantined
+        _ = _ofd_unlock_v1()
+        return Err(issued.unwrap_err())
+    val result = OpenFileDescriptionCloseBeginV1(
+        disposition: OpenFileDescriptionCloseDispositionV1.BackendCloseRequired,
+        ticket: Some(issued.unwrap()))
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(result)
+
+fn _ofd_close_ticket_index_v1(ticket: OpenFileDescriptionCloseTicketV1) -> i32:
+    if (ticket.ref_.slot < 0 or ticket.ref_.slot >= _ofd_owner_v1.slots.len() or
+        ticket.ref_.generation == 0u32 or ticket.nonce == 0u64):
+        return -1
+    val slot = _ofd_owner_v1.slots[ticket.ref_.slot]
+    if (slot.state != OpenFileDescriptionStateV1.Closing or
+        slot.generation != ticket.ref_.generation or
+        slot.close_nonce != ticket.nonce or not slot.close_claimed or
+        slot.ref_count != 0u32 or slot.pin_count != 0u32):
+        return -1
+    ticket.ref_.slot
+
+pub(package) fn open_file_description_resolve_close_backend_v1(
+    ticket: OpenFileDescriptionCloseTicketV1
+) -> Result<OpenFileDescriptionBackendBindingV1, text>:
+    """Resolve an opaque close ticket to the exact owner-stored backend."""
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_close_ticket_index_v1(ticket)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-close-ticket")
+    if _ofd_owner_v1.slots[index].close_dispatched:
+        _ = _ofd_unlock_v1()
+        return Err("close-already-resolved")
+    val backend = _ofd_owner_v1.slots[index].backend
+    _ofd_owner_v1.slots[index].close_dispatched = true
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(backend)
+
+pub(package) fn open_file_description_commit_close_v1(
+    ticket: OpenFileDescriptionCloseTicketV1
+) -> Result<(), text>:
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_close_ticket_index_v1(ticket)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-close-ticket")
+    if not _ofd_owner_v1.slots[index].close_dispatched:
+        _ = _ofd_unlock_v1()
+        return Err("close-not-resolved")
+    val generation = _ofd_owner_v1.slots[index].generation
+    val transitioned = open_file_description_protocol_transition_v1(
+        _ofd_owner_v1.slots[index].state, 0u32, 0u32,
+        OpenFileDescriptionProtocolEventV1.BackendCloseCommitted)
+    if transitioned == nil:
+        _ofd_owner_v1.permanently_quarantined = true
+        _ = _ofd_unlock_v1()
+        return Err("close-transition-invalid")
+    if generation == _OFD_GENERATION_MAX_V1:
+        var retired = _ofd_empty_slot_v1(generation)
+        retired.state = OpenFileDescriptionStateV1.Retired
+        _ofd_owner_v1.slots[index] = retired
+    else:
+        _ofd_owner_v1.slots[index] = _ofd_empty_slot_v1(generation)
+        _ofd_owner_v1.free_slots.push(index)
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(())
+
+pub(package) fn open_file_description_quarantine_close_v1(
+    ticket: OpenFileDescriptionCloseTicketV1
+) -> Result<(), text>:
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_close_ticket_index_v1(ticket)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-close-ticket")
+    if not _ofd_owner_v1.slots[index].close_dispatched:
+        _ = _ofd_unlock_v1()
+        return Err("close-not-resolved")
+    val transitioned = open_file_description_protocol_transition_v1(
+        _ofd_owner_v1.slots[index].state, 0u32, 0u32,
+        OpenFileDescriptionProtocolEventV1.BackendCloseIndeterminate)
+    if transitioned == nil:
+        _ofd_owner_v1.permanently_quarantined = true
+        _ = _ofd_unlock_v1()
+        return Err("close-transition-invalid")
+    _ofd_owner_v1.slots[index].state = transitioned.unwrap()
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(())
+
+export open_file_description_status_valid_v1
+export open_file_description_access_allows_read_v1
+export open_file_description_access_allows_write_v1
+export open_file_description_io_allowed_v1
+export open_file_description_protocol_transition_v1
