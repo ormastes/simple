@@ -13,7 +13,12 @@ use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.obj_taker.{SymbolType}
 use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
 use compiler.loader.aspect_pack_section.{smf_validate_optional_aspect_pack, smf_register_validated_aspect_pack}
-use std.common.aspect_pack.{apk_loader_new, apk_loader_unregister_pack}
+use std.common.aspect_pack.{
+    ApkFacetLoadV1, APK_ACT_OFF, APK_FC_BOUND, APK_FC_QUIESCING,
+    apk_loader_new, apk_loader_unregister_pack, apk_load_facet, apk_try_facet,
+    apk_facet_pin_v1, apk_facet_unpin_v1, apk_facet_state_v1,
+    apk_facet_generation_v1
+}
 use std.io_runtime.{file_read_bytes}
 
 fn _path_tag(path: text) -> text:
@@ -212,6 +217,49 @@ struct ModuleLoader:
     aspect_loader_cell: Dict<i64, i64>
     aspect_pack_paths: Dict<text, bool>
 
+fn _moduleloader_aspect_result(found: bool, facet_key: text, code: text, message: text) -> ApkFacetLoadV1:
+    var empty: [u8] = []
+    ApkFacetLoadV1(ok: code == "", found: found, error_code: code, error_message: message,
+        facet_key: facet_key, pack_path: "", module_id: "", aspect_id: "",
+        activation: APK_ACT_OFF, from_cache: false, payload: empty, generation: 0)
+
+class ModuleFacetRefV1:
+    """Explicit lifetime token for one loader-owned facet generation.
+
+    A successful acquisition pins the binding until `release` is called.
+    `is_live` checks both the exact key and activation generation, so a released
+    handle cannot silently become valid again after unload/reload publishes a
+    newer generation. This is a single-owner runtime contract; it does not
+    claim concurrent acquisition safety or compiler `facet<T>` lowering.
+    """
+    load: ApkFacetLoadV1
+    owner_handle: i64
+    active: bool
+
+    fn is_live() -> bool:
+        if not self.active or not self.load.found or self.owner_handle < 0:
+            return false
+        val state = apk_facet_state_v1(self.owner_handle, self.load.facet_key)
+        if state != APK_FC_BOUND and state != APK_FC_QUIESCING:
+            return false
+        apk_facet_generation_v1(self.owner_handle, self.load.facet_key) == self.load.generation
+
+    me release() -> bool:
+        if not self.active:
+            return false
+        self.active = false
+        apk_facet_unpin_v1(self.owner_handle, self.load.facet_key)
+
+fn _moduleloader_facet_ref(load: ApkFacetLoadV1, owner_handle: i64) -> ModuleFacetRefV1:
+    var pinned = false
+    if load.ok and load.found and owner_handle >= 0:
+        pinned = apk_facet_pin_v1(owner_handle, load.facet_key)
+    if load.ok and load.found and not pinned:
+        val failed = _moduleloader_aspect_result(false, load.facet_key,
+            "APK_FACET_PIN_FAILED", "facet binding could not be pinned")
+        return ModuleFacetRefV1(load: failed, owner_handle: owner_handle, active: false)
+    ModuleFacetRefV1(load: load, owner_handle: owner_handle, active: pinned)
+
 impl ModuleLoader:
     static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
         moduleloader_new(config)
@@ -235,6 +283,36 @@ impl ModuleLoader:
         for path in self.modules.keys():
             out.push(path)
         out
+
+    fn try_aspect_facet(facet_key: text) -> ModuleFacetRefV1:
+        """Return only an already-resident binding for the exact catalog key.
+
+        This path never creates the lazy aspect owner, parses a catalog, scans
+        registered packs, opens a pack, or decompresses a module. A loader that
+        has admitted no aspect pack therefore returns a clean miss and leaves
+        the lazy owner absent. The result object itself is not claimed to be
+        allocation-free.
+        """
+        if not self.aspect_loader_cell.has(0):
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key, "", ""), -1)
+        val owner = self.aspect_loader_cell[0]
+        _moduleloader_facet_ref(apk_try_facet(owner, facet_key), owner)
+
+    fn aspect_facet(catalog: [u8], facet_key: text) -> ModuleFacetRefV1:
+        """Acquire the exact catalog key through this loader's admitted packs.
+
+        The catalog and returned resident payload remain reference-backed array
+        values; this facade neither rebuilds the catalog nor copies payload
+        bytes. Aspect packs must first be admitted through `load`, which owns
+        the single lazy aspect-loader handle and its unload/pin generations.
+        """
+        if not self.aspect_loader_cell.has(0):
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key, "APK_PACK_MISSING",
+                    "no aspect pack has been admitted by this module loader"), -1)
+        val owner = self.aspect_loader_cell[0]
+        _moduleloader_facet_ref(apk_load_facet(owner, catalog, facet_key), owner)
 
     # NOTE: the body below is inlined directly (rather than delegating to a
     # free helper function) because the interpreter used by `bin/simple`
@@ -379,6 +457,12 @@ impl ModuleLoader:
                             pass
 
                 if aspect_candidate.present:
+                    # Validation requires a standalone, non-executable aspect
+                    # SMF. Consequently `symbols` and the global-symbol publish
+                    # set are empty here: aspect registration cannot fail after
+                    # executable symbols were partially published. If combined
+                    # executable+aspect artifacts become legal, this point must
+                    # gain transaction rollback before that invariant changes.
                     if not self.aspect_loader_cell.has(0):
                         self.aspect_loader_cell[0] = apk_loader_new()
                     match smf_register_validated_aspect_pack(self.aspect_loader_cell[0], path, aspect_candidate):
@@ -590,6 +674,18 @@ fn moduleloader_aspect_loader_handle(self: ModuleLoader) -> i64:
     if self.aspect_loader_cell.has(0):
         return self.aspect_loader_cell[0]
     -1
+
+fn moduleloader_try_aspect_facet(self: ModuleLoader, facet_key: text) -> ModuleFacetRefV1:
+    self.try_aspect_facet(facet_key)
+
+fn moduleloader_aspect_facet(self: ModuleLoader, catalog: [u8], facet_key: text) -> ModuleFacetRefV1:
+    self.aspect_facet(catalog, facet_key)
+
+fn modulefacetref_is_live(self: ModuleFacetRefV1) -> bool:
+    self.is_live()
+
+me modulefacetref_release(self: ModuleFacetRefV1) -> bool:
+    self.release()
 
 fn moduleloader_with_defaults() -> ModuleLoader:
     moduleloader_new(moduleloaderconfig_default())

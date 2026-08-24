@@ -1355,9 +1355,11 @@ var _fc_module: [text] = []
 var _fc_aspect: [text] = []
 var _fc_activation: [i64] = []
 var _fc_pack: [text] = []
-var _fc_off: [i64] = []
-var _fc_len: [i64] = []
-var _fc_pool: [u8] = []
+# Keep each resident payload as one reference-backed array value. This mirrors
+# `_pk_data`: a resident hit returns the existing payload value instead of
+# rebuilding it byte-by-byte, and unload compaction moves one reference per
+# surviving binding rather than copying every surviving payload byte.
+var _fc_payload: [[u8]] = []
 var _fc_generation: [i64] = []
 # design §14.7 unload: per-binding lifecycle state and pin count. A binding is
 # freed only when nothing still holds it.
@@ -1617,19 +1619,12 @@ fn apk_try_facet(ld: i64, facet_key: text) -> ApkFacetLoadV1:
     val n = _fc_ld.len()
     while i < n:
         if _fc_ld[i] == ld and _fc_key[i] == facet_key and _fc_state[i] == APK_FC_BOUND:
-            var payload: [u8] = []
-            var j = 0
-            val base = _fc_off[i]
-            val plen = _fc_len[i]
-            while j < plen:
-                payload.push(_fc_pool[base + j])
-                j = j + 1
             _ld_cache_hits[ld] = _ld_cache_hits[ld] + 1
             _ld_last_error[ld] = ""
             return ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
                 facet_key: facet_key, pack_path: _fc_pack[i], module_id: _fc_module[i],
                 aspect_id: _fc_aspect[i], activation: _fc_activation[i],
-                from_cache: true, payload: payload, generation: _fc_generation[i])
+                from_cache: true, payload: _fc_payload[i], generation: _fc_generation[i])
         i = i + 1
     _apk_facet_miss(facet_key)
 
@@ -1793,16 +1788,10 @@ fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bo
     _fc_aspect = _fc_aspect.push(load.aspect_id)
     _fc_activation = _fc_activation.push(route.activation)
     _fc_pack = _fc_pack.push(route.pack_path)
-    _fc_off = _fc_off.push(_fc_pool.len())
-    _fc_len = _fc_len.push(load.payload.len())
+    _fc_payload = _fc_payload.push(load.payload)
     _fc_generation = _fc_generation.push(gen)
     _fc_state = _fc_state.push(APK_FC_BOUND)
     _fc_refs = _fc_refs.push(0)
-    var k = 0
-    while k < load.payload.len():
-        _fc_pool = _fc_pool.push(load.payload[k])
-        k = k + 1
-
     ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
         facet_key: facet_key, pack_path: route.pack_path, module_id: load.module_id,
         aspect_id: load.aspect_id, activation: route.activation, from_cache: false,
@@ -1851,6 +1840,19 @@ fn apk_facet_refcount_v1(ld: i64, facet_key: text) -> i64:
         return -1
     _fc_refs[i]
 
+fn apk_facet_generation_v1(ld: i64, facet_key: text) -> i64:
+    """Generation of a live binding, or 0 when the key has no live row.
+
+    This is lifecycle metadata only: it performs no catalog lookup, payload
+    materialization, pack scan, I/O, decompression, or cache-hit accounting.
+    Facade references use it to reject stale generations without acquiring a
+    second reference or copying the resident payload.
+    """
+    val i = _apk_fc_index(ld, facet_key)
+    if i < 0:
+        return 0
+    _fc_generation[i]
+
 fn apk_facet_pin_v1(ld: i64, facet_key: text) -> bool:
     """design §14.7 / §6.7: take a reference on a bound facet, the container
     analogue of holding a `FacetRef` — while it is held the binding must not
@@ -1890,18 +1892,17 @@ fn _apk_record_unloaded(ld: i64, key: text):
 fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool):
     """design §14.7 step 5: free the binding. Only ever reached with a zero
     refcount, so a resident, still-referenced module can never be freed."""
-    # Compact the SoA and payload pool in one pass. Leaving tombstone rows or
-    # dead payload bytes here makes reload grow RSS and every future lookup
-    # without bound.
+    # Compact the SoA and reference-backed payload values in one pass. Leaving
+    # tombstone rows here makes reload grow RSS and every future lookup without
+    # bound; copying payload bytes would make unload proportional to all live
+    # payload bytes rather than the number of live bindings.
     var next_ld: [i64] = []
     var next_key: [text] = []
     var next_module: [text] = []
     var next_aspect: [text] = []
     var next_activation: [i64] = []
     var next_pack: [text] = []
-    var next_off: [i64] = []
-    var next_len: [i64] = []
-    var next_pool: [u8] = []
+    var next_payload: [[u8]] = []
     var next_generation: [i64] = []
     var next_state: [i64] = []
     var next_refs: [i64] = []
@@ -1922,12 +1923,7 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool):
             next_aspect.push(_fc_aspect[row])
             next_activation.push(_fc_activation[row])
             next_pack.push(_fc_pack[row])
-            next_off.push(next_pool.len())
-            next_len.push(_fc_len[row])
-            var byte = 0
-            while byte < _fc_len[row]:
-                next_pool.push(_fc_pool[_fc_off[row] + byte])
-                byte = byte + 1
+            next_payload.push(_fc_payload[row])
             next_generation.push(_fc_generation[row])
             next_state.push(_fc_state[row])
             next_refs.push(_fc_refs[row])
@@ -1938,9 +1934,7 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool):
     _fc_aspect = next_aspect
     _fc_activation = next_activation
     _fc_pack = next_pack
-    _fc_off = next_off
-    _fc_len = next_len
-    _fc_pool = next_pool
+    _fc_payload = next_payload
     _fc_generation = next_generation
     _fc_state = next_state
     _fc_refs = next_refs
@@ -1951,7 +1945,7 @@ fn _apk_release_binding(ld: i64, i: i64):
     _apk_compact_bindings(ld, i, "", false)
 
 fn _apk_release_pack_bindings(ld: i64, path: text):
-    """Free all unpinned bindings for a pack with one O(active-bytes) pass."""
+    """Free all unpinned bindings for a pack with one O(active-bindings) pass."""
     _apk_compact_bindings(ld, -1, path, true)
 
 fn apk_unload_facet_v1(ld: i64, facet_key: text) -> ApkUnloadResultV1:
