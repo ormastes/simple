@@ -1352,7 +1352,10 @@ RISC-V sharing requires an exhaustive disjoint committed-tree inventory with
 bilateral and specialization evidence.
 Performance external gates use narrow numeric validators over retained raw
 artifacts; binary-size parity recomputes committed stripped bytes and derives
-`Simple <= Go` rather than trusting a PASS field.
+`Simple <= Go` rather than trusting a PASS field. Interpreter-startup parity
+recomputes fixed-width trial-interleaved cold/warm process-launch p50/p95 for
+Simple/Python/Bun/Go, checks every Simple interpreter-mode receipt, and
+requires the live canonical Stage 4 chain.
 When a push guard's default command also runs mutation fixtures, wire its
 scan-only mode into push and retain the self-test as a required bootstrap row.
 

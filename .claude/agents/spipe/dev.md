@@ -160,6 +160,9 @@ oracle after common signature/hash validation; a signed PASS label is not
 enough.
 Performance external-gate criteria require raw retained artifacts and a narrow
 numeric oracle; precomputed PASS or ratio fields are not the verdict.
+Interpreter-startup evidence is trial-interleaved process launch, not warm
+workload throughput; recompute cold/warm p50+p95 and require exact Simple
+interpreter mode plus canonical Stage 4 authority.
 
 For ordinary feature development, first apply
 `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: name

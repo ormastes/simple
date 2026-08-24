@@ -183,10 +183,15 @@ the committed compiler/provenance copies to match the producer host's live
 canonical files, and runs the full canonical Stage-3/Stage-4 verifier there.
 Detached or custom `admitted=true` summaries are not provenance. Rust-seed,
 Cargo, or rustc process evidence fails.
-`interpreter-startup-parity` and `rust-go-benchmark-parity` are explicitly
-rejected by the generic external validator until their lane-owned checkers can
-recompute raw samples, statistics, semantic work, and threshold verdicts.
-Independent signatures cannot substitute for those quantitative oracles.
+`interpreter-startup-parity` loads committed raw samples, statistics,
+equivalence, environment, compiler, and canonical provenance blobs. Its oracle
+requires 50–1000 ordered samples per cold/warm × Simple/Python/Bun/Go cell,
+fixed-width nanoseconds, exact output and interpreter-mode receipts, and
+recomputes p50/p95 before requiring Simple to be strictly faster in all twelve
+comparisons. The outer checker also runs full live Stage 3/4 verification.
+`rust-go-benchmark-parity` remains explicitly rejected until its equivalent
+lane-owned checker exists. Independent signatures cannot substitute for either
+quantitative oracle.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
 It cross-checks registry and ledger structure in one linear parser pass. Only

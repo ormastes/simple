@@ -1070,7 +1070,10 @@ oracle after common signature/hash validation; RISC-V sharing requires an
 exhaustive disjoint HEAD inventory with bilateral and specialization evidence.
 Performance external gates require narrow numeric validators over retained raw
 artifacts; binary-size parity hashes and sizes the committed stripped binaries
-and derives `Simple <= Go` itself.
+and derives `Simple <= Go` itself. Interpreter-startup parity requires ordered
+trial-interleaved raw process-launch samples for Simple/Python/Bun/Go, exact
+Simple interpreter-mode receipts, recomputed p50/p95, strict cold+warm
+comparisons, and the live canonical Stage 4 chain.
 When a push guard's default command also runs mutation fixtures, register its
 scan-only mode in the push tier and retain the self-test as a distinct required
 bootstrap row.

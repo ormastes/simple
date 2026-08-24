@@ -1,0 +1,85 @@
+#!/bin/sh
+# Production admission for interpreter-startup-parity evidence.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+ROOT=""; FINGERPRINT=""; RUN_ID=""; RAW=""; STATS=""; EQUIV=""; ENVIRONMENT=""; COMPILER=""; PROVENANCE=""
+fail() { echo "STATUS: FAIL interpreter-startup-parity — $*" >&2; exit 1; }
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root) ROOT=$2; shift 2 ;;
+        --fingerprint) FINGERPRINT=$2; shift 2 ;;
+        --run-id) RUN_ID=$2; shift 2 ;;
+        --raw-samples) RAW=$2; shift 2 ;;
+        --statistics) STATS=$2; shift 2 ;;
+        --equivalence) EQUIV=$2; shift 2 ;;
+        --environment) ENVIRONMENT=$2; shift 2 ;;
+        --simple-compiler) COMPILER=$2; shift 2 ;;
+        --stage4-provenance) PROVENANCE=$2; shift 2 ;;
+        *) fail "unknown-argument-$1" ;;
+    esac
+done
+[ -n "$ROOT" ] && [ -n "$FINGERPRINT" ] && [ -n "$RUN_ID" ] || fail missing-identity
+ROOT=$(CDPATH= cd -- "$ROOT" && pwd -P) || fail invalid-root
+for file in "$RAW" "$STATS" "$EQUIV" "$ENVIRONMENT" "$COMPILER" "$PROVENANCE"; do
+    [ -f "$file" ] && [ ! -L "$file" ] || fail missing-evidence-blob
+done
+
+sh "$ROOT/scripts/check/check-interpreter-startup-samples.shs" \
+    --root "$ROOT" --fingerprint "$FINGERPRINT" --run-id "$RUN_ID" \
+    --raw-samples "$RAW" --statistics "$STATS" --equivalence "$EQUIV" \
+    --environment "$ENVIRONMENT" >/dev/null || fail metric-evidence
+
+field() {
+    [ "$(grep -c "^$2=" "$1" 2>/dev/null || true)" -eq 1 ] || return 1
+    sed -n "s/^$2=//p" "$1"
+}
+sha_field() {
+    value=$(field "$1" "$2") || fail "missing-$2"
+    case "$value" in *[!0-9a-f]*|'') fail "invalid-$2" ;; esac
+    [ "${#value}" -eq 64 ] || fail "invalid-$2-length"
+    [ "$value" != 0000000000000000000000000000000000000000000000000000000000000000 ] || fail "zero-$2"
+    printf '%s' "$value"
+}
+eq_field() { value=$(field "$1" "$2") || fail "missing-$2"; [ "$value" = "$3" ] || fail "$2"; }
+
+compiler_path=$(field "$ENVIRONMENT" simple_compiler_path) || fail compiler-path
+case "$compiler_path" in /*/bin/release/*) ;; *) fail non-absolute-release-simple-compiler ;; esac
+case "$compiler_path" in *compiler_rust*|*rust*seed*|*bootstrap*simple*) fail rust-seed-compiler-path ;; esac
+compiler_sha=$(sha_field "$ENVIRONMENT" simple_executable_sha256)
+[ "$compiler_sha" = "$(sha256sum "$COMPILER" | awk '{print $1}')" ] || fail committed-compiler-hash
+
+[ "$(wc -l < "$PROVENANCE" | tr -d ' ')" -eq 21 ] || fail provenance-field-count
+for key in schema status artifact_kind output_path output_sha256 source_revision_kind \
+    source_revision source_roots producer_path producer_sha256 provenance_helper_path \
+    provenance_helper_sha256 parent_compiler_path parent_compiler_sha256 \
+    stage3_provenance_path stage3_provenance_sha256 build_log_path build_log_sha256 \
+    essential_tools_log_path essential_tools_log_sha256 completed_gate; do
+    field "$PROVENANCE" "$key" >/dev/null || fail "provenance-$key"
+done
+eq_field "$PROVENANCE" schema simple-bootstrap-stage4-provenance-v1
+eq_field "$PROVENANCE" status pass
+eq_field "$PROVENANCE" artifact_kind pure-simple-full-cli
+eq_field "$PROVENANCE" output_sha256 "$compiler_sha"
+eq_field "$PROVENANCE" source_revision_kind content-sha256
+eq_field "$PROVENANCE" source_roots src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+eq_field "$PROVENANCE" completed_gate stage4-essential-tools-smoke
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+eq_field "$PROVENANCE" source_revision "$(stage4_source_revision "$ROOT")"
+[ "$(sha_field "$PROVENANCE" producer_sha256)" = "$(sha256sum "$ROOT/scripts/bootstrap/bootstrap-from-scratch.sh" | awk '{print $1}')" ] || fail provenance-producer-hash
+[ "$(sha_field "$PROVENANCE" provenance_helper_sha256)" = "$(sha256sum "$ROOT/scripts/check/lib/stage4-candidate-provenance.shs" | awk '{print $1}')" ] || fail provenance-helper-hash
+
+live_provenance="${compiler_path}.provenance.env"
+[ -f "$compiler_path" ] && [ ! -L "$compiler_path" ] || fail live-stage4-compiler-missing
+[ -f "$live_provenance" ] && [ ! -L "$live_provenance" ] || fail live-stage4-provenance-missing
+[ "$(sha256sum "$compiler_path" | awk '{print $1}')" = "$compiler_sha" ] || fail live-stage4-compiler-hash
+cmp -s "$live_provenance" "$PROVENANCE" || fail live-stage4-provenance-copy-mismatch
+stage4_verify_candidate_provenance "$live_provenance" "$compiler_path" "$ROOT" || fail canonical-stage4-verification
+
+echo 'STATUS: PASS interpreter-startup-parity — canonical Stage4 and recomputed cold/warm launch evidence'

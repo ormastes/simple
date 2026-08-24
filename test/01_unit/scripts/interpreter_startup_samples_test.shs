@@ -1,0 +1,240 @@
+#!/bin/sh
+set -eu
+LC_ALL=C
+export LC_ALL
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+CHECKER="$ROOT/scripts/check/check-interpreter-startup-samples.shs"
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT INT TERM
+mkdir -p "$fixture/test/05_perf/fixtures"
+mkdir -p "$fixture/scripts/check/lib" "$fixture/scripts/bootstrap" \
+    "$fixture/src/compiler" "$fixture/src/lib" "$fixture/src/app" "$fixture/src/runtime" \
+    "$fixture/examples/10_tooling"
+cp -R "$ROOT/test/05_perf/fixtures/interpreter_startup" "$fixture/test/05_perf/fixtures/"
+cp "$ROOT/scripts/check/check-interpreter-startup-samples.shs" "$fixture/scripts/check/"
+cp "$ROOT/scripts/check/check-interpreter-startup-parity.shs" "$fixture/scripts/check/"
+cp "$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs" "$fixture/scripts/check/lib/"
+cp "$ROOT/scripts/check/lib/stage4-candidate-provenance.shs" "$fixture/scripts/check/lib/"
+cp -R "$ROOT/scripts/check/lib/bootstrap-stage3" "$fixture/scripts/check/lib/"
+cp "$ROOT/scripts/bootstrap/bootstrap-from-scratch.sh" "$fixture/scripts/bootstrap/"
+git -C "$fixture" init -q
+git -C "$fixture" config user.name startup-test
+git -C "$fixture" config user.email startup-test@example.invalid
+git -C "$fixture" add test scripts
+git -C "$fixture" commit -qm fixtures
+
+fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+run_id=startup-run-001
+fixture_id=hello-world
+empty_sha=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+stdout_sha=$(printf 'Hello World\n' | sha256sum | awk '{print $1}')
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+base=test/05_perf/fixtures/interpreter_startup
+
+cat >"$fixture/equivalence.env" <<EOF
+equivalence_schema=simple.interpreter-startup-equivalence/v1
+gate_id=interpreter-startup-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+semantic_oracle_path=$base/oracle.txt
+semantic_oracle_sha256=$(hash_file "$fixture/$base/oracle.txt")
+simple_source_path=$base/hello.spl
+simple_source_sha256=$(hash_file "$fixture/$base/hello.spl")
+python_source_path=$base/hello.py
+python_source_sha256=$(hash_file "$fixture/$base/hello.py")
+bun_source_path=$base/hello.js
+bun_source_sha256=$(hash_file "$fixture/$base/hello.js")
+go_source_path=$base/hello.go
+go_source_sha256=$(hash_file "$fixture/$base/hello.go")
+expected_stdout_sha256=$stdout_sha
+simple_stdout_sha256=$stdout_sha
+python_stdout_sha256=$stdout_sha
+bun_stdout_sha256=$stdout_sha
+go_stdout_sha256=$stdout_sha
+simple_exit=0
+python_exit=0
+bun_exit=0
+go_exit=0
+final_verdict=PASS
+EOF
+
+identity_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cat >"$fixture/environment.env" <<EOF
+environment_schema=simple.interpreter-startup-environment/v1
+gate_id=interpreter-startup-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+host_id=fixture-host
+boot_id=fixture-boot
+os=linux
+kernel=fixture-kernel
+arch=x86_64
+cpu_model_sha256=$identity_sha
+cpu_count=4
+cpu_governor=performance
+cpuset_sha256=$identity_sha
+isolation=offline-controlled
+clock_tool_sha256=$identity_sha
+python_executable_sha256=$identity_sha
+bun_executable_sha256=$identity_sha
+go_executable_sha256=$identity_sha
+simple_compiler_path=/fixture/bin/release/x86_64/simple
+simple_executable_sha256=$identity_sha
+warmup_launches=10
+final_verdict=PASS
+EOF
+
+sample_value() {
+    case "$1.$2" in
+        cold.simple) echo 00000000000000000100 ;;
+        cold.python) echo 00000000000000000200 ;;
+        cold.bun) echo 00000000000000000300 ;;
+        cold.go) echo 00000000000000000400 ;;
+        warm.simple) echo 00000000000000000080 ;;
+        warm.python) echo 00000000000000000180 ;;
+        warm.bun) echo 00000000000000000280 ;;
+        warm.go) echo 00000000000000000380 ;;
+    esac
+}
+
+cat >"$fixture/raw.env" <<EOF
+sample_schema=simple.interpreter-startup-samples/v1
+gate_id=interpreter-startup-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+clock_id=clock_gettime-monotonic
+unit=ns
+sample_count=50
+warmup_launches=10
+cold_policy=fresh-process-before-runtime-prime
+EOF
+for i in $(seq 1 50); do
+    for phase in cold warm; do
+        for language in simple python bun go; do
+            mode=not-applicable
+            mode_count=0
+            [ "$language" = simple ] && {
+                mode=requested-interpreter-actual-interpreter-fallback-false
+                mode_count=1
+            }
+            action=fixed-warmup-launches
+            [ "$phase" = cold ] && action=fresh-process-before-runtime-prime
+            printf 'sample|%s|%s|%s|%s|0|%s|%s|%s|%s|%s\n' \
+                "$phase" "$language" "$i" "$(sample_value "$phase" "$language")" \
+                "$stdout_sha" "$empty_sha" "$mode_count" "$action" "$mode" >>"$fixture/raw.env"
+        done
+    done
+done
+
+cat >"$fixture/statistics.env" <<EOF
+statistics_schema=simple.interpreter-startup-statistics/v1
+gate_id=interpreter-startup-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+sample_count=50
+cold_simple_p50_ns=00000000000000000100
+cold_simple_p95_ns=00000000000000000100
+cold_python_p50_ns=00000000000000000200
+cold_python_p95_ns=00000000000000000200
+cold_bun_p50_ns=00000000000000000300
+cold_bun_p95_ns=00000000000000000300
+cold_go_p50_ns=00000000000000000400
+cold_go_p95_ns=00000000000000000400
+warm_simple_p50_ns=00000000000000000080
+warm_simple_p95_ns=00000000000000000080
+warm_python_p50_ns=00000000000000000180
+warm_python_p95_ns=00000000000000000180
+warm_bun_p50_ns=00000000000000000280
+warm_bun_p95_ns=00000000000000000280
+warm_go_p50_ns=00000000000000000380
+warm_go_p95_ns=00000000000000000380
+comparison_policy=simple-p50-p95-strictly-lower
+final_verdict=PASS
+EOF
+
+run_checker() {
+    sh "$CHECKER" --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" \
+        --raw-samples "$1" --statistics "$2" \
+        --equivalence "$fixture/equivalence.env" --environment "$fixture/environment.env"
+}
+
+run_checker "$fixture/raw.env" "$fixture/statistics.env" | grep -q '^STATUS: PASS '
+
+sed '0,/sample|cold|simple|1|/s//sample|cold|python|1|/' "$fixture/raw.env" >"$fixture/raw.reordered"
+run_checker "$fixture/raw.reordered" "$fixture/statistics.env" >/dev/null 2>&1 && {
+    echo 'FAIL: reordered startup row accepted' >&2; exit 1;
+}
+sed '0,/00000000000000000100/s//n\/a/' "$fixture/raw.env" >"$fixture/raw.invalid"
+run_checker "$fixture/raw.invalid" "$fixture/statistics.env" >/dev/null 2>&1 && {
+    echo 'FAIL: malformed startup duration accepted' >&2; exit 1;
+}
+sed '0,/|1|fresh-process-before-runtime-prime|requested-interpreter/s//|0|fresh-process-before-runtime-prime|requested-interpreter/' \
+    "$fixture/raw.env" >"$fixture/raw.mode"
+run_checker "$fixture/raw.mode" "$fixture/statistics.env" >/dev/null 2>&1 && {
+    echo 'FAIL: missing Simple interpreter mode receipt accepted' >&2; exit 1;
+}
+forged_stdout=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+sed "s/$stdout_sha/$forged_stdout/g" "$fixture/raw.env" >"$fixture/raw.forged-output"
+sed "s/$stdout_sha/$forged_stdout/g" "$fixture/equivalence.env" >"$fixture/equivalence.forged-output"
+sh "$CHECKER" --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" \
+    --raw-samples "$fixture/raw.forged-output" --statistics "$fixture/statistics.env" \
+    --equivalence "$fixture/equivalence.forged-output" --environment "$fixture/environment.env" \
+    >/dev/null 2>&1 && {
+        echo 'FAIL: outputs detached from the committed semantic oracle were accepted' >&2; exit 1;
+    }
+sed 's/sample|cold|python|\([0-9][0-9]*\)|00000000000000000200/sample|cold|python|\1|00000000000000000100/' \
+    "$fixture/raw.env" >"$fixture/raw.equal"
+sed 's/cold_python_p\(50\|95\)_ns=00000000000000000200/cold_python_p\1_ns=00000000000000000100/' \
+    "$fixture/statistics.env" >"$fixture/statistics.equal"
+run_checker "$fixture/raw.equal" "$fixture/statistics.equal" >/dev/null 2>&1 && {
+    echo 'FAIL: equal Simple/Python cold startup accepted' >&2; exit 1;
+}
+
+# Metric-valid evidence still cannot promote a fabricated compiler: the outer
+# checker requires the producer host's complete canonical Stage 4 chain.
+cp /bin/true "$fixture/stage4-simple"
+compiler_sha=$(hash_file "$fixture/stage4-simple")
+sed "s/simple_executable_sha256=$identity_sha/simple_executable_sha256=$compiler_sha/" \
+    "$fixture/environment.env" >"$fixture/environment.wrapper"
+cat >"$fixture/stage4-provenance.env" <<EOF
+schema=simple-bootstrap-stage4-provenance-v1
+status=pass
+artifact_kind=pure-simple-full-cli
+output_path=/fixture/bin/release/x86_64/simple
+output_sha256=$compiler_sha
+source_revision_kind=content-sha256
+source_revision=$identity_sha
+source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+producer_path=/fixture/scripts/bootstrap/bootstrap-from-scratch.sh
+producer_sha256=$identity_sha
+provenance_helper_path=/fixture/scripts/check/lib/stage4-candidate-provenance.shs
+provenance_helper_sha256=$identity_sha
+parent_compiler_path=/fixture/build/stage3/simple
+parent_compiler_sha256=$identity_sha
+stage3_provenance_path=/fixture/build/stage3/provenance.env
+stage3_provenance_sha256=$identity_sha
+build_log_path=/fixture/build/logs/stage4-native-build.log
+build_log_sha256=$identity_sha
+essential_tools_log_path=/fixture/build/logs/stage4-essential-tools-smoke.log
+essential_tools_log_sha256=$identity_sha
+completed_gate=stage4-essential-tools-smoke
+EOF
+sh "$fixture/scripts/check/check-interpreter-startup-parity.shs" \
+    --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" \
+    --raw-samples "$fixture/raw.env" --statistics "$fixture/statistics.env" \
+    --equivalence "$fixture/equivalence.env" --environment "$fixture/environment.wrapper" \
+    --simple-compiler "$fixture/stage4-simple" --stage4-provenance "$fixture/stage4-provenance.env" \
+    >/dev/null 2>&1 && {
+        echo 'FAIL: fabricated Stage 4 compiler admitted for startup parity' >&2; exit 1;
+    }
+grep -Fq 'stage4_verify_candidate_provenance "$live_provenance" "$compiler_path" "$ROOT"' \
+    "$fixture/scripts/check/check-interpreter-startup-parity.shs"
+grep -Fq 'check-interpreter-startup-parity.shs' \
+    "$ROOT/scripts/check/check-external-must-check-receipt.shs"
+
+echo 'PASS: interpreter startup raw-sample/statistics oracle'
