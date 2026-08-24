@@ -241,3 +241,37 @@ describe "typed HIR collection performance facts":
         expect(facts.collection_ops[0].method_name).to_equal("parent_lookup")
         expect(facts.collection_ops[1].method_name).to_equal("receiver_lookup")
         expect(facts.collection_ops[2].method_name).to_equal("argument_lookup")
+
+    it "visits for and if expressions owned by comprehension clause kinds":
+        val resolution = MethodResolution.InstanceMethod(
+            SymbolId(id: 10), SymbolId(id: 30))
+        val leaf = pf_expr(
+            HirExprKind.NamedVar(SymbolId(id: 70), "leaf"),
+            pf_array_type(), 29)
+        val iter_lookup = pf_named_lookup(
+            leaf, "iter_lookup", pf_array_type(),
+            pf_expr(HirExprKind.IntLit(1, nil), pf_i64_type(), 30),
+            resolution, 30)
+        val if_lookup = pf_named_lookup(
+            leaf, "if_lookup", pf_bool_type(),
+            pf_expr(HirExprKind.IntLit(2, nil), pf_i64_type(), 31),
+            resolution, 31)
+        val comprehension = pf_expr(HirExprKind.Comprehension(
+            HirComprehensionKind.List,
+            pf_expr(HirExprKind.IntLit(9, nil), pf_i64_type(), 29),
+            [HirCompClause(
+                kind: HirCompClauseKind.For(SymbolId(id: 72), iter_lookup),
+                span: pf_span(30)),
+             HirCompClause(
+                kind: HirCompClauseKind.If(if_lookup), span: pf_span(31))]),
+            pf_array_type(), 29)
+        val facts = collect_hir_function_perf_facts(
+            pf_function_with_expr(comprehension), pf_registry(30, true))
+        expect(facts.collection_ops.len()).to_equal(2)
+        expect(facts.collection_ops[0].method_name).to_equal("iter_lookup")
+        expect(facts.collection_ops[1].method_name).to_equal("if_lookup")
+        expect(facts.collection_ops[0].loop_depth).to_equal(0)
+        expect(facts.collection_ops[1].loop_depth).to_equal(0)
+        expect(facts.unknown_execution_domains).to_equal(1)
+        expect(facts.coverage_complete).to_equal(false)
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
