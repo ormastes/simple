@@ -98,6 +98,7 @@ struct BlockDeviceIdentitySlotV1:
     generation: u64
     identity_nonce: u64
     lifecycle_nonce: u64
+    backend_pin_nonce: u64
     pin_count: i32
     binding: BlockDeviceRegionBindingV1
 
@@ -113,6 +114,7 @@ struct BlockDevicePinSlotV1:
     device_slot: i32
     device_generation: u64
     identity_nonce: u64
+    backend_owner_pin: bool
 
 struct BlockDeviceIdentityOwnerStateV1:
     slots: [BlockDeviceIdentitySlotV1]
@@ -137,6 +139,7 @@ fn _block_device_empty_slot_v1(generation: u64) -> BlockDeviceIdentitySlotV1:
     BlockDeviceIdentitySlotV1(
         state: BlockDeviceIdentitySlotStateV1.Free,
         generation: generation, identity_nonce: 0u64, lifecycle_nonce: 0u64,
+        backend_pin_nonce: 0u64,
         pin_count: 0,
         binding: _block_device_empty_binding_v1())
 
@@ -144,7 +147,7 @@ fn _block_device_empty_pin_slot_v1(generation: u64) -> BlockDevicePinSlotV1:
     BlockDevicePinSlotV1(
         state: BlockDevicePinStateV1.Free, generation: generation,
         pin_nonce: 0u64, device_slot: -1, device_generation: 0u64,
-        identity_nonce: 0u64)
+        identity_nonce: 0u64, backend_owner_pin: false)
 
 fn _block_device_identity_initial_state_v1() -> BlockDeviceIdentityOwnerStateV1:
     BlockDeviceIdentityOwnerStateV1(
@@ -256,6 +259,7 @@ pub fn block_device_identity_create_v1(
                     state: BlockDeviceIdentitySlotStateV1.Active,
                     generation: generation, identity_nonce: identity_nonce,
                     lifecycle_nonce: lifecycle_nonce, pin_count: 0,
+                    backend_pin_nonce: 0u64,
                     binding: binding)
                 next.next_nonce = state.next_nonce + 2u64
                 next.live_count = state.live_count + 1
@@ -334,6 +338,7 @@ pub fn block_device_identity_replace_v1(
                     state: BlockDeviceIdentitySlotStateV1.Active,
                     generation: generation, identity_nonce: identity_nonce,
                     lifecycle_nonce: lifecycle_nonce, pin_count: 0,
+                    backend_pin_nonce: 0u64,
                     binding: replacement)
                 next.next_nonce = state.next_nonce + 2u64
                 next.last_registration = BlockDeviceRegistrationV1(
@@ -398,9 +403,10 @@ fn _block_device_pin_matches_v1(
      lease._device_generation == pin.device_generation and
      lease._identity_nonce == pin.identity_nonce)
 
-pub fn block_device_identity_pin_v1(
+fn _block_device_identity_pin_kind_v1(
     registration: BlockDeviceRegistrationV1,
-    binding: BlockDeviceRegionBindingV1
+    binding: BlockDeviceRegionBindingV1,
+    backend_owner_pin: bool
 ) -> Result<BlockDevicePinLeaseV1, BlockDeviceIdentityErrorV1>:
     if (not _block_device_registration_shape_valid_v1(registration) or
         not _block_device_binding_valid_v1(binding)):
@@ -423,6 +429,8 @@ pub fn block_device_identity_pin_v1(
                 next.last_error = Some(BlockDeviceIdentityErrorV1.LifecycleAuthorityConsumed)
             elif not _block_device_binding_equal_v1(binding, device.binding):
                 next.last_error = Some(BlockDeviceIdentityErrorV1.InvalidBinding)
+            elif backend_owner_pin and device.backend_pin_nonce != 0u64:
+                next.last_error = Some(BlockDeviceIdentityErrorV1.Busy)
             elif state.next_nonce == 0u64 or state.next_nonce == _BLOCK_DEVICE_IDENTITY_NONCE_MAX_V1:
                 next.owner_quarantined = true
                 next.last_error = Some(BlockDeviceIdentityErrorV1.CounterExhausted)
@@ -445,9 +453,12 @@ pub fn block_device_identity_pin_v1(
                         state: BlockDevicePinStateV1.Active,
                         generation: pin_generation, pin_nonce: pin_nonce,
                         device_slot: seal._slot, device_generation: seal._generation,
-                        identity_nonce: seal._identity_nonce)
+                        identity_nonce: seal._identity_nonce,
+                        backend_owner_pin: backend_owner_pin)
                     var pinned_device = device
                     pinned_device.pin_count = device.pin_count + 1
+                    if backend_owner_pin:
+                        pinned_device.backend_pin_nonce = pin_nonce
                     next.slots[seal._slot] = pinned_device
                     next.next_nonce = state.next_nonce + 1u64
                     next.last_pin_lease = BlockDevicePinLeaseV1(
@@ -458,6 +469,21 @@ pub fn block_device_identity_pin_v1(
         next)
     if val err = updated.last_error: return Err(err)
     Ok(updated.last_pin_lease)
+
+pub fn block_device_identity_pin_v1(
+    registration: BlockDeviceRegistrationV1,
+    binding: BlockDeviceRegionBindingV1
+) -> Result<BlockDevicePinLeaseV1, BlockDeviceIdentityErrorV1>:
+    _block_device_identity_pin_kind_v1(registration, binding, false)
+
+# Exclusive long-lived pin for one controller-owned backend capsule.  While it
+# exists, copied registration authority cannot bind a second backend object to
+# the same device identity.
+pub(package) fn block_device_identity_backend_pin_v1(
+    registration: BlockDeviceRegistrationV1,
+    binding: BlockDeviceRegionBindingV1
+) -> Result<BlockDevicePinLeaseV1, BlockDeviceIdentityErrorV1>:
+    _block_device_identity_pin_kind_v1(registration, binding, true)
 
 fn _block_device_release_pin_locked_v1(
     state: BlockDeviceIdentityOwnerStateV1,
@@ -497,6 +523,12 @@ fn _block_device_release_pin_locked_v1(
         return next
     var released_device = device
     released_device.pin_count = device.pin_count - 1
+    if pin.backend_owner_pin:
+        if device.backend_pin_nonce != pin.pin_nonce:
+            next.owner_quarantined = true
+            next.last_error = Some(BlockDeviceIdentityErrorV1.OwnerQuarantined)
+            return next
+        released_device.backend_pin_nonce = 0u64
     next.slots[pin.device_slot] = released_device
     if pin.generation == _BLOCK_DEVICE_IDENTITY_GENERATION_MAX_V1:
         var retired = pin
