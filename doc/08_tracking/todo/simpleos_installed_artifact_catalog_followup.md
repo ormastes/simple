@@ -1,20 +1,40 @@
 # SimpleOS installed-artifact catalog follow-up
 
-Status: blocked design audit; unsafe phase-1 draft reverted after the required
-independent static re-review failed. No catalog or launch integration landed.
+Status: bounded catalog owner implemented as an unverified draft; authenticated
+bootstrap population and launch integration remain deferred.
 
-## Implemented prerequisite primitive (pending commit)
+## Implemented prerequisite primitive
 
 The common `SimpleArtifactManifest` owner now defines fixed collection,
 element, aggregate-value, and canonical-body ceilings; bounded nested-array
 deep copy; and a signature-free, domain-separated canonical byte projection.
-This resolves only the input-shape and allocation prerequisite. The catalog
-lifecycle and launch transaction below remain unimplemented and blocked on
-their own owner/security review.
+This resolved the input-shape and allocation prerequisite. The catalog
+lifecycle is now implemented by the bounded owner below; authenticated
+bootstrap wiring and the launch transaction remain unimplemented.
 
-## Phase-1 blockers
+## Catalog lifecycle implemented in the current draft
 
-The catalog must resolve these issues together before implementation is safe:
+- package-private, one-way bootstrap session and population surface;
+- maximum 16 immutable records and 8 exact aliases per record, with one shared
+  collision domain and no reuse;
+- deep-owned bounded manifest/alias retention and deep-owned public lookup;
+- exact target, nonzero lowercase content digest, signer, scheme, and detached
+  signature metadata;
+- cached manifest/record identities with bounded out-of-lock integrity
+  recomputation and slot-generation confirmation;
+- synchronized fail-stop quarantine for committed-unknown unlock failure;
+- no loader, filesystem, namespace, or scheduler authority.
+
+The focused loader-package spec covers the public bounded input gate, forged
+and stale bootstrap sessions, the 16-record ceiling, one-way seal, and nested
+caller/output copy isolation. The pure transition oracle documents the required
+committed-unknown quarantine rule but is not raw-mutex serialization evidence.
+Direct raw-mutex failure injection remains unavailable; no test or build was
+run for this draft.
+
+## Resolved phase-1 blockers
+
+The catalog design resolves these issues together:
 
 - Bound every manifest collection count, every contained text/byte value, and
   the total canonical signing-body size before hashing, copying, or retention.
@@ -39,9 +59,8 @@ Required focused coverage includes oversized collection/element/total-body
 rejection, bootstrap-owner privacy/exhaustion, forged/stale handles, copy
 isolation, alias capacity, post-seal integrity, and fail-stop serialization.
 
-After those blockers are resolved, the bounded catalog will store immutable
-signed metadata but still will not be execution authority. Remaining launch
-work must be completed as one owner transaction:
+The bounded catalog stores immutable signed metadata but still is not execution
+authority. Remaining launch work must be completed as one owner transaction:
 
 1. populate and seal the catalog from authenticated boot/package metadata;
 2. acquire and hash a stable MountTable snapshot of the canonical file;

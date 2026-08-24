@@ -1,0 +1,543 @@
+"""Bounded bootstrap-owned installed-artifact catalog.
+
+The catalog retains authenticated package metadata, not execution authority.
+Only sibling loader/bootstrap code can begin, populate, and seal it. Public
+consumers receive bounded deep copies after integrity revalidation; no public
+operation allocates a permanent slot or mints loader authority.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, SimpleArtifactManifest,
+    simple_artifact_manifest_bounds_validate_v1,
+    simple_artifact_manifest_deep_copy_bounded_v1,
+    simple_artifact_manifest_canonical_hash_input_v1
+}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use os.kernel.loader.artifact_manifest.{manifest_sha256_hex}
+
+pub const SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1: i64 = 16
+pub const SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1: i64 = 8
+pub const SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1: i64 = 256
+pub const SIMPLEOS_INSTALLED_ARTIFACT_PATH_MAX_BYTES_V1: i64 = 4096
+pub const SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1: i64 = 256
+
+pub enum InstalledArtifactCatalogLifecycleV1:
+    Uninitialized
+    Populating
+    Sealed
+    Quarantined
+
+pub enum InstalledArtifactCatalogProtocolEventV1:
+    BeginBootstrap
+    AddRecord
+    Seal
+    CommittedUnknownUnlock
+
+pub fn installed_artifact_catalog_protocol_transition_v1(
+    state: InstalledArtifactCatalogLifecycleV1,
+    event: InstalledArtifactCatalogProtocolEventV1
+) -> InstalledArtifactCatalogLifecycleV1?:
+    """Pure lifecycle oracle; it creates no session and retains no record."""
+    if event == InstalledArtifactCatalogProtocolEventV1.CommittedUnknownUnlock:
+        if state != InstalledArtifactCatalogLifecycleV1.Quarantined:
+            return Some(InstalledArtifactCatalogLifecycleV1.Quarantined)
+        return nil
+    if event == InstalledArtifactCatalogProtocolEventV1.BeginBootstrap and
+        state == InstalledArtifactCatalogLifecycleV1.Uninitialized:
+        return Some(InstalledArtifactCatalogLifecycleV1.Populating)
+    if event == InstalledArtifactCatalogProtocolEventV1.AddRecord and
+        state == InstalledArtifactCatalogLifecycleV1.Populating:
+        return Some(InstalledArtifactCatalogLifecycleV1.Populating)
+    if event == InstalledArtifactCatalogProtocolEventV1.Seal and
+        state == InstalledArtifactCatalogLifecycleV1.Populating:
+        return Some(InstalledArtifactCatalogLifecycleV1.Sealed)
+    nil
+
+pub struct InstalledArtifactRecordV1:
+    canonical_path: text
+    aliases: [text]
+    target: ManifestTarget
+    content_sha256: text
+    signature_scheme: text
+    signer_identity: text
+    detached_signature: text
+    manifest_identity_sha256: text
+    manifest: SimpleArtifactManifest
+
+pub struct InstalledArtifactCatalogStatusV1:
+    lifecycle: InstalledArtifactCatalogLifecycleV1
+    artifact_count: i64
+
+pub(package) struct InstalledArtifactBootstrapSessionV1:
+    generation: u64
+    nonce: u64
+
+struct InstalledArtifactSlotV1:
+    generation: u64
+    canonical_path: text
+    aliases: [text]
+    target: ManifestTarget
+    content_sha256: text
+    signature_scheme: text
+    signer_identity: text
+    detached_signature: text
+    manifest_identity_sha256: text
+    record_integrity_sha256: text
+    manifest: SimpleArtifactManifest
+
+struct InstalledArtifactKeySlotV1:
+    occupied: bool
+    path_hash: u64
+    path: text
+    record_slot: i64
+
+struct InstalledArtifactLookupCandidateV1:
+    slot: i64
+    generation: u64
+    expected_integrity_sha256: text
+    record: InstalledArtifactRecordV1
+
+struct InstalledArtifactCatalogOwnerV1:
+    initialized: bool
+    lifecycle: InstalledArtifactCatalogLifecycleV1
+    bootstrap_generation: u64
+    bootstrap_nonce: u64
+    nonce_counter: u64
+    records: [InstalledArtifactSlotV1]
+    keys: [InstalledArtifactKeySlotV1]
+
+fn _installed_artifact_empty_slots_v1() -> [InstalledArtifactSlotV1]:
+    val empty: [InstalledArtifactSlotV1] = []
+    empty
+
+fn _installed_artifact_empty_key_v1() -> InstalledArtifactKeySlotV1:
+    InstalledArtifactKeySlotV1(
+        occupied: false, path_hash: 0u64, path: "", record_slot: -1)
+
+fn _installed_artifact_empty_keys_v1() -> [InstalledArtifactKeySlotV1]:
+    var keys: [InstalledArtifactKeySlotV1] = []
+    var i: i64 = 0
+    while i < SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1:
+        keys.push(_installed_artifact_empty_key_v1())
+        i = i + 1
+    keys
+
+val _installed_artifact_catalog_mutex_v1: i64 = mutex_raw_create()
+var _installed_artifact_catalog_v1 = InstalledArtifactCatalogOwnerV1(
+    initialized: false,
+    lifecycle: InstalledArtifactCatalogLifecycleV1.Uninitialized,
+    bootstrap_generation: 0u64,
+    bootstrap_nonce: 0u64,
+    nonce_counter: 0x494e5354414c4c31u64,
+    records: [],
+    keys: [])
+
+fn _installed_artifact_initialize_locked_v1():
+    if not _installed_artifact_catalog_v1.initialized:
+        _installed_artifact_catalog_v1.records = _installed_artifact_empty_slots_v1()
+        _installed_artifact_catalog_v1.keys = _installed_artifact_empty_keys_v1()
+        _installed_artifact_catalog_v1.initialized = true
+
+fn _installed_artifact_lock_v1() -> bool:
+    if _installed_artifact_catalog_mutex_v1 <= 0 or
+        not mutex_raw_lock(_installed_artifact_catalog_mutex_v1):
+        return false
+    _installed_artifact_initialize_locked_v1()
+    if _installed_artifact_catalog_v1.lifecycle ==
+        InstalledArtifactCatalogLifecycleV1.Quarantined:
+        _ = mutex_raw_unlock(_installed_artifact_catalog_mutex_v1)
+        return false
+    true
+
+fn _installed_artifact_unlock_v1() -> bool:
+    if mutex_raw_unlock(_installed_artifact_catalog_mutex_v1):
+        return true
+    # All supported raw mutex providers report false only while ownership is
+    # retained. The preceding mutation is now committed-unknown. Publish the
+    # fail-stop state while still serialized; no caller may retry or consume a
+    # result from this transition.
+    _installed_artifact_catalog_v1.lifecycle =
+        InstalledArtifactCatalogLifecycleV1.Quarantined
+    false
+
+fn _installed_artifact_next_nonce_locked_v1() -> u64:
+    if _installed_artifact_catalog_v1.nonce_counter == 0xffffffffffffffffu64:
+        return 0u64
+    _installed_artifact_catalog_v1.nonce_counter =
+        _installed_artifact_catalog_v1.nonce_counter + 1u64
+    _installed_artifact_catalog_v1.nonce_counter
+
+fn _installed_artifact_session_valid_locked_v1(
+    session: InstalledArtifactBootstrapSessionV1
+) -> bool:
+    _installed_artifact_catalog_v1.lifecycle ==
+        InstalledArtifactCatalogLifecycleV1.Populating and
+        session.generation != 0u64 and session.nonce != 0u64 and
+        session.generation == _installed_artifact_catalog_v1.bootstrap_generation and
+        session.nonce == _installed_artifact_catalog_v1.bootstrap_nonce
+
+fn _installed_artifact_text_bounded_v1(value: text, maximum: i64) -> bool:
+    if value == "" or value.len() > maximum:
+        return false
+    val raw = value.bytes()
+    raw.len() as i64 <= maximum
+
+fn _installed_artifact_path_valid_v1(path: text) -> bool:
+    _installed_artifact_text_bounded_v1(
+        path, SIMPLEOS_INSTALLED_ARTIFACT_PATH_MAX_BYTES_V1) and
+        path.starts_with("/") and path != "/" and not path.ends_with("/") and
+        not path.contains("\\") and not path.contains("\0") and
+        not path.contains("\n") and not path.contains("\r") and
+        not path.contains("//") and not path.contains("/./") and
+        not path.ends_with("/.") and not path.contains("/../") and
+        not path.ends_with("/..")
+
+fn _installed_artifact_target_valid_v1(target: ManifestTarget) -> bool:
+    _installed_artifact_text_bounded_v1(
+        target.os, SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1) and
+        _installed_artifact_text_bounded_v1(
+            target.arch, SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1) and
+        _installed_artifact_text_bounded_v1(
+            target.abi, SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1) and
+        target.os != "any" and target.arch != "any" and target.abi != "any"
+
+fn _installed_artifact_target_equal_v1(a: ManifestTarget, b: ManifestTarget) -> bool:
+    a.os == b.os and a.arch == b.arch and a.abi == b.abi
+
+fn _installed_artifact_copy_aliases_v1(source: [text]) -> [text]:
+    var copied: [text] = []
+    for alias in source:
+        copied.push(alias)
+    copied
+
+fn _installed_artifact_aliases_valid_v1(canonical_path: text, aliases: [text]) -> bool:
+    if aliases.len() > SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1:
+        return false
+    var i: i64 = 0
+    while i < aliases.len():
+        if not _installed_artifact_path_valid_v1(aliases[i]) or
+            aliases[i] == canonical_path:
+            return false
+        var prior: i64 = 0
+        while prior < i:
+            if aliases[prior] == aliases[i]: return false
+            prior = prior + 1
+        i = i + 1
+    true
+
+fn _installed_artifact_digest_declared_v1(manifest: SimpleArtifactManifest, digest: text) -> bool:
+    for declared in manifest.content_hashes:
+        if declared == digest: return true
+    false
+
+pub fn installed_artifact_record_input_valid_v1(
+    canonical_path: text,
+    aliases: [text],
+    content_sha256: text,
+    signature_scheme: text,
+    signer_identity: text,
+    detached_signature: text,
+    manifest: SimpleArtifactManifest
+) -> bool:
+    """Pure shape gate. Passing it does not prove installation or trust."""
+    if not _installed_artifact_path_valid_v1(canonical_path) or
+        not _installed_artifact_aliases_valid_v1(canonical_path, aliases) or
+        not hash256_hex_valid(content_sha256) or hash256_is_zero(content_sha256) or
+        not _installed_artifact_text_bounded_v1(
+            signature_scheme, SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1) or
+        not _installed_artifact_text_bounded_v1(
+            signer_identity, SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1) or
+        not _installed_artifact_text_bounded_v1(
+            detached_signature, SIMPLEOS_INSTALLED_ARTIFACT_PATH_MAX_BYTES_V1) or
+        not _installed_artifact_target_valid_v1(manifest.target) or
+        manifest.entrypoint != canonical_path or manifest.signature != detached_signature or
+        not _installed_artifact_digest_declared_v1(manifest, content_sha256):
+        return false
+    simple_artifact_manifest_bounds_validate_v1(manifest).ok
+
+class _InstalledArtifactIdentityWriterV1:
+    bytes: [u8]
+
+    me append_raw(value: text):
+        for byte in value.bytes(): self.bytes.push(byte)
+
+    me append_field(value: text):
+        val raw = value.bytes()
+        self.append_raw(raw.len().to_text())
+        self.bytes.push(58u8)
+        for byte in raw: self.bytes.push(byte)
+
+fn _installed_artifact_manifest_identity_v1(manifest: SimpleArtifactManifest) -> text:
+    if val body = simple_artifact_manifest_canonical_hash_input_v1(manifest):
+        return manifest_sha256_hex(body)
+    ""
+
+fn _installed_artifact_record_integrity_v1(record: InstalledArtifactRecordV1) -> text:
+    # Re-run the complete shape relation, not only the canonical manifest hash:
+    # the manifest signature is deliberately excluded from its signing body,
+    # so equality with the separately retained detached signature must be
+    # checked explicitly on every integrity read.
+    if not installed_artifact_record_input_valid_v1(
+        record.canonical_path, record.aliases, record.content_sha256,
+        record.signature_scheme, record.signer_identity,
+        record.detached_signature, record.manifest) or
+        not _installed_artifact_target_equal_v1(record.target, record.manifest.target):
+        return ""
+    val manifest_identity = _installed_artifact_manifest_identity_v1(record.manifest)
+    if manifest_identity == "" or manifest_identity != record.manifest_identity_sha256:
+        return ""
+    var writer = _InstalledArtifactIdentityWriterV1(bytes: [])
+    writer.append_raw("simpleos-installed-artifact-record-v1")
+    writer.append_field(record.canonical_path)
+    writer.append_field(record.aliases.len().to_text())
+    for alias in record.aliases: writer.append_field(alias)
+    writer.append_field(record.target.os)
+    writer.append_field(record.target.arch)
+    writer.append_field(record.target.abi)
+    writer.append_field(record.content_sha256)
+    writer.append_field(record.signature_scheme)
+    writer.append_field(record.signer_identity)
+    writer.append_field(record.detached_signature)
+    writer.append_field(manifest_identity)
+    manifest_sha256_hex(writer.bytes)
+
+fn _installed_artifact_record_copy_v1(slot: InstalledArtifactSlotV1) -> InstalledArtifactRecordV1?:
+    if val manifest = simple_artifact_manifest_deep_copy_bounded_v1(slot.manifest):
+        return Some(InstalledArtifactRecordV1(
+            canonical_path: slot.canonical_path,
+            aliases: _installed_artifact_copy_aliases_v1(slot.aliases),
+            target: ManifestTarget(
+                os: slot.target.os, arch: slot.target.arch, abi: slot.target.abi),
+            content_sha256: slot.content_sha256,
+            signature_scheme: slot.signature_scheme,
+            signer_identity: slot.signer_identity,
+            detached_signature: slot.detached_signature,
+            manifest_identity_sha256: slot.manifest_identity_sha256,
+            manifest: manifest))
+    nil
+
+fn _installed_artifact_path_hash_v1(path: text) -> u64:
+    # FNV-1a is only a bounded table index, never an integrity decision.
+    var hash = 1469598103934665603u64
+    for byte in path.bytes():
+        hash = hash ^ (byte as u64)
+        hash = hash * 1099511628211u64
+    hash
+
+fn _installed_artifact_find_locked_v1(path: text) -> i64:
+    val capacity = SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1
+    val path_hash = _installed_artifact_path_hash_v1(path)
+    val start = (path_hash % (capacity as u64)) as i64
+    var probe: i64 = 0
+    while probe < capacity:
+        val index = (start + probe) % capacity
+        val key = _installed_artifact_catalog_v1.keys[index]
+        if not key.occupied: return -1
+        if key.path_hash == path_hash and key.path == path: return key.record_slot
+        probe = probe + 1
+    -1
+
+fn _installed_artifact_key_insert_locked_v1(path: text, record_slot: i64) -> bool:
+    val capacity = SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1
+    val path_hash = _installed_artifact_path_hash_v1(path)
+    val start = (path_hash % (capacity as u64)) as i64
+    var probe: i64 = 0
+    while probe < capacity:
+        val index = (start + probe) % capacity
+        if not _installed_artifact_catalog_v1.keys[index].occupied:
+            _installed_artifact_catalog_v1.keys[index] = InstalledArtifactKeySlotV1(
+                occupied: true, path_hash: path_hash,
+                path: path, record_slot: record_slot)
+            return true
+        if _installed_artifact_catalog_v1.keys[index].path_hash == path_hash and
+            _installed_artifact_catalog_v1.keys[index].path == path:
+            return false
+        probe = probe + 1
+    false
+
+pub(package) fn installed_artifact_catalog_bootstrap_begin_v1(
+) -> InstalledArtifactBootstrapSessionV1?:
+    if not _installed_artifact_lock_v1(): return nil
+    if _installed_artifact_catalog_v1.lifecycle !=
+        InstalledArtifactCatalogLifecycleV1.Uninitialized:
+        _ = _installed_artifact_unlock_v1()
+        return nil
+    if _installed_artifact_catalog_v1.bootstrap_generation == 0xffffffffffffffffu64:
+        _installed_artifact_catalog_v1.lifecycle =
+            InstalledArtifactCatalogLifecycleV1.Quarantined
+        _ = _installed_artifact_unlock_v1()
+        return nil
+    val nonce = _installed_artifact_next_nonce_locked_v1()
+    if nonce == 0u64:
+        _installed_artifact_catalog_v1.lifecycle =
+            InstalledArtifactCatalogLifecycleV1.Quarantined
+        _ = _installed_artifact_unlock_v1()
+        return nil
+    _installed_artifact_catalog_v1.bootstrap_generation =
+        _installed_artifact_catalog_v1.bootstrap_generation + 1u64
+    _installed_artifact_catalog_v1.bootstrap_nonce = nonce
+    _installed_artifact_catalog_v1.lifecycle =
+        InstalledArtifactCatalogLifecycleV1.Populating
+    val session = InstalledArtifactBootstrapSessionV1(
+        generation: _installed_artifact_catalog_v1.bootstrap_generation,
+        nonce: nonce)
+    if not _installed_artifact_unlock_v1(): return nil
+    Some(session)
+
+pub(package) fn installed_artifact_catalog_bootstrap_add_v1(
+    session: InstalledArtifactBootstrapSessionV1,
+    canonical_path: text,
+    aliases: [text],
+    content_sha256: text,
+    signature_scheme: text,
+    signer_identity: text,
+    detached_signature: text,
+    manifest: SimpleArtifactManifest
+) -> bool:
+    if not installed_artifact_record_input_valid_v1(
+        canonical_path, aliases, content_sha256, signature_scheme,
+        signer_identity, detached_signature, manifest):
+        return false
+    val manifest_copy = simple_artifact_manifest_deep_copy_bounded_v1(manifest)
+    if not manifest_copy.?: return false
+    val owned_manifest = manifest_copy.unwrap()
+    val owned_aliases = _installed_artifact_copy_aliases_v1(aliases)
+    val manifest_identity = _installed_artifact_manifest_identity_v1(owned_manifest)
+    if manifest_identity == "": return false
+    val candidate = InstalledArtifactRecordV1(
+        canonical_path: canonical_path,
+        aliases: owned_aliases,
+        target: ManifestTarget(
+            os: owned_manifest.target.os,
+            arch: owned_manifest.target.arch,
+            abi: owned_manifest.target.abi),
+        content_sha256: content_sha256,
+        signature_scheme: signature_scheme,
+        signer_identity: signer_identity,
+        detached_signature: detached_signature,
+        manifest_identity_sha256: manifest_identity,
+        manifest: owned_manifest)
+    val integrity = _installed_artifact_record_integrity_v1(candidate)
+    if integrity == "": return false
+
+    if not _installed_artifact_lock_v1(): return false
+    if not _installed_artifact_session_valid_locked_v1(session) or
+        _installed_artifact_catalog_v1.records.len() >=
+            SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1:
+        _ = _installed_artifact_unlock_v1()
+        return false
+    if _installed_artifact_find_locked_v1(canonical_path) >= 0:
+        _ = _installed_artifact_unlock_v1()
+        return false
+    for alias in owned_aliases:
+        if _installed_artifact_find_locked_v1(alias) >= 0:
+            _ = _installed_artifact_unlock_v1()
+            return false
+    val generation = (_installed_artifact_catalog_v1.records.len() as u64) + 1u64
+    val record_slot = _installed_artifact_catalog_v1.records.len() as i64
+    _installed_artifact_catalog_v1.records.push(InstalledArtifactSlotV1(
+        generation: generation,
+        canonical_path: canonical_path,
+        aliases: owned_aliases,
+        target: candidate.target,
+        content_sha256: content_sha256,
+        signature_scheme: signature_scheme,
+        signer_identity: signer_identity,
+        detached_signature: detached_signature,
+        manifest_identity_sha256: manifest_identity,
+        record_integrity_sha256: integrity,
+        manifest: owned_manifest))
+    if not _installed_artifact_key_insert_locked_v1(canonical_path, record_slot):
+        _installed_artifact_catalog_v1.lifecycle =
+            InstalledArtifactCatalogLifecycleV1.Quarantined
+        _ = _installed_artifact_unlock_v1()
+        return false
+    for alias in owned_aliases:
+        if not _installed_artifact_key_insert_locked_v1(alias, record_slot):
+            _installed_artifact_catalog_v1.lifecycle =
+                InstalledArtifactCatalogLifecycleV1.Quarantined
+            _ = _installed_artifact_unlock_v1()
+            return false
+    _installed_artifact_unlock_v1()
+
+pub(package) fn installed_artifact_catalog_bootstrap_seal_v1(
+    session: InstalledArtifactBootstrapSessionV1
+) -> bool:
+    if not _installed_artifact_lock_v1(): return false
+    if not _installed_artifact_session_valid_locked_v1(session) or
+        _installed_artifact_catalog_v1.records.len() == 0:
+        _ = _installed_artifact_unlock_v1()
+        return false
+    _installed_artifact_catalog_v1.bootstrap_nonce = 0u64
+    _installed_artifact_catalog_v1.lifecycle = InstalledArtifactCatalogLifecycleV1.Sealed
+    _installed_artifact_unlock_v1()
+
+pub fn installed_artifact_catalog_lookup_v1(path: text) -> InstalledArtifactRecordV1?:
+    """Return a deep-owned metadata snapshot. It never grants execution."""
+    if not _installed_artifact_path_valid_v1(path): return nil
+    if not _installed_artifact_lock_v1(): return nil
+    if _installed_artifact_catalog_v1.lifecycle != InstalledArtifactCatalogLifecycleV1.Sealed:
+        _ = _installed_artifact_unlock_v1()
+        return nil
+    val index = _installed_artifact_find_locked_v1(path)
+    if index < 0:
+        _ = _installed_artifact_unlock_v1()
+        return nil
+    if index >= _installed_artifact_catalog_v1.records.len():
+        _installed_artifact_catalog_v1.lifecycle =
+            InstalledArtifactCatalogLifecycleV1.Quarantined
+        _ = _installed_artifact_unlock_v1()
+        return nil
+    val slot = _installed_artifact_catalog_v1.records[index]
+    val copied = _installed_artifact_record_copy_v1(slot)
+    if not copied.?:
+        _installed_artifact_catalog_v1.lifecycle =
+            InstalledArtifactCatalogLifecycleV1.Quarantined
+        _ = _installed_artifact_unlock_v1()
+        return nil
+    val candidate = InstalledArtifactLookupCandidateV1(
+        slot: index, generation: slot.generation,
+        expected_integrity_sha256: slot.record_integrity_sha256,
+        record: copied.unwrap())
+    if not _installed_artifact_unlock_v1(): return nil
+
+    # Hashing and nested-copy validation are bounded but potentially expensive;
+    # perform them outside the catalog mutex. Sealed rows cannot change.
+    val actual_integrity = _installed_artifact_record_integrity_v1(candidate.record)
+    var requested_path_bound = candidate.record.canonical_path == path
+    if not requested_path_bound:
+        for alias in candidate.record.aliases:
+            if alias == path: requested_path_bound = true
+    if not requested_path_bound or actual_integrity == "" or
+        actual_integrity != candidate.expected_integrity_sha256:
+        if _installed_artifact_lock_v1():
+            _installed_artifact_catalog_v1.lifecycle =
+                InstalledArtifactCatalogLifecycleV1.Quarantined
+            _ = _installed_artifact_unlock_v1()
+        return nil
+
+    if not _installed_artifact_lock_v1(): return nil
+    val confirmed_slot = _installed_artifact_find_locked_v1(path)
+    if _installed_artifact_catalog_v1.lifecycle != InstalledArtifactCatalogLifecycleV1.Sealed or
+        confirmed_slot != candidate.slot or
+        candidate.slot < 0 or
+        candidate.slot >= _installed_artifact_catalog_v1.records.len() or
+        _installed_artifact_catalog_v1.records[candidate.slot].generation !=
+            candidate.generation or
+        _installed_artifact_catalog_v1.records[candidate.slot].record_integrity_sha256 !=
+            candidate.expected_integrity_sha256:
+        _installed_artifact_catalog_v1.lifecycle =
+            InstalledArtifactCatalogLifecycleV1.Quarantined
+        _ = _installed_artifact_unlock_v1()
+        return nil
+    if not _installed_artifact_unlock_v1(): return nil
+    Some(candidate.record)
+
+pub fn installed_artifact_catalog_status_v1() -> InstalledArtifactCatalogStatusV1?:
+    if not _installed_artifact_lock_v1(): return nil
+    val result = InstalledArtifactCatalogStatusV1(
+        lifecycle: _installed_artifact_catalog_v1.lifecycle,
+        artifact_count: _installed_artifact_catalog_v1.records.len() as i64)
+    if not _installed_artifact_unlock_v1(): return nil
+    Some(result)

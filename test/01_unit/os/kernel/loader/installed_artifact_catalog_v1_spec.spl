@@ -1,0 +1,157 @@
+use std.spec.{describe, it, expect}
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestResourceLimits, ManifestTarget, SimpleArtifactManifest
+}
+use os.kernel.loader.installed_artifact_catalog_v1.{
+    SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1,
+    InstalledArtifactBootstrapSessionV1,
+    InstalledArtifactCatalogLifecycleV1, InstalledArtifactCatalogProtocolEventV1,
+    installed_artifact_record_input_valid_v1,
+    installed_artifact_catalog_protocol_transition_v1,
+    installed_artifact_catalog_bootstrap_begin_v1,
+    installed_artifact_catalog_bootstrap_add_v1,
+    installed_artifact_catalog_bootstrap_seal_v1,
+    installed_artifact_catalog_lookup_v1
+}
+
+fn catalog_digest() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn catalog_manifest(path: text = "/bin/simple") -> SimpleArtifactManifest:
+    SimpleArtifactManifest(
+        format_version: 1,
+        artifact_kind: "elf",
+        target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+        entrypoint: path,
+        required_abi_features: [],
+        required_services: ["filesystem"],
+        required_capabilities: 1u32,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: 1048576, max_open_handles: 8,
+            max_threads: 2, cpu_budget_us: 100000),
+        namespace_template: "default",
+        native_libraries: [],
+        smf_libraries: [],
+        interpreter: "",
+        argument_schema: [],
+        startup_preloads: [],
+        content_hashes: [catalog_digest()],
+        signature: "signed-fixture",
+        debug_identity: "simple-fixture")
+
+fn catalog_input_valid(
+    path: text = "/bin/simple", aliases: [text] = ["/usr/bin/simple"],
+    digest: text = catalog_digest(), signature: text = "signed-fixture",
+    manifest: SimpleArtifactManifest = catalog_manifest()
+) -> bool:
+    installed_artifact_record_input_valid_v1(
+        path, aliases, digest, "ed25519", "boot-root-1", signature, manifest)
+
+describe "installed artifact catalog bounded input":
+    it "accepts exact signed target and digest metadata":
+        expect(catalog_input_valid()).to_be(true)
+
+    it "rejects a non-canonical path and duplicate aliases":
+        expect(catalog_input_valid(path: "bin/simple")).to_be(false)
+        expect(catalog_input_valid(
+            aliases: ["/usr/bin/simple", "/usr/bin/simple"])).to_be(false)
+
+    it "rejects alias capacity overflow":
+        var aliases: [text] = []
+        var i: i64 = 0
+        while i <= SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1:
+            aliases.push("/alias/{i}")
+            i = i + 1
+        expect(catalog_input_valid(aliases: aliases)).to_be(false)
+
+    it "rejects target path digest and signature disagreement":
+        var wrong_target = catalog_manifest()
+        wrong_target.target.arch = "any"
+        expect(catalog_input_valid(manifest: wrong_target)).to_be(false)
+
+        expect(catalog_input_valid(
+            digest: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
+            .to_be(false)
+        expect(catalog_input_valid(signature: "other")).to_be(false)
+
+        val other_path_manifest = catalog_manifest("/bin/other")
+        expect(catalog_input_valid(manifest: other_path_manifest)).to_be(false)
+
+    it "rejects unsigned records and uppercase digests":
+        expect(catalog_input_valid(signature: "")).to_be(false)
+        expect(catalog_input_valid(
+            digest: "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"))
+            .to_be(false)
+
+    it "models one-way sealing and fail-stop committed-unknown serialization":
+        expect(installed_artifact_catalog_protocol_transition_v1(
+            InstalledArtifactCatalogLifecycleV1.Uninitialized,
+            InstalledArtifactCatalogProtocolEventV1.BeginBootstrap).unwrap())
+            .to_equal(InstalledArtifactCatalogLifecycleV1.Populating)
+        expect(installed_artifact_catalog_protocol_transition_v1(
+            InstalledArtifactCatalogLifecycleV1.Populating,
+            InstalledArtifactCatalogProtocolEventV1.Seal).unwrap())
+            .to_equal(InstalledArtifactCatalogLifecycleV1.Sealed)
+        expect(installed_artifact_catalog_protocol_transition_v1(
+            InstalledArtifactCatalogLifecycleV1.Sealed,
+            InstalledArtifactCatalogProtocolEventV1.AddRecord).?).to_be(false)
+        expect(installed_artifact_catalog_protocol_transition_v1(
+            InstalledArtifactCatalogLifecycleV1.Populating,
+            InstalledArtifactCatalogProtocolEventV1.CommittedUnknownUnlock).unwrap())
+            .to_equal(InstalledArtifactCatalogLifecycleV1.Quarantined)
+        expect(installed_artifact_catalog_protocol_transition_v1(
+            InstalledArtifactCatalogLifecycleV1.Quarantined,
+            InstalledArtifactCatalogProtocolEventV1.BeginBootstrap).?).to_be(false)
+
+    it "keeps bootstrap population private bounded stale-safe and copy-isolated":
+        val session = installed_artifact_catalog_bootstrap_begin_v1()
+        expect(session.?).to_be(true)
+        val active = session.unwrap()
+        val forged = InstalledArtifactBootstrapSessionV1(
+            generation: active.generation, nonce: active.nonce + 1u64)
+        expect(installed_artifact_catalog_bootstrap_add_v1(
+            forged, "/bin/forged", [], catalog_digest(), "ed25519",
+            "boot-root-1", "signed-fixture", catalog_manifest("/bin/forged")))
+            .to_be(false)
+
+        var caller_aliases = ["/alias/zero"]
+        var caller_manifest = catalog_manifest("/bin/tool0")
+        expect(installed_artifact_catalog_bootstrap_add_v1(
+            active, "/bin/tool0", caller_aliases, catalog_digest(), "ed25519",
+            "boot-root-1", "signed-fixture", caller_manifest))
+            .to_be(true)
+        caller_aliases.push("/alias/late-mutation")
+        caller_manifest.required_services.push("late-service")
+        caller_manifest.content_hashes.push(
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+
+        var i: i64 = 1
+        while i < SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1:
+            val path = "/bin/tool{i}"
+            expect(installed_artifact_catalog_bootstrap_add_v1(
+                active, path, [], catalog_digest(), "ed25519", "boot-root-1",
+                "signed-fixture", catalog_manifest(path))).to_be(true)
+            i = i + 1
+        expect(installed_artifact_catalog_bootstrap_add_v1(
+            active, "/bin/overflow", [], catalog_digest(), "ed25519",
+            "boot-root-1", "signed-fixture", catalog_manifest("/bin/overflow")))
+            .to_be(false)
+        expect(installed_artifact_catalog_bootstrap_seal_v1(active)).to_be(true)
+        expect(installed_artifact_catalog_bootstrap_add_v1(
+            active, "/bin/stale", [], catalog_digest(), "ed25519",
+            "boot-root-1", "signed-fixture", catalog_manifest("/bin/stale")))
+            .to_be(false)
+
+        val first = installed_artifact_catalog_lookup_v1("/alias/zero")
+        expect(first.?).to_be(true)
+        expect(first.unwrap().aliases.len()).to_equal(1)
+        var changed = first.unwrap()
+        changed.aliases.push("/alias/output-mutation")
+        changed.manifest.content_hashes.push(
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+        val second = installed_artifact_catalog_lookup_v1("/bin/tool0")
+        expect(second.?).to_be(true)
+        expect(second.unwrap().aliases.len()).to_equal(1)
+        expect(second.unwrap().manifest.required_services.len()).to_equal(1)
+        expect(second.unwrap().manifest.content_hashes.len()).to_equal(1)
