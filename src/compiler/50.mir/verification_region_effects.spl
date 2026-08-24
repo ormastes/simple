@@ -199,15 +199,17 @@ fn verification_region_effect_manifest_with_internal_calls_v1(
 ) -> MirRegionEffectManifestV1:
     val execution_hash = sha256_text(serialize_mir_function(func))
     var effects: [MirRegionEffectV1] = []
+    var region_types: {text: text} = {}
     for block in func.blocks:
         for instruction in block.instructions:
             var source_span = ""
-            if val span = instruction.span:
-                if span.file != "" and span.line > 0 and span.col > 0 and
-                        span.start >= 0 and span.end >= span.start:
-                    source_span = "file=" + span.file + "|start=" +
-                        span.start.to_string() + "|end=" + span.end.to_string() +
-                        "|line=" + span.line.to_string() + "|col=" + span.col.to_string()
+            if verification_region_instruction_requires_span_v1(instruction.kind):
+                if val span = instruction.span:
+                    if span.file != "" and span.line > 0 and span.col > 0 and
+                            span.start >= 0 and span.end >= span.start:
+                        source_span = "file=" + span.file + "|start=" +
+                            span.start.to_string() + "|end=" + span.end.to_string() +
+                            "|line=" + span.line.to_string() + "|col=" + span.col.to_string()
             match verification_region_effect_from_instruction_v1(
                     func, instruction.kind, source_span, internal_call_names):
                 case Err(message):
@@ -220,13 +222,14 @@ fn verification_region_effect_manifest_with_internal_calls_v1(
                         if diagnostic != "": return MirRegionEffectManifestV1(
                             "MirRegionEffectManifest-v1", func.symbol.id.to_string(),
                             execution_hash, [], "", diagnostic)
-                        for prior in effects:
-                            if prior.region_id == present.region_id and
-                                    prior.value_type_identity != present.value_type_identity:
+                        if val prior_type = region_types.get(present.region_id):
+                            if prior_type != present.value_type_identity:
                                 return MirRegionEffectManifestV1(
                                     "MirRegionEffectManifest-v1", func.symbol.id.to_string(),
                                     execution_hash, [], "",
                                     "FV2-E-REGION-TYPE-MISMATCH: one region has inconsistent MIR value types")
+                        else:
+                            region_types[present.region_id] = present.value_type_identity
                         effects.push(present)
         if not verification_region_terminator_supported_v1(block.terminator):
             return MirRegionEffectManifestV1(
@@ -239,6 +242,11 @@ fn verification_region_effect_manifest_with_internal_calls_v1(
     MirRegionEffectManifestV1(
         "MirRegionEffectManifest-v1", func.symbol.id.to_string(), execution_hash,
         effects, frame_hash, "")
+
+fn verification_region_instruction_requires_span_v1(instruction: MirInstKind) -> bool:
+    match instruction:
+        case MirInstKind.LoadGlobal(_, _) | MirInstKind.StoreGlobal(_, _): true
+        case _: false
 
 fn verification_region_effect_from_instruction_v1(
     func: MirFunction,
