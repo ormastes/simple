@@ -2441,3 +2441,21 @@ through Stage 3+" if that is judged to be missing from the reason list.
   whoever holds the authorization to continue.
 * Stage 4/5 and the MCP verification were therefore **not attempted**; the goal
   (`mcp` exists only in the full CLI) is unreached and is not claimed.
+## 2026-08-24 — signature parameter projection workaround (does not close this record)
+
+A separate Stage 3 diagnostic run reached MIR lowering for the 26-function flat entry module,
+then emitted twelve identical diagnostics before its missing-return cascade:
+
+```
+E-MIR-TYPE-Unknown: unreachable HirTypeKind disc=-1: 0
+```
+
+The signature loop was the only parameter loop that read the enum-bearing field
+through a chained array projection (`fn_.params[pmi].type_`).  The later binding
+loop already materialized the `HirParam` first and retained its nested type.  The
+candidate change applies that same owner-local shape to CPU, Vulkan, and CUDA
+signature lowering.  This is deliberately a **workaround**, not proof of the self-host
+codegen/runtime root cause and not grounds to close this record.  The next bounded
+Stage 3 run must show that all twelve `disc=-1` diagnostics disappear, check
+whether the missing-return cascade disappears, and compare peak RSS because the
+local may introduce one additional value-semantic `HirParam` copy per parameter.
