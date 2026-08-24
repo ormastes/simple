@@ -50,9 +50,9 @@ doc/05_design/os/desktop/tmux_simpleos_tui.md
 
 #### stores the name it was created with
 
-- Create session \
+- Create session "main" at index 0
    - Expected: s.session_name equals `main`
-   - Expected: s.session_index equals `0)  # oracle: index 0 is the first session slot; smux numbers sessions from 0`
+   - Expected: s.session_index equals `0`
 
 
 <details>
@@ -75,7 +75,7 @@ expect(s.session_index).to_equal(0)  # oracle: index 0 is the first session slot
 
 #### matches its own name
 
-- Create session \
+- Create session "work" and ask it to match that same name
    - Expected: s.matches_name("work") is true
 
 
@@ -95,7 +95,7 @@ expect(s.matches_name("work")).to_equal(true)
 
 #### rejects a different name
 
-- Ask session \
+- Ask session "work" to match an unrelated name
    - Expected: s.matches_name("other") is false
 
 
@@ -117,8 +117,8 @@ expect(s.matches_name("other")).to_equal(false)
 
 #### records index and title on creation
 
-- Create window 2 titled \
-   - Expected: w.window_index equals `2)  # oracle: the window index passed to create() is stored verbatim`
+- Create window 2 titled "editor"
+   - Expected: w.window_index equals `2`
    - Expected: w.title equals `editor`
    - Expected: w.is_active is false
 
@@ -144,7 +144,7 @@ expect(w.is_active).to_equal(false)
 
 #### becomes active when activated
 
-- Create window 0 titled \
+- Create window 0 titled "shell"
 - Activate it
    - Expected: a.is_active is true
 
@@ -194,8 +194,8 @@ expect(d.is_active).to_equal(false)
 #### records the width and height it was created with
 
 - Create pane 0 at the default 80x24 terminal geometry
-   - Expected: p.width equals `80)  # oracle: 80 columns is the POSIX default terminal width`
-   - Expected: p.height equals `24)  # oracle: 24 rows is the POSIX default terminal height`
+   - Expected: p.width equals `80`
+   - Expected: p.height equals `24`
 
 
 <details>
@@ -219,7 +219,7 @@ expect(p.height).to_equal(24)  # oracle: 24 rows is the POSIX default terminal h
 #### computes area as width times height
 
 - Create an 80x24 pane and ask for its cell area
-   - Expected: p.area() equals `1920)  # oracle: 1920 = 80 * 24 addressable cells`
+   - Expected: p.area() equals `1920`
 
 
 <details>
@@ -241,8 +241,8 @@ expect(p.area()).to_equal(1920)  # oracle: 1920 = 80 * 24 addressable cells
 #### adopts new dimensions when resized
 
 - Create an 80x24 pane, then resize it to 120x40
-   - Expected: r.width equals `120)  # oracle: the requested resize width is stored verbatim`
-   - Expected: r.height equals `40)  # oracle: the requested resize height is stored verbatim`
+   - Expected: r.width equals `120`
+   - Expected: r.height equals `40`
 
 
 <details>
@@ -267,7 +267,7 @@ expect(r.height).to_equal(40)  # oracle: the requested resize height is stored v
 
 - Build session state over a newly created session
    - Expected: ss.is_empty() is true
-   - Expected: ss.active_count equals `0)  # oracle: a fresh session owns no windows yet`
+   - Expected: ss.active_count equals `0`
 
 
 <details>
@@ -318,7 +318,7 @@ expect(sp.is_horizontal()).to_equal(true)
 
 - Split node 2 vertically at a 30 percent ratio
    - Expected: sp.direction equals `vertical`
-   - Expected: sp.ratio equals `30)  # oracle: the requested split ratio is stored unrounded`
+   - Expected: sp.ratio equals `30`
 
 
 <details>
@@ -383,7 +383,7 @@ expect(n.has_pane()).to_equal(true)
 
 - Build an internal node wrapping a vertical split
    - Expected: n.has_pane() is false
-   - Expected: n.pane_index equals `-1)  # oracle: -1 is the sentinel meaning "this node holds no pane"`
+   - Expected: n.pane_index equals `-1`
 
 
 <details>
@@ -409,8 +409,8 @@ expect(n.pane_index).to_equal(-1)  # oracle: -1 is the sentinel meaning "this no
 #### defaults to an 80x24 terminal
 
 - Read the default PTY configuration
-   - Expected: cfg.rows equals `24)  # oracle: 24 rows is the POSIX default terminal height`
-   - Expected: cfg.cols equals `80)  # oracle: 80 columns is the POSIX default terminal width`
+   - Expected: cfg.rows equals `24`
+   - Expected: cfg.cols equals `80`
 
 
 <details>
@@ -434,8 +434,8 @@ expect(cfg.cols).to_equal(80)  # oracle: 80 columns is the POSIX default termina
 #### adopts a new terminal size
 
 - Resize the default configuration to 40 rows by 120 columns
-   - Expected: r.rows equals `40)  # oracle: the requested row count is stored verbatim`
-   - Expected: r.cols equals `120)  # oracle: the requested column count is stored verbatim`
+   - Expected: r.rows equals `40`
+   - Expected: r.cols equals `120`
 
 
 <details>
@@ -460,7 +460,7 @@ expect(r.cols).to_equal(120)  # oracle: the requested column count is stored ver
 
 - Create a 4-line ring buffer and append one line
    - Expected: b1.get_line(0) equals `hello`
-   - Expected: b1.line_count equals `1)  # oracle: one append yields exactly one buffered line`
+   - Expected: b1.line_count equals `1`
 
 
 <details>
@@ -489,7 +489,7 @@ expect(b1.line_count).to_equal(1)  # oracle: one append yields exactly one buffe
 - Create a pane backend over the default PTY configuration
 - Stop it with a clean exit status
    - Expected: stopped.is_running is false
-   - Expected: stopped.exit_code equals `0)  # oracle: stop() records the status it was handed`
+   - Expected: stopped.exit_code equals `0`
 
 
 <details>
@@ -517,7 +517,7 @@ expect(stopped.exit_code).to_equal(0)  # oracle: stop() records the status it wa
 
 #### classifies new-session as a session command
 
-- Build a new-session command targeting \
+- Build a new-session command targeting "dev"
    - Expected: cmd.is_session_cmd() is true
    - Expected: cmd.target_name equals `dev`
 
@@ -551,6 +551,14 @@ expect(cmd.target_name).to_equal("dev")
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-TOOLS-SMUX-UNIT-001`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
@@ -564,23 +572,20 @@ Source SHA-256: `80fbcebc0fb8bc255f2b8d666ee48a5543de6723b3262fd26f77c301fb51922
 
 Source SHA-256: `80fbcebc0fb8bc255f2b8d666ee48a5543de6723b3262fd26f77c301fb519220`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 90/100
+SSpec documentization score: 92/100
 source: test/01_unit/os/smux_spec.spl
 mirror: doc/06_spec/01_unit/os/smux_spec.md (current)
-findings: 6 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=55 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/smux_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/os/smux_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/smux_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, evidence, recovery/troubleshooting
+doc/06_spec/01_unit/os/smux_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, evidence, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
 test/01_unit/os/smux_spec.spl:248:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'stores the name it was created with' has no retained capture or evidence

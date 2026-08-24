@@ -1281,10 +1281,32 @@ fn is_manual_step_source_line(trimmed: text) -> bool:
     # the pending_label / is_explicit_step_anchor_source_line path.
     trimmed.starts_with("step(")
 
+fn without_trailing_oracle_comment(trimmed: text) -> text:
+    """Drop a sanctioned same-line oracle marker so it cannot leak into the manual."""
+    # SSDOC-ORA-003 REQUIRES the rationale for a numeric expected value to sit
+    # on the SAME line as the assertion, so every well-documented spec hands
+    # this renderer lines ending in `# oracle: ...`. Only these two sanctioned
+    # markers are stripped — a bare `#` may legitimately live inside a string
+    # literal, and cutting there would corrupt the rendered value.
+    var out = trimmed
+    for marker in ["  # oracle:", "  # explained:"]:
+        val at = out.find(marker)
+        if at >= 0:
+            out = out[:at]
+    out.trim()
+
 fn step_helper_label_from_source(trimmed: text) -> text:
     if not trimmed.starts_with("step("):
         return ""
     if trimmed.contains("\""):
+        # Span the FIRST to the LAST quote rather than taking the first quoted
+        # segment: a label carrying an escaped quote (step("session \"main\""))
+        # splits into several segments, and a first-segment reader truncated it
+        # at the backslash — manuals showed `- Create session \`.
+        val open_at = trimmed.find("\"")
+        val close_at = trimmed.rfind("\"")
+        if close_at > open_at:
+            return trimmed[open_at + 1:close_at].replace("\\\"", "\"")
         return extract_quoted_name(trimmed)
     ""
 
@@ -1441,7 +1463,11 @@ fn manual_expected_value_label(value: text) -> text:
         label = label[0:77] + "... (full value in folded executable source)"
     label
 
-fn assertion_expected_summary(trimmed: text) -> text:
+fn assertion_expected_summary(raw_trimmed: text) -> text:
+    # Strip the same-line oracle marker first: without this the rendered
+    # expected value swallowed the comment, e.g.
+    #   Expected: s.session_index equals `0)  # oracle: index 0 is the first ...`
+    val trimmed = without_trailing_oracle_comment(raw_trimmed)
     if not trimmed.starts_with("expect("):
         return ""
     var expected_true = false
