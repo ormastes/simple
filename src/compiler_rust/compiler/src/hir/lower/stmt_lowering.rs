@@ -8,6 +8,15 @@ use super::context::FunctionContext;
 use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
+/// Runtime id reserved for the canonical `Option` enum -- mirrors
+/// `OPTION_ENUM_ID` in `runtime/src/value/objects.rs:259`, which is
+/// `pub(crate)` and so cannot be imported here. A user enum never receives this
+/// id, which is what lets the `Some(x)` binding tell a boxed `Some` apart from a
+/// raw payload that happens to itself be an enum. If the runtime constant moves,
+/// this must move with it.
+const OPTION_ENUM_ID: i64 = 1;
+
+
 /// Map an augmented-assignment operator to the binary operator it desugars to.
 ///
 /// Returns `None` for a plain `=` and for `~=` — neither carries an arithmetic
@@ -1452,8 +1461,25 @@ impl Lowerer {
                             // `lower_builtin_call_expr`; raw values must pass
                             // through untouched), so the discrimination must be
                             // a runtime branch, not a different builtin:
-                            //   if rt_enum_id(subj) >= 0: rt_enum_payload(subj)
+                            //   if rt_enum_id(subj) == OPTION_ENUM_ID: rt_enum_payload(subj)
                             //   else: subj
+                            //
+                            // The test is `== OPTION_ENUM_ID`, NOT the `>= 0` it
+                            // used to be. `>= 0` only asks "is the subject SOME
+                            // enum", which is ambiguous exactly when the
+                            // optional's payload type is ITSELF an enum: a raw
+                            // `SdnValue?` holding `SdnValue.Dict(d)` is a real
+                            // enum, so `>= 0` took the boxed branch and asked
+                            // `rt_enum_payload` for the SdnValue's OWN payload --
+                            // unwrapping one level too far and binding `d`
+                            // instead of the SdnValue. Nothing crashed; the
+                            // binding simply became the wrong value, so later
+                            // reads answered as if the data were absent.
+                            // `rt_unwrap_or_self` (runtime value/objects.rs:318)
+                            // already guards the identical hazard with the
+                            // identical rule and states the identical reason;
+                            // this makes the match lowering agree with it. Bug:
+                            // doc/08_tracking/bug/jit_option_of_enum_payload_double_unwrap_2026-08-24.md
                             // The then-branch is the byte-identical legacy path
                             // (same builtin, same expr type, same unboxing); the
                             // else-branch reinterprets the raw payload as the
@@ -1475,7 +1501,7 @@ impl Lowerer {
                                     kind: HirExprKind::If {
                                         condition: Box::new(HirExpr {
                                             kind: HirExprKind::Binary {
-                                                op: BinOp::GtEq,
+                                                op: BinOp::Eq,
                                                 left: Box::new(HirExpr {
                                                     kind: HirExprKind::BuiltinCall {
                                                         name: "rt_enum_id".to_string(),
@@ -1487,7 +1513,7 @@ impl Lowerer {
                                                     ty: TypeId::I64,
                                                 }),
                                                 right: Box::new(HirExpr {
-                                                    kind: HirExprKind::Integer(0),
+                                                    kind: HirExprKind::Integer(OPTION_ENUM_ID),
                                                     ty: TypeId::I64,
                                                 }),
                                             },
