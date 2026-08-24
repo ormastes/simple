@@ -37,7 +37,25 @@ equal (as on x86 boot scanout) but may not move backward. Rejection updates only
 diagnostic reason; it never advances canonical presentation state.
 
 This makes readiness correlation O(1) in time and space and adds no pixel copy.
-The next integration slice should construct one owner per desktop boot and
-require its accepted receipt before emitting each architecture's readiness or
-input-to-frame correlation marker. Until that wiring lands, this module is a
-prerequisite contract and not runtime proof that all three entries use it.
+
+## Architecture entry wiring
+
+The x86-64, AArch64, and RISC-V64 production desktop entries now construct one
+boot-scoped owner from metadata already admitted by their platform adapter.
+x86 uses the positive BGA scanout generation as its opaque boot identity;
+AArch64 and RISC-V64 use the value `1` for their platform-owned singleton
+primary output. These values are handles only. Framebuffer addresses remain in
+the architecture entry and are never passed to or retained by the owner.
+
+Readiness is emitted only after the first owner commit. AArch64 first requires
+successful RAMFB configuration plus its existing bounded visual-commit result.
+RISC-V64 commits only after `riscv64_display_present` succeeds and the display
+capsule publishes a positive generation; every later changed frame advances a
+local frame id and is admitted before its input/frame marker. AArch64 likewise
+admits each first/changed frame after the platform visual-commit result. x86's
+existing interactive loop and markers are unchanged; its first rendered frame
+is admitted before the pre-existing readiness markers, while subsequent loop
+presentation remains owned by `DesktopShell` and retains its existing behavior.
+
+All added admission work is fixed-field O(1), performs no frame-sized copy or
+allocation, and does not add dispatch to the idle input path.

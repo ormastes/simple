@@ -45,6 +45,11 @@ use os.compositor.engine2d_baremetal_core.{
     baremetal_simd_fill_tail_pixels
 }
 use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.compositor.baremetal_wm_present_owner.{
+    WM_PRESENT_ARCH_AARCH64,
+    BaremetalWmScanoutIdentityV1,
+    BaremetalWmPresentOwnerV1
+}
 use os.compositor.simpleos_wm_theme_bootstrap.{install_generated_simpleos_wm_theme, apply_simpleos_css_theme_override}
 use os.desktop.shell.{DesktopShell}
 use os.desktop.font_bootstrap.{simpleos_desktop_register_selected_fonts_from_vfs}
@@ -141,12 +146,13 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
         return
 
     val ramfb_scratch = (framebuffer_address + framebuffer_size).to_u64()
-    if not arm64_ramfb_setup(
+    val ramfb_configured = arm64_ramfb_setup(
         framebuffer_address.to_u64(),
         ARM64_RAMFB_WIDTH,
         ARM64_RAMFB_HEIGHT,
         ramfb_scratch
-    ):
+    )
+    if not ramfb_configured:
         uart_writeln("[desktop-gui-arm64] ramfb unavailable; rendering remains local")
 
     var framebuffer = FramebufferDriver.from_scanout_raw(
@@ -156,6 +162,17 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
         (screen_width * 4).to_u32(),
         32u32
     )
+    # RAMFB is a singleton boot output.  The scalar id is an opaque adapter
+    # handle, never its framebuffer address or dereference authority.
+    val wm_scanout_identity = BaremetalWmScanoutIdentityV1(
+        architecture: WM_PRESENT_ARCH_AARCH64,
+        scanout_id: 1u64,
+        width: ARM64_RAMFB_WIDTH,
+        height: ARM64_RAMFB_HEIGHT,
+        stride: ARM64_RAMFB_WIDTH * 4u32,
+        bpp: 32u32
+    )
+    var wm_present_owner = BaremetalWmPresentOwnerV1.create(wm_scanout_identity)
     val vfs_mounted = vfs_boot_init_virtio_fat32()
     val theme_css = if vfs_mounted:
         g_vfs_read_file_text("/THEME.CSS")
@@ -235,12 +252,20 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
         uart_writeln("[desktop-gui-arm64] fatal reason=first-frame")
         return
     var ramfb_frame_id: i64 = 1
-    if not arm64_emit_ramfb_visual_commit(
+    val first_platform_presented = arm64_emit_ramfb_visual_commit(
         0,
         framebuffer_address.to_u64(),
         first_revision,
         ramfb_frame_id
-    ):
+    )
+    val first_present_receipt = wm_present_owner.commit_present(
+        wm_scanout_identity,
+        first_revision.to_u64(),
+        ramfb_frame_id.to_u64(),
+        ramfb_frame_id.to_u64(),
+        ramfb_configured and first_platform_presented
+    )
+    if not first_present_receipt.accepted:
         uart_writeln("[desktop-gui-arm64] fatal reason=first-frame-ramfb-receipt")
         return
     val simd_enabled = baremetal_simd_fill_enabled()
@@ -445,14 +470,25 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
                     key_sequence
                 else:
                     pointer_sequence
-                if not arm64_emit_ramfb_visual_commit(
+                val platform_presented = arm64_emit_ramfb_visual_commit(
                     frame_input_sequence,
                     framebuffer_address.to_u64(),
                     rendered_revision,
                     ramfb_frame_id
-                ):
+                )
+                val present_receipt = wm_present_owner.commit_present(
+                    wm_scanout_identity,
+                    rendered_revision.to_u64(),
+                    ramfb_frame_id.to_u64(),
+                    ramfb_frame_id.to_u64(),
+                    ramfb_configured and platform_presented
+                )
+                if not present_receipt.accepted:
                     uart_writeln("[desktop-gui-arm64] fatal reason=changed-frame-ramfb-receipt")
                     running = false
+                    # Never publish input/frame correlation for a platform or
+                    # owner rejection from this iteration.
+                    continue
             if rendered_revision > 0 and pointer_event_pending:
                 uart_writeln("[wm-pointer-frame] input_seq={pointer_sequence} rendered_revision={rendered_revision} frame_id={ramfb_frame_id}")
             if rendered_revision > 0 and key_event_pending:

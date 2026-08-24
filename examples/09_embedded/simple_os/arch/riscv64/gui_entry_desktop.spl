@@ -18,6 +18,11 @@ use os.compositor.arm64_virtio_input_backend.{Arm64VirtioInputBackend}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.engine2d_display.{create_fb_engine_sized}
 use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.compositor.baremetal_wm_present_owner.{
+    WM_PRESENT_ARCH_RISCV64,
+    BaremetalWmScanoutIdentityV1,
+    BaremetalWmPresentOwnerV1
+}
 use os.compositor.simpleos_wm_theme_bootstrap.{install_generated_simpleos_wm_theme, apply_simpleos_css_theme_override}
 use os.desktop.shell.{DesktopShell}
 use os.desktop.font_bootstrap.{simpleos_desktop_register_selected_fonts_from_vfs}
@@ -87,6 +92,17 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
     serial_println("[desktop-gui-riscv64] scanout-ready width={width} height={height} stride={pitch}")
     val screen_w = width.to_i64()
     val screen_h = height.to_i64()
+    # The platform display capsule owns one primary scanout per boot.  This
+    # opaque scalar handle does not expose its framebuffer address.
+    val wm_scanout_identity = BaremetalWmScanoutIdentityV1(
+        architecture: WM_PRESENT_ARCH_RISCV64,
+        scanout_id: 1u64,
+        width: width,
+        height: height,
+        stride: pitch,
+        bpp: bpp
+    )
+    var wm_present_owner = BaremetalWmPresentOwnerV1.create(wm_scanout_identity)
 
     val vfs_mounted = vfs_boot_init_riscv64_virtio_fat32()
     if not vfs_mounted:
@@ -165,6 +181,17 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
     val display_generation = riscv64_display_generation()
     if display_generation <= 0:
         serial_println("[desktop-gui-riscv64] fatal reason=scanout-generation")
+        return
+    var wm_frame_id: u64 = 1u64
+    val first_present_receipt = wm_present_owner.commit_present(
+        wm_scanout_identity,
+        revision.to_u64(),
+        wm_frame_id,
+        display_generation.to_u64(),
+        true
+    )
+    if not first_present_receipt.accepted:
+        serial_println("[desktop-gui-riscv64] fatal reason=present-owner-first-frame")
         return
     serial_println("[desktop-gui-riscv64] scanout-present address={address} width={width} height={height} stride={pitch} bpp={bpp} format=bgra8888 generation={display_generation} scene_revision={revision}")
     serial_println("[desktop-gui-riscv64] present-ok revision={revision}")
@@ -297,6 +324,22 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
                 running = false
             else:
                 val changed_generation = riscv64_display_generation()
+                if changed_generation <= 0:
+                    serial_println("[desktop-gui-riscv64] fatal reason=changed-scanout-generation")
+                    running = false
+                    continue
+                wm_frame_id = wm_frame_id + 1u64
+                val present_receipt = wm_present_owner.commit_present(
+                    wm_scanout_identity,
+                    rendered_revision.to_u64(),
+                    wm_frame_id,
+                    changed_generation.to_u64(),
+                    true
+                )
+                if not present_receipt.accepted:
+                    serial_println("[desktop-gui-riscv64] fatal reason=present-owner-changed-frame")
+                    running = false
+                    continue
                 serial_println("[desktop-gui-riscv64] scanout-present address={address} width={width} height={height} stride={pitch} bpp={bpp} format=bgra8888 generation={changed_generation} scene_revision={rendered_revision}")
                 if key_event_pending and changed:
                     serial_println("[wm-frame] input_seq={key_sequence} generation={changed_generation}")
