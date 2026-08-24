@@ -21,9 +21,14 @@ This reconciliation is source evidence, not runtime certification. The deployed
 `bin/release/simple` wrapper currently fails because its admitted self-hosted
 target is absent. Therefore test, optimizer, timing, and RSS claims remain
 blocked by `simple_compiler_perf_audit_missing_stage4_binary.md`. The correct
-next implementation layers remain typed HIR collection facts, MemorySSA-lite,
-bounded cost summaries, and profile correlation; dormant transforms must not be
-bulk-activated.
+first typed HIR collection-fact slice is now implemented with resolved-symbol
+metadata, receiver evidence, loop ancestry, explicit incomplete outcomes, and a
+fail-closed `Array.contains` COLL002 candidate projection. Unknown/unbounded
+`while` and `loop` bodies are recognized as loop contexts but do not claim a
+finite trip bound. The generated standard-library registry,
+driver diagnostic adapter, remaining typed rules, CollectionPlan, MemorySSA-lite,
+bounded summaries, and profile correlation remain incomplete; dormant transforms
+must not be bulk-activated.
 
 I inspected the lint path, collection analysis, MIR optimization registry and dispatch, loop analyses, vectorization, bounds-check elimination, and escape analysis. This was a source-level audit; I did not execute the compiler, test suite, or benchmarks. Findings below therefore distinguish observed code, derived risk, and runtime impact requiring measurement.
 

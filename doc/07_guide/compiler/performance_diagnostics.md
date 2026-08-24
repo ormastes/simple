@@ -27,6 +27,13 @@ after projection, avoiding duplicate source splitting without retaining editor c
 The same view feeds file attributes and migrated line-oriented rules; compatibility source
 wrappers remain for standalone callers.
 
+The first typed collection-analysis slice is request-local `HirPerfFacts`. Its
+COLL002 projection requires a resolved method symbol, authoritative typed array/slice
+receiver, verified version-matched linear-cost metadata, and positive loop ancestry.
+Unknown or unverified facts produce no typed warning and no fix. Until the standard-
+library registry and driver adapter land, existing source-pattern collection warnings
+remain advisory compatibility output rather than typed proof.
+
 ## Optimizer truth
 
 The requested pipeline is an inventory. The effective pipeline contains only descriptors
