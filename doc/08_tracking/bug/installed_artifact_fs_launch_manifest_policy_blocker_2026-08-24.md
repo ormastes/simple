@@ -1,7 +1,7 @@
 # Installed-artifact filesystem launch manifest-policy blocker — 2026-08-24
 
-Status: blocked after three independent static review cycles; unsafe draft
-reverted; no runtime verification performed.
+Status: policy boundary implemented for the current ELF64 launch subset;
+static review pending; no runtime verification performed.
 
 ## Intended boundary
 
@@ -48,3 +48,21 @@ Before opening or minting authority, the future owner must:
 The Simple interpreter, compiler, and loader remain required signed catalog
 rows. Their filesystem-launch goal is not complete until this policy boundary,
 architecture user-entry dispatch, and later QEMU acceptance evidence exist.
+
+## 2026-08-24 continuation
+
+`installed_artifact_manifest_execution_policy_v1.spl` now owns a bounded,
+metadata-only catalog-to-load-plan transition. The installed-artifact loader
+entrypoint binds the active target, sealed catalog generation, canonical
+manifest identity, content digest, exact ELF kind/version, child capability
+mask, ABI features, service policy, resource policy, signer identity, and the
+boot-verified public-key digest before its first VFS read or authority issue.
+The sealed catalog now retains that trust-root digest in its integrity hash so
+the per-open trust registry cannot substitute another key under the same key
+name. Unsupported services and nonzero resource limits are
+intentionally denied until their scheduler/descriptor transaction exists.
+
+This closes the manifest-intent bypass for the supported ELF64 subset. It does
+not claim filesystem execution complete: the new path is unverified, requires
+independent static review, and still needs a canonical caller plus architecture
+entry and QEMU acceptance evidence.

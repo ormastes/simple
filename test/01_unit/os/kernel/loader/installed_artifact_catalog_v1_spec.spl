@@ -21,6 +21,9 @@ use os.kernel.loader.installed_artifact_catalog_v1.{
 fn catalog_digest() -> text:
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+fn catalog_trust_root_digest() -> text:
+    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
 fn catalog_manifest(
     path: text = "/bin/simple", arch: text = "x86_64"
 ) -> SimpleArtifactManifest:
@@ -121,14 +124,16 @@ describe "installed artifact catalog bounded input":
             generation: active.generation, nonce: active.nonce + 1u64)
         expect(installed_artifact_catalog_bootstrap_add_v1(
             forged, "/bin/forged", [], catalog_digest(), "ed25519",
-            "boot-root-1", "signed-fixture", catalog_manifest("/bin/forged")))
+            "boot-root-1", "signed-fixture", catalog_trust_root_digest(),
+            catalog_manifest("/bin/forged")))
             .to_be(false)
 
         var caller_aliases = ["/usr/bin/simple", "/diagnostic/x86-simple"]
         var caller_manifest = catalog_manifest("/bin/simple", "x86_64")
         expect(installed_artifact_catalog_bootstrap_add_v1(
             active, "/bin/simple", caller_aliases, catalog_digest(), "ed25519",
-            "boot-root-1", "signed-fixture", caller_manifest))
+            "boot-root-1", "signed-fixture", catalog_trust_root_digest(),
+            caller_manifest))
             .to_be(true)
         caller_aliases.push("/alias/late-mutation")
         caller_manifest.required_services.push("late-service")
@@ -142,6 +147,7 @@ describe "installed artifact catalog bounded input":
             expect(installed_artifact_catalog_bootstrap_add_v1(
                 active, "/bin/simple", ["/usr/bin/simple"], catalog_digest(),
                 "ed25519", "boot-root-1", "signed-fixture",
+                catalog_trust_root_digest(),
                 catalog_manifest("/bin/simple", architectures[arch_index])))
                 .to_be(true)
             arch_index = arch_index + 1
@@ -153,12 +159,14 @@ describe "installed artifact catalog bounded input":
                 val path = "/bin/tool{i}"
                 expect(installed_artifact_catalog_bootstrap_add_v1(
                     active, path, [], catalog_digest(), "ed25519", "boot-root-1",
-                    "signed-fixture", catalog_manifest(path, architectures[arch_index])))
+                    "signed-fixture", catalog_trust_root_digest(),
+                    catalog_manifest(path, architectures[arch_index])))
                     .to_be(true)
                 i = i + 1
             expect(installed_artifact_catalog_bootstrap_add_v1(
                 active, "/bin/overflow", [], catalog_digest(), "ed25519",
                 "boot-root-1", "signed-fixture",
+                catalog_trust_root_digest(),
                 catalog_manifest("/bin/overflow", architectures[arch_index])))
                 .to_be(false)
             arch_index = arch_index + 1
@@ -166,12 +174,14 @@ describe "installed artifact catalog bounded input":
             SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1 * architectures.len())
         expect(installed_artifact_catalog_bootstrap_add_v1(
             active, "/bin/over-total", [], catalog_digest(), "ed25519",
-            "boot-root-1", "signed-fixture", catalog_manifest("/bin/over-total")))
+            "boot-root-1", "signed-fixture", catalog_trust_root_digest(),
+            catalog_manifest("/bin/over-total")))
             .to_be(false)
         expect(installed_artifact_catalog_bootstrap_seal_v1(active)).to_be(true)
         expect(installed_artifact_catalog_bootstrap_add_v1(
             active, "/bin/stale", [], catalog_digest(), "ed25519",
-            "boot-root-1", "signed-fixture", catalog_manifest("/bin/stale")))
+            "boot-root-1", "signed-fixture", catalog_trust_root_digest(),
+            catalog_manifest("/bin/stale")))
             .to_be(false)
 
         # Target-free compatibility lookup rejects a cross-target collision.
@@ -180,6 +190,8 @@ describe "installed artifact catalog bounded input":
         val first = installed_artifact_catalog_lookup_v1("/diagnostic/x86-simple")
         expect(first.?).to_be(true)
         expect(first.unwrap().aliases.len()).to_equal(2)
+        expect(first.unwrap().expected_trust_root_sha256).to_equal(
+            catalog_trust_root_digest())
         var changed = first.unwrap()
         changed.aliases.push("/alias/output-mutation")
         changed.manifest.content_hashes.push(

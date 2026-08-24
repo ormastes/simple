@@ -9,7 +9,8 @@
 use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
 use std.fs_driver.types.{FileHandle}
 use std.common.contracts.execution.simpleos_executable_v1.{
-    ManifestTarget, SimpleArtifactManifest
+    ManifestTarget, SimpleArtifactManifest,
+    simple_artifact_manifest_canonical_hash_input_v1
 }
 use std.common.contracts.execution.simpleos_executable_admission_v1.{
     ExecutableAdmissionV1, ExecutableImageHandleV1, ExecutableLoadRangeV1,
@@ -55,6 +56,10 @@ use os.kernel.loader.executable_target_dispatch_v1.{
 }
 use os.kernel.loader.elf_loader.{elf_authenticated_layout_v1}
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.loader.installed_artifact_manifest_execution_policy_v1.{
+    installed_artifact_catalog_elf_load_plan_v1,
+    installed_artifact_trust_binding_check_v1
+}
 
 pub enum ExecutableLoaderAdmissionErrorV1:
     StaleBinding
@@ -66,6 +71,7 @@ pub enum ExecutableLoaderAdmissionErrorV1:
     RangeInvalid
     DigestInvalid
     CapabilityMismatch
+    ManifestPolicyDenied
     HandleInvalid
     AdmissionMismatch
     CryptographicVerifierUnavailable
@@ -95,6 +101,10 @@ pub struct ExecutableLoaderAdmissionResultV1:
     authority_token: ExecutableAuthorityTokenV1
     namespace_generation: u64
     entry_point: u64
+
+pub struct InstalledArtifactLoaderAdmissionResultV1:
+    admission: ExecutableLoaderAdmissionResultV1
+    consumer: ExecutableLoadConsumerV1
 
 pub struct ExecutableLoaderImageRetrievalV1:
     # Diagnostic retrieval only. This value is not mapping/load authority.
@@ -389,6 +399,62 @@ pub fn executable_loader_admit_authenticated_open_binding_v1(
                 namespace_generation: binding.namespace_generation,
                 entry_point: layout.unwrap().entry_point))
 
+pub fn executable_loader_admit_installed_artifact_open_binding_v1(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    binding: ExecuteOpenBinding,
+    inputs: ExecutableLoaderVerificationInputsV1,
+    admission: ExecutableAdmissionV1,
+    proof: ExecutableLoaderCryptographicProofV1
+) -> Result<InstalledArtifactLoaderAdmissionResultV1, ExecutableLoaderAdmissionErrorV1>:
+    """Catalog-bound filesystem admission; no path-only compatibility mode.
+
+    The sealed catalog lookup and manifest policy complete before the delegated
+    authenticated path performs its first VFS read.  Canonical manifest and
+    content identities must agree with the admission inputs, so callers cannot
+    pair a trusted catalog path with different signed metadata.
+    """
+    if not table.execute_binding_is_current(binding) or
+        not _loader_binding_matches_admission(binding, admission):
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.StaleBinding)
+    val planned = installed_artifact_catalog_elf_load_plan_v1(
+        binding.canonical_source_path, admission.effective_capabilities)
+    if planned.is_err():
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.ManifestPolicyDenied)
+    val policy_plan = planned.unwrap()
+    if not installed_artifact_trust_binding_check_v1(
+        policy_plan.record, inputs.manifest.signature,
+        proof.signer_key_id, admission.trust_root_hash):
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
+    # The catalog signature and per-open admission signature use distinct
+    # canonical domains. They need not be byte-equal. Exact signer
+    # identity binds the already boot-verified catalog row to the trusted key
+    # that the delegated admission verifier checks against trust_root_hash.
+    val canonical = simple_artifact_manifest_canonical_hash_input_v1(inputs.manifest)
+    if not canonical.?:
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.ManifestPolicyDenied)
+    val input_identity = sha256_u8_hex(canonical.unwrap())
+    if input_identity != policy_plan.record.manifest_identity_sha256 or
+        policy_plan.record.content_sha256 != admission.image_hash or
+        policy_plan.record.content_sha256 != inputs.image_hash:
+        val closed = table.close(binding.file_handle)
+        if closed.is_err(): return Err(ExecutableLoaderAdmissionErrorV1.CloseFailed)
+        return Err(ExecutableLoaderAdmissionErrorV1.DigestInvalid)
+    val admitted = executable_loader_admit_authenticated_open_binding_v1(
+        table, authorities, binding, inputs, admission, proof)
+    match admitted:
+        case Err(error): Err(error)
+        case Ok(result): Ok(InstalledArtifactLoaderAdmissionResultV1(
+            admission: result, consumer: policy_plan.consumer))
+
 pub fn executable_loader_authority_owner_initialize(
     slot_limit: i64,
     nonce_seed: u64
@@ -506,12 +572,14 @@ pub(package) fn executable_loader_revoke_joint_reservation_v1(
         case Ok(close_lease): _loader_finish_close(table, authorities, close_lease)
 
 export ExecutableLoaderAdmissionErrorV1
+export InstalledArtifactLoaderAdmissionResultV1
 export ExecutableLoaderVerificationInputsV1
 export ExecutableLoaderAdmissionResultV1
 export ExecutableLoaderImageRetrievalV1
 export ExecutableLoaderCryptographicProofV1
 export executable_loader_admit_open_binding
 export executable_loader_admit_authenticated_open_binding_v1
+export executable_loader_admit_installed_artifact_open_binding_v1
 export executable_loader_architecture_for_target_v1
 export executable_loader_authority_owner_initialize
 export executable_loader_commit, executable_loader_retrieve_once
