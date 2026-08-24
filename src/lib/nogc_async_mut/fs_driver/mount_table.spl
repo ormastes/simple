@@ -69,12 +69,14 @@ struct OpenFileBinding:
     virtual_handle: u64
     mount_id: MountId
     inner_handle: FileHandle
+    canonical_source_path: text
 
 struct ExecuteOpenBinding:
     """Owned, backend-neutral executable-open identity and generation snapshot."""
     mount_id: MountId
     backend_name: text
     backend_kind: text
+    canonical_source_path: text
     file_handle: FileHandle
     mount_generation: u64
     namespace_generation: u64
@@ -99,6 +101,7 @@ struct StableFileSnapshotSealV1:
     mount_id: MountId
     backend_name: text
     backend_kind: text
+    canonical_source_path: text
     mount_generation: u64
     namespace_generation: u64
     content_generation: u64
@@ -112,6 +115,7 @@ struct StableFileSnapshotBindingV1:
     lease_id: u64
     mount_id: MountId
     file_handle: FileHandle
+    canonical_source_path: text
     kind: PositionedDriverKind
     mount_generation: u64
     namespace_generation: u64
@@ -139,7 +143,8 @@ fn _retired_file_binding(binding: OpenFileBinding) -> OpenFileBinding:
         active: false, retired: terminal,
         generation: if terminal: binding.generation else: binding.generation + 1u32,
         virtual_handle: 0u64, mount_id: binding.mount_id,
-        inner_handle: binding.inner_handle)
+        inner_handle: binding.inner_handle,
+        canonical_source_path: binding.canonical_source_path)
 
 fn _retired_dir_binding(binding: OpenDirBinding) -> OpenDirBinding:
     val terminal = binding.generation == MOUNT_HANDLE_GENERATION_MAX
@@ -199,7 +204,8 @@ impl MountTable:
                 val handle = mount_handle_encode(slot, prior.generation)
                 self.open_files[slot] = OpenFileBinding(
                     active: true, retired: false, generation: prior.generation,
-                    virtual_handle: handle, mount_id: mount_id, inner_handle: inner)
+                    virtual_handle: handle, mount_id: mount_id, inner_handle: inner,
+                    canonical_source_path: "")
                 return Ok(FileHandle(id: handle))
             slot = slot + 1
         if self.open_files.len() >= MOUNT_TABLE_MAX_OPEN_FILES:
@@ -207,8 +213,20 @@ impl MountTable:
         val handle = mount_handle_encode(self.open_files.len() as i32, 1u32)
         self.open_files = self.open_files.push(OpenFileBinding(
             active: true, retired: false, generation: 1u32,
-            virtual_handle: handle, mount_id: mount_id, inner_handle: inner))
+            virtual_handle: handle, mount_id: mount_id, inner_handle: inner,
+            canonical_source_path: ""))
         Ok(FileHandle(id: handle))
+
+    me fn _seal_file_source_path(handle: FileHandle, path: text) -> bool:
+        if not mount_path_canonical(path) or path == "/": return false
+        val slot = mount_handle_slot(handle.id)
+        if slot < 0 or slot >= self.open_files.len() as i32: return false
+        val binding = self.open_files[slot]
+        if not binding.active or binding.generation != mount_handle_generation(handle.id) or
+           (binding.canonical_source_path != "" and binding.canonical_source_path != path):
+            return false
+        self.open_files[slot].canonical_source_path = path
+        true
 
     me fn _bind_dir(mount_id: MountId, inner: DirHandle) -> Result<DirHandle, FsError>:
         var slot: i32 = 0
@@ -237,6 +255,7 @@ impl MountTable:
 
     me fn _bind_stable_snapshot(
         mount_id: MountId, file_handle: FileHandle, kind: PositionedDriverKind,
+        canonical_source_path: text,
         mount_generation: u64, namespace_generation: u64,
         content_generation: u64, size: u64
     ) -> Result<StableFileSnapshotLeaseV1, FsError>:
@@ -249,6 +268,7 @@ impl MountTable:
                 self.stable_snapshots[slot] = StableFileSnapshotBindingV1(
                     active: true, retired: false, generation: prior.generation,
                     lease_id: lease_id, mount_id: mount_id, file_handle: file_handle,
+                    canonical_source_path: canonical_source_path,
                     kind: kind, mount_generation: mount_generation,
                     namespace_generation: namespace_generation,
                     content_generation: content_generation, size: size,
@@ -263,6 +283,7 @@ impl MountTable:
         self.stable_snapshots = self.stable_snapshots.push(StableFileSnapshotBindingV1(
             active: true, retired: false, generation: 1u32,
             lease_id: lease_id, mount_id: mount_id, file_handle: file_handle,
+            canonical_source_path: canonical_source_path,
             kind: kind, mount_generation: mount_generation,
             namespace_generation: namespace_generation,
             content_generation: content_generation, size: size,
@@ -294,6 +315,7 @@ impl MountTable:
             generation: if terminal: binding.generation else: binding.generation + 1u32,
             lease_id: 0u64, mount_id: binding.mount_id,
             file_handle: binding.file_handle, kind: binding.kind,
+            canonical_source_path: binding.canonical_source_path,
             mount_generation: binding.mount_generation,
             namespace_generation: binding.namespace_generation,
             content_generation: binding.content_generation, size: binding.size,
@@ -507,8 +529,11 @@ impl MountTable:
                     val _ = _driver_close_handle(entry.driver, inner)
                     return Err(virtual_result.unwrap_err())
                 val virtual_handle = virtual_result.unwrap()
+                if not self._seal_file_source_path(virtual_handle, path):
+                    val _ = self.close(virtual_handle)
+                    return Err(FsError.StaleHandle)
                 val lease_result = self._bind_stable_snapshot(
-                    entry.id, virtual_handle, kind, entry.mount_generation,
+                    entry.id, virtual_handle, kind, path, entry.mount_generation,
                     entry.namespace_generation, entry.content_generation, stat.size)
                 if lease_result.is_err():
                     val _ = self.close(virtual_handle)
@@ -637,6 +662,7 @@ impl MountTable:
                     mount_id: snapshot.mount_id,
                     backend_name: _driver_name(entry.driver),
                     backend_kind: _driver_kind_name(entry.driver),
+                    canonical_source_path: snapshot.canonical_source_path,
                     mount_generation: snapshot.mount_generation,
                     namespace_generation: snapshot.namespace_generation,
                     content_generation: snapshot.content_generation,
@@ -664,6 +690,7 @@ impl MountTable:
            seal.mount_generation != snapshot.mount_generation or
            seal.namespace_generation != snapshot.namespace_generation or
            seal.content_generation != snapshot.content_generation or
+           seal.canonical_source_path != snapshot.canonical_source_path or
            seal.size != snapshot.size or
            seal.content_sha256 != snapshot.content_sha256:
             return Err(FsError.Permission)
@@ -698,6 +725,7 @@ impl MountTable:
                     mount_id: entry.id,
                     backend_name: backend_name,
                     backend_kind: backend_kind,
+                    canonical_source_path: snapshot.canonical_source_path,
                     file_handle: snapshot.file_handle,
                     mount_generation: snapshot.mount_generation,
                     namespace_generation: snapshot.namespace_generation,
@@ -857,10 +885,14 @@ impl MountTable:
                     _driver_close_handle(entry.driver, opened)
                     return Err(bound.unwrap_err())
                 val virtual_handle = bound.unwrap().id
+                if not self._seal_file_source_path(FileHandle(id: virtual_handle), path):
+                    val _ = self.close(FileHandle(id: virtual_handle))
+                    return Err(FsError.StaleHandle)
                 return Ok(ExecuteOpenBinding(
                     mount_id: entry.id,
                     backend_name: _driver_name(entry.driver),
                     backend_kind: _driver_kind_name(entry.driver),
+                    canonical_source_path: path,
                     file_handle: FileHandle(id: virtual_handle),
                     mount_generation: entry.mount_generation,
                     namespace_generation: entry.namespace_generation,
@@ -876,6 +908,10 @@ impl MountTable:
             case nil: return false
             case Some(value):
                 if value.mount_id != binding.mount_id:
+                    return false
+                if value.canonical_source_path != binding.canonical_source_path or
+                   not mount_path_canonical(binding.canonical_source_path) or
+                   binding.canonical_source_path == "/":
                     return false
         var i: i32 = 0
         while i < self.mounts.len() as i32:
