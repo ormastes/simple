@@ -151,7 +151,7 @@ fn archive_from_dir(dir: &Path, stem: &str) -> Option<PathBuf> {
     None
 }
 
-fn archive_from_path_or_dir(path: &Path, stem: &str) -> Option<PathBuf> {
+pub(crate) fn archive_from_path_or_dir(path: &Path, stem: &str) -> Option<PathBuf> {
     if path.is_dir() {
         return archive_from_dir(path, stem);
     }
