@@ -74,6 +74,13 @@ untagged identities and stale baseline entries. This prevents new silent debt
 without mass-stamping existing declarations or adding runtime work. It does
 not prove ABI correctness or cryptographic admission.
 
+The TLS 1.3 client audit also found three Ed25519 CertificateVerify provider
+operations on one handshake path: two raw debug probes followed by the decision
+call, including one ambient symbol with no owned declaration. Both transport
+modes now use the canonical checked verifier once. This removes two raw
+declarations and two redundant public-key operations without adding lookup,
+allocation, copy, or dispatch work.
+
 ## Post-P0 native bridge inventory
 
 The value-returning `spl_wffi_call_i64` family is not one semantic contract.
