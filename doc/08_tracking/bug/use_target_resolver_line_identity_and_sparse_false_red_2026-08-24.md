@@ -1,7 +1,7 @@
 # Use-target ratchet keys line numbers and silently scans missing sparse files
 
 **Date:** 2026-08-24
-**Status:** CHECKER FIXED / SOURCE AND BASELINE DEBT REMAIN
+**Status:** CHECKER AND SOURCE DRIFT FIXED / BOOTSTRAP ADMISSION PENDING
 **Owner:** must-check bootstrap lane
 
 ## Defects
@@ -19,9 +19,11 @@ Tracked-but-unmaterialized input now returns ERROR with the first missing path.
 
 ## Evidence
 
-Ten fixtures pass, including real missing module/member cases, line-only
+Thirteen fixtures pass, including real missing module/member cases, line-only
 movement stability, changed-target distinction, vendor exclusion, non-vacuity,
-and missing tracked bytes. The sparse checkout fails closed at the first absent
+missing tracked bytes, bare sibling imports, one-hop wildcard facades, and an
+importer-scoped compiler-Rust stdlib root that cannot leak into the repository
+stdlib namespace. The sparse checkout fails closed at the first absent
 formal-verification spec instead of printing fabricated debt.
 
 After materializing the complete `src/` and `test/` trees, the authoritative
@@ -31,5 +33,18 @@ and retracted. The baseline was not regenerated: the remaining rows require
 source/alias review, including new warning-phase lint exports, raw file-read
 imports, and bare sibling imports in `app.leak_finder`.
 
-The bootstrap ledger row stays TODO until these rows are resolved and an
-admitted Stage 4 bootstrap retains a clean scan.
+The follow-up authoritative scan checked 313,713 uses in 42.03 seconds with
+623,708 KiB peak RSS. Every one of its 134 changed enforced keys was proven to
+map to pre-existing debt (whole-module alias normalization or a more precise
+MODULE_MISSING to MEMBER_MISSING classification); there were zero unmapped new
+obligations. The corrected resolver made 3,960 old keys stale, and the baseline
+was regenerated from the captured scan only after that mapping audit.
+
+The source review also repaired real drift exposed by the stronger resolver:
+canonical file reads in four bootstrap specs, split tooling and JSON owners,
+real filesystem result handling, synchronous webhook transport, a missing
+ctype smoke table, and an unused nonexistent time import.
+
+At 42.03 seconds and roughly 609 MiB, this remains a bootstrap-owned gate and
+must not move into the approximately ten-second push path. The bootstrap ledger
+row stays TODO until an admitted Stage 4 bootstrap retains a clean scan.
