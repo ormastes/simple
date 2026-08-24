@@ -2343,3 +2343,17 @@ pre-existing harness/upstream failures: an unresolved `plan` variable and a
 child runner resolving the sibling `simple-main` worktree. Current authority
 totals are 21,435 raw calls, 2,124 explicit, and 19,311 missing. Signed and
 admitted provider evidence remains zero.
+
+## HIR-entry heap-reference probe authority
+
+Both fail-closed `rt_heap_ref_wellformed` calls now sit inside lexical
+`unsafe(ffi)` blocks while their existing named-error returns remain intact.
+The non-streaming path still avoids both unwrap and provider call when the
+optional owner is absent. The edit adds no scalar temporary, allocation,
+provider call, loop work, or dispatch.
+
+The formation-guard specification passes 8/8. Optimizer findings remain 195;
+one paired host sample changes from 6.91 s / 284,052 KiB to 6.02 s /
+281,760 KiB. This supports the no-regression claim but is not treated as a
+general speedup. Current authority totals are 21,435 raw calls, 2,126 explicit,
+and 19,309 missing. Signed and admitted provider evidence remains zero.

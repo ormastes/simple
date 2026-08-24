@@ -1367,3 +1367,9 @@ or introduce a second per-object filesystem probe. The optimizer remains at 70
 findings and the paired measurement is 4.78 s / 269,808 KiB before versus
 4.48 s / 269,624 KiB after. The focused specification's unrelated `plan` and
 cross-worktree child-runner failures must be repaired by their canonical owners.
+
+HIR-entry follow-up scopes both heap-reference formation probes without adding
+a temporary or changing the absent-owner short circuit. Current census: 21,435
+calls (2,126 explicit, 19,309 missing), with zero signed/admitted. The focused
+guard spec passes 8/8, optimizer findings remain 195, and paired measurement is
+6.91 s / 284,052 KiB before versus 6.02 s / 281,760 KiB after.
