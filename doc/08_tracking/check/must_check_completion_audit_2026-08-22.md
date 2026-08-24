@@ -8,8 +8,8 @@ never counts as PASS.
 | Requirement | State | Authoritative evidence or exact unblock condition |
 |---|---|---|
 | Textual SDN ledger with TODO-to-first-PASS promotion | PASS | `doc/08_tracking/check/must_check_db.sdn`; `simple.must-check-gate-receipt/v1`; focused tiering contract PASS |
-| Lightweight push / expensive bootstrap split | PASS | `config/check/must_check_gates.sdn`; push registry has five bounded rows; expensive rows are bootstrap-owned |
-| Push completes in about ten seconds | PASS | Real 118,074-file committed-tree path: 5.40s, 211,932 KiB peak RSS; focused self-test 5s and exact-ref/two-ref/installed-hook subpaths each below one whole second |
+| Lightweight push / expensive bootstrap split | PASS | `config/check/must_check_gates.sdn`; push retains bounded range/ref checks and two sub-second tree checks; measured whole-tree/compiler/executable rows plus detector mutation fixtures are bootstrap-owned |
+| Push completes in about ten seconds | PASS | Real committed-tree path on 2026-08-24: 9.27s, 223,520 KiB peak RSS. The same path was 10.21s/225,032 KiB before splitting runtime-API mutation fixtures, and the removed tree-mode subset alone measured about 59s |
 | Push evidence is exact-ref, bounded, and monotonic | PASS | Exact pushed blobs, 64 MiB pre-hash aggregate cap, two-ref cap, required-ID ratchet, initial unpromoted state, and post-PASS downgrade rejection are covered by `must_check_tiering_test.shs` |
 | Bootstrap recorder uses exact admitted Stage 4 | PASS (contract) | Bare mode rejects mutation; `--record-bootstrap-success` binds Stage 1–4 and injects exact Stage 4 into automated gates; recorder self-test PASS |
 | Ad-hoc bootstrap reaches admitted Stage 4 | TODO | Stage 2 passed earlier; Stage 3 terminates on the documented HIR RSS cliff. Resume from `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`; do not substitute the Rust seed |

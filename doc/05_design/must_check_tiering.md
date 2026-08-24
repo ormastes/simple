@@ -26,6 +26,10 @@ The runtime-API range guard uses `--scan-only` only from its closed push
 dispatch row; that mode requires an explicit range. Its four mutation fixtures
 remain a separate automated bootstrap row, while default manual execution still
 runs them before scanning.
+On the same committed tree, the full production consumer measured 10.21 seconds
+and 225,032 KiB peak RSS before that fixture split, then 9.27 seconds and
+223,520 KiB afterward. This is the retained NFR-MCT-001 before/after evidence;
+the focused fixture is coverage, not the production timing oracle.
 The quick rules row extracts `rules.sdl` from the same committed ref before
 parsing its numeric commands. An explicit `--rules` path exists only for
 diagnostic and self-test fixtures.
