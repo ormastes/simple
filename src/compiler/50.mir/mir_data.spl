@@ -31,6 +31,17 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 @unsafe(reason: "raw debug-environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 
+pub fn mir_trace_requested(
+    compiler_trace: text,
+    bootstrap_diag: text,
+    mir_builder_trace: text
+) -> bool:
+    """Whether fine-grained MIR tracing was explicitly requested.
+
+    Phase profiling owns bounded phase receipts, not per-expression tracing.
+    """
+    compiler_trace == "1" or bootstrap_diag == "1" or mir_builder_trace == "1"
+
 # One immutable trace-policy snapshot per outer MIR lowering. The lowering
 # pipeline is process-global/serial today; nested lowering inherits the parent
 # decision and restores its depth without rewriting environment variables.
@@ -40,13 +51,13 @@ pub fn mir_trace_scope_enter() -> i64:
     val previous_depth = _mir_trace_scope_slot[0]
     if previous_depth == 0:
         unsafe(capabilities: [ffi]):
-            val compiler_trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
-            val phase_trace = (rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1"
-            val bootstrap_diag = (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1"
-            _mir_trace_scope_slot[1] = if (
-                compiler_trace or phase_trace or bootstrap_diag): 1 else: 0
-            _mir_trace_scope_slot[2] = if (
-                (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"): 1 else: 0
+            val compiler_trace = rt_env_get("SIMPLE_COMPILER_TRACE") ?? ""
+            val bootstrap_diag = rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
+            val mir_builder_trace = rt_env_get("SIMPLE_MIRB_TRACE") ?? ""
+            _mir_trace_scope_slot[1] = if mir_trace_requested(
+                compiler_trace, bootstrap_diag, ""): 1 else: 0
+            _mir_trace_scope_slot[2] = if mir_trace_requested(
+                "", "", mir_builder_trace): 1 else: 0
         _mir_trace_scope_slot[3] = _mir_trace_scope_slot[3] + 1
     _mir_trace_scope_slot[0] = previous_depth + 1
     previous_depth
@@ -61,15 +72,16 @@ pub fn mir_lowering_trace_enabled() -> bool:
     if _mir_trace_scope_slot[0] > 0:
         return _mir_trace_scope_slot[1] != 0
     unsafe(capabilities: [ffi]):
-        ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
-         (rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1" or
-         (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1")
+        mir_trace_requested(
+            rt_env_get("SIMPLE_COMPILER_TRACE") ?? "",
+            rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "",
+            "")
 
 pub fn mir_builder_trace_enabled() -> bool:
     if _mir_trace_scope_slot[0] > 0:
         return _mir_trace_scope_slot[2] != 0
     unsafe(capabilities: [ffi]):
-        (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        mir_trace_requested("", "", rt_env_get("SIMPLE_MIRB_TRACE") ?? "")
 
 pub fn mir_trace_enabled() -> bool:
     """Shared MIR-lowering trace gate. Default OFF.
