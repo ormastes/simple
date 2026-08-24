@@ -1082,6 +1082,19 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Completed next: replace the remaining fixed probes with an immutable sparse
   multi-pattern matcher without constructing a registry per call.
 - Verification intentionally not run under the user's no-verify instruction.
+
+## Completed lint lexical-snapshot tranche
+
+- Add one neutral `CodeLineSnapshot` owner in `lint_text` with the exact legacy
+  triple-quote state machine and an explicit release boundary.
+- Share one snapshot across module-init/COW checks and a second across
+  unwrapped-resource/raw-SFFI checks, reducing four full lexical projections to
+  two while avoiding whole-request retention.
+- Preserve public source adapters, per-rule path exclusions, physical line
+  numbers, complete finding order, raw text, and trimmed text.
+- Add a real projection/lifetime fixture covering multiline and one-line
+  docstrings; verification intentionally not run under the user's no-verify
+  instruction.
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
