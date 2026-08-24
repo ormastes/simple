@@ -2705,3 +2705,32 @@ with no resolved callable declaration remains a separate audit ambiguity and
 forces `hir_complete: false`; it is not added to the raw-call total. Separate
 `signature_evidence_included` and `verification_evidence_included` booleans are
 false because HIR identity cannot prove artifact admission.
+
+## Dynamic-loader checked migration boundary
+
+The canonical no-GC synchronous owner already had `DynLib.call_checked`, whose
+two-word `[status, value]` transport distinguishes a legitimate integer zero
+from bridge failure. That distinction stopped at the single-library object:
+`DynLoader.ensure_loaded`, all singleton call helpers, and convention-level
+`sffi_call` still collapsed load, symbol, and dispatch failures to `false` or
+zero.
+
+The migration surface now extends the checked result through
+`DynLoader.ensure_loaded_checked`, `DynLoader.call_checked`, and
+`sffi_call_checked`. Legacy APIs retain their behavior and ABI but are tagged
+unsafe with the exact sentinel ambiguity. The checked APIs are also unsafe:
+they fail closed for transport errors but still use a generic all-`i64` calling
+convention and do not verify or cryptographically admit the provider artifact.
+
+The cache path remains expected O(1); a successful cached dispatch retains one
+dictionary lookup and one `dlsym`, matching the legacy general dispatcher. No
+hashing, signature check, provider search, or new cache is performed per call.
+The checked bridge's existing two-element result allocation remains its only
+additional result transport. A future hardened hot path must resolve and admit
+typed function pointers once, publish immutable slots, and eliminate per-call
+string lookup and generic marshalling.
+
+This slice is source-reviewed but not executed: the deployed `bin/simple`
+remains the Rust seed rather than an admitted current-source pure-Simple Stage
+4. Therefore it provides neither compiled correctness evidence nor timing/RSS
+evidence and must not be described as verified, signed, or safe.

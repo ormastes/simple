@@ -191,6 +191,7 @@ impl DynLoader:
         DynLoader(libs: _dyn_loader_libs)
 
     # Ensure the library at path is loaded. Returns true if available.
+    @unsafe(reason: "legacy boolean load result omits provider admission evidence", capabilities: [ffi])
     me ensure_loaded(path: text) -> bool:
         if self.libs.contains(path):
             true
@@ -202,7 +203,25 @@ impl DynLoader:
             _dyn_loader_libs[path] = lib
             true
 
+    # Fail-closed load path for callers migrating away from boolean/sentinel
+    # results. This caches exactly the same DynLib value as ensure_loaded and
+    # performs no hashing, signature verification, or symbol lookup per call.
+    # It remains unsafe because this legacy loader has not admitted the
+    # provider artifact or verified its ABI registry.
+    @unsafe(reason: "checked load result cannot admit or verify the dynamic provider", capabilities: [ffi])
+    me ensure_loaded_checked(path: text) -> Result<DynLib, text>:
+        if self.libs.contains(path):
+            return Ok(self.libs[path])
+        match DynLib.load_checked(path):
+            case Ok(lib):
+                self.libs[path] = lib
+                _dyn_loader_libs[path] = lib
+                Ok(lib)
+            case Err(error):
+                Err(error)
+
     # Return the loaded DynLib for path, or nil.
+    @unsafe(reason: "exposes an unverified dynamic provider handle", capabilities: [ffi, raw_ptr])
     fn get_lib(path: text) -> DynLib?:
         if self.libs.contains(path):
             self.libs[path]
@@ -210,6 +229,7 @@ impl DynLoader:
             nil
 
     # Call with 0 arguments, loading the library if needed.
+    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
     me call0(path: text, func: text) -> i64:
         if not self.ensure_loaded(path):
             return 0
@@ -217,6 +237,7 @@ impl DynLoader:
         lib.call0(func)
 
     # Call with 1 argument.
+    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
     me call1(path: text, func: text, a0: i64) -> i64:
         if not self.ensure_loaded(path):
             return 0
@@ -224,6 +245,7 @@ impl DynLoader:
         lib.call1(func, a0)
 
     # Call with 2 arguments.
+    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
     me call2(path: text, func: text, a0: i64, a1: i64) -> i64:
         if not self.ensure_loaded(path):
             return 0
@@ -231,6 +253,7 @@ impl DynLoader:
         lib.call2(func, a0, a1)
 
     # Call with 3 arguments.
+    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
     me call3(path: text, func: text, a0: i64, a1: i64, a2: i64) -> i64:
         if not self.ensure_loaded(path):
             return 0
@@ -238,11 +261,24 @@ impl DynLoader:
         lib.call3(func, a0, a1, a2)
 
     # General dispatch with pre-built args array.
+    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
     me call(path: text, func: text, args: [i64]) -> i64:
         if not self.ensure_loaded(path):
             return 0
         val lib = self.libs[path]
         lib.call_n(func, args)
+
+    # Canonical fail-closed singleton dispatch. The provider cache lookup and
+    # dlsym cost match the legacy general path; only the checked bridge result
+    # allocation is added. ABI typing and provider admission remain unresolved,
+    # so this surface is intentionally unsafe.
+    @unsafe(reason: "checked transport cannot verify the provider artifact or all-i64 ABI", capabilities: [ffi, raw_ptr])
+    me call_checked(path: text, func: text, args: [i64]) -> Result<i64, text>:
+        match self.ensure_loaded_checked(path):
+            case Ok(lib):
+                lib.call_checked(func, args)
+            case Err(error):
+                Err(error)
 
 # ============================================================================
 # Platform helpers
@@ -292,6 +328,7 @@ fn sffi_lib_path(prefix: text) -> text:
 #
 # Example:
 #   sffi_call("rt_torch_available", [])
+@unsafe(reason: "legacy convention dispatch fabricates zero on malformed names or provider failure", capabilities: [ffi, raw_ptr])
 fn sffi_call(func_name: text, args: [i64]) -> i64:
     val parts = func_name.split("_")
     if parts.len() < 2:
@@ -302,6 +339,23 @@ fn sffi_call(func_name: text, args: [i64]) -> i64:
     val lib_path = sffi_lib_path(prefix)
     var loader = DynLoader.instance()
     loader.call(lib_path, func_name, args)
+
+# Fail-closed convention dispatch for migration callers. This distinguishes a
+# valid foreign zero from malformed naming, provider load failure, missing
+# symbol, corrupt bridge transport, and bridge rejection. It is not a safe ABI:
+# all arguments/results are still untyped i64 values and the provider is not
+# cryptographically admitted by this module.
+@unsafe(reason: "checked convention transport cannot verify the provider artifact or all-i64 ABI", capabilities: [ffi, raw_ptr])
+fn sffi_call_checked(func_name: text, args: [i64]) -> Result<i64, text>:
+    val parts = func_name.split("_")
+    if parts.len() < 2:
+        return Err("E-SFFI-014: malformed convention symbol: {func_name}")
+    val prefix = parts[1]
+    if prefix == "":
+        return Err("E-SFFI-014: empty convention provider prefix: {func_name}")
+    val lib_path = sffi_lib_path(prefix)
+    var loader = DynLoader.instance()
+    loader.call_checked(lib_path, func_name, args)
 
 export spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64, spl_wffi_call_i64_checked
 export DynLib, DynLoader

@@ -1556,3 +1556,21 @@ source lower bound until both views reconcile.
 Do not restore `rt_`/`spl_` spelling as foreign authority. Prefix-only,
 unresolved callable candidates are an incomplete-inventory condition; only the
 compiler-owned extern marker admits a resolved raw call.
+
+The next dynamic-loader migration slice is now implemented but unverified:
+propagate `Result<i64, text>` from the existing checked bridge through
+`DynLoader` and convention dispatch, and classify every legacy zero-sentinel
+entry point as unsafe without changing its API. The checked path remains unsafe
+until a compiler-owned ABI registry replaces the all-`i64` dispatcher.
+
+Performance acceptance for the eventual typed replacement is unchanged:
+provider hashing, signature verification, ABI comparison, and symbol lookup
+happen once at admission; the hot path uses an immutable typed function slot
+plus only its required status/null/descriptor checks. Do not promote the
+current checked migration path to a safe wrapper or critical profile, because
+it still performs per-call string/dictionary lookup and generic marshalling.
+
+When an admitted current-source Stage-4 runtime exists, run the focused checked
+loader correctness spec, the Simple optimizer on `dynamic.spl`, and one paired
+legacy-versus-checked dispatcher timing/RSS sample. Until those exact gates run,
+retain `UNVERIFIED`, zero signed/admitted, and the current census debt.
