@@ -61,10 +61,26 @@ stale operations.
 Opted-in reads add O(chunk bytes) SHA-256 work; ordinary reads do not. One
 state, block, schedule, and constant table is allocated per lease-table slot,
 reset in place on reuse, and no full-file bytes are retained. Live and no-GC
-lifetime hash memory are therefore O(lease-table slots). Finish and promotion
-scan the bounded mount table once: O(active mounts). Promotion avoids
+lifetime hash memory are therefore O(lease-table slots). Incremental updates
+complete at most one partial block, process complete 64-byte blocks directly,
+and retain only the tail; helper dispatch and block-full checks are O(blocks),
+not O(bytes), while byte work remains O(chunk bytes).
+
+The compact mount list is reserved for path resolution. Every open file also
+seals an index into a separate stable mount-slot registry. Snapshot read,
+finish, promotion, close, and execute-current checks resolve that slot in O(1)
+and centrally compare its never-reused MountId plus mount, namespace, and
+content generations. Unmount clears its stable slot only after proving the
+target has no live handles; later slot reuse cannot alias an old handle because
+the MountId differs. Generation mutations update the compact entry and stable
+slot atomically under the MountTable owner. Thus unrelated mount count no longer
+multiplies sequential snapshot-read cost. Promotion also avoids
 the path walk, backend open, stat, and associated handle allocation performed
 by `open_for_execute`. The seal contains bounded scalar/text metadata.
+
+FAT32 positioned reads transfer the already-owned request buffer directly when
+the backend fills it. Only a short read allocates and copies an exact-size
+prefix, avoiding the former second full-size allocation/copy on normal chunks.
 
 ## Focused coverage
 
@@ -73,7 +89,12 @@ exclusion, opt-in, premature/incomplete/unordered finish, owner digest mismatch,
 idempotent finish, digest substitution, successful transfer, promotion and
 close replay, forged backend metadata, untrusted policy denial, generation
 invalidation, close-only corruption, a multi-chunk SHA-256 block boundary, and
-close after failed promotion.
+close after failed promotion. It also covers direct full-block hashing and
+stable mount identity across unrelated compact-list removal and stable-slot
+reuse.
+`test/01_unit/lib/common/crypto/sha256_stream_v1_spec.spl` locks partition
+invariance for empty input, complementary partial blocks, full block plus tail,
+multiple direct blocks, and mixed partial/direct-block updates.
 
 This implementation was prepared under an explicit no-verification directive;
 the focused coverage was added but not executed in this lane.

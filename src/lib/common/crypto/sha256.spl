@@ -496,13 +496,36 @@ fn _sha256_stream_v1_push(stream: Sha256StreamV1, value: i64):
         stream.block_len = 0
 
 fn sha256_stream_v1_update(stream: Sha256StreamV1, data: [u8]) -> bool:
-    if stream.finished or data.len() > 0x1fffffffffffffffu64 - stream.total_bytes:
+    val data_len = data.len()
+    if stream.finished or data_len > 0x1fffffffffffffffu64 - stream.total_bytes:
         return false
     var i: u64 = 0u64
-    while i < data.len():
-        _sha256_stream_v1_push(stream, data[i] as i64)
+    # Complete an existing partial block once.  The former byte-at-a-time
+    # helper performed a call and block-full branch for every input byte.
+    while i < data_len and stream.block_len < 64:
+        stream.block[stream.block_len] = data[i] as i64
+        stream.block_len = stream.block_len + 1
         i = i + 1u64
-    stream.total_bytes = stream.total_bytes + data.len()
+    if stream.block_len == 64:
+        _sha256_stream_v1_process(stream)
+        stream.block_len = 0
+
+    # Process complete blocks directly.  This preserves the exact schedule and
+    # state transition while reducing dispatch/fullness checks from O(bytes) to
+    # O(blocks); the byte copies remain linear and allocation-free.
+    while i + 64u64 <= data_len:
+        var j: i64 = 0
+        while j < 64:
+            stream.block[j] = data[i + j as u64] as i64
+            j = j + 1
+        _sha256_stream_v1_process(stream)
+        i = i + 64u64
+
+    while i < data_len:
+        stream.block[stream.block_len] = data[i] as i64
+        stream.block_len = stream.block_len + 1
+        i = i + 1u64
+    stream.total_bytes = stream.total_bytes + data_len
     true
 
 fn sha256_stream_v1_finish_hex(stream: Sha256StreamV1) -> text?:

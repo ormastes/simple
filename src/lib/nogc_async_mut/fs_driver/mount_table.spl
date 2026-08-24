@@ -68,6 +68,7 @@ struct OpenFileBinding:
     generation: u32
     virtual_handle: u64
     mount_id: MountId
+    mount_slot: i32
     inner_handle: FileHandle
     canonical_source_path: text
 
@@ -143,6 +144,7 @@ fn _retired_file_binding(binding: OpenFileBinding) -> OpenFileBinding:
         active: false, retired: terminal,
         generation: if terminal: binding.generation else: binding.generation + 1u32,
         virtual_handle: 0u64, mount_id: binding.mount_id,
+        mount_slot: binding.mount_slot,
         inner_handle: binding.inner_handle,
         canonical_source_path: binding.canonical_source_path)
 
@@ -157,6 +159,11 @@ fn _retired_dir_binding(binding: OpenDirBinding) -> OpenDirBinding:
 struct MountTable:
     """Bounded mount and generational open-handle registry."""
     mounts:           [MountEntry]
+    # Stable O(1) identity for handle-based operations.  `mounts` remains the
+    # compact path-resolution list; these slots are reused only after unmount,
+    # and every lookup also checks the never-reused MountId.
+    mount_slots:      [MountEntry?]
+    mount_slot_by_active_index: [i32]
     next_id:          u32
     open_files:       [OpenFileBinding]
     open_dirs:        [OpenDirBinding]
@@ -165,7 +172,9 @@ struct MountTable:
 
 impl MountTable:
     static fn new() -> MountTable:
-        MountTable(mounts: [], next_id: 1, open_files: [], open_dirs: [], stable_snapshots: [], dir_capacity_limit: MOUNT_TABLE_MAX_OPEN_DIRS)
+        MountTable(mounts: [], mount_slots: [], mount_slot_by_active_index: [],
+            next_id: 1, open_files: [], open_dirs: [], stable_snapshots: [],
+            dir_capacity_limit: MOUNT_TABLE_MAX_OPEN_DIRS)
 
     fn has_live_handles() -> bool:
         """Report whether this table still owns any live virtual binding.
@@ -196,7 +205,10 @@ impl MountTable:
                 return true
         self.open_dirs.len() < self.dir_capacity_limit
 
-    me fn _bind_file(mount_id: MountId, inner: FileHandle) -> Result<FileHandle, FsError>:
+    me fn _bind_file(mount_index: i32, mount_id: MountId, inner: FileHandle) -> Result<FileHandle, FsError>:
+        if mount_index < 0 or mount_index >= self.mount_slot_by_active_index.len() as i32:
+            return Err(FsError.StaleHandle)
+        val mount_slot = self.mount_slot_by_active_index[mount_index]
         var slot: i32 = 0
         while slot < self.open_files.len() as i32:
             val prior = self.open_files[slot]
@@ -204,7 +216,8 @@ impl MountTable:
                 val handle = mount_handle_encode(slot, prior.generation)
                 self.open_files[slot] = OpenFileBinding(
                     active: true, retired: false, generation: prior.generation,
-                    virtual_handle: handle, mount_id: mount_id, inner_handle: inner,
+                    virtual_handle: handle, mount_id: mount_id, mount_slot: mount_slot,
+                    inner_handle: inner,
                     canonical_source_path: "")
                 return Ok(FileHandle(id: handle))
             slot = slot + 1
@@ -213,7 +226,8 @@ impl MountTable:
         val handle = mount_handle_encode(self.open_files.len() as i32, 1u32)
         self.open_files = self.open_files.push(OpenFileBinding(
             active: true, retired: false, generation: 1u32,
-            virtual_handle: handle, mount_id: mount_id, inner_handle: inner,
+            virtual_handle: handle, mount_id: mount_id, mount_slot: mount_slot,
+            inner_handle: inner,
             canonical_source_path: ""))
         Ok(FileHandle(id: handle))
 
@@ -333,6 +347,38 @@ impl MountTable:
             return Some(binding)
         nil
 
+    fn _mount_entry_for_file(binding: OpenFileBinding) -> MountEntry?:
+        """Resolve stable slot identity in O(1), rejecting stale slot reuse."""
+        if binding.mount_slot < 0 or binding.mount_slot >= self.mount_slots.len() as i32:
+            return nil
+        match self.mount_slots[binding.mount_slot]:
+            case nil: nil
+            case Some(entry):
+                if entry.id == binding.mount_id: Some(entry) else: nil
+
+    fn _mount_generations_current(
+        entry: MountEntry, mount_generation: u64,
+        namespace_generation: u64, content_generation: u64
+    ) -> bool:
+        entry.mount_generation == mount_generation and
+            entry.namespace_generation == namespace_generation and
+            entry.content_generation == content_generation
+
+    fn _current_snapshot_mount(
+        snapshot: StableFileSnapshotBindingV1, file: OpenFileBinding
+    ) -> MountEntry?:
+        """Central generation validation for every snapshot hot-path operation."""
+        if file.mount_id != snapshot.mount_id:
+            return nil
+        val entry = match self._mount_entry_for_file(file):
+            case nil: return nil
+            case Some(value): value
+        if not _mount_generations_current(
+            entry, snapshot.mount_generation, snapshot.namespace_generation,
+            snapshot.content_generation):
+            return nil
+        Some(entry)
+
     me fn _dir_binding(handle: DirHandle) -> OpenDirBinding?:
         val slot = mount_handle_slot(handle.id)
         if slot < 0 or slot >= self.open_dirs.len() as i32:
@@ -397,7 +443,22 @@ impl MountTable:
             namespace_generation: 1u64,
             content_generation: 1u64
         )
+        var mount_slot: i32 = -1
+        var slot_scan: i32 = 0
+        while slot_scan < self.mount_slots.len() as i32:
+            if self.mount_slots[slot_scan] == nil:
+                mount_slot = slot_scan
+                break
+            slot_scan = slot_scan + 1
+        if mount_slot < 0:
+            if self.mount_slots.len() >= MOUNT_TABLE_MAX_MOUNTS:
+                return Err(FsError.TooLarge)
+            mount_slot = self.mount_slots.len() as i32
+            self.mount_slots.push(Some(entry))
+        else:
+            self.mount_slots[mount_slot] = Some(entry)
         self.mounts = self.mounts.push(entry)
+        self.mount_slot_by_active_index.push(mount_slot)
         Ok(id)
 
     me fn unmount(path: text) -> Result<(), FsError>:
@@ -423,7 +484,10 @@ impl MountTable:
         for binding in self.open_dirs:
             if binding.active and binding.mount_id == mount_id:
                 return Err(FsError.Busy)
+        val mount_slot = self.mount_slot_by_active_index[idx as i32]
+        self.mount_slots[mount_slot] = nil
         self.mounts = self.mounts.remove(idx as i32)
+        self.mount_slot_by_active_index = self.mount_slot_by_active_index.remove(idx as i32)
         Ok(())
 
     me fn lookup_text(path: text) -> MountEntry?:
@@ -524,7 +588,7 @@ impl MountTable:
                 if stat.size > max_size:
                     val _ = _driver_close_handle(entry.driver, inner)
                     return Err(FsError.TooLarge)
-                val virtual_result = self._bind_file(entry.id, inner)
+                val virtual_result = self._bind_file(i, entry.id, inner)
                 if virtual_result.is_err():
                     val _ = _driver_close_handle(entry.driver, inner)
                     return Err(virtual_result.unwrap_err())
@@ -580,34 +644,27 @@ impl MountTable:
         val file = match self._file_binding(snapshot.file_handle):
             case nil: return Err(FsError.StaleHandle)
             case Some(value): value
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val entry = self.mounts[i]
-            if entry.id == snapshot.mount_id:
-                if entry.mount_generation != snapshot.mount_generation or
-                   entry.namespace_generation != snapshot.namespace_generation or
-                   entry.content_generation != snapshot.content_generation:
-                    return Err(FsError.StaleHandle)
-                if offset >= snapshot.size:
-                    return Ok([])
-                val available = snapshot.size - offset
-                val bounded = if length < available: length else: available
-                val chunk = driver_bounded_positioned_read_bytes(
-                    entry.driver, snapshot.kind, file.inner_handle,
-                    offset as i64, bounded as i64)?
-                val slot = mount_handle_slot(lease.id)
-                if snapshot.hash_tracking:
-                    if offset != snapshot.hash_next_offset or chunk.len() != bounded:
-                        self.stable_snapshots[slot].hash_invalid = true
-                    else if not sha256_stream_v1_update(snapshot.hash_stream, chunk):
-                        self.stable_snapshots[slot].hash_invalid = true
-                    else:
-                        val next = offset + chunk.len()
-                        self.stable_snapshots[slot].hash_next_offset = next
-                        self.stable_snapshots[slot].hash_complete = next == snapshot.size
-                return Ok(chunk)
-            i = i + 1
-        Err(FsError.StaleHandle)
+        val entry = match self._current_snapshot_mount(snapshot, file):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        if offset >= snapshot.size:
+            return Ok([])
+        val available = snapshot.size - offset
+        val bounded = if length < available: length else: available
+        val chunk = driver_bounded_positioned_read_bytes(
+            entry.driver, snapshot.kind, file.inner_handle,
+            offset as i64, bounded as i64)?
+        val slot = mount_handle_slot(lease.id)
+        if snapshot.hash_tracking:
+            if offset != snapshot.hash_next_offset or chunk.len() != bounded:
+                self.stable_snapshots[slot].hash_invalid = true
+            else if not sha256_stream_v1_update(snapshot.hash_stream, chunk):
+                self.stable_snapshots[slot].hash_invalid = true
+            else:
+                val next = offset + chunk.len()
+                self.stable_snapshots[slot].hash_next_offset = next
+                self.stable_snapshots[slot].hash_complete = next == snapshot.size
+        Ok(chunk)
 
     me fn finish_stable_snapshot_v1(
         lease: StableFileSnapshotLeaseV1, content_sha256: text
@@ -627,49 +684,40 @@ impl MountTable:
         val file = match self._file_binding(snapshot.file_handle):
             case nil: return Err(FsError.StaleHandle)
             case Some(value): value
-        if file.mount_id != snapshot.mount_id:
-            return Err(FsError.StaleHandle)
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val entry = self.mounts[i]
-            if entry.id == snapshot.mount_id:
-                if entry.mount_generation != snapshot.mount_generation or
-                   entry.namespace_generation != snapshot.namespace_generation or
-                   entry.content_generation != snapshot.content_generation:
-                    return Err(FsError.StaleHandle)
-                if snapshot.hash_invalid:
+        val entry = match self._current_snapshot_mount(snapshot, file):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        if snapshot.hash_invalid:
+            return Err(FsError.Corrupt)
+        if not snapshot.hash_tracking or not snapshot.hash_complete or
+           snapshot.hash_next_offset != snapshot.size:
+            return Err(FsError.InvalidArg)
+        if snapshot.sealed:
+            if snapshot.content_sha256 != content_sha256:
+                return Err(FsError.Permission)
+        else:
+            val slot = mount_handle_slot(lease.id)
+            val computed = match sha256_stream_v1_finish_hex(snapshot.hash_stream):
+                case nil:
+                    self.stable_snapshots[slot].hash_invalid = true
                     return Err(FsError.Corrupt)
-                if not snapshot.hash_tracking or not snapshot.hash_complete or
-                   snapshot.hash_next_offset != snapshot.size:
-                    return Err(FsError.InvalidArg)
-                if snapshot.sealed:
-                    if snapshot.content_sha256 != content_sha256:
-                        return Err(FsError.Permission)
-                else:
-                    val slot = mount_handle_slot(lease.id)
-                    val computed = match sha256_stream_v1_finish_hex(snapshot.hash_stream):
-                        case nil:
-                            self.stable_snapshots[slot].hash_invalid = true
-                            return Err(FsError.Corrupt)
-                        case Some(value): value
-                    if computed != content_sha256:
-                        self.stable_snapshots[slot].hash_invalid = true
-                        return Err(FsError.Corrupt)
-                    self.stable_snapshots[slot].sealed = true
-                    self.stable_snapshots[slot].content_sha256 = computed
-                return Ok(StableFileSnapshotSealV1(
-                    lease_id: lease.id,
-                    mount_id: snapshot.mount_id,
-                    backend_name: _driver_name(entry.driver),
-                    backend_kind: _driver_kind_name(entry.driver),
-                    canonical_source_path: snapshot.canonical_source_path,
-                    mount_generation: snapshot.mount_generation,
-                    namespace_generation: snapshot.namespace_generation,
-                    content_generation: snapshot.content_generation,
-                    size: snapshot.size,
-                    content_sha256: content_sha256))
-            i = i + 1
-        Err(FsError.StaleHandle)
+                case Some(value): value
+            if computed != content_sha256:
+                self.stable_snapshots[slot].hash_invalid = true
+                return Err(FsError.Corrupt)
+            self.stable_snapshots[slot].sealed = true
+            self.stable_snapshots[slot].content_sha256 = computed
+        return Ok(StableFileSnapshotSealV1(
+            lease_id: lease.id,
+            mount_id: snapshot.mount_id,
+            backend_name: _driver_name(entry.driver),
+            backend_kind: _driver_kind_name(entry.driver),
+            canonical_source_path: snapshot.canonical_source_path,
+            mount_generation: snapshot.mount_generation,
+            namespace_generation: snapshot.namespace_generation,
+            content_generation: snapshot.content_generation,
+            size: snapshot.size,
+            content_sha256: content_sha256))
 
     me fn promote_stable_snapshot_for_execute_v1(
         lease: StableFileSnapshotLeaseV1,
@@ -699,40 +747,31 @@ impl MountTable:
         val file = match self._file_binding(snapshot.file_handle):
             case nil: return Err(FsError.StaleHandle)
             case Some(value): value
-        if file.mount_id != snapshot.mount_id:
-            return Err(FsError.StaleHandle)
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val entry = self.mounts[i]
-            if entry.id == snapshot.mount_id:
-                val backend_name = _driver_name(entry.driver)
-                val backend_kind = _driver_kind_name(entry.driver)
-                if entry.mount_generation != snapshot.mount_generation or
-                   entry.namespace_generation != snapshot.namespace_generation or
-                   entry.content_generation != snapshot.content_generation:
-                    return Err(FsError.StaleHandle)
-                if seal.backend_name != backend_name or seal.backend_kind != backend_kind:
-                    return Err(FsError.Permission)
-                val caps = FsCapabilitySet(bits: entry.active_caps)
-                if entry.opts.noexec or not caps.has(Capability.Execute):
-                    return Err(FsError.Permission)
-                if trust == ExecuteTrust.Untrusted and not entry.opts.allow_untrusted_exec:
-                    return Err(FsError.Permission)
-                if snapshot.size < 1u64 or snapshot.size > MOUNT_TABLE_MAX_EXECUTABLE_BYTES:
-                    return Err(FsError.TooLarge)
-                self._retire_stable_snapshot(lease)
-                return Ok(ExecuteOpenBinding(
-                    mount_id: entry.id,
-                    backend_name: backend_name,
-                    backend_kind: backend_kind,
-                    canonical_source_path: snapshot.canonical_source_path,
-                    file_handle: snapshot.file_handle,
-                    mount_generation: snapshot.mount_generation,
-                    namespace_generation: snapshot.namespace_generation,
-                    content_generation: snapshot.content_generation,
-                    size: snapshot.size as i64))
-            i = i + 1
-        Err(FsError.StaleHandle)
+        val entry = match self._current_snapshot_mount(snapshot, file):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        val backend_name = _driver_name(entry.driver)
+        val backend_kind = _driver_kind_name(entry.driver)
+        if seal.backend_name != backend_name or seal.backend_kind != backend_kind:
+            return Err(FsError.Permission)
+        val caps = FsCapabilitySet(bits: entry.active_caps)
+        if entry.opts.noexec or not caps.has(Capability.Execute):
+            return Err(FsError.Permission)
+        if trust == ExecuteTrust.Untrusted and not entry.opts.allow_untrusted_exec:
+            return Err(FsError.Permission)
+        if snapshot.size < 1u64 or snapshot.size > MOUNT_TABLE_MAX_EXECUTABLE_BYTES:
+            return Err(FsError.TooLarge)
+        self._retire_stable_snapshot(lease)
+        return Ok(ExecuteOpenBinding(
+            mount_id: entry.id,
+            backend_name: backend_name,
+            backend_kind: backend_kind,
+            canonical_source_path: snapshot.canonical_source_path,
+            file_handle: snapshot.file_handle,
+            mount_generation: snapshot.mount_generation,
+            namespace_generation: snapshot.namespace_generation,
+            content_generation: snapshot.content_generation,
+            size: snapshot.size as i64))
 
     me fn close_stable_snapshot(lease: StableFileSnapshotLeaseV1) -> Result<(), FsError>:
         """Consume a live lease and attempt its backend close exactly once."""
@@ -743,16 +782,11 @@ impl MountTable:
         val result = match open_binding:
             case nil: Err(FsError.StaleHandle)
             case Some(file):
-                var found = false
-                var close_result: Result<(), FsError> = Err(FsError.StaleHandle)
-                var i: i32 = 0
-                while i < self.mounts.len() as i32:
-                    if self.mounts[i].id == file.mount_id:
-                        found = true
-                        close_result = _driver_close_handle(self.mounts[i].driver, file.inner_handle)
-                    i = i + 1
+                val close_result = match self._mount_entry_for_file(file):
+                    case nil: Err(FsError.StaleHandle)
+                    case Some(entry): _driver_close_handle(entry.driver, file.inner_handle)
                 self._unbind_file_handle(snapshot.file_handle)
-                if found: close_result else: Err(FsError.StaleHandle)
+                close_result
         self._retire_stable_snapshot(lease)
         result
 
@@ -841,7 +875,7 @@ impl MountTable:
                             case Err(e):
                                 return Err(e)
                             case Ok(inner):
-                                val bound = self._bind_file(mount_id, inner)
+                                val bound = self._bind_file(i, mount_id, inner)
                                 if bound.is_err():
                                     val _ = _driver_close_handle(self.mounts[i].driver, inner)
                                     return Err(bound.unwrap_err())
@@ -880,7 +914,7 @@ impl MountTable:
                 if stat.size < 1u64 or stat.size > MOUNT_TABLE_MAX_EXECUTABLE_BYTES:
                     _driver_close_handle(entry.driver, opened)
                     return Err(FsError.TooLarge)
-                val bound = self._bind_file(entry.id, opened)
+                val bound = self._bind_file(i, entry.id, opened)
                 if bound.is_err():
                     _driver_close_handle(entry.driver, opened)
                     return Err(bound.unwrap_err())
@@ -913,15 +947,12 @@ impl MountTable:
                    not mount_path_canonical(binding.canonical_source_path) or
                    binding.canonical_source_path == "/":
                     return false
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val entry = self.mounts[i]
-            if entry.id == binding.mount_id:
-                return entry.mount_generation == binding.mount_generation and
-                    entry.namespace_generation == binding.namespace_generation and
-                    entry.content_generation == binding.content_generation
-            i = i + 1
-        false
+        val entry = match self._mount_entry_for_file(open_binding.unwrap()):
+            case nil: return false
+            case Some(value): value
+        _mount_generations_current(
+            entry, binding.mount_generation, binding.namespace_generation,
+            binding.content_generation)
 
     me fn bump_namespace_generation(mount_id: MountId) -> Result<(), FsError>:
         self._advance_generation(mount_id, true)
@@ -946,6 +977,10 @@ impl MountTable:
             if self.mounts[mount_index].content_generation == HANDLE_ID_MAX:
                 return Err(FsError.TooLarge)
             self.mounts[mount_index].content_generation = self.mounts[mount_index].content_generation + 1u64
+        # Keep the stable handle registry authoritative and coherent with the
+        # compact path-resolution list in the same owner mutation.
+        val mount_slot = self.mount_slot_by_active_index[mount_index]
+        self.mount_slots[mount_slot] = Some(self.mounts[mount_index])
         Ok(())
 
     fn _generation_available(mount_id: MountId, is_namespace: bool) -> Result<(), FsError>:

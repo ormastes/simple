@@ -49,7 +49,11 @@ describe "stable file snapshot leases":
         var table = MountTable.new()
         table.mount("/", DriverInstance.Fat32(fat), MountOptions.default()).unwrap()
         val snapshot = table.open_stable_snapshot("/HELLO.BIN", 16u64).unwrap()
-        expect(table.read_stable_snapshot(snapshot.lease, 3u64, 2u64).unwrap()).to_equal([100u8, 101u8])
+        var full = table.read_stable_snapshot(snapshot.lease, 3u64, 2u64).unwrap()
+        expect(full).to_equal([100u8, 101u8])
+        full[0] = 0u8
+        expect(table.read_stable_snapshot(
+            snapshot.lease, 3u64, 2u64).unwrap()).to_equal([100u8, 101u8])
         expect(table.read_stable_snapshot(snapshot.lease, 1u64, 2u64).unwrap()).to_equal([98u8, 99u8])
         expect(table.read_stable_snapshot(snapshot.lease, 5u64, 8u64).unwrap()).to_equal([102u8])
         table.close_stable_snapshot(snapshot.lease).unwrap()
@@ -90,6 +94,25 @@ describe "stable file snapshot leases":
         expect(table.read_stable_snapshot(first.lease, 0u64, 1u64).unwrap_err()).to_equal(FsError.StaleHandle)
         table.close_stable_snapshot(second.lease).unwrap()
         table.unmount("/").unwrap()
+
+    it "keeps snapshot mount identity stable across unrelated unmount and slot reuse":
+        var table = MountTable.new()
+        table.mount("/first", DriverInstance.DbFs(DbFsDriver.new_hosted()), MountOptions.default()).unwrap()
+        table.mount("/kept", DriverInstance.DbFs(DbFsDriver.new_hosted()), MountOptions.default()).unwrap()
+        val file = table.open("/kept/payload.bin", OpenFlags.create_write()).unwrap()
+        table.positioned_write_bytes(
+            file.id, PositionedDriverKind.Dbfs, 0u64, [7u8, 8u8, 9u8]).unwrap()
+        table.close(file).unwrap()
+        val snapshot = table.open_stable_snapshot("/kept/payload.bin", 8u64).unwrap()
+
+        # Removing the earlier compact-list entry must not renumber the live
+        # snapshot's stable identity. Reusing that freed slot must also not
+        # alias the still-live binding because MountId is checked with the slot.
+        table.unmount("/first").unwrap()
+        table.mount("/replacement", DriverInstance.DbFs(DbFsDriver.new_hosted()), MountOptions.default()).unwrap()
+        expect(table.read_stable_snapshot(
+            snapshot.lease, 0u64, 3u64).unwrap()).to_equal([7u8, 8u8, 9u8])
+        table.close_stable_snapshot(snapshot.lease).unwrap()
 
     it "finishes into immutable owner metadata without closing the lease":
         var table = dbfs_table_with_bytes("/sealed.bin", [97u8, 98u8, 99u8])
@@ -181,3 +204,15 @@ describe "stable file snapshot leases":
             "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb").unwrap()
         expect(seal.size).to_equal(64u64)
         table.close_stable_snapshot(snapshot.lease).unwrap()
+
+        # One complete update takes the direct full-block path and must produce
+        # the same digest as the split partial-block sequence above.
+        var direct = nvfs_table_with_bytes("/direct.bin", sixty_four_as)
+        val direct_snapshot = direct.open_stable_snapshot("/direct.bin", 64u64).unwrap()
+        direct.begin_stable_snapshot_promotion_hash_v1(direct_snapshot.lease).unwrap()
+        direct.read_stable_snapshot(direct_snapshot.lease, 0u64, 64u64).unwrap()
+        val direct_seal = direct.finish_stable_snapshot_v1(
+            direct_snapshot.lease,
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb").unwrap()
+        expect(direct_seal.content_sha256).to_equal(seal.content_sha256)
+        direct.close_stable_snapshot(direct_snapshot.lease).unwrap()
