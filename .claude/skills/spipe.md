@@ -1347,6 +1347,8 @@ hash-shaped assertion, or prose report alone is not acceptance evidence. Hashes
 must be recomputed from separate committed evidence blobs and the summary must
 verify against a repository-pinned reviewer public key. This validation stays
 bootstrap-owned and must not be added to the interactive push path.
+When a push guard's default command also runs mutation fixtures, wire its
+scan-only mode into push and retain the self-test as a required bootstrap row.
 
 On this repo's shared working tree, a concurrent session's checkout/reconcile
 can silently WIPE an in-progress file — no `git status` trace, not even

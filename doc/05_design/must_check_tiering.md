@@ -36,6 +36,11 @@ split and 9.27 seconds/223,520 KiB afterward. Current main measures 11.05
 seconds/225,736 KiB after runtime extraction optimization, so NFR-MCT-001 is
 again RED by 1.05 seconds. The focused fixture is coverage, not the production
 timing oracle; the current production row is authoritative.
+The interpreter-extern registry and type-walk constructor mutation fixtures now
+run only as distinct required bootstrap rows; their production push rows use
+`--scan-only`. The same exact committed-ref production oracle passes in 4.57
+seconds/227,920 KiB afterward: 58.6% lower elapsed time than 11.05 seconds, with
+a 0.97% peak-RSS increase. NFR-MCT-001 is GREEN.
 For the runtime-API range gate, Git tree equality over both runtime roots is an
 algorithmic fast path: an unchanged range extracts and counts the tip once;
 any changed runtime root performs the full base/tip removal analysis. The

@@ -152,6 +152,10 @@ dev-done
 
 ## Bootstrap readiness handoff tasks
 
+For must-check work, acceptance criteria keep interactive push bounded: a
+guard whose default command runs mutation fixtures uses scan-only mode in push,
+with the mutation self-test retained as a required bootstrap-owned row.
+
 For ordinary feature development, first apply
 `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: name
 the smallest target/provider/SCI projection and expected receipt. Do not create
