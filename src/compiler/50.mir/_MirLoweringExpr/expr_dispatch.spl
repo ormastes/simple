@@ -124,6 +124,18 @@ fn hir_expr_is_optional_type(e: HirExpr) -> bool:
 # ============================================================================
 
 impl MirLowering:
+    me begin_expr_trace_session():
+        """Snapshot the process trace policy for one module-lowering session.
+
+        A compiler process may service several builds with different trace
+        switches. Refreshing here prevents the module-global hot-path cache
+        from leaking the first build's policy into later in-process builds.
+        """
+        if mir_trace_enabled():
+            mir_lower_expr_trace_state = 1
+        else:
+            mir_lower_expr_trace_state = 0
+
     # mutglobal2 lane (module-level `var`/`val` mutation end-to-end, see
     # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report). The prior
     # lane gave `MirModule.statics`/`LoadGlobal`/`StoreGlobal` real backend
@@ -3476,18 +3488,22 @@ impl MirLowering:
 
         match expr_value.kind:
             case IntLit(value, _):
-
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                # This arm is among MIR lowering's hottest paths. Reuse the
+                # wrapper's cached fine-grained trace policy once per literal rather
+                # than treating every bootstrap build as a trace session (or
+                # repeating an environment lookup for each receipt).
+                val int_trace_enabled = mir_lower_expr_trace_state == 1
+                if int_trace_enabled:
                     print "[mir-lower-expr] int:start"
                 var b = self.builder
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if int_trace_enabled:
                     print "[mir-lower-expr] int:builder"
                 val result = b.new_temp(MirType.i64())
                 b.emit_const(result, MirConstValue.Int(value), MirType.i64())
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if int_trace_enabled:
                     print "[mir-lower-expr] int:emitted"
                 self.builder = b
-                if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if int_trace_enabled:
                     print "[mir-lower-expr] int:done"
                 result
 
