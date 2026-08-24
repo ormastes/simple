@@ -1369,6 +1369,23 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   contracts; verification intentionally not run under the user's no-verify
   instruction.
 
+## Completed canonical-module call-index tranche
+
+- Build one compact internal function-name-to-SymbolId dictionary during the
+  existing ordered nonempty/unique validation pass.
+- Replace every direct-call full-module rescan and temporary candidate array
+  with expected constant-time dictionary resolution.
+- Cache only successfully closed and pure callee names so repeated calls do not
+  repeat region-manifest serialization and hashing; never cache failures.
+- Reduce expected structural validation work from O(F^2 + C*F + repeated
+  callee bytes) to O(F+C+unique referenced callee bytes), plus name-byte
+  hashing/comparison, with O(F+U) compact request-local entries.
+- Preserve owner/name/callee diagnostic precedence, exact messages, recursive
+  skipping, instruction order, hashes, and public APIs.
+- Add repeated-pure-leaf, missing/duplicate precedence, exact effect rejection,
+  and source-topology contracts; verification intentionally not run under the
+  user's no-verify instruction.
+
 ## Completed check-tier accumulator tranche
 
 - Replace input-sized keyword, module-tier, and restricted-file copy-on-append
