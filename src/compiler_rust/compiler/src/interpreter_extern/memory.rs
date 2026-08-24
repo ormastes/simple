@@ -1043,17 +1043,32 @@ pub fn rt_mmio_write_u8(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Interpreter parity for the native acquire/release/full memory barriers.
+fn memory_barrier(args: &[Value], ordering: std::sync::atomic::Ordering, name: &str) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(format!("{name} requires 0 arguments")));
+    }
+    std::sync::atomic::fence(ordering);
+    Ok(Value::Nil)
+}
+
+pub fn rt_memory_barrier(args: &[Value]) -> Result<Value, CompileError> {
+    memory_barrier(args, std::sync::atomic::Ordering::SeqCst, "rt_memory_barrier")
+}
+
+pub fn rt_load_barrier(args: &[Value]) -> Result<Value, CompileError> {
+    memory_barrier(args, std::sync::atomic::Ordering::Acquire, "rt_load_barrier")
+}
+
+pub fn rt_store_barrier(args: &[Value]) -> Result<Value, CompileError> {
+    memory_barrier(args, std::sync::atomic::Ordering::Release, "rt_store_barrier")
+}
+
 /// Volatile read/write family mirroring the native runtime's
-/// `rt_volatile_read_u{8,16,32,64}` / `rt_volatile_write_u{8,16,32,64}`
-/// (src/compiler_rust/runtime/src/lib.rs:379-417, all `(addr: i64 [, value:
-/// i64])` C-ABI). Under the tree-walk interpreter these serve spec harnesses
-/// whose "mmio" region is a plain `rt_alloc`ed process-memory buffer (mock
-/// ivshmem), so a plain load/store through the pointer is faithful — no real
-/// volatile ordering semantics are needed here; `read_volatile`/
-/// `write_volatile` are used anyway to match the JIT lane byte-for-byte.
-/// Addresses are treated strictly as process-memory addresses, same as the
-/// sibling `rt_ptr_*`/`rt_mmio_*` accessors above. See
-/// doc/08_tracking/bug/interpreter_missing_rt_volatile_externs_blocks_ivshmem_specs_2026-08-15.md.
+/// `rt_volatile_read_u{8,16,32,64}` / `rt_volatile_write_u{8,16,32,64}`.
+/// Addresses are process-memory addresses, as with the sibling raw pointer
+/// accessors. The volatile operations preserve the native lane's access
+/// semantics while the registered barriers above preserve ordering.
 ///
 /// Callable from Simple as: `rt_volatile_read_u8(addr: i64) -> i64`
 pub fn rt_volatile_read_u8(args: &[Value]) -> Result<Value, CompileError> {
@@ -1638,6 +1653,14 @@ mod tests {
         assert!(rt_call_ptr_1(&[Value::Int(0), Value::Int(1)]).is_err());
         assert!(rt_call_ptr_2(&[Value::Int(0), Value::Int(1), Value::Int(2)]).is_err());
         assert!(rt_call_ptr_3(&[Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3),]).is_err());
+    }
+
+    #[test]
+    fn memory_barriers_match_native_arity_and_unit_result() {
+        for barrier in [rt_memory_barrier, rt_load_barrier, rt_store_barrier] {
+            assert_eq!(barrier(&[]).unwrap(), Value::Nil);
+            assert!(barrier(&[Value::Int(0)]).is_err());
+        }
     }
 
     #[test]

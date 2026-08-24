@@ -1768,6 +1768,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_volatile_write_u16", memory::rt_volatile_write_u16);
     insert_simple!("rt_volatile_write_u32", memory::rt_volatile_write_u32);
     insert_simple!("rt_volatile_write_u64", memory::rt_volatile_write_u64);
+    insert_simple!("rt_memory_barrier", memory::rt_memory_barrier);
+    insert_simple!("rt_load_barrier", memory::rt_load_barrier);
+    insert_simple!("rt_store_barrier", memory::rt_store_barrier);
     insert_simple!("rt_ptr_write_u8", memory::rt_ptr_write_u8);
     insert_simple!("rt_ptr_write_bytes", memory::rt_ptr_write_bytes);
     insert_simple!("rt_ptr_write_bytes_raw", memory::rt_ptr_write_bytes_raw);
