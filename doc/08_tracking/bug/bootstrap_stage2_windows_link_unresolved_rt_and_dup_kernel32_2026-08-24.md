@@ -67,8 +67,39 @@ nm -g --defined-only ... | grep -c ' T rt_black_box$'            -> 0
 at least `rt_black_box` and `rt_host_gpu_active_backend_handle` have no
 definition anywhere in `src/runtime/*.c` or `src/compiler_rust/runtime/src`.
 
-So the coverage-gap reading stands. Do not re-litigate it by chasing a
-compilation failure — check `nm` on the archive first.
+### Narrowed further — the core-C archive is never built or linked here
+
+A whole-tree scan settles it. Over every `.a` built in the last 6 hours under
+`build/` and `src/compiler_rust/target/`:
+
+```
+nm -g --defined-only <each>.a | grep ' T rt_io_udp_recv_from'   -> no hits, anywhere
+```
+
+The symbol is in `src/runtime/runtime_native.c` (line ~11363, plus a stub
+variant) yet exists in **no built artifact on this machine**. Both archives the
+Stage 2 link actually consumes were checked directly:
+
+| archive | `rt_*` defined | has these 68 |
+|---|---|---|
+| `stage2-runtime-authority/libsimple_native_all.a` | 2154 | no |
+| `rust-authority-*/.../libsimple_runtime.a` (newest, post-fix 20:57) | 1944 | no |
+
+The reason is structural, not a coverage gap after all: **`runtime_native.c` is
+not in the Rust runtime crate's `build.rs` input list.** It is compiled only by
+`build_c_runtime_library` (`native_project/tools.rs`), the `core-c-bootstrap`
+bundle path — and that archive is never produced in this lane, so the symbols
+never reach the link.
+
+**Next step is therefore a build-pipeline question, not a porting project:** find
+why `--runtime-bundle core-c-bootstrap` does not build/link its C archive on
+`x86_64-pc-windows-gnu`. Note `setup.shs` warns here that no versioned clang was
+found and the C runtime falls back to a bare host `clang/cc`, which is a
+plausible thread to pull first.
+
+Three readings of this were tried in one session — coverage gap, compile
+failure, coverage gap again — before the whole-tree `nm` scan settled it. Run
+that scan FIRST next time; it is one command and it is decisive.
 
 ## Blocker B — 22 `multiple definition` errors from the kernel32 import stubs
 
