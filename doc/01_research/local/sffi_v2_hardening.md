@@ -2327,6 +2327,21 @@ requirement. Current totals are 21,435 raw, 2,121 explicit, 19,314 missing;
 12,112 declarations, 885 tagged, 382 minimized, 10,961 untouched, and zero
 signed/admitted.
 
+## HIR-cache environment authority
+
+All seven HIR-cache environment reads now use one tagged declaration and narrow
+lexical `unsafe(ffi)` scopes. The cache enable, root, lane, status, and key
+switches remain mutation-visible; only the shard specification and shard queue
+retain their pre-existing one-read memos. The five-variable key loop still
+performs exactly five reads in the same order, so cache identity and provider
+cardinality are unchanged.
+
+The HIR-cache round-trip specification passes 4/4. Optimizer findings remain
+77; the paired measurement changes from 3.36 s / 283,912 KiB to 3.21 s /
+283,848 KiB. Current totals are 21,266 raw calls, 2,143 explicit, 19,123
+missing; 12,111 declarations, 894 tagged, 383 minimized, 10,951 untouched, and
+zero signed/admitted.
+
 ## Runtime-object-cache authority and performance evidence
 
 The two newly added runtime-object-cache environment reads and its cached-object

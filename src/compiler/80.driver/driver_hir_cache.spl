@@ -43,6 +43,7 @@ use std.io.{file_exists, file_write}
 use std.io.file_ops.{file_lock, file_unlock}
 use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_hash}
 
+@unsafe(reason: "raw HIR-cache environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -75,17 +76,24 @@ var _hir_cache_store_io_failures: i64 = 0
 var _hir_cache_last_warnings: [text] = []
 
 fn hir_cache_enabled() -> bool:
-    if (rt_env_get("SIMPLE_HIR_CACHE") ?? "") == "0":
+    var cache_switch = ""
+    unsafe(capabilities: [ffi]):
+        cache_switch = rt_env_get("SIMPLE_HIR_CACHE") ?? ""
+    if cache_switch == "0":
         return false
     # Requires the front-end cache scope: that is the compiler identity the
     # header is checked against. No scope, no identity, no cache.
     frontend_parse_cache_scope() != ""
 
 fn hir_cache_dir() -> text:
-    val root = rt_env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+    var root = ""
+    unsafe(capabilities: [ffi]):
+        root = rt_env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
     if root != "":
         return root
-    val lane = rt_env_get("SIMPLE_CACHE_SCOPE") ?? ""
+    var lane = ""
+    unsafe(capabilities: [ffi]):
+        lane = rt_env_get("SIMPLE_CACHE_SCOPE") ?? ""
     val lane_name = if lane == "": "default" else: lane
     "build/bootstrap/native_cache/{lane_name}/hir"
 
@@ -108,7 +116,10 @@ fn _hir_cache_env_switches() -> text:
     # HIR). Folding them keeps one directory safe across modes.
     var out = ""
     for name in ["SIMPLE_BOOTSTRAP", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STUB_HIR", "SIMPLE_STAGE3_STREAMING_SURFACES"]:
-        out = out + name + "=" + (rt_env_get(name) ?? "") + "\n"
+        var value = ""
+        unsafe(capabilities: [ffi]):
+            value = rt_env_get(name) ?? ""
+        out = out + name + "=" + value + "\n"
     out
 
 fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> text:
@@ -240,7 +251,10 @@ fn hir_cache_summary() -> text:
 fn hir_cache_status_line() -> text:
     if hir_cache_enabled():
         return hir_cache_summary()
-    val why = if (rt_env_get("SIMPLE_HIR_CACHE") ?? "") == "0":
+    var cache_switch = ""
+    unsafe(capabilities: [ffi]):
+        cache_switch = rt_env_get("SIMPLE_HIR_CACHE") ?? ""
+    val why = if cache_switch == "0":
         "SIMPLE_HIR_CACHE=0"
     else:
         "no SIMPLE_FRONTEND_CACHE_SCOPE published"
@@ -274,7 +288,8 @@ var _hir_shard_claimed: i64 = 0
 fn hir_shard_spec() -> text:
     if _hir_shard_memo != "@@unset@@":
         return _hir_shard_memo
-    _hir_shard_memo = rt_env_get("SIMPLE_HIR_SHARD") ?? ""
+    unsafe(capabilities: [ffi]):
+        _hir_shard_memo = rt_env_get("SIMPLE_HIR_SHARD") ?? ""
     _hir_shard_memo
 
 fn hir_shard_active() -> bool:
@@ -286,7 +301,8 @@ fn hir_shard_claimed() -> i64:
 fn _hir_shard_queue_dir() -> text:
     if _hir_shard_queue_memo != "@@unset@@":
         return _hir_shard_queue_memo
-    _hir_shard_queue_memo = rt_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
+    unsafe(capabilities: [ffi]):
+        _hir_shard_queue_memo = rt_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
     _hir_shard_queue_memo
 
 # A malformed spec owns EVERYTHING (same fail-closed rule as the parse shard:

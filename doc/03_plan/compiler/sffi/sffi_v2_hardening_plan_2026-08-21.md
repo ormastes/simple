@@ -1404,3 +1404,11 @@ calls (2,136 explicit, 19,130 missing); 12,111 declarations (893 tagged, 383
 minimized, 10,952 untouched), zero signed/admitted. Five-site convergence passes
 26/26, optimizer findings remain 34, and the paired measurement is 3.28 s /
 283,828 KiB before versus 3.49 s / 283,724 KiB after.
+
+HIR-cache follow-up scopes all seven environment reads while preserving five
+mutable policy reads, five ordered key-loop reads, and the two intentional
+one-read shard memos. Current census: 21,266 calls (2,143 explicit, 19,123
+missing); 12,111 declarations (894 tagged, 383 minimized, 10,951 untouched),
+zero signed/admitted. Round-trip coverage passes 4/4, optimizer findings remain
+77, and paired measurement is 3.36 s / 283,912 KiB before versus 3.21 s /
+283,848 KiB after.
