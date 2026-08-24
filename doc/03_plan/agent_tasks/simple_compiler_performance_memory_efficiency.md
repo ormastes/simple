@@ -149,6 +149,21 @@ current-head research reconciliation.
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed lint-cache reverse-index tranche
+
+- Canonicalize dependency membership for indexing without changing the public
+  entry dependency list or `Dict<text, [text]>` representation.
+- Apply old/new dependency deltas on store; leave unchanged buckets untouched.
+- Remove every reverse link when an entry is overwritten or invalidated and
+  delete empty buckets.
+- Detach symbol buckets before invalidation traversal and deduplicate legacy
+  repeated keys in the snapshot.
+- Bound retained reverse-index slots by live unique edges rather than refresh
+  history; preserve bucket encounter order and existing file invalidation
+  cascade behavior.
+- Manual verification intentionally omitted under the user's explicit
+  no-verification instruction.
+
 ## Completed no-allocation closure-index tranche
 
 - Replace processed/queued array membership scans with one insertion-time
