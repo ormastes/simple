@@ -411,6 +411,16 @@ original spans. Later
 context cleanup and final trimming keep their historical order, so this kernel
 changes copying cost without widening formatter semantics.
 
+### Repository-scale tier-check ownership
+
+`check-tier` owns keyword, module, and restricted-tier file accumulators for
+one invocation. These arrays mutate through their unique owner and retain
+source/sorted encounter order; copy-on-append is forbidden for input-sized
+collections. Full-tier paths are counted rather than retained because they are
+never inspected after classification. Immutable operator metadata is built
+once per checked file and shared read-only across its line scan, preserving
+core-before-full violation order without per-line table reconstruction.
+
 ### Raw-SFFI source-view ownership
 
 Raw-SFFI analysis owns one request-local, read-only-by-convention `CodeLine`
