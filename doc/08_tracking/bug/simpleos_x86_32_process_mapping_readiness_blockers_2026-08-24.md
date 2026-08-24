@@ -57,6 +57,13 @@ x86-32 execution must remain blocked before loader authority consumption.
   PAE/NX remains necessary for any future hardware W^X claim.
 - A consume-once scheduler adoption must transfer the future mapping owner into
   a task, install its CR3 for CPL3 entry, and invoke terminal destruction.
+  The canonical TCB now appends an opaque generation-bound x86-32 mapping
+  locator. Every constructor and fork path initializes it absent, and legacy
+  exec rejects a present locator. There is intentionally no present-locator
+  constructor: the remaining blocker is an owner-consumed mapper-to-scheduler
+  transfer bound to the exact TCB lifecycle, followed by terminal reap. The
+  locator exposes neither the page-directory address nor mapper teardown
+  authority.
 
 Until those owners join the scheduler transaction,
 `executable_target_dispatch_v1` must retain
