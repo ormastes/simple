@@ -207,6 +207,21 @@ current-head research reconciliation.
   contracts; verification intentionally not run under the user's no-verify
   instruction.
 
+## Completed adaptive MIR local-type index tranche
+
+- Keep the first local-backed global access on the historical direct scan; on
+  the second, build one first-declaration-wins LocalId-to-position dictionary.
+- Cache serialized identities only for referenced locals and keep constant
+  operands on their direct embedded-type path.
+- Reduce repeated local lookup from O(G*L) to expected O(L+G) without adding
+  index work to G=0/G=1 functions or adding a second eager serialization of
+  unused recursive types.
+- Preserve duplicate LocalId first-match behavior, missing load/store
+  diagnostics, effect order/multiplicity, and canonical hashes.
+- Reuse the repeated-access contract and add duplicate-ID, constant-store,
+  exact indexed-missing, and adaptive source-topology contracts; verification
+  intentionally not run under the user's no-verify instruction.
+
 ## Implemented generated HIR child-frame tranche
 
 - Generator owner: add `HirChildFrame`, its context-neutral sink, reverse
