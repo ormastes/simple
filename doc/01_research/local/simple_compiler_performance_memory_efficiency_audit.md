@@ -2560,11 +2560,16 @@ temporary fold-output root. This closes a side-effect hazard where the
 `visitors` command's omitted second output argument could write fold artifacts
 under the scanned source tree during a nominally read-only check.
 
-The schema generator still skips `kind` fields on non-base wrapper structs;
-therefore `HirCompClause.kind` expressions remain absent from both legacy and
-frame traversal. This is a pre-existing completeness defect, tracked separately
-in `doc/08_tracking/bug/hir_comp_clause_children_omitted_2026-08-24.md` rather
-than changing collector semantics inside the allocation migration.
+Follow-up repaired the schema generator's unconditional `kind` skip. Only the
+four base carriers now bypass structural kind traversal because they match
+their kind enum explicitly. The three reachable non-base wrappers—`DimExpr`,
+`Effect`, and `HirCompClause`—now delegate to their kind nodes in recursive
+visit, immediate-child enumeration, structural hash, and frame expansion.
+Comprehension `For` iterable and `If` condition operations are therefore visible
+to typed performance facts in declared clause order. Structural hashes for
+trees containing these wrappers intentionally change from incomplete hashes.
+Comprehension coverage remains marked incomplete until cardinality and callback
+execution-domain facts exist.
 
 ### TYPE001/TYPE002 canonical line snapshot
 
