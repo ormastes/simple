@@ -547,3 +547,86 @@ without a corrupt→correct measurement on the Linux lane.
   under `#if defined(__APPLE__)`, mirroring the seed's own `_main_stub`).
   `weak_import` was tried first and does NOT work when the symbol exists in no
   input at all.
+
+## 2026-08-24 (later) — the HIR fix direction is now IMPLEMENTED, and the host's oracle situation is not what it looked like
+
+### The "NOT implemented" fix direction landed at `c9da626ec1c`
+
+This record's fix direction — *type `Dict<K,V>.values()` as `[V]` (and `keys()`
+likewise) in the Simple HIR layer, mirroring the Rust seed's
+`hir/lower/expr/mod.rs:1619`* — is implemented. Located site, so nobody has to
+find it again:
+
+- **File:** `src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl`,
+  function `me lower_hir_expr(e: Expr) -> HirExpr`.
+- **Two insertion points, both patched:** the discriminant-gated MethodCall
+  pre-dispatch arm (terminal return, was `:175-179`) and the big-match MethodCall
+  fallback arm (was `:557`). Patching one only would make typing depend on which
+  duplicated arm fires, and a *defeated* kind pre-dispatch is exactly what
+  `bootstrap_stage2_empty_mir_bodies_2026-07-05.md` localises for statements.
+- **Precedent to copy from:** the `ExprKind.Index` arm at `:474-489` in the same
+  function already does this for `d[k]` (`case HirTypeKind.Dict(_, value)`).
+  Its caveat is load-bearing: `has_type_` is the AUTHORITATIVE presence bit;
+  `type_ != nil` alone lets a zeroed placeholder be interpreted and SIGSEGVs
+  later in `lower_hir_block`'s 16-byte HirType clone.
+- **Type shapes:** `HirTypeKind.Array(element: HirType, size: i64?)` and
+  `HirTypeKind.Dict(key: HirType, value: HirType)`, `20.hir/hir_types.spl:516-519`.
+  There is **no TypeId and no interning API** in the pure-Simple layer
+  (`grep TypeId 20.hir/hir_types.spl` -> zero matches); `HirType` is a plain
+  structural value built inline.
+
+Why not the two later passes, so they are not re-investigated:
+
+- `35.semantics/resolve.spl:483` is the only place that assigns a method-call
+  result type today, but it goes through `resolve_call_result_type_raw`
+  (`resolve_lookup_helpers.spl:73-88`), which needs a **resolved user symbol**.
+  A builtin `Dict.keys()` has none, so it returns the `nil` fallback. It also
+  writes back `has_type_: expr.has_type_` at `:754`, so a type set there without
+  flipping that bit would be invisible downstream.
+- `30.types/type_infer/inference_expr_calls.spl:54-93` (`infer_method_call`) has
+  the receiver type in hand but ends in an unconstrained `fresh_var`, and
+  **nothing in `30.types/type_infer/` writes back into the HIR** (`grep '\.type_ ='`
+  -> zero matches). Its driver is Advisory by default and runs AFTER resolve.
+
+Grep evidence that no per-method result-type table existed anywhere in the
+pure-Simple layer before this: `"keys"`/`"values"` across `20.hir`, `30.types`,
+`35.semantics`, `25.traits` -> **zero matches**;
+`30.types/type_system/builtin_registry.spl:121` registers name/arity/doc with no
+return type; `30.types/type_infer/traits.spl:214`'s `case "to_string":` is a
+trait-obligation stub whose arms are literally `pass`.
+
+**Still unverified, and it must be said plainly:** the typing was not exercised.
+Nothing was compiled or run through the pure-Simple pipeline, so no dict loop
+variable was observed acquiring its element type and the arm64 32-bit mask was
+not observed disappearing. The change is a mechanical mirror of the seed's arms
+plus this file's own Index-arm idiom, +74/-0, entirely behind a
+`keys`/`values` + zero-args + `has_type_` + `HirTypeKind.Dict` gate.
+
+### Oracle situation on aarch64-apple-darwin (measured 2026-08-24)
+
+Correcting an assumption that cost time in more than one lane here:
+
+- **The deployed self-hosted binary is dead for compiling.**
+  `bin/release/aarch64-apple-darwin-macho/simple` (132,398,344 bytes, 2026-08-10;
+  `bin/simple` is a 431-byte exec wrapper pointing at it) cannot `native-build` a
+  three-line hello world: `error: in-process native-build: AOT compile error in
+  h: <invalid-heap:0xafd011821>`. It also has no `lint` (bootstrap CLI: only
+  `compile` and `native-build`).
+- **`simple_seed` DOES work and is a usable oracle.**
+  `bin/release/aarch64-apple-darwin-macho/simple_seed` (20,392,352 bytes,
+  2026-07-25) runs Simple source correctly (`run h.spl` -> `hello`, rc=0) and
+  parses `.spl` files, so `simple_seed run <file>` is a genuine PARSE check for
+  an edited compiler source (a parse failure is reported as
+  `error: compile failed: parse: in "<file>": ...`). This is how `c9da626ec1c`
+  was parse-verified. Note it exercises the seed's own Rust frontend, so it does
+  NOT exercise pure-Simple HIR/MIR changes.
+- **`simple_seed lint` is unusable** — it dies before reaching any target file:
+  `parse: in ".../src/compiler/35.semantics/lint/raw_sffi_call.spl": Unexpected
+  token: expected expression, found Dedent`. Pre-existing; last touched by
+  `b77e6effd9e`. Filed here rather than separately because it is the reason the
+  parse check above had to be done the long way.
+- **Anyone measuring a compiler source edit must pass `--fresh-cache`**: a warm
+  rebuild after a real edit produced a BYTE-IDENTICAL binary
+  (`3 compiled, 747 cached`) — see
+  `stage3_native_build_and_monomorphize_segv_at_origin_main_arm64_2026-08-24.md`.
+  A "nothing changed" reading from a warm build proves nothing.
