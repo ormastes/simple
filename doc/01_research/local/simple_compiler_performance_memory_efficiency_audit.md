@@ -30,6 +30,12 @@ driver diagnostic adapter, remaining typed rules, CollectionPlan, MemorySSA-lite
 bounded summaries, and profile correlation remain incomplete; dormant transforms
 must not be bulk-activated.
 
+The production COLL002 adapter is additionally blocked by
+`typed_collection_perf_builtin_identity_2026-08-24.md`: Array/Slice built-in
+methods have no HIR `SymbolId`, and native Array `contains` is deliberately
+unsupported rather than silently misrouted to text search. The unit registry's
+synthetic IDs are test evidence only, not a deployable standard-library receipt.
+
 I inspected the lint path, collection analysis, MIR optimization registry and dispatch, loop analyses, vectorization, bounds-check elimination, and escape analysis. This was a source-level audit; I did not execute the compiler, test suite, or benchmarks. Findings below therefore distinguish observed code, derived risk, and runtime impact requiring measurement.
 
 Executive conclusions
