@@ -146,3 +146,47 @@ The DLL **is** produced by the build. Restoring it is not a plain `cp` revert:
 main replaced that loop with `bootstrap_stage3_prepare_seed_generation`, a
 hash-recorded immutable artifact set, so the DLL has to join that published
 list. Deserves its own reviewed change.
+
+### FINAL diagnosis — the symbols are undefined on EVERY platform; only Windows enforces it
+
+The core-C archive is a red herring too. For a `bootstrap_main` entry — which is
+exactly what Stage 2 builds — `native_project/config.rs` takes this branch:
+
+```rust
+if is_bootstrap_main_entry(&self.entry_file) {
+    if let Some(native_all) = bootstrap_hosted_native_all_runtime(...) {
+        return Ok(Some((native_all, true)));   // libsimple_native_all.a
+    }
+}
+```
+
+so `build_core_c_runtime_library` is never reached and `libsimple_native_all.a`
+is the runtime. The 68 symbols are therefore expected to come from the Rust
+runtime crate — and they are not there either:
+
+```
+grep -rn 'rt_io_udp_recv_from\|rt_black_box' src/compiler_rust/runtime/src --include=*.rs
+  -> no matches
+```
+
+**These 68 names are defined in no C archive, no Rust source, and no built
+artifact — on any platform.** Linux does not fail on them because, as
+`.claude/rules/vcs.md` already records for `check-no-unresolved-runtime-symbols.shs`,
+"the native link tolerated the undefined symbol ... and the NULL GOT slot became
+a SIGSEGV". ELF lazy binding defers the error to runtime. Windows PE has no
+equivalent tolerance: every symbol must resolve at link time, so the same defect
+is a hard error here.
+
+**This is not a Windows porting gap. Windows is CATCHING a latent repo-wide
+defect that Linux links past and pays for later as a runtime SIGSEGV** — the
+identical failure mode that bug already describes for `rt_unwrap_or_trap`.
+
+Consequences for whoever picks this up:
+- the fix is to implement or explicitly trap all 68 names, which benefits every
+  platform, not just Windows;
+- `check-no-unresolved-runtime-symbols.shs` should be promoted from ADVISORY
+  once a Windows link exists, because the Windows link is a far stronger oracle
+  for this class than `nm` on a tolerant ELF binary;
+- do NOT "fix" it with `-Wl,--unresolved-symbols=ignore-all` or an equivalent;
+  that reproduces the Linux behaviour and converts a caught link error back into
+  a latent runtime SIGSEGV.
