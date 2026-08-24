@@ -13,10 +13,13 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_instructions.{BlockId, MirBlock, MirFunction, MirInst, MirInstKind, MirModule, MirOperand, MirOperandKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirSignature, MirType, MirTypeKind}
+use compiler.mir.mir_json.{serialize_mir_type}
 use compiler.mir.verification_effects.{VerificationEffectV1}
 use compiler.mir.verification_ir.{verification_ir_from_retained_contract, verification_ir_from_canonical_mir, verification_effect_closure_from_mir_module_v1, verification_ir_module_from_canonical_mir_v1}
 use compiler.mir.verification_contract_bridge.{verification_region_state_semantics_v1, verification_contract_expected_state_context_v2}
 use compiler.mir.verification_region_effects.{MirRegionAccessV1, verification_region_effect_manifest_v1, verification_region_frame_obligation_v1, issue_region_frame_proof_receipt_v1}
+
+extern fn rt_file_read_text(path: text) -> text?
 
 fn region_local(id: i64, type_: MirType) -> MirLocal:
     MirLocal(id: LocalId(id: id), name: nil, type_: type_,
@@ -180,6 +183,56 @@ describe "FV2 typed MIR region effects":
         expect(manifest.closed()).to_be(false)
         expect(manifest.diagnostic).to_equal(
             "FV2-E-REGION-TYPE-MISMATCH: one region has inconsistent MIR value types")
+
+    it "preserves first local declaration and exact missing-local diagnostics":
+        step("Verify: preserves first local declaration and exact missing-local diagnostics")
+        val duplicate = region_function("duplicate_local", [
+            region_local(0, MirType.i64()),
+            region_local(0, MirType.bool()),
+            region_local(1, MirType.bool())
+        ], [
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 39),
+                MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Int(7), MirType.i64()))), span: Some(region_span())),
+            MirInst(kind: MirInstKind.LoadGlobal(
+                LocalId(id: 1), SymbolId(id: 40)), span: Some(region_span())),
+            MirInst(kind: MirInstKind.StoreGlobal(
+                SymbolId(id: 41), region_copy(0)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        val duplicate_manifest = verification_region_effect_manifest_v1(duplicate)
+        expect(duplicate_manifest.closed()).to_be(true)
+        expect(duplicate_manifest.effects[0].value_type_identity).to_equal(
+            serialize_mir_type(MirType.i64()))
+        expect(duplicate_manifest.effects[2].value_type_identity).to_equal(
+            serialize_mir_type(MirType.i64()))
+
+        val missing_load = region_function("missing_load", [region_local(0, MirType.i64())], [
+            MirInst(kind: MirInstKind.StoreGlobal(
+                SymbolId(id: 40), region_copy(0)), span: Some(region_span())),
+            MirInst(kind: MirInstKind.LoadGlobal(
+                LocalId(id: 99), SymbolId(id: 41)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        expect(verification_region_effect_manifest_v1(missing_load).diagnostic).to_equal(
+            "FV2-E-REGION-LOAD-TYPE: global load destination has no exact MIR type")
+
+        val missing_store = region_function("missing_store", [region_local(0, MirType.i64())], [
+            MirInst(kind: MirInstKind.LoadGlobal(
+                LocalId(id: 0), SymbolId(id: 40)), span: Some(region_span())),
+            MirInst(kind: MirInstKind.StoreGlobal(
+                SymbolId(id: 41), region_copy(99)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        expect(verification_region_effect_manifest_v1(missing_store).diagnostic).to_equal(
+            "FV2-E-REGION-STORE-TYPE: global store value has no exact MIR type")
+
+    it "builds the local position index only at the adaptive threshold":
+        step("Verify: builds the local position index only at the adaptive threshold")
+        val source = rt_file_read_text(
+            "src/compiler/50.mir/verification_region_effects.spl") ?? ""
+        expect(source).to_contain("if local_lookup_count == 2:")
+        expect(source.split(
+            "local_positions = verification_local_position_index_v1(func)").len()).to_equal(2)
+        expect(source).to_contain(
+            "if not positions.has(local_id): positions[local_id] = position")
 
     it "rejects a global effect without exact source provenance":
         step("Verify: rejects a global effect without exact source provenance")
