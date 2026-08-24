@@ -55,6 +55,11 @@ to a stale compiler.
 The exhaustive structural-tree fixture campaign is a bootstrap automated row.
 Interactive push retains the same final-tree invariants but evaluates only each
 bounded committed tip and its count-only first-parent reference.
+Whole-tree semantic scans, compiler-dependent checks, C runtime compilation,
+and executable parse probes are bootstrap producers even when their gate names
+originated in the push hook. Retiering changes their execution owner, not their
+authority: each becomes a required automated manifest/result pair whose PASS
+log is fingerprinted and consumed by the next push.
 Ledger schema v3 also binds every result to a non-empty owner. A non-passing
 row must retain an actionable unblock condition; a passing row must use
 `unblock_condition=none`. The push consumer rejects unowned work, vacuous TODOs,

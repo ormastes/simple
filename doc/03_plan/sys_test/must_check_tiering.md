@@ -19,6 +19,8 @@
   the real pre-push ref-input consumer without manually fabricating PASS state.
 - Prove the push driver directly names no native-build, QEMU, full-test, or
   benchmark command and its focused self-test stays within ten seconds.
+- Prove the measured whole-tree/compiler gates are automated bootstrap rows,
+  remain present in the textual ledger, and are absent from push dispatch.
 - Prove identical ref updates execute the tree gate once, more than two unique
   updates fail closed, and the push tree gate receives bounded `--push-tip`
   mode while its exhaustive fixture campaign is bootstrap-owned.

@@ -14,6 +14,14 @@ the live checkout is not consulted, and aggregate hashed size is limited to
 it retains absolute size, duplicate entry, source shape, load-bearing path, and
 first-parent delta checks without materializing or scanning every outgoing
 commit. Exhaustive detector fixtures run in the bootstrap tier.
+Production profiling on 2026-08-24 found the former tree-mode subset alone took
+about 59 seconds. Eight whole-tree, compiler, or executable checks were moved
+to automated bootstrap rows: use-target resolution, C runtime compilation,
+direct-runtime scanning, signature provenance, performance-mechanism coverage,
+process-wait EINTR coverage, guard wiring, and outline parsing. Their ledger
+rows remain required TODO until a bound bootstrap records real PASS evidence.
+The push tier retains the two measured sub-second structural tree checks plus
+the bounded committed-ref/range guards.
 The quick rules row extracts `rules.sdl` from the same committed ref before
 parsing its numeric commands. An explicit `--rules` path exists only for
 diagnostic and self-test fixtures.

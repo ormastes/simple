@@ -96,6 +96,13 @@ The quick rules gate also extracts `rules.sdl` from the exact pushed ref; local
 dirty policy cannot alter commands or floors, and `rules.sdl` is included in
 the bootstrap/push source fingerprint.
 
+Whole-tree use resolution, C runtime compilation, direct-runtime scanning,
+signature provenance, performance-mechanism coverage, process-wait EINTR
+coverage, guard wiring, and executable outline parsing are bootstrap-owned.
+They previously consumed about 59 seconds before the bounded range/ref work;
+moving them does not waive them—the textual ledger keeps every row TODO until
+the bootstrap recorder retains its accepted PASS log.
+
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
 checker or a committed receipt:
 
