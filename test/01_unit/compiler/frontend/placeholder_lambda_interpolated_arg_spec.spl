@@ -133,6 +133,18 @@ fn driver_lambda_args_in_method_calls(src: text) -> i64:
         idx = idx + 1
     lambdas
 
+fn driver_ident_count(src: text, wanted: text) -> i64:
+    """Count exact flat-AST identifiers after the driver placeholder passes."""
+    ast_reset()
+    val _module = parse_and_build_module_scoped(src, "placeholder_ident_probe.spl", false)
+    var count = 0
+    var idx = 0
+    while idx < expr_count():
+        if expr_tag[idx] == EXPR_IDENT and expr_s_val[idx] == wanted:
+            count = count + 1
+        idx = idx + 1
+    count
+
 # The probe sources must contain literal `{`/`}` interpolation braces. Writing
 # them inline would make THIS spec's own string literal an interpolated string
 # (and, since the fix, a placeholder lambda), so they are assembled from
@@ -187,6 +199,21 @@ describe "placeholder lambdas in interpolated-string call arguments":
         expect(leaked_placeholder_args(src)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "placeholder lambdas on the driver / native-build parse path":
+    it "preserves ordinary underscore identifiers without fabricating parameter minus one":
+        step("Verify: preserves ordinary underscore identifiers without fabricating parameter minus one")
+        # Stage-3 bootstrap regression: `_pp` was misclassified by relational
+        # text comparisons as a numbered placeholder whose parsed number was
+        # zero, producing the impossible identifier `__p-1`.
+        val src = "fn profile() -> i64:\n    var _pp = 1\n    _pp = _pp + 1\n    _pp\n"
+        expect(driver_ident_count(src, "_pp")).to_be_greater_than(0)
+        expect(driver_ident_count(src, "__p-1")).to_equal(0)
+
+    it "keeps zero-index underscore names outside one-indexed placeholder grammar":
+        step("Verify: keeps zero-index underscore names outside one-indexed placeholder grammar")
+        val src = "fn positional_name() -> i64:\n    val _0 = 7\n    _0\n"
+        expect(driver_ident_count(src, "_0")).to_be_greater_than(0)
+        expect(driver_ident_count(src, "__p-1")).to_equal(0)
+
     it "leaves no bare `_` in an interpolated-string map argument":
         step("Verify: leaves no bare `_` in an interpolated-string map argument")
         expect(driver_leaked_placeholder_args(unnumbered_probe_src())).to_equal(0)  # oracle: 0 — named expected value from the requirement
