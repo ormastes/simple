@@ -2697,3 +2697,12 @@ fact loop. The standalone public witness check retains its compatibility API
 and constructs one snapshot only when invoked independently. This removes two
 full registry/provider materializations from the combined integrity path with
 no change to error ordering or content.
+
+Pipeline report generation and budget filtering had a parallel duplication:
+each known pass first resolved a descriptor for status/canonical naming and
+then called a backend-decision function that resolved and reconstructed the
+same descriptor/provider again. Backend policy now has a private
+resolved-descriptor kernel. The public name-taking decision API remains the
+compatibility boundary, while callers that already resolved a descriptor reuse
+it. Existing deterministic report and backend-decision contracts cover output
+behavior but were not executed under the user's no-verification instruction.
