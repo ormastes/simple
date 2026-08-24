@@ -26,10 +26,11 @@ The runtime-API range guard uses `--scan-only` only from its closed push
 dispatch row; that mode requires an explicit range. Its four mutation fixtures
 remain a separate automated bootstrap row, while default manual execution still
 runs them before scanning.
-On the same committed tree, the full production consumer measured 10.21 seconds
-and 225,032 KiB peak RSS before that fixture split, then 9.27 seconds and
-223,520 KiB afterward. This is the retained NFR-MCT-001 before/after evidence;
-the focused fixture is coverage, not the production timing oracle.
+An earlier committed tree measured 10.21 seconds/225,032 KiB before the fixture
+split and 9.27 seconds/223,520 KiB afterward. Current main measures 11.05
+seconds/225,736 KiB after runtime extraction optimization, so NFR-MCT-001 is
+again RED by 1.05 seconds. The focused fixture is coverage, not the production
+timing oracle; the current production row is authoritative.
 For the runtime-API range gate, Git tree equality over both runtime roots is an
 algorithmic fast path: an unchanged range extracts and counts the tip once;
 any changed runtime root performs the full base/tip removal analysis. The
