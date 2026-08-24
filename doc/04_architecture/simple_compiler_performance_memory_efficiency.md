@@ -132,6 +132,10 @@ to that descriptor. Missing or misbound stable names are compiler-integrity
 failures even when status/expectation metadata is internally consistent.
 Stable-name and witness identities use hash-set uniqueness checks so those
 uniqueness phases remain linear as the pass inventory grows.
+One registry-integrity invocation owns one immutable descriptor snapshot and
+shares it across status, witness, alias, and fact-preservation phases. Public
+sub-check adapters may construct their own snapshot when invoked independently,
+but nested phases must not rebuild provider-bearing descriptors.
 
 ### Diagnostic model
 
