@@ -1,0 +1,150 @@
+# @req: REQ-009, REQ-010, REQ-012, REQ-023, REQ-024
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{
+    FunctionAttr, vhdl_hardware_metadata_default}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.semantics.perf_facts.*
+
+fn pf_span(line: i64) -> Span:
+    Span.at(line, line, 1)
+
+fn pf_unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: pf_span(1))
+
+fn pf_array_type() -> HirType:
+    HirType(kind: HirTypeKind.Array(
+        HirType(kind: HirTypeKind.Int(64, true), span: pf_span(1)), nil),
+        span: pf_span(1))
+
+fn pf_expr(kind: HirExprKind, type_: HirType, line: i64) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: pf_span(line))
+
+fn pf_empty_expr() -> HirExpr:
+    pf_expr(HirExprKind.UnitLit, pf_unit_type(), 1)
+
+fn pf_function_with_iter(
+    resolution: MethodResolution, iter: HirExpr
+) -> HirFunction:
+    val receiver = pf_expr(
+        HirExprKind.NamedVar(SymbolId(id: 11), "items"), pf_array_type(), 3)
+    val lookup = pf_expr(HirExprKind.MethodCall(
+        receiver, "contains", [], resolution), pf_unit_type(), 4)
+    val body = HirBlock(
+        stmts: [HirStmt(kind: HirStmtKind.Expr(lookup), span: pf_span(4))],
+        has: false, value: pf_empty_expr(), span: pf_span(4))
+    val loop = pf_expr(
+        HirExprKind.For(SymbolId(id: 13), iter, body, nil),
+        pf_unit_type(), 2)
+    HirFunction(
+        symbol: SymbolId(id: 20), name: "scan", type_params: [], params: [],
+        return_type: pf_unit_type(),
+        body: HirBlock(
+            stmts: [HirStmt(kind: HirStmtKind.Expr(loop), span: pf_span(2))],
+            has: false, value: pf_empty_expr(), span: pf_span(1)),
+        effects: [], visibility: Visibility.Private, is_async: false,
+        is_static: false, is_public: false, is_method: false,
+        is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_doc_comment: false, doc_comment: "", span: pf_span(1),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil)
+
+fn pf_function(resolution: MethodResolution) -> HirFunction:
+    pf_function_with_iter(resolution, pf_expr(
+        HirExprKind.NamedVar(SymbolId(id: 12), "queries"),
+        pf_array_type(), 2))
+
+fn pf_registry(symbol_id: i64, verified: bool) -> CollectionOperationRegistry:
+    var registry = CollectionOperationRegistry.new("stdlib-cost-v1")
+    registry.register(CollectionOperationSummary(
+        symbol_id: symbol_id, stable_name: "Array.contains",
+        operation: HirPerfOperationKind.LinearLookup,
+        cost: HirPerfCostClass.LinearReceiver,
+        output_cardinality: HirPerfCardinality.Exact(1),
+        enumeration: HirPerfEnumerationClass.Once,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.contains(T)->bool",
+        effects: HirPerfEffectFacts(
+            reads: true, writes: false, allocates: false, throws: false,
+            suspends: false, observable: false, unknown: false),
+        allocation: HirPerfAllocationClass.None,
+        preserves_order: true, materializes: false,
+        metadata_version: "stdlib-cost-v1",
+        provenance: "stdlib build metadata",
+        verification_receipt: if verified: "stdlib-build-receipt" else: ""))
+    registry
+
+describe "typed HIR collection performance facts":
+    it "records one resolved linear lookup with loop ancestry":
+        val facts = collect_hir_function_perf_facts(
+            pf_function(MethodResolution.InstanceMethod(
+                SymbolId(id: 10), SymbolId(id: 30))), pf_registry(30, true))
+        expect(facts.functions_scanned).to_equal(1)
+        expect(facts.collection_ops.len()).to_equal(1)
+        expect(facts.collection_ops[0].loop_depth).to_equal(1)
+        expect(facts.collection_ops[0].registry_verified).to_equal(true)
+        val findings = typed_coll002_linear_lookup_findings(facts)
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("COLL002")
+        expect(findings[0].evidence).to_contain("lookup_cost=linear(receiver)")
+
+    it "fails closed when operation metadata is absent":
+        val facts = collect_hir_function_perf_facts(
+            pf_function(MethodResolution.InstanceMethod(
+                SymbolId(id: 10), SymbolId(id: 31))),
+            CollectionOperationRegistry.new("stdlib-cost-v1"))
+        expect(facts.unclassified_method_calls).to_equal(1)
+        expect(facts.collection_ops.len()).to_equal(0)
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+
+    it "fails closed when registry metadata is not verified":
+        val facts = collect_hir_function_perf_facts(
+            pf_function(MethodResolution.InstanceMethod(
+                SymbolId(id: 10), SymbolId(id: 32))), pf_registry(32, false))
+        expect(facts.unclassified_method_calls).to_equal(1)
+        expect(facts.collection_ops.len()).to_equal(0)
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+
+    it "does not infer a collection capability without a typed receiver":
+        val untyped = HirExpr(
+            kind: HirExprKind.UnitLit, has_type_: false,
+            type_: pf_unit_type(), span: pf_span(9))
+        match hir_perf_receiver_kind(untyped):
+            case HirPerfReceiverKind.Unknown(reason):
+                expect(reason).to_contain("unavailable")
+            case _:
+                expect(false).to_equal(true)
+
+    it "does not convert an unresolved method name into cost evidence":
+        val facts = collect_hir_function_perf_facts(
+            pf_function(MethodResolution.Unresolved), pf_registry(30, true))
+        expect(facts.unclassified_method_calls).to_equal(1)
+        expect(facts.collection_ops.len()).to_equal(0)
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+
+    it "suppresses an exact small literal iteration domain":
+        val literal = pf_expr(HirExprKind.ArrayLit([
+            pf_expr(HirExprKind.IntLit(1, nil), pf_array_type(), 10)
+        ], nil), pf_array_type(), 10)
+        expect(hir_perf_iteration_is_fixed_small(literal)).to_equal(true)
+        val facts = collect_hir_function_perf_facts(
+            pf_function_with_iter(MethodResolution.InstanceMethod(
+                SymbolId(id: 10), SymbolId(id: 30)), literal),
+            pf_registry(30, true))
+        expect(facts.collection_ops[0].loop_depth).to_equal(0)
+        expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+
+    it "poisons duplicate registry symbols instead of overwriting them":
+        var registry = pf_registry(40, true)
+        val duplicate = registry.summaries[40]
+        registry.register(duplicate)
+        expect(registry.is_valid()).to_equal(false)
+        expect(registry.lookup(40).?).to_equal(false)
