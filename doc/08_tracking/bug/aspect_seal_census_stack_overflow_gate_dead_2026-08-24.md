@@ -70,3 +70,77 @@ and the plan text still describes it as landed and green.
 - **Done when:** `sh scripts/check/check-aspect-seal.shs` exits 0 and
   `sh scripts/check/refresh-critical-release-receipts.shs --only check-aspect-seal`
   reports the obligation fresh.
+
+## Update 2026-08-24 — does NOT reproduce on clean origin/main; the laundering half is FIXED
+
+Two separate defects were conflated under this record. They are now separated.
+
+### 1. The stack overflow does not reproduce on a clean tree
+
+Measured in a fresh `git worktree` detached at `origin/main` (`d62957f017b`),
+using the same deployed seed as the original report:
+
+```
+$ readlink -f bin/simple
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+$ sh scripts/check/check-aspect-seal.shs ; echo rc=$?
+PASS — 1 aspect(s) checked, unbound-required=0 late-activation=0 post-weave-recheck=ran
+rc=0
+$ sh scripts/check/check-aspect-seal.shs --selftest ; echo rc=$?
+PASS — 5 selftest fixture(s) checked, scanner detects all four rejection classes
+rc=0
+```
+
+All five selftest fixtures pass, including the four rejection classes the
+original report listed as undetected. The original
+`ERROR — nothing was checked (selftest failed: positive-fixture-produced-no-summary
+unbound-required-not-detected duplicate-binding-not-detected
+late-activation-not-detected unverified-signature-not-detected)` was measured in
+the SHARED worktree `/mnt/data/worktrees/simple-main`, which carries hundreds of
+uncommitted modifications and runs well behind origin. This is the same
+stale-worktree class that produced four phantom `check-engine-differential`
+divergences the same day. NOT closed: the overflow may still be real against
+that worktree's modified driver source, and this note is evidence about clean
+origin/main only, not a refutation of the original observation.
+
+### 2. The receipt laundering was real, is structural, and is fixed
+
+Independent of the overflow, and the more dangerous half: **every** ERROR path
+in `check-aspect-seal.shs` exited 2 without touching `build/evidence/`, so the
+gate's PREVIOUS `PASS` receipt stayed on disk — still bound to the same artifact
+and seal hash, still inside the freshness window — and
+`check-critical-release-seal.shs` kept counting it. A dead gate laundered into
+release evidence. Reproduced verbatim before the fix:
+
+```
+$ sh scripts/check/check-aspect-seal.shs --bogus ; echo rc=$?
+ERROR — nothing was checked (unknown argument: --bogus)
+rc=2
+$ grep verdict_line build/evidence/check-aspect-seal.receipt
+verdict_line=PASS — 1 aspect(s) checked, unbound-required=0 late-activation=0 post-weave-recheck=ran
+```
+
+Fix: `receipt_error()` in `scripts/check/lib/emit_receipt.shs`, called from a
+`die_error()` helper that every ERROR path in the gate now routes through. It
+records the ERROR verdict — which the census rejects via
+`receipt_verdict_is_pass()` (`starts_with("PASS")`) as `verdict-not-pass` — and,
+when the receipt cannot be written at all (one ERROR path IS a missing
+`bin/simple`, the artifact `emit_receipt` must hash), DELETES the stale receipt
+so the census reports `missing`. Both outcomes fail the seal.
+
+Proven to discriminate end to end after the fix:
+
+```
+$ sh scripts/check/check-aspect-seal.shs --bogus ; echo rc=$?
+ERROR — nothing was checked (unknown argument: --bogus)
+rc=2
+$ grep verdict_line build/evidence/check-aspect-seal.receipt
+verdict_line=ERROR — nothing was checked (unknown argument: --bogus)
+$ sh scripts/check/check-critical-release-seal.shs ; echo rc=$?
+RECEIPT check-aspect-seal status=verdict-not-pass verdict=ERROR — nothing was checked (unknown argument: --bogus)
+FAIL — 12 evidence receipt(s) checked, 12 not fresh: ... check-aspect-seal(verdict-not-pass) ...
+rc=1
+```
+
+Before the fix that same sequence left the seal green. The remaining `missing`
+entries are the pre-existing Phase 9 backlog, unrelated to this change.
