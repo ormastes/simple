@@ -148,120 +148,142 @@ to deploy, and the MCP `tools/call simple_info` probe still executes the Rust
 seed and still returns `exit: 1` with "this Rust-built Simple binary is a
 bootstrap seed only". That probe cannot turn green until Stage 3 self-host does.
 
+
 ---
 
-## ROOT CAUSE FOUND — fix `af74374c355` (2026-08-24)
+## INVESTIGATION 2026-08-24 — defect localized to ~30 lines; two theories REFUTED by measurement
 
-### `n_modules=0` was never the defect
+Still OPEN. Stage 3 still SEGVs. What follows is measured, not reasoned, and it
+retires two wrong explanations (including one this record previously asserted).
 
-It is **correct by design** on this path. Phase 2's streaming-surface path ends
-with (`driver_source_pipeline_parsing.spl`):
+### REFUTED #1 — `n_modules=0` is not the defect
 
-```
-self.ctx.module_surfaces = Some(retained_surfaces)
-self.ctx.modules = {}
-```
+It is **correct by design**. Phase 2's streaming path ends with
+`self.ctx.module_surfaces = Some(retained_surfaces)` / `self.ctx.modules = {}`
+(`driver_source_pipeline_parsing.spl`): on that path the **surfaces ARE the
+module set**. `phase2:parse:done` read `ctx.modules` unconditionally, so a fully
+successful 692-module parse printed a bare `n_modules=0`. The line now names its
+carrier (`carrier=surfaces`). Anyone chasing "the 692 modules are lost between
+release and parse:done" is chasing a logging artifact.
 
-On the streaming path the **surfaces ARE the module set**; `ctx.modules` is
-deliberately emptied. `phase2:parse:done` read `ctx.modules` unconditionally and
-so printed a bare `n_modules=0` after a fully successful 692-module parse. That
-line reads as catastrophic loss and misdirected this investigation to the wrong
-field. It now names its carrier.
+### REFUTED #2 — the readiness flag is NOT lost, and phase 3 routes correctly
 
-Streaming was confirmed active: `bootstrap-from-scratch.sh` exports
-`SIMPLE_STAGE3_STREAMING_SURFACES=1` for Stage 3, and the 692
-`phase2:surface:file:released` lines are emitted only by the streaming path
-(`log_module_surface_released`, `driver_log_helpers.spl:177`).
-
-### The actual defect: phase 3 dispatched on a lost readiness flag
-
-`driver_hir_pipeline_lowering.spl`, `lower_and_check_impl`:
+A previous revision of this record claimed the phase-3 dispatch fell into the
+legacy path because `streaming_surface_owner_ready` was lost across the phase
+boundary. **That is false.** Instrumented Stage 3 prints:
 
 ```
-if self.streaming_surface_owner_ready:          # <-- the mutable scalar, ALONE
-    return self.lower_and_check_streaming_surfaces_impl()
+[BOOTSTRAP-PHASE] +348192ms phase3:route ready=true config=true n_modules=0 n_sources=968
+[BOOTSTRAP-PHASE] +348192ms phase3:streaming:entry
 ```
 
-Phase 2 sets `streaming_surface_owner_ready = true`. Under native value
-semantics that boolean was **lost across the phase boundary**, so this test read
-false and fell into the **legacy** path — which iterates `ctx.modules`, the
-collection phase 2 had just deliberately emptied. Result: zero iterations, phase
-3 "completes" in 1 ms, returns SUCCESS with zero HIR modules.
+`ready=true` — the flag survives, and the streaming impl **is** entered.
 
-The empty program then flows on: monomorphize reports `0/0` (vacuous), and MIR
-lowering is simply the first phase that DEREFERENCES rather than iterating —
-`_bootstrap_entry_hir_module` is nil, `.?` enters the Some arm anyway (the
-predicate-misread class of `c018ee15926`, where `is_empty()` returns false on an
-empty list in Stage-2-compiled code), and `hir_module.symbols` SEGVs.
-**The crash site was three phases downstream of the defect site.**
+That claim rested on "the streaming impl's pre-loop `log_build_progress("hir",…)`
+never appears in the stage3 log". **That reasoning was invalid**:
+`log_build_progress` ends in `file_append`, so it never goes to that log at all.
+A guard against repeating this: `log_phase` → stderr, `log_build_progress` →
+`bootstrap-build-progress.events`. Do not use the absence of one to reason about
+the other.
 
-### Proven from the existing log — no new run required
+### MEASURED — where it actually goes wrong
 
-From the 367 KB `stage3-native-build.log` of the original failing run:
+`lower_and_check_streaming_surfaces_impl` is entered and then **returns success
+from the middle of the method without executing any return statement**:
 
-- `grep -c 'phase=hir'` → **0**. The streaming impl's pre-loop
-  `log_build_progress("hir", "modules", 0, surfaces.surfaces.len(), "pending", …)`
-  **never printed**.
-- `grep -c FAILED` → **0**, and phase 3 returned true in 1 ms.
-- The streaming impl has **no success path before that log line** — every exit
-  above it is `return (self.ctx, false)` with a recorded error.
+| probe (all UNCONDITIONAL `log_phase`, so they cannot be mis-branched) | result |
+|---|---|
+| `phase3:streaming:entry` (first line of the impl)                    | **printed** |
+| `phase3:streaming:visit` (after `hir_visit_order` is computed)        | **never printed** |
+| `phase3:legacy:entry`                                                 | never printed |
+| any recorded error                                                    | **zero** |
+| phase 3 verdict                                                       | **true**, in ~0 ms over 692 surfaces |
 
-Therefore the streaming impl was **never entered**, while the 692
-`surface:file:released` lines prove phase 2 *did* take the streaming path. The
-two halves of the pipeline disagreed about the mode. That is the seam.
+Execution then continues normally — `phase3:hir_typecheck:done`, `[mono]
+generic_fns=0 call_sites=0`, `aot:lower_to_mir:start`, SEGV at
+`[mir-lower-free] start`.
 
-Corroboration: `phase1:load_sources:done n_sources=968` — the sources were all
-there; `phase2:source_reclaim` and `[parse-shard]` are both absent, excluding
-eviction and shard-exit as alternative mechanisms.
+**Every `return` between those two probes is `return (self.ctx, false)` and every
+one is immediately preceded by `add_error`.** Zero errors were recorded and the
+verdict was `true`, so none of them ran. The method's only `(self.ctx, true)` is
+at the very end, after a teardown that emits
+`phase3:streaming_source_reclaim:done` and `hir_reclaim` events — **both absent
+from this run**.
 
-### Fix (minimal, semantics-preserving)
+So the defect is bracketed to roughly 30 lines, between the entry probe and the
+visit-order computation: owner unwrap, `rt_heap_ref_wellformed` inside an
+`unsafe(capabilities: [ffi])` block, `hirlowering_for_module`,
+`bootstrap_hir_modules_reset`, `hir_cache_enabled`/`hir_cache_closure_digest`,
+`hir_shard_active`/`hir_shard_levels`.
 
-`driver_orchestration` already derived *its* phase-3 routing from stable
-configuration for exactly this reason — *"not the adjacent mutable readiness
-boolean that native value semantics can lose between phase methods"*. This
-dispatch was the one place still trusting the boolean.
+### Assessment
 
-1. **Route on both** — `streaming_ready_flag or streaming_config_gate`.
-   Configuration rescues a lost flag; the flag serves compat callers that stage
-   surfaces without the env gates.
-2. **Legacy path fails closed** — `E-DRV-PHASE3-EMPTY`: 0 modules from >0
-   sources aborts.
-3. **Streaming path fails closed** — `E-DRV-PHASE3-EMPTY-SURFACES`.
-4. **MIR entry fails closed** — `E-MIR-BOOTSTRAP-ENTRY-NIL` explicitly
-   nil-checks the payload instead of trusting `.?`, turning the SEGV into a
-   named error.
-5. `phase2:parse:done` now reports `carrier=surfaces|modules`.
+This is **not a driver-logic defect** — no driver logic can return `true` from
+the middle of that method. It is a **control-flow miscompilation in
+Stage-2-compiled code**, the same family as `c018ee15926` ("`is_empty()` returns
+FALSE on an empty list in Stage-2-compiled code"), where a predicate/branch in
+the self-compiled compiler is lowered incorrectly. MIR lowering is merely the
+first phase that DEREFERENCES the resulting empty program instead of iterating
+zero times over it — **the crash site is three phases downstream of the defect
+site**, which is why this was repeatedly misfiled as a MIR bug.
 
-A zero-module parse result can no longer flow into a later phase on any path.
+Fixing that codegen defect is out of scope for this record; it needs a
+narrowed-down miscompilation reproducer, and `c018ee15926` is the existing
+thread.
 
-### Regression gate
+### Landed here (defensive; does not fix the SEGV)
 
-`scripts/check/check-phase3-empty-module-abort.shs` — `--selftest` first and
-fatal (4 fixtures: clean, incident-replay, partial-regression, empty-tree);
-verdict last on stdout. Validated against reality:
+- `af74374c355` — phase-3 dispatch routes on stable configuration as well as the
+  readiness flag (defensive; measured to be a no-op for this bug), plus
+  fail-closed aborts: `E-DRV-PHASE3-EMPTY` (legacy, 0 modules from >0 sources),
+  `E-DRV-PHASE3-EMPTY-SURFACES` (streaming), `E-MIR-BOOTSTRAP-ENTRY-NIL`
+  (explicit nil check instead of trusting `.?`).
+- `0db03fbe7ac` — the `parse:done` carrier diagnostic must not dereference the
+  retained surface owner. The first version did, and **SEGV'd in the diagnostic
+  itself**: the log ended at `surface:file:released seq=692` with no
+  `parse:done` line at all. A diagnostic must never be able to crash the compile
+  it describes.
+- `759ad1fd1c5` — the unconditional path receipts above, plus
+  `E-DRV-PHASE3-EMPTY-VISIT`, which fails closed when the visit order is empty
+  while surfaces are present. Deliberately conditioned on the **surfaces** (the
+  carrier proven present), never on the owner arrays — a guard conditioned on
+  the carrier it suspects is vacuous exactly when the bug fires.
+- `scripts/check/check-phase3-empty-module-abort.shs` — 5-invariant ratchet,
+  `--selftest` first and fatal, verdict last. Validated against reality: FAILs
+  on the pre-fix tree naming all violations, PASSes after.
+
+Note none of the new aborts fired in the failing run — consistent with the
+assessment above, since a miscompiled branch skips guards too. They remain
+correct and will catch the same *shape* of failure on any correctly-compiled
+path.
+
+### Verified evidence trail
+
+Stage 2 admitted and a valid `//bootstrap:stage4` receipt were obtained (exit
+codes read directly into variables, never through a pipe):
 
 ```
-# at origin/main (the broken tree)
-FAIL — 4 invariant(s) checked in <tree>, violated: phase3-dispatch-routes-on-mutable-flag-alone \
-  legacy-phase3-missing-zero-module-abort streaming-phase3-missing-zero-surface-abort \
-  mir-bootstrap-entry-missing-nil-check
-
-# at af74374c355 (fixed)
-PASS — 4 invariant(s) checked, phase-3 zero-module abort intact (dispatch routes on config+flag; \
-  legacy, streaming and MIR-entry paths all fail closed)
+Stage 2 admitted; stopping before Stage 3 as requested.          STEP1_RC=0
+bootstrap-admission: produced .../lane3/stage4-admission.env     STEP2_MINT_RC=0
+bootstrap-policy: receipt-valid target=//bootstrap:stage4 reason=self-host-convergence-check execution=not-attempted   STEP3_VALIDATE_RC=0
 ```
 
-### Relationship to the arm64 report
+The full run then reported, verbatim:
 
-One defect, not two. `stage3_monomorphize_segv_at_origin_main_arm64_2026-08-24.md`
-describes the same empty-program condition ("clears HIR entirely"); after its own
-monomorphize fault was fixed, that lane also proceeds to `aot:lower_to_mir` —
-converging on exactly this x86_64 crash site.
+```
+Stage 3: stage2 → bootstrap_main.spl (self-host)
+Segmentation fault (core dumped)
+  warning: stage3 self-host was KILLED by signal 11 (SEGV), not a compile failure; Stage 4 unavailable
+Stage 3 unavailable — no provenance-verified compiler for Stage 4
+STEP4_FULLRUN_RC=2
+```
 
-### Status
+**No Stage 4 artifact exists. Status: OPEN.**
 
-**Root cause identified, fixed and landed at `af74374c355`; regression gate green.**
-End-to-end Stage 3 / Stage 4 artifact verification is a separate long bootstrap
-run and is recorded below when complete. Note that even absent that run, the
-change is a strict improvement: the silent SEGV is now a named, fail-closed
-error on every path.
+### Next step for whoever picks this up
+
+Do not re-diagnose from the MIR crash, and do not re-open the two refuted
+theories. Bisect the ~30-line region with more unconditional `log_phase` receipts
+(one between each call) to find the exact statement after which control escapes,
+then reduce that statement to a standalone miscompilation fixture against
+`c018ee15926`.
