@@ -23,6 +23,10 @@ use os.kernel.fs.fat32_atomic_replace.{fat32_atomic_replace_path_allowed}
 use os.kernel.fs.fat32_fd_table.{
     fat32_fd_register, fat32_fd_clear, fat32_fd_read_into, fat32_fd_write_from, fat32_fd_sync
 }
+use os.kernel.scheduler.server_data_namespace_owner.{
+    ServerDataNamespaceOperationV1,
+    server_data_namespace_path_is_managed_v1
+}
 
 # ============================================================================
 # Errno constants used by this module (negative return convention)
@@ -37,6 +41,18 @@ val _FS_ERANGE: i64 = -34
 val _FS_ENOMEM: i64 = -12
 val _FS_ENOSYS: i64 = -38
 val _FS_ENAMETOOLONG: i64 = -36
+
+pub enum ServerDataManagedGateDispositionV1:
+    Unmanaged
+    Denied
+    AuthorizedBackendDeferred
+
+pub fn server_data_managed_gate_decide_v1(
+    managed: bool, current_active_authorized: bool
+) -> ServerDataManagedGateDispositionV1:
+    if not managed: return ServerDataManagedGateDispositionV1.Unmanaged
+    if not current_active_authorized: return ServerDataManagedGateDispositionV1.Denied
+    ServerDataManagedGateDispositionV1.AuthorizedBackendDeferred
 
 # ============================================================================
 # Per-process current working directory
@@ -292,6 +308,14 @@ fn _open_permissions(flags: u32) -> text:
         perms = perms + "c"
     perms
 
+fn _server_data_open_operation_v1(flags: u32) -> ServerDataNamespaceOperationV1:
+    if (flags & O_CREAT) != 0u32:
+        return ServerDataNamespaceOperationV1.Create
+    val access = flags & 3u32
+    if access == O_WRONLY or access == O_RDWR:
+        return ServerDataNamespaceOperationV1.Write
+    ServerDataNamespaceOperationV1.Read
+
 fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Open a file against the kernel-global mounted Fat32Filesystem.
 
@@ -326,10 +350,6 @@ fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
         return SyscallResult(value: _FS_ENAMETOOLONG)
     if not _is_userspace_range(path_ptr, path_len):
         return SyscallResult(value: _FS_EFAULT)
-    if not fat32_mount_ready():
-        # Honest: no boot path has published a mounted filesystem yet. Never
-        # fabricate fd 0 (stdin) as a fake success.
-        return SyscallResult(value: _FS_ENOSYS)
     var sched = scheduler
     val current = sched.get_current()
     val raw_copy = _fs_copy_user_bytes(path_ptr, path_len)
@@ -343,6 +363,23 @@ fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
     if not ipc_mgr.cap_manager.check_file_access(
         current, resolved_path, _open_permissions(flags)):
         return SyscallResult(value: _FS_EPERM)
+    val managed = server_data_namespace_path_is_managed_v1(resolved_path)
+    val namespace_authorized = managed and
+        sched.server_data_namespace_authorize_current_managed_path_v1(
+            _server_data_open_operation_v1(flags), resolved_path, "")
+    val namespace_gate = server_data_managed_gate_decide_v1(
+        managed, namespace_authorized)
+    if namespace_gate != ServerDataManagedGateDispositionV1.Unmanaged:
+        if namespace_gate == ServerDataManagedGateDispositionV1.Denied:
+            return SyscallResult(value: _FS_EPERM)
+        # MountTable can open the exact DBFS object, but the production fd
+        # table cannot yet bind that virtual object to the new OFD/descriptor
+        # owners. Never route protected DBFS paths through the FAT32 fallback.
+        return SyscallResult(value: _FS_ENOSYS)
+    if not fat32_mount_ready():
+        # Honest: no boot path has published a mounted filesystem yet. Never
+        # fabricate fd 0 (stdin) as a fake success.
+        return SyscallResult(value: _FS_ENOSYS)
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
     var open_r = fs.open_at(dev, resolved_path)
@@ -720,8 +757,6 @@ fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
         return SyscallResult(value: _FS_ENAMETOOLONG)
     if not _is_userspace_range(old_ptr, old_len) or not _is_userspace_range(new_ptr, new_len):
         return SyscallResult(value: _FS_EFAULT)
-    if not fat32_mount_ready():
-        return SyscallResult(value: _FS_ENOSYS)
     var sched = scheduler
     val current = sched.get_current()
     val old_copy = _fs_copy_user_bytes(old_ptr, old_len)
@@ -732,6 +767,23 @@ fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
     val new_raw = new_copy.unwrap()
     val old_resolved = _bytes_to_text(path_resolve(current.id, old_raw))
     val new_resolved = _bytes_to_text(path_resolve(current.id, new_raw))
+    val managed = server_data_namespace_path_is_managed_v1(old_resolved) or
+        server_data_namespace_path_is_managed_v1(new_resolved)
+    val namespace_authorized = managed and
+        sched.server_data_namespace_authorize_current_managed_path_v1(
+            ServerDataNamespaceOperationV1.Rename,
+            old_resolved, new_resolved)
+    val namespace_gate = server_data_managed_gate_decide_v1(
+        managed, namespace_authorized)
+    if namespace_gate != ServerDataManagedGateDispositionV1.Unmanaged:
+        if namespace_gate == ServerDataManagedGateDispositionV1.Denied:
+            return SyscallResult(value: _FS_EPERM)
+        # No DBFS namespace rename dispatcher is bound to the canonical file
+        # syscall owner yet. In particular, never fall through to FAT32's
+        # non-atomic rename or recoverable-replace policy for /srv/data.
+        return SyscallResult(value: _FS_ENOSYS)
+    if not fat32_mount_ready():
+        return SyscallResult(value: _FS_ENOSYS)
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
     if fat32_atomic_replace_path_allowed(new_resolved):

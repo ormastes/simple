@@ -7,8 +7,17 @@ use os.kernel.scheduler.server_data_namespace_owner.{
     server_data_namespace_lease_transition_v1,
     server_data_namespace_slot_reusable_v1,
     server_data_namespace_binding_allowed_v1,
+    server_data_namespace_path_is_managed_v1,
     server_data_namespace_path_operation_allowed_v1,
     server_data_namespace_rename_allowed_v1
+}
+use os.kernel.ipc.syscall_file.{
+    ServerDataManagedGateDispositionV1,
+    server_data_managed_gate_decide_v1
+}
+use os.services.vfs.dbfs_mount_capability.{
+    DbfsVfsMountCapabilitySnapshotV1,
+    dbfs_vfs_mount_capability_snapshot_current_v1
 }
 
 extern fn rt_file_read_text(path: text) -> text
@@ -64,6 +73,16 @@ describe "server-data namespace owner policy":
             4u64)).to_equal(false)
 
     it "allows only canonical web and database subtree paths":
+        expect(server_data_namespace_path_is_managed_v1(
+            "/srv/data")).to_equal(true)
+        expect(server_data_namespace_path_is_managed_v1(
+            "/srv/data/db/main.db")).to_equal(true)
+        expect(server_data_namespace_path_is_managed_v1(
+            "/srv/database/main.db")).to_equal(false)
+        expect(server_data_namespace_path_is_managed_v1(
+            "/srv/datax/db/main.db")).to_equal(false)
+        expect(server_data_namespace_path_is_managed_v1(
+            "/srv/data/other/main.db")).to_equal(true)
         expect(server_data_namespace_path_operation_allowed_v1(
             SERVER_DATA_WEB_ROOT_V1 + "/index.bin",
             ServerDataNamespaceOperationV1.Write)).to_equal(true)
@@ -87,6 +106,35 @@ describe "server-data namespace owner policy":
         expect(server_data_namespace_rename_allowed_v1(
             SERVER_DATA_DATABASE_ROOT_V1 + "/main.db",
             SERVER_DATA_WEB_ROOT_V1 + "/main.db")).to_equal(false)
+        expect(server_data_namespace_rename_allowed_v1(
+            SERVER_DATA_DATABASE_ROOT_V1 + "/main.db",
+            "/tmp/main.db")).to_equal(false)
+        expect(server_data_namespace_rename_allowed_v1(
+            "/tmp/main.db",
+            SERVER_DATA_DATABASE_ROOT_V1 + "/main.db")).to_equal(false)
+
+    it "maps managed authorization to EPERM-or-deferred without backend fallback":
+        expect(server_data_managed_gate_decide_v1(false, false)).to_equal(
+            ServerDataManagedGateDispositionV1.Unmanaged)
+        expect(server_data_managed_gate_decide_v1(true, false)).to_equal(
+            ServerDataManagedGateDispositionV1.Denied)
+        expect(server_data_managed_gate_decide_v1(true, true)).to_equal(
+            ServerDataManagedGateDispositionV1.AuthorizedBackendDeferred)
+
+    it "rejects stale and ABA capability snapshots around Active validation":
+        val mounted = DbfsVfsMountCapabilitySnapshotV1(code: 1, generation: 7u64)
+        expect(dbfs_vfs_mount_capability_snapshot_current_v1(
+            mounted,
+            DbfsVfsMountCapabilitySnapshotV1(code: 1, generation: 7u64)
+        )).to_equal(true)
+        expect(dbfs_vfs_mount_capability_snapshot_current_v1(
+            mounted,
+            DbfsVfsMountCapabilitySnapshotV1(code: 0, generation: 8u64)
+        )).to_equal(false)
+        expect(dbfs_vfs_mount_capability_snapshot_current_v1(
+            mounted,
+            DbfsVfsMountCapabilitySnapshotV1(code: 1, generation: 9u64)
+        )).to_equal(false)
 
     it "keeps dual revalidation ambiguity handling and revoke ordering in owner code":
         val source = rt_file_read_text(
@@ -112,3 +160,31 @@ describe "server-data namespace owner policy":
             "server_data_launch_grant_revoke_task_lifecycle_v1(\n        task_id",
             namespace_revoke)
         expect(namespace_revoke).to_be_less_than(grant_revoke)
+
+    it "enforces current Active authority at ABI open rename and readiness":
+        val file_source = rt_file_read_text(
+            "src/os/kernel/ipc/syscall_file.spl") ?? ""
+        val readiness_source = rt_file_read_text(
+            "src/os/kernel/ipc/syscall_dbfs_mount_capability.spl") ?? ""
+        val libc_open = rt_file_read_text("src/os/libc/simpleos_libc.c") ?? ""
+        val libc_rename = rt_file_read_text("src/os/libc/simpleos_fs.c") ?? ""
+        expect(file_source).to_contain(
+            "server_data_namespace_authorize_current_managed_path_v1")
+        expect(file_source).to_contain(
+            "Never route protected DBFS paths through the FAT32 fallback")
+        expect(file_source).to_contain(
+            "never fall through to FAT32")
+        expect(readiness_source).to_contain(
+            "server_data_namespace_current_active_ready_v1")
+        val capability_snapshot = readiness_source.index_of(
+            "val before = dbfs_vfs_mount_capability_snapshot_v1()")
+        val active_check = readiness_source.index_of(
+            "server_data_namespace_current_active_ready_v1()")
+        expect(capability_snapshot).to_be_less_than(active_check)
+        val second_snapshot = readiness_source.index_of(
+            "val after = dbfs_vfs_mount_capability_snapshot_v1()")
+        expect(active_check).to_be_less_than(second_snapshot)
+        expect(readiness_source).to_contain("SyscallResult(value: 0)")
+        expect(file_source).to_contain("if not fat32_mount_ready()")
+        expect(libc_open).to_contain("simpleos_syscall(30")
+        expect(libc_rename).to_contain("simpleos_syscall(44")

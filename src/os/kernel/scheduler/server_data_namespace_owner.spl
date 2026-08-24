@@ -228,6 +228,11 @@ pub fn server_data_namespace_path_operation_allowed_v1(
         return (_SERVER_DATA_WEB_RIGHTS_V1 & required) == required
     false
 
+pub fn server_data_namespace_path_is_managed_v1(path: text) -> bool:
+    """Identify the protected namespace without granting a subtree."""
+    if not _server_data_path_canonical_v1(path): return false
+    _server_data_path_below_v1(path, "/srv/data")
+
 pub fn server_data_namespace_rename_allowed_v1(old_path: text, new_path: text) -> bool:
     if (not _server_data_path_canonical_v1(old_path) or
         not _server_data_path_canonical_v1(new_path)):
@@ -470,6 +475,47 @@ impl Scheduler:
                     return Some((task.id.id, task.lifecycle_generation))
             i = i + 1
         nil
+
+    me fn _server_data_current_active_ready_v1() -> bool:
+        val identity = self._server_data_current_task_identity_v1()
+        if identity == nil: return false
+        val seal = _server_data_seal_snapshot_v1()
+        if seal == nil: return false
+        val facts = vfs_state_revalidate_dbfs_root_mount_seal_v1(seal.unwrap())
+        if facts.is_err(): return false
+        if not _server_data_namespace_lock_v1(): return false
+        val index = _server_data_find_task_v1(identity.unwrap().0, identity.unwrap().1)
+        var ready = false
+        if index >= 0:
+            val slot = _server_data_namespace_owner_v1.slots[index]
+            val current = facts.unwrap()
+            ready = server_data_namespace_binding_allowed_v1(
+                slot.state, slot.task_id, slot.lifecycle_generation,
+                identity.unwrap().0, identity.unwrap().1,
+                slot.mount_id, current.mount_id.id,
+                slot.mount_generation, current.mount_generation,
+                slot.dbfs_instance_identity, current.dbfs_instance_identity,
+                slot.dbfs_mutation_epoch, current.dbfs_mutation_epoch) and
+                _server_data_mount_facts_match_v1(slot, current)
+        if not _server_data_namespace_unlock_v1(): return false
+        ready
+
+    pub me server_data_namespace_current_active_ready_v1() -> bool:
+        """Current-TCB-derived readiness; caller IDs are never accepted."""
+        self._server_data_current_active_ready_v1()
+
+    pub me server_data_namespace_authorize_current_managed_path_v1(
+        operation: ServerDataNamespaceOperationV1,
+        path: text,
+        rename_target: text
+    ) -> bool:
+        """Authorize a protected path from the current Active owner row only."""
+        if not server_data_namespace_path_operation_allowed_v1(path, operation):
+            return false
+        if operation == ServerDataNamespaceOperationV1.Rename and
+            not server_data_namespace_rename_allowed_v1(path, rename_target):
+            return false
+        self._server_data_current_active_ready_v1()
 
     pub(package) me server_data_namespace_authorize_current_v1(
         lease: ServerDataNamespaceLeaseV1,
