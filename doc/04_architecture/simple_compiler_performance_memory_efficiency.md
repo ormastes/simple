@@ -503,3 +503,20 @@ exports remain present, and `module_count` means requested root count rather
 than distinct emitted file modules. Empty output contains only four terminated
 header lines; each contiguous module transition owns one blank line, module
 header, and path row.
+
+### Adaptive MIR local-type resolution
+
+Region-effect manifests own a short-lived resolver with two states. The first
+local-backed global access performs the historical ordered local scan. At the
+second access, the resolver builds one first-declaration-wins LocalId-to-local
+position dictionary and shares it read-only for the remaining instruction
+walk. A separate dictionary caches serialized identities only for referenced
+locals. This avoids the position-index build for zero/single local-backed
+accesses and preserves malformed duplicate-ID semantics while bounding repeated
+lookup without adding eager serialization or retaining identities for unused
+types.
+
+Constant store operands bypass the resolver. Missing positions resolve to the
+empty identity consumed by the stable load/store diagnostics. Neither index is
+attached to `MirFunction`, included in canonical MIR serialization, or retained
+across passes, so there is no invalidation or hash surface.
