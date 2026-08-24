@@ -6,12 +6,17 @@ use std.common.contracts.execution.simpleos_executable_admission_v1.{
     ExecutableImageHandleV1, ExecutableLoadRangeV1
 }
 use os.kernel.loader.executable_authority_registry.{
-    ExecutableAuthorityErrorV1,
+    ExecutableAuthorityErrorV1, ExecutableAuthorityStateV1,
     executable_authority_loader_owner_initialize,
     executable_authority_issue_verified,
     executable_authority_snapshot_armed_identity,
     executable_authority_commit,
-    executable_authority_slot_count
+    executable_authority_slot_count, executable_authority_snapshot,
+    executable_authority_begin_joint_reservation_v1,
+    executable_authority_abort_joint_reservation_v1,
+    executable_authority_commit_joint_reservation_v1,
+    executable_authority_begin_joint_revoke_v1,
+    executable_authority_close_succeeded
 }
 use os.kernel.loader.executable_load_plan_v1.{
     executable_load_consumer_new_v1
@@ -152,6 +157,61 @@ describe "loader-owned Armed authority identity snapshot":
             "/servers/simple-web")
         expect(missing_entry_check.error).to_equal(
             Arm64SshJointLaunchValidationErrorV1.MissingEntryIdentity)
+
+        val joint_token = executable_authority_issue_verified(
+            owner, identity_handle(), true, 0x400100u64).unwrap()
+        val reserved = executable_authority_begin_joint_reservation_v1(
+            owner, joint_token, consumer, 0x400100u64,
+            "/servers/simple-web")
+        if reserved.is_err(): fail("joint reservation failed")
+        val first_reservation = reserved.unwrap()
+        expect(executable_authority_snapshot(
+            owner, joint_token).unwrap().state).to_equal(
+                ExecutableAuthorityStateV1.JointReserved)
+        match executable_authority_commit(owner, joint_token):
+            case Err(error):
+                expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidJointLease)
+            case Ok(_): fail("legacy commit bypassed joint reservation")
+        var mismatched_token = joint_token
+        mismatched_token.nonce = joint_token.nonce + 1u64
+        expect(executable_authority_commit_joint_reservation_v1(
+            owner, mismatched_token, first_reservation.lease, consumer,
+            0x400100u64, "/servers/simple-web").is_err()).to_be_true()
+        expect(executable_authority_commit_joint_reservation_v1(
+            owner, joint_token, first_reservation.lease, consumer,
+            0x400200u64, "/servers/simple-web").is_err()).to_be_true()
+        expect(executable_authority_snapshot(
+            owner, joint_token).unwrap().state).to_equal(
+                ExecutableAuthorityStateV1.JointReserved)
+        expect(executable_authority_abort_joint_reservation_v1(
+            owner, first_reservation.lease).is_ok()).to_be_true()
+        expect(executable_authority_snapshot(
+            owner, joint_token).unwrap().state).to_equal(
+                ExecutableAuthorityStateV1.Armed)
+        val second_reservation = executable_authority_begin_joint_reservation_v1(
+            owner, joint_token, consumer, 0x400100u64,
+            "/servers/simple-web").unwrap()
+        expect(executable_authority_abort_joint_reservation_v1(
+            owner, first_reservation.lease).is_err()).to_be_true()
+        expect(executable_authority_commit_joint_reservation_v1(
+            owner, joint_token, second_reservation.lease, consumer,
+            0x400100u64, "/servers/simple-web").is_ok()).to_be_true()
+        expect(executable_authority_snapshot(
+            owner, joint_token).unwrap().state).to_equal(
+                ExecutableAuthorityStateV1.Committed)
+
+        val revoke_token = executable_authority_issue_verified(
+            owner, identity_handle(), true, 0x400100u64).unwrap()
+        val revoke_reservation = executable_authority_begin_joint_reservation_v1(
+            owner, revoke_token, consumer, 0x400100u64,
+            "/servers/simple-web").unwrap()
+        val close_lease = executable_authority_begin_joint_revoke_v1(
+            owner, revoke_reservation.lease).unwrap()
+        expect(executable_authority_close_succeeded(
+            owner, close_lease).is_ok()).to_be_true()
+        expect(executable_authority_snapshot(
+            owner, revoke_token).unwrap().state).to_equal(
+                ExecutableAuthorityStateV1.Released)
 
         val before_invalid = executable_authority_slot_count(owner)
         match executable_authority_issue_verified(

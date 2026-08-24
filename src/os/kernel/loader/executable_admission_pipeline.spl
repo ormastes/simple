@@ -27,6 +27,7 @@ use os.kernel.loader.executable_manifest_signature_verifier.{
 use os.kernel.loader.executable_authority_registry.{
     ExecutableAuthorityErrorV1, ExecutableAuthorityRegistryV1,
     ExecutableAuthorityTokenV1, ExecutableAuthorityCloseLeaseV1,
+    ExecutableAuthorityJointLeaseV1, ExecutableAuthorityJointReservationV1,
     executable_authority_loader_owner_initialize,
     executable_authority_loader_owner,
     executable_authority_issue_verified,
@@ -35,6 +36,10 @@ use os.kernel.loader.executable_authority_registry.{
     executable_authority_begin_revoke_or_retry,
     executable_authority_close_succeeded,
     executable_authority_close_failed_retryable,
+    executable_authority_begin_joint_reservation_v1,
+    executable_authority_abort_joint_reservation_v1,
+    executable_authority_commit_joint_reservation_v1,
+    executable_authority_begin_joint_revoke_v1,
     executable_authority_issue_verified,
     executable_authority_owner_valid
 }
@@ -46,6 +51,7 @@ use std.common.crypto.sha256.{sha256_u8_hex}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.elf_loader.{elf_authenticated_layout_v1}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 
 pub enum ExecutableLoaderAdmissionErrorV1:
     StaleBinding
@@ -385,6 +391,35 @@ pub fn executable_loader_commit(
 ) -> Result<(), ExecutableAuthorityErrorV1>:
     executable_authority_commit(authorities, token)
 
+pub(package) fn executable_loader_begin_joint_reservation_v1(
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    canonical_path: text
+) -> Result<ExecutableAuthorityJointReservationV1, ExecutableAuthorityErrorV1>:
+    executable_authority_begin_joint_reservation_v1(
+        authorities, token, consumer, entry_point, canonical_path)
+
+pub(package) fn executable_loader_abort_joint_reservation_v1(
+    authorities: ExecutableAuthorityRegistryV1,
+    lease: ExecutableAuthorityJointLeaseV1
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    executable_authority_abort_joint_reservation_v1(authorities, lease)
+
+pub fn executable_loader_commit_joint_reservation_v1(
+    authorities: ExecutableAuthorityRegistryV1,
+    expected_token: ExecutableAuthorityTokenV1,
+    lease: ExecutableAuthorityJointLeaseV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    canonical_path: text
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    # The lease is opaque and can only be minted by the loader package. Repeat
+    # every bound input under the registry mutex before the Committed handoff.
+    executable_authority_commit_joint_reservation_v1(
+        authorities, expected_token, lease, consumer, entry_point, canonical_path)
+
 pub fn executable_loader_retrieve_once(
     authorities: ExecutableAuthorityRegistryV1,
     token: ExecutableAuthorityTokenV1
@@ -444,6 +479,18 @@ pub fn executable_loader_revoke(
         case Err(_): Err(ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid)
         case Ok(lease): _loader_finish_close(table, authorities, lease)
 
+pub(package) fn executable_loader_revoke_joint_reservation_v1(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    lease: ExecutableAuthorityJointLeaseV1
+) -> Result<(), ExecutableLoaderAdmissionErrorV1>:
+    val begun = executable_authority_begin_joint_revoke_v1(authorities, lease)
+    match begun:
+        case Err(ExecutableAuthorityErrorV1.SerializationUnavailable):
+            Err(ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+        case Err(_): Err(ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid)
+        case Ok(close_lease): _loader_finish_close(table, authorities, close_lease)
+
 export ExecutableLoaderAdmissionErrorV1
 export ExecutableLoaderVerificationInputsV1
 export ExecutableLoaderAdmissionResultV1
@@ -453,5 +500,6 @@ export executable_loader_admit_open_binding
 export executable_loader_admit_authenticated_open_binding_v1
 export executable_loader_authority_owner_initialize
 export executable_loader_commit, executable_loader_retrieve_once
+export executable_loader_commit_joint_reservation_v1
 export executable_loader_release_retrieved
 export executable_loader_revoke

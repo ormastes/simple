@@ -25,11 +25,13 @@ use os.kernel.types.task_types.{
 use os.kernel.types.capability_types.{CapabilitySet, capability_set_bind_owner}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.loader.executable_authority_registry.{
-    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    ExecutableAuthorityJointLeaseV1
 }
 use os.kernel.loader.executable_admission_pipeline.{
     executable_loader_commit, executable_loader_retrieve_once,
-    executable_loader_release_retrieved, executable_loader_revoke
+    executable_loader_release_retrieved, executable_loader_revoke,
+    executable_loader_commit_joint_reservation_v1
 }
 use os.kernel.loader.executable_image_prepare.{
     executable_prepare_image_with_launch_v1
@@ -157,10 +159,11 @@ impl Scheduler:
         self.executable_adoption_token_generation = token.generation
         self.executable_adoption_token_nonce = token.nonce
 
-    pub me adopt_authenticated_executable_pid_with_launch_v1(
+    me _adopt_authenticated_executable_pid_with_launch_v1(
         mut table: MountTable,
         authorities: ExecutableAuthorityRegistryV1,
         token: ExecutableAuthorityTokenV1,
+        joint_lease: ExecutableAuthorityJointLeaseV1?,
         consumer: ExecutableLoadConsumerV1,
         launch: ExecutableLaunchArgumentsV1,
         entry_point: u64,
@@ -189,7 +192,13 @@ impl Scheduler:
         if prepared_owner.state != SchedulerExecutableAdoptionOwnerStateV1.Prepared:
             return _scheduler_adoption_reject(
                 consumer, ExecutableLoadConsumerErrorV1.AuthorityRejected)
-        val committed = executable_loader_commit(authorities, token)
+        val committed = match joint_lease:
+            case Some(lease):
+                val joint_committed = executable_loader_commit_joint_reservation_v1(
+                    authorities, token, lease, consumer, entry_point,
+                    owned_launch.path)
+                joint_committed
+            case nil: executable_loader_commit(authorities, token)
         if committed.is_err():
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
@@ -350,6 +359,36 @@ impl Scheduler:
         self._record_authenticated_executable_adoption_v1(
             completed_owner.state, id.id, token)
         result
+
+    pub me adopt_authenticated_executable_pid_with_launch_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        token: ExecutableAuthorityTokenV1,
+        consumer: ExecutableLoadConsumerV1,
+        launch: ExecutableLaunchArgumentsV1,
+        entry_point: u64,
+        priority: TaskPriority,
+        caps: CapabilitySet
+    ) -> SchedulerExecutableAdoptionResultV1:
+        self._adopt_authenticated_executable_pid_with_launch_v1(
+            table, authorities, token, nil, consumer, launch, entry_point,
+            priority, caps)
+
+    pub me adopt_joint_reserved_executable_pid_with_launch_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        token: ExecutableAuthorityTokenV1,
+        joint_lease: ExecutableAuthorityJointLeaseV1,
+        consumer: ExecutableLoadConsumerV1,
+        launch: ExecutableLaunchArgumentsV1,
+        entry_point: u64,
+        priority: TaskPriority,
+        caps: CapabilitySet
+    ) -> SchedulerExecutableAdoptionResultV1:
+        """Adopt only through the matching loader-minted joint reservation."""
+        self._adopt_authenticated_executable_pid_with_launch_v1(
+            table, authorities, token, Some(joint_lease), consumer, launch,
+            entry_point, priority, caps)
 
     pub me adopt_authenticated_executable_pid_v1(
         mut table: MountTable,

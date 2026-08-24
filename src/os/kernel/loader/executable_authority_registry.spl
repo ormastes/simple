@@ -12,12 +12,17 @@ use std.common.contracts.execution.simpleos_executable_admission_v1.{
     ExecutableImageHandleV1, executable_image_handle_validate
 }
 use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.kernel.loader.executable_load_plan_v1.{
+    ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
+    ExecutableLoadConsumerV1, executable_load_consumer_schema_version_v1
+}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
 pub enum ExecutableAuthorityStateV1:
     Armed
+    JointReserved
     Committed
     Retrieved
     CloseInProgress
@@ -43,6 +48,8 @@ pub enum ExecutableAuthorityErrorV1:
     GenerationExhausted
     NonceExhausted
     NotArmed
+    InvalidJointLease
+    InvalidJointBinding
 
 pub struct ExecutableAuthorityTokenV1:
     slot_index: i64
@@ -74,10 +81,19 @@ pub(package) struct ExecutableAuthorityCloseLeaseV1:
     close_attempt: u64
     image_handle: ExecutableImageHandleV1
 
+pub struct ExecutableAuthorityJointLeaseV1:
+    _token: ExecutableAuthorityTokenV1
+    _joint_nonce: u64
+
+pub(package) struct ExecutableAuthorityJointReservationV1:
+    identity: ExecutableAuthorityArmedIdentityV1
+    lease: ExecutableAuthorityJointLeaseV1
+
 struct ExecutableAuthoritySlotV1:
     state: ExecutableAuthorityStateV1
     generation: u64
     nonce: u64
+    joint_nonce: u64
     close_attempt: u64
     has_entry_identity: bool
     entry_point: u64
@@ -97,6 +113,7 @@ pub class ExecutableAuthorityRegistryV1:
 # while `_authority_registry_mutex_handle` is held.
 val _authority_registry_mutex_handle: i64 = mutex_raw_create()
 var _authority_registry_state: ExecutableAuthorityRegistryStateV1? = nil
+var _authority_registry_serialization_poisoned: bool = false
 
 pub fn executable_authority_registry_max_slots() -> i64:
     4096
@@ -139,11 +156,22 @@ fn _authority_owner_epoch(slot_limit: i64, nonce_seed: u64) -> u64:
     epoch
 
 fn _authority_lock() -> bool:
-    _authority_registry_mutex_handle > 0 and
-        mutex_raw_lock(_authority_registry_mutex_handle)
+    if _authority_registry_mutex_handle <= 0 or
+        not mutex_raw_lock(_authority_registry_mutex_handle):
+        return false
+    if _authority_registry_serialization_poisoned:
+        _ = mutex_raw_unlock(_authority_registry_mutex_handle)
+        return false
+    true
 
 fn _authority_unlock() -> bool:
-    mutex_raw_unlock(_authority_registry_mutex_handle)
+    val unlocked = mutex_raw_unlock(_authority_registry_mutex_handle)
+    if not unlocked:
+        # A failed native unlock means ownership is indeterminate. Poison the
+        # whole singleton rather than allowing any possibly-mutated slot to be
+        # observed, retrieved, retried, or reused through another entrypoint.
+        _authority_registry_serialization_poisoned = true
+    unlocked
 
 fn _authority_owner_matches(
     state: ExecutableAuthorityRegistryStateV1,
@@ -176,6 +204,61 @@ fn _authority_next_nonce(
     if nonce == 0u64:
         nonce = _authority_mix64(material ^ 0xA5A5A5A5A5A5A5A5)
     nonce
+
+fn _authority_joint_request_matches(
+    slot: ExecutableAuthoritySlotV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    canonical_path: text
+) -> bool:
+    val image = slot.image_handle
+    canonical_path != "" and canonical_path.len() <= 16384 and
+        image.canonical_source_path == canonical_path and
+        slot.has_entry_identity and slot.entry_point != 0u64 and
+        slot.entry_point == entry_point and
+        image.target.os == "simpleos" and image.target.arch == "aarch64" and
+        image.target.abi == "simpleos" and
+        consumer.schema_version == executable_load_consumer_schema_version_v1() and
+        consumer.state == ExecutableLoadConsumerStateV1.Ready and
+        consumer.expected_os == image.target.os and
+        consumer.expected_arch == image.target.arch and
+        consumer.expected_abi == image.target.abi and
+        consumer.segment_count == 0 and consumer.planned_pages == 0u64 and
+        consumer.mapped_pages == 0u64 and consumer.pages_to_unmap == 0u64 and
+        consumer.close_attempt == 0u64 and consumer.entry_point == 0u64 and
+        consumer.failure == ExecutableLoadConsumerErrorV1.None
+
+fn _authority_copy_armed_identity(
+    slot: ExecutableAuthoritySlotV1,
+    token: ExecutableAuthorityTokenV1
+) -> Result<ExecutableAuthorityArmedIdentityV1, ExecutableAuthorityErrorV1>:
+    val path = _authority_copy_text_bounded(
+        slot.image_handle.canonical_source_path, 16384)
+    val image_hash = _authority_copy_text_bounded(slot.image_handle.image_hash, 64)
+    val admission_id = _authority_copy_text_bounded(
+        slot.image_handle.admission_id, 1024)
+    val role = _authority_copy_text_bounded(slot.image_handle.role, 1024)
+    val target_os = _authority_copy_text_bounded(slot.image_handle.target.os, 1024)
+    val target_arch = _authority_copy_text_bounded(
+        slot.image_handle.target.arch, 1024)
+    val target_abi = _authority_copy_text_bounded(
+        slot.image_handle.target.abi, 1024)
+    if not path.? or not image_hash.? or not admission_id.? or not role.? or
+        not target_os.? or not target_arch.? or not target_abi.?:
+        return Err(ExecutableAuthorityErrorV1.InvalidHandle)
+    Ok(ExecutableAuthorityArmedIdentityV1(
+        slot_index: token.slot_index,
+        token_generation: slot.generation,
+        token_nonce: slot.nonce,
+        canonical_source_path: path.unwrap(),
+        image_hash: image_hash.unwrap(),
+        admission_id: admission_id.unwrap(),
+        role: role.unwrap(),
+        target: ManifestTarget(
+            os: target_os.unwrap(), arch: target_arch.unwrap(),
+            abi: target_abi.unwrap()),
+        has_entry_identity: slot.has_entry_identity,
+        entry_point: slot.entry_point))
 
 pub fn executable_authority_loader_owner_initialize(
     slot_limit: i64,
@@ -289,6 +372,7 @@ pub(package) fn executable_authority_issue_verified(
                             state: ExecutableAuthorityStateV1.Armed,
                             generation: generation,
                             nonce: nonce,
+                            joint_nonce: 0u64,
                             close_attempt: 0u64,
                             has_entry_identity: has_entry_identity,
                             entry_point: entry_point,
@@ -338,6 +422,8 @@ pub fn executable_authority_commit(
                             var updated = slot
                             updated.state = ExecutableAuthorityStateV1.Committed
                             state.slots[index] = updated
+                        case ExecutableAuthorityStateV1.JointReserved:
+                            error = ExecutableAuthorityErrorV1.InvalidJointLease
                         case ExecutableAuthorityStateV1.Committed:
                             error = ExecutableAuthorityErrorV1.AlreadyCommitted
                         case ExecutableAuthorityStateV1.Retrieved:
@@ -354,6 +440,195 @@ pub fn executable_authority_commit(
     if not _authority_unlock():
         return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
     if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
+
+fn _authority_joint_lease_index(
+    state: ExecutableAuthorityRegistryStateV1,
+    lease: ExecutableAuthorityJointLeaseV1
+) -> i64:
+    val index = _authority_token_index(state, lease._token)
+    if index < 0 or lease._joint_nonce == 0u64:
+        return -1
+    val slot = state.slots[index]
+    if slot.state != ExecutableAuthorityStateV1.JointReserved or
+        slot.joint_nonce != lease._joint_nonce:
+        return -1
+    index
+
+pub(package) fn executable_authority_begin_joint_reservation_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    canonical_path: text
+) -> Result<ExecutableAuthorityJointReservationV1, ExecutableAuthorityErrorV1>:
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    var reservation: ExecutableAuthorityJointReservationV1? = nil
+    match _authority_registry_state:
+        case nil:
+            error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_token_index(state, token)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidToken
+                else:
+                    val slot = state.slots[index]
+                    if slot.state != ExecutableAuthorityStateV1.Armed:
+                        error = ExecutableAuthorityErrorV1.NotArmed
+                    elif not _authority_joint_request_matches(
+                        slot, consumer, entry_point, canonical_path):
+                        error = ExecutableAuthorityErrorV1.InvalidJointBinding
+                    elif state.next_nonce_counter == 18446744073709551615u64:
+                        error = ExecutableAuthorityErrorV1.NonceExhausted
+                    else:
+                        val copied = _authority_copy_armed_identity(slot, token)
+                        match copied:
+                            case Err(copy_error): error = copy_error
+                            case Ok(identity):
+                                var joint_nonce = _authority_mix64(
+                                    _authority_next_nonce(state, slot.generation, index) ^
+                                    0x4A4F494E54525356u64)
+                                if joint_nonce == 0u64:
+                                    joint_nonce = _authority_mix64(
+                                        state.nonce_seed ^ 0x4A4F494E54525356u64)
+                                if joint_nonce == 0u64:
+                                    error = ExecutableAuthorityErrorV1.NonceExhausted
+                                else:
+                                    var updated = slot
+                                    updated.state = ExecutableAuthorityStateV1.JointReserved
+                                    updated.joint_nonce = joint_nonce
+                                    state.slots[index] = updated
+                                    state.next_nonce_counter =
+                                        state.next_nonce_counter + 1u64
+                                    val lease = ExecutableAuthorityJointLeaseV1(
+                                        _token: token, _joint_nonce: joint_nonce)
+                                    reservation = Some(
+                                        ExecutableAuthorityJointReservationV1(
+                                            identity: identity, lease: lease))
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error != ExecutableAuthorityErrorV1.None:
+        return Err(error)
+    match reservation:
+        case Some(value): Ok(value)
+        case nil: Err(ExecutableAuthorityErrorV1.InvalidRegistry)
+
+pub(package) fn executable_authority_abort_joint_reservation_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    lease: ExecutableAuthorityJointLeaseV1
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    match _authority_registry_state:
+        case nil:
+            error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_joint_lease_index(state, lease)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidJointLease
+                else:
+                    var updated = state.slots[index]
+                    updated.state = ExecutableAuthorityStateV1.Armed
+                    updated.joint_nonce = 0u64
+                    state.slots[index] = updated
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
+
+pub(package) fn executable_authority_commit_joint_reservation_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    expected_token: ExecutableAuthorityTokenV1,
+    lease: ExecutableAuthorityJointLeaseV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    canonical_path: text
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    match _authority_registry_state:
+        case nil:
+            error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            elif expected_token.slot_index != lease._token.slot_index or
+                expected_token.generation != lease._token.generation or
+                expected_token.nonce != lease._token.nonce:
+                error = ExecutableAuthorityErrorV1.InvalidJointLease
+            else:
+                val index = _authority_joint_lease_index(state, lease)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidJointLease
+                elif not _authority_joint_request_matches(
+                    state.slots[index], consumer, entry_point, canonical_path):
+                    error = ExecutableAuthorityErrorV1.InvalidJointBinding
+                else:
+                    var updated = state.slots[index]
+                    updated.state = ExecutableAuthorityStateV1.Committed
+                    updated.joint_nonce = 0u64
+                    state.slots[index] = updated
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error != ExecutableAuthorityErrorV1.None:
+        return Err(error)
+    Ok(())
+
+pub(package) fn executable_authority_begin_joint_revoke_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    lease: ExecutableAuthorityJointLeaseV1
+) -> Result<ExecutableAuthorityCloseLeaseV1, ExecutableAuthorityErrorV1>:
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    var close_lease: ExecutableAuthorityCloseLeaseV1? = nil
+    match _authority_registry_state:
+        case nil:
+            error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_joint_lease_index(state, lease)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidJointLease
+                else:
+                    val slot = state.slots[index]
+                    if slot.close_attempt == 18446744073709551615u64:
+                        error = ExecutableAuthorityErrorV1.NonceExhausted
+                    else:
+                        var updated = slot
+                        updated.state = ExecutableAuthorityStateV1.CloseInProgress
+                        updated.joint_nonce = 0u64
+                        updated.close_attempt = slot.close_attempt + 1u64
+                        state.slots[index] = updated
+                        close_lease = Some(ExecutableAuthorityCloseLeaseV1(
+                            token: lease._token,
+                            close_attempt: updated.close_attempt,
+                            image_handle: slot.image_handle))
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error != ExecutableAuthorityErrorV1.None:
+        return Err(error)
+    match close_lease:
+        case Some(value): Ok(value)
+        case nil: Err(ExecutableAuthorityErrorV1.InvalidRegistry)
 
 pub fn executable_authority_retrieve_once(
     owner: ExecutableAuthorityRegistryV1,
@@ -379,6 +654,8 @@ pub fn executable_authority_retrieve_once(
                     match slot.state:
                         case ExecutableAuthorityStateV1.Armed:
                             error = ExecutableAuthorityErrorV1.NotCommitted
+                        case ExecutableAuthorityStateV1.JointReserved:
+                            error = ExecutableAuthorityErrorV1.InvalidJointLease
                         case ExecutableAuthorityStateV1.Committed:
                             var updated = slot
                             updated.state = ExecutableAuthorityStateV1.Retrieved
@@ -432,6 +709,8 @@ fn _authority_begin_close(
                                 error = ExecutableAuthorityErrorV1.NotRetrieved
                             else:
                                 may_close = true
+                        case ExecutableAuthorityStateV1.JointReserved:
+                            error = ExecutableAuthorityErrorV1.InvalidJointLease
                         case ExecutableAuthorityStateV1.Committed:
                             if require_retrieved:
                                 error = ExecutableAuthorityErrorV1.NotRetrieved
@@ -591,40 +870,10 @@ pub(package) fn executable_authority_snapshot_armed_identity(
                     if slot.state != ExecutableAuthorityStateV1.Armed:
                         error = ExecutableAuthorityErrorV1.NotArmed
                     else:
-                        val path = _authority_copy_text_bounded(
-                            slot.image_handle.canonical_source_path, 16384)
-                        val image_hash = _authority_copy_text_bounded(
-                            slot.image_handle.image_hash, 64)
-                        val admission_id = _authority_copy_text_bounded(
-                            slot.image_handle.admission_id, 1024)
-                        val role = _authority_copy_text_bounded(
-                            slot.image_handle.role, 1024)
-                        val target_os = _authority_copy_text_bounded(
-                            slot.image_handle.target.os, 1024)
-                        val target_arch = _authority_copy_text_bounded(
-                            slot.image_handle.target.arch, 1024)
-                        val target_abi = _authority_copy_text_bounded(
-                            slot.image_handle.target.abi, 1024)
-                        if not path.? or not image_hash.? or not admission_id.? or
-                            not role.? or not target_os.? or not target_arch.? or
-                            not target_abi.?:
-                            error = ExecutableAuthorityErrorV1.InvalidHandle
-                        else:
-                            identity = Some(ExecutableAuthorityArmedIdentityV1(
-                                slot_index: token.slot_index,
-                                token_generation: slot.generation,
-                                token_nonce: slot.nonce,
-                                canonical_source_path: path.unwrap(),
-                                image_hash: image_hash.unwrap(),
-                                admission_id: admission_id.unwrap(),
-                                role: role.unwrap(),
-                                target: ManifestTarget(
-                                    os: target_os.unwrap(),
-                                    arch: target_arch.unwrap(),
-                                    abi: target_abi.unwrap()),
-                                has_entry_identity: slot.has_entry_identity,
-                                entry_point: slot.entry_point
-                            ))
+                        val copied = _authority_copy_armed_identity(slot, token)
+                        match copied:
+                            case Err(copy_error): error = copy_error
+                            case Ok(value): identity = Some(value)
     if not _authority_unlock():
         return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
     if error != ExecutableAuthorityErrorV1.None:
@@ -649,6 +898,7 @@ fn _authority_counts(owner: ExecutableAuthorityRegistryV1) -> (i64, i64, i64, bo
                 capacity = state.slot_limit
                 for slot in state.slots:
                     if slot.state == ExecutableAuthorityStateV1.Armed or
+                        slot.state == ExecutableAuthorityStateV1.JointReserved or
                         slot.state == ExecutableAuthorityStateV1.Committed or
                         slot.state == ExecutableAuthorityStateV1.Retrieved or
                         slot.state == ExecutableAuthorityStateV1.CloseInProgress or
@@ -672,6 +922,7 @@ pub fn executable_authority_owner_valid(owner: ExecutableAuthorityRegistryV1) ->
 
 export ExecutableAuthorityStateV1, ExecutableAuthorityErrorV1
 export ExecutableAuthorityTokenV1, ExecutableAuthoritySnapshotV1
+export ExecutableAuthorityJointLeaseV1
 export ExecutableAuthorityRegistryV1
 export executable_authority_registry_max_slots
 export executable_authority_loader_owner_initialize
