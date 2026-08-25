@@ -28,6 +28,8 @@ enum SafetyError:
     InlineAsmOutsideUnsafe(span: Span)
     UnsafeFfiOutsideUnsafe(span: Span)
     RawPointerOutsideUnsafe(span: Span)
+    StaticReferenceOutsideUnsafe(span: Span)
+    MutableReferenceToImmutableStatic(span: Span)
     Other(message: text, span: Span)
 
 
@@ -77,9 +79,10 @@ struct SafetyIterTrack:
 
 struct SafetyContext:
     """Tracks whether we're currently in an unsafe context."""
-    in_unsafe: bool
+    unsafe_depth: i64
     errors: [SafetyError]
     extern_symbol_ids: Dict<i64, bool>  # resolved raw-call identities (FFI rule)
+    static_mutability: Dict<i64, bool>  # module/import static symbol -> mutable
     class_symbol_ids: [i64] # module-local `class` symbol ids (E1047 s19 gate)
     params: [SafetyParamTrack]  # current function's trackable non-mut params
     iter_tracks: [SafetyIterTrack]  # E1048: stack of collections currently being for-iterated
@@ -91,7 +94,28 @@ struct SafetyContext:
 # ============================================================================
 
 fn safetycontext_new() -> SafetyContext:
-        SafetyContext(in_unsafe: false, errors: [], extern_symbol_ids: {}, class_symbol_ids: [], params: [], iter_tracks: [], expr_depth: 0)
+        SafetyContext(unsafe_depth: 0, errors: [], extern_symbol_ids: {}, static_mutability: {}, class_symbol_ids: [], params: [], iter_tracks: [], expr_depth: 0)
+
+
+fn safetychecker_static_mutability(self: SafetyChecker, expr: HirExpr) -> bool?:
+    var symbol_id = -1
+    match expr.kind:
+        case Var(symbol): symbol_id = symbol.id
+        case NamedVar(symbol, _): symbol_id = symbol.id
+        case _: pass
+    if symbol_id >= 0 and self.context.static_mutability.contains_key(symbol_id):
+        return Some(self.context.static_mutability[symbol_id])
+    nil
+
+
+fn safetychecker_flag_static_reference(self: SafetyChecker, op: HirUnaryOp, operand: HirExpr, span: Span):
+    if val Some(is_mutable_static) = safetychecker_static_mutability(self, operand):
+        if self.context.unsafe_depth <= 0:
+            self.context.errors = self.context.errors.push(
+                SafetyError.StaticReferenceOutsideUnsafe(span))
+        if op == HirUnaryOp.RefMut and not is_mutable_static:
+            self.context.errors = self.context.errors.push(
+                SafetyError.MutableReferenceToImmutableStatic(span))
 
 
 fn safetychecker_max_expr_depth() -> i64:
@@ -334,7 +358,7 @@ class SafetyChecker:
     inside a nested call mutates only that call's local copy and is lost the
     moment it returns, leaving the top-level caller's `errors` empty. This
     silently discarded every diagnostic the checker ever produced (all three
-    rules), while `in_unsafe` toggling still looked like it worked because
+    rules), while unsafe-depth toggling still looked like it worked because
     each block's own nested calls saw the mutation made earlier in the SAME
     downward call chain. `HirLowering` (compiler/20.hir/hir_lowering/types.spl)
     is a `class` for exactly this reason -- it accumulates `self.errors`
@@ -354,7 +378,9 @@ fn safetychecker_check_module(self: SafetyChecker, module: HirModule) -> [Safety
     # symbol id instead of O(calls * module-local extern names). Local extern
     # bodies are also admitted directly as a fail-closed fallback for an
     # incomplete signature.
+    self.context.unsafe_depth = 0
     self.context.extern_symbol_ids = {}
+    self.context.static_mutability = {}
     for _for_item_e in module.functions:
         val ext_func = _for_item_e[1]
         if ext_func.is_extern:
@@ -365,6 +391,14 @@ fn safetychecker_check_module(self: SafetyChecker, module: HirModule) -> [Safety
         val symbol = symbol_entry[1]
         if hir_type_is_sffi_raw_callable(symbol.type_):
             self.context.extern_symbol_ids[symbol.id.id] = true
+        if symbol.kind == SymbolKind.Const:
+            self.context.static_mutability[symbol.id.id] = symbol.is_mutable
+    # Local HIR constants are authoritative even when a frontend path did not
+    # retain mutability on its symbol-table row. Imported constants are covered
+    # by the SymbolKind.Const rows registered from ModuleSurfaceConst below.
+    for constant_entry in module.constants:
+        val constant = constant_entry[1]
+        self.context.static_mutability[constant.symbol.id] = constant.is_mutable
 
     # Collect module-local `class` symbol ids (E1047 s19 gate): a param typed
     # Named(sym, _) whose sym is in this set is a reference type and must NOT
@@ -442,8 +476,12 @@ fn safetychecker_build_param_tracks(self: SafetyChecker, params: [HirParam]) -> 
 
 fn safetychecker_check_function(self: SafetyChecker, func: HirFunction):
     """Check a function body for safety violations."""
+    # Defensive function boundary: malformed prior HIR must not leak unsafe
+    # authority into the next function checked by the shared module owner.
+    self.context.unsafe_depth = 0
     self.context.params = safetychecker_build_param_tracks(self, func.params)
     safetychecker_check_block(self, func.body)
+    self.context.unsafe_depth = 0
 
 
 fn safetychecker_check_block(self: SafetyChecker, block: HirBlock):

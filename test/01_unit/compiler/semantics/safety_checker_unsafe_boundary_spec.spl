@@ -89,6 +89,12 @@ fn count_kind(errors: [SafetyError], kind: text) -> i64:
             case UnsafeFfiOutsideUnsafe(_):
                 if kind == "ffi":
                     n = n + 1
+            case StaticReferenceOutsideUnsafe(_):
+                if kind == "static_ref":
+                    n = n + 1
+            case MutableReferenceToImmutableStatic(_):
+                if kind == "immutable_static_mut_ref":
+                    n = n + 1
             case Other(_, _):
                 if kind == "other":
                     n = n + 1
@@ -181,6 +187,75 @@ describe "safety checker unsafe boundary":
         expect(inventory.hir_complete).to_equal(true)
         expect(inventory.signature_evidence_included).to_equal(false)
         expect(inventory.verification_evidence_included).to_equal(false)
+
+    it "covers the static mutability reference unsafe MC/DC matrix":
+        step("Verify each static/ref/unsafe condition independently affects its diagnostic")
+        val immutable_ref_out = check_source(
+            "val STATIC_VALUE = 1\nfn f():\n    val p = &STATIC_VALUE\n", "static_immutable_ref_out")
+        val immutable_mut_ref_out = check_source(
+            "val STATIC_VALUE = 1\nfn f():\n    val p = &mut STATIC_VALUE\n", "static_immutable_mut_ref_out")
+        val mutable_ref_out = check_source(
+            "var STATIC_VALUE = 1\nfn f():\n    val p = &STATIC_VALUE\n", "static_mutable_ref_out")
+        val mutable_mut_ref_out = check_source(
+            "var STATIC_VALUE = 1\nfn f():\n    val p = &mut STATIC_VALUE\n", "static_mutable_mut_ref_out")
+        val immutable_ref_in = check_source(
+            "val STATIC_VALUE = 1\nfn f():\n    unsafe:\n        val p = &STATIC_VALUE\n", "static_immutable_ref_in")
+        val immutable_mut_ref_in = check_source(
+            "val STATIC_VALUE = 1\nfn f():\n    unsafe:\n        val p = &mut STATIC_VALUE\n", "static_immutable_mut_ref_in")
+        val mutable_ref_in = check_source(
+            "var STATIC_VALUE = 1\nfn f():\n    unsafe:\n        val p = &STATIC_VALUE\n", "static_mutable_ref_in")
+        val mutable_mut_ref_in = check_source(
+            "var STATIC_VALUE = 1\nfn f():\n    unsafe:\n        val p = &mut STATIC_VALUE\n", "static_mutable_mut_ref_in")
+
+        expect(count_kind(immutable_ref_out, "static_ref")).to_equal(1)
+        expect(count_kind(immutable_ref_out, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(immutable_mut_ref_out, "static_ref")).to_equal(1)
+        expect(count_kind(immutable_mut_ref_out, "immutable_static_mut_ref")).to_equal(1)
+        expect(count_kind(mutable_ref_out, "static_ref")).to_equal(1)
+        expect(count_kind(mutable_ref_out, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(mutable_mut_ref_out, "static_ref")).to_equal(1)
+        expect(count_kind(mutable_mut_ref_out, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(immutable_ref_in, "static_ref")).to_equal(0)
+        expect(count_kind(immutable_ref_in, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(immutable_mut_ref_in, "static_ref")).to_equal(0)
+        expect(count_kind(immutable_mut_ref_in, "immutable_static_mut_ref")).to_equal(1)
+        expect(count_kind(mutable_ref_in, "static_ref")).to_equal(0)
+        expect(count_kind(mutable_ref_in, "immutable_static_mut_ref")).to_equal(0)
+        expect(count_kind(mutable_mut_ref_in, "static_ref")).to_equal(0)
+        expect(count_kind(mutable_mut_ref_in, "immutable_static_mut_ref")).to_equal(0)
+
+    it "does not classify references to locals as static references":
+        step("Verify locals preserve their existing reference behavior")
+        val errors = check_source(
+            "fn f():\n    var local = 1\n    val p = &mut local\n", "local_mut_ref")
+        expect(count_kind(errors, "static_ref")).to_equal(0)
+        expect(count_kind(errors, "immutable_static_mut_ref")).to_equal(0)
+
+    it "restores nested unsafe depth before checking a following reference":
+        step("Verify nested unsafe blocks restore the exact enclosing depth")
+        val src = "val STATIC_VALUE = 1\nfn f():\n" +
+            "    unsafe:\n        unsafe:\n            val a = &STATIC_VALUE\n" +
+            "        val b = &STATIC_VALUE\n    val c = &STATIC_VALUE\n"
+        val errors = check_source(src, "nested_static_ref_restore")
+        expect(count_kind(errors, "static_ref")).to_equal(1)
+
+    it "preserves imported static mutability for reference diagnostics":
+        step("Verify imported immutable and mutable statics match local policy")
+        val immutable_provider = "pub val EXPORTED = 1\n"
+        val immutable_consumer = r"use ffi_provider.{EXPORTED}" + "\n" +
+            "fn f():\n    unsafe:\n        val p = &mut EXPORTED\n"
+        val (immutable_errors, _) = check_imported_source(
+            immutable_provider, immutable_consumer)
+        expect(count_kind(immutable_errors, "static_ref")).to_equal(0)
+        expect(count_kind(immutable_errors, "immutable_static_mut_ref")).to_equal(1)
+
+        val mutable_provider = "pub var EXPORTED = 1\n"
+        val mutable_consumer = r"use ffi_provider.{EXPORTED}" + "\n" +
+            "fn f():\n    unsafe:\n        val p = &mut EXPORTED\n"
+        val (mutable_errors, _) = check_imported_source(
+            mutable_provider, mutable_consumer)
+        expect(count_kind(mutable_errors, "static_ref")).to_equal(0)
+        expect(count_kind(mutable_errors, "immutable_static_mut_ref")).to_equal(0)
 
     it "accepts the same aliased imported extern inside minimal unsafe":
         step("Verify: alias identity respects the lexical ffi boundary")
