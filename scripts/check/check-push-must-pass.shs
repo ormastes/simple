@@ -16,6 +16,7 @@ MAX_EVIDENCE_BYTES=67108864
 ALLOW_EXTERNAL_EVIDENCE=0
 ALLOW_UNPROMOTED_LEDGER=0
 MUST_CHECK_CONFLICT_UNION_DONE=0
+RUNTIME_API_EXPECT_REMOVALS=${MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS:-}
 EVIDENCE_REV=""
 REQUIRED_BOOTSTRAP_IDS='compiler-stage1
 compiler-stage2
@@ -72,6 +73,13 @@ if [ "${MUST_CHECK_SELFTEST:-0}" = 1 ] && [ -n "${MUST_CHECK_REQUIRED_IDS_FIXTUR
 fi
 
 die() { echo "push-must-check: FAIL — $*" >&2; exit 1; }
+
+case "$RUNTIME_API_EXPECT_REMOVALS" in
+    ''|*[!0-9]*)
+        [ -z "$RUNTIME_API_EXPECT_REMOVALS" ] ||
+            die "MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS must be a non-negative integer"
+        ;;
+esac
 
 fingerprint_rev() {
     _rev=$1
@@ -297,7 +305,11 @@ run_manifest_push_gates() {
             'push-interpreter-module-owners:ref:sh scripts/check/check-interpreter-module-owners.shs --scan-only --ref')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-module-owners.shs" --scan-only --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-runtime-api-regression:range:sh scripts/check/check-runtime-api-regression-push.shs --scan-only')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+                if [ -n "$RUNTIME_API_EXPECT_REMOVALS" ]; then
+                    run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only --expect-removals "$RUNTIME_API_EXPECT_REMOVALS" "$_range" || { rm -f "$_push_rows"; return 1; }
+                else
+                    run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; }
+                fi ;;
             'push-no-direct-rt:tree:sh scripts/check/check-no-direct-rt.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-interpreter-extern-registry-gap:tree:sh scripts/check/check-interpreter-extern-registry-gap.shs --scan-only')

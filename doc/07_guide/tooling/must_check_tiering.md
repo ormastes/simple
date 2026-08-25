@@ -62,6 +62,13 @@ binary may retain the full-run log and change this row from TODO.
 
 ## Operator commands
 
+For a reviewed, deliberate runtime ABI deprecation, the pre-push dispatcher
+accepts an exact one-push removal count through
+`MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS`. The value must be a non-negative
+integer and is forwarded to the existing runtime API guard's
+`--expect-removals` option. Omitting it preserves the default fail-closed
+behavior; a count smaller than the observed removal set still fails.
+
 ```sh
 sh scripts/check/check-push-must-pass.shs --self-test
 sh scripts/check/check-bootstrap-must-pass.shs --self-test
