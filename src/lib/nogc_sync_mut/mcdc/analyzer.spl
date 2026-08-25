@@ -1,0 +1,218 @@
+# codex-impl
+# Bounded expected-O(E*C) unique-cause analyzer. Masking analysis is admitted
+# only after a canonical decision-graph signature is supplied; this module does
+# not guess masking from output coincidence.
+
+use std.common.mcdc.model.{McdcEvaluation, McdcPairEvidence, McdcPairKind}
+
+pub struct McdcConditionAnalysis:
+    condition_ordinal: i64
+    covered: bool
+    pair: McdcPairEvidence
+
+pub struct McdcAnalysisResult:
+    condition_count: i64
+    covered_count: i64
+    saturated: bool
+    evaluated_rows: i64
+    signature_count: i64
+    conditions: [McdcConditionAnalysis]
+
+class McdcUniqueTable:
+    capacity: i64
+    occupied: [i64]
+    keys: [[i64]]
+    seq_ff: [i64]
+    seq_ft: [i64]
+    seq_tf: [i64]
+    seq_tt: [i64]
+
+impl McdcUniqueTable:
+    static fn create(requested_capacity: i64) -> McdcUniqueTable:
+        var capacity = 2
+        while capacity < requested_capacity:
+            capacity = capacity * 2
+        var occupied: [i64] = []
+        var keys: [[i64]] = []
+        var seq_ff: [i64] = []
+        var seq_ft: [i64] = []
+        var seq_tf: [i64] = []
+        var seq_tt: [i64] = []
+        var i = 0
+        while i < capacity:
+            occupied.push(0)
+            keys.push([0, 0, 0, 0, 0, 0, 0, 0])
+            seq_ff.push(-1)
+            seq_ft.push(-1)
+            seq_tf.push(-1)
+            seq_tt.push(-1)
+            i = i + 1
+        McdcUniqueTable(
+            capacity: capacity, occupied: occupied, keys: keys,
+            seq_ff: seq_ff, seq_ft: seq_ft,
+            seq_tf: seq_tf, seq_tt: seq_tt
+        )
+
+    me clear():
+        var i = 0
+        while i < self.capacity:
+            self.occupied[i] = 0
+            self.seq_ff[i] = -1
+            self.seq_ft[i] = -1
+            self.seq_tf[i] = -1
+            self.seq_tt[i] = -1
+            i = i + 1
+
+fn mcdc_mask_word(evaluation: McdcEvaluation, word: i64, true_mask: bool) -> i64:
+    if true_mask:
+        match word:
+            0 => evaluation.true_mask0
+            1 => evaluation.true_mask1
+            2 => evaluation.true_mask2
+            _ => evaluation.true_mask3
+    match word:
+        0 => evaluation.evaluated_mask0
+        1 => evaluation.evaluated_mask1
+        2 => evaluation.evaluated_mask2
+        _ => evaluation.evaluated_mask3
+
+fn mcdc_condition_bit(condition_ordinal: i64) -> i64:
+    1 << (condition_ordinal % 64)
+
+fn mcdc_condition_evaluated(evaluation: McdcEvaluation, condition_ordinal: i64) -> bool:
+    val word = condition_ordinal / 64
+    (mcdc_mask_word(evaluation, word, false) & mcdc_condition_bit(condition_ordinal)) != 0
+
+fn mcdc_condition_value(evaluation: McdcEvaluation, condition_ordinal: i64) -> bool:
+    val word = condition_ordinal / 64
+    (mcdc_mask_word(evaluation, word, true) & mcdc_condition_bit(condition_ordinal)) != 0
+
+fn mcdc_unique_key(evaluation: McdcEvaluation, condition_ordinal: i64) -> [i64]:
+    val target_word = condition_ordinal / 64
+    val clear_bit = ~mcdc_condition_bit(condition_ordinal)
+    var key: [i64] = []
+    var word = 0
+    while word < 4:
+        var evaluated = mcdc_mask_word(evaluation, word, false)
+        var values = mcdc_mask_word(evaluation, word, true)
+        if word == target_word:
+            evaluated = evaluated & clear_bit
+            values = values & clear_bit
+        key.push(evaluated)
+        key.push(values)
+        word = word + 1
+    key
+
+fn mcdc_unique_key_equal(left: [i64], right: [i64]) -> bool:
+    var i = 0
+    while i < 8:
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn mcdc_unique_key_hash(key: [i64]) -> i64:
+    var hash = 1469598103934665603
+    var i = 0
+    while i < 8:
+        hash = (hash ^ key[i]) * 1099511628211
+        i = i + 1
+    hash & 0x7fffffffffffffff
+
+fn mcdc_empty_pair(condition_ordinal: i64) -> McdcPairEvidence:
+    McdcPairEvidence(
+        condition_ordinal: condition_ordinal,
+        left_sequence: -1,
+        right_sequence: -1,
+        kind: McdcPairKind.UniqueCause
+    )
+
+pub fn analyze_mcdc_unique_cause(
+    evaluations: [McdcEvaluation], condition_count: i64, max_table_entries: i64
+) -> McdcAnalysisResult:
+    var requested = evaluations.len() * 2
+    if requested < 2:
+        requested = 2
+    if max_table_entries < requested:
+        return McdcAnalysisResult(
+            condition_count: condition_count, covered_count: 0,
+            saturated: true, evaluated_rows: 0, signature_count: 0,
+            conditions: []
+        )
+    val table = McdcUniqueTable.create(requested)
+    var conditions: [McdcConditionAnalysis] = []
+    var covered_count = 0
+    var evaluated_rows = 0
+    var signature_count = 0
+    var condition_ordinal = 0
+    while condition_ordinal < condition_count:
+        table.clear()
+        var pair = mcdc_empty_pair(condition_ordinal)
+        var covered = false
+        var eval_index = 0
+        while eval_index < evaluations.len() and not covered:
+            val evaluation = evaluations[eval_index]
+            if mcdc_condition_evaluated(evaluation, condition_ordinal):
+                evaluated_rows = evaluated_rows + 1
+                val key = mcdc_unique_key(evaluation, condition_ordinal)
+                var slot = mcdc_unique_key_hash(key) % table.capacity
+                var probes = 0
+                while probes < table.capacity:
+                    if table.occupied[slot] == 0:
+                        table.occupied[slot] = 1
+                        table.keys[slot] = key
+                        signature_count = signature_count + 1
+                    if mcdc_unique_key_equal(table.keys[slot], key):
+                        val target_code = if mcdc_condition_value(
+                            evaluation, condition_ordinal): 1 else: 0
+                        val outcome_code = if evaluation.outcome == true: 1 else: 0
+                        val combination = target_code * 2 + outcome_code
+                        var opposite_sequence = -1
+                        match combination:
+                            0:
+                                opposite_sequence = table.seq_tt[slot]
+                                if table.seq_ff[slot] < 0:
+                                    table.seq_ff[slot] = evaluation.sequence
+                            1:
+                                opposite_sequence = table.seq_tf[slot]
+                                if table.seq_ft[slot] < 0:
+                                    table.seq_ft[slot] = evaluation.sequence
+                            2:
+                                opposite_sequence = table.seq_ft[slot]
+                                if table.seq_tf[slot] < 0:
+                                    table.seq_tf[slot] = evaluation.sequence
+                            _:
+                                opposite_sequence = table.seq_ff[slot]
+                                if table.seq_tt[slot] < 0:
+                                    table.seq_tt[slot] = evaluation.sequence
+                        if opposite_sequence >= 0:
+                            pair = McdcPairEvidence(
+                                condition_ordinal: condition_ordinal,
+                                left_sequence: opposite_sequence,
+                                right_sequence: evaluation.sequence,
+                                kind: McdcPairKind.UniqueCause
+                            )
+                            covered = true
+                        probes = table.capacity
+                    else:
+                        slot = slot + 1
+                        if slot >= table.capacity:
+                            slot = 0
+                        probes = probes + 1
+            eval_index = eval_index + 1
+        if covered:
+            covered_count = covered_count + 1
+        conditions.push(McdcConditionAnalysis(
+            condition_ordinal: condition_ordinal,
+            covered: covered,
+            pair: pair
+        ))
+        condition_ordinal = condition_ordinal + 1
+    McdcAnalysisResult(
+        condition_count: condition_count,
+        covered_count: covered_count,
+        saturated: false,
+        evaluated_rows: evaluated_rows,
+        signature_count: signature_count,
+        conditions: conditions
+    )

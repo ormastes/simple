@@ -4,6 +4,8 @@
 # Supports: .sdn files, env vars, CLI args, profile selection.
 
 # env_get inlined here to avoid L0→L7 layer violation (was: use compiler.backend.sffi)
+use std.common.mcdc.model.{McdcMode, mcdc_mode_from_text}
+use std.common.convert.{try_parse_int}
 extern fn rt_env_get(key: text) -> text?
 fn env_get(key: text) -> text?:
     rt_env_get(key)
@@ -73,6 +75,9 @@ struct CompilerConfig:
     use_rust_lexer: bool      # --fast-lex Rust lexer fallback
     deterministic: bool       # Deterministic mode (fixed seeds, sorted)
     coverage_enabled: bool
+    mcdc_mode: McdcMode
+    mcdc_owner_bytes: i64
+    mcdc_global_bytes: i64
 
 impl CompilerConfig:
     static fn default() -> CompilerConfig:
@@ -85,7 +90,10 @@ impl CompilerConfig:
             use_rust_interp: false,
             use_rust_lexer: false,
             deterministic: false,
-            coverage_enabled: false
+            coverage_enabled: false,
+            mcdc_mode: McdcMode.StaticOff,
+            mcdc_owner_bytes: 1048576,
+            mcdc_global_bytes: 67108864
         )
 
     static fn from_env() -> CompilerConfig:
@@ -115,6 +123,25 @@ impl CompilerConfig:
         if val cov_value = cov_env:
             if cov_value == "1":
                 config.coverage_enabled = true
+                config.mcdc_mode = McdcMode.StaticOn
+
+        val mcdc_env = env_get("SIMPLE_MCDC_MODE")
+        if val mcdc_value = mcdc_env:
+            if val parsed_mode = mcdc_mode_from_text(mcdc_value):
+                config.mcdc_mode = parsed_mode
+                config.coverage_enabled = parsed_mode == McdcMode.StaticOn
+
+        val mcdc_owner_env = env_get("SIMPLE_MCDC_OWNER_BYTES")
+        if val owner_value = mcdc_owner_env:
+            if val parsed_owner = try_parse_int(owner_value):
+                if parsed_owner > 0:
+                    config.mcdc_owner_bytes = parsed_owner
+
+        val mcdc_global_env = env_get("SIMPLE_MCDC_GLOBAL_BYTES")
+        if val global_value = mcdc_global_env:
+            if val parsed_global = try_parse_int(global_value):
+                if parsed_global >= config.mcdc_owner_bytes:
+                    config.mcdc_global_bytes = parsed_global
 
         config
 
@@ -138,12 +165,37 @@ impl CompilerConfig:
                     self.deterministic = true
                 case "--coverage":
                     self.coverage_enabled = true
+                    self.mcdc_mode = McdcMode.StaticOn
+                case "--mcdc":
+                    self.coverage_enabled = true
+                    self.mcdc_mode = McdcMode.StaticOn
+                case "--mcdc-mode":
+                    if i + 1 < args.len():
+                        if val parsed_mode = mcdc_mode_from_text(args[i + 1]):
+                            self.mcdc_mode = parsed_mode
+                            self.coverage_enabled = parsed_mode == McdcMode.StaticOn
+                        i = i + 1
+                case "--no-mcdc":
+                    self.coverage_enabled = false
+                    self.mcdc_mode = McdcMode.StaticOff
                 case _:
                     # Check for --key=value form
                     if arg.starts_with("--") and arg.contains("="):
                         val parts: [text] = arg[2:].split("=")
                         if parts.len() >= 2:
                             self.values[parts[0]] = parts[1]
+                            if parts[0] == "mcdc":
+                                if val parsed_mode = mcdc_mode_from_text(parts[1]):
+                                    self.mcdc_mode = parsed_mode
+                                    self.coverage_enabled = parsed_mode == McdcMode.StaticOn
+                            elif parts[0] == "mcdc-owner-bytes":
+                                if val parsed_owner = try_parse_int(parts[1]):
+                                    if parsed_owner > 0:
+                                        self.mcdc_owner_bytes = parsed_owner
+                            elif parts[0] == "mcdc-global-bytes":
+                                if val parsed_global = try_parse_int(parts[1]):
+                                    if parsed_global >= self.mcdc_owner_bytes:
+                                        self.mcdc_global_bytes = parsed_global
             i = i + 1
 
     me apply_sdn(content: text):

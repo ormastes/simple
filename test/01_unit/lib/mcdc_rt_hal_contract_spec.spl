@@ -1,0 +1,118 @@
+# @cover src/lib/common/mcdc/model.spl 80%
+# @cover src/lib/common/rt_hal/model.spl 80%
+# @cover src/lib/common/env_access/model.spl 80%
+use std.spec
+use std.common.mcdc.model.*
+use std.common.rt_hal.model.*
+use std.common.env_access.model.*
+use std.nogc_sync_mut.mcdc.recorder.{McdcRecorder}
+
+describe "MC/DC safety contracts":
+    it "REQ-001: supplies bounded balanced defaults":
+        val policy = mcdc_default_policy(McdcMode.StaticOn)
+        expect(policy.owner_bytes).to_equal(1048576)
+        expect(policy.global_bytes).to_equal(67108864)
+        expect(policy.max_conditions).to_equal(256)
+        expect(mcdc_policy_error(policy)).to_equal("")
+
+    it "REQ-006: rejects a reasonless exclusion":
+        val exclusion = McdcExclusion(
+            semantic_id: "module:decision:1",
+            condition_ordinal: 0,
+            whole_decision: false,
+            reason: "",
+            reviewer: "safety-owner",
+            review_id: "review-1",
+            expires_or_version: "v2"
+        )
+        expect(mcdc_exclusion_error(exclusion)).to_equal("MCDC-E-EXCLUSION-REASON")
+
+    it "REQ-005: treats only exact integer equality as complete":
+        expect(mcdc_is_exact_complete(9, 10)).to_equal(false)
+        expect(mcdc_is_exact_complete(10, 10)).to_equal(true)
+
+    it "REQ-004: bounds owner-local recording without hot-path growth":
+        val policy = McdcPolicy(
+            mode: McdcMode.StaticOn,
+            retain_unique_cause: true,
+            max_conditions: 256,
+            max_nesting: 4,
+            owner_bytes: 160,
+            global_bytes: 160,
+            overflow: McdcOverflowPolicy.DropNewest
+        )
+        val recorder = McdcRecorder.create(7, policy)
+        val first = recorder.record(
+            3, true, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0)
+        val second = recorder.record(
+            3, false, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+        expect(first).to_equal(true)
+        expect(second).to_equal(false)
+        expect(recorder.count).to_equal(1)
+        expect(recorder.dropped).to_equal(1)
+        expect(recorder.evaluation_at(0).owner_id).to_equal(7)
+
+describe "Pure-first HAL comparison contracts":
+    it "REQ-008: requires exactly one Pure Simple owner":
+        val rust = RtHalProvider(
+            provider_id: "rust-reference",
+            kind: RtHalProviderKind.RustComparator,
+            abi_version: 1,
+            schema_version: 1,
+            query_capable: true,
+            replay_capable: true
+        )
+        val comparison = RtHalComparison(
+            providers: [rust],
+            worker_count: 1,
+            queue_capacity: 1,
+            timeout_ticks: 100,
+            max_output_bytes: 1024,
+            require_all: false
+        )
+        expect(rt_hal_comparison_error(comparison)).to_equal("RTHAL-E-PURE-OWNER")
+
+    it "REQ-009: compares canonical value and effect hashes":
+        val pure = RtHalOutcome(
+            status: RtHalOutcomeStatus.Value,
+            code: "",
+            value_hash: "value-a",
+            effect_hash: "effect-a"
+        )
+        val candidate = RtHalOutcome(
+            status: RtHalOutcomeStatus.Value,
+            code: "",
+            value_hash: "value-a",
+            effect_hash: "effect-b"
+        )
+        expect(rt_hal_outcomes_match(pure, candidate)).to_equal(false)
+
+describe "Environment access contracts":
+    it "REQ-010: rejects an undeclared resource":
+        val instruction = EnvAccessInstruction(
+            kind: EnvAccessKind.RunAllowedTool,
+            resource: "",
+            arguments: [],
+            timeout_ms: 100,
+            max_stdout_bytes: 1024,
+            max_stderr_bytes: 1024
+        )
+        expect(env_access_instruction_error(instruction)).to_equal("ENV-E-UNDECLARED")
+
+    it "REQ-011: requires actionable blocked evidence":
+        val receipt = EnvAccessReceipt(
+            plan_id: "hal-probe",
+            instruction_index: 0,
+            status: EnvAccessStatus.Blocked,
+            exit_code: -1,
+            stdout_hash: "",
+            stderr_hash: "",
+            discarded_bytes: 0,
+            reason: "hardware unavailable",
+            prerequisite: "attach board",
+            owner: "hal-team",
+            artifact_paths: [],
+            resume_command: ""
+        )
+        expect(env_access_receipt_error(receipt)).to_equal("ENV-B-BLOCKED-INCOMPLETE")

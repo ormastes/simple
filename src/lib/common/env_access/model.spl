@@ -1,0 +1,74 @@
+# codex-impl
+# Typed environment-access plans. Arbitrary shell commands are intentionally absent.
+
+pub enum EnvAccessKind:
+    ReadEnv
+    HostIdentity
+    ReadRepoFile
+    RunAllowedTool
+    HardwareProbe
+
+pub struct EnvAccessInstruction:
+    kind: EnvAccessKind
+    resource: text
+    arguments: [text]
+    timeout_ms: i64
+    max_stdout_bytes: i64
+    max_stderr_bytes: i64
+
+pub enum EnvAccessStatus:
+    Executed
+    Blocked
+    Unsupported
+    Rejected
+    TimedOut
+
+pub struct EnvAccessReceipt:
+    plan_id: text
+    instruction_index: i64
+    status: EnvAccessStatus
+    exit_code: i64
+    stdout_hash: text
+    stderr_hash: text
+    discarded_bytes: i64
+    reason: text
+    prerequisite: text
+    owner: text
+    artifact_paths: [text]
+    resume_command: text
+
+pub struct EnvAccessPlan:
+    plan_id: text
+    instructions: [EnvAccessInstruction]
+    max_total_bytes: i64
+    max_processes: i64
+    allowed_tools: [text]
+
+pub fn env_access_instruction_error(instruction: EnvAccessInstruction) -> text:
+    if instruction.resource.trim() == "" and instruction.kind != EnvAccessKind.HostIdentity:
+        return "ENV-E-UNDECLARED"
+    if instruction.timeout_ms <= 0:
+        return "ENV-E-BOUND"
+    if instruction.max_stdout_bytes < 0 or instruction.max_stderr_bytes < 0:
+        return "ENV-E-BOUND"
+    ""
+
+pub fn env_access_plan_error(plan: EnvAccessPlan) -> text:
+    if plan.plan_id.trim() == "":
+        return "ENV-E-PLAN-ID"
+    if plan.max_total_bytes <= 0 or plan.max_processes < 0:
+        return "ENV-E-BOUND"
+    for instruction in plan.instructions:
+        val problem = env_access_instruction_error(instruction)
+        if problem != "":
+            return problem
+    ""
+
+pub fn env_access_receipt_error(receipt: EnvAccessReceipt) -> text:
+    if receipt.plan_id.trim() == "" or receipt.instruction_index < 0:
+        return "ENV-E-RECEIPT-ID"
+    if receipt.status == EnvAccessStatus.Blocked or receipt.status == EnvAccessStatus.Unsupported:
+        if (receipt.reason.trim() == "" or receipt.prerequisite.trim() == ""
+            or receipt.owner.trim() == "" or receipt.resume_command.trim() == ""):
+            return "ENV-B-BLOCKED-INCOMPLETE"
+    ""
