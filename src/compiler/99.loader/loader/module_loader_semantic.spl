@@ -29,6 +29,13 @@ fn text_array_intersects(left: [text], right: [text]) -> bool:
             return true
     false
 
+fn text_array_intersects_key_set(items: [text], keys: Dict<text, bool>) -> bool:
+    """Return whether any item is present in an indexed text-key set."""
+    for item in items:
+        if keys.has(item):
+            return true
+    false
+
 # ============================================================================
 # Semantic export/dependency records
 # ============================================================================
@@ -43,30 +50,52 @@ fn moduleloader_record_semantic_dependency(self: LazyModuleLoader, path: text, k
         self.semantic_dependencies[path] = []
     self.semantic_dependencies[path] = text_array_push_unique(self.semantic_dependencies[path], key)
 
-fn moduleloader_semantic_dependents(self: LazyModuleLoader, changed_key: text) -> [text]:
-    var changed_keys: [text] = [changed_key]
+fn _semantic_dependents_from_paths(
+    module_paths: [text],
+    semantic_exports: Dict<text, [text]>,
+    semantic_dependencies: Dict<text, [text]>,
+    changed_key: text
+) -> [text]:
+    """Compute the ordered semantic closure over an explicit module order.
+
+    Kept separate from the loader wrapper so the graph algorithm has direct
+    correctness coverage without constructing mapped SMF modules.
+    """
+    # Keep the fixed-point passes and output array for their established order,
+    # but index membership. The former nested array scans made dense semantic
+    # invalidation cubic in the number of modules/keys.
+    var changed_keys: Dict<text, bool> = {}
+    changed_keys[changed_key] = true
     var affected: [text] = []
+    var affected_set: Dict<text, bool> = {}
     var progressed = true
     while progressed:
         progressed = false
-        for path in self.modules.keys():
-            if text_array_contains(affected, path):
+        for path in module_paths:
+            if affected_set.has(path):
                 continue
-            val exports = if self.semantic_exports.has(path):
-                self.semantic_exports[path]
+            val exports = if semantic_exports.has(path):
+                semantic_exports[path]
             else:
                 []
-            val deps = if self.semantic_dependencies.has(path):
-                self.semantic_dependencies[path]
+            val deps = if semantic_dependencies.has(path):
+                semantic_dependencies[path]
             else:
                 []
-            if text_array_intersects(exports, changed_keys) or text_array_intersects(deps, changed_keys):
-                affected = text_array_push_unique(affected, path)
-                changed_keys = text_array_push_unique(changed_keys, path)
+            if text_array_intersects_key_set(exports, changed_keys) or text_array_intersects_key_set(deps, changed_keys):
+                affected.push(path)
+                affected_set[path] = true
+                changed_keys[path] = true
                 for exported_key in exports:
-                    changed_keys = text_array_push_unique(changed_keys, exported_key)
+                    changed_keys[exported_key] = true
                 progressed = true
     affected
+
+fn moduleloader_semantic_dependents(self: LazyModuleLoader, changed_key: text) -> [text]:
+    _semantic_dependents_from_paths(
+        self.modules.keys(), self.semantic_exports,
+        self.semantic_dependencies, changed_key
+    )
 
 # ============================================================================
 # Semantic fingerprint records + freshness
@@ -108,12 +137,13 @@ fn moduleloader_semantic_cache_is_fresh(self: LazyModuleLoader, path: text, curr
 fn moduleloader_semantic_dependents_of(self: LazyModuleLoader, changed_path: text) -> [text]:
     """Return transitive semantic dependents, including dependency cycles."""
     var affected: [text] = []
+    var affected_set: Dict<text, bool> = {}
     var changed_keys: [text] = [changed_path]
     var progressed = true
     while progressed:
         progressed = false
         for module_path in self.dependency_semantic_fingerprints.keys():
-            if affected.contains(module_path):
+            if affected_set.has(module_path):
                 continue
             val deps = self.dependency_semantic_fingerprints[module_path]
             var depends_on_changed = false
@@ -121,8 +151,9 @@ fn moduleloader_semantic_dependents_of(self: LazyModuleLoader, changed_path: tex
                 if deps.has(candidate):
                     depends_on_changed = true
             if depends_on_changed:
-                affected = affected.push(module_path)
-                changed_keys = changed_keys.push(module_path)
+                affected.push(module_path)
+                affected_set[module_path] = true
+                changed_keys.push(module_path)
                 progressed = true
     affected
 

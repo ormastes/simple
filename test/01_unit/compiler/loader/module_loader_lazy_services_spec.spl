@@ -14,8 +14,11 @@ use compiler.loader.loader.module_loader.{
     moduleloader_any_heavy_service_created,
     moduleloader_compiler_ctx_created, moduleloader_obj_taker_created,
     moduleloader_provider_created, moduleloader_jit_service_created,
-    moduleloader_loader_mapper_created, moduleloader_lifecycle_created
+    moduleloader_loader_mapper_created, moduleloader_lifecycle_created,
+    moduleloader_record_dependency_semantic_fingerprint,
+    moduleloader_semantic_dependents_of
 }
+use compiler.loader.loader.module_loader_semantic.{_semantic_dependents_from_paths}
 
 fn lazy_default_config() -> LazyModuleLoaderConfig:
     lazymoduleloaderconfig_default()
@@ -87,3 +90,49 @@ describe "Module Loader Lazy Services":
         val _r2 = moduleloader_resolve_symbol(loader, "sym_a_lazy_spec")
         expect(moduleloader_jit_service_created(loader)).to_equal(true)
         expect(moduleloader_lifecycle_created(loader)).to_equal(true)
+
+    it "keeps transitive dependent order across a cycle and skips unrelated modules":
+        var loader = lazymoduleloader_new(lazy_default_config())
+        moduleloader_record_dependency_semantic_fingerprint(loader, "late.smf", "middle.smf", "middle:v1")
+        moduleloader_record_dependency_semantic_fingerprint(loader, "middle.smf", "root.smf", "root:v1")
+        moduleloader_record_dependency_semantic_fingerprint(loader, "root.smf", "late.smf", "late:v1")
+        moduleloader_record_dependency_semantic_fingerprint(loader, "unrelated.smf", "other.smf", "other:v1")
+
+        val affected = moduleloader_semantic_dependents_of(loader, "root.smf")
+
+        expect(affected).to_equal(["middle.smf", "late.smf", "root.smf"])
+        expect(affected.contains("unrelated.smf")).to_equal(false)
+
+    it "returns no dependents when the changed path has no incoming edges":
+        var loader = lazymoduleloader_new(lazy_default_config())
+        moduleloader_record_dependency_semantic_fingerprint(loader, "module.smf", "dependency.smf", "dependency:v1")
+
+        val affected = moduleloader_semantic_dependents_of(loader, "absent.smf")
+
+        expect(affected).to_equal([])
+
+    it "keeps export and dependency closure order across backward edges and a cycle":
+        val paths = ["late.smf", "exporter.smf", "direct.smf", "unrelated.smf", "seed"]
+        var exports: Dict<text, [text]> = {}
+        exports["exporter.smf"] = ["seed", "api.key"]
+        var dependencies: Dict<text, [text]> = {}
+        dependencies["late.smf"] = ["api.key"]
+        dependencies["direct.smf"] = ["seed"]
+        dependencies["unrelated.smf"] = ["other.key"]
+        dependencies["seed"] = ["late.smf"]
+
+        val affected = _semantic_dependents_from_paths(paths, exports, dependencies, "seed")
+
+        expect(affected).to_equal(["exporter.smf", "direct.smf", "late.smf", "seed"])
+        expect(affected.contains("unrelated.smf")).to_equal(false)
+
+    it "returns no semantic closure for unrelated exports and dependencies":
+        val paths = ["module.smf"]
+        var exports: Dict<text, [text]> = {}
+        exports["module.smf"] = ["other.export"]
+        var dependencies: Dict<text, [text]> = {}
+        dependencies["module.smf"] = ["other.dependency"]
+
+        val affected = _semantic_dependents_from_paths(paths, exports, dependencies, "absent.key")
+
+        expect(affected).to_equal([])
