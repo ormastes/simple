@@ -325,6 +325,40 @@ constant-time proof receipts, and provider semantic verification remain
 unresolved. This cryptographic boundary and the wider estate are not globally
 verified or signed; verified-and-signed admission remains 0.
 
+## AudioManager resource-authority checkpoint
+
+`src/lib/nogc_sync_mut/engine/audio/audio_manager.spl` now exposes foreign
+resource authority through 24 narrowly selected direct and transitive owners.
+Creation, clip loading/caching, playback, spatial mutation, listener mutation,
+stop/pause/resume, volume propagation, unload, and shutdown carry `ffi` and,
+where copyable handles participate, `raw_ptr`. Pure bus metadata getters and
+updates remain safe.
+
+The facade is not safely owned: engine, clip, and playback identities are
+copyable integers; positivity is not backend branding or exactly-once
+ownership. The raw spatialization ABI accepts numeric 0/1 and returns no
+status. Changing only this caller to a boolean would neither change that ABI
+nor repair its missing result contract, so the numeric raw call remains
+explicitly unsafe while public stop/pause/resume results remain semantic
+`bool`.
+
+The focused authority/provider/performance ratchet passed. None of the 18 raw
+symbols appears in either typed registry. The annotation-only change adds no
+audio-buffer allocation/copy, dictionary operation, loop, branch, callback,
+lookup, lock, dispatch, hash, signature operation, or forced inlining. The
+census changed exactly by the 34 formerly unbounded calls:
+
+- raw call sites: unchanged at 18,812
+- missing authority: 14,069 -> 14,035
+- lexical unsafe: unchanged at 3,403
+- function unsafe: 1,340 -> 1,374
+
+Typed resource ownership, backend branding, exactly-once teardown, raw
+spatialization status, provider closure, exact artifact identity, trusted
+signatures, and proof receipts remain unresolved. AudioManager and the wider
+estate are not globally verified or signed; verified-and-signed admission
+remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
