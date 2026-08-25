@@ -61,6 +61,54 @@ fi
 
 require_text 'n > available' src/compiler_rust/runtime/src/value/wsffi_native.rs
 require_text 'nargs > call_args.len' src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs
+require_text 'dynload_rejects_interior_nul_instead_of_returning_zero' \
+    src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs
+require_text 'symbol_lookup_rejects_null_handle_instead_of_returning_zero' \
+    src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs
+require_text 'integer_bridge_rejects_boolean_coercion' \
+    src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs
+require_text 'generic_dispatch_accepts_integers_and_rejects_boolean_coercion' \
+    src/compiler_rust/compiler/src/interpreter_extern/dynamic_sffi.rs
+
+for fn_name in spl_dlopen spl_dlsym
+do
+    fn_body=$(sed -n "/pub fn $fn_name(/,/^}/p" \
+        "$root/src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs")
+    if printf '%s\n' "$fn_body" | rg -q 'Ok\(Value::Int\(0\)\)'; then
+        echo "SFFI lint: interpreter $fn_name fabricates zero on boundary failure" >&2
+        failed=1
+    fi
+done
+
+for value_bridge in \
+    src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs:spl_wffi_call_i64 \
+    src/compiler_rust/compiler/src/interpreter_extern/dynamic_sffi.rs:value_to_i64
+do
+    bridge_file=${value_bridge%%:*}
+    bridge_fn=${value_bridge#*:}
+    bridge_body=$(sed -n "/fn $bridge_fn(/,/^}/p" "$root/$bridge_file")
+    if printf '%s\n' "$bridge_body" | rg -q 'Value::Bool'; then
+        echo "SFFI lint: $bridge_fn coerces boolean into the integer ABI" >&2
+        failed=1
+    fi
+done
+
+# Optimizer-strength non-null attributes may erase the defensive checks this
+# guard requires. They are forbidden on owned foreign providers until a future
+# proof-bound allowlist names the exact artifact and discharged obligation.
+if rg -n --glob '!**/vendor/**' --glob '*.{c,h,cc,cpp,cxx,hpp}' \
+    'returns_nonnull|__attribute__\s*\(\(\s*nonnull' \
+    "$root/src/runtime" "$root/src/compiler_rust" >/dev/null; then
+    echo 'SFFI lint: proofless optimizer non-null attribute in owned foreign source' >&2
+    failed=1
+fi
+
+if rg -n --glob '*.rs' 'NonNull::new_unchecked' \
+    "$root/src/compiler_rust/runtime/src/value" \
+    "$root/src/compiler_rust/compiler/src/interpreter_extern" >/dev/null; then
+    echo 'SFFI lint: unchecked NonNull lift in an owned Rust foreign boundary' >&2
+    failed=1
+fi
 require_text 'pub extern "C" fn rt_ed25519_verify\(message: RuntimeValue, pubkey: RuntimeValue' \
     src/compiler_rust/runtime/src/value/sffi/signature.rs
 require_text 'rt_ed25519_verify_checked' src/compiler_rust/runtime/src/value/sffi/signature.rs

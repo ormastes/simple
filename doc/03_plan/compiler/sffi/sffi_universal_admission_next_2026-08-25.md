@@ -64,6 +64,14 @@ native checked bridge and reject every non-integer value; typed boolean ABI
 support must use a boolean thunk instead of changing the source value's type.
 This removes conversion work rather than adding hot-path overhead.
 
+Checkpoint: the focused SFFI guard now ratchets interpreter dynload errors,
+boolean ABI identity, proofless C/C++ optimizer non-null attributes, and
+unchecked Rust `NonNull` lifts. Its first run exposed a string-builder lift
+that converted invalid handles/null data to empty text. The lift now preserves
+valid empty text, rejects invalid handles/data/UTF-8, copies exactly once, and
+releases the consumed runtime string. The repaired focused guard passed once on
+2026-08-25; this is narrow source-contract evidence, not global SFFI proof.
+
 ### 3. Complete resolved-HIR inventory
 
 Checkpoint: the bounded source ledgers now report 12,128 `rt_*` declaration
