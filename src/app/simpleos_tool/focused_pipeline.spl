@@ -13,6 +13,7 @@ use compiler.backend.backend.backend_types.{compileoptions_release_options}
 use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct_compiled, llvm_translate_module_direct_ir}
 use compiler.backend.backend.simpleos_guest_link.{link_simpleos_guest_external_for_target}
 use app.simpleos_tool.guest_target.{SimpleOsGuestTarget, simpleos_guest_target_current, simpleos_guest_target_valid, simpleos_guest_target_configure, simpleos_guest_user_context}
+use app.io.mod.{file_hash_sha256, file_rename, file_size_raw, getpid}
 
 extern fn rt_file_read_text_rv(path: text) -> text
 use std.io_runtime.{file_write_bytes}
@@ -107,19 +108,44 @@ pub fn simpleos_compile_native_file_for_target(path: text, output: text, emit_ob
         print "error: {compiled.unwrap_err().message}"
         return 1
 
-    val object_path = if emit_object: output else: "/tmp/SIMPLEUSR.O"
+    val process_id = getpid()
+    val object_path = if emit_object: output else: "/tmp/SIMPLEUSR-" + process_id.to_text() + ".O"
+    if not emit_object:
+        file_delete(object_path)
     if not file_write_bytes(object_path, compiled.unwrap().object_code):
+        if not emit_object:
+            file_delete(object_path)
         print "error: cannot write object: {object_path}"
         return 1
     if not require_user_context("post-write", target):
+        if not emit_object:
+            file_delete(object_path)
         return 1
     if emit_object:
         return 0
+    # Link into an unpublished process-qualified path.  The requested output
+    # remains authoritative until a fresh executable from this invocation has
+    # a nonempty SHA-256 identity and can be atomically published.  This policy
+    # is shared by x86_64, AArch64, and RISC-V rather than delegated to their
+    # different linker implementations.
+    val candidate_output = output + ".candidate-" + process_id.to_text()
+    file_delete(candidate_output)
     val linked = link_simpleos_guest_external_for_target(
-        target.arch, target.compiler_triple, [object_path], output)
+        target.arch, target.compiler_triple, [object_path], candidate_output)
     file_delete(object_path)
     match linked:
-        case Ok(_): 0
+        case Ok(_):
+            if (file_size_raw(candidate_output) <= 0 or
+                    file_hash_sha256(candidate_output).len() != 64):
+                file_delete(candidate_output)
+                print "error: linked executable is missing or invalid: {candidate_output}"
+                return 1
+            if not file_rename(candidate_output, output):
+                file_delete(candidate_output)
+                print "error: cannot publish linked executable: {output}"
+                return 1
+            0
         case Err(error):
+            file_delete(candidate_output)
             print "error: {error}"
             1

@@ -17,7 +17,9 @@ use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
     authenticated_fs_exec_submit_with_argv_file_v1
 }
 use os.kernel.loader.authenticated_argv_file_binding_owner_v1.{
-    authenticated_argv_file_binding_acquire_v1
+    AuthenticatedArgvFileLeaseV1,
+    authenticated_argv_file_binding_acquire_v1,
+    authenticated_argv_file_binding_cancel_v1
 }
 use os.kernel.scheduler.process_execution_observation.{SchedulerArgvFileRoleV1}
 use os.kernel.loader.executable_admission_pipeline.{executable_loader_revoke}
@@ -74,6 +76,12 @@ fn _consume_evidence_if_any_v1(
     if not token.?: return true
     scheduler_execution_evidence_consume_once_v2(token.unwrap()).is_some()
 
+fn _cancel_binding_v1(
+    table: MountTable,
+    lease: AuthenticatedArgvFileLeaseV1
+) -> bool:
+    authenticated_argv_file_binding_cancel_v1(table, lease)
+
 pub(package) fn simple_toolchain_filesystem_launch_authenticated_v1(
     scheduler: Scheduler,
     table: MountTable,
@@ -101,27 +109,38 @@ pub(package) fn simple_toolchain_filesystem_launch_authenticated_v1(
         if not interpreter_retired or not compiler_retired or not loader_retired:
             return Err("simple-interpreter-binding-cleanup-indeterminate")
         return Err(interpreter_source.unwrap_err())
+
+    # Reserve both source snapshots before either executable runs.  Acquiring
+    # the compiler lease only after interpretation would leave a pathname
+    # TOCTOU window: a replacement source could be compiled and loaded before
+    # the terminal receipt noticed that the two stage digests differed.
+    val compiler_source = authenticated_argv_file_binding_acquire_v1(
+        table, plan.source_path, SchedulerArgvFileRoleV1.SourceInput, 0)
+    if compiler_source.is_err():
+        val interpreter_binding_retired = _cancel_binding_v1(
+            table, interpreter_source.unwrap())
+        val interpreter_retired = _revoke_unused_v1(table, interpreter_submission)
+        val compiler_retired = _revoke_unused_v1(table, compiler_submission)
+        val loader_retired = _revoke_unused_v1(table, loader_submission)
+        if not interpreter_binding_retired or not interpreter_retired or
+           not compiler_retired or not loader_retired:
+            return Err("simple-source-binding-cleanup-indeterminate")
+        return Err(compiler_source.unwrap_err())
+
     val interpreted = authenticated_fs_exec_submit_with_argv_file_v1(
         scheduler, table, interpreter_submission,
         interpreter_path, [plan.source_path], interpreter_source.unwrap())
     if interpreted.exit_code != 0 or not interpreted.evidence.?:
+        val compiler_binding_retired = _cancel_binding_v1(
+            table, compiler_source.unwrap())
         val interpreted_retired = _consume_evidence_if_any_v1(interpreted.evidence)
         val compiler_retired = _revoke_unused_v1(table, compiler_submission)
         val loader_retired = _revoke_unused_v1(table, loader_submission)
-        if interpreted.cleanup_indeterminate or not interpreted_retired or
-           not compiler_retired or not loader_retired:
+        if interpreted.cleanup_indeterminate or not compiler_binding_retired or
+           not interpreted_retired or not compiler_retired or not loader_retired:
             return Err("simple-interpreter-cleanup-indeterminate")
         return Err("simple-interpreter-authenticated-launch-failed")
 
-    val compiler_source = authenticated_argv_file_binding_acquire_v1(
-        table, plan.source_path, SchedulerArgvFileRoleV1.SourceInput, 0)
-    if compiler_source.is_err():
-        val interpreted_retired = _consume_evidence_if_any_v1(interpreted.evidence)
-        val compiler_retired = _revoke_unused_v1(table, compiler_submission)
-        val loader_retired = _revoke_unused_v1(table, loader_submission)
-        if not interpreted_retired or not compiler_retired or not loader_retired:
-            return Err("simple-compiler-binding-cleanup-indeterminate")
-        return Err(compiler_source.unwrap_err())
     val compiled = authenticated_fs_exec_submit_with_argv_file_v1(
         scheduler, table, compiler_submission,
         compiler_path, [plan.source_path, "--output", plan.artifact_path],

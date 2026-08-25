@@ -90,7 +90,6 @@ pub class DbdAuthenticatedRespIngressV1:
     current_frame_length: i64
     number_value: i64
     number_digits: i64
-    negative_length: bool
     array_remaining: i64
     argument_index: i64
     bulk_length: i64
@@ -121,7 +120,6 @@ pub class DbdAuthenticatedRespIngressV1:
             current_frame_length: 0,
             number_value: 0,
             number_digits: 0,
-            negative_length: false,
             array_remaining: 0,
             argument_index: 0,
             bulk_length: 0,
@@ -149,7 +147,6 @@ pub class DbdAuthenticatedRespIngressV1:
     me reset_number():
         self.number_value = 0
         self.number_digits = 0
-        self.negative_length = false
 
     me reset_frame_parser():
         self.phase = DbdRespParsePhaseV1.Start
@@ -278,22 +275,20 @@ pub class DbdAuthenticatedRespIngressV1:
             return true
 
         if self.phase == DbdRespParsePhaseV1.BulkLength:
-            if byte == 45u8 and self.number_digits == 0 and
-                not self.negative_length:
-                self.negative_length = true
-                return true
+            # RESP null bulk strings are reply values, not valid command
+            # arguments.  The canonical text parser historically maps `$-1`
+            # to `""`; admitting it here would therefore collapse two
+            # different authenticated wire representations before dispatch
+            # and durable journal encoding.  Reject the negative marker in
+            # the byte-domain owner instead of normalizing it.
+            if byte == 45u8:
+                return self.fail()
             if byte == 13u8:
                 if self.number_digits == 0:
                     return self.fail()
-                if self.negative_length and self.number_value != 1:
-                    return self.fail()
-                self.bulk_length = if self.negative_length:
-                    0
-                else:
-                    self.number_value
+                self.bulk_length = self.number_value
                 if self.argument_index == 0:
-                    self.command_possible_auth = not self.negative_length and
-                        self.bulk_length == 4
+                    self.command_possible_auth = self.bulk_length == 4
                     self.command_token_length = 0
                     self.command_token_done = false
                 self.phase = DbdRespParsePhaseV1.BulkLengthLf
@@ -305,11 +300,6 @@ pub class DbdAuthenticatedRespIngressV1:
         if self.phase == DbdRespParsePhaseV1.BulkLengthLf:
             if byte != 10u8:
                 return self.fail()
-            if self.negative_length:
-                if self.argument_index == 0:
-                    self.command_possible_auth = false
-                    self.command_token_done = true
-                return self.finish_array_argument()
             self.bulk_index = 0
             if self.bulk_length == 0:
                 if self.argument_index == 0:
