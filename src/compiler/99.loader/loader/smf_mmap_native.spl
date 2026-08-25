@@ -346,8 +346,11 @@ fn slice_from_raw_parts(ptr: *u8, len: usize) -> [u8]:
             i = i + 1
         result
 
-pub fn str_from_utf8_lossy(bytes: [u8]) -> text:
-    """Convert bytes to string, replacing invalid UTF-8."""
+fn str_from_utf8_lossy_legacy_nul(bytes: [u8]) -> text:
+    # Exact pre-optimization decoder retained only for NUL-containing input.
+    # Native text concatenation currently has engine-specific embedded-NUL
+    # behavior, so this path must remain byte-for-byte unchanged until that
+    # runtime contract is fixed across all engines.
     var result = ""
     var i = 0
     while i < bytes.len():
@@ -374,6 +377,58 @@ pub fn str_from_utf8_lossy(bytes: [u8]) -> text:
             result = result + "?"
             i = i + 1
     result
+
+pub fn str_from_utf8_lossy(bytes: [u8]) -> text:
+    """Convert bytes to string, replacing invalid UTF-8."""
+    # Build bounded scalar chunks, then join those chunks once. The previous
+    # `result = result + scalar` loop recopied the whole growing prefix on every
+    # iteration and was quadratic for long SMF strings. A fixed 64-scalar chunk
+    # bounds prefix copying, while retaining only O(n / 64) builder texts.
+    # Keeping char_from_code preserves the original cross-engine conversion.
+    val byte_count = bytes.len()
+    var scan = 0
+    while scan < byte_count:
+        if bytes[scan] == 0u8:
+            return str_from_utf8_lossy_legacy_nul(bytes)
+        scan = scan + 1
+
+    var chunks: [text] = []
+    var chunk = ""
+    var chunk_scalars = 0
+    var i = 0
+    while i < byte_count:
+        val b = bytes[i] as i64
+        var scalar = "?"
+        var advance = 1
+        if b < 0x80:
+            scalar = char_from_code(b)
+        elif b >= 0xC2 and b < 0xE0 and i + 1 < byte_count and is_utf8_continuation(bytes[i + 1]):
+            val b1 = bytes[i + 1] as i64
+            scalar = char_from_code(((b & 0x1F) << 6) | (b1 & 0x3F))
+            advance = 2
+        elif b >= 0xE0 and b < 0xF0 and i + 2 < byte_count and is_valid_utf8_3(bytes, i):
+            val b1 = bytes[i + 1] as i64
+            val b2 = bytes[i + 2] as i64
+            scalar = char_from_code(((b & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F))
+            advance = 3
+        elif b >= 0xF0 and b < 0xF5 and i + 3 < byte_count and is_valid_utf8_4(bytes, i):
+            val b1 = bytes[i + 1] as i64
+            val b2 = bytes[i + 2] as i64
+            val b3 = bytes[i + 3] as i64
+            scalar = char_from_code(((b & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F))
+            advance = 4
+
+        chunk = chunk + scalar
+        chunk_scalars = chunk_scalars + 1
+        if chunk_scalars == 64:
+            chunks.push(chunk)
+            chunk = ""
+            chunk_scalars = 0
+        i = i + advance
+
+    if chunk_scalars > 0:
+        chunks.push(chunk)
+    chunks.join("")
 
 fn is_utf8_continuation(b: u8) -> bool:
     val value = b as i64
