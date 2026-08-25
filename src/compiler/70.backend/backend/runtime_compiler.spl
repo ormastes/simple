@@ -14,20 +14,56 @@ use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use std.io_runtime.{host_arch, host_os}
 
+@unsafe(reason: "raw filesystem existence ABI", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_path_absolute(path: text) -> text
+@unsafe(reason: "raw nullable absolute-path resolution ABI", capabilities: [ffi])
+extern fn rt_path_absolute(path: text) -> text?
+@unsafe(reason: "raw filesystem delete ABI", capabilities: [ffi])
 extern fn rt_file_delete(path: text) -> bool
+@unsafe(reason: "raw process execution ABI with signed exit status", capabilities: [ffi])
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw process identifier ABI", capabilities: [ffi])
 extern fn rt_getpid() -> i64
+
+@always_inline
+fn _sffi_file_exists(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
+
+@always_inline
+fn _sffi_path_absolute(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_path_absolute(path)
+
+@always_inline
+fn _sffi_file_delete(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_delete(path)
+
+@always_inline
+fn _sffi_process_run(cmd: text, args: [text]) -> (text, text, i64):
+    unsafe(capabilities: [ffi]):
+        rt_process_run(cmd, args)
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_getpid() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_getpid()
 
 # ============================================================================
 # Platform Helpers
 # ============================================================================
 
 fn _is_windows() -> bool:
-    val os_env = rt_env_get("OS")
-    if os_env != "" and os_env != nil:
+    val os_env = _sffi_env_get("OS") ?? ""
+    if os_env != "":
         return os_env.lower().contains("windows")
     false
 
@@ -38,28 +74,28 @@ fn _is_msvc_cc(cc: text) -> bool:
     driver == "cl" or driver == "cl.exe" or driver == "clang-cl" or driver == "clang-cl.exe"
 
 fn _is_mingw() -> bool:
-    val linker_flavor = rt_env_get("SIMPLE_LINKER_FLAVOR")
+    val linker_flavor = _sffi_env_get("SIMPLE_LINKER_FLAVOR") ?? ""
     if linker_flavor == "msvc":
         return false
     if linker_flavor == "gnu":
         return true
-    val windows_abi = rt_env_get("SIMPLE_WINDOWS_ABI")
+    val windows_abi = _sffi_env_get("SIMPLE_WINDOWS_ABI") ?? ""
     if windows_abi == "msvc":
         return false
     if windows_abi == "gnu":
         return true
-    val msystem = rt_env_get("MSYSTEM")
-    msystem != "" and msystem != nil
+    val msystem = _sffi_env_get("MSYSTEM") ?? ""
+    msystem != ""
 
 fn _get_temp_dir() -> text:
-    val tmpdir = rt_env_get("TMPDIR")
-    if tmpdir != "" and tmpdir != nil:
+    val tmpdir = _sffi_env_get("TMPDIR") ?? ""
+    if tmpdir != "":
         return tmpdir
-    val tmp = rt_env_get("TMP")
-    if tmp != "" and tmp != nil:
+    val tmp = _sffi_env_get("TMP") ?? ""
+    if tmp != "":
         return tmp
-    val temp = rt_env_get("TEMP")
-    if temp != "" and temp != nil:
+    val temp = _sffi_env_get("TEMP") ?? ""
+    if temp != "":
         return temp
     if _is_windows():
         return "C:/Windows/Temp"
@@ -72,7 +108,7 @@ fn _obj_ext() -> text:
         ".o"
 
 fn runtime_compile_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    (_sffi_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 # ============================================================================
 # C Compiler Discovery
@@ -134,14 +170,14 @@ fn find_c_compiler() -> text:
     Tries SIMPLE_CC env var first, then platform-specific discovery.
     Returns the command name or empty string if none found.
     """
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = _sffi_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val plan = hosted_c_compiler_plan(target, host_os(), host_arch())
     if not plan.supported:
         return ""
 
     # User override via env var, after target admission.
-    val simple_cc = rt_env_get("SIMPLE_CC")
-    if simple_cc != "" and simple_cc != nil:
+    val simple_cc = _sffi_env_get("SIMPLE_CC") ?? ""
+    if simple_cc != "":
         return simple_cc
 
     if plan.requires_cross:
@@ -157,11 +193,11 @@ fn find_c_compiler() -> text:
         return _find_c_compiler_windows()
 
     # Unix: check well-known paths first
-    if rt_file_exists("/usr/bin/clang"):
+    if _sffi_file_exists("/usr/bin/clang"):
         return "/usr/bin/clang"
-    if rt_file_exists("/usr/bin/gcc"):
+    if _sffi_file_exists("/usr/bin/gcc"):
         return "/usr/bin/gcc"
-    if rt_file_exists("/usr/bin/cc"):
+    if _sffi_file_exists("/usr/bin/cc"):
         return "/usr/bin/cc"
 
     val candidates = ["clang", "clang-18", "clang-17", "clang-16", "gcc", "cc"]
@@ -217,7 +253,7 @@ fn _runtime_dir_walk_up(start: text) -> text:
                 prefix = "{prefix}/{parts[i]}"
             i = i + 1
         if prefix != "":
-            if rt_file_exists("{prefix}/src/runtime/runtime.c"):
+            if _sffi_file_exists("{prefix}/src/runtime/runtime.c"):
                 return "{prefix}/src/runtime"
         depth = depth - 1
     ""
@@ -235,21 +271,21 @@ fn find_runtime_source_dir() -> text:
     """
     # Try SIMPLE_PROJECT_ROOT env var first so tests and callers can force
     # deterministic resolution even when cwd also contains src/runtime.
-    val project_root = rt_env_get("SIMPLE_PROJECT_ROOT")
-    if project_root != "" and project_root != nil:
+    val project_root = _sffi_env_get("SIMPLE_PROJECT_ROOT") ?? ""
+    if project_root != "":
         val rt_path = "{project_root}/src/runtime/runtime.c"
-        if rt_file_exists(rt_path):
+        if _sffi_file_exists(rt_path):
             return "{project_root}/src/runtime"
 
     # Try relative to current working directory
-    if rt_file_exists("src/runtime/runtime.c"):
+    if _sffi_file_exists("src/runtime/runtime.c"):
         return "src/runtime"
 
     # Unix-only: walk up from the executable location.
     if not _is_windows():
         # Canonicalize in-process. Inside `sh -c`, /proc/self is the shell, so
         # a shell-out here reports the shell's path, not ours (2026-07-25).
-        val exe_path = rt_path_absolute("/proc/self/exe") ?? ""
+        val exe_path = _sffi_path_absolute("/proc/self/exe") ?? ""
         if exe_path.len() > 0 and exe_path != "/proc/self/exe":
             val from_exe = _runtime_dir_walk_up(exe_path)
             if from_exe != "":
@@ -257,7 +293,7 @@ fn find_runtime_source_dir() -> text:
 
     # Walk up from the current working directory: covers running from a nested
     # subdirectory of the tree.
-    val cwd = rt_path_absolute(".") ?? ""
+    val cwd = _sffi_path_absolute(".") ?? ""
     val from_cwd = _runtime_dir_walk_up(cwd)
     if from_cwd != "":
         return from_cwd
@@ -266,10 +302,10 @@ fn find_runtime_source_dir() -> text:
 
 fn _runtime_dir_not_found_message() -> text:
     """Honest diagnostic for a failed runtime-source lookup."""
-    val cwd = rt_path_absolute(".") ?? "<unknown>"
-    val exe_path = rt_path_absolute("/proc/self/exe") ?? "<unknown>"
-    val project_root = rt_env_get("SIMPLE_PROJECT_ROOT")
-    val pr = if project_root != "" and project_root != nil: project_root else: "<unset>"
+    val cwd = _sffi_path_absolute(".") ?? "<unknown>"
+    val exe_path = _sffi_path_absolute("/proc/self/exe") ?? "<unknown>"
+    val project_root = _sffi_env_get("SIMPLE_PROJECT_ROOT") ?? ""
+    val pr = if project_root != "": project_root else: "<unset>"
     var msg = "Runtime source directory not found: no src/runtime/runtime.c under the current directory ({cwd}), "
     msg = msg + "under any ancestor of it, or under any ancestor of the running executable ({exe_path}). "
     msg = msg + "SIMPLE_PROJECT_ROOT={pr} - set SIMPLE_PROJECT_ROOT to the repository root to resolve this explicitly."
@@ -292,9 +328,7 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
     recompiles. Returns "" when caching is unavailable or disabled
     (SIMPLE_RT_OBJ_CACHE=0), in which case the caller compiles as before.
     """
-    var cache_policy = ""
-    unsafe(capabilities: [ffi]):
-        cache_policy = rt_env_get("SIMPLE_RT_OBJ_CACHE") ?? ""
+    val cache_policy = _sffi_env_get("SIMPLE_RT_OBJ_CACHE") ?? ""
     if cache_policy == "0":
         return ""
     if _is_windows():
@@ -310,9 +344,7 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
     val key = out.trim()
     if key.len() < 16:
         return ""
-    var root = ""
-    unsafe(capabilities: [ffi]):
-        root = rt_env_get("SIMPLE_RT_OBJ_CACHE_DIR") ?? ""
+    val root = _sffi_env_get("SIMPLE_RT_OBJ_CACHE_DIR") ?? ""
     val base = if root != "": root else: "{_get_temp_dir()}/simple-rt-objcache"
     val dir = base + "/" + key
     val (mout, merr, mcode) = backend_shell_tuple("mkdir -p '" + dir + "'")
@@ -372,8 +404,8 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     val tmp_dir = _get_temp_dir()
     val ext = _obj_ext()
     val use_msvc = _is_msvc_cc(cc)
-    val compile_pid = rt_getpid()
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "host"
+    val compile_pid = _sffi_getpid()
+    val target = _sffi_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "host"
     val object_prefix = "{tmp_dir}/simple_rt_{compile_pid}_{target}_"
     var objects = [
         "{object_prefix}runtime{ext}",
@@ -424,17 +456,14 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         val src_path = "{rt_dir}/{name}.c"
         if trace:
             print "[RT-COMPILE] checking existence of {src_path}"
-        if not rt_file_exists(src_path):
+        if not _sffi_file_exists(src_path):
             cleanup_runtime_objects(objects)
             return Err("Required runtime source not found: {src_path}")
 
         val obj_path = objects[object_count]
         val cache_obj = if cache_dir != "": cache_dir + "/" + name + ext else: ""
         var cache_hit = false
-        var cache_obj_exists = false
-        if cache_obj != "":
-            unsafe(capabilities: [ffi]):
-                cache_obj_exists = rt_file_exists(cache_obj)
+        val cache_obj_exists = cache_obj != "" and _sffi_file_exists(cache_obj)
         if cache_obj_exists:
             val (hit_out, hit_err, hit_code) = backend_shell_tuple(
                 "cp -f '" + cache_obj + "' '" + obj_path + "'")
@@ -477,7 +506,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             if target.starts_with("aarch64-") or (target == "host" and host_arch() == "aarch64"):
                 comp_args.push("-mno-outline-atomics")
             # Explicit opt-in: the resulting binary requires an RVV-capable CPU.
-            if name == "runtime_simd_dispatch" and target.starts_with("riscv64") and (rt_env_get("SIMPLE_RUNTIME_RISCV64_VECTOR") ?? "") == "1":
+            if name == "runtime_simd_dispatch" and target.starts_with("riscv64") and (_sffi_env_get("SIMPLE_RUNTIME_RISCV64_VECTOR") ?? "") == "1":
                 comp_args.push("-march=rv64gcv")
                 comp_args.push("-mabi=lp64d")
             comp_args.push("-I")
@@ -492,7 +521,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         var comp_err = ""
         var comp_code = 0
         if not cache_hit:
-            val (run_out, run_err, run_code) = rt_process_run(cc, comp_args)
+            val (run_out, run_err, run_code) = _sffi_process_run(cc, comp_args)
             comp_out = run_out
             comp_err = run_err
             comp_code = run_code
@@ -529,7 +558,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
 fn cleanup_runtime_objects(objects: [text]):
     """Remove temporary runtime object files."""
     for obj in objects:
-        rt_file_delete(obj)
+        _sffi_file_delete(obj)
 
 # ============================================================================
 # Exports

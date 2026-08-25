@@ -101,6 +101,37 @@ optimizer or benchmark was available.  Flat AST assembly and the wider SFFI
 estate remain neither globally verified nor signed; verified-and-signed
 admission remains 0.
 
+## Hosted runtime-compiler authority checkpoint
+
+The hosted C-runtime compiler now confines filesystem existence/deletion,
+absolute-path resolution, process execution, environment lookup, and PID
+retrieval to six mandatory-inline lexical `unsafe(ffi)` owners.  Environment
+and absolute-path results are truthfully optional and decoded before text use;
+the former mixed text/`nil` comparisons and three broader unsafe blocks were
+removed.
+
+The C-source loop retains one required-source existence probe and at most one
+compiler process execution per uncached source.  Cache checks, cache
+publication, cleanup, object arrays, compiler arguments, and process output
+copies are unchanged.  The ownership change adds no allocation, copy, lookup,
+hash, lock, branch, loop, or foreign call.
+
+The focused static authority/performance ratchet passed.  The authoritative
+census changed:
+
+- raw call sites: 18,974 -> 18,949
+- missing authority: 14,719 -> 14,691
+- lexical unsafe: 3,298 -> 3,301
+- function unsafe: unchanged at 957
+
+Five symbols have typed-native plus interpreter registration.  Temporary-file
+deletion is interpreter-registered but absent from the typed-native registry;
+cleanup is best-effort, but that provider gap blocks verified promotion.  No
+production self-hosted optimizer or benchmark was available.  Exact artifact
+identity, signatures, and evidence admission remain absent, so the runtime
+compiler and wider SFFI estate are not globally verified or signed;
+verified-and-signed admission remains 0.
+
 ## RISC-V boot-services authority checkpoint
 
 `riscv_services.spl` had twelve PCI/network/storage/log interfaces and 63
