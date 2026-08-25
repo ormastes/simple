@@ -947,7 +947,8 @@ The change adds no provider call, dispatch, branch, allocation, copy, or GPU
 data movement. It deletes fabricated surface and adds compile-time metadata to
 the remaining direct calls. The Metal identity/contract audit and whitespace
 check passed; production Simple and optimizer verification remain unavailable.
-Relative to the last authoritative baseline plus the scoped-symbol checkpoint,
-declaration rows decrease by three and 40 additional rows become unsafe-tagged.
-An authoritative full recount remains scheduled after this lane. Exact-artifact
-verified-and-signed admission remains zero.
+The refreshed source-only authoritative inventory reports 11,819 `rt_*`
+declaration rows / 3,138 `rt_*` symbols, 1,410 unsafe-tagged rows, 10,151
+untouched rows, and zero exact-artifact verified-and-signed admissions. The
+inventory artifacts are retained at
+`/mnt/data/tmp/sffi-inventory.pNuueT/{contracts,symbols}.tsv`.

@@ -503,3 +503,7 @@ passing placeholder.
     always-zero sampler/swapchain/present facade; implement and admit a real
     provider contract before exposing those APIs. Preserve direct batched GPU
     submission and existing buffer-copy counts.
+95. Treat the refreshed authoritative baseline as 11,819 `rt_*` declaration
+    rows / 3,138 symbols, 1,410 unsafe-tagged, 10,151 untouched, and zero signed
+    admissions. Continue from the largest owned production untouched owner;
+    never infer semantic verification from an unsafe tag alone.
