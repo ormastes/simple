@@ -4,6 +4,7 @@
 #
 # Verdict is ALWAYS the last stdout line:
 #   PASS — <n> step(s) checked, <d> done, <a> active, 0 blocked      exit 0
+#   PASS — 0 step(s) due, nothing to do (<d> done, <p> pending)      exit 0   (quiet hour)
 #   FAIL — <n> step(s) checked, <d> done, <a> active, <b> blocked: … exit 1
 #   ERROR — nothing was checked (<reason>)                           exit 2
 #
@@ -18,7 +19,7 @@
 # The ledger is rewritten atomically (tmp in the same dir + mv) and one line per run is
 # appended to .spipe/scv-migration/runs.log. --dry-run mutates nothing.
 #
-# --selftest runs first and is fatal (5 fixtures). Inside selftest ONLY, --verify-cmd
+# --selftest runs first and is fatal (6 fixtures). Inside selftest ONLY, --verify-cmd
 # substitutes a fixture verifier; outside selftest the option is refused so the real
 # path always calls the real trust script.
 #
@@ -98,6 +99,7 @@ run_ledger() {
   tmp="$(dirname "$LEDGER")/.todo.sdn.tmp.$$"
   : > "$tmp"
   n=0; d=0; a=0; b=0; blocked_names=""
+  total=0; done_all=0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "    SCV-MIG-"*) ;;
@@ -112,6 +114,8 @@ run_ledger() {
     last_run="$(printf '%s' "$body" | awk -F', ' '{print $6}')"
     last_verdict="$(printf '%s' "$body" | awk -F', ' '{print $7}' | tr -d '"')"
     reason="$(printf '%s' "$body" | awk -F', ' '{print $8}')"
+    total=$((total+1))
+    [ "$status" = "done" ] && done_all=$((done_all+1))
     if [ "$due" \> "$NOW_DAY" ]; then
       printf '%s\n' "$line" >> "$tmp"; continue
     fi
@@ -151,10 +155,18 @@ run_ledger() {
       "$id" "$week" "$due" "$status" "$cmd" "$last_run" "$last_verdict" "$reason" >> "$tmp"
   done < "$LEDGER"
 
-  if [ "$n" -eq 0 ]; then
+  if [ "$total" -eq 0 ]; then
     rm -f "$tmp"
-    echo "ERROR — nothing was checked (0 due steps in $LEDGER as of $NOW_DAY)"
+    echo "ERROR — nothing was checked (0 steps in $LEDGER)"
     return 2
+  fi
+  if [ $((n - d)) -eq 0 ] && [ "$b" -eq 0 ]; then
+    # Quiet hour: no actionable step (none due, or every due step already done).
+    rm -f "$tmp"
+    verdict="PASS — 0 step(s) due, nothing to do ($done_all done, $((total - done_all)) pending)"
+    [ "$DRY_RUN" -eq 1 ] || printf '%s %s\n' "$NOW" "$verdict" >> "$RUNS_LOG"
+    echo "$verdict"
+    return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     rm -f "$tmp"
@@ -231,17 +243,30 @@ EOF
   # F5: --verify-cmd refused outside selftest
   v="$(sh "$SCRIPT_PATH" $common 2>&1 | tail -n 1)"
   case "$v" in "ERROR — nothing was checked (--verify-cmd"*) ;; *) echo "selftest F5 FAIL: $v"; fails=$((fails+1)) ;; esac
+  # F6: quiet hour — only future-due pending steps -> quiet PASS exit 0, ledger untouched
+  {
+    echo 'steps |id, week, due, status, check_cmd, last_run_utc, last_verdict, blocked_reason|'
+    echo '    SCV-MIG-04, 2, 2099-01-01, pending, "sh scripts/scv-migration/steps/SCV-MIG-04.shs", , , '
+    echo '    SCV-MIG-05, 2, 2099-01-01, pending, "sh scripts/scv-migration/steps/SCV-MIG-05.shs", , , '
+  } > "$L"
+  cp "$L" "$L.f6before"
+  out="$(SCV_MIG_SELFTEST=1 sh "$SCRIPT_PATH" $common 2>&1)"
+  rc=$?
+  v="$(printf '%s\n' "$out" | tail -n 1)"
+  case "$v" in "PASS — 0 step(s) due, nothing to do (0 done, 2 pending)") ;; *) echo "selftest F6 FAIL: $v"; fails=$((fails+1)) ;; esac
+  [ "$rc" -eq 0 ] || { echo "selftest F6 exit FAIL: $rc"; fails=$((fails+1)); }
+  cmp -s "$L" "$L.f6before" || { echo "selftest F6 mutated ledger"; fails=$((fails+1)); }
   rm -rf "$fx"
   if [ "$fails" -gt 0 ]; then
     echo "ERROR — nothing was checked (selftest failed: $fails fixture(s))"
     exit 2
   fi
-  echo "selftest: 5 fixture(s) OK"
+  echo "selftest: 6 fixture(s) OK"
 }
 
 if [ "$SELFTEST" -eq 1 ]; then selftest; fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-  echo "PASS — 5 selftest fixture(s) checked, 0 failed"
+  echo "PASS — 6 selftest fixture(s) checked, 0 failed"
   exit 0
 fi
 run_ledger

@@ -26,7 +26,7 @@ Unsigned/invalid/missing ⇒ `blocked/unsigned`, overall FAIL, script NEVER
 executed. Signed ⇒ run under `timeout`, read only the last stdout line, flip to
 `done` on `PASS`. Ledger rewritten atomically; one verdict line appended to
 `runs.log`. Verdict convention matches the pre-push guards
-(`PASS`/`FAIL`/`ERROR — nothing was checked`, exit 0/1/2).
+(`PASS`/`FAIL`/`ERROR — nothing was checked`, exit 0/1/2); a quiet hour with no actionable step (none due, or all due steps done) is `PASS — 0 step(s) due, nothing to do (<d> done, <p> pending)`, exit 0.
 
 ## Commands
 
