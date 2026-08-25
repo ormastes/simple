@@ -179,6 +179,8 @@ class SshSession:
     host_ed25519_public: [u8]
     ctr_counter_c2s: [u8]
     ctr_counter_s2c: [u8]
+    rekey_in_progress: bool
+    rekey_count: u32
     active_remote_channel_id: u32
     pending_ring3_exec: bool   # set by exec dispatch; consumed by the shallow accept loop
     pending_ring3_exec_exit_code: u32  # exit code from ring-3; set by accept loop after spawn
@@ -267,6 +269,8 @@ impl SshSession:
             host_ed25519_public: host_ed25519_public,
             ctr_counter_c2s: [],
             ctr_counter_s2c: [],
+            rekey_in_progress: false,
+            rekey_count: 0u32,
             active_remote_channel_id: 0,
             pending_ring3_exec: false,
             pending_ring3_exec_exit_code: 0,
@@ -319,6 +323,12 @@ impl SshSession:
             if payload_len == 0:
                 self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
                 return false
+            val msg_type = ssh_session_u8_at(payload, 0)
+            if msg_type == SSH_MSG_KEXINIT:
+                if not self.do_rekey(payload):
+                    self.transition_closed()
+                    return false
+                continue
             if _is_ssh_userauth_service_request(payload):
                 serial_println("[sshd-session] service request fast matched")
                 val accept = ssh_build_service_accept("ssh-userauth")
@@ -327,7 +337,6 @@ impl SshSession:
                 log_info("[app.sshd] " + "[sshd-session] service request ok")
                 return true
 
-            val msg_type = ssh_session_u8_at(payload, 0)
             if msg_type == 7 or msg_type == 2 or msg_type == 4:
                 serial_println("[sshd-session] service payload len={payload.len()} payload={_bytes_to_hex(payload)}")
                 serial_println("[sshd-session] pre-auth skip type=0x{format_hex(msg_type.to_i64())}")
@@ -374,7 +383,12 @@ impl SshSession:
                 pass_dn
             else:
                 val auth_msg_type = ssh_session_u8_at(payload, 0)
-                if auth_msg_type == 7 or auth_msg_type == 2 or auth_msg_type == 4:
+                if auth_msg_type == SSH_MSG_KEXINIT:
+                    if not self.do_rekey(payload):
+                        self.transition_closed()
+                        return false
+                    pass_dn
+                elif auth_msg_type == 7 or auth_msg_type == 2 or auth_msg_type == 4:
                     serial_println("[sshd-session] auth skip type=0x{format_hex(auth_msg_type.to_i64())}")
                     pass_dn
                 elif auth_msg_type != 50:
@@ -521,10 +535,14 @@ impl SshSession:
                 ssh_session_u8_at(payload, 0).to_u32()
             else:
                 0u32
-        val force_plain =
+        # Initial KEX is plaintext.  During rekey RFC 4253 requires KEXINIT,
+        # KEX_ECDH_REPLY, and NEWKEYS to remain protected by the old outbound
+        # keys through the NEWKEYS packet itself.
+        val force_plain = not self.cipher.active and (
             msg_type == 20u32 or
             msg_type == 31u32 or
             msg_type == 21u32
+        )
         var encrypted_io = false
         if not force_plain:
             encrypted_io = self.encrypted_packets_enabled()

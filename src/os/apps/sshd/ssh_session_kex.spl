@@ -187,10 +187,7 @@ fn _rv64_live_x25519_shared_alpha(server_private: [u8], client_public: [u8]) -> 
     selected
 
 
-fn _derive_session_x25519_private_key(host_seed: [u8]?, client_public: [u8], client_kexinit_payload: [u8]) -> [u8]:
-    # Baremetal uses the fixed bootstrap scalar pending RV64 exchange-hash proof.
-    if client_public.len() == 32:
-        return _live_bootstrap_x25519_private_key()
+fn _derive_session_x25519_private_key(host_seed: [u8]?, client_public: [u8], client_kexinit_payload: [u8], rekey_epoch: u32) -> [u8]:
     var seed_material: [u8] = []
     if host_seed != nil:
         seed_material = _copy_bytes_stable(host_seed)
@@ -204,6 +201,12 @@ fn _derive_session_x25519_private_key(host_seed: [u8]?, client_public: [u8], cli
     while i < stable_kex_prefix.len():
         seed_material.push(ssh_session_u8_at(stable_kex_prefix, i))
         i = i + 1
+    # Bind peer-controlled repeat proposals to a monotonically bounded daemon
+    # epoch so two accepted rekeys cannot reuse the server ephemeral scalar.
+    seed_material.push(((rekey_epoch >> 24) & 0xFFu32).to_u8())
+    seed_material.push(((rekey_epoch >> 16) & 0xFFu32).to_u8())
+    seed_material.push(((rekey_epoch >> 8) & 0xFFu32).to_u8())
+    seed_material.push((rekey_epoch & 0xFFu32).to_u8())
     val digest = ssh_kex_compute_exchange_hash(
         [],
         [],
@@ -401,6 +404,35 @@ impl SshSession:
 
     me do_kex() -> bool:
         """Perform key exchange (curve25519-sha256)."""
+        self._do_kex([])
+
+    me do_rekey(client_kexinit: [u8]) -> bool:
+        """Complete one peer-initiated rekey while preserving connection state.
+
+        The caller has already authenticated and decrypted client_kexinit with
+        the old inbound key.  Rekey owns no channel/authentication state and
+        publishes each new directional key only after that direction's
+        NEWKEYS boundary.
+        """
+        if not self.cipher.active or client_kexinit.len() == 0u64:
+            return false
+        # The freestanding rekey scalar derivation is keyed by this host
+        # secret.  Never fall back to peer-only deterministic material.
+        if self.host_keys.ed25519_seed == nil:
+            return false
+        if self.rekey_in_progress or self.rekey_count >= 16u32:
+            return false
+        self.rekey_in_progress = true
+        val completed = self._do_kex(client_kexinit)
+        self.rekey_in_progress = false
+        if completed:
+            self.rekey_count = self.rekey_count + 1u32
+        completed
+
+    me _do_kex(preloaded_client_kexinit: [u8]) -> bool:
+        """Perform initial KEX or one staged rekey."""
+        val was_rekey = self.cipher.active
+        val state_before_kex = self.state
         log_info("[app.sshd] " + "[sshd-session] kex start")
         # Send our KEXINIT — advertise algorithms available in our host key set
         val server_kexinit = ssh_build_kexinit_for_host_keys_and_certs(self.host_keys, self.host_certs)
@@ -408,8 +440,13 @@ impl SshSession:
         self.server_kexinit_payload = server_kexinit
         self.send_packet(server_kexinit)
 
-        # Receive client KEXINIT
-        val client_payload = self.recv_packet_payload()
+        # A peer-initiated rekey arrives through the connection dispatcher, so
+        # do not consume the following KEX_ECDH_INIT as a second KEXINIT.
+        val client_payload =
+            if preloaded_client_kexinit.len() > 0u64:
+                preloaded_client_kexinit
+            else:
+                self.recv_packet_payload()
         log_info("[app.sshd] " + "[sshd-session] client kexinit received")
         if client_payload.len() == 0:
             log_info("[app.sshd] " + "[sshd-session] client kexinit missing")
@@ -425,36 +462,35 @@ impl SshSession:
         # conversion before negotiation.
         val using_live_openssh_profile = true
         serial_println("[sshd-session] using live OpenSSH constrained KEX profile")
-        val client_kex = SshKexInit(
-            cookie: [],
-            kex_algorithms: "curve25519-sha256,kex-strict-c-v00@openssh.com",
-            server_host_key_algorithms: "ssh-ed25519,rsa-sha2-256,rsa-sha2-512",
-            encryption_client_to_server: "aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr",
-            encryption_server_to_client: "aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr",
-            mac_client_to_server: "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none",
-            mac_server_to_client: "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none",
-            compression_client_to_server: "none",
-            compression_server_to_client: "none",
-            first_kex_packet_follows: false
-        )
+        val client_kex = match _parse_kexinit_fast(client_payload):
+            Ok(parsed): parsed
+            Err(_):
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEXINIT")
+                return false
+        if client_kex.first_kex_packet_follows:
+            # This constrained transport cannot prove that an optimistic guess
+            # matches both selected algorithms without retaining the original
+            # ordered name-list heads.  Fail closed instead of interpreting a
+            # guessed packet under the wrong KEX state.
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "optimistic KEX unsupported")
+            return false
+        val server_kex = match _parse_kexinit_fast(server_kexinit):
+            Ok(parsed): parsed
+            Err(_):
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad server KEXINIT")
+                return false
         log_info("[app.sshd] " + "[sshd-session] client kexinit parsed")
         log_raw_println("[sshd-session] client kex list={client_kex.kex_algorithms}")
         log_raw_println("[sshd-session] client hostkey list={client_kex.server_host_key_algorithms}")
         log_raw_println("[sshd-session] client enc c2s={client_kex.encryption_client_to_server}")
         log_raw_println("[sshd-session] client mac c2s={client_kex.mac_client_to_server}")
 
-        serial_println("[sshd-session] live server kex profile pinned")
-        val algos_early = SshAlgorithms(
-            kex: "curve25519-sha256",
-            host_key: "ssh-ed25519",
-            cipher_c2s: "aes256-gcm@openssh.com",
-            cipher_s2c: "aes256-gcm@openssh.com",
-            mac_c2s: "none",
-            mac_s2c: "none",
-            compress_c2s: "none",
-            compress_s2c: "none"
-        )
-        val strict_kex = true
+        val algos_early = match ssh_negotiate_algorithms(client_kex, server_kex):
+            Ok(negotiated): negotiated
+            Err(_):
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no matching KEX algorithms")
+                return false
+        val strict_kex = ssh_kex_uses_strict_kex(client_kex, server_kex)
         log_info("[app.sshd] " + "[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
         serial_println("[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
 
@@ -464,6 +500,9 @@ impl SshSession:
         if kex_init_payload.len() == 0:
             log_raw_println("[sshd-session] client ecdh init missing")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEX_ECDH_INIT")
+            return false
+        if ssh_validate_kex_ecdh_init_payload(kex_init_payload, strict_kex).is_err():
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad KEX_ECDH_INIT")
             return false
         var client_public: [u8] = []
         if using_live_openssh_profile:
@@ -490,10 +529,17 @@ impl SshSession:
 
         # Generate our ephemeral keypair without the hosted random runtime path.
         serial_println("[sshd-session] server private generation start")
-        val server_private = if using_live_openssh_profile:
+        val server_private = if was_rekey:
+            _derive_session_x25519_private_key(
+                self.host_keys.ed25519_seed,
+                client_public,
+                self.client_kexinit_payload,
+                self.rekey_count + 1u32
+            )
+        elif using_live_openssh_profile:
             _live_bootstrap_x25519_private_key()
         elif client_public.len() == 32:
-            _derive_session_x25519_private_key(self.host_keys.ed25519_seed, client_public, self.client_kexinit_payload)
+            _derive_session_x25519_private_key(self.host_keys.ed25519_seed, client_public, self.client_kexinit_payload, 0u32)
         else:
             _live_bootstrap_x25519_private_key()
         serial_println("[sshd-session] server private generation len={server_private.len()}")
@@ -695,28 +741,24 @@ impl SshSession:
         val keys = ssh_derive_keys(shared_secret, exchange_hash, self.session_id)
         if using_live_openssh_profile:
             serial_println("[sshd-session] derived iv_s2c len={keys.iv_s2c.len()} key_s2c len={keys.enc_key_s2c.len()}")
-            serial_println("[sshd-session] derived iv_s2c={_bytes_to_hex(keys.iv_s2c)}")
-            serial_println("[sshd-session] derived key_s2c={_bytes_to_hex(keys.enc_key_s2c)}")
             val runtime_iv_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x42, self.session_id, 12)
             val runtime_key_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x44, self.session_id, 32)
-            serial_println("[sshd-session] runtime iv_s2c={_bytes_to_hex(runtime_iv_s2c)}")
-            serial_println("[sshd-session] runtime key_s2c={_bytes_to_hex(runtime_key_s2c)}")
             if not dual_backend_bytes_equal(keys.iv_s2c, runtime_iv_s2c) or not dual_backend_bytes_equal(keys.enc_key_s2c, runtime_key_s2c):
                 serial_println("[sshd-session] kdf sha256 alpha mismatch: using runtime session keys")
         else:
-            serial_println("[sshd-session] derived iv_s2c={_bytes_to_hex(keys.iv_s2c)}")
-            serial_println("[sshd-session] derived key_s2c={_bytes_to_hex(keys.enc_key_s2c)}")
+            serial_println("[sshd-session] derived directional key material")
+        # Derive into locals.  During rekey the old inbound material must stay
+        # live until the peer's NEWKEYS has been authenticated; publishing it
+        # earlier would attempt to decrypt that packet with the new key.
+        var next_iv_c2s: [u8] = []
+        var next_iv_s2c: [u8] = []
         if using_live_openssh_profile:
-            self.iv_c2s = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x41, self.session_id, 12)
-            self.iv_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x42, self.session_id, 12)
+            next_iv_c2s = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x41, self.session_id, 12)
+            next_iv_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x42, self.session_id, 12)
         else:
-            self.iv_c2s = _copy_bytes_stable(keys.iv_c2s)
-            self.iv_s2c = _copy_bytes_stable(keys.iv_s2c)
+            next_iv_c2s = _copy_bytes_stable(keys.iv_c2s)
+            next_iv_s2c = _copy_bytes_stable(keys.iv_s2c)
         var enc_key_len: u64 = 0
-        self.negotiated_cipher_c2s = algos_early.cipher_c2s
-        self.negotiated_cipher_s2c = algos_early.cipher_s2c
-        self.negotiated_mac_c2s = algos_early.mac_c2s
-        self.negotiated_mac_s2c = algos_early.mac_s2c
         if algos_early.cipher_c2s == "aes256-gcm@openssh.com" and algos_early.cipher_s2c == "aes256-gcm@openssh.com":
             enc_key_len = 32
         elif algos_early.cipher_c2s == "aes128-gcm@openssh.com" and algos_early.cipher_s2c == "aes128-gcm@openssh.com":
@@ -726,29 +768,35 @@ impl SshSession:
         else:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
             return false
+        var next_enc_key_c2s: [u8] = []
+        var next_enc_key_s2c: [u8] = []
+        var next_mac_key_c2s: [u8] = []
+        var next_mac_key_s2c: [u8] = []
         if using_live_openssh_profile:
-            self.enc_key_c2s = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x43, self.session_id, enc_key_len)
-            self.enc_key_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x44, self.session_id, enc_key_len)
-            self.mac_key_c2s = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x45, self.session_id, 32)
-            self.mac_key_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x46, self.session_id, 32)
+            next_enc_key_c2s = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x43, self.session_id, enc_key_len)
+            next_enc_key_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x44, self.session_id, enc_key_len)
+            next_mac_key_c2s = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x45, self.session_id, 32)
+            next_mac_key_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x46, self.session_id, 32)
         else:
-            self.enc_key_c2s = _copy_prefix_stable(keys.enc_key_c2s, enc_key_len)
-            self.enc_key_s2c = _copy_prefix_stable(keys.enc_key_s2c, enc_key_len)
-            self.mac_key_c2s = _copy_bytes_stable(keys.mac_key_c2s)
-            self.mac_key_s2c = _copy_bytes_stable(keys.mac_key_s2c)
-        self.ctr_counter_c2s = _copy_bytes_stable(self.iv_c2s)
-        self.ctr_counter_s2c = _copy_bytes_stable(self.iv_s2c)
+            next_enc_key_c2s = _copy_prefix_stable(keys.enc_key_c2s, enc_key_len)
+            next_enc_key_s2c = _copy_prefix_stable(keys.enc_key_s2c, enc_key_len)
+            next_mac_key_c2s = _copy_bytes_stable(keys.mac_key_c2s)
+            next_mac_key_s2c = _copy_bytes_stable(keys.mac_key_s2c)
+
+        # Our NEWKEYS was just sent with the old outbound key.  RFC 4253 makes
+        # the next outbound packet use the new key, independently of inbound.
+        self.iv_s2c = next_iv_s2c
+        self.enc_key_s2c = next_enc_key_s2c
+        self.mac_key_s2c = next_mac_key_s2c
+        self.ctr_counter_s2c = _copy_bytes_stable(next_iv_s2c)
+        self.negotiated_cipher_s2c = algos_early.cipher_s2c
+        self.negotiated_mac_s2c = algos_early.mac_s2c
+        if was_rekey and strict_kex:
+            self.cipher.seq_s2c = 0u32
         if using_live_openssh_profile:
-            serial_println("[sshd-session] stored key lengths iv_c2s={self.iv_c2s.len()} iv_s2c={self.iv_s2c.len()} key_c2s={self.enc_key_c2s.len()} key_s2c={self.enc_key_s2c.len()}")
-            serial_println("[sshd-session] live iv_s2c={_bytes_to_hex(self.iv_s2c)}")
-            serial_println("[sshd-session] live key_s2c={_bytes_to_hex(self.enc_key_s2c)}")
-            serial_println("[sshd-session] live iv_c2s={_bytes_to_hex(self.iv_c2s)}")
-            serial_println("[sshd-session] live key_c2s={_bytes_to_hex(self.enc_key_c2s)}")
+            serial_println("[sshd-session] staged key lengths iv_c2s={next_iv_c2s.len()} iv_s2c={next_iv_s2c.len()} key_c2s={next_enc_key_c2s.len()} key_s2c={next_enc_key_s2c.len()}")
         else:
-            serial_println("[sshd-session] stored iv_c2s={_bytes_to_hex(self.iv_c2s)}")
-            serial_println("[sshd-session] stored iv_s2c={_bytes_to_hex(self.iv_s2c)}")
-            serial_println("[sshd-session] stored key_c2s={_bytes_to_hex(self.enc_key_c2s)}")
-            serial_println("[sshd-session] stored key_s2c={_bytes_to_hex(self.enc_key_s2c)}")
+            serial_println("[sshd-session] staged directional keys")
 
         # Keep inbound and outbound plaintext until the client's NEWKEYS is
         # consumed. Sending encrypted EXT_INFO before this point races
@@ -768,22 +816,37 @@ impl SshSession:
         var client_newkeys_type: u8 = 0
         if client_newkeys_len > 0:
             client_newkeys_type = ssh_session_u8_at(client_newkeys, 0)
-        if using_live_openssh_profile and client_newkeys_len == 1 and client_newkeys_type == 0:
-            serial_println("[sshd-session] live NEWKEYS zero payload workaround")
-            client_newkeys_type = 21
         serial_println("[sshd-session] client NEWKEYS len={client_newkeys_len} type=0x{format_hex(client_newkeys_type.to_i64())}")
-        if client_newkeys_len != 1 or client_newkeys_type != 21:
+        if client_newkeys_len != 1 or ssh_validate_newkeys_payload(client_newkeys, strict_kex).is_err():
             log_raw_println("[sshd-session] invalid client NEWKEYS payload")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid NEWKEYS")
             return false
 
-        # Strict KEX resets encrypted sequence numbers after NEWKEYS. OpenSSH
-        # logs the pre-reset value, then sets the packet sequence to zero.
-        self.cipher.seq_c2s = 0u32
-        if not sent_server_ext_info_early:
-            self.cipher.seq_s2c = 0u32
+        # The authenticated peer NEWKEYS is the inbound publication boundary.
+        self.iv_c2s = next_iv_c2s
+        self.enc_key_c2s = next_enc_key_c2s
+        self.mac_key_c2s = next_mac_key_c2s
+        self.ctr_counter_c2s = _copy_bytes_stable(next_iv_c2s)
+        self.negotiated_cipher_c2s = algos_early.cipher_c2s
+        self.negotiated_mac_c2s = algos_early.mac_c2s
+
+        # Strict KEX resets each encrypted direction at its own NEWKEYS
+        # boundary.  Initial KEX has no encrypted counters but initializes both
+        # to the same canonical value before cipher activation.
+        if strict_kex:
+            self.cipher.seq_c2s = 0u32
+            if not was_rekey and not sent_server_ext_info_early:
+                self.cipher.seq_s2c = 0u32
+        elif not was_rekey:
+            # Without strict-KEX, RFC 4253 sequence numbers span the plaintext
+            # handshake instead of restarting at cipher activation.
+            self.cipher.seq_c2s = self.recv_seq
+            self.cipher.seq_s2c = self.send_seq
         self.cipher.active = true
-        self.state = SshSessionState.Authentication
+        if was_rekey:
+            self.state = state_before_kex
+        else:
+            self.state = SshSessionState.Authentication
         serial_println("[sshd-session] cipher activated c2s_seq={self.cipher.seq_c2s} s2c_seq={self.cipher.seq_s2c} recv_seq={self.recv_seq} send_seq={self.send_seq}")
         log_info("[app.sshd] " + "[sshd-session] cipher activated")
 
