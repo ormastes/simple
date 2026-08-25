@@ -71,18 +71,48 @@ fn incremental_hash_text(content: text) -> text:
 
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
 
+fn incremental_sift_down(mut values: [text], root_index: i64, heap_len: i64):
+    var root = root_index
+    while true:
+        val left = root * 2 + 1
+        if left >= heap_len:
+            return
+
+        var largest = root
+        if values[largest] < values[left]:
+            largest = left
+        val right = left + 1
+        if right < heap_len and values[largest] < values[right]:
+            largest = right
+        if largest == root:
+            return
+
+        val tmp = values[root]
+        values[root] = values[largest]
+        values[largest] = tmp
+        root = largest
+
 fn incremental_sorted_text(values: [text]) -> [text]:
     var result = values
-    var i = 0
-    while i < result.len():
-        var j = i + 1
-        while j < result.len():
-            if result[j] < result[i]:
-                val tmp = result[i]
-                result[i] = result[j]
-                result[j] = tmp
-            j = j + 1
-        i = i + 1
+    if result.len() < 2:
+        return result
+
+    # Build a max heap bottom-up, then place each maximum at the shrinking
+    # suffix.  This keeps the old byte-for-byte text ordering while reducing
+    # every directory sort from quadratic comparisons to O(n log n), with no
+    # auxiliary array allocation beyond the existing value-semantics result.
+    var start = result.len() / 2
+    while start > 0:
+        start = start - 1
+        incremental_sift_down(result, start, result.len())
+
+    var end = result.len()
+    while end > 1:
+        end = end - 1
+        val tmp = result[0]
+        result[0] = result[end]
+        result[end] = tmp
+        incremental_sift_down(result, 0, end)
     result
 
 fn native_build_compiler_source_fingerprint() -> text:
