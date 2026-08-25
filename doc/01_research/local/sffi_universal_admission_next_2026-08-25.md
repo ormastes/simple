@@ -12,6 +12,34 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## MIR expression-dispatch authority checkpoint
+
+The largest remaining compiler file was a genuine boundary rather than census
+noise.  `expr_dispatch.spl` declared five runtime functions directly; the
+unused `rt_dict_contains` declaration is removed, and all calls to the four
+active environment/enum/tuple interfaces are routed through mandatory-inline
+`ffi` owners.  The focused `mir-expr-dispatch-sffi-authority.shs` ratchet
+passed, pins the compiler-owned ABI registry, and preserves the exact number
+of runtime probes in the lowering logic.
+
+This file is on MIR lowering's hot path.  The change adds no runtime enum
+probe, environment lookup, tuple projection, allocation, copy, loop, lock,
+hash, signature operation, or generic dispatch.  Mandatory inlining reduces
+the source authority surface without adding a call frame.  Caching or replacing
+the many discriminant probes was deliberately not attempted without production
+profiles because enum construction/lifetime differs across compiler lanes.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,634 -> 19,539
+- lexical unsafe: 3,215 -> 3,219
+- function unsafe: unchanged at 919
+- missing authority: 15,500 -> 15,401
+
+The file itself now reports four raw rows, all lexically authorized, and zero
+missing authority.  Provider implementation proofs and exact signed compiler
+artifacts remain absent, so verified-and-signed admission remains 0.
+
 ## Simple-core authority-coverage checkpoint
 
 The final two simple-core gaps were `core_stdio.spl` and `core_math.spl`.

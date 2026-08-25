@@ -26,18 +26,41 @@ use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
-extern fn rt_dict_contains(dict: i64, key: Any) -> bool
+@unsafe(reason: "raw process environment lookup ABI; nil means unset or provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
+@unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
 extern fn rt_enum_payload(value: Any) -> i64
+@unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_enum_discriminant(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+@always_inline
+fn _sffi_enum_payload(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_payload(value)
+
+@always_inline
+fn _sffi_tuple_get(tuple: i64, index: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_tuple_get(tuple, index)
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
 # wrapper are OPTIONAL — every call site below already uses the optional-safe
 # `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
 # Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
 fn mir_expr_env_get(key: text) -> text?:
-    rt_env_get(key)
+    _sffi_env_get(key)
 
 fn mir_exception_type_tag(type_: HirType?) -> i64:
     """Stable, allocation-free tags for catchable runtime types.
@@ -432,7 +455,7 @@ impl MirLowering:
         if self.runtime_dict_locals.contains(local.id):
             return true
         if val type_ = self.builder.local_type(local):
-            return rt_enum_discriminant(type_.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64()))
+            return _sffi_enum_discriminant(type_.kind) == _sffi_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64()))
         false
     fn noted_runtime_elem_type(container_local: LocalId) -> MirType?:
         """Nil-discriminating read of the store-observed element/value note.
@@ -566,8 +589,8 @@ impl MirLowering:
         `lower_dict_runtime_read` can never disagree about which value types
         have their raw word transformed at read time.
         """
-        val disc = rt_enum_discriminant(t.kind)
-        disc == rt_enum_discriminant(MirTypeKind.I8) or disc == rt_enum_discriminant(MirTypeKind.U8) or disc == rt_enum_discriminant(MirTypeKind.I16) or disc == rt_enum_discriminant(MirTypeKind.U16) or disc == rt_enum_discriminant(MirTypeKind.I32) or disc == rt_enum_discriminant(MirTypeKind.U32) or disc == rt_enum_discriminant(MirTypeKind.I64) or disc == rt_enum_discriminant(MirTypeKind.U64) or disc == rt_enum_discriminant(MirTypeKind.Char)
+        val disc = _sffi_enum_discriminant(t.kind)
+        disc == _sffi_enum_discriminant(MirTypeKind.I8) or disc == _sffi_enum_discriminant(MirTypeKind.U8) or disc == _sffi_enum_discriminant(MirTypeKind.I16) or disc == _sffi_enum_discriminant(MirTypeKind.U16) or disc == _sffi_enum_discriminant(MirTypeKind.I32) or disc == _sffi_enum_discriminant(MirTypeKind.U32) or disc == _sffi_enum_discriminant(MirTypeKind.I64) or disc == _sffi_enum_discriminant(MirTypeKind.U64) or disc == _sffi_enum_discriminant(MirTypeKind.Char)
 
     fn mir_type_is_str(t: MirType) -> bool:
         """True for the native string MIR types: the fat-pointer struct
@@ -963,8 +986,8 @@ impl MirLowering:
     me note_container_elem_type(container: LocalId, value_local: LocalId):
         val vt = self.local_mir_type_of(value_local)
         if vt != nil:
-            val vt_disc = rt_enum_discriminant(vt.kind)
-            if vt_disc == rt_enum_discriminant(MirTypeKind.F64) or vt_disc == rt_enum_discriminant(MirTypeKind.F32):
+            val vt_disc = _sffi_enum_discriminant(vt.kind)
+            if vt_disc == _sffi_enum_discriminant(MirTypeKind.F64) or vt_disc == _sffi_enum_discriminant(MirTypeKind.F32):
                 self.runtime_elem_value_type[container.id] = vt
         # Bug (layoutglyph_struct_array_i64_field_tag_shift_readback):
         # lower_array_lit captures a struct-typed element's name into
@@ -1015,10 +1038,10 @@ impl MirLowering:
 
     me decode_runtime_value(raw: LocalId, result_type: MirType) -> LocalId:
         var b = self.builder
-        val disc = rt_enum_discriminant(result_type.kind)
+        val disc = _sffi_enum_discriminant(result_type.kind)
         val is_integer = self.mir_type_is_integer(result_type)
         if is_integer:
-            if disc == rt_enum_discriminant(MirTypeKind.I64) or disc == rt_enum_discriminant(MirTypeKind.U64):
+            if disc == _sffi_enum_discriminant(MirTypeKind.I64) or disc == _sffi_enum_discriminant(MirTypeKind.U64):
                 # Mirror of box_runtime_value's I64/U64 arm: a wide value that
                 # did not fit the 61-bit tagged immediate is heap-boxed, so a
                 # bare `>> 3` would read back a shredded pointer. Narrower
@@ -1037,12 +1060,12 @@ impl MirLowering:
             val decoded = b.emit_cast(mir_operand_copy(value), result_type)
             self.builder = b
             return decoded
-        if disc == rt_enum_discriminant(MirTypeKind.Bool):
+        if disc == _sffi_enum_discriminant(MirTypeKind.Bool):
             val true_value = b.emit_const_int(11)
             val decoded = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_copy(true_value), result_type)
             self.builder = b
             return decoded
-        if disc == rt_enum_discriminant(MirTypeKind.F64):
+        if disc == _sffi_enum_discriminant(MirTypeKind.F64):
             # Unbox via rt_value_as_float (dual-aware: heap-boxed lossless form,
             # or legacy inline TAG_FLOAT). Mirrors box_runtime_value's F64 heap
             # box. The old inline `raw & ~7` reinterpret dropped the low 3
@@ -1062,7 +1085,7 @@ impl MirLowering:
             val decoded = b.emit_bitcast(mir_operand_copy(bits), result_type)
             self.builder = b
             return decoded
-        if disc == rt_enum_discriminant(MirTypeKind.F32):
+        if disc == _sffi_enum_discriminant(MirTypeKind.F32):
             # Unbox to f64 via rt_value_as_float, then narrow to f32.
             val unbox_fn = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_value_as_float"),
@@ -1080,14 +1103,14 @@ impl MirLowering:
             val decoded = b.emit_cast(mir_operand_copy(float64), result_type)
             self.builder = b
             return decoded
-        if disc == rt_enum_discriminant(MirTypeKind.Array(MirType.i64(), 0)) or disc == rt_enum_discriminant(MirTypeKind.Slice(MirType.i64())):
+        if disc == _sffi_enum_discriminant(MirTypeKind.Array(MirType.i64(), 0)) or disc == _sffi_enum_discriminant(MirTypeKind.Slice(MirType.i64())):
             val typed = b.new_temp(result_type)
             b.emit_copy(typed, raw)
             self.runtime_array_locals[typed.id] = true
             self.mark_runtime_value_local(typed.id)
             self.builder = b
             return typed
-        if disc == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
+        if disc == _sffi_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
             val typed = b.new_temp(result_type)
             b.emit_copy(typed, raw)
             self.runtime_dict_locals[typed.id] = true
@@ -1228,7 +1251,7 @@ impl MirLowering:
         else:
             false
         if has_dict_mir_type:
-            if rt_enum_discriminant(resolved_dict_mir_type.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
+            if _sffi_enum_discriminant(resolved_dict_mir_type.kind) == _sffi_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
                 match resolved_dict_mir_type.kind:
                     case MirTypeKind.Dict(_, value_type):
                         dict_result_type = value_type
@@ -1243,7 +1266,7 @@ impl MirLowering:
         # value type at the i64 default, so an f64 stored later would decode
         # via the integer `>>3` arm and leak the heap-box POINTER. Use the
         # store-observed type instead.
-        if rt_enum_discriminant(dict_result_type.kind) == rt_enum_discriminant(MirTypeKind.I64):
+        if _sffi_enum_discriminant(dict_result_type.kind) == _sffi_enum_discriminant(MirTypeKind.I64):
             if val noted_value_type = self.noted_runtime_elem_type(base_local):
                 dict_result_type = noted_value_type
         val get_op = MirOperand(kind: MirOperandKind.Const(
@@ -1794,9 +1817,9 @@ impl MirLowering:
         self.finally_stack = saved
 
     me lower_index_expr_from_hir(expr_value: HirExpr) -> LocalId:
-        val payload = rt_enum_payload(expr_value.kind)
-        val base: HirExpr = rt_tuple_get(payload, 0)
-        val index: HirExpr = rt_tuple_get(payload, 1)
+        val payload = _sffi_enum_payload(expr_value.kind)
+        val base: HirExpr = _sffi_tuple_get(payload, 0)
+        val index: HirExpr = _sffi_tuple_get(payload, 1)
         if base == nil or index == nil:
             self.error_fatal("empty HIR Index payload", Some(expr_value.span))
             return self.builder.emit_const_int(0)
@@ -1997,7 +2020,7 @@ impl MirLowering:
         # element type still wins. For a genuine `[i64]` this is a no-op (the
         # HIR element type is i64 too), which is why `[i64]` was the one case
         # that always worked and why this cannot regress it.
-        var result_type_is_erased_i64 = rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.I64)
+        var result_type_is_erased_i64 = _sffi_enum_discriminant(result_type.kind) == _sffi_enum_discriminant(MirTypeKind.I64)
         if (not result_type_from_base or result_type_is_erased_i64) and self.find_local_hir_type(base_local.id) != nil:
             val base_hir_type = self.find_local_hir_type(base_local.id) ?? HirType(kind: HirTypeKind.Error, span: base.span)
             match base_hir_type.kind:
@@ -2027,10 +2050,10 @@ impl MirLowering:
         # a later `a.push(0.1)` / `a[i] = 0.1` heap-boxes, so decoding
         # as i64 would shred the box pointer via `>>3`.
         if val noted_elem_type = self.noted_runtime_elem_type(base_local):
-            val array_disc = rt_enum_discriminant(MirTypeKind.Array(MirType.i64(), 0))
-            val slice_disc = rt_enum_discriminant(MirTypeKind.Slice(MirType.i64()))
-            val noted_disc = rt_enum_discriminant(noted_elem_type.kind)
-            val result_disc = rt_enum_discriminant(result_type.kind)
+            val array_disc = _sffi_enum_discriminant(MirTypeKind.Array(MirType.i64(), 0))
+            val slice_disc = _sffi_enum_discriminant(MirTypeKind.Slice(MirType.i64()))
+            val noted_disc = _sffi_enum_discriminant(noted_elem_type.kind)
+            val result_disc = _sffi_enum_discriminant(result_type.kind)
             val noted_is_array = noted_disc == array_disc or noted_disc == slice_disc
             val result_is_array = result_disc == array_disc or result_disc == slice_disc
             # The erased-i64 gate alone cannot rescue nested arrays in the
@@ -2041,7 +2064,7 @@ impl MirLowering:
             # default too — but never a result_type that is already an array,
             # whose element type came from the base and is the more precise of
             # the two (it feeds the next nesting level's own Index read).
-            if result_disc == rt_enum_discriminant(MirTypeKind.I64) or (noted_is_array and not result_is_array):
+            if result_disc == _sffi_enum_discriminant(MirTypeKind.I64) or (noted_is_array and not result_is_array):
                 result_type = noted_elem_type
         val runtime_array = self.local_is_runtime_array(base_local)
         # Bug (native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02,
@@ -2231,7 +2254,7 @@ impl MirLowering:
             val disc_result = enum_builder.emit_call(disc_func, [mir_operand_copy(operand_local)], MirType.i64())
             self.builder = enum_builder
             if val resolved_disc = disc_result:
-                if rt_enum_discriminant(mir_target.kind) == rt_enum_discriminant(MirTypeKind.I64):
+                if _sffi_enum_discriminant(mir_target.kind) == _sffi_enum_discriminant(MirTypeKind.I64):
                     return resolved_disc
                 var cast_builder = self.builder
                 val narrowed = cast_builder.emit_cast(mir_operand_copy(resolved_disc), mir_target)
@@ -2288,7 +2311,7 @@ impl MirLowering:
                 mir_lower_expr_trace_state = 0
             mir_lower_expr_trace_generation = trace_generation
         if mir_lower_garbage_debug_state == 1 and expr != nil:
-            val garbage_disc = rt_enum_discriminant(expr.kind)
+            val garbage_disc = _sffi_enum_discriminant(expr.kind)
             if garbage_disc < 0:
                 garbage_expr_here = true
                 mir_lower_garbage_expr_count = mir_lower_garbage_expr_count + 1
@@ -3158,42 +3181,42 @@ impl MirLowering:
             # Values are bound first and interpolated by NAME on purpose: a
             # nested string literal inside a `{...}` interpolation is a lexer
             # hazard in this language (a text literal brace-scans its own body).
-            val d_intlit = rt_enum_discriminant(HirExprKind.IntLit(0, nil))
-            val d_strlit = rt_enum_discriminant(HirExprKind.StringLit(ex_empty, nil))
-            val d_boollit = rt_enum_discriminant(HirExprKind.BoolLit(false))
-            val d_nillit = rt_enum_discriminant(HirExprKind.NilLit)
-            val d_unitlit = rt_enum_discriminant(HirExprKind.UnitLit)
-            val d_arraylit = rt_enum_discriminant(HirExprKind.ArrayLit([], nil))
-            val d_tuplelit = rt_enum_discriminant(HirExprKind.TupleLit([]))
-            val d_setlit = rt_enum_discriminant(HirExprKind.SetLit([], nil))
-            val d_index = rt_enum_discriminant(HirExprKind.Index(nil_expr, nil_expr))
-            val d_tupleindex = rt_enum_discriminant(HirExprKind.TupleIndex(nil_expr, 0))
-            val d_field = rt_enum_discriminant(HirExprKind.Field(nil_expr, ex_empty, nil))
-            val d_optchain = rt_enum_discriminant(HirExprKind.OptionalChain(nil_expr, ex_empty))
-            val d_nullcoalesce = rt_enum_discriminant(HirExprKind.NullCoalesce(nil_expr, nil_expr))
-            val d_existscheck = rt_enum_discriminant(HirExprKind.ExistsCheck(nil_expr))
-            val d_unwrap = rt_enum_discriminant(HirExprKind.Unwrap(nil_expr))
-            val d_binary = rt_enum_discriminant(HirExprKind.Binary(HirBinOp.NotEq, nil_expr, nil_expr))
-            val d_unary = rt_enum_discriminant(HirExprKind.Unary(HirUnaryOp.Not, nil_expr))
-            val d_call = rt_enum_discriminant(HirExprKind.Call(nil_expr, [], []))
-            val d_cast = rt_enum_discriminant(HirExprKind.Cast(nil_expr, ex_type))
-            val d_block = rt_enum_discriminant(HirExprKind.Block(ex_block))
-            val d_if = rt_enum_discriminant(HirExprKind.If(nil_expr, ex_block, nil))
-            val d_if_chain = rt_enum_discriminant(HirExprKind.IfChain([], nil))
-            val d_while = rt_enum_discriminant(HirExprKind.While(nil_expr, ex_block, nil))
-            val d_loop = rt_enum_discriminant(HirExprKind.Loop(ex_block, nil))
-            val d_matchcase = rt_enum_discriminant(HirExprKind.MatchCase(nil_expr, []))
-            val d_return = rt_enum_discriminant(HirExprKind.Return(nil))
-            val d_try = rt_enum_discriminant(HirExprKind.Try(nil_expr))
-            val d_await = rt_enum_discriminant(HirExprKind.Await(nil_expr))
-            val d_throw = rt_enum_discriminant(HirExprKind.Throw(nil_expr))
-            val d_yield = rt_enum_discriminant(HirExprKind.Yield(nil))
-            val d_range = rt_enum_discriminant(HirExprKind.Range(nil_expr, nil_expr, false, nil))
-            val d_var = rt_enum_discriminant(HirExprKind.Var(SymbolId(id: -1)))
-            val d_namedvar = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ex_empty))
-            val d_arrayrepeat = rt_enum_discriminant(HirExprKind.ArrayRepeat(nil_expr, nil_expr, nil))
-            val d_break = rt_enum_discriminant(HirExprKind.Break(ex_empty, nil))
-            val d_continue = rt_enum_discriminant(HirExprKind.Continue(nil))
+            val d_intlit = _sffi_enum_discriminant(HirExprKind.IntLit(0, nil))
+            val d_strlit = _sffi_enum_discriminant(HirExprKind.StringLit(ex_empty, nil))
+            val d_boollit = _sffi_enum_discriminant(HirExprKind.BoolLit(false))
+            val d_nillit = _sffi_enum_discriminant(HirExprKind.NilLit)
+            val d_unitlit = _sffi_enum_discriminant(HirExprKind.UnitLit)
+            val d_arraylit = _sffi_enum_discriminant(HirExprKind.ArrayLit([], nil))
+            val d_tuplelit = _sffi_enum_discriminant(HirExprKind.TupleLit([]))
+            val d_setlit = _sffi_enum_discriminant(HirExprKind.SetLit([], nil))
+            val d_index = _sffi_enum_discriminant(HirExprKind.Index(nil_expr, nil_expr))
+            val d_tupleindex = _sffi_enum_discriminant(HirExprKind.TupleIndex(nil_expr, 0))
+            val d_field = _sffi_enum_discriminant(HirExprKind.Field(nil_expr, ex_empty, nil))
+            val d_optchain = _sffi_enum_discriminant(HirExprKind.OptionalChain(nil_expr, ex_empty))
+            val d_nullcoalesce = _sffi_enum_discriminant(HirExprKind.NullCoalesce(nil_expr, nil_expr))
+            val d_existscheck = _sffi_enum_discriminant(HirExprKind.ExistsCheck(nil_expr))
+            val d_unwrap = _sffi_enum_discriminant(HirExprKind.Unwrap(nil_expr))
+            val d_binary = _sffi_enum_discriminant(HirExprKind.Binary(HirBinOp.NotEq, nil_expr, nil_expr))
+            val d_unary = _sffi_enum_discriminant(HirExprKind.Unary(HirUnaryOp.Not, nil_expr))
+            val d_call = _sffi_enum_discriminant(HirExprKind.Call(nil_expr, [], []))
+            val d_cast = _sffi_enum_discriminant(HirExprKind.Cast(nil_expr, ex_type))
+            val d_block = _sffi_enum_discriminant(HirExprKind.Block(ex_block))
+            val d_if = _sffi_enum_discriminant(HirExprKind.If(nil_expr, ex_block, nil))
+            val d_if_chain = _sffi_enum_discriminant(HirExprKind.IfChain([], nil))
+            val d_while = _sffi_enum_discriminant(HirExprKind.While(nil_expr, ex_block, nil))
+            val d_loop = _sffi_enum_discriminant(HirExprKind.Loop(ex_block, nil))
+            val d_matchcase = _sffi_enum_discriminant(HirExprKind.MatchCase(nil_expr, []))
+            val d_return = _sffi_enum_discriminant(HirExprKind.Return(nil))
+            val d_try = _sffi_enum_discriminant(HirExprKind.Try(nil_expr))
+            val d_await = _sffi_enum_discriminant(HirExprKind.Await(nil_expr))
+            val d_throw = _sffi_enum_discriminant(HirExprKind.Throw(nil_expr))
+            val d_yield = _sffi_enum_discriminant(HirExprKind.Yield(nil))
+            val d_range = _sffi_enum_discriminant(HirExprKind.Range(nil_expr, nil_expr, false, nil))
+            val d_var = _sffi_enum_discriminant(HirExprKind.Var(SymbolId(id: -1)))
+            val d_namedvar = _sffi_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ex_empty))
+            val d_arrayrepeat = _sffi_enum_discriminant(HirExprKind.ArrayRepeat(nil_expr, nil_expr, nil))
+            val d_break = _sffi_enum_discriminant(HirExprKind.Break(ex_empty, nil))
+            val d_continue = _sffi_enum_discriminant(HirExprKind.Continue(nil))
             eprint("[mir-lower-expr] disc-table IntLit={d_intlit} StringLit={d_strlit} BoolLit={d_boollit} NilLit={d_nillit} UnitLit={d_unitlit}\n")
             eprint("[mir-lower-expr] disc-table ArrayLit={d_arraylit} TupleLit={d_tuplelit} SetLit={d_setlit} Index={d_index} TupleIndex={d_tupleindex}\n")
             eprint("[mir-lower-expr] disc-table Field={d_field} OptionalChain={d_optchain} NullCoalesce={d_nullcoalesce} ExistsCheck={d_existscheck} Unwrap={d_unwrap}\n")
@@ -3201,18 +3224,18 @@ impl MirLowering:
             eprint("[mir-lower-expr] disc-table If={d_if} IfChain={d_if_chain} While={d_while} Loop={d_loop} MatchCase={d_matchcase} Return={d_return}\n")
             eprint("[mir-lower-expr] disc-table Try={d_try} Await={d_await} Throw={d_throw} Yield={d_yield} Range={d_range}\n")
             eprint("[mir-lower-expr] disc-table Var={d_var} NamedVar={d_namedvar} ArrayRepeat={d_arrayrepeat} Break={d_break} Continue={d_continue}\n")
-        val expr_disc = rt_enum_discriminant(expr_value.kind)
+        val expr_disc = _sffi_enum_discriminant(expr_value.kind)
         # Native recursive enum matching can misbind Binary's tuple payload on
         # the condition path. Decode the live payload explicitly, then route
         # through the same helper used by the ordinary Binary arm so operator
         # semantics remain single-sourced.
-        val binary_disc = rt_enum_discriminant(HirExprKind.Binary(HirBinOp.Add, nil_expr, nil_expr))
+        val binary_disc = _sffi_enum_discriminant(HirExprKind.Binary(HirBinOp.Add, nil_expr, nil_expr))
         if expr_disc == binary_disc:
-            val binary_payload = rt_enum_payload(expr_value.kind)
-            val binary_op: HirBinOp = rt_tuple_get(binary_payload, 0)
-            val binary_left: HirExpr = rt_tuple_get(binary_payload, 1)
-            val binary_right: HirExpr = rt_tuple_get(binary_payload, 2)
-            if binary_left == nil or binary_right == nil or rt_enum_discriminant(binary_op) < 0:
+            val binary_payload = _sffi_enum_payload(expr_value.kind)
+            val binary_op: HirBinOp = _sffi_tuple_get(binary_payload, 0)
+            val binary_left: HirExpr = _sffi_tuple_get(binary_payload, 1)
+            val binary_right: HirExpr = _sffi_tuple_get(binary_payload, 2)
+            if binary_left == nil or binary_right == nil or _sffi_enum_discriminant(binary_op) < 0:
                 self.error_fatal("empty HIR Binary payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
             return self.lower_binary_expr(expr_value, binary_op, binary_left, binary_right)
@@ -3223,12 +3246,12 @@ impl MirLowering:
         # the generated match is about to call rt_enum_check_discriminant.
         # Decode the payload tuple directly, as done for Cast and Index above,
         # and reject malformed mandatory fields before any aggregate deref.
-        val if_disc = rt_enum_discriminant(HirExprKind.If(nil_expr, HirBlock(stmts: [], has: false, value: nil, span: nil_span), nil))
+        val if_disc = _sffi_enum_discriminant(HirExprKind.If(nil_expr, HirBlock(stmts: [], has: false, value: nil, span: nil_span), nil))
         if expr_disc == if_disc:
-            val if_payload = rt_enum_payload(expr_value.kind)
-            val if_cond: HirExpr = rt_tuple_get(if_payload, 0)
-            val if_then: HirBlock = rt_tuple_get(if_payload, 1)
-            val if_else: HirBlock? = rt_tuple_get(if_payload, 2)
+            val if_payload = _sffi_enum_payload(expr_value.kind)
+            val if_cond: HirExpr = _sffi_tuple_get(if_payload, 0)
+            val if_then: HirBlock = _sffi_tuple_get(if_payload, 1)
+            val if_else: HirBlock? = _sffi_tuple_get(if_payload, 2)
             if if_cond == nil or if_then == nil:
                 self.error_fatal("empty HIR If payload", Some(expr_value.span))
                 var b_bad_if = self.builder
@@ -3240,11 +3263,11 @@ impl MirLowering:
         # IfChain is intentionally decoded before pattern dispatch.  Its tuple
         # payload contains an array of value aggregates, and staged native
         # multi-field enum matches have previously misbound such payloads.
-        val if_chain_disc = rt_enum_discriminant(HirExprKind.IfChain([], nil))
+        val if_chain_disc = _sffi_enum_discriminant(HirExprKind.IfChain([], nil))
         if expr_disc == if_chain_disc:
-            val if_chain_payload = rt_enum_payload(expr_value.kind)
-            val if_chain_arms: [HirIfArm] = rt_tuple_get(if_chain_payload, 0)
-            val if_chain_else: HirBlock? = rt_tuple_get(if_chain_payload, 1)
+            val if_chain_payload = _sffi_enum_payload(expr_value.kind)
+            val if_chain_arms: [HirIfArm] = _sffi_tuple_get(if_chain_payload, 0)
+            val if_chain_else: HirBlock? = _sffi_tuple_get(if_chain_payload, 1)
             if if_chain_arms == nil or if_chain_arms.len() == 0:
                 self.error_fatal("empty HIR IfChain payload", Some(expr_value.span))
                 var b_bad_if_chain = self.builder
@@ -3257,7 +3280,7 @@ impl MirLowering:
                 if_chain_index = if_chain_index + 1
             val expected_if_chain_type: HirType? = if expr_value.has_type_ and expr_value.type_ != nil: expr_value.type_ else: nil
             return self.lower_if_chain(if_chain_arms, if_chain_else, expected_if_chain_type)
-        val field_disc = rt_enum_discriminant(HirExprKind.Field(nil_expr, "", nil))
+        val field_disc = _sffi_enum_discriminant(HirExprKind.Field(nil_expr, "", nil))
         if expr_disc == field_disc:
             match expr_value.kind:
                 case HirExprKind.Field(base, field_name, resolved):
@@ -3408,7 +3431,7 @@ impl MirLowering:
                     return field_result
                 case _:
                     self.payload_decode_failed("HirExprKind.Field", expr_value.span)
-        val cast_disc = rt_enum_discriminant(HirExprKind.Cast(nil_expr, nil_expr.type_))
+        val cast_disc = _sffi_enum_discriminant(HirExprKind.Cast(nil_expr, nil_expr.type_))
         if expr_disc == cast_disc:
             # Stage-3 blocker #9: the `case HirExprKind.Cast(operand, target)`
             # match-arm binding decoded slot 1 (`target: HirType`) as nil, so
@@ -3425,14 +3448,14 @@ impl MirLowering:
             # (and used by hand at hir_lowering/expressions.spl:1777) -- it is a
             # decode CORRECTION, not a guard: a genuinely absent payload still
             # reports through error_fatal rather than being silently defaulted.
-            val cast_payload = rt_enum_payload(expr_value.kind)
-            val cast_operand: HirExpr = rt_tuple_get(cast_payload, 0)
-            val cast_target: HirType = rt_tuple_get(cast_payload, 1)
+            val cast_payload = _sffi_enum_payload(expr_value.kind)
+            val cast_operand: HirExpr = _sffi_tuple_get(cast_payload, 0)
+            val cast_target: HirType = _sffi_tuple_get(cast_payload, 1)
             if cast_operand == nil or cast_target == nil:
                 self.error_fatal("empty HIR Cast payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
             return self.lower_cast_expr(cast_operand, cast_target, expr.span)
-        val call_disc = rt_enum_discriminant(HirExprKind.Call(nil_expr, [], []))
+        val call_disc = _sffi_enum_discriminant(HirExprKind.Call(nil_expr, [], []))
         if expr_disc == call_disc:
             match expr_value.kind:
                 case HirExprKind.Call(callee, args, _):
@@ -3444,8 +3467,8 @@ impl MirLowering:
                     # interception in switch_operators_calls' lower_call, but
                     # placed here so Option support needs no edit to that file.
                     val callee_kind: HirExprKind = callee.kind
-                    val nv_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
-                    if rt_enum_discriminant(callee_kind) == nv_disc:
+                    val nv_disc = _sffi_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
+                    if _sffi_enum_discriminant(callee_kind) == nv_disc:
                         match callee_kind:
                             case HirExprKind.NamedVar(nv_symbol, nv_name):
                                 # A typed Result constructor is a semantic MIR
@@ -3465,7 +3488,7 @@ impl MirLowering:
                     return self.lower_call(callee, args)
                 case _:
                     self.payload_decode_failed("HirExprKind.Call", expr_value.span)
-        val block_disc = rt_enum_discriminant(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
+        val block_disc = _sffi_enum_discriminant(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
         if expr_disc == block_disc:
             match expr_value.kind:
                 case HirExprKind.Block(block):
@@ -3478,14 +3501,14 @@ impl MirLowering:
                     return block_temp
                 case _:
                     self.payload_decode_failed("HirExprKind.Block", expr_value.span)
-        val return_disc = rt_enum_discriminant(HirExprKind.Return(nil))
+        val return_disc = _sffi_enum_discriminant(HirExprKind.Return(nil))
         if expr_disc == return_disc:
             match expr_value.kind:
                 case HirExprKind.Return(value):
                     return self.lower_return_expr(value)
                 case _:
                     self.payload_decode_failed("HirExprKind.Return", expr_value.span)
-        val index_disc = rt_enum_discriminant(HirExprKind.Index(nil_expr, nil_expr))
+        val index_disc = _sffi_enum_discriminant(HirExprKind.Index(nil_expr, nil_expr))
         if expr_disc == index_disc:
             return self.lower_index_expr_from_hir(expr_value)
         # Var/NamedVar reads need the same disc-guarded pre-dispatch as
@@ -3498,7 +3521,7 @@ impl MirLowering:
         # 'i64'" on the dict probe). Confirmed by disc trace: a NamedVar base
         # reached `case Index` with rt_enum_discriminant(base.kind) equal to the
         # NamedVar exemplar disc while the NamedVar match arm never fired.
-        val var_pre_disc = rt_enum_discriminant(HirExprKind.Var(SymbolId(id: -1)))
+        val var_pre_disc = _sffi_enum_discriminant(HirExprKind.Var(SymbolId(id: -1)))
         if expr_disc == var_pre_disc:
             match expr_value.kind:
                 case HirExprKind.Var(pre_symbol):
@@ -3516,11 +3539,11 @@ impl MirLowering:
                             return pre_var_glob
                 case _:
                     self.payload_decode_failed("HirExprKind.Var", expr_value.span)
-        val namedvar_pre_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
+        val namedvar_pre_disc = _sffi_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
         if expr_disc == namedvar_pre_disc:
-            val named_var_payload = rt_enum_payload(expr_value.kind)
-            val named_var_symbol: SymbolId = rt_tuple_get(named_var_payload, 0)
-            val named_var_name: text = rt_tuple_get(named_var_payload, 1)
+            val named_var_payload = _sffi_enum_payload(expr_value.kind)
+            val named_var_symbol: SymbolId = _sffi_tuple_get(named_var_payload, 0)
+            val named_var_name: text = _sffi_tuple_get(named_var_payload, 1)
             if named_var_symbol == nil or named_var_name == nil:
                 self.error_fatal("empty HIR NamedVar payload", Some(expr_value.span))
                 var b_bad_named_var = self.builder
@@ -3768,9 +3791,9 @@ impl MirLowering:
                 self.lower_binary_expr(expr_value, op, left, right)
 
             case Unary(op, operand):
-                val op_disc = rt_enum_discriminant(op)
-                val is_ref = op_disc == rt_enum_discriminant(HirUnaryOp.Ref)
-                val is_ref_mut = op_disc == rt_enum_discriminant(HirUnaryOp.RefMut)
+                val op_disc = _sffi_enum_discriminant(op)
+                val is_ref = op_disc == _sffi_enum_discriminant(HirUnaryOp.Ref)
+                val is_ref_mut = op_disc == _sffi_enum_discriminant(HirUnaryOp.RefMut)
                 val global_addr = if is_ref or is_ref_mut:
                     self.try_lower_global_addr(operand, is_ref_mut)
                 else:
@@ -3890,7 +3913,7 @@ impl MirLowering:
                     # so a correctly-annotated expression is never clobbered,
                     # and confined to the `Str` arm so no other payload type
                     # changes.
-                    val nc_result_is_erased_i64 = rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.I64)
+                    val nc_result_is_erased_i64 = _sffi_enum_discriminant(result_type.kind) == _sffi_enum_discriminant(MirTypeKind.I64)
                     match nc_inner_type.kind:
                         case HirTypeKind.Str:
                             if not self.mir_type_is_str(result_type):
@@ -4616,7 +4639,7 @@ impl MirLowering:
                 # SIGSEGV inside lower_expr_impl, which is strictly LESS
                 # diagnosable than the SIGILL it replaced. Gate every span read
                 # on the discriminant probe, which never dereferences.
-                val unsupported_disc = rt_enum_discriminant(expr_value.kind)
+                val unsupported_disc = _sffi_enum_discriminant(expr_value.kind)
                 if unsupported_disc >= 0:
                     self.error("unsupported MIR expression: {expr_value.kind}", Some(expr_value.span))
                 else:
