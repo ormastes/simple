@@ -152,6 +152,25 @@ int main(int argc, char **argv)
         fprintf(stderr, "AUTHHELLO.ELF requires manifest, admission, proof, and trust-root sidecars\n");
         return 1;
     }
+    const char *simplebox_path = getenv("SIMPLEOS_SIMPLEBOX_BINARY");
+    const char *simplebox_scr1_path = getenv("SIMPLEOS_SIMPLEBOX_SCR1");
+    const char *simplebox_trust_path = getenv("SIMPLEOS_SIMPLEBOX_TRUST");
+    bool simplebox_requested =
+        (simplebox_path && simplebox_path[0]) ||
+        (simplebox_scr1_path && simplebox_scr1_path[0]) ||
+        (simplebox_trust_path && simplebox_trust_path[0]);
+    bool simplebox_complete =
+        simplebox_path && simplebox_path[0] &&
+        simplebox_scr1_path && simplebox_scr1_path[0] &&
+        simplebox_trust_path && simplebox_trust_path[0];
+    if (simplebox_requested && !simplebox_complete)
+        die("signed Simplebox media requires payload, SCR1, and trust inputs");
+    struct bytes simplebox_payload = read_bounded_public_file(simplebox_path, 67108864U);
+    struct bytes simplebox_scr1 = read_bounded_public_file(simplebox_scr1_path, 262144U);
+    struct bytes simplebox_trust = read_bounded_public_file(simplebox_trust_path, 16384U);
+    if (simplebox_complete &&
+        (!simplebox_payload.len || !simplebox_scr1.len || !simplebox_trust.len))
+        die("signed Simplebox inputs must be non-empty bounded regular files");
     struct bytes servers_payload = read_file(getenv("SIMPLEOS_SERVERS_BINARY"));
     struct bytes servers_manifest = read_file(getenv("SIMPLEOS_SERVERS_MANIFEST"));
     struct bytes servers_admission = read_file(getenv("SIMPLEOS_SERVERS_ADMISSION"));
@@ -238,6 +257,9 @@ int main(int argc, char **argv)
     }
     int efi_cluster = alloc_directory();
     int boot_cluster = alloc_directory();
+    int canonical_boot_cluster = simplebox_complete ? alloc_directory() : 0;
+    int canonical_boot_bin_cluster = simplebox_complete ? alloc_directory() : 0;
+    int canonical_boot_catalog_cluster = simplebox_complete ? alloc_directory() : 0;
     int sys_cluster = alloc_directory();
     int fonts_cluster = alloc_directory();
     int apps_cluster = alloc_directory();
@@ -433,6 +455,20 @@ int main(int argc, char **argv)
     int authhello_admission_cluster = authhello_admission.len ? alloc_clusters(authhello_admission.data, authhello_admission.len) : 0;
     int authhello_proof_cluster = authhello_proof.len ? alloc_clusters(authhello_proof.data, authhello_proof.len) : 0;
     int authhello_trust_root_cluster = authhello_trust_root.len ? alloc_clusters(authhello_trust_root.data, authhello_trust_root.len) : 0;
+    /* Each signed-media member owns an independent FAT chain.  Sharing a
+     * first cluster would make replacement or corruption of one member alias
+     * the other two and invalidate the all-or-nothing admission boundary. */
+    int simplebox_payload_cluster = simplebox_complete ? alloc_clusters(simplebox_payload.data, simplebox_payload.len) : 0;
+    int simplebox_scr1_cluster = simplebox_complete ? alloc_clusters(simplebox_scr1.data, simplebox_scr1.len) : 0;
+    int simplebox_trust_cluster = simplebox_complete ? alloc_clusters(simplebox_trust.data, simplebox_trust.len) : 0;
+    if (simplebox_complete) {
+        require_cluster_bytes(simplebox_payload_cluster, simplebox_payload,
+                              "simplebox payload staging verification failed");
+        require_cluster_bytes(simplebox_scr1_cluster, simplebox_scr1,
+                              "simplebox SCR1 staging verification failed");
+        require_cluster_bytes(simplebox_trust_cluster, simplebox_trust,
+                              "simplebox trust staging verification failed");
+    }
     int servers_cluster = servers_payload.len ? alloc_clusters(servers_payload.data, servers_payload.len) : 0;
     int servers_manifest_cluster = servers_manifest.len ? alloc_clusters(servers_manifest.data, servers_manifest.len) : 0;
     int servers_admission_cluster = servers_admission.len ? alloc_clusters(servers_admission.data, servers_admission.len) : 0;
@@ -466,6 +502,9 @@ int main(int argc, char **argv)
      * write_directory() call at the end — TMP was the sole gap. */
     unsigned char root[DIRECTORY_BYTES] = {0}, efi[DIRECTORY_BYTES] = {0};
     unsigned char boot[DIRECTORY_BYTES] = {0}, sys[DIRECTORY_BYTES] = {0};
+    unsigned char canonical_boot[DIRECTORY_BYTES] = {0};
+    unsigned char canonical_boot_bin[DIRECTORY_BYTES] = {0};
+    unsigned char canonical_boot_catalog[DIRECTORY_BYTES] = {0};
     unsigned char fonts[DIRECTORY_BYTES] = {0}, apps[DIRECTORY_BYTES] = {0};
     unsigned char perf[DIRECTORY_BYTES] = {0}, usr[DIRECTORY_BYTES] = {0};
     unsigned char usr_bin[DIRECTORY_BYTES] = {0}, usr_lib[DIRECTORY_BYTES] = {0};
@@ -476,6 +515,7 @@ int main(int argc, char **argv)
     int apps_n = 0, perf_n = 0, usr_n = 0, usr_bin_n = 0, usr_lib_n = 0;
     int bin_n = 0, sysrt_n = 0, tmp_n = 0;
     int work_n = 0;
+    int canonical_boot_n = 0, canonical_boot_bin_n = 0, canonical_boot_catalog_n = 0;
     put_dir_entry(root, &root_n, "SIMPLEOS   ", 0, 0, 0x08);
     put_dir_entry(root, &root_n, "EFI        ", efi_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "SYS        ", sys_cluster, 0, 0x10);
@@ -484,6 +524,9 @@ int main(int argc, char **argv)
     put_dir_entry(root, &root_n, "SYSRT      ", sysrt_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "TMP        ", tmp_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "WORK       ", work_cluster, 0, 0x10);
+    if (simplebox_complete)
+        put_named_dir_entry(root, &root_n, "BOOT       ", "boot",
+                            canonical_boot_cluster, 0, 0x10);
     if (theme_cluster)
         put_dir_entry(root, &root_n, "THEME   CSS", theme_cluster, theme_payload.len, 0x20);
     /* Lane BA: root-level staging of the cross-built interpreter so the arm64
@@ -526,6 +569,26 @@ int main(int argc, char **argv)
     }
     put_dot_entries(efi, &efi_n, efi_cluster, 0);
     put_dot_entries(boot, &boot_n, boot_cluster, efi_cluster);
+    if (simplebox_complete) {
+        put_dot_entries(canonical_boot, &canonical_boot_n, canonical_boot_cluster, 0);
+        put_dot_entries(canonical_boot_bin, &canonical_boot_bin_n,
+                        canonical_boot_bin_cluster, canonical_boot_cluster);
+        put_dot_entries(canonical_boot_catalog, &canonical_boot_catalog_n,
+                        canonical_boot_catalog_cluster, canonical_boot_cluster);
+        put_named_dir_entry(canonical_boot, &canonical_boot_n, "BIN        ", "bin",
+                            canonical_boot_bin_cluster, 0, 0x10);
+        put_named_dir_entry(canonical_boot, &canonical_boot_n, "CATALOG    ", "catalog",
+                            canonical_boot_catalog_cluster, 0, 0x10);
+        put_named_dir_entry(canonical_boot_bin, &canonical_boot_bin_n,
+                            "SIMPLEBOX  ", "simplebox", simplebox_payload_cluster,
+                            simplebox_payload.len, 0x20);
+        put_named_dir_entry(canonical_boot_catalog, &canonical_boot_catalog_n,
+                            "SIMPLESCR1 ", "simplebox.scr1", simplebox_scr1_cluster,
+                            simplebox_scr1.len, 0x20);
+        put_named_dir_entry(canonical_boot_catalog, &canonical_boot_catalog_n,
+                            "SIMPLETRUST", "simplebox.trust", simplebox_trust_cluster,
+                            simplebox_trust.len, 0x20);
+    }
     put_dot_entries(sys, &sys_n, sys_cluster, 0);
     put_dot_entries(fonts, &fonts_n, fonts_cluster, sys_cluster);
     put_dot_entries(apps, &apps_n, apps_cluster, sys_cluster);
@@ -662,6 +725,12 @@ int main(int argc, char **argv)
     write_directory(ROOT_CLUSTER, root, root_n);
     write_directory(efi_cluster, efi, efi_n);
     write_directory(boot_cluster, boot, boot_n);
+    if (simplebox_complete) {
+        write_directory(canonical_boot_cluster, canonical_boot, canonical_boot_n);
+        write_directory(canonical_boot_bin_cluster, canonical_boot_bin, canonical_boot_bin_n);
+        write_directory(canonical_boot_catalog_cluster, canonical_boot_catalog,
+                        canonical_boot_catalog_n);
+    }
     write_directory(sys_cluster, sys, sys_n);
     write_directory(fonts_cluster, fonts, fonts_n);
     write_directory(apps_cluster, apps, apps_n);

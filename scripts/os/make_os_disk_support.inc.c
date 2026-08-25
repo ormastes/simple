@@ -261,7 +261,8 @@ static struct bytes read_file(const char *path)
  * bounded.  The generic image inputs predate this contract and may be large;
  * server credentials must never be allocated from an attacker-controlled
  * length before their limits are checked. */
-static struct bytes read_bounded_regular_file(const char *path, size_t max_len)
+static struct bytes read_bounded_regular_file_mode(const char *path, size_t max_len,
+                                                   bool require_private_mode)
 {
     struct bytes out = {0};
 #ifdef _WIN32
@@ -270,6 +271,7 @@ static struct bytes read_bounded_regular_file(const char *path, size_t max_len)
      * the same descriptor contract as O_NOFOLLOW+fstat below. */
     (void)path;
     (void)max_len;
+    (void)require_private_mode;
     return out;
 #else
     struct stat metadata;
@@ -278,7 +280,7 @@ static struct bytes read_bounded_regular_file(const char *path, size_t max_len)
     int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (descriptor < 0 || fstat(descriptor, &metadata) != 0 ||
         !S_ISREG(metadata.st_mode) || metadata.st_size <= 0 ||
-        (metadata.st_mode & (S_IRWXG | S_IRWXO)) != 0 ||
+        (require_private_mode && (metadata.st_mode & (S_IRWXG | S_IRWXO)) != 0) ||
         (uintmax_t)metadata.st_size > (uintmax_t)max_len) {
         if (descriptor >= 0)
             close(descriptor);
@@ -306,6 +308,16 @@ static struct bytes read_bounded_regular_file(const char *path, size_t max_len)
     close(descriptor);
     return out;
 #endif
+}
+
+static struct bytes read_bounded_regular_file(const char *path, size_t max_len)
+{
+    return read_bounded_regular_file_mode(path, max_len, true);
+}
+
+static struct bytes read_bounded_public_file(const char *path, size_t max_len)
+{
+    return read_bounded_regular_file_mode(path, max_len, false);
 }
 
 static void require_cluster_bytes(int first_cluster, const struct bytes expected,

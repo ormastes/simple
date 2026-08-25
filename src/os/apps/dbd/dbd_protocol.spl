@@ -542,7 +542,12 @@ fn _dbd_decode_j1_journal_line(line: text) -> [text]:
     val fields = line.split(" ")
     if fields.len() < 4 or fields[0] != "J1" or fields[1].len() != 64:
         return rejected
-    var body_parts: [text] = []
+    # The integrity body is already present verbatim after the fixed ASCII
+    # ``J1 `` prefix and 64-byte hex digest.  Hash that exact suffix once
+    # instead of allocating one prefixed copy per argument and joining all of
+    # them again on journal replay.  Keeping the leading space is required:
+    # it is part of the body signed by dbd_encode_journal_line().
+    val body = line.substring(67, line.len())
     var args: [text] = []
     var i: u64 = 2
     while i < fields.len():
@@ -555,10 +560,8 @@ fn _dbd_decode_j1_journal_line(line: text) -> [text]:
         # base64 must never be normalized into a different durable command.
         if base64_encode(decoded) != encoded:
             return rejected
-        body_parts.push(" " + field)
         args.push(decoded)
         i = i + 1
-    val body = body_parts.join("")
     if sha256_text(body) != fields[1] or not dbd_journal_args_valid(args):
         return rejected
     args

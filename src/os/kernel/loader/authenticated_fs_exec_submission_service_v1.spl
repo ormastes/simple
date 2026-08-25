@@ -29,6 +29,10 @@ use os.kernel.loader.installed_artifact_manifest_execution_policy_v1.{
 use os.kernel.loader.installed_artifact_catalog_v1.{
     installed_artifact_catalog_lookup_target_v1
 }
+use os.kernel.loader.executable_online_reattestation_owner_v1.{
+    EXECUTABLE_ONLINE_REATTESTATION_LIMIT_V1,
+    executable_online_reattest_open_binding_v1
+}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerExecutionEvidenceTokenV1,
@@ -75,6 +79,11 @@ pub(package) struct AuthenticatedFsExecUserReservationV1:
     slot_index: i64
     generation: u64
     submission: AuthenticatedFsExecSubmissionV1
+
+pub(package) struct AuthenticatedFsExecOnlineBatchResultV1:
+    ok: bool
+    armed_count: i64
+    reason: text
 
 pub(package) class AuthenticatedFsExecUserServiceV1:
     """Bounded loader-owned one-shot ingress for unprivileged path+argv requests.
@@ -131,12 +140,10 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
             not spawn_recipe_launch_contract_valid(
                 recipe, canonical_path, [canonical_path], []):
             return -13
-        for slot in self.slots:
-            if slot.state != AuthenticatedFsExecUserSlotStateV1.Retired and
-                slot.caller == caller and
-                slot.canonical_path == canonical_path and
-                slot.recipe == recipe:
-                return -17
+        # Multiple slots for one tuple are intentional: xargs-style batches
+        # need one distinct open-bound authority per execution. reserve()
+        # consumes the first Armed generation, and the registry independently
+        # enforces that every retained token is one-shot.
         val generation = self.next_generation
         self.next_generation = self.next_generation + 1u64
         self.slots.push(AuthenticatedFsExecUserSlotV1(
@@ -216,6 +223,75 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
             # Admission owns the still-open execute binding through the token.
             # A failed bounded-slot commit must retire that authority rather
             # than leak it or leave a second caller able to consume it.
+            if executable_loader_revoke(
+                table, authorities, prepared.admission.authority_token).is_err():
+                return -5
+        armed
+
+    me arm_installed_artifact_online_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        caller: i64,
+        canonical_path: text,
+        recipe: i64
+    ) -> i64:
+        """Open, re-attest, admit, and retain one fresh one-shot authority.
+
+        File-handle coordinates are learned only from this live open. The
+        loader-private signer binds those exact coordinates, after which the
+        ordinary admission pipeline independently checks them and owns close.
+        """
+        if caller < 0 or not executable_authority_owner_valid(authorities):
+            return -13
+        val target = installed_artifact_active_target_v1()
+        if not target.?: return -8
+        val record = installed_artifact_catalog_lookup_target_v1(
+            canonical_path, target.unwrap())
+        if not record.?: return -13
+        val installed = record.unwrap()
+        val opened = table.open_for_execute(canonical_path, ExecuteTrust.Trusted)
+        if opened.is_err(): return -13
+        val binding = opened.unwrap()
+        val attested = executable_online_reattest_open_binding_v1(
+            binding, installed.manifest, installed.content_sha256)
+        if attested.is_err():
+            if table.close(binding.file_handle).is_err(): return -5
+            return -13
+        val signed = attested.unwrap()
+        if installed.content_sha256 != signed.admission.image_hash or
+            installed.expected_trust_root_sha256 != signed.admission.trust_root_hash or
+            installed.signer_identity != signed.proof.signer_key_id or
+            installed.target.os != signed.admission.target.os or
+            installed.target.arch != signed.admission.target.arch or
+            installed.target.abi != signed.admission.target.abi:
+            if table.close(binding.file_handle).is_err(): return -5
+            return -13
+        val inputs = ExecutableLoaderVerificationInputsV1(
+            manifest: installed.manifest,
+            manifest_hash: signed.admission.manifest_hash,
+            image_hash: installed.content_sha256,
+            trust_root_hash: installed.expected_trust_root_sha256,
+            target: installed.target,
+            format: installed.manifest.artifact_kind,
+            role: "installed-main-image",
+            verified_load_ranges: [],
+            manifest_verified: true, signature_verified: true,
+            trust_root_verified: true, target_verified: true,
+            format_verified: true, ranges_verified: true,
+            image_digest_verified: true)
+        val admitted = executable_loader_admit_installed_artifact_open_binding_v1(
+            table, authorities, binding, inputs, signed.admission, signed.proof)
+        if admitted.is_err(): return -13
+        val prepared = admitted.unwrap()
+        val submission = AuthenticatedFsExecSubmissionV1(
+            authorities: authorities,
+            token: prepared.admission.authority_token,
+            consumer: prepared.consumer,
+            entry_point: prepared.admission.entry_point,
+            caller: caller,
+            recipe: recipe)
+        val armed = self.arm(caller, canonical_path, recipe, submission)
+        if armed < 0:
             if executable_loader_revoke(
                 table, authorities, prepared.admission.authority_token).is_err():
                 return -5
@@ -434,6 +510,61 @@ pub(package) fn authenticated_fs_exec_user_pre_admit_and_arm_v1(
     if not _authenticated_fs_exec_user_unlock_v1():
         return -5
     armed
+
+pub(package) fn authenticated_fs_exec_user_pre_admit_online_batch_v1(
+    authorities: ExecutableAuthorityRegistryV1,
+    caller: i64,
+    canonical_path: text,
+    recipe: i64,
+    count: i64
+) -> AuthenticatedFsExecOnlineBatchResultV1:
+    """Privileged runtime producer for N distinct per-open admissions.
+
+    This is intentionally not a user syscall. A boot/loader owner chooses the
+    exact caller/path/recipe tuple and count. Each successful iteration retains
+    a different live FileHandle and a different one-shot loader token. If a
+    later iteration fails, earlier grants remain valid and the exact partial
+    count is returned; no grant is fabricated or silently reported as armed.
+    """
+    if count <= 0 or count > EXECUTABLE_ONLINE_REATTESTATION_LIMIT_V1:
+        return AuthenticatedFsExecOnlineBatchResultV1(
+            ok: false, armed_count: 0, reason: "count")
+    if not _authenticated_fs_exec_user_lock_v1():
+        return AuthenticatedFsExecOnlineBatchResultV1(
+            ok: false, armed_count: 0, reason: "serialization")
+    if not g_authenticated_fs_exec_user_service_v1.? or
+        not g_authenticated_fs_exec_user_vfs_owner_v1.?:
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return AuthenticatedFsExecOnlineBatchResultV1(
+            ok: false, armed_count: 0, reason: "service-unavailable")
+    val lease_opt = vfs_state_mount_table_lease_begin_v1(
+        g_authenticated_fs_exec_user_vfs_owner_v1.unwrap())
+    if not lease_opt.?:
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return AuthenticatedFsExecOnlineBatchResultV1(
+            ok: false, armed_count: 0, reason: "vfs-busy")
+    var lease = lease_opt.unwrap()
+    var service = g_authenticated_fs_exec_user_service_v1.unwrap()
+    var armed_count: i64 = 0
+    var reason = ""
+    while armed_count < count and reason == "":
+        val armed = service.arm_installed_artifact_online_v1(
+            lease.table, authorities, caller, canonical_path, recipe)
+        if armed < 0:
+            reason = "admission-" + armed.to_text()
+        else:
+            armed_count = armed_count + 1
+    g_authenticated_fs_exec_user_service_v1 = Some(service)
+    if not vfs_state_mount_table_lease_restore_v1(lease):
+        g_authenticated_fs_exec_user_quarantined_v1 = true
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return AuthenticatedFsExecOnlineBatchResultV1(
+            ok: false, armed_count: armed_count, reason: "vfs-restore")
+    if not _authenticated_fs_exec_user_unlock_v1():
+        return AuthenticatedFsExecOnlineBatchResultV1(
+            ok: false, armed_count: armed_count, reason: "serialization")
+    AuthenticatedFsExecOnlineBatchResultV1(
+        ok: armed_count == count, armed_count: armed_count, reason: reason)
 
 pub fn authenticated_fs_exec_user_submit_syscall_v1(
     scheduler: Scheduler,

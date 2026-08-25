@@ -54,7 +54,9 @@ val DB_CERTIFICATE_PATH: text = SIMPLEOS_SERVER_DB_CERTIFICATE_V1
 val DB_PRIVATE_KEY_PATH: text = SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1
 val MAX_DB_CREDENTIAL_BYTES: u64 = 128u64
 val MAX_WIRE_RESPONSE: u64 = 65536
-val MAX_WEBSOCKET_READS: i32 = 200
+val MAX_WEBSOCKET_NO_PROGRESS_POLLS: i32 = 200
+val MAX_WEBSOCKET_INPUT_READS: u64 = 4096u64
+val MAX_WEBSOCKET_INPUT_BYTES: u64 = 16777216u64
 
 fn debug_line(message: text):
     val bytes = text_to_bytes_pure(message + "\n")
@@ -241,13 +243,17 @@ class WebSocketTransportOwner:
     client: Socket
     protocol: Rfc6455ServerConnectionOwner
     consecutive_no_progress: i32
+    input_reads: u64
+    input_bytes: u64
 
     static fn create() -> WebSocketTransportOwner:
         WebSocketTransportOwner(
             active: false,
             client: Socket(fd: -1),
             protocol: Rfc6455ServerConnectionOwner.create(),
-            consecutive_no_progress: 0
+            consecutive_no_progress: 0,
+            input_reads: 0u64,
+            input_bytes: 0u64
         )
 
     fn can_adopt() -> bool: not self.active
@@ -258,6 +264,8 @@ class WebSocketTransportOwner:
         self.active = false
         self.client = Socket(fd: -1)
         self.consecutive_no_progress = 0
+        self.input_reads = 0u64
+        self.input_bytes = 0u64
 
     me _policy_close():
         if not self.active:
@@ -274,6 +282,11 @@ class WebSocketTransportOwner:
         self.client = client
         self.protocol = Rfc6455ServerConnectionOwner.create()
         self.consecutive_no_progress = 0
+        # The HTTP receive that completed the Upgrade may already contain
+        # frame bytes. Charge that transferred tail to the same lifetime
+        # budget; ownership transfer must not create an unmetered first read.
+        self.input_reads = if tail.len() > 0u64: 1u64 else: 0u64
+        self.input_bytes = tail.len()
         val events = self.protocol.append_tail(tail)
         if not send_websocket_events(self.client, events):
             self._release()
@@ -295,7 +308,7 @@ class WebSocketTransportOwner:
                 # dropping an otherwise healthy WebSocket on its first idle
                 # service-loop turn.
                 self.consecutive_no_progress = self.consecutive_no_progress + 1
-                if self.consecutive_no_progress >= MAX_WEBSOCKET_READS:
+                if self.consecutive_no_progress >= MAX_WEBSOCKET_NO_PROGRESS_POLLS:
                     self._policy_close()
                 false
             Ok(input):
@@ -306,6 +319,20 @@ class WebSocketTransportOwner:
                     # Close on a connection that cannot carry it.
                     self._release()
                     return false
+                # An active peer can otherwise keep this single-owner service
+                # alive forever with a stream of tiny Ping or data frames,
+                # continually resetting both the idle loop and the
+                # no-progress counter. Bound successful receive work as well
+                # as retained frame/message memory. Check by subtraction so a
+                # future larger policy cannot turn the byte guard into an
+                # overflowing addition.
+                if (self.input_reads >= MAX_WEBSOCKET_INPUT_READS or
+                    self.input_bytes > MAX_WEBSOCKET_INPUT_BYTES or
+                    input.len() > MAX_WEBSOCKET_INPUT_BYTES - self.input_bytes):
+                    self._policy_close()
+                    return true
+                self.input_reads = self.input_reads + 1u64
+                self.input_bytes = self.input_bytes + input.len()
                 self.consecutive_no_progress = 0
                 val events = self.protocol.append_tail(input)
                 if not send_websocket_events(self.client, events):
