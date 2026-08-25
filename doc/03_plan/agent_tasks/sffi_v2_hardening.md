@@ -394,3 +394,9 @@ passing placeholder.
     through canonical checked entropy. All six browser-client call sites must
     propagate failure; never emit a zero/short mask or retry silently. Preserve
     one provider call and the existing counter-mix schedule on success.
+75. Keep all three OAuth memory-model variants Result-bearing from canonical
+    entropy through random integers, random strings, CSRF state, PKCE verifier,
+    and mock-token creation. Never restore `?? "0"`; retain one provider draw
+    per character with immediate failure and no retries. The next duplicate is
+    security correlation-ID generation, which must not degrade to timestamp
+    only when entropy fails.

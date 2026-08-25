@@ -533,3 +533,22 @@ The focused static ratchet passed. Production execution and signed admission
 remain blocked as recorded above. One declaration row is removed: 11,981 rows
 / 3,156 symbols, 1,189 tagged, 637 `unsafe_contract_declared`, 10,526
 untouched, and zero exact-artifact verified-and-signed.
+
+## OAuth entropy-result checkpoint
+
+The no-GC sync, no-GC async, and GC async OAuth variants no longer redeclare
+or call `rt_random_hex`, and they no longer substitute `"0"` when entropy is
+unavailable. `random_int`, random-string generation, CSRF state, timestamped
+state, PKCE verifier, and mock-token creation now return and propagate typed
+`Result` failures. The OAuth entropy spec uses the canonical checked facade
+rather than bypassing it with another raw declaration.
+
+Success retains the previous one CSPRNG draw per generated character and stops
+immediately on failure. Each draw now includes the canonical bounded
+16-character validation scan; there is no retry, payload copy, lookup, generic
+dispatch, or added random draw. The focused static ratchet passed. Production
+execution and exact-artifact admission remain unavailable.
+
+Three declaration rows are removed: 11,978 rows / 3,156 symbols, 1,189 tagged,
+637 `unsafe_contract_declared`, 10,523 untouched, and zero exact-artifact
+verified-and-signed.

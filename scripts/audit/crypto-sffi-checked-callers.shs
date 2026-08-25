@@ -20,6 +20,12 @@ session_token="$root/src/app/ui.web/session_token.spl"
 credential_store="$root/src/lib/nogc_sync_mut/terminal/credential/store.spl"
 ws_crypto="$root/src/lib/gc_async_mut/gpu/browser_engine/net/ws_crypto.spl"
 ws_client="$root/src/lib/gc_async_mut/gpu/browser_engine/net/websocket_client.spl"
+oauth_sync="$root/src/lib/nogc_sync_mut/oauth/utilities.spl"
+oauth_nogc_async="$root/src/lib/nogc_async_mut/oauth/utilities.spl"
+oauth_gc_async="$root/src/lib/gc_async_mut/oauth/utilities.spl"
+oauth_authorize_sync="$root/src/lib/nogc_sync_mut/oauth/authorize.spl"
+oauth_authorize_nogc_async="$root/src/lib/nogc_async_mut/oauth/authorize.spl"
+oauth_authorize_gc_async="$root/src/lib/gc_async_mut/oauth/authorize.spl"
 tls_verify_dir="$root/src/os/tls13/_CertVerify"
 failed=0
 
@@ -143,6 +149,24 @@ if [ "$(grep -c 'generate_mask_key()?' "$ws_client")" -ne 5 ] ||
     echo "WebSocket client must propagate every key/mask entropy failure" >&2
     failed=1
 fi
+for oauth in "$oauth_sync" "$oauth_nogc_async" "$oauth_gc_async"; do
+    if grep -n -E 'extern fn rt_random_hex|rt_random_hex\(|\?\?[[:space:]]*"0"' "$oauth"; then
+        echo "OAuth entropy must use the canonical owner without a zero fallback: $oauth" >&2
+        failed=1
+    fi
+    if ! grep -q 'fn random_int.*Result<i64, text>' "$oauth" ||
+       ! grep -q 'fn generate_random_string.*Result<text, text>' "$oauth"; then
+        echo "OAuth entropy failure must remain typed: $oauth" >&2
+        failed=1
+    fi
+done
+for oauth_authorize in "$oauth_authorize_sync" "$oauth_authorize_nogc_async" "$oauth_authorize_gc_async"; do
+    if ! grep -q 'fn generate_state() -> Result<text, text>' "$oauth_authorize" ||
+       ! grep -q 'fn generate_code_verifier() -> Result<text, text>' "$oauth_authorize"; then
+        echo "OAuth CSRF/PKCE generators must propagate entropy failure: $oauth_authorize" >&2
+        failed=1
+    fi
+done
 if ! grep -R -q 'rsa_pss_sha256_verify_checked' "$tls_verify_dir" ||
    ! grep -R -q 'rsa_pss_sha384_verify_checked' "$tls_verify_dir" ||
    ! grep -R -q 'rsa_pss_sha512_verify_checked' "$tls_verify_dir"; then
