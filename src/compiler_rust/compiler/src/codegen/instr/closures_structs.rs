@@ -1086,9 +1086,54 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // Cross-module method: resolve via use_map → import_map
         // First try exact match, then check for "TypeName.method" qualified
         // entries in use_map (prefers imported types over alphabetical import_map)
-        let mut resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
+        //
+        // SECOND BIND SITE (fixed 2026-08-25). An UNQUALIFIED Option/Result-family
+        // name must not be bound by NAME alone anywhere in this cross-module
+        // ladder. `T?` lowers to `HirType::Pointer`, which has no registered type
+        // name, so `mir/lower` emits `MethodCallStatic { func_name: "unwrap" }`
+        // with the receiver type erased. `imports.rs` inserts BARE raw method
+        // names into `use_map`, so in the self-host closure `use_map["unwrap"]`
+        // is `lib__nogc_async_mut__async__poll__Poll_dot_unwrap` — the only
+        // library that defines an `unwrap` method. `Poll.unwrap` tests
+        // Poll::Ready/Poll::Pending, matches neither `Some` tag, falls through
+        // and returns 0; 0 is `< 4096`, so `rt_heap_ref_wellformed` reports the
+        // payload malformed while the field still holds a real enum —
+        // E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED, and the Stage 2/3 self-host
+        // lane dies rc=139.
+        //
+        // The family exclusion previously guarded ONLY the import_map bare
+        // fallback at the bottom of this ladder. The three steps above it — the
+        // bare `use_map` hit, and the two `".{method}"` suffix scans (both
+        // first-wins with `break` over a HashMap, i.e. NONDETERMINISTIC iteration
+        // order) — were unguarded and ran FIRST, so the exclusion never decided
+        // anything for these names. That is why fixing the name-suffix binder
+        // above left `lower_and_check_impl` bit-for-bit unchanged at 4 sites:
+        // those calls stopped being bound there and were immediately re-stolen
+        // here, by a different mechanism, onto the SAME wrong symbol.
+        //
+        // Skipping is a ROUTE, not a refusal: `resolved_name == None` falls
+        // through to `try_compile_builtin_method_call`, which maps `unwrap` to
+        // the runtime builtin `rt_unwrap_or_trap` (correct Some/Ok-payload-or-trap
+        // semantics for ANY enum receiver) and declares the symbol on demand. No
+        // raw name survives to become a link-time import, so this cannot regress
+        // into the NULL-GOT class that produces the same rc=139 by another cause.
+        //
+        // QUALIFIED spellings are deliberately unaffected: `lookup_name` is
+        // `func_name` with `_dot_` rewritten to `.`, so matching these bare
+        // spellings exactly implies there is no type qualifier. A genuine
+        // `Poll.unwrap` / `Poll_dot_unwrap` call site still resolves normally.
+        // See doc/08_tracking/bug/poll_unwrap_second_bind_site_lower_and_check_impl_2026-08-25.md
+        let is_erased_enum_helper_family = matches!(
+            lookup_name,
+            "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
+        );
+        let mut resolved_name = if is_erased_enum_helper_family {
+            None
+        } else {
+            ctx.use_map.get(func_name).map(|s| s.as_str())
+        };
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
-        if resolved_name.is_none() {
+        if resolved_name.is_none() && !is_erased_enum_helper_family {
             let method_suffix = format!(".{}", func_name);
             for (raw, mangled) in ctx.use_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
@@ -1098,7 +1143,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
         // Also check import_map for qualified entries where type is imported
-        if resolved_name.is_none() {
+        if resolved_name.is_none() && !is_erased_enum_helper_family {
             let method_suffix = format!(".{}", lookup_name);
             for (raw, mangled) in ctx.import_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
@@ -1111,12 +1156,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
         // Final fallback: import_map bare name (may pick wrong overload)
-        if resolved_name.is_none()
-            && !matches!(
-                lookup_name,
-                "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
-            )
-        {
+        if resolved_name.is_none() && !is_erased_enum_helper_family {
             resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
         }
 
