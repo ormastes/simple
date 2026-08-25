@@ -12,6 +12,34 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Parser type-expression authority checkpoint
+
+`parser_types_expr.spl` had five genuine environment/diagnostic/enum/tuple
+runtime interfaces and 51 ambient calls.  All are now explicitly tagged and
+routed through mandatory-inline `ffi` owners.  The focused
+`parser-types-expr-sffi-authority.shs` ratchet passed, pins the compiler ABI
+registry entries, and preserves the exact number of parser discriminant,
+payload, tuple, and diagnostic operations.
+
+The `rt_env_get` declaration incorrectly promised non-optional `text` even
+though the trace gate already handled absence with `?? ""`.  It now declares
+`text?`, matching the provider and caller semantics without adding a branch or
+lookup.  No parser loop, enum sample construction, allocation, copy, cache,
+lock, hash, signature operation, or generic dispatch changed.  Discriminant
+caching remains deferred until production profiles can prove it improves the
+different compiler lanes without extending object lifetimes.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,394 -> 19,348
+- lexical unsafe: 3,231 -> 3,236
+- function unsafe: unchanged at 919
+- missing authority: 15,244 -> 15,193
+
+The file now reports five raw rows, all lexically authorized, and zero missing
+authority.  Provider proof and exact signed compiler artifacts remain absent,
+so verified-and-signed admission remains 0.
+
 ## ARM filesystem-exec VFS authority checkpoint
 
 The ARM filesystem-exec VFS declared eleven foreign interfaces; the unused

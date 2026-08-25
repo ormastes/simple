@@ -26,11 +26,41 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.blocks.value.{BlockValue}
 use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 
+@unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
 extern fn rt_enum_payload(value: TypeKind) -> i64
+@unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
+@unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
+@unsafe(reason: "raw runtime diagnostic line output ABI", capabilities: [ffi])
 extern fn rt_println(msg: text)
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw process environment lookup ABI; nil means unset or provider failure", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+
+@always_inline
+fn _sffi_enum_payload(value: TypeKind) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_payload(value)
+
+@always_inline
+fn _sffi_enum_discriminant(value: TypeKind) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+@always_inline
+fn _sffi_tuple_get(tuple: i64, index: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_tuple_get(tuple, index)
+
+@always_inline
+fn _sffi_println(msg: text):
+    unsafe(capabilities: [ffi]):
+        rt_println(msg)
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
 
 fn parser_types_trace_enabled() -> bool:
     """Level gate for TypeKind payload-decode tracing (default off).
@@ -39,7 +69,7 @@ fn parser_types_trace_enabled() -> bool:
     asked for an ``Array`` element but handed a different variant.  This is
     the probe that located the Stage-3 ``field access on nil receiver`` trap.
     """
-    ((rt_env_get("SIMPLE_TRACE_TYPEKIND") ?? "") == "1" and
+    ((_sffi_env_get("SIMPLE_TRACE_TYPEKIND") ?? "") == "1" and
      not frontend_trace_suppressed())
 
 # ============================================================================
@@ -72,21 +102,21 @@ enum TypeKind:
 # Keep multi-field TypeKind extraction beside its owner.  Consumers that also
 # import HirTypeKind have a colliding Named variant on stage4.
 fn parser_type_kind_named_name(kind: TypeKind) -> text:
-    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Named("", [])):
+    if _sffi_enum_discriminant(kind) != _sffi_enum_discriminant(TypeKind.Named("", [])):
         return ""
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil:
         return ""
-    val name: text = rt_tuple_get(payload, 0)
+    val name: text = _sffi_tuple_get(payload, 0)
     name
 
 fn parser_type_kind_named_args(kind: TypeKind) -> [Type]:
-    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Named("", [])):
+    if _sffi_enum_discriminant(kind) != _sffi_enum_discriminant(TypeKind.Named("", [])):
         return []
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil:
         return []
-    val args: [Type] = rt_tuple_get(payload, 1)
+    val args: [Type] = _sffi_tuple_get(payload, 1)
     args
 
 fn parser_type_kind_array_discriminant() -> i64:
@@ -97,7 +127,7 @@ fn parser_type_kind_array_discriminant() -> i64:
     `Named`/`Tuple` decoders above build their own comparison values.
     """
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    rt_enum_discriminant(TypeKind.Array(placeholder, nil))
+    _sffi_enum_discriminant(TypeKind.Array(placeholder, nil))
 
 fn parser_type_kind_array_element(kind: TypeKind, fallback: Type) -> Type:
     # Decode slot 0 ONLY for a real `Array` payload.  Every other variant
@@ -105,12 +135,12 @@ fn parser_type_kind_array_element(kind: TypeKind, fallback: Type) -> Type:
     # an array, `Infer`/`Error` nothing at all), so an unguarded decode
     # reinterprets a foreign value as a `Type`.  Same discriminant guard the
     # `Named`/`Tuple` decoders above already carry.
-    if rt_enum_discriminant(kind) != parser_type_kind_array_discriminant():
+    if _sffi_enum_discriminant(kind) != parser_type_kind_array_discriminant():
         return fallback
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil:
         return fallback
-    val element: Type = rt_tuple_get(payload, 0)
+    val element: Type = _sffi_tuple_get(payload, 0)
     if element == nil:
         return fallback
     element
@@ -123,7 +153,7 @@ fn parser_type_kind_is_array(kind: TypeKind) -> bool:
     (`[(text, MirType)]`, `[[T]]`, `[T?]`). Callers that must recurse into the
     element cannot distinguish those two on the name alone.
     """
-    rt_enum_discriminant(kind) == parser_type_kind_array_discriminant()
+    _sffi_enum_discriminant(kind) == parser_type_kind_array_discriminant()
 
 fn parser_type_kind_array_element_name(kind: TypeKind) -> text:
     """Name of an `Array` element type, or "" for any non-array kind.
@@ -132,23 +162,23 @@ fn parser_type_kind_array_element_name(kind: TypeKind) -> text:
     type, not just array-typed ones, so a non-`Array` kind is the common
     case and must return "" rather than decode a foreign payload slot.
     """
-    val disc = rt_enum_discriminant(kind)
+    val disc = _sffi_enum_discriminant(kind)
     if disc != parser_type_kind_array_discriminant():
         if parser_types_trace_enabled():
-            rt_println("[typekind] array-element-name on non-array disc={disc}")
+            _sffi_println("[typekind] array-element-name on non-array disc={disc}")
         return ""
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil:
         return ""
-    val element: Type = rt_tuple_get(payload, 0)
+    val element: Type = _sffi_tuple_get(payload, 0)
     if element == nil:
         if parser_types_trace_enabled():
-            rt_println("[typekind] array payload slot0 nil disc={disc}")
+            _sffi_println("[typekind] array payload slot0 nil disc={disc}")
         return ""
     parser_type_kind_named_name(element.kind)
 
 fn parser_type_kind_tuple_elements(kind: TypeKind) -> [Type]:
-    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Tuple([])):
+    if _sffi_enum_discriminant(kind) != _sffi_enum_discriminant(TypeKind.Tuple([])):
         return []
     match kind:
         case TypeKind.Tuple(elements): elements
@@ -165,7 +195,7 @@ fn parser_type_kind_tuple_elements(kind: TypeKind) -> [Type]:
 # also imports `HirTypeKind` gets colliding variant names, so a `match` in that
 # scope is not safe.
 fn parser_type_kind_is_infer(kind: TypeKind) -> bool:
-    rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Infer)
+    _sffi_enum_discriminant(kind) == _sffi_enum_discriminant(TypeKind.Infer)
 
 fn parser_type_kind_pointer_inner(kind: TypeKind, fallback: Type) -> Type:
     """Pointee of a `Pointer` kind (`*T` / `*mut T`), else `fallback`.
@@ -176,12 +206,12 @@ fn parser_type_kind_pointer_inner(kind: TypeKind, fallback: Type) -> Type:
     that scope is not safe.
     """
     val placeholder = Type(kind: TypeKind.Infer, span: fallback.span)
-    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
+    if _sffi_enum_discriminant(kind) != _sffi_enum_discriminant(TypeKind.Pointer(placeholder, false)):
         return fallback
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil:
         return fallback
-    val inner: Type = rt_tuple_get(payload, 0)
+    val inner: Type = _sffi_tuple_get(payload, 0)
     if inner == nil:
         return fallback
     inner
@@ -189,24 +219,24 @@ fn parser_type_kind_pointer_inner(kind: TypeKind, fallback: Type) -> Type:
 fn parser_type_kind_pointer_is_mutable(kind: TypeKind) -> bool:
     """Mutability flag of a `Pointer` kind; false for any other kind."""
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
+    if _sffi_enum_discriminant(kind) != _sffi_enum_discriminant(TypeKind.Pointer(placeholder, false)):
         return false
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil:
         return false
-    val mutable: bool = rt_tuple_get(payload, 1)
+    val mutable: bool = _sffi_tuple_get(payload, 1)
     mutable
 
 fn parser_type_kind_is_pointer(kind: TypeKind) -> bool:
     """True only for a `Pointer` kind (`*T`)."""
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Pointer(placeholder, false))
+    _sffi_enum_discriminant(kind) == _sffi_enum_discriminant(TypeKind.Pointer(placeholder, false))
 
 fn parser_type_kind_union_members(kind: TypeKind) -> [Type]:
     """Members of a `Union` kind (`A | B | C`), or [] for any other kind."""
-    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Union([])):
+    if _sffi_enum_discriminant(kind) != _sffi_enum_discriminant(TypeKind.Union([])):
         return []
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil:
         return []
     val members: [Type] = payload
@@ -215,16 +245,16 @@ fn parser_type_kind_union_members(kind: TypeKind) -> [Type]:
 fn parser_type_kind_is_function(kind: TypeKind) -> bool:
     """True only for a `Function` kind (`fn(A, B) -> C`)."""
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    rt_enum_discriminant(kind) == rt_enum_discriminant(TypeKind.Function([], placeholder))
+    _sffi_enum_discriminant(kind) == _sffi_enum_discriminant(TypeKind.Function([], placeholder))
 
 fn parser_type_kind_function_params(kind: TypeKind) -> [Type]:
     """Parameter types of a `Function` kind, or [] for any other kind."""
     if not parser_type_kind_is_function(kind):
         return []
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil:
         return []
-    val params: [Type] = rt_tuple_get(payload, 0)
+    val params: [Type] = _sffi_tuple_get(payload, 0)
     params
 
 fn parser_type_kind_function_return(kind: TypeKind, fallback: Type) -> Type:
@@ -235,10 +265,10 @@ fn parser_type_kind_function_return(kind: TypeKind, fallback: Type) -> Type:
     """
     if not parser_type_kind_is_function(kind):
         return fallback
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil:
         return fallback
-    val ret: Type = rt_tuple_get(payload, 1)
+    val ret: Type = _sffi_tuple_get(payload, 1)
     if ret == nil:
         return fallback
     ret
@@ -254,59 +284,59 @@ fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
     nodes do not allocate result arrays and then copy them into their parents.
     """
     val kind = type_.kind
-    val disc = rt_enum_discriminant(kind)
-    if disc == rt_enum_discriminant(TypeKind.Named("", [])):
+    val disc = _sffi_enum_discriminant(kind)
+    if disc == _sffi_enum_discriminant(TypeKind.Named("", [])):
         val name = parser_type_kind_named_name(kind)
         if name != "": names.push(name)
         for arg in parser_type_kind_named_args(kind):
             parser_type_named_dependencies_into(arg, names)
         return
-    if disc == rt_enum_discriminant(TypeKind.Tuple([])):
+    if disc == _sffi_enum_discriminant(TypeKind.Tuple([])):
         for element in parser_type_kind_tuple_elements(kind):
             parser_type_named_dependencies_into(element, names)
         return
 
     val placeholder = Type(kind: TypeKind.Infer, span: type_.span)
-    if disc == rt_enum_discriminant(TypeKind.Array(placeholder, nil)):
+    if disc == _sffi_enum_discriminant(TypeKind.Array(placeholder, nil)):
         parser_type_named_dependencies_into(
             parser_type_kind_array_element(kind, placeholder), names)
         return
-    val payload = rt_enum_payload(kind)
+    val payload = _sffi_enum_payload(kind)
     if payload == nil: return
-    if disc == rt_enum_discriminant(TypeKind.Function([], placeholder)):
-        val params: [Type] = rt_tuple_get(payload, 0)
-        val return_type: Type = rt_tuple_get(payload, 1)
+    if disc == _sffi_enum_discriminant(TypeKind.Function([], placeholder)):
+        val params: [Type] = _sffi_tuple_get(payload, 0)
+        val return_type: Type = _sffi_tuple_get(payload, 1)
         for param in params:
             parser_type_named_dependencies_into(param, names)
         parser_type_named_dependencies_into(return_type, names)
         return
-    if disc == rt_enum_discriminant(TypeKind.Optional(placeholder)):
+    if disc == _sffi_enum_discriminant(TypeKind.Optional(placeholder)):
         val inner: Type = payload
         parser_type_named_dependencies_into(inner, names)
         return
-    if disc == rt_enum_discriminant(TypeKind.Reference(placeholder, false)):
-        val inner: Type = rt_tuple_get(payload, 0)
+    if disc == _sffi_enum_discriminant(TypeKind.Reference(placeholder, false)):
+        val inner: Type = _sffi_tuple_get(payload, 0)
         parser_type_named_dependencies_into(inner, names)
         return
-    if disc == rt_enum_discriminant(TypeKind.Atomic(placeholder)):
+    if disc == _sffi_enum_discriminant(TypeKind.Atomic(placeholder)):
         val inner: Type = payload
         parser_type_named_dependencies_into(inner, names)
         return
-    if disc == rt_enum_discriminant(TypeKind.Isolated(placeholder)):
+    if disc == _sffi_enum_discriminant(TypeKind.Isolated(placeholder)):
         val inner: Type = payload
         parser_type_named_dependencies_into(inner, names)
         return
-    if disc == rt_enum_discriminant(TypeKind.Union([])):
+    if disc == _sffi_enum_discriminant(TypeKind.Union([])):
         val members: [Type] = payload
         for member in members:
             parser_type_named_dependencies_into(member, names)
         return
-    if disc == rt_enum_discriminant(TypeKind.Projection(placeholder, "")):
-        val base: Type = rt_tuple_get(payload, 0)
+    if disc == _sffi_enum_discriminant(TypeKind.Projection(placeholder, "")):
+        val base: Type = _sffi_tuple_get(payload, 0)
         parser_type_named_dependencies_into(base, names)
         return
-    if disc == rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
-        val inner: Type = rt_tuple_get(payload, 0)
+    if disc == _sffi_enum_discriminant(TypeKind.Pointer(placeholder, false)):
+        val inner: Type = _sffi_tuple_get(payload, 0)
         parser_type_named_dependencies_into(inner, names)
 
 fn parser_type_named_dependencies(type_: Type) -> [text]:
