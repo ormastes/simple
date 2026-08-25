@@ -57,6 +57,8 @@ wiki / file-server access from caret and from dev tools (MCP); bootstrap redeplo
 | G17 | Seed 05:16 could not parse easy_fix/accessor_rewrite.spl | **CLOSED 2026-08-25** | root cause: expression-position unsafe-block rule accepted a bare colon, so an identifier named unsafe/danger ate its block header. Fixed + rebuilt + DEPLOYED 06:08 (60646096, sha 3ef64bff…); cargo test 8/8, doctest 1/1, regression specs green |
 | G18 | MCP core tool set serves 3 tools, specs pin 20 (pre-existing at origin) | OPEN, filed | mcp_core_tool_set_has_3_tools_spec_expects_20_2026-08-25 |
 | G19 | Seeds have been built from UNCOMMITTED trees (the 05:16 deploy came from a scratch worktree carrying an unlanded parser hunk) | OPEN, needs record | require a git-clean, origin-pinned source for any deployed binary; check-seed-builds-push could bind the deployed sha to a commit |
+| G20 | caret wiki_write appends .md, wiki_read does not — a page cannot be read back by the id used to write it | OPEN, filed | llm_caret_wiki_write_read_id_asymmetry_2026-08-25; one normalisation fn owned by write/read/search |
+| G21 | doc/08_tracking/todo/todo_db.sdn regenerates to 277 rows against origin's 741 — a full-tree scan from this worktree would delete 464 tracked rows | OPEN, needs owner | establish which tree is authoritative for todo-scan before regenerating; this session deliberately did NOT commit the regenerated db |
 
 ## Rejected shortcuts (do not retry)
 - Subagent stripped spec docstrings/@req/step() while "fixing one line" (2x) — restore origin spec, re-apply hunk only.
