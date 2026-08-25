@@ -1175,3 +1175,240 @@ built `simple-native-all` binary rather than the seed `bin`. Establishing that
 direct-from-seed fixture path is therefore the concrete prerequisite, and it is
 the recommended first step of the next attempt — ahead of any further code
 change.
+
+## 2026-08-25 (lane-fast-oracle): the ~40-minute fix loop is replaced by a ~70-second one, and the blind early-return is localized
+
+**Deliverable was the INSTRUMENT, not a fix. No compiler source was changed in this lane.**
+
+### 1. The stated prerequisite dissolved: `refusing Rust fallback` is a cwd artifact, not a guard that must be bypassed
+
+The previous lane recorded: *"The seed-direct fixture that would shorten it is
+blocked by `refusing Rust fallback` (`driver/src/main.rs:230`); establishing it
+is the next lane's prerequisite."*
+
+That refusal is real but it is **not** a policy barrier to this fixture.
+`native-build` is a `command_is_pure_simple_tool` name
+(`driver/src/main.rs:287-305`), so when the Simple-app dispatch returns `None`
+the driver refuses to fall back to Rust (`:228-233`). That dispatch resolves
+`src/app/...` **relative to the current working directory**
+(`resolve_app_path`). Measured 2026-08-25, same binary, same arguments, exit
+status read directly into a variable on the line after the command:
+
+| cwd | result |
+|---|---|
+| `test/fixture/erased_unwrap_oracle/` | `error: pure-Simple tool 'native-build' unavailable; refusing Rust fallback`, rc=1 |
+| repo root | builds, rc=0 |
+
+**The sanctioned way to exercise this path is to invoke the seed from the repo
+root.** Nothing was disabled, weakened, allowlisted, or opted out of; the guard
+is untouched and still fires everywhere it did before.
+
+### 2. The fast oracle
+
+`scripts/check/check-erased-receiver-unwrap-oracle.shs` — `--selftest` first and
+fatal (9 classifier cases), verdict last on stdout, `PASS`/`FAIL`/`ERROR —
+nothing was checked` with exits 0/1/2, 0 fixtures = ERROR, build half under
+`timeout` with **rc=124 classified as a distinct HANG**, never a pass.
+
+Measured runtime on this host:
+
+| step | cold | warm |
+|---|---|---|
+| seed `cargo build --release --bin simple` | 3m03s | ~1-3 min incremental |
+| one fixture `native-build --backend=cranelift` | — | 22-52s |
+| whole gate, 3 fixtures + selftest | — | **70s** |
+
+That replaces the ~40-minute Stage-2 bootstrap per candidate fix.
+
+### 3. It discriminates: RED on `origin/main`, GREEN on a byte-identical shape
+
+Measured on `origin/main` (`3e8c13f4149`), exit status read directly into a
+variable on the line after the command: **`GATE_RC=1`, 81s**.
+
+```
+case poll_absent (reference):         observed=ERASED_UNWRAP=4242            expected=ERASED_UNWRAP=4242   verdict=OK
+case xmod_main (reference):           observed=ERASED_UNWRAP=4242            expected=ERASED_UNWRAP=4242   verdict=OK
+case hijack_control (control):        observed=CONTROL_PING=1                expected=CONTROL_PING=1       verdict=OK
+case hijack_name_control (control):   observed=NAME_CONTROL=111              expected=NAME_CONTROL=111     verdict=OK
+case hijack_erased (reference):       observed=ERASED_UNWRAP=4242            expected=ERASED_UNWRAP=4242   verdict=OK
+case hijack_probe (probe):            observed=CONCRETE_UNWRAP=110153921397409 expected=CONCRETE_UNWRAP=111 verdict=THEFT
+FAIL — 6 case(s) checked, .unwrap() mis-bound in: hijack_probe=THEFT
+```
+
+**The GREEN side is not hypothetical and needed no compiler change to
+demonstrate.** `Aaa.unwrap_ctl()` and `Aaa.unwrap()` are the same class, the same
+receiver variable, the same call-site shape, and byte-identical bodies
+(`111`). They differ in exactly one character sequence: the method NAME.
+`NAME_CONTROL=111` is correct; `CONCRETE_UNWRAP` is a pointer-shaped word. Two
+further controls bracket it — `CONTROL_PING=1` proves ordinary user methods on
+that receiver work at all, and three `ERASED_UNWRAP=4242` cases prove the
+oracle reports OK when a bind IS correct. So a fix that flips the probe cannot
+be confused with a fix that merely broke the fixture.
+
+The classifier half is additionally mutation-proven by the `--selftest`
+(14 cases, fatal, runs first): the incident's `ERASED_UNWRAP=0` shape, a
+foreign-value shape, an observed text-valued shape, rc=139, rc=124, a
+build failure, and a clean exit with **no sentinel at all** each read as their
+own non-passing class, and a correct value with a non-zero exit is not OK.
+
+**Gate polarity, stated so nobody "fixes" it:** `PASS` means the defect is gone.
+This gate is therefore **ADVISORY and honestly RED on `origin/main`, which is the
+correct state** — the same convention already recorded for
+`check-stage2-option-unwrap-not-stolen.shs`. Promote it to mandatory when it
+goes green.
+
+### 3b. HONEST SCOPE LIMIT — what the probe does and does not pin
+
+The RED probe is a **concrete-receiver** `.unwrap()` hijack: the receiver's type
+is known and local, and a user-defined `unwrap` is nonetheless not called. That
+is a defect in the same `.unwrap()` resolution chain, in the same file, and it is
+RED in 81 seconds — but it is **NOT proven to be the same root cause** as the
+Stage-2 erased-receiver -> `Poll.unwrap` theft. It is recorded as a related,
+separately-filed defect
+(`concrete_receiver_unwrap_returns_receiver_word_2026-08-25.md`), and this lane
+does **not** claim that fixing one fixes the other.
+
+All three erased-receiver fixtures still bind CORRECTLY in a small link, so the
+exact Stage-2 theft is **not yet reproduced standalone**. The reason is given in
+§4: the theft needs two or more `*_dot_unwrap` keys in `func_ids` at once, and a
+small program supplies at most one. Closing that gap is the remaining work, and
+until it is closed the oracle is a fast instrument for the `unwrap` binding chain
+rather than a proven proxy for the Stage-2 blocker. Anyone using it to accept a
+candidate fix must say which of the two it moved.
+
+### 4. HYPOTHESIS (reconciles the prior evidence; NOT proven) — a blind early-return the discriminator cannot see
+
+`closures_structs.rs:909-933`, inside `compile_method_call_static`:
+
+```rust
+if candidates.len() > 1 {
+    let method_dot = format!("_dot_{}", method_part);
+    for (cand_name, &cand_id) in &candidates {
+        if let Some(dot_pos) = cand_name.rfind(&method_dot) {
+            let prefix = &cand_name[..dot_pos];
+            let type_name = prefix.rsplit("__").next().unwrap_or(prefix);
+            if ctx.use_map.contains_key(type_name) {
+                return Some(cand_id);        // <-- receiver-type-BLIND
+            }
+        }
+    }
+    // ... the same shape again over ctx.import_map, another `return Some(v)`
+}
+```
+
+`candidates` is built at `:876-886` by filtering `ctx.func_ids` for **any** key
+ending in `".unwrap"` / `"_dot_unwrap"`. The only receiver evidence consulted
+before these two `return Some(...)` is whether the candidate's *extracted type
+name* happens to be in `ctx.use_map` — a test on what the module IMPORTS, not on
+what the receiver IS. In a Stage-2-sized link `Poll` is in `use_map`, so
+`Poll_dot_unwrap` satisfies it.
+
+**This is a hypothesis, not a proven site. What it does is reconcile the previous lane's evidence instead of contradicting it.**
+That lane inferred the bind "does not flow through `compile_method_call_static`
+at all" because the wired discriminator `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1`
+(call sites `:996`, `:1049`) produced zero output. Both report sites sit **after**
+`:962`; the two returns above sit **before** it. A bind escaping at `:919` or
+`:930` is invisible to that discriminator by construction, so the silence was
+never evidence of absence. The same explains why the `:702` builtin-first gate
+moved nothing: `:702` guards a different, earlier predicate
+(`is_bare_builtin_collection_method`) that a bare `unwrap` on an erased receiver
+does not satisfy.
+
+**Precedent in the same block, for whoever fixes this:** `:836-843` already
+early-returns `None` for bare `has` and bare `len`/`length`, both added after
+this identical miscompile class, with the comment that the builtin fallback then
+lowers them safely. `unwrap` has no such guard. That is a candidate shape — it is
+**NOT applied or measured here**, and it must not be recorded as proven. Note it
+is in the same file as, but a different site from, the already-refuted `:702`
+theory.
+
+**Why the current fixtures stay green, stated as the open item it is:** the theft
+needs three conditions at once — (1) resolution must reach this fallback with a
+bare `unwrap` so `type_qualifier == None`, (2) `candidates.len() > 1`, i.e. two
+or more distinct `*_dot_unwrap` keys linked in, and (3) the stolen candidate's
+type name must be in `use_map`. Every standalone fixture tried so far (this
+lane's three, and the four in the earlier lanes) supplies at most one
+`*_dot_unwrap`, so the `candidates.len() > 1` block is never entered. Closing
+that gap is what turns this instrument RED.
+
+### 5. A SEPARATE defect found while building the instrument — reported, not chased
+
+In both `decoy_present.spl` and `xmod_main.spl`, a `.unwrap()` on a
+**concretely-typed** class receiver returns a garbage word instead of its field:
+
+```
+DECOY=95601341756065    # decoy_present.spl, expected 7
+DECOY=100373692547745   # xmod_main.spl,     expected 7
+```
+
+`BUILD_RC=0`, `RUN_RC=0` both times; the values look like heap pointers, i.e. the
+callee appears to return the receiver rather than `self.v`. This is a **distinct**
+miscompile from the erased-receiver theft (the receiver type here is known and
+local) and is deliberately left uninvestigated in this lane. It is the reason the
+oracle's GREEN criterion asserts `ERASED_UNWRAP=4242` specifically rather than
+"the binary exited 0" — otherwise this second defect would contaminate verdicts.
+
+### Invocation
+
+```sh
+cd <repo root>                 # required: outside it the seed refuses, see 1
+sh scripts/check/check-erased-receiver-unwrap-oracle.shs --selftest
+sh scripts/check/check-erased-receiver-unwrap-oracle.shs
+sh scripts/check/check-erased-receiver-unwrap-oracle.shs --seed /path/to/simple
+```
+
+### 4b. CORRECTION to §4, from a parallel fixture search in the same lane — read this BEFORE acting on the §4 hypothesis
+
+A parallel search inside this lane established three facts that **narrow §4 and
+must not be omitted**. They were found by measurement, not argument.
+
+1. **`--backend=cranelift` does not run the Rust seed's `closures_structs.rs`
+   scan at all.** The `[cranelift-direct]` lines these fixtures emit come from
+   the pure-Simple `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`;
+   `grep -rn cranelift-direct src/compiler_rust` returns **zero** hits. With
+   `SIMPLE_DEBUG_METHOD_DISPATCH=1` a fixture build emits 139
+   `[CODEGEN-METHOD-STATIC]` lines and **all 139 name stdlib functions** — none
+   from the fixture module. **So the §4 hypothesis about `closures_structs.rs:909-933`
+   is NOT exercised by this oracle's fixtures, and the oracle is therefore not
+   established as a proxy for whatever the Stage-2 bootstrap's Rust codegen does.**
+   `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1` printed **zero** lines in every fixture
+   build, consistent with that.
+
+2. **`.unwrap()` on a `T?` field or local never reaches
+   `compile_method_call_static` in these fixtures.** Disassembly of
+   `decoy_present.Holder.take` (`0x2fb1`): load `self.owner` -> indirect GOT call
+   -> `test %rax,%rax` -> null branch prints an error and exits -> non-null branch
+   calls **`rt_unwrap_or_self`** -> field load -> ret. `nm` shows **no
+   `*_dot_unwrap` symbol in the binary at all**. The unwrap is inlined tag-check
+   code plus a runtime call, which is exactly why no suffix scan fires and why
+   `ERASED_UNWRAP=4242` is correct in every erased fixture.
+
+3. **`func_ids` is per-MODULE, not per-program**, so a decoy and a victim cannot
+   be made to co-occur in a fixture. The build logs 7 separate native units; the
+   one call that provably does reach the scan (`file_read_text_at`'s bare
+   `unwrap`, `src/lib/nogc_sync_mut/io/file_ops.spl:192`) is compiled in a unit
+   that cannot see a user-module decoy. **This is a structural reason to expect
+   that no standalone fixture can reproduce the Stage-2 erased-receiver theft** —
+   it needs one large single-unit compilation, i.e. the self-hosted compiler
+   itself. That retires a line of attack rather than leaving the next lane to
+   re-spend a day on it.
+
+Also confirmed: `closures_structs.rs:973-981` already returns `None` for
+`unwrap` when `candidates.len() > 1`. The §4 `use_map` early-return at `:909-933`
+runs **before** that guard, so it remains the only silent multi-candidate window
+— but per fact 1, none of that is exercised here.
+
+**Recommended next step, superseding "find a better fixture":** stop pursuing
+standalone fixtures for the erased case. Instrument a real bootstrap /
+self-hosted build with `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1` and grep for
+`[CODEGEN-ERASED-RECEIVER-BIND] ... 'unwrap'`, which enumerates every live
+instance of the bind directly.
+
+### 5b. The second defect is a BACKEND DIVERGENCE, which is stronger than §5 stated
+
+The concrete-receiver hijack in §5 reproduces **only** under
+`--backend=cranelift`. On the default backend the same source prints `111`/`222`
+correctly. So a user-defined `fn unwrap()` on a class is shadowed by the builtin
+(`rt_unwrap_or_self`, which returns the receiver — hence the pointer-shaped word)
+on one backend and not the other. Filed in
+`concrete_receiver_unwrap_returns_receiver_word_2026-08-25.md`.
