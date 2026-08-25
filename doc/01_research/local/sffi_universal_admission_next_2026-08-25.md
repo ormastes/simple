@@ -163,6 +163,39 @@ lifetime, the missing provider, exact artifact identity, trusted signatures,
 and proof receipts remain unresolved. This lane and the wider estate are not
 globally verified or signed; verified-and-signed admission remains 0.
 
+## Metal GPU-lane session authority checkpoint
+
+`src/lib/gc_async_mut/gpu_lane/metal_lane_session.spl` now declares all 25
+Metal ABI families with explicit authority. The availability and global-error
+queries require `ffi`; every copyable device, queue, buffer, shader, pipeline,
+command-buffer, and encoder handle additionally requires `raw_ptr`. Six
+lifecycle/I/O methods—probe, initialization, arena upload/download, dispatch,
+and shutdown—carry the minimal corresponding caller authority.
+
+The implementation remains behaviorally unchanged. Existing bounds precede
+arena allocation and transfer, status values remain semantic booleans where
+declared, cleanup ordering is retained, and failed completion remains
+quarantined rather than reported as success. The annotation-only change adds
+no loop, branch, allocation, copy, lookup, lock, hash, signature operation, or
+dispatch layer and deliberately adds no forced-inlining annotation.
+
+The focused ratchet initially rejected a documentation-sensitive token count;
+the audit itself was corrected to strip comments and declarations before
+counting the 42 executable call sites, then passed. Twenty symbols appear in
+both typed-native and interpreter registries, five in only one, and none in
+neither. The global census changed exactly by those 42 calls:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,257 -> 14,215
+- lexical unsafe: unchanged at 3,401
+- function unsafe: 1,188 -> 1,230
+
+Metal object ownership, backend/device branding, exactly-once destruction,
+mutable-download aliasing, cross-lane closure for five symbols, exact artifact
+identity, trusted signatures, and proof receipts remain unresolved. This lane
+and the wider estate are not globally verified or signed;
+verified-and-signed admission remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
