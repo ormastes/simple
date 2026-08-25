@@ -80,8 +80,8 @@ adds the schema entries, dispatch arms and permission classification.
 
 | Tool | Arguments | Class | Backing facade |
 |------|-----------|-------|----------------|
-| `mail_list` | `mailbox` (default INBOX), `limit` (<=200) | read-only | IMAP `SELECT` + `FETCH` headers, `std.nogc_sync_mut.imap` |
-| `mail_read` | `uid` | read-only | IMAP `UID FETCH (BODY.PEEK[])` |
+| `mail_list` | `mailbox` (default INBOX), `limit` (<=200) | read-only | IMAP `SELECT` + `FETCH` headers via the RFC 3501 parser in `std.nogc_sync_mut.imap.parse` |
+| `mail_read` | `uid` | read-only | IMAP `UID FETCH (BODY.PEEK[])` (`imap_build_uid_fetch`), literal-aware body extraction |
 | `mail_send` | `to`, `subject`, `body` | **mutating** | SMTP `EHLO`/`AUTH PLAIN`/`DATA`, `std.nogc_sync_mut.smtp` |
 | `storage_ls` | `bucket`, `prefix` | read-only | `app.devhub.adapter_minio` (pure-Simple SigV4, same path as `bin/itf minio ls`) |
 | `storage_get` | `key`, `bucket`, `max_bytes` (<=262144) | read-only | SigV4 ranged GET |
@@ -116,12 +116,125 @@ storage:
 
 Missing sections give `mail not configured: set [mail] in llm_caret.sdn` /
 `storage not configured: set [storage] in llm_caret.sdn`; an unset secret env
-names the variable, never a value. Specs:
+names the variable, never a value.
+
+Mail hardening (2026-08-25):
+
+- **IMAP responses are parsed, not line-scanned.** Framing and parsing are
+  literal-aware (`imap_response_complete` / `imap_parse_fetch_response` in
+  `std.nogc_sync_mut.imap.parse`): a message body containing `)`, CRLFs or a
+  tag-looking line can no longer terminate a reply early or corrupt
+  `mail_list` rows. Folded headers are unfolded; UTF-8 literals are consumed
+  by byte count.
+- **Every server read is bounded.** A server that accepts and then stalls
+  fails the tool call with `mail server timed out after N ms` (default
+  budget 15 s per reply; TLS reads use `tls_read_timeout`, plaintext reads
+  the fd read-timeout) instead of hanging the caret turn.
+- **STARTTLS (587/143) is negotiation-ready but refused.** The full RFC
+  3207 / RFC 3501 negotiation state machine lives in
+  `app.llm_caret.infra_mail_starttls` and is transcript-proven, but the
+  runtime has no in-place TLS upgrade of a connected fd
+  (`rt_tls_client_from_fd` is missing — see
+  `doc/08_tracking/bug/tls_no_fd_upgrade_blocks_starttls_2026-08-25.md`),
+  so `smtp_port: 587` is refused before connecting with an error naming the
+  missing symbol. Use 465/993 (implicit TLS) or a plaintext port.
+
+Specs:
 `test/01_unit/app/llm_caret/infra_tools_spec.spl` (schemas, gating,
-validation) and `test/03_system/app/llm_caret/infra_servers_system_spec.spl`
+validation), `test/01_unit/lib/nogc_sync_mut/imap/fetch_parse_spec.spl`
+(FETCH parser), `test/01_unit/app/llm_caret/infra_mail_starttls_spec.spl`
+(STARTTLS transcripts), `test/01_unit/app/llm_caret/infra_mail_timeout_spec.spl`
+(bounded reads) and `test/03_system/app/llm_caret/infra_servers_system_spec.spl`
 (live round trips, gated on `LLM_CARET_MAIL_LIVE=1` / `LLM_CARET_STORAGE_LIVE=1`
 + `LLM_CARET_CONFIG`; no in-repo SMTP/IMAP/S3/FTP server exists, so they are
 honestly blocked on a bare host).
+
+## Wiki tools
+
+`infra_wiki.spl` adds a wiki surface behind the same gate:
+
+| Tool | Arguments | Class | Backing |
+|------|-----------|-------|---------|
+| `wiki_search` | `query` | read-only | one line per hit: `id<TAB>title<TAB>url` |
+| `wiki_read` | `page_id` | read-only | `Title:` / `Id:` header lines, then the body |
+| `wiki_write` | `page_id` (update) or `parent` + `title` (create), `body` | **mutating** | same allow/deny gate as `write_file` |
+
+Two backends, selected by `[wiki] backend` in `llm_caret.sdn`:
+
+- `confluence` — the existing devhub adapter (`app.devhub.adapter_confluence`,
+  the `bin/itf wiki` code path). Auth is Basic `user:token`; the token is read
+  **only** from the env var named by `token_env` (validated as a strict
+  identifier), routed through ItfConfig's `token_cmd` seam so the devhub
+  `auth.sdn` plaintext fallback is never consulted. `space` is required to
+  create pages.
+- `local` — a markdown directory; no server needed. `root` (default `doc`,
+  resolved under the workspace root) holds the pages; a page id is the `.md`
+  path relative to `root`. Search is a case-insensitive substring scan over
+  `*.md` (path + body); write only ever writes under `root` and rejects `..`
+  traversal and absolute paths outside it.
+
+```
+wiki:
+    backend: local           # confluence | local
+    root: doc                # local: markdown dir (relative to workspace root)
+    base_url: https://x.atlassian.net/wiki   # confluence only
+    space: ENG               # confluence space id (required to create)
+    user: me@example.com     # confluence user
+    token_env: CARET_CONFLUENCE_TOKEN        # env var holding the API token
+```
+
+Unconfigured use answers `wiki not configured: set [wiki] in llm_caret.sdn`;
+an unsupported backend or a missing token names the problem and never aborts.
+Specs: `test/01_unit/app/llm_caret/infra_wiki_spec.spl` (local round trip,
+traversal, gating) and the `LLM_CARET_WIKI_LIVE=1`-gated Confluence row in
+`infra_servers_system_spec.spl`.
+
+## Using caret tools from Claude Code / Codex via MCP
+
+The compiler MCP server (`bin/simple_mcp_server`, `src/app/mcp/main.spl`)
+exposes all nine infra tools to any MCP client as `caret_*`:
+
+`caret_mail_list`, `caret_mail_read`, `caret_mail_send`,
+`caret_wiki_search`, `caret_wiki_read`, `caret_wiki_write`,
+`caret_storage_ls`, `caret_storage_get`, `caret_storage_put`.
+
+Semantics:
+
+- **Confirm gate.** The mutating three (`caret_mail_send`, `caret_wiki_write`,
+  `caret_storage_put`) are DENIED with an `isError` tool result unless the
+  call passes `"confirm": true` in its arguments (each schema description says
+  so). With it, the call is granted exactly that one tool; read-only tools
+  need no confirm.
+- **Process boundary.** The server never imports the caret/devhub/imap module
+  graph (that was measured to double its startup); each `caret_*` call runs
+  the one-shot CLI `simple run src/app/llm_caret/tool_cli.spl <tool>
+  <input.json> [--allow]` as a child and returns its stdout. Handlers live in
+  `src/app/mcp/main_lazy_caret_tools.spl`.
+- **Config.** The server process reads `$LLM_CARET_CONFIG` (path to an
+  `llm_caret.sdn`); unset, every call reports caret's honest "not configured"
+  error. The workspace root for the local wiki and file guards is the server
+  cwd.
+
+`.mcp.json` snippet (Claude Code; Codex's `mcp_servers` block is analogous):
+
+```json
+{
+  "mcpServers": {
+    "simple-mcp": {
+      "command": "bin/simple_mcp_server",
+      "env": {
+        "LLM_CARET_CONFIG": "/abs/path/llm_caret.sdn",
+        "CARET_CONFLUENCE_TOKEN": "${CARET_CONFLUENCE_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+The default `auto` tool set serves a small core list on the first
+`tools/list`; the caret tools appear in the full list (`SIMPLE_MCP_TOOL_SET=all`
+forces it immediately). End-to-end spec:
+`test/03_system/app/mcp/caret_tools_mcp_system_spec.spl`.
 
 ## Secret redaction + injection defense
 

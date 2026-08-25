@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 2 | 0 | 1 |
+| 4 | 3 | 0 | 1 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -40,6 +40,10 @@ An example therefore runs only when the operator points it at a real server:
            and the env var named by `secret_env` exported.
 - storage: LLM_CARET_STORAGE_LIVE=1 plus LLM_CARET_CONFIG=<llm_caret.sdn with
            [storage]> and the env vars named by access_key_env / secret_key_env.
+- wiki:    LLM_CARET_WIKI_LIVE=1 plus LLM_CARET_CONFIG=<llm_caret.sdn with [wiki]
+           backend: confluence> and the env var named by token_env exported.
+           (No Confluence runs on this host; the local markdown backend is
+           covered server-free in test/01_unit/app/llm_caret/infra_wiki_spec.spl.)
 
 Without the gate the example reports `pending(BLOCKED: ...)` and returns; it
 never silently passes.
@@ -171,12 +175,64 @@ return
 
 </details>
 
+### infra servers: confluence wiki round trip (write -> search -> read)
+
+#### creates a page, finds it by title and reads the body back
+
+- wiki_write creates the page through the gate with an explicit allow
+   - Expected: wrote.is_error is false
+- wiki_search by title returns the new page id
+   - Expected: found.is_error is false
+- wiki_read returns the title and the nonce body (absolute oracle)
+   - Expected: read.is_error is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+if not _live("LLM_CARET_WIKI_LIVE"):
+    pending("BLOCKED: no local Confluence on this host — set LLM_CARET_WIKI_LIVE=1 with credentials (LLM_CARET_CONFIG with [wiki] backend: confluence + base_url/space/user, and the env var named by token_env exported) to run")
+    return
+val cfg_err = _load_live_config()
+expect(cfg_err).to_equal("")
+assert_not_equal(config_wiki_base_url(), "")
+val nonce = _nonce()
+val title = "llm-caret-live-" + nonce
+val body = "<p>round-trip body " + nonce + "</p>"
+
+step("wiki_write creates the page through the gate with an explicit allow")
+val wrote = run_tool(allow_all_policy(WS), new_tool_call("w", "wiki_write",
+    _json([_kv("title", title), _kv("body", "<p>round-trip body " + nonce + "</p>")])))
+expect(wrote.is_error).to_equal(false)
+expect(wrote.content).to_contain("created ")
+val page_id = wrote.content.split(" ")[1]
+assert_not_equal(page_id, "")
+
+step("wiki_search by title returns the new page id")
+val found = run_tool(allow_all_policy(WS), new_tool_call("s", "wiki_search", _json([_kv("query", title)])))
+expect(found.is_error).to_equal(false)
+expect(found.content).to_contain(page_id + "\t" + title)
+
+step("wiki_read returns the title and the nonce body (absolute oracle)")
+val read = run_tool(allow_all_policy(WS), new_tool_call("r", "wiki_read", _json([_kv("page_id", page_id)])))
+expect(read.is_error).to_equal(false)
+expect(read.content).to_contain("Title: " + title)
+expect(read.content).to_contain("round-trip body " + nonce)
+reset_config()
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 2 |
+| Total scenarios | 4 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 1 |

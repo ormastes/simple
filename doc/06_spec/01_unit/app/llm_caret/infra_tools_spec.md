@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,7 +38,7 @@ Audience: llm_caret maintainers and anyone extending the tool surface.
 #### advertises every infra tool with a name, description and object input_schema
 
 - Collect the full schema list run_tool can dispatch
-   - Expected: all.len() equals `11`
+   - Expected: all.len() equals `14`
 - Every infra tool has a well-formed entry
    - Expected: _json_get_str(s, "name") equals `name`
    - Expected: _json_get_str(s, "description").len() > 10 is true
@@ -57,7 +57,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Collect the full schema list run_tool can dispatch")
 val all = tool_schemas()
-expect(all.len()).to_equal(11)
+expect(all.len()).to_equal(14)
 
 step("Every infra tool has a well-formed entry")
 for name in INFRA_TOOLS:
@@ -110,12 +110,13 @@ expect(_schema_named("storage_ls")).to_contain("\"required\": []")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(_json_get_str(_schema_named("mail_send"), "description")).to_contain("MUTATING")
 expect(_json_get_str(_schema_named("storage_put"), "description")).to_contain("MUTATING")
+expect(_json_get_str(_schema_named("wiki_write"), "description")).to_contain("MUTATING")
 step("module-level lists agree with the aggregate")
 expect(mail_tool_schemas().len()).to_equal(3)
 expect(storage_tool_schemas().len()).to_equal(3)
@@ -379,6 +380,27 @@ reset_config()
 
 </details>
 
+#### mail_build_message emits RFC 5322 headers and exactly ONE DATA terminator (live-server defect 2026-08-25)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# Before the fix mail_send used smtp.send.message_build_simple, whose
+# mime_type_text_plain() call hit a bodyless forward declaration and
+# aborted the whole tool with "missing return in non-unit function"
+# against a real greenmail SMTP; it also appended message_terminate()
+# on top of smtp_dot_stuff's own terminator (a stray "." command).
+val msg = mail_build_message("caret@localhost", "to@example.test", "hello", "line one\n.starts with dot\nline three")
+expect(msg).to_equal("From: caret@localhost\r\nTo: to@example.test\r\nSubject: hello\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nline one\r\n..starts with dot\r\nline three\r\n.\r\n")
+expect(msg.split("\r\n.\r\n").len()).to_equal(2)
+```
+
+</details>
+
 #### mail_read rejects a missing or non-numeric uid
 
 <details>
@@ -487,8 +509,8 @@ expect(r.content).to_equal("unknown tool: mail_delete")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
