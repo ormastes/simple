@@ -1039,6 +1039,11 @@ pub fn native_udp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+pub fn rt_io_udp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    Ok(Value::Bool(release_socket(handle)))
+}
+
 pub fn native_udp_connect_interp(args: &[Value]) -> Result<Value, CompileError> {
     let addr = extract_socket_addr(args, 1)?;
     with_udp_socket_op!(args, 0, |socket| socket.connect(addr).map(|_| Value::Nil))
@@ -1330,6 +1335,14 @@ mod tcp_read_contract_tests {
         assert!(matches!(
             rt_io_tcp_accept_timeout_interp(&[Value::Int(-1), Value::Int(0)]),
             Ok(Value::Int(-1))
+        ));
+    }
+
+    #[test]
+    fn invalid_udp_close_is_false() {
+        assert!(matches!(
+            rt_io_udp_close_interp(&[Value::Int(-1)]),
+            Ok(Value::Bool(false))
         ));
     }
 }

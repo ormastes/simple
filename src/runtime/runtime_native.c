@@ -12837,7 +12837,7 @@ int64_t rt_io_udp_set_broadcast(int64_t fd, int64_t e) {
     return setsockopt((int)fd, SOL_SOCKET, SO_BROADCAST, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 int64_t rt_io_udp_set_read_timeout(int64_t fd, int64_t ms) { return rt_io_tcp_set_read_timeout(fd, ms); }
-int64_t rt_io_udp_close(int64_t fd) { return close((int)fd) == 0 ? 1 : 0; }
+bool rt_io_udp_close(int64_t fd) { return close((int)fd) == 0; }
 int64_t rt_io_udp_set_nonblocking(int64_t fd, int64_t e) { return rt_io_tcp_set_nonblocking(fd, e); }
 
 int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
@@ -12884,7 +12884,7 @@ int64_t rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
 int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return 0; }
 int64_t rt_io_udp_set_broadcast(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
 int64_t rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
-int64_t rt_io_udp_close(int64_t f) { (void)f; return 0; }
+bool rt_io_udp_close(int64_t f) { (void)f; return false; }
 int64_t rt_io_udp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
 int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
 #endif /* !_WIN32 */

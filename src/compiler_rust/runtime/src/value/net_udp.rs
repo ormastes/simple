@@ -331,3 +331,19 @@ pub unsafe extern "C" fn native_udp_leave_multicast_v6(
 pub extern "C" fn native_udp_close(handle: i64) -> i64 {
     close_socket(handle)
 }
+
+/// Simple-facing close contract: false means the handle was not live.
+#[no_mangle]
+pub extern "C" fn rt_io_udp_close(handle: i64) -> bool {
+    native_udp_close(handle) == NetError::Success as i64
+}
+
+#[cfg(test)]
+mod udp_close_contract_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_udp_close_is_false() {
+        assert!(!rt_io_udp_close(-1));
+    }
+}

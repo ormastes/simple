@@ -982,6 +982,7 @@ pub use value::{
     rt_io_tcp_local_addr, rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len,
     rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout, rt_io_tcp_set_write_timeout,
     rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len,
+    rt_io_udp_close,
     rt_tls_client_close, rt_tls_client_config_add_root_cert, rt_tls_client_config_enable_sni,
     rt_tls_client_config_free, rt_tls_client_config_new, rt_tls_client_config_set_alpn,
     rt_tls_client_config_set_verify_mode, rt_tls_client_connect, rt_tls_client_connect_with_sni,
