@@ -1233,3 +1233,25 @@ The inventory artifacts are retained at
 production untouched file is now bootstrap `infra/file_io.spl` with 33 rows;
 tests and duplicated test layouts remain separately visible but do not outrank
 production boundary ownership work.
+
+## Bootstrap file-I/O raw-contract checkpoint
+
+The bootstrap `infra/file_io.spl` owner contains 35 declarations; two optional
+read returns already had recognized contract state, and all declarations now
+carry adjacent, operation-specific `@unsafe(... capabilities: [ffi])` metadata.
+The contracts cover path metadata, optional text-line/byte reads, text and byte
+writes, atomic/append operations, copy/move/rename/remove, canonical paths,
+directory list/glob/walk and recursive mutation, path decomposition/joining,
+current-directory state, and file-descriptor open/size/close.
+
+The metadata identifies ambiguous non-optional empty text/list results rather
+than treating them as proven success. A static ratchet fixes the inventory at
+35 and requires every declaration to retain its tag; it passed with the
+whitespace check. No preflight call, filesystem operation, recursive scan,
+allocation, buffer copy, path normalization, branch, or descriptor operation
+was added. Production Simple and optimizer verification remain unavailable.
+
+Relative to the refreshed authoritative baseline, declaration rows and symbols
+remain 11,713 / 3,137. Unsafe-tagged rows increase from 1,737 to 1,770,
+untouched rows decrease from 9,720 to 9,687, and exact signed admission remains
+zero. Non-optional empty results still require typed `Result` migration.

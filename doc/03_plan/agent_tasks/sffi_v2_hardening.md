@@ -560,3 +560,7 @@ passing placeholder.
      3,137 symbols, 1,737 unsafe-tagged, 9,720 untouched, and zero signed
      admissions. Continue with bootstrap `infra/file_io.spl` (33 untouched
      rows), preserving its filesystem call and buffer-copy counts.
+109. Keep all 35 bootstrap file-I/O declarations explicitly tagged
+     `unsafe(ffi)`. Preserve optional reads and migrate ambiguous non-optional
+     empty text/list returns to typed errors without extra preflight calls,
+     recursive scans, path normalization, allocations, or buffer copies.
