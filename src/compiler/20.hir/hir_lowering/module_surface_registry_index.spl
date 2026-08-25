@@ -2,6 +2,90 @@
 
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_declaration_authority_lookup, module_surface_export_origin_index_position}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_logical_name_from_path, module_surface_package_name_from_name}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb, module_surface_semantic_state, module_surface_semantic_mix, module_surface_semantic_finish}
+
+fn _module_surface_text_lt(a: text, b: text) -> bool:
+    var i = 0
+    while i < a.len() and i < b.len():
+        val ab = a.byte_at(i)
+        val bb = b.byte_at(i)
+        if ab != bb: return ab < bb
+        i = i + 1
+    a.len() < b.len()
+
+fn _module_surface_sift_down(values: [text], start: i64, end: i64):
+    var root = start
+    while root * 2 + 1 <= end:
+        var child = root * 2 + 1
+        if child + 1 <= end and _module_surface_text_lt(values[child], values[child + 1]):
+            child = child + 1
+        if not _module_surface_text_lt(values[root], values[child]): return
+        val tmp = values[root]
+        values[root] = values[child]
+        values[child] = tmp
+        root = child
+
+fn _module_surface_sort(values: [text]):
+    if values.len() < 2: return
+    var start = (values.len() - 2) / 2
+    while start >= 0:
+        _module_surface_sift_down(values, start, values.len() - 1)
+        if start == 0: break
+        start = start - 1
+    var end = values.len() - 1
+    while end > 0:
+        val tmp = values[end]
+        values[end] = values[0]
+        values[0] = tmp
+        end = end - 1
+        _module_surface_sift_down(values, 0, end)
+
+fn _module_surface_final_semantic_digest(surface: ModuleSurface) -> text:
+    if not surface.semantic_cacheable: return ""
+    var digest = module_surface_semantic_state()
+    digest = module_surface_semantic_mix(digest, "schema", "module-surface-frozen-v1")
+    for limb in [surface.semantic_hash0, surface.semantic_hash1, surface.semantic_hash2, surface.semantic_hash3]:
+        digest = module_surface_semantic_mix(digest, "declaration-limb", "{limb}")
+    var i = 0
+    while i < surface.import_target_names.len():
+        digest = module_surface_semantic_mix(digest, "import-target", surface.import_target_names[i])
+        digest = module_surface_semantic_mix(digest, "import-source", surface.imports[i].module)
+        digest = module_surface_semantic_mix(digest, "import-lazy", "{surface.imports[i].is_lazy}")
+        val item_start = surface.import_item_offsets[i]
+        val item_end = surface.import_item_offsets[i + 1]
+        var item = item_start
+        while item < item_end:
+            digest = module_surface_semantic_mix(digest, "import-item-name", surface.import_item_names[item])
+            digest = module_surface_semantic_mix(digest, "import-item-alias", surface.import_item_aliases[item])
+            digest = module_surface_semantic_mix(digest, "import-item-has-alias", "{surface.import_item_has_alias[item]}")
+            item = item + 1
+        i = i + 1
+    i = 0
+    while i < surface.export_route_sources.len():
+        digest = module_surface_semantic_mix(digest, "route-source", surface.export_route_sources[i])
+        digest = module_surface_semantic_mix(digest, "route-local", surface.export_route_locals[i])
+        digest = module_surface_semantic_mix(digest, "route-target", surface.export_route_target_names[i])
+        digest = module_surface_semantic_mix(digest, "route-glob", "{surface.export_route_is_glob[i]}")
+        i = i + 1
+    for friend in surface.friends:
+        digest = module_surface_semantic_mix(digest, "friend", friend)
+    for internal_export in surface.internal_exports:
+        digest = module_surface_semantic_mix(digest, "internal-export", internal_export)
+    # Origin discovery can traverse sibling owners in different orders. Sort
+    # only the scalar names, then resolve their aligned row positions.
+    var origin_names = surface.export_origin_index.names.copy()
+    _module_surface_sort(origin_names)
+    i = 0
+    while i < origin_names.len():
+        if not surface.export_origin_index.index_by_name.contains_key(origin_names[i]): return ""
+        val row = surface.export_origin_index.index_by_name[origin_names[i]]
+        if row < 0 or row >= surface.export_origin_index.names.len(): return ""
+        digest = module_surface_semantic_mix(digest, "origin-name", origin_names[i])
+        digest = module_surface_semantic_mix(digest, "origin-owner", surface.export_origin_index.owner_modules[row])
+        digest = module_surface_semantic_mix(digest, "origin-source", surface.export_origin_index.source_names[row])
+        digest = module_surface_semantic_mix(digest, "origin-kind", surface.export_origin_index.resolution_kinds[row])
+        i = i + 1
+    module_surface_semantic_finish(digest)
 
 pub(package) fn module_surfaces_validate_index_alignment(
     surfaces: [ModuleSurface],
@@ -528,6 +612,16 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         surface.frozen = true
         surface.export_origin_index.frozen = true
         surface.declaration_authority_index.frozen = true
+        # Final identity is published only after every declaration, route,
+        # origin, and freeze flag is complete. No consumer can observe the
+        # construction-only declaration limbs as a frozen surface digest.
+        val final_semantic_hex = _module_surface_final_semantic_digest(surface)
+        surface.semantic_cacheable = final_semantic_hex.len() == 64
+        if surface.semantic_cacheable:
+            surface.semantic_hash0 = module_surface_semantic_hex_limb(final_semantic_hex, 0)
+            surface.semantic_hash1 = module_surface_semantic_hex_limb(final_semantic_hex, 1)
+            surface.semantic_hash2 = module_surface_semantic_hex_limb(final_semantic_hex, 2)
+            surface.semantic_hash3 = module_surface_semantic_hex_limb(final_semantic_hex, 3)
         registry.surfaces[surface_index] = surface
         surface_index = surface_index + 1
     registry.generation = generation
