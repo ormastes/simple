@@ -140,6 +140,61 @@ Reverting the source edit alone turns it red:
 FAIL — 1 check(s) performed, offender(s): source-half(missing: total_match_trap_ok all_discs_resolved any_guarded terminate_abort-call)
 ```
 
+## Blast radius, measured (2026-08-25)
+
+Headline: **no legitimate program hit the trap.** `grep -c "total enum match
+fell through"` over every run log of every natively-built-and-executed program
+in this sweep returns **0**. The only place the trap has ever fired is the
+fixture built to force it.
+
+Method: native-build + run each program with the fixed compiler, then repeat the
+failures against a **pre-fix control worktree** (`HEAD~1`, verified to contain
+zero occurrences of `total_match_trap_ok`) using the same seed binary. Reverting
+in place was deliberately avoided — the compiler `.spl` source is read live on
+every run, so an in-tree revert would have corrupted the concurrently running
+jobs.
+
+| program | post-fix | pre-fix control | verdict |
+|---|---|---|---|
+| `test/perf/bytes_push_1mib.spl` | run rc=0 | — | OK |
+| `test/04_smoke/compiler_unparenthesized_tuple_for_runtime.spl` | build rc=0, run **rc=139** | build rc=0, run **rc=139** | **PRE-EXISTING** |
+| `test/04_smoke/compiler_unparenthesized_tuple_for.spl` | build **rc=1** | build **rc=1** | **PRE-EXISTING** |
+| `test/perf/run_duplicate_check.spl` | build **rc=1** | — (fails in HIR, upstream of this change) | **PRE-EXISTING** |
+
+Attribution detail, so none of this rests on inference:
+
+- **The SEGV is provably untouched.** Beyond the identical `rc=139` on both
+  sides, `sha256sum` of the post-fix and pre-fix binaries for
+  `compiler_unparenthesized_tuple_for_runtime.spl` collapses to **one distinct
+  hash** — the two executables are **byte-identical**, so this change cannot
+  have contributed to the crash. Its run log also shows a bare
+  `[simple-runtime] Fatal: SIGSEGV`, with no `rt_panic` line and no
+  `total enum match fell through` text, which is independently inconsistent with
+  the trap having fired.
+- **Both build failures are missing-name defects, not codegen.**
+  `compiler_unparenthesized_tuple_for.spl` fails with
+  `error: MIR lowering error: unresolved method call: enumerate` — verbatim
+  identical on the pre-fix control — and the file does call `.enumerate()`
+  (`names.enumerate()`, line 6). `run_duplicate_check.spl` fails earlier still,
+  in **HIR** lowering (`unresolved name: exit`, `default_config`,
+  `collect_files`), a phase upstream of the MIR site this change touches.
+
+**Inconclusive by design, reported rather than omitted:** a whole-compiler blast
+build (`native-build src/app/cli/bootstrap_main.spl`, 694 modules) was started
+and killed by this lane. It was not a red — it never reached a verdict. Running
+the pure-Simple compiler under the seed *interpreter* parsed only 122/694 modules
+in 547 s, projecting well past its 3600 s cap before MIR lowering even began; it
+was stopped to free capacity for the control run, which is the decisive evidence.
+That measurement needs a deployed native compiler to be affordable and is left
+open rather than claimed.
+
+**Two structural reasons the blast surface is small**, stated so the low count is
+not mistaken for a thin sample: the trap exists only in *natively generated*
+code, so every interpreted path (which is most of the test suite) is unaffected
+by construction; and within native code the four gates confine it to matches
+that are total, name-unambiguous, fully resolved and unguarded — i.e. code no
+valid value can reach.
+
 ## Known gaps, stated rather than papered over
 
 - **The Rust seed is not fixed.** `hir/lower/expr/control.rs:464` and
