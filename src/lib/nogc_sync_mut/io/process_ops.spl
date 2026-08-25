@@ -5,6 +5,7 @@ use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 
 # Extern fn declarations (runtime resolves at file level)
 
+@unsafe(reason: "raw stderr runtime-value ABI; provider status is discarded", capabilities: [ffi])
 extern fn rt_stderr_write(s: text)
 @unsafe(reason: "raw process capture; exit_code -1 is the execution-failure sentinel", capabilities: [ffi])
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -27,7 +28,9 @@ extern fn rt_process_pin_executable(canonical_path: text) -> i64
 extern fn rt_process_close_pinned_executable(handle: i64) -> bool
 @unsafe(reason: "spawns private-pipe process from an already pinned executable descriptor", capabilities: [ffi])
 extern fn rt_process_spawn_pinned_piped(handle: i64, args: [text]) -> i64
+@unsafe(reason: "unbacked browser renderer sandbox spawn ABI; positive PID ownership and failure sentinel are unverified", capabilities: [ffi])
 extern fn rt_browser_renderer_spawn_sandboxed(cmd: text, args: [text]) -> i64
+@unsafe(reason: "unbacked process sandbox transition ABI; false conflates refusal, unsupported, and runtime failure", capabilities: [ffi])
 extern fn rt_browser_renderer_sandbox_enter() -> bool
 @unsafe(reason: "raw piped-child stdin status; false sentinel means absent or write failure", capabilities: [ffi])
 extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
@@ -43,12 +46,15 @@ extern fn rt_process_is_alive(pid: i64) -> bool
 extern fn rt_process_is_alive_checked(pid: i64) -> i32
 @unsafe(reason: "raw piped-child close status; false sentinel means absent or cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped(pid: i64) -> bool
+@unsafe(reason: "raw file read ABI; nil failure is declared as non-optional text in this legacy facade", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{file_delete}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
+@unsafe(reason: "raw stdout flush ABI; native provider status is discarded", capabilities: [ffi])
 extern fn rt_stdout_flush()
+@unsafe(reason: "raw stderr flush ABI; native provider status is discarded", capabilities: [ffi])
 extern fn rt_stderr_flush()
 
 fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
@@ -234,10 +240,12 @@ pub fn process_spawn_piped_result(cmd: text, args: [text]) -> Result<i64, text>:
     Ok(pid)
 
 pub fn browser_renderer_spawn_sandboxed(cmd: text, args: [text]) -> i64:
-    rt_browser_renderer_spawn_sandboxed(cmd, args)
+    unsafe(capabilities: [ffi]):
+        rt_browser_renderer_spawn_sandboxed(cmd, args)
 
 pub fn browser_renderer_sandbox_enter() -> bool:
-    rt_browser_renderer_sandbox_enter()
+    unsafe(capabilities: [ffi]):
+        rt_browser_renderer_sandbox_enter()
 
 pub fn process_write_stdin(pid: i64, data: text) -> bool:
     _process_write_stdin_raw(pid, data)
@@ -317,10 +325,12 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stdout = ""
     var stderr = ""
     if file_exists(stdout_file):
-        stdout = rt_file_read_text(stdout_file)
+        unsafe(capabilities: [ffi]):
+            stdout = rt_file_read_text(stdout_file)
         file_delete(stdout_file)
     if file_exists(stderr_file):
-        stderr = rt_file_read_text(stderr_file)
+        unsafe(capabilities: [ffi]):
+            stderr = rt_file_read_text(stderr_file)
         file_delete(stderr_file)
 
     if pid <= 0:
@@ -362,11 +372,13 @@ fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (tex
     var stderr = ""
 
     if file_exists(stdout_file):
-        stdout = rt_file_read_text(stdout_file)
+        unsafe(capabilities: [ffi]):
+            stdout = rt_file_read_text(stdout_file)
         file_delete(stdout_file)
 
     if file_exists(stderr_file):
-        stderr = rt_file_read_text(stderr_file)
+        unsafe(capabilities: [ffi]):
+            stderr = rt_file_read_text(stderr_file)
         file_delete(stderr_file)
 
     if exit_code == -2:
@@ -481,7 +493,8 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
                 case Ok(chunk):
                     if chunk.len() > 0:
                         print chunk
-                        rt_stdout_flush()
+                        unsafe(capabilities: [ffi]):
+                            rt_stdout_flush()
                         stdout_relayed = stdout_relayed + chunk.len()
                 case Err(message):
                     relay_error = message
@@ -494,7 +507,8 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
                 case Ok(chunk_err):
                     if chunk_err.len() > 0:
                         eprint(chunk_err)
-                        rt_stderr_flush()
+                        unsafe(capabilities: [ffi]):
+                            rt_stderr_flush()
                         stderr_relayed = stderr_relayed + chunk_err.len()
                 case Err(message):
                     relay_error = message
@@ -517,10 +531,12 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stdout = ""
     var stderr = ""
     if file_exists(stdout_file):
-        stdout = rt_file_read_text(stdout_file)
+        unsafe(capabilities: [ffi]):
+            stdout = rt_file_read_text(stdout_file)
         file_delete(stdout_file)
     if file_exists(stderr_file):
-        stderr = rt_file_read_text(stderr_file)
+        unsafe(capabilities: [ffi]):
+            stderr = rt_file_read_text(stderr_file)
         file_delete(stderr_file)
 
     if relay_error != "":
@@ -777,7 +793,8 @@ fn process_kill(pid: i64) -> bool:
 # It must write the real fd 2. Do NOT reintroduce a `print` fallback here.
 # See doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md
 fn eprint(msg: text):
-    rt_stderr_write("{msg}\n")
+    unsafe(capabilities: [ffi]):
+        rt_stderr_write("{msg}\n")
 
 fn _process_group_alive(pgid_file: text) -> bool:
     """
@@ -792,7 +809,10 @@ fn _process_group_alive(pgid_file: text) -> bool:
     """
     if not file_exists(pgid_file):
         return false
-    val pgid = rt_file_read_text(pgid_file).trim()
+    var pgid_text = ""
+    unsafe(capabilities: [ffi]):
+        pgid_text = rt_file_read_text(pgid_file)
+    val pgid = pgid_text.trim()
     if pgid == "":
         return false
     val (_out, _err, code) = _process_run_bounded_raw("pkill", ["-0", "-s", "{pgid}"], 2000, 4096)
@@ -806,7 +826,10 @@ fn _process_kill_group(pgid_file: text):
     # TERM first, then KILL.
     if not file_exists(pgid_file):
         return
-    val pgid = rt_file_read_text(pgid_file).trim()
+    var pgid_text = ""
+    unsafe(capabilities: [ffi]):
+        pgid_text = rt_file_read_text(pgid_file)
+    val pgid = pgid_text.trim()
     if pgid == "":
         return
     _process_run_bounded_raw("pkill", ["-TERM", "-s", "{pgid}"], 2000, 4096)

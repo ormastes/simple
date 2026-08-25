@@ -643,3 +643,10 @@ passing placeholder.
      command/channel output, remote path semantics, and typed errors to exact
      signed admission without extra network/file operations, allocations,
      copies, lookups, locks, or generic dispatch on the hot path.
+126. Keep all 38 process declarations across the canonical library and
+     application closure owners explicitly tagged and lexically scoped. Do not
+     add weak browser-sandbox providers. Generate one authoritative contract
+     for nullable file reads and fallible stderr/flush status, then migrate the
+     duplicate declarations together. Preserve one provider call per operation
+     and add no polling, filesystem scan, launch, allocation, copy, lookup,
+     lock, branch, or generic dispatch beyond contract-required status checks.

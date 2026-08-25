@@ -1590,3 +1590,27 @@ unreviewed provider.
 Estimated repository totals remain 11,651 declarations / 3,137 symbols.
 Unsafe-tagged rows increase from 2,226 to 2,249, untouched rows decrease from
 9,230 to 9,207, and exact-artifact verified-and-signed admission remains zero.
+
+## Process I/O raw-contract checkpoint
+
+The canonical no-GC process owner has 23 declarations and the application
+closure owner has 15. The final six and five untagged declarations respectively
+now carry `unsafe(ffi)` metadata, and every direct call added by those legacy
+declarations is lexically scoped. Browser renderer sandbox spawn/enter still
+have no C or Rust provider. File read exists but returns nullable
+`RuntimeValue` while both legacy facades declare non-optional `text`. Native
+stderr write and flush providers return `i64` status while these facades discard
+it through unit declarations; the providers also currently return zero even
+when Rust flush reports failure.
+
+The lexical/metadata changes add no syscall, filesystem access, process launch,
+poll, allocation, copy, lookup, lock, branch, or generic dispatch. Variable
+placement around lexical unsafe regions retains the same single file-size/read
+or flush operation per existing loop iteration. A static ratchet fixes both
+inventories, requires every tag, rejects an unreviewed browser provider, and
+pins the known native signatures until one canonical generated contract
+replaces duplicate declarations.
+
+Estimated repository totals remain 11,651 declarations / 3,137 symbols.
+Unsafe-tagged rows increase from 2,249 to 2,260, untouched rows decrease from
+9,207 to 9,196, and exact-artifact verified-and-signed admission remains zero.
