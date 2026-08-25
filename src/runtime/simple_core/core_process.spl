@@ -12,9 +12,9 @@ extern fn abort()
 extern fn gettimeofday(tv: i64, tz: i64) -> i64
 @unsafe(reason: "raw libc clock output-pointer ABI", capabilities: [ffi])
 extern fn clock_gettime(clk_id: i64, tp: i64) -> i64
-@unsafe(reason: "raw libc heap allocation ABI; zero means failure", capabilities: [ffi])
+@unsafe(reason: "raw libc heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
 extern fn malloc(size: i64) -> i64
-@unsafe(reason: "raw libc zeroed heap allocation ABI; count-size product must not overflow", capabilities: [ffi])
+@unsafe(reason: "raw libc zeroed heap allocation ABI; count-size product must not overflow", capabilities: [ffi, raw_ptr])
 extern fn calloc(count: i64, size: i64) -> i64
 @unsafe(reason: "raw libc owned heap-pointer release ABI", capabilities: [ffi, raw_ptr])
 extern fn free(ptr: i64)
@@ -22,9 +22,9 @@ extern fn free(ptr: i64)
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
 @unsafe(reason: "raw pointer/offset byte load ABI", capabilities: [ffi])
 extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
-@unsafe(reason: "raw pointer/offset i64 store ABI", capabilities: [ffi])
+@unsafe(reason: "raw pointer/offset i64 store ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
-@unsafe(reason: "raw pointer/offset byte store ABI", capabilities: [ffi])
+@unsafe(reason: "raw pointer/offset byte store ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 @unsafe(reason: "raw tagged-array handle length ABI", capabilities: [ffi])
 extern fn rt_array_len(array: i64) -> i64
@@ -40,7 +40,7 @@ extern fn rt_tuple_new(len: i64) -> i64
 extern fn rt_tuple_set(tuple: i64, idx: i64, value: i64) -> i8
 @unsafe(reason: "raw owned tagged-integer value allocation ABI", capabilities: [ffi])
 extern fn rt_value_int(value: i64) -> i64
-@unsafe(reason: "raw tagged-string borrowed data-pointer ABI", capabilities: [ffi])
+@unsafe(reason: "raw tagged-string borrowed data-pointer ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_string_data(value: i64) -> i64
 @unsafe(reason: "raw tagged-string length ABI", capabilities: [ffi])
 extern fn rt_string_len(value: i64) -> i64
@@ -50,9 +50,9 @@ extern fn rt_string_new(bytes: i64, len: i64) -> i64
 extern fn rt_stderr_write(value: i64) -> i64
 @unsafe(reason: "raw libc process fork ABI", capabilities: [ffi])
 extern fn fork() -> i64
-@unsafe(reason: "raw libc path/argv pointer exec ABI", capabilities: [ffi])
+@unsafe(reason: "raw libc path/argv pointer exec ABI", capabilities: [ffi, raw_ptr])
 extern fn execvp(path: i64, argv: i64) -> i64
-@unsafe(reason: "raw libc process wait and status-output pointer ABI", capabilities: [ffi])
+@unsafe(reason: "raw libc process wait and status-output pointer ABI", capabilities: [ffi, raw_ptr])
 extern fn waitpid(pid: i64, status: i64, options: i64) -> i64
 @unsafe(reason: "raw libc process-id ABI", capabilities: [ffi])
 extern fn getpid() -> i64
@@ -102,6 +102,56 @@ fn _sffi_rt_string_new(bytes: i64, len: i64) -> i64:
 fn _sffi_kill(pid: i64, signal_num: i64) -> i64:
     unsafe(capabilities: [ffi]):
         kill(pid, signal_num)
+
+@always_inline
+fn _sffi_calloc(count: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        calloc(count, size)
+
+@always_inline
+fn _sffi_malloc(size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        malloc(size)
+
+@always_inline
+fn _sffi_store_i64(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_i64(ptr, offset, value)
+
+@always_inline
+fn _sffi_store_u8(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_u8(ptr, offset, value)
+
+@always_inline
+fn _sffi_rt_tuple_set(tuple: i64, idx: i64, value: i64) -> i8:
+    unsafe(capabilities: [ffi]):
+        rt_tuple_set(tuple, idx, value)
+
+@always_inline
+fn _sffi_rt_string_data(value: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_string_data(value)
+
+@always_inline
+fn _sffi_getpid() -> i64:
+    unsafe(capabilities: [ffi]):
+        getpid()
+
+@always_inline
+fn _sffi_fork() -> i64:
+    unsafe(capabilities: [ffi]):
+        fork()
+
+@always_inline
+fn _sffi_execvp(path: i64, argv: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        execvp(path, argv)
+
+@always_inline
+fn _sffi_waitpid(pid: i64, status: i64, options: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        waitpid(pid, status, options)
 
 var _rt_cli_argc: i64 = 0
 var _rt_cli_argv: i64 = 0
@@ -160,7 +210,7 @@ pub fn sys_get_args() -> i64:
     return rt_cli_get_args()
 
 pub fn rt_getpid() -> i64:
-    getpid()
+    _sffi_getpid()
 
 pub fn rt_cli_arg_count() -> i64:
     return _rt_cli_argc
@@ -178,7 +228,7 @@ pub fn rt_time_now_unix() -> i64:
 
 pub fn rt_time_now_unix_micros() -> i64:
     # struct timeval { time_t tv_sec; suseconds_t tv_usec; } — 16 bytes
-    val tv = malloc(16)
+    val tv = _sffi_malloc(16)
     if tv < 1:
         return 0
     val result = gettimeofday(tv, 0)
@@ -193,7 +243,7 @@ pub fn rt_time_now_unix_micros() -> i64:
 pub fn rt_time_now_nanos() -> i64:
     # CLOCK_MONOTONIC = 1 on Linux
     # struct timespec { time_t tv_sec; long tv_nsec; } — 16 bytes
-    val ts = malloc(16)
+    val ts = _sffi_malloc(16)
     if ts < 1:
         return 0
     val result = clock_gettime(1, ts)
@@ -207,7 +257,7 @@ pub fn rt_time_now_nanos() -> i64:
 
 pub fn rt_time_now_micros() -> i64:
     # CLOCK_MONOTONIC = 1 on Linux
-    val ts = malloc(16)
+    val ts = _sffi_malloc(16)
     if ts < 1:
         return 0
     val result = clock_gettime(1, ts)
@@ -239,42 +289,42 @@ pub fn rt_term_read_timeout(max_len: i64, timeout_ms: i64) -> text:
 
 fn _process_result(exit_code: i64) -> i64:
     val result = rt_tuple_new(3)
-    rt_tuple_set(result, 0, _sffi_rt_string_new(0, 0))
-    rt_tuple_set(result, 1, _sffi_rt_string_new(0, 0))
-    rt_tuple_set(result, 2, rt_value_int(exit_code))
+    _sffi_rt_tuple_set(result, 0, _sffi_rt_string_new(0, 0))
+    _sffi_rt_tuple_set(result, 1, _sffi_rt_string_new(0, 0))
+    _sffi_rt_tuple_set(result, 2, rt_value_int(exit_code))
     result
 
 fn _process_run_inherit(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     if cmd_ptr < 1 or cmd_len < 1:
         return -1
-    val command = malloc(cmd_len + 1)
+    val command = _sffi_malloc(cmd_len + 1)
     if command < 1:
         return -1
     var i = 0
     while i < cmd_len:
-        spl_store_u8(command, i, spl_load_u8(cmd_ptr, i))
+        _sffi_store_u8(command, i, spl_load_u8(cmd_ptr, i))
         i = i + 1
-    spl_store_u8(command, cmd_len, 0)
+    _sffi_store_u8(command, cmd_len, 0)
 
     val argc = rt_array_len(args)
-    val argv = calloc(argc + 2, 8)
+    val argv = _sffi_calloc(argc + 2, 8)
     if argv < 1:
         _sffi_free(command)
         return -1
-    spl_store_i64(argv, 0, command)
+    _sffi_store_i64(argv, 0, command)
     i = 0
     while i < argc:
-        spl_store_i64(argv, (i + 1) * 8, rt_string_data(rt_array_get_text(args, i)))
+        _sffi_store_i64(argv, (i + 1) * 8, _sffi_rt_string_data(rt_array_get_text(args, i)))
         i = i + 1
 
-    val status = calloc(1, 8)
+    val status = _sffi_calloc(1, 8)
     if status < 1:
         _sffi_free(argv)
         _sffi_free(command)
         return -1
-    val pid = fork()
+    val pid = _sffi_fork()
     if pid == 0:
-        execvp(command, argv)
+        _sffi_execvp(command, argv)
         _sffi_exit(127)
         return 127
     if pid < 1:
@@ -283,7 +333,7 @@ fn _process_run_inherit(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
         _sffi_free(command)
         return -1
 
-    val waited = waitpid(pid, status, 0)
+    val waited = _sffi_waitpid(pid, status, 0)
     val exit_code = if waited < 1: -1 else: (_sffi_load_i64(status, 0) >> 8) & 255
     _sffi_free(status)
     _sffi_free(argv)
@@ -294,7 +344,7 @@ pub fn rt_process_run_inherit(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     _process_run_inherit(cmd_ptr, cmd_len, args)
 
 pub fn rt_process_run_inherit_value(cmd: i64, args: i64) -> i64:
-    _process_run_inherit(rt_string_data(cmd), rt_string_len(cmd), args)
+    _process_run_inherit(_sffi_rt_string_data(cmd), rt_string_len(cmd), args)
 
 pub fn rt_process_run(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     # ponytail: stdout/stderr inherit the guest console; add pipe capture when
@@ -318,7 +368,7 @@ pub fn spl_thread_cpu_count() -> i64:
 pub fn rt_signal_check(signal_num: i64) -> i64:
     if signal_num <= 0:
         return 0
-    val pending = calloc(1, 128)
+    val pending = _sffi_calloc(1, 128)
     if pending < 1:
         return 0
     val queried = sigpending(pending)
@@ -340,24 +390,24 @@ fn _process_stop_group(pid: i64, worker_live: bool):
         _sffi_kill(pid, 9)
 
 fn _process_guard_exec(command: i64, argv: i64, expected_parent: i64):
-    val worker = fork()
+    val worker = _sffi_fork()
     if worker == 0:
         setpgid(0, 0)
-        execvp(command, argv)
+        _sffi_execvp(command, argv)
         _sffi_exit(127)
         return
     if worker < 0:
         _sffi_exit(127)
         return
     setpgid(worker, worker)
-    val status = calloc(1, 8)
+    val status = _sffi_calloc(1, 8)
     if status < 1:
         _process_stop_group(worker, true)
         _sffi_exit(127)
         return
     var wait_errors = 0
     while true:
-        val waited = waitpid(worker, status, 1)
+        val waited = _sffi_waitpid(worker, status, 1)
         if waited == worker:
             val raw_status = _sffi_load_i64(status, 0)
             _process_stop_group(worker, false)
@@ -365,7 +415,7 @@ fn _process_guard_exec(command: i64, argv: i64, expected_parent: i64):
             if (raw_status & 127) != 0:
                 val signal_num = raw_status & 127
                 signal(signal_num, 0)
-                _sffi_kill(getpid(), signal_num)
+                _sffi_kill(_sffi_getpid(), signal_num)
                 _sffi_exit(127)
             _sffi_exit((raw_status >> 8) & 255)
             return
@@ -378,7 +428,7 @@ fn _process_guard_exec(command: i64, argv: i64, expected_parent: i64):
             wait_errors = 0
         if waited < 0 or getppid() != expected_parent:
             _process_stop_group(worker, true)
-            waitpid(worker, status, 0)
+            _sffi_waitpid(worker, status, 0)
             _sffi_free(status)
             _sffi_exit(143)
             return
@@ -387,31 +437,31 @@ fn _process_guard_exec(command: i64, argv: i64, expected_parent: i64):
 fn _process_spawn(cmd_ptr: i64, cmd_len: i64, args: i64, guarded: bool) -> i64:
     if cmd_ptr < 1 or cmd_len < 1:
         return -1
-    val command = malloc(cmd_len + 1)
+    val command = _sffi_malloc(cmd_len + 1)
     if command < 1:
         return -1
     var i = 0
     while i < cmd_len:
-        spl_store_u8(command, i, spl_load_u8(cmd_ptr, i))
+        _sffi_store_u8(command, i, spl_load_u8(cmd_ptr, i))
         i = i + 1
-    spl_store_u8(command, cmd_len, 0)
+    _sffi_store_u8(command, cmd_len, 0)
     val argc = rt_array_len(args)
-    val argv = calloc(argc + 2, 8)
+    val argv = _sffi_calloc(argc + 2, 8)
     if argv < 1:
         _sffi_free(command)
         return -1
-    spl_store_i64(argv, 0, command)
+    _sffi_store_i64(argv, 0, command)
     i = 0
     while i < argc:
-        spl_store_i64(argv, (i + 1) * 8, rt_string_data(rt_array_get_text(args, i)))
+        _sffi_store_i64(argv, (i + 1) * 8, _sffi_rt_string_data(rt_array_get_text(args, i)))
         i = i + 1
-    val expected_parent = getpid()
-    val pid = fork()
+    val expected_parent = _sffi_getpid()
+    val pid = _sffi_fork()
     if pid == 0:
         if guarded:
             _process_guard_exec(command, argv, expected_parent)
         else:
-            execvp(command, argv)
+            _sffi_execvp(command, argv)
             _sffi_exit(127)
             return -1
     _sffi_free(argv)
@@ -432,17 +482,17 @@ fn _process_exit_code(status: i64) -> i64:
 pub fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64:
     if pid <= 0:
         return -1
-    val status = calloc(1, 8)
+    val status = _sffi_calloc(1, 8)
     if status < 1:
         return -1
     if timeout_ms <= 0:
-        val waited = waitpid(pid, status, 0)
+        val waited = _sffi_waitpid(pid, status, 0)
         val code = if waited == pid: _process_exit_code(_sffi_load_i64(status, 0)) else: -1
         _sffi_free(status)
         return code
     var elapsed = 0
     while elapsed < timeout_ms:
-        val waited = waitpid(pid, status, 1)
+        val waited = _sffi_waitpid(pid, status, 1)
         if waited == pid:
             val code = _process_exit_code(_sffi_load_i64(status, 0))
             _sffi_free(status)
@@ -467,9 +517,9 @@ pub fn rt_process_kill(pid: i64) -> i8:
     if _sffi_kill(pid, 0) == 0:
         if _sffi_kill(pid, 9) != 0:
             return 0
-    val status = calloc(1, 8)
+    val status = _sffi_calloc(1, 8)
     if status > 0:
-        waitpid(pid, status, 0)
+        _sffi_waitpid(pid, status, 0)
         _sffi_free(status)
     1
 

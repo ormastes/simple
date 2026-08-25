@@ -2439,6 +2439,30 @@ operation and adds no dispatch, allocation, copy, scan, lookup, lock, hash, or
 signature check.  Lower-volume process boundaries and exact-artifact proof
 remain outstanding; verified-and-signed admission remains 0.
 
+## simple-core process spawn/memory authority checkpoint
+
+The next ten `core_process.spl` operations now have mandatory-inline owners:
+zeroed/raw allocation, i64/byte stores, tuple field transfer, borrowed string
+data, PID retrieval, fork, exec, and waitpid.  Allocation, pointer stores,
+borrowed data, argv, and wait-status output require `ffi, raw_ptr`; tuple and
+PID-only operations retain `ffi`.  Fork PIDs, exec errors, and wait results
+remain signed integers rather than booleans.
+
+The extended process authority ratchet passed and now pins load/store intrinsic
+lowering in both native backends.  The census recognized 41 of 44 source
+occurrences:
+
+- raw call sites: 19,927 -> 19,896
+- missing authority: 15,916 -> 15,875
+- lexical unsafe: 3,092 -> 3,102
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Mandatory inlining preserves all allocation, store, tuple, fork/exec/wait, and
+PID operation counts.  No new dispatch, allocation, copy, scan, lookup, lock,
+hash, or signature check was added.  Remaining low-volume process calls and
+artifact verification are outstanding; verified-and-signed admission is 0.
+
 ## simple-core filesystem open/seek authority checkpoint
 
 The next 40 `core_fs.spl` operations—heap allocation, FILE/path opening,
