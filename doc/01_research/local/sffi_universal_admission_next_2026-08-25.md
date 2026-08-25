@@ -461,3 +461,31 @@ artifact admission. The exact declaration delta is two tagged rows removed and
 none added: 12,017 rows / 3,172 symbols, 1,188 tagged, 636
 `unsafe_contract_declared`, 10,563 untouched, and zero exact-artifact
 verified-and-signed.
+
+## General crypto unresolved-provider removal checkpoint
+
+The general crypto facade advertised 17 raw symbols, duplicated again by
+`app.io.crypto_ffi`. A provider search across Rust runtime/compiler and C
+runtime sources found an implementation only for `rt_random_hex`; the other 16
+hash/HMAC/password/AES/key/PBKDF2/random-byte symbols had no implementation.
+The app module is now a zero-cost re-export. The canonical facade routes
+SHA-256/SHA-512/SHA3-256/BLAKE3 and HMAC-SHA256/SHA512 to existing in-tree
+owners, removes the unsupported password/AES/key/PBKDF2 advertisements, and
+keeps only `rt_random_hex` under one lexical `unsafe(ffi)` wrapper with
+presence, exact-length, lowercase-hex, and nonzero-entropy validation.
+The async compatibility facade now exports only this supported surface, so it
+cannot keep the removed provider names alive through another module path.
+
+The supported algorithms remain linear in input length. CSPRNG remains one
+provider call plus its existing linear output validation. No lookup, retry,
+generic dispatch, or extra entropy buffer was added. Hash/HMAC previously had
+no callable provider, so routing them to Pure Simple changes an unresolved
+operation into a real implementation rather than regressing an executable
+baseline. Existing entropy failure specs and crypto vector suites remain the
+correctness coverage. The focused static ratchet passed; production execution
+is still blocked by the policy-rejected bootstrap runtime.
+
+Thirty-three declaration rows and sixteen unsupported symbol identities are
+removed. The source-only ledger is now 11,984 rows / 3,156 symbols: 1,189
+tagged, 637 `unsafe_contract_declared`, 10,529 untouched, and zero
+exact-artifact verified-and-signed.

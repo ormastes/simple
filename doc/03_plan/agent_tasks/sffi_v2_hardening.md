@@ -373,3 +373,10 @@ passing placeholder.
     direct-plus-component diagnostic schedule; do not add provider calls,
     copies, lookups, or success-path allocations. Exact-artifact admission is
     still required before this boundary can be called verified or signed.
+71. Keep `crypto_sffi` limited to implemented providers. Hash/HMAC route to
+    their in-tree owners; `rt_random_hex` is the sole raw declaration and must
+    remain one lexical call followed by exact entropy validation. Do not
+    restore the 16 unresolved password/AES/key/PBKDF2/random-byte symbols or
+    the duplicate app facade. Ledger: 11,984 rows / 3,156 symbols, 10,529
+    untouched, and zero exact-artifact signed/admitted. A policy-accepted
+    self-hosted runtime is still required for executable/performance evidence.

@@ -13,6 +13,9 @@ rsa_facade="$root/src/os/crypto/rsa.spl"
 jwt="$root/src/lib/common/jwt/sign.spl"
 common_p256="$root/src/lib/common/crypto/ecdsa_p256.spl"
 os_ed25519="$root/src/os/crypto/ed25519.spl"
+app_crypto="$root/src/app/io/crypto_ffi.spl"
+canonical_crypto="$root/src/lib/nogc_sync_mut/io/crypto_sffi.spl"
+async_crypto="$root/src/lib/nogc_async_mut/io/crypto_sffi.spl"
 tls_verify_dir="$root/src/os/tls13/_CertVerify"
 failed=0
 
@@ -78,6 +81,32 @@ fi
 if ! grep -q 'fn ed25519_sign_live.*Result<\[u8\], text>' "$os_ed25519" ||
    ! grep -q 'ed25519_sign_seed_checked' "$os_ed25519"; then
     echo "OS Ed25519 live signing must preserve typed provider failures" >&2
+    failed=1
+fi
+if grep -n -E 'extern fn rt_|^[[:space:]]*fn ' "$app_crypto"; then
+    echo "app crypto compatibility module must not duplicate providers or wrappers" >&2
+    failed=1
+fi
+if ! grep -q '^export use std\.nogc_sync_mut\.io\.crypto_sffi\.\*$' "$app_crypto"; then
+    echo "app crypto compatibility module must re-export the canonical owner" >&2
+    failed=1
+fi
+if [ "$(grep -c '^[[:space:]]*extern fn rt_' "$canonical_crypto")" -ne 1 ] ||
+   ! grep -q 'extern fn rt_random_hex' "$canonical_crypto"; then
+    echo "canonical crypto facade may own only the implemented CSPRNG provider" >&2
+    failed=1
+fi
+if grep -n -E 'rt_(hash_|hmac_|password_|encrypt_|decrypt_|generate_key|derive_key|random_bytes)' "$canonical_crypto"; then
+    echo "canonical crypto facade advertises unresolved providers" >&2
+    failed=1
+fi
+if ! grep -q 'fn _random_hex_raw' "$canonical_crypto" ||
+   ! grep -q 'unsafe(capabilities: \[ffi\])' "$canonical_crypto"; then
+    echo "CSPRNG provider call must remain in one minimal lexical unsafe wrapper" >&2
+    failed=1
+fi
+if grep -n -E 'password_|encrypt|decrypt|generate_key|derive_key|random_bytes' "$async_crypto"; then
+    echo "async crypto facade re-exports unsupported provider APIs" >&2
     failed=1
 fi
 if ! grep -R -q 'rsa_pss_sha256_verify_checked' "$tls_verify_dir" ||
