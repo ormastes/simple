@@ -337,6 +337,21 @@ of strings and `join` them. A segmented buffer is necessary because protocol
 1.0's length prefix precedes the payload. The response-byte ceiling bounds that
 buffer, and the encoder computes the prefix from exact segment lengths.
 
+`segmented_bytes.spl` is the target sole owner of
+`ProviderSegmentedBytesV1`; the accepted sink consumes that shared value
+contract. The unaccepted `frame_encoder.spl` still declares a parallel value
+type, so encoder migration to this owner remains a red Wave 4S-C obligation;
+the current import graph is not evidence of single ownership. Sink growth is capability-owned:
+`ProviderByteSinkPort.append(bytes, offset, count, budget)` validates the
+checked range and prospective total, then submits logical output bytes and the
+exact new-segment allocation in one atomic `charge_all` batch before any
+mutation or allocation. A rejected category, aggregate overflow, or later
+category limit leaves every budget counter unchanged.
+`ProviderSegmentedByteSinkV1.configured(segment_bytes, maximum_bytes)` rejects
+nonpositive limits. `take` moves all bounded segments out and resets the sink
+without retaining aliases. Callers may not precharge approximately and then
+delegate unchecked growth.
+
 ### 7.2 Incremental SHA-256
 
 SHA state owns eight working words, a partial 64-byte block, and a checked total
@@ -346,7 +361,10 @@ bytes so it cannot perform an unbudgeted compression. Updates charge one
 `hash_blocks` unit immediately before each bounded block and checkpoint;
 finalization pads the partial block, then charges and checkpoints each padding
 compression without copying or rereading the whole payload. Chunk partition
-never changes the digest. A sink transform can update SHA while JSON emits.
+never changes the digest. A rejected charge prevents that compression. A
+checkpoint rejection terminalizes the stream and prevents digest publication;
+already-compressed internal state need not roll back. A sink transform can
+update SHA while JSON emits.
 
 ### 7.3 Streaming analyzer
 
@@ -436,7 +454,15 @@ is permitted.
 2. **Raw framing:** introduce the byte-stream port and incremental frame
    decoder/encoder behind parity fixtures; protocol 1.0 bytes remain identical.
 3. **Iterative JSON and SHA:** typed streaming decode/emission and incremental
-   hashing replace provider hot-path whole-value calls after byte/digest parity.
+   hashing replace provider hot-path whole-value calls only after executed
+   byte/digest parity. UTF-8 qualification covers every single split plus
+   deterministic mixed and randomized partition sequences across valid
+   multi-byte scalars and combining sequences. Every byte-slice entry point
+   rejects negative offset, negative count, and `offset > bytes.len` before
+   reading. SHA qualification covers boundary and randomized partitions and
+   the frozen receipt, candidate, payload, and domain vectors. A source review
+   or static correction without a post-fix executed PASS is not acceptance
+   evidence.
 4. **Streaming analyzer:** land split-invariant NFC/lowercase/NFC/token states
    and cache identity; retain batch facade until exhaustive parity passes.
 5. **Work machines:** split read/search/explain/stats, then index mutations,
@@ -453,6 +479,13 @@ is permitted.
 Each stage is independently reversible. A failed parity or checkpoint gate
 retains the preceding implementation and its honest capability response; it
 does not create a compatibility fallback inside a new hot path.
+
+Current Wave 4S-C evidence status is deliberately non-transitive: the
+work-control prerequisite is accepted and pushed; the UTF-8 source has been
+reviewed, but its required partition/range execution evidence is incomplete;
+the SHA source has passed static review, but the last executed focused run was
+4/5. Consequently Wave 4S-C remains open, and neither review result may be
+reported as an executed post-fix PASS.
 
 The `cancel:true` gate requires an actual protocol 1.0 session test: transmit a
 bounded long-running request, then a real framed canonical `cancel` operation

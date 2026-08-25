@@ -169,7 +169,7 @@ non-overlapping:
 | Sublane | Exclusive paths | Required return | Forbidden overlap |
 |---|---|---|---|
 | `W4-RUNTIME-BYTE-POLL` | runtime-owner declarations/implementations plus the concrete `src/app/io` inherited-stdio adapter named by its accepted mini-design | binary-safe pollable partial read/write with absolute monotonic deadline and distinct data/would-block/deadline/EOF/error evidence on every admitted target | provider framing/session code; post-return clock checks around blocking reads; treating piped-child empty-string sentinels as authoritative status |
-| `W4-PROD-STREAM` | `src/app/spipe_knowledge_provider/{byte_stream,frame_decoder,encoder,request_control,work_machine,session_owner,main,wire_dispatch,wire_core,wire_types,protocol,query_clock}.spl` | one-frame incremental ingress/egress, first-byte timing, one-active+16 FIFO, immediate control, exact progress counters | test fixtures/specs; search/scoring internals; durable lifecycle internals except calls through their published ports |
+| `W4-PROD-STREAM` | `src/app/spipe_knowledge_provider/{byte_stream,frame_decoder,segmented_bytes,segmented_sink,encoder,request_control,work_machine,session_owner,main,wire_dispatch,wire_core,wire_types,protocol,query_clock}.spl` | one-frame incremental ingress/egress, sole canonical segmented-byte value owner, precharged bounded sink growth, first-byte timing, one-active+16 FIFO, immediate control, exact progress counters | test fixtures/specs; search/scoring internals; durable lifecycle internals except calls through their published ports |
 | `W4-TEST-BYTES` | `test/fixtures/spipe_controlled_work/controlled_work_proof.spl`, `test/01_unit/app/spipe_knowledge_provider/{provider_controlled_work_import_smoke_spec,provider_streaming_limits_spec}.spl`, `examples/05_stdlib/spipe/test/fixture/wave4_search/provider_protocol_vectors.json` | W4-28–31 vectors and standalone/imported-runtime evidence | production provider code; session/fault spec; system spec/manual/checker |
 | `W4-TEST-CONTROL` | `test/01_unit/app/spipe_knowledge_provider/{provider_deadline_control_spec,provider_session_owner_spec}.spl` | W4-32–36 deterministic boundary clocks plus scripted-pipe live cancel/shutdown frames, FIFO, state-digest, commit/fsync races, and partial-write faults | production provider code; byte/stat specs; system spec/manual |
 | `W4-TEST-STATS` | `test/01_unit/app/spipe_knowledge_provider/provider_stats_count_explain_spec.spl` and ignored evidence root `build/test-artifacts/spipe-wave4/platform-stats/` | W4-37 positive independently recomputed statistics on every supported provider target; an unsupported target is `NOT EVIDENCE`, never `stats:false` conformance | provider implementation; other unit/system specs |
@@ -201,6 +201,31 @@ stall, cancellation, fault-injection, stats, and admission records before any
 W4-28–39 PASS mark or `cancel:true` promotion. The merge owner runs each
 acceptance command at most once after integration and observes the three-cycle
 cap.
+
+Wave 4S-C acceptance is evidence-specific. UTF-8 lanes must return every
+single split plus deterministic mixed/random partition sequences and negative
+offset/count/`offset > len` results. SHA lanes must return boundary and
+randomized partitions at 0/1/55/56/63/64/65/4095/4096/4097/1 MiB, frozen
+domain-separated receipt/candidate/payload vectors, frozen domain-input
+vectors, and injected charge/checkpoint failure with no digest publication.
+Both must show an executed post-fix PASS; static correction or source review
+is insufficient. Current status is: work-control accepted and pushed; UTF-8
+source reviewed with execution evidence incomplete; SHA source static-reviewed
+with the last focused run at 4/5. The merge owner therefore keeps Wave 4S-C
+open.
+
+Budget admission in this wave uses the exact
+`ProviderBudgetPort.charge_all(charges: [ProviderBudgetChargeV1])` owner
+operation. Multi-category growth, including sink `output_bytes` plus exact new
+`logical_allocations`, is admitted as one batch: closed state, positive
+amounts, known categories, checked duplicate aggregation, and every limit are
+validated before any counter changes. The adversarial evidence must show a
+second-category rejection and duplicate-sum overflow leave all counters
+unchanged. The legacy `charge` operation is only a one-element compatibility
+facade. SHA checkpoint rejection terminalizes hashing and forbids digest
+publication; it does not require rollback of a compression already completed.
+The accepted sink owns `segmented_bytes.spl`, while migration of the unaccepted
+encoder away from its parallel segmented value remains red.
 
 Streaming/control metrics are payload-free: lanes may retain phase, byte/member
 counts, timing, stop reason, validated request ID, and approved hashes, but no

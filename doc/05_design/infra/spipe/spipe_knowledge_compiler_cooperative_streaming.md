@@ -302,13 +302,14 @@ cannot create a `ProviderResponseV1` before binding.
 
 ```simple
 trait ProviderByteSinkPort:
-    me append(bytes: [u8], offset: i64, count: i64) -> Result<(), text>
+    me append(bytes: [u8], offset: i64, count: i64,
+              budget: ProviderBudgetPort) -> Result<(), text>
     fn total_bytes() -> i64
 
 class ProviderSegmentedByteSinkV1 with ProviderByteSinkPort:
     static fn configured(segment_bytes: i64,
                          maximum_bytes: i64) \
-        -> ProviderSegmentedByteSinkV1
+        -> Result<ProviderSegmentedByteSinkV1, text>
     me take() -> ProviderSegmentedBytesV1
 
 class ProviderCanonicalJsonEmitterV1:
@@ -324,10 +325,21 @@ class ProviderCanonicalJsonEmitterV1:
 
 Response schemas supply fields in canonical byte order. The emitter uses an
 explicit stack and string-escape cursor. It emits at most the step limit,
-charges both logical response bytes and segment allocation before append, and
-updates SHA from the same bytes. It never forms `parts`, calls `join`, or
-serializes into a second full string. The segmented sink is bounded because the
-protocol prefix requires payload length before output.
+and updates SHA from the same bytes. It never forms `parts`, calls `join`, or
+serializes into a second full string. `ProviderSegmentedBytesV1` has one target
+canonical owner in `segmented_bytes.spl`; the accepted sink imports it. The
+unaccepted `frame_encoder.spl` still declares a parallel type, so migrating the
+encoder to that owner is a red/future obligation and current imports do not
+prove the target ownership contract. The sink requires positive configured
+limits. Each append validates its checked range and prospective total, then
+charges logical output bytes and the exact newly required segment allocation
+through one `budget.charge_all` batch, all before mutation or allocation. The
+batch aggregates duplicate categories with checked arithmetic and validates
+all category limits before committing any counter, so a second-category
+failure leaves output-byte and allocation counters unchanged. Segments stay bounded.
+`take` moves all segments to the returned owner and resets the sink without
+retaining aliases. The segmented sink is necessary because the protocol prefix
+requires payload length before output.
 
 ## 4. Incremental SHA-256 contract
 
@@ -361,10 +373,18 @@ facades and, after parity, may internally instantiate `Sha256StreamV1`; the
 provider hot path must never fall back from streaming to one-shot based on
 input size.
 
-Required parity covers empty input, 55/56/63/64/65-byte boundaries, multi-block
-messages, all single split points, randomized chunk partitions, and the frozen
-receipt/candidate/payload vectors. The digest and canonical emitted bytes must
-match together.
+Required parity covers lengths 0, 1, 55, 56, 63, 64, 65, 4,095, 4,096,
+4,097, and 1,048,576, multi-block messages, all single split points,
+deterministic randomized chunk partitions, the frozen domain-separated
+receipt/candidate/payload vectors, and the frozen domain-input vectors.
+`update` also proves
+fail-closed range validation for negative offset, negative count, and
+`offset > bytes.len`; no rejected range may read, hash, or advance state.
+Charge failure occurs before its compression. Checkpoint failure after a
+compression terminalizes the stream and prevents digest publication; it does
+not promise rollback of already-compressed internal state. The digest and canonical emitted bytes must match together
+in an executed post-fix run. Static inspection or a source correction without
+that PASS is not gate evidence.
 
 ## 5. Streaming Unicode analyzer
 
@@ -445,6 +465,7 @@ struct ProviderBudgetChargeV1:
 
 trait ProviderBudgetPort:
     me charge(charge: ProviderBudgetChargeV1) -> Result<(), text>
+    me charge_all(charges: [ProviderBudgetChargeV1]) -> Result<(), text>
     fn consumed(category: text) -> i64
     fn limit(category: text) -> i64
 
@@ -463,6 +484,10 @@ trait ProviderCheckpointPort:
 The budget owner charges raw/decoded/output bytes, JSON events/depth,
 normalization/case/token carry, tokens/terms/candidates/comparisons, logical
 allocations, and durable-record growth before allocation or append. The
+single-charge facade delegates to `charge_all`. Batch admission rejects an
+empty batch, nonpositive amount, unknown category, duplicate-category sum
+overflow, closed owner, or any exceeded limit before mutation; only after all
+checks pass does the owner commit every aggregate counter atomically. The
 session owner constructs one request-scoped checkpoint capability and binds the
 validated `ProviderRequestControlHandleV1` exactly once. The checkpoint owner
 validates per-step progress, queries the monotonic clock held by request
@@ -764,8 +789,21 @@ These subwaves refine parent Wave 4 and precede any accepted `cancel:true`.
 - Add UTF-8 lexer, explicit JSON stack, typed envelope builders, iterative
   emitter, segmented sink, and streaming SHA.
 - Keep whole-value compatibility facades outside the provider hot path.
-- **Gate:** canonical/error/digest parity for every boundary and randomized
-  chunk partition; bounded depth/tokens/bytes prove before allocation.
+- Exercise UTF-8 with every single split and deterministic mixed/random
+  partition sequences through two-, three-, and four-byte scalars and
+  combining sequences. Reject negative offset, negative count, and
+  `offset > bytes.len` at every byte-slice boundary without state advance.
+- Exercise SHA at 0, 1, 55, 56, 63, 64, 65, 4,095, 4,096, 4,097, and
+  1,048,576 bytes with single-split and randomized partitions, frozen
+  domain-separated receipt/candidate/payload vectors, frozen domain-input
+  vectors, and charge/checkpoint failures that leave no published digest.
+- **Gate:** canonical/error/digest parity for every required partition and
+  vector; bounded depth/tokens/bytes prove before allocation; the post-fix
+  focused tests execute and PASS. Static correction or review alone cannot
+  close the gate.
+- **Current status:** work-control is accepted and pushed. UTF-8 source review
+  is complete but execution evidence is incomplete. SHA source static review
+  is complete, while its last focused execution was 4/5. Wave 4S-C is open.
 
 ### Wave 4S-D — Streaming analyzer and lexical cache
 
@@ -836,7 +874,8 @@ Required evidence includes:
 | raw framing | every header/payload split, coalesced frames, short/zero/would-block read/write, timeout/EOF/error; exactly one header event precedes contiguous nonempty bounded owned payload chunks; concatenated chunk bytes equal the declared payload once with no gap/overlap/replay; completion returns metadata only |
 | prebinding safety | oversize, malformed header, invalid UTF-8, noncanonical JSON silently close with no reflected content |
 | iterative JSON | depth/token/member/string limits, duplicate/out-of-order keys, integer/escape canonicality, no recursion |
-| incremental SHA | frozen vectors and all boundary/random chunk splits equal one-shot |
+| incremental SHA | lengths 0/1/55/56/63/64/65/4095/4096/4097/1 MiB, frozen domain-separated receipt/candidate/payload vectors, frozen domain-input vectors, and all single-split/random chunk partitions equal one-shot; negative offset/count and `offset > len` reject without state change; charge failure prevents its compression, while checkpoint failure terminalizes the stream without digest publication and need not roll back prior compressed state; acceptance records an executed post-fix PASS rather than a static correction |
+| incremental UTF-8 | every single split plus deterministic mixed/random partition sequences preserve valid decoded bytes; negative offset/count and `offset > len` reject without state change; malformed/truncated input fails identically in an executed post-fix PASS |
 | Unicode | NFC split sequences, Hangul, combining reorder/compose, U+0130 expansion, Final_Sigma lookahead across chunks, long carry failure |
 | analyzer/search | token/position/length/TF/corpus-stat/score/order/explanation parity and targeted invalidation |
 | deadline | exact 1 ms minimum, header-relative expiry during ingress/parse/work/emission, measured checkpoint overshoot |
