@@ -11,11 +11,14 @@
 #   write_file  - real FS write, refused outside workspace root
 #   list_dir    - real directory listing
 #   glob        - simple `*` glob within the workspace
+#   mail_list / mail_read / mail_send      - IMAP/SMTP (infra_mail.spl)
+#   storage_ls / storage_get / storage_put - MinIO/FTP (infra_storage.spl)
 #
 # Permission model:
-#   read-only tools (read_file / list_dir / glob) are auto-allowed
-#   mutating tools (bash / write_file) require explicit allow (allow_list or
-#   allow_all). With no grant the policy default is "ask"; in non-interactive
+#   read-only tools (read_file / list_dir / glob / mail_list / mail_read /
+#   storage_ls / storage_get) are auto-allowed
+#   mutating tools (bash / write_file / mail_send / storage_put) require
+#   explicit allow (allow_list or allow_all). With no grant the policy default is "ask"; in non-interactive
 #   mode "ask" resolves to DENY and the model gets a permission-error tool_result
 #   instead of any execution.
 #
@@ -32,6 +35,8 @@ use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{dir_exists}
 use std.io_runtime.{dir_list}
+use app.llm_caret.infra_mail.{mail_tool_schemas, mail_list, mail_read, mail_send}
+use app.llm_caret.infra_storage.{storage_tool_schemas, storage_ls, storage_get, storage_put}
 
 # ============================================================================
 # JSON helpers (inlined - self contained)
@@ -222,10 +227,26 @@ fn _list_contains(items: [text], target: text) -> bool:
     false
 
 fn is_read_only_tool(name: text) -> bool:
-    name == "read_file" or name == "list_dir" or name == "glob"
+    name == "read_file" or name == "list_dir" or name == "glob" or
+        name == "mail_list" or name == "mail_read" or
+        name == "storage_ls" or name == "storage_get"
+
+fn is_mutating_tool(name: text) -> bool:
+    name == "bash" or name == "write_file" or name == "mail_send" or name == "storage_put"
 
 fn is_known_tool(name: text) -> bool:
-    is_read_only_tool(name) or name == "bash" or name == "write_file"
+    is_read_only_tool(name) or is_mutating_tool(name)
+
+# Anthropic-shape tool definitions (`name` / `description` / `input_schema`)
+# for every tool run_tool can dispatch. Providers may hand this list to the
+# model verbatim.
+fn tool_schemas() -> [text]:
+    val q = _Q()
+    val obj_schema = _LB() + q + "type" + q + ": " + q + "object" + q + ", " + q + "properties" + q + ": " + _LB() + _RB() + _RB()
+    var base: [text] = []
+    for name in ["bash", "read_file", "write_file", "list_dir", "glob"]:
+        base.push(_LB() + q + "name" + q + ": " + q + name + q + ", " + q + "description" + q + ": " + q + "workspace tool " + name + q + ", " + q + "input_schema" + q + ": " + obj_schema + _RB())
+    base + mail_tool_schemas() + storage_tool_schemas()
 
 # Returns "allow" | "deny" | "ask".
 fn permission_decision(policy: PermissionPolicy, name: text) -> text:
@@ -404,6 +425,13 @@ fn exec_glob(policy: PermissionPolicy, input: text) -> ToolResult:
             matches = matches + [e]
     new_tool_result("", matches.join("\n"))
 
+# Infra tools report (success, content); map onto ToolResult.
+fn _infra_result(r: (bool, text)) -> ToolResult:
+    val (ok, content) = r
+    if ok:
+        return new_tool_result("", _truncate(content, MAX_TOOL_OUTPUT))
+    new_tool_error("", content)
+
 # ============================================================================
 # The gate - every tool call MUST traverse this function
 # ============================================================================
@@ -431,6 +459,18 @@ fn run_tool(policy: PermissionPolicy, call: ToolCall) -> ToolResult:
         res = exec_list_dir(policy, call.input)
     elif call.name == "glob":
         res = exec_glob(policy, call.input)
+    elif call.name == "mail_list":
+        res = _infra_result(mail_list(_json_get_str(call.input, "mailbox"), _json_get_int(call.input, "limit", 20)))
+    elif call.name == "mail_read":
+        res = _infra_result(mail_read(_json_get_str(call.input, "uid")))
+    elif call.name == "mail_send":
+        res = _infra_result(mail_send(_json_get_str(call.input, "to"), _json_get_str(call.input, "subject"), _json_get_str(call.input, "body")))
+    elif call.name == "storage_ls":
+        res = _infra_result(storage_ls(_json_get_str(call.input, "bucket"), _json_get_str(call.input, "prefix")))
+    elif call.name == "storage_get":
+        res = _infra_result(storage_get(_json_get_str(call.input, "bucket"), _json_get_str(call.input, "key"), _json_get_int(call.input, "max_bytes", 0)))
+    elif call.name == "storage_put":
+        res = _infra_result(storage_put(_json_get_str(call.input, "bucket"), _json_get_str(call.input, "key"), _json_get_str(call.input, "content")))
     ToolResult(tool_use_id: call.id, content: res.content, is_error: res.is_error)
 
 # ============================================================================

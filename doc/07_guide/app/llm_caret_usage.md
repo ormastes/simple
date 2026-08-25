@@ -69,6 +69,60 @@ executes ungated:
 - File tools are path-guarded to the workspace root (`..` traversal rejected).
 - `bash` output is truncated (~30 KB); the agent loop is capped at 25 iterations.
 
+## Infrastructure tools (mail + file server)
+
+Caret reaches infrastructure servers through first-class tools, never by
+shelling out to `curl`/`mc`. Server-facing code lives in
+`src/app/llm_caret/infra_mail.spl` and `infra_storage.spl`; `tools.spl` only
+adds the schema entries, dispatch arms and permission classification.
+`tool_schemas()` returns every entry (Anthropic `name`/`description`/
+`input_schema` shape) for providers to hand to the model.
+
+| Tool | Arguments | Class | Backing facade |
+|------|-----------|-------|----------------|
+| `mail_list` | `mailbox` (default INBOX), `limit` (<=200) | read-only | IMAP `SELECT` + `FETCH` headers, `std.nogc_sync_mut.imap` |
+| `mail_read` | `uid` | read-only | IMAP `UID FETCH (BODY.PEEK[])` |
+| `mail_send` | `to`, `subject`, `body` | **mutating** | SMTP `EHLO`/`AUTH PLAIN`/`DATA`, `std.nogc_sync_mut.smtp` |
+| `storage_ls` | `bucket`, `prefix` | read-only | `app.devhub.adapter_minio` (pure-Simple SigV4, same path as `bin/itf minio ls`) |
+| `storage_get` | `key`, `bucket`, `max_bytes` (<=262144) | read-only | SigV4 ranged GET |
+| `storage_put` | `key`, `content` (<=4 MiB), `bucket` | **mutating** | SigV4 PUT |
+
+Permission behaviour is identical to the workspace tools: the four read-only
+tools are auto-allowed; `mail_send` and `storage_put` go through the same
+allow/deny gate as `bash`/`write_file` and are **denied by default** (config
+`tools.allow` or the allow-all flag grants them). Every failure — denied,
+unconfigured, bad argument, unreachable server — comes back as a tool error;
+no arm aborts the process.
+
+Config lives in `llm_caret.sdn`; credentials are **env references only**:
+
+```
+mail:
+    imap_host: imap.example.com
+    imap_port: 993           # 993 / 465 => implicit TLS; other ports plaintext
+    smtp_host: smtp.example.com
+    smtp_port: 465           # 587 (STARTTLS) is refused: no in-place TLS upgrade
+    user: me@example.com
+    secret_env: CARET_MAIL_SECRET
+
+storage:
+    backend: minio           # minio | ftp (ftp refused: rt_ftp_* unbacked)
+    endpoint: minio.corp:9000
+    bucket: caret
+    access_key_env: CARET_S3_ACCESS_KEY
+    secret_key_env: CARET_S3_SECRET_KEY
+    tls: true                # URL scheme when endpoint has none
+```
+
+Missing sections give `mail not configured: set [mail] in llm_caret.sdn` /
+`storage not configured: set [storage] in llm_caret.sdn`; an unset secret env
+names the variable, never a value. Specs:
+`test/01_unit/app/llm_caret/infra_tools_spec.spl` (schemas, gating,
+validation) and `test/03_system/app/llm_caret/infra_servers_system_spec.spl`
+(live round trips, gated on `LLM_CARET_MAIL_LIVE=1` / `LLM_CARET_STORAGE_LIVE=1`
++ `LLM_CARET_CONFIG`; no in-repo SMTP/IMAP/S3/FTP server exists, so they are
+honestly blocked on a bare host).
+
 ## Secret redaction + injection defense
 
 `redact.spl` masks secrets (`sk-ant-*`, `sk-*`, `ghp_*`/`github_pat_*`, `AKIA*`,

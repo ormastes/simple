@@ -1,0 +1,185 @@
+# infra_servers_system_spec
+
+> Purpose: Prove LIVE round trips of the LLM Caret infrastructure tools against
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 3 | 2 | 0 | 1 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# infra_servers_system_spec
+
+Purpose: Prove LIVE round trips of the LLM Caret infrastructure tools against
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | In Progress |
+| Source | `test/03_system/app/llm_caret/infra_servers_system_spec.spl` |
+| Updated | 2026-08-25 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Prove LIVE round trips of the LLM Caret infrastructure tools against
+real servers: send a mail, list it, read its body; put an object, list it, get
+identical bytes back. Every example runs the real IMAP/SMTP or SigV4 client
+through run_tool (the permission gate) - nothing is fabricated from the request.
+Audience: llm_caret maintainers and infra operators validating a deployment.
+
+## Live gates (honest blocking)
+The repository ships no in-process or child SMTP, IMAP, S3-compatible or FTP
+server (`std.nogc_sync_mut.imap` / `smtp` are protocol builders only; the
+`ftp_sffi` externs are unbacked), and this host has no minio/aiosmtpd/pyftpdlib.
+An example therefore runs only when the operator points it at a real server:
+
+- mail:    LLM_CARET_MAIL_LIVE=1 plus LLM_CARET_CONFIG=<llm_caret.sdn with [mail]>
+           and the env var named by `secret_env` exported.
+- storage: LLM_CARET_STORAGE_LIVE=1 plus LLM_CARET_CONFIG=<llm_caret.sdn with
+           [storage]> and the env vars named by access_key_env / secret_key_env.
+
+Without the gate the example reports `pending(BLOCKED: ...)` and returns; it
+never silently passes.
+
+## Scenarios
+
+### infra servers: mail round trip (SMTP send -> IMAP list -> IMAP read)
+
+#### sends a mail, sees it in mail_list and reads its body back
+
+- mail_send goes through the gate with an explicit allow
+   - Expected: sent.is_error is false
+- mail_list shows the nonce subject with a uid
+   - Expected: listed.is_error is false
+- mail_read returns the exact body we sent (absolute oracle: the nonce)
+   - Expected: read.is_error is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+if not _live("LLM_CARET_MAIL_LIVE"):
+    pending("BLOCKED: no local SMTP/IMAP server on this host — set LLM_CARET_MAIL_LIVE=1 with credentials (LLM_CARET_CONFIG + secret_env) to run")
+    return
+val cfg_err = _load_live_config()
+expect(cfg_err).to_equal("")
+assert_not_equal(config_mail_imap_host(), "")
+val nonce = _nonce()
+val subject = "llm-caret-live-" + nonce
+val body = "round-trip body " + nonce
+val to = env_get("LLM_CARET_MAIL_TO") ?? ""
+assert_not_equal(to, "")
+
+step("mail_send goes through the gate with an explicit allow")
+val sent = run_tool(allow_all_policy(WS), new_tool_call("send", "mail_send",
+    _json([_kv("to", to), _kv("subject", subject), _kv("body", body)])))
+expect(sent.is_error).to_equal(false)
+expect(sent.content).to_contain("sent to " + to)
+
+step("mail_list shows the nonce subject with a uid")
+val listed = run_tool(allow_all_policy(WS), new_tool_call("list", "mail_list",
+    _json([_kv("mailbox", "INBOX"), "\"limit\": 50"])))
+expect(listed.is_error).to_equal(false)
+expect(listed.content).to_contain(subject)
+var uid = ""
+for line in listed.content.split("\n"):
+    if line.contains(subject) and line.starts_with("uid="):
+        uid = line.split(" ")[0].substring(4)
+assert_not_equal(uid, "")
+
+step("mail_read returns the exact body we sent (absolute oracle: the nonce)")
+val read = run_tool(allow_all_policy(WS), new_tool_call("read", "mail_read", _json([_kv("uid", uid)])))
+expect(read.is_error).to_equal(false)
+expect(read.content).to_contain("Subject: " + subject)
+expect(read.content).to_contain(body)
+reset_config()
+```
+
+</details>
+
+### infra servers: storage round trip (put -> ls -> get)
+
+#### puts an object, lists it and gets identical bytes back
+
+- storage_put goes through the gate with an explicit allow
+   - Expected: put.is_error is false
+- storage_ls under the prefix shows the key with its byte size
+   - Expected: ls.is_error is false
+- storage_get returns byte-identical content (absolute oracle: nonce + exact length)
+   - Expected: got.is_error is false
+   - Expected: got.content equals `content`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+if not _live("LLM_CARET_STORAGE_LIVE"):
+    pending("BLOCKED: no local S3-compatible (minio) server on this host — set LLM_CARET_STORAGE_LIVE=1 with credentials (LLM_CARET_CONFIG + access_key_env/secret_key_env) to run")
+    return
+val cfg_err = _load_live_config()
+expect(cfg_err).to_equal("")
+assert_not_equal(config_storage_endpoint(), "")
+val nonce = _nonce()
+val key = "llm-caret-live/" + nonce + ".txt"
+val content = "line one " + nonce + "\nline two\n"
+
+step("storage_put goes through the gate with an explicit allow")
+val put = run_tool(allow_all_policy(WS), new_tool_call("put", "storage_put",
+    _json([_kv("key", key), _kv("content", "line one " + nonce + "\\nline two\\n")])))
+expect(put.is_error).to_equal(false)
+expect(put.content).to_contain("stored " + content.len().to_text() + " bytes")
+
+step("storage_ls under the prefix shows the key with its byte size")
+val ls = run_tool(allow_all_policy(WS), new_tool_call("ls", "storage_ls", _json([_kv("prefix", "llm-caret-live/")])))
+expect(ls.is_error).to_equal(false)
+expect(ls.content).to_contain(key + "\t" + content.len().to_text())
+
+step("storage_get returns byte-identical content (absolute oracle: nonce + exact length)")
+val got = run_tool(allow_all_policy(WS), new_tool_call("get", "storage_get", _json([_kv("key", key)])))
+expect(got.is_error).to_equal(false)
+expect(got.content).to_equal(content)
+reset_config()
+```
+
+</details>
+
+### infra servers: ftp backend
+
+#### is blocked until the runtime backs the ftp facade _(pending)_
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+pending("BLOCKED: no local FTP server on this host and rt_ftp_* (src/lib/nogc_sync_mut/io/ftp_sffi.spl:17) is an unbacked runtime extern — set LLM_CARET_FTP_LIVE=1 with credentials to run once the facade is backed")
+return
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 1 |
+
+
+</details>
