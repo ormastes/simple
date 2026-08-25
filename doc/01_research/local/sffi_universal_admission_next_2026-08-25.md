@@ -1195,3 +1195,25 @@ provider call, branch, allocation, buffer copy, or render/event data-layout
 change was added. Estimated totals decrease from 11,736 to 11,712 declaration
 rows while symbols remain 3,137; unsafe-tagged rows become 1,762, untouched
 rows become 9,692, and exact signed admission remains zero.
+
+## TLS 1.3 context raw-contract checkpoint
+
+All 48 declarations in the TLS 1.3 context I/O module now carry adjacent,
+operation-specific `@unsafe(... capabilities: [ffi])` metadata. The contracts
+cover network and IPC transport, blocking sleep, record receive/parsing,
+byte-array indexing/allocation, ClientHello and X25519, HKDF and secret caches,
+SHA-256/transcript/HMAC derivation, encrypted handshake extraction, record
+metadata, certificate/key/signature parsing, and inner-plaintext decoding.
+
+The metadata explicitly identifies ambiguous empty-array failures, untyped
+parser/status/discriminant sentinels, cache-take ownership, and the numeric
+byte-equality result. It does not treat empty bytes or zero as verified success.
+A static ratchet fixes the inventory at 48 and requires every declaration to
+retain its tag; it passed with the whitespace check.
+
+This pass changes no ABI signature, network/IPC call, hash, HMAC, HKDF, key
+agreement, record parse, allocation, byte-array copy, cache lookup, branch, or
+cryptographic data layout. Production Simple and optimizer verification remain
+unavailable. Estimated totals remain 11,712 declaration rows / 3,137 symbols;
+unsafe-tagged rows increase from 1,762 to 1,810, untouched rows decrease from
+9,692 to 9,644, and exact signed admission remains zero.

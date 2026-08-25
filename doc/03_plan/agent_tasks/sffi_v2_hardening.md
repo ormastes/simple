@@ -552,3 +552,7 @@ passing placeholder.
      canonical boolean fullscreen/release contracts. Keep all 35 Winit owner
      declarations tagged and the four irreducible hosted time/env/args externs
      tagged, without adding event polls, wrappers, copies, or render work.
+107. Keep all 48 TLS 1.3 context declarations explicitly tagged `unsafe(ffi)`.
+     Replace ambiguous empty-array and numeric parser/status/equality contracts
+     with typed results without extra hashes, HKDF/HMAC operations, record
+     parses, transport calls, allocations, or byte-array copies.
