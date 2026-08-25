@@ -20,6 +20,7 @@ use std.nogc_sync_mut.http_server.server.{
     SecureServerPolicy, plaintext_development_capability,
     request_parse_error_status
 }
+use std.nogc_sync_mut.http_server.parser.{parse_request_line}
 use os.apps.dbd.dbd.{DbdServer}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
@@ -103,6 +104,17 @@ fn http_wire_parts_fit(parts: HttpWireParts, max_wire_bytes: u64) -> bool:
 fn _text_response_parts(response: HttpResponse) -> HttpWireParts:
     HttpWireParts(head: text_to_bytes_pure(serialize_response(response)), body: [])
 
+fn _text_response_parts_for_method(
+    response: HttpResponse, head_only: bool
+) -> HttpWireParts:
+    if not head_only:
+        return _text_response_parts(response)
+    # HEAD selects exactly the same representation as GET. Preserve that
+    # representation's Content-Length while transferring no message body.
+    val head = serialize_response_head_for_body_length(
+        response, response.body.len().to_i64())
+    HttpWireParts(head: text_to_bytes_pure(head), body: [])
+
 fn http_frame_rejection_wire(error: text, max_wire_bytes: u64) -> [u8]:
     val rejected = HttpResponse(
         status: request_parse_error_status(error),
@@ -138,8 +150,23 @@ fn bind_listener(port: u16) -> Result<Socket, text>:
                             Err(message)
                         case Ok(_): Ok(listener)
 
+fn _head_routing_request(request: text) -> (bool, text):
+    # Reuse the canonical request-line parser and the canonical GET route
+    # owner. This is only a method projection for representation selection;
+    # the retained request remains authoritative for framing and upgrades.
+    val line_end = request.find("\r\n")
+    if line_end < 0:
+        return (false, request)
+    val parsed = parse_request_line(request.slice(0, line_end))
+    if parsed.0 != "HEAD":
+        return (false, request)
+    val get_line = "GET {parsed.1} {parsed.2}"
+    (true, get_line + request.slice(line_end, request.len()))
+
 fn http_response(request: text) -> HttpWireParts:
-    val route = http_classify_request(request)
+    val projection = _head_routing_request(request)
+    val head_only = projection.0
+    val route = http_classify_request(projection.1)
     var response = HttpResponse(
         status: HttpStatus.NotFound,
         headers: [],
@@ -168,10 +195,10 @@ fn http_response(request: text) -> HttpWireParts:
             # never derive an arbitrary /SYS path from network input.
             val public_path = simpleos_server_public_file_path_v1(route.file_path)
             if public_path == nil:
-                return _text_response_parts(with_default_security_headers(
+                return _text_response_parts_for_method(with_default_security_headers(
                     HttpResponse(
                         status: HttpStatus.NotFound, headers: [],
-                        body: "ERR file not found\n"), false))
+                        body: "ERR file not found\n"), false), head_only)
             val mounted_path = public_path.unwrap()
             match read_file_bytes_direct(mounted_path, 65536):
                 Err(_):
@@ -182,8 +209,12 @@ fn http_response(request: text) -> HttpWireParts:
                         headers: [("Content-Type", mime_from_path(mounted_path))],
                         body: ""
                     ), false)
-                    return _byte_response_parts(file_response, bytes)
-    _text_response_parts(with_default_security_headers(response, false))
+                    val file_parts = _byte_response_parts(file_response, bytes)
+                    if head_only:
+                        return HttpWireParts(head: file_parts.head, body: [])
+                    return file_parts
+    _text_response_parts_for_method(
+        with_default_security_headers(response, false), head_only)
 
 fn send_websocket_events(client: Socket, events: [Rfc6455ServerEvent]) -> bool:
     for event in events:
