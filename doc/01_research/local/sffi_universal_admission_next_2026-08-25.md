@@ -2492,6 +2492,35 @@ lookup, lock, hash, or signature check.  Static authority is complete for this
 file, but provider semantics and exact-artifact proof are not; verified-and-
 signed admission remains 0.
 
+## simple-core array provider authority checkpoint
+
+`core_array.spl`, the archive-level provider used by split array modules, had
+14 untagged raw declarations and 65 missing-authority calls.  Every declaration
+now carries an explicit contract/capability annotation.  All 11 used raw
+operations are confined to mandatory-inline owners: seven pointer-bearing
+libc/compiler operations use `ffi, raw_ptr`, while four tagged-string/value
+operations use `ffi`.  Three unused declarations remain tagged and uncalled.
+
+Provider review also found an allocation-failure leak in
+`array_new_with_flags`: if item storage allocation failed, the already-owned
+array header was abandoned.  The failure path now releases that header before
+returning zero.  Valid allocation and array hot paths are unchanged.
+
+`simple-core-array-provider-authority.shs` passed, pinning declarations, exact
+raw-call confinement, owner inventories, mandatory-inline policy, all four
+memory-intrinsic lowerings, and the leak cleanup.  Census results:
+
+- raw call sites: 19,890 -> 19,836
+- missing authority: 15,849 -> 15,784
+- lexical unsafe: 3,122 -> 3,133
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Mandatory inlining adds no hot-path dispatch, allocation, copy, scan, lookup,
+lock, hash, or signature check.  One `free` is added only on an allocation
+failure that previously leaked.  Provider semantics and exact-artifact proof
+remain incomplete; verified-and-signed admission remains 0.
+
 ## simple-core filesystem open/seek authority checkpoint
 
 The next 40 `core_fs.spl` operations—heap allocation, FILE/path opening,
