@@ -7,6 +7,9 @@
 
 use std.nogc_sync_mut.websocket.handshake.{compute_websocket_accept}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use os.apps.servers_user.http1_request_frame_owner.{
+    http1_host_authority_is_valid
+}
 
 pub val RFC6455_MAX_MESSAGE_BYTES: u64 = 65536u64
 pub val RFC6455_MAX_RETAINED_FRAME_BYTES: u64 = 65550u64
@@ -237,8 +240,12 @@ pub fn validate_rfc6455_server_handshake(request: text) -> Rfc6455HandshakeDecis
     if index + 2u64 != lines.len():
         return _handshake_reject("bytes follow the WebSocket handshake")
 
-    if host_count != 1 or host == "":
-        return _handshake_reject("handshake requires exactly one non-empty Host")
+    if host_count != 1 or not http1_host_authority_is_valid(host):
+        # Keep the alternate/direct handshake seam on the exact authority
+        # policy owned by the incremental HTTP/1 framer.  Production normally
+        # reaches this after framing, but the exported handshake function must
+        # not become a weaker second protocol path.
+        return _handshake_reject("handshake requires exactly one valid Host authority")
     if upgrade_count < 1 or not upgrade_has_websocket:
         return _handshake_reject("handshake requires a WebSocket Upgrade field")
     if connection_count < 1 or not connection_has_upgrade:
