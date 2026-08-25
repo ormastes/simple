@@ -331,3 +331,18 @@ Removing the nonexistent APIs changes the source-only ledger to 12,034 `rt_*`
 declaration rows and 3,175 symbols: 1,198 rows are unsafe-tagged, 646 are in
 `unsafe_contract_declared`, 10,570 are untouched, and zero are exact-artifact
 verified-and-signed.
+
+## SSH session crypto-authority reduction checkpoint
+
+The SSH session and helper modules declared raw RSA-SHA256 and Ed25519 verify
+externs that they never called. Those three declarations are removed. A static
+ratchet prevents these session modules from reacquiring direct signature
+verification authority; verification belongs to the checked signature owner.
+This is a pure surface reduction with no runtime branch, allocation, copy,
+lookup, hashing, or dispatch change. The ratchet and focused two-module source
+check passed, while the available executable still identifies itself as the
+bootstrap seed rather than admitted self-hosted evidence.
+
+The source-only ledger is now 12,031 `rt_*` declaration rows / 3,175 symbols:
+1,198 rows unsafe-tagged, 646 `unsafe_contract_declared`, 10,567 untouched, and
+zero exact-artifact verified-and-signed.

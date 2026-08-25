@@ -264,6 +264,12 @@ new hot-path work. The ledger is now 12,034 `rt_*` rows / 3,175 symbols: 1,198
 tagged, 646 contract-declared, 10,570 untouched, and zero exact-artifact
 verified-and-signed.
 
+Checkpoint: removed three unused raw RSA/Ed25519 verification declarations from
+the SSH session layer and ratcheted direct crypto authority out of those files.
+Focused static and source checks pass with zero runtime/performance change. The
+ledger is 12,031 `rt_*` rows / 3,175 symbols: 1,198 tagged, 646
+contract-declared, 10,567 untouched, and zero exact-artifact signed/admitted.
+
 ### 7. Verify once, then stop
 
 - Run sabotage and parity across interpreter, JIT, native, sealed dynload, and
