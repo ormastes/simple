@@ -57,16 +57,18 @@ use os.installer.simplebox_signed_catalog_provisioner_v1.{
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.crypto.secure_memory.{secure_zero_u8_slots}
 use std.common.string_core.{bytes_to_text}
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_write_bytes(path: text, content: [u8]) -> bool
-extern fn rt_file_copy(src: text, dst: text) -> bool
-extern fn rt_file_hash_sha256(path: text) -> text
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
-extern fn rt_dir_exists(path: text) -> bool
-extern fn rt_file_size(path: text) -> i64
+use std.io_runtime.{
+    process_run_timeout as image_process_run_timeout,
+    file_exists as image_file_exists,
+    file_write_exact as image_file_write_text,
+    file_write_bytes as image_file_write_bytes,
+    file_copy as image_file_copy,
+    file_hash_sha256 as image_file_hash_sha256,
+    dir_create_all as image_dir_create_all,
+    dir_list_optional as image_dir_list,
+    dir_exists as image_dir_exists,
+    file_size_signed as image_file_size
+}
 val DEFAULT_IMAGE_SIZE_MB: u64 = 512
 val EFI_PARTITION_SIZE_MB: u64 = 64
 pub const MIN_IMAGE_SIZE_MB_V1: u64 = 67
@@ -928,7 +930,7 @@ impl ImageBuilder:
             simplebox_decision = _validate_simplebox_artifact_v1(
                 self.config.simplebox_artifact, self.config.arch, observer)?
         var kernel_bytes: [u8] = []
-        if self.config.kernel_path != "" and rt_file_exists(self.config.kernel_path):
+        if self.config.kernel_path != "" and image_file_exists(self.config.kernel_path):
             kernel_bytes = image_read_file_bounded_v1(self.config.kernel_path, IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1, "SimpleOS kernel payload")?
         var font_guest_paths: [text] = []
         var font_blobs: [[u8]] = []
@@ -976,7 +978,7 @@ impl ImageBuilder:
         val decision = image_package_payload_decision_v1(
             owner, guest_path, bytes, image_target_architecture(self.config.arch))
         if decision.write_payload:
-            if rt_file_write_bytes(destination, bytes):
+            if image_file_write_bytes(destination, bytes):
                 return _manifest_file(guest_path, role, owner)
             return image_package_payload_decision_v1(
                 owner, guest_path, [], image_target_architecture(self.config.arch)).inventory_row
@@ -1044,7 +1046,7 @@ impl ImageBuilder:
         while font_index < font_guest_paths.len() and font_index < font_blobs.len():
             val font_path = font_guest_paths[font_index]
             _ensure_parent_dirs(rootfs_root, font_path)
-            if not rt_file_write_bytes(rootfs_root + font_path, font_blobs[font_index]):
+            if not image_file_write_bytes(rootfs_root + font_path, font_blobs[font_index]):
                 return Err("SimpleOS font asset staging failed: " + font_path)
             val kind = if font_path.ends_with(".ttf"): "font-asset" else: "font-notice"
             manifest = manifest + _manifest_file(font_path, kind, "simpleos-core")
@@ -1062,7 +1064,7 @@ impl ImageBuilder:
                 image_target_architecture(self.config.arch)).inventory_row)
         if not validated.write_payload or not validated.manifest_deployed:
             return Err("SimpleOS simplebox payload policy rejected")
-        if not rt_file_write_bytes(rootfs_root + SIMPLEBOX_CANONICAL_PATH_V1, artifact.bytes):
+        if not image_file_write_bytes(rootfs_root + SIMPLEBOX_CANONICAL_PATH_V1, artifact.bytes):
             return Err("SimpleOS simplebox artifact staging failed")
         val receipt = artifact.receipt
         var manifest = _manifest_file(
@@ -1081,13 +1083,13 @@ impl ImageBuilder:
         if validated.artifact.bytes.len() == 0 or
             media.scr1_bytes.len() == 0 or media.trust_config_bytes.len() == 0:
             return Err("signed catalog media is incomplete")
-        if not rt_file_write_bytes(
+        if not image_file_write_bytes(
             "{rootfs_root}/boot/bin/simplebox", validated.artifact.bytes):
             return Err("signed catalog boot payload staging failed")
-        if not rt_file_write_bytes(
+        if not image_file_write_bytes(
             "{rootfs_root}/boot/catalog/simplebox.scr1", media.scr1_bytes):
             return Err("signed catalog SCR1 staging failed")
-        if not rt_file_write_bytes(
+        if not image_file_write_bytes(
             "{rootfs_root}/boot/catalog/simplebox.trust", media.trust_config_bytes):
             return Err("signed catalog trust config staging failed")
         var manifest = _manifest_file(
@@ -1100,7 +1102,7 @@ impl ImageBuilder:
 
     fn _stage_simple_toolchain_payload(rootfs_root: text) -> Result<text, text>:
         val simple_binary = image_effective_simple_binary(self.config.simple_binary)
-        if simple_binary == "" or not rt_file_exists(simple_binary):
+        if simple_binary == "" or not image_file_exists(simple_binary):
             var blocked = ""
             for guest_path in IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS:
                 blocked = blocked + image_package_payload_decision_v1(
@@ -1119,12 +1121,12 @@ impl ImageBuilder:
                 "simple_loader.scr1"]
             var record_index: i64 = 0
             while record_index < record_names.len():
-                if not rt_file_write_bytes(
+                if not image_file_write_bytes(
                     "{rootfs_root}/boot/catalog/{record_names[record_index]}",
                     signed_media.toolchain_scr1_bytes[record_index]):
                     return Err("signed toolchain SCR1 staging failed")
                 record_index = record_index + 1
-            if not rt_file_write_bytes(
+            if not image_file_write_bytes(
                 "{rootfs_root}/boot/catalog/simple_toolchain.trust",
                 signed_media.toolchain_trust_config_bytes):
                 return Err("signed toolchain trust config staging failed")
@@ -1138,7 +1140,7 @@ impl ImageBuilder:
                 return Err("SimpleOS essential toolchain policy rejected: {guest_path}")
             val target_path = "{rootfs_root}{guest_path}"
             _ensure_parent_dirs(rootfs_root, guest_path)
-            val ok = rt_file_write_bytes(target_path, simple_bytes)
+            val ok = image_file_write_bytes(target_path, simple_bytes)
             if not ok:
                 return Err("SimpleOS essential toolchain staging failed: {guest_path}")
             manifest = manifest + _manifest_file(guest_path, "simple-toolchain-role", "simpleos-tools")
@@ -1189,11 +1191,11 @@ impl ImageBuilder:
                 # bundle transaction, but the root owner is already closed and
                 # the namespace can change.  Stream it once, then authenticate
                 # the image-owned copy against the admitted digest below.
-                if not rt_file_copy(source, rootfs_root + guest_paths[index]):
+                if not image_file_copy(source, rootfs_root + guest_paths[index]):
                     return Err("signed Clang payload staging failed: " + guest_paths[index])
                 # The digest is authenticated in its SCR1 record, so a
                 # replacement or short copy after publication fails closed.
-                if rt_file_hash_sha256(rootfs_root + guest_paths[index]) !=
+                if image_file_hash_sha256(rootfs_root + guest_paths[index]) !=
                         expected_sha256:
                     return Err("signed Clang payload copy digest mismatch: " +
                         guest_paths[index])
@@ -1201,14 +1203,14 @@ impl ImageBuilder:
                 # copy from the verified image-owned destination so a bundle
                 # replacement cannot split the installed pair.
                 if index < 3:
-                    if not rt_file_copy(
+                    if not image_file_copy(
                         rootfs_root + guest_paths[index],
                         rootfs_root + boot_payloads[index]) or
-                        rt_file_hash_sha256(rootfs_root + boot_payloads[index]) !=
+                        image_file_hash_sha256(rootfs_root + boot_payloads[index]) !=
                             expected_sha256:
                         return Err("signed Clang boot payload staging failed: " +
                             boot_payloads[index])
-                if not rt_file_write_bytes(
+                if not image_file_write_bytes(
                     rootfs_root + boot_records[index],
                     signed_media.signed_clang_scr1_bytes[index]):
                     return Err("signed Clang SCR1 staging failed: " + boot_records[index])
@@ -1220,14 +1222,14 @@ impl ImageBuilder:
                 manifest = manifest + _manifest_file(
                     boot_records[index], "boot-catalog-scr1", "simpleos-loader")
                 index = index + 1
-            if not rt_file_write_bytes(
+            if not image_file_write_bytes(
                 "{rootfs_root}/boot/catalog/clang_toolchain.trust",
                 signed_media.signed_clang_trust_config_bytes):
                 return Err("signed Clang trust staging failed")
             manifest = manifest + _manifest_file(
                 "/boot/catalog/clang_toolchain.trust", "boot-catalog-trust",
                 "simpleos-loader")
-            if not rt_file_write_bytes(
+            if not image_file_write_bytes(
                 "{rootfs_root}/boot/catalog/clang_catalog_release.ccrd",
                 signed_media.signed_clang_descriptor_bytes):
                 return Err("signed Clang release descriptor staging failed")
@@ -1237,7 +1239,7 @@ impl ImageBuilder:
 
             return Ok(manifest)
         val clang_binary = image_effective_clang_binary()
-        if clang_binary == "" or not rt_file_exists(clang_binary):
+        if clang_binary == "" or not image_file_exists(clang_binary):
             var blocked = ""
             for guest_path in IMAGE_CLANG_GUEST_BIN_PATHS:
                 blocked = blocked + image_package_payload_decision_v1(
@@ -1262,7 +1264,7 @@ impl ImageBuilder:
             val decision = image_package_payload_decision_v1(
                 "simpleos-tools", guest_path, clang_bytes, architecture)
             if decision.write_payload:
-                if rt_file_write_bytes("{rootfs_root}{guest_path}", clang_bytes):
+                if image_file_write_bytes("{rootfs_root}{guest_path}", clang_bytes):
                     manifest = manifest + _manifest_file(guest_path, "clang-toolchain-binary", "simpleos-tools")
                 else:
                     manifest = manifest + image_package_payload_decision_v1(
@@ -1315,7 +1317,7 @@ impl ImageBuilder:
 
     fn _stage_rust_toolchain_payload(rootfs_root: text) -> text:
         val rustc_binary = image_effective_rustc_binary()
-        if rustc_binary == "" or not rt_file_exists(rustc_binary):
+        if rustc_binary == "" or not image_file_exists(rustc_binary):
             var blocked = ""
             for guest_path in IMAGE_RUSTC_GUEST_BIN_PATHS:
                 blocked = blocked + image_package_payload_decision_v1(
@@ -1340,7 +1342,7 @@ impl ImageBuilder:
             val decision = image_package_payload_decision_v1(
                 "simpleos-tools", guest_path, rustc_bytes, architecture)
             if decision.write_payload:
-                if rt_file_write_bytes("{rootfs_root}{guest_path}", rustc_bytes):
+                if image_file_write_bytes("{rootfs_root}{guest_path}", rustc_bytes):
                     manifest = manifest + _manifest_file(guest_path, "rust-toolchain-binary", "simpleos-tools")
                 else:
                     manifest = manifest + image_package_payload_decision_v1(
@@ -1426,12 +1428,12 @@ impl ImageBuilder:
                 "-c",
                 _make_os_disk_command(self.config)
             ]
-            val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", args, 120000)
+            val (stdout, stderr, exit_code) = image_process_run_timeout("/bin/sh", args, 120000)
             if stdout != "":
                 print stdout.trim()
             if stderr != "":
                 print stderr.trim()
-            if exit_code == 0 and rt_file_exists(self.config.output_path):
+            if exit_code == 0 and image_file_exists(self.config.output_path):
                 return Result.Ok(true)
             return Result.Err("FAT32 disk generation failed; refusing non-bootable descriptor fallback")
         _write_artifact_descriptor(self.config, self.layout, manifest_path)
@@ -1938,8 +1940,8 @@ fn _staged_rootfs_allocation_v1(
 ) -> Result<(u64, i64), text>:
     if depth > _IMAGE_ROOTFS_MAX_DEPTH_V1:
         return Err("SimpleOS staged rootfs directory depth exceeds bound")
-    if not rt_dir_exists(path):
-        val size = rt_file_size(path)
+    if not image_dir_exists(path):
+        val size = image_file_size(path)
         if size < 0:
             return Err("SimpleOS staged rootfs contains an unreadable file: {path}")
         val raw = size.to_u64()
@@ -1951,9 +1953,10 @@ fn _staged_rootfs_allocation_v1(
         if rounded < raw:
             return Err("SimpleOS staged rootfs file allocation overflow")
         return Ok((rounded, 1))
-    val entries = rt_dir_list(path)
-    if entries == nil:
+    val listed = image_dir_list(path)
+    if listed == nil:
         return Err("SimpleOS staged rootfs directory is unreadable: {path}")
+    val entries = listed ?? []
     var allocation = _IMAGE_ROOTFS_CLUSTER_BYTES_V1
     var count: i64 = 1
     for name in entries:
@@ -1988,13 +1991,13 @@ fn _validate_staged_rootfs_budget_v1(
     Ok(true)
 
 fn write_text(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
+    image_file_write_text(path, content)
 
 fn readdir(path: text) -> [text]:
-    rt_dir_list(path) ?? []
+    image_dir_list(path) ?? []
 
 fn mkdir(path: text):
-    val _ok = rt_dir_create_all(path)
+    val _ok = image_dir_create_all(path)
 
 fn _ensure_dir(path: text):
     if path == "":
@@ -2061,7 +2064,7 @@ fn _basename(path: text) -> text:
 
 fn detect_iso_tool() -> text:
     val cmd = "command -v xorriso || command -v mkisofs || command -v genisoimage || true"
-    val (stdout, _e, _c) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 15000)
+    val (stdout, _e, _c) = image_process_run_timeout("/bin/sh", ["-c", cmd], 15000)
     val found = stdout.trim()
     if found == "":
         return "iso-tool-missing"

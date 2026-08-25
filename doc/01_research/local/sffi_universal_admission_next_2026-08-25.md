@@ -5719,3 +5719,41 @@ The authoritative census changed as follows:
 Annotations add no branch, allocation, copy, lookup, polling, lock, hash,
 signature operation, dispatch, or data-layout change. This adapter remains
 unsafe and critical-ineligible; verified-and-signed admission remains 0.
+
+## Image-builder canonical I/O owner checkpoint
+
+The image builder's 24 private process/file/directory calls now route through
+eight canonical `std.io_runtime` owners. Two exact owners were added because
+the existing convenience APIs intentionally normalized away distinctions this
+security-sensitive builder needs: `file_size_signed` preserves negative
+failure, and `dir_list_optional` preserves nil provider/read/allocation failure
+separately from an empty directory. The process tuple owner is mandatory-inline
+to avoid an extra aggregate-return frame.
+
+Exact one-call text/byte writes, file existence, directory creation/existence,
+the 120-second disk-build timeout, and the 15-second tool-probe timeout remain
+unchanged. The recursive rootfs validator explicitly unwraps a successfully
+listed directory only after rejecting nil, retaining its depth, entry-count,
+allocation-overflow, and partition-capacity checks.
+
+The focused `image-builder-sffi-authority.shs` audit passed. It pins zero local
+extern declarations, 24 canonical calls, exact status/nullable behavior,
+mandatory process inlining, original timeout values, and both-registry coverage
+for all eight underlying providers. Registration remains weaker than signed
+artifact admission or ABI proof.
+
+The authoritative census changed as follows:
+
+- raw call sites: 18,501 -> 18,479
+- distinct called symbols: unchanged at 3,257
+- caller files: 3,087 -> 3,086
+- missing authority: 13,334 -> 13,310
+- lexical unsafe: 3,429 -> 3,431
+- function unsafe: unchanged at 1,738
+
+The 24 duplicate raw calls become two centralized mandatory-inline raw calls,
+so the net raw count falls by 22. No retry, scan, loop, filesystem operation,
+buffer allocation/copy, lookup, lock, hash, signature operation, or generic
+dispatch was added. The image providers and produced artifact are still not
+cryptographically admitted by this source change; verified-and-signed remains
+0.
