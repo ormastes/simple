@@ -27,7 +27,9 @@
 use std.sffi.dynamic.{DynLib, spl_dlclose}
 use std.diag.{dbg_stage, dbg_event_hop, dbg_events_on}
 
+@unsafe(reason: "raw function address and dynamic integer ABI remain caller-owned", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+@unsafe(reason: "borrows an untyped foreign string pointer", capabilities: [ffi, raw_ptr])
 extern fn spl_str_ptr(s: text) -> i64
 @unsafe(reason: "nonnull raw store; staging buffer owner validates bounds", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
@@ -41,6 +43,12 @@ fn _gui_renderer_resolve(lib: DynLib, name: text) -> i64:
     match result:
         case Ok(symbol): symbol
         case Err(_): 0
+
+@always_inline
+fn _gui_frame_extent_valid(w: i64, h: i64, pixel_count: i64) -> bool:
+    if w <= 0 or h <= 0 or pixel_count < 0:
+        return false
+    pixel_count % w == 0 and pixel_count / w == h
 
 # Event kind codes — identical to the seed interpreter's winit_sffi constants.
 val GUI_EVT_NONE: i64 = 0
@@ -125,6 +133,7 @@ impl GuiRenderer:
         )
 
     # Open a real window. Returns nil (with one clear log line) on failure.
+    @unsafe(reason: "loads a foreign provider and retains raw library, object, and function handles", capabilities: [ffi, raw_ptr])
     static fn create(engine: text, w: i32, h: i32, title: text) -> GuiRenderer?:
         dbg_stage("gui", "renderer_create_start")
         if engine == "electron":
@@ -249,6 +258,7 @@ impl GuiRenderer:
     # Poll one pending event. kind == GUI_EVT_NONE when the queue is empty.
     # The native event handle is freed before returning — callers only ever
     # see the typed record.
+    @unsafe(reason: "invokes cached foreign event functions with raw object handles", capabilities: [ffi, raw_ptr])
     fn poll_event() -> GuiEvent:
         if self.win == 0:
             return GuiEvent.none()
@@ -304,8 +314,9 @@ impl GuiRenderer:
 
     # Present an XRGB frame (one i64 per pixel, 0x00RRGGBB). The staging
     # buffer is filled two pixels per poke, then blitted by the cdylib.
+    @unsafe(reason: "writes a validated frame into a foreign staging pointer", capabilities: [ffi, raw_ptr])
     fn present_rgba(w: i64, h: i64, pixels: [i64]) -> bool:
-        if self.win == 0:
+        if self.win == 0 or not _gui_frame_extent_valid(w, h, pixels.len().to_i64()):
             return false
         val sp = spl_wffi_call_i64(self.fp_staging, [self.win, w, h], 3)
         if sp == 0:
@@ -320,8 +331,9 @@ impl GuiRenderer:
             rt_ptr_write_i32(sp, (i * 4).to_i64(), pixels[i] as i32)
         spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
 
+    @unsafe(reason: "writes a validated frame into a foreign staging pointer", capabilities: [ffi, raw_ptr])
     fn present_argb_u32(w: i64, h: i64, pixels: [u32]) -> bool:
-        if self.win == 0:
+        if self.win == 0 or not _gui_frame_extent_valid(w, h, pixels.len().to_i64()):
             return false
         val sp = spl_wffi_call_i64(self.fp_staging, [self.win, w, h], 3)
         if sp == 0:
@@ -336,8 +348,10 @@ impl GuiRenderer:
             rt_ptr_write_i32(sp, (i * 4).to_i64(), pixels[i])
         spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
 
+    @unsafe(reason: "writes a bounded source rectangle into a foreign staging pointer", capabilities: [ffi, raw_ptr])
     fn stage_blit_argb_u32(x: i64, y: i64, w: i64, h: i64, dst_w: i64, dst_h: i64, pixels: [u32]) -> bool:
-        if self.win == 0:
+        if (self.win == 0 or dst_w <= 0 or dst_h <= 0 or
+            not _gui_frame_extent_valid(w, h, pixels.len().to_i64())):
             return false
         val sp = spl_wffi_call_i64(self.fp_staging, [self.win, dst_w, dst_h], 3)
         if sp == 0 or w <= 0 or h <= 0:
@@ -363,22 +377,26 @@ impl GuiRenderer:
             row = row + 1
         true
 
+    @unsafe(reason: "invokes a cached foreign staging function with raw window authority", capabilities: [ffi, raw_ptr])
     fn stage_clear(w: i64, h: i64, color: u32) -> bool:
         if self.win == 0 or self.fp_stage_clear == 0:
             return false
         spl_wffi_call_i64(self.fp_stage_clear, [self.win, w, h, color.to_i64()], 4) == 1
 
+    @unsafe(reason: "invokes a cached foreign staging function with raw window authority", capabilities: [ffi, raw_ptr])
     fn stage_fill_rect(x: i64, y: i64, w: i64, h: i64, color: u32) -> bool:
         if self.win == 0 or self.fp_stage_fill_rect == 0:
             return false
         spl_wffi_call_i64(self.fp_stage_fill_rect, [self.win, x, y, w, h, color.to_i64()], 6) == 1
 
+    @unsafe(reason: "invokes a cached foreign presentation function with raw window authority", capabilities: [ffi, raw_ptr])
     fn present_staged(w: i64, h: i64) -> bool:
         if self.win == 0:
             return false
         spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
 
     # Destroy the window and event loop. Safe to call twice.
+    @unsafe(reason: "destroys raw foreign objects and closes their provider library", capabilities: [ffi, raw_ptr])
     me close():
         if self.win != 0:
             spl_wffi_call_i64(self.fp_window_free, [self.win], 1)

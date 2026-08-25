@@ -127,6 +127,42 @@ signatures, and proof receipts remain unresolved. These applets and the wider
 estate are not globally verified or signed; verified-and-signed admission
 remains 0.
 
+## GUI renderer staging-extent and authority checkpoint
+
+`src/lib/nogc_sync_mut/ui/gui_renderer.spl` now declares its dynamic integer
+call and borrowed string-pointer ABI explicitly unsafe alongside the existing
+raw staging stores. Nine create, event, presentation, staging, and close owners
+carry `ffi, raw_ptr` because they retain or invoke raw provider/object/function
+handles.
+
+Review found that full-frame presenters requested a `w*h` foreign staging
+buffer but did not prove `pixels.len() == w*h`, allowing an oversized array to
+write past it. A mandatory-inline helper now performs an overflow-safe exact
+extent check using division/remainder before staging. The blit path also
+validates positive destination dimensions and exact source extent before
+requesting staging memory.
+
+The new validation is O(1) once per present/blit, not inside the pixel loop.
+Packed two-pixel `i64` stores, the odd final `i32` store, event decoding, cached
+function addresses, and semantic pressed/presentation booleans remain
+unchanged. No allocation, copy, per-pixel branch, symbol lookup, lock, hash,
+signature operation, or dispatch layer was added.
+
+The focused authority/provider/performance ratchet passed. Four of five used
+symbols appear in both typed registries; `spl_str_ptr` appears in one. The
+census changed as follows (a containing unsafe close owner supersedes its
+nested lexical classification):
+
+- raw call sites: unchanged at 18,671
+- missing authority: 13,864 -> 13,829
+- lexical unsafe: 3,412 -> 3,411
+- function unsafe: 1,395 -> 1,431
+
+String borrow lifetime, event/window ownership, exact dylib/ABI identity,
+complete provider closure, trusted signatures, and proof receipts remain
+unresolved. This renderer and the wider estate are not globally verified or
+signed; verified-and-signed admission remains 0.
+
 ## QEMU runner environment/file/process authority checkpoint
 
 `src/os/qemu_runner_part2.spl` now declares all seven local process, file,
