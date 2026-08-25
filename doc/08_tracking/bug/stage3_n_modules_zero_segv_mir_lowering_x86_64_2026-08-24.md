@@ -996,3 +996,182 @@ site yields `FAIL — 1190 unsafe block(s) checked, 1 tuple return(s)` naming
   measured failure): `CompileContext.mark_module_poisoned`
   (`driver_types.spl:1025`) does `self.poisoned_modules = self.poisoned_modules.push(name)`,
   the temporary-alias write shape that `.claude/rules/code-style.md` forbids.
+
+## 2026-08-25 (lane `lane-poll-unwrap`, verification lane) — RED re-confirmed on current `origin/main`; THIRD bind-site theory REFUTED by measurement
+
+This lane was opened to finish an interrupted verification, not to add a theory.
+It carried out two full sanctioned bootstrap cycles and lands **no code**. Both
+results below are measurements; neither is a code reading.
+
+### Scope note — which backend
+
+The reproducer in this record is `--backend=cranelift` (see the Commands
+section at the top). That matters and had been lost: `bootstrap-from-scratch.sh`
+**defaults to `--backend=llvm`** (`--backend=<name>` help text, line ~4028), and
+LLVM 18 is present on this host, so a bootstrap invoked without an explicit
+`--backend` builds a *different lane* than this record's evidence. A first run
+in this lane was started that way and was discarded unmeasured for exactly that
+reason. Every number below comes from the record's own invocation:
+
+```
+bootstrap-from-scratch.sh --strategy=adhoc --full-bootstrap --stop-after-stage2 \
+    --backend=cranelift --mode=dynload --jobs=full --output=<out>
+  -> "Stage 2 admitted; stopping before Stage 3 as requested."   (rc=0)
+```
+
+### Finding 1 — the defect STILL REPRODUCES at `3b676a17736`
+
+`origin/main` had moved to `3b676a17736` ("fix(hir): register enum-body method
+return types — the second `case Some(x)` defect"), which is adjacent to this
+erased-receiver defect, so the baseline was re-measured from scratch rather than
+assumed. Fresh seed, fresh Stage 2, pristine tree (the previous lane's
+uncommitted edit was removed first, so nothing foreign was in the tree).
+
+```
+RED_RC=1
+FAIL -- 2 check(s) performed: 4 Simple '*_dot_unwrap' call site(s) inside
+lower_and_check_impl -- an Option unwrap bound to a user method instead of the
+runtime builtin; hello world emitted E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED
+(rc=139);
+```
+
+Byte-identical verdict to the recorded baseline. **The hir fix `3b676a17736`
+does not cover this defect.** Stage-2 sha256
+`36cdfad6f671cf9b06e9c9360b162a08b7d499a0d8d14fccc62d51527ddcde93`.
+
+### Finding 2 — theory #3 (the cranelift builtin-first gate) is REFUTED
+
+The previous lane's judgement, recorded in `.bugaddendum.md`, was that the
+preempting fix belongs at the cranelift **builtin-first gate**
+(`codegen/instr/closures_structs.rs:702`), routing bare enum helpers to
+`rt_unwrap_or_trap` *before* name resolution. That is a well-founded reading:
+the same file fixed the *identical* defect class twice before by exactly this
+mechanism — `ByteSpan.starts_with` and `ByteSpan.slice` were both stolen from an
+erased receiver and both fixed by adding the bare name to
+`is_bare_builtin_collection_method`, which the `:702` gate consults before any
+name-based resolution. `try_compile_builtin_method_call` already maps
+`"unwrap" => "rt_unwrap_or_trap"` and `"unwrap_or" => "rt_unwrap_or_value"`, so
+the routing target existed and no undefined-symbol/NULL-GOT risk was introduced.
+
+The fix applied was therefore the minimal in-pattern one: add `("unwrap", 0)`
+and `("unwrap_or", 1)` to `is_bare_builtin_collection_method`. (Arity excludes
+the receiver, which `:704` passes separately — matching the existing
+`("starts_with", 1)` rows.)
+
+Measured, same invocation, same gate:
+
+```
+FIX_RC=1
+FAIL -- 2 check(s) performed: 4 Simple '*_dot_unwrap' call site(s) inside
+lower_and_check_impl -- ... (rc=139);
+```
+
+**Both gate numbers unmoved: 4 call sites, rc=139.** This is not a no-op build:
+the two Stage-2 binaries differ,
+`e7481b094328bc2ba6e93e5baa572ef6b0132801dff5cbfd32fee0f82ad2084e` vs the RED
+hash above, and the bootstrap independently reported "Seed/runtime stale (Rust
+source content changed since last build)" and rebuilt the seed. The fix was
+compiled in and changed the binary; it did not change the defect.
+
+The patch is preserved, unlanded, at
+`/mnt/data/tmp/refuted_closures_structs_fix.patch`.
+
+### What this eliminates, stated as the two-step inference it is
+
+The discriminator `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1` was set for the whole
+fixed build and produced **zero** output. That reporter is genuinely wired — two
+live call sites, `closures_structs.rs:996` and `:1049` — so its silence is
+evidence, not a vacuous absence. But both report sites sit *after* the
+`unique_ids.len() == 1` early-return at `:962`, so silence on its own is
+consistent with either "bound via `import_map`" or "the `:962` early-return
+fired".
+
+The second fact breaks that tie: the `:702` gate runs *before* `:962`, so the
+applied fix would have preempted the early-return path too. It moved nothing.
+Taken together — a `:702` gate that does not fire, and a reporter that never
+speaks — **the offending bind does not flow through `compile_method_call_static`
+at all.** That points at the `MirInst::Call` / cross-module import route
+(`codegen/instr/calls.rs:~3828`, `ctx.use_map.get(func_name).or_else(|| ctx.import_map.get(func_name))`,
+fed by the bare-method-name insertion in `pipeline/native_project/imports.rs`
+`build_import_map:~606-618`, where >1 candidate becomes `ambiguous` yet a non-`_`
+name still keeps arbitrary HashMap-order first-wins).
+
+That is a *direction*, not a proven site. It is deliberately not being acted on
+in this lane: three theories have now been refuted by measurement, and the
+standing instruction is that an open record beats a fourth blind iteration.
+
+Note for whoever takes it: refusing the bind at `calls.rs:3828` or at
+`build_import_map` is **not** sufficient on its own. Unlike the `:702` gate,
+those sites have no builtin-routing fallback — the documented fall-through is a
+link-time import of the raw name, which this repo has already seen become an
+undefined symbol, a NULL GOT slot and the *same* rc=139 by a different cause
+(`check-no-unresolved-runtime-symbols.shs`, and the `rt_unwrap_or_trap` incident
+in `stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`). A fix
+there must also establish where the refused bare name gets routed instead, and
+`nm -u` the resulting Stage 2 for an undefined bare `unwrap` before attributing
+any surviving SEGV to the original defect.
+
+### The cost problem, and the highest-value next step
+
+Each theory tested here costs a **~40-minute full bootstrap**, because the only
+reproducer currently in use is Stage 2 itself. That is what has made three
+refutations expensive and it is the reason to fix the harness before the defect.
+
+The *symbolic* half of the gate — the wrong-callee bind — does not need a
+bootstrap at all. A small `.spl` fixture with an erased-optional `.unwrap()`,
+compiled directly by the seed's `native-build` with `poll.spl` inside the entry
+closure, exhibits the bind in minutes and can be disassembled the same way. The
+evidence worktree once held exactly this (`zpfix2` in
+`/mnt/data/worktrees/lane-surfaces-payload`); it is **gone** — that path no
+longer exists. **Reconstructing that minutes-scale fixture should be the first
+step of the next attempt, ahead of any further code change.**
+
+### Status of the other on-disk candidate (unmeasured, not discarded)
+
+The previous lane's uncommitted edit (`imports.rs` `is_bare_enum_helper` +
+`mangle.rs` refusals) is preserved at
+`/mnt/data/tmp/candidate_poll_unwrap.patch` and is **not landed**. It is inert
+for *this* record's reproducer: `mangle_mir` has exactly one non-test caller,
+`pipeline/native_project/compiler.rs:849`, inside `if use_llvm { #[cfg(feature
+= "llvm")] ... }` where `use_llvm = backend == "llvm"` — so on `--backend=cranelift`
+it never executes. The previous lane's own self-doubt on this point was correct.
+Whether the same rule is needed on the **llvm**-backend path is a separate,
+still-unmeasured question; it is out of scope for this cranelift reproducer and
+is recorded here rather than silently dropped.
+
+### Evidence paths
+
+- gate verdict, RED baseline: `/mnt/data/tmp/gate_red.log`
+- gate verdict, after theory #3: `/mnt/data/tmp/gate_fix.log`
+- refuted patch: `/mnt/data/tmp/refuted_closures_structs_fix.patch`
+- unmeasured llvm-path candidate: `/mnt/data/tmp/candidate_poll_unwrap.patch`
+
+No code landed from this lane. The gate
+`scripts/check/check-stage2-option-unwrap-not-stolen.shs` remains ADVISORY and
+honestly RED, which is still the correct state.
+
+### Addendum on the "fast oracle" — it speeds up REPRODUCTION, not fix-testing
+
+A hello-world `native-build` on an already-admitted Stage 2 does reproduce in
+seconds (confirmed here against a prebuilt Stage 2: `NB_RC=139` in ~0.1s of
+phase output). That is a genuine improvement over a 13-minute Stage 3 run, and
+the advisory gate's behavioural half already uses exactly this shape.
+
+But it does **not** shorten the loop for testing a *compiler* fix, and the
+distinction matters for planning the next attempt. The wrong-callee bind is
+baked into the Stage-2 binary by the seed that built it, so changing the bind
+means changing the seed and **rebuilding Stage 2** — the ~40-minute cycle this
+lane paid twice. A prebuilt Stage 2 can only ever re-exhibit the defect it was
+already built with.
+
+What would actually shorten the fix loop is the *symbolic* half run against a
+small fixture compiled **by the seed directly** (erased-optional `.unwrap()`
+with `poll.spl` in the entry closure, then disassembled for the `Poll_dot_unwrap`
+reference) — no Stage 2 in the path at all. That was attempted here and is
+**blocked**: the seed `simple` binary refuses the command outright
+(`error: pure-Simple tool 'native-build' unavailable; refusing Rust fallback`,
+`driver/src/main.rs:230`), and the bootstrap drives Stage 2 through a separately
+built `simple-native-all` binary rather than the seed `bin`. Establishing that
+direct-from-seed fixture path is therefore the concrete prerequisite, and it is
+the recommended first step of the next attempt — ahead of any further code
+change.
