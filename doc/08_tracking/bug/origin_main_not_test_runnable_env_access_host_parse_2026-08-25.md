@@ -39,3 +39,31 @@ tests is doing so against a working tree that differs from `main`.
 A pre-push check that parses the committed `src/app/**` + `src/lib/**` (e.g. `simple compile`
 or a parse-only entry point) from a `git worktree` of the new tip — the `.spl` analogue of
 `check-seed-builds-push.shs`, and fail-closed the same way.
+
+## Resolution (2026-08-25, same day)
+
+The parse abort is FIXED. `src/app/io/env_access_host.spl` had the closing `)` of the multi-line
+`rt_hal_install_isolated_exact_host_from_plan(...)` call moved **past the following `pub fn`** to
+the end of the file, so the argument list never closed and the parser met `pub` where it wanted a
+comma. The call passes exactly the callee's nine parameters
+(`src/app/io/rt_hal_isolated_host.spl:237-241`), so restoring the paren to its own line after
+`loaded.max_output_bytes` and deleting the stray trailing line is the whole fix — one line moved.
+
+Two further blockers were found behind it and fixed here as well:
+
+1. `rt_env_cwd` infinite recursion —
+   `doc/08_tracking/bug/rt_env_cwd_wrapper_shadows_extern_infinite_recursion_2026-08-25.md`.
+   With 1 and 2 fixed, `bin/simple todo-scan` runs on clean `origin/main`: `239 TODOs found`
+   (it previously died with a depth-1000 stack overflow).
+2. A variable named `namespace` was rejected by the "common mistake" detector
+   (`test_runner_mcdc_report.spl:331`), renamed to `ns_hash`.
+
+**Still blocking `bin/simple test` on clean content:** the same detector rejects
+`dict[Ctor(...)] = v` as `List[T]` generics, at 42 sites —
+`doc/08_tracking/bug/common_mistake_detector_false_positive_dict_index_ctor_2026-08-25.md`.
+That is a detector fix, not 42 source edits, so it is filed rather than worked around.
+
+**Unrelated finding worth acting on:** a fresh `todo-scan` of clean `origin/main` yields 239
+entries while the committed `doc/08_tracking/todo/todo_db.sdn` holds roughly 741 lines' worth —
+the checked-in database does not match its own source. It was deliberately NOT regenerated here,
+because replacing it from any single tree would silently delete entries other sessions rely on.
