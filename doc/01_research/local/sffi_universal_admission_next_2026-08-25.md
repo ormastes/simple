@@ -2456,6 +2456,32 @@ generic dispatch, or long-lived allocation.  Ptrace/DWARF and 15 debugger
 operations are still unavailable, so the module is not verified or signed;
 verified-and-signed admission remains 0.
 
+## TLS 1.3 context-I/O call-authority checkpoint
+
+The TLS 1.3 context owner retains 48 operation-specific raw declarations and
+now places all 17 actual raw calls in minimal lexical `unsafe(ffi)` scopes.
+The focused `tls13-context-sffi-contract.shs` ratchet passed and excludes
+function-name substrings from its raw-call scan.
+
+Review found an extent defect before the IPC receive boundary.  The direct
+receive helper previously narrowed arbitrary `u64` lengths to `u32` and then
+computed `max_len + 16` for the foreign receive allocation.  It now rejects
+zero and values above the existing RFC 8446 record payload bound of 18,432
+bytes before either operation.  Valid TLS records keep the same calls, copies,
+loops, and allocation sizes.
+
+The authoritative census changed exactly by the 17 newly bounded calls:
+
+- missing authority: 17,370 -> 17,353
+- lexical unsafe: 2,887 -> 2,904
+- function unsafe: unchanged at 919
+
+The new valid-path check is constant-time and prevents oversized work.  No
+hashing, signing, discovery, lock, allocation, copy, or generic dispatch was
+added.  The wider handshake driver still contains unbounded raw calls and the
+TLS providers lack exact-artifact signed proof receipts, so the TLS family is
+not globally verified or signed; verified-and-signed admission remains 0.
+
 ## HTTP/WebSocket call-authority checkpoint
 
 The three legacy HTTP/WebSocket facades each retain 26 explicitly tagged raw

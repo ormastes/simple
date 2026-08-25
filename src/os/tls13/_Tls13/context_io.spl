@@ -226,7 +226,8 @@ fn tls13_verification_time(config: Tls13ClientConfig) -> i64:
     """
     if config.verify_time_unix >= 0:
         return config.verify_time_unix
-    val micros = rt_time_now_unix_micros()
+    val micros = unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros()
     if micros <= 0:
         return -1
     micros / 1000000
@@ -235,14 +236,16 @@ fn _tls_debug(msg: text):
     val _unused = msg.len()
 
 fn _byte_buf(cap: u64) -> [u8]:
-    rt_array_new_with_cap(cap.to_i64())
+    unsafe(capabilities: [ffi]):
+        rt_array_new_with_cap(cap.to_i64())
 
 fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
     buf.push(byte_val.to_u8())
     buf
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
-    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+    unsafe(capabilities: [ffi]):
+        rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
 
 fn _clone_bytes(buf: [u8]) -> [u8]:
     var out: [u8] = _byte_buf(buf.len())
@@ -327,7 +330,9 @@ fn _debug_bytes32(label: text, buf: [u8]):
     _tls_debug("{label} 24={_u8_at(buf, 24)} 25={_u8_at(buf, 25)} 26={_u8_at(buf, 26)} 27={_u8_at(buf, 27)} 28={_u8_at(buf, 28)} 29={_u8_at(buf, 29)} 30={_u8_at(buf, 30)} 31={_u8_at(buf, 31)}")
 
 fn _transcript_hash_fd(t: Transcript) -> [u8]:
-    _clone_bytes(rt_tls13_sha256(t.buf))
+    val digest = unsafe(capabilities: [ffi]):
+        rt_tls13_sha256(t.buf)
+    _clone_bytes(digest)
 
 fn _tls_label_bytes(label: text) -> [u8]:
     if label == "derived":
@@ -343,8 +348,12 @@ fn _tls_label_bytes(label: text) -> [u8]:
     []
 
 fn _tls13_traffic_keys_fd(traffic_secret: [u8]) -> TrafficKeys:
-    val key = _copy_range(_clone_bytes(rt_tls13_hkdf_expand_label_key(traffic_secret)), 0, 16)
-    val iv = _copy_range(_clone_bytes(rt_tls13_hkdf_expand_label_iv(traffic_secret)), 0, 12)
+    val key_raw = unsafe(capabilities: [ffi]):
+        rt_tls13_hkdf_expand_label_key(traffic_secret)
+    val iv_raw = unsafe(capabilities: [ffi]):
+        rt_tls13_hkdf_expand_label_iv(traffic_secret)
+    val key = _copy_range(_clone_bytes(key_raw), 0, 16)
+    val iv = _copy_range(_clone_bytes(iv_raw), 0, 12)
     TrafficKeys(key: key, iv: iv)
 
 # ============================================================================
@@ -385,10 +394,12 @@ fn _net_send_direct(fd: i32, data: [u8]) -> Result<u64, text>:
     while i < data.len():
         payload = _push_byte(payload, data[i].to_u64().to_i64())
         i = i + 1
-    val send_rc = rt_ipc_send_bytes(_NETSTACK_PORT, _NET_SEND, payload)
+    val send_rc = unsafe(capabilities: [ffi]):
+        rt_ipc_send_bytes(_NETSTACK_PORT, _NET_SEND, payload)
     if send_rc < 0:
         return Err("ipc send failed")
-    val reply = rt_ipc_recv_bytes(_NETSTACK_PORT, 64)
+    val reply = unsafe(capabilities: [ffi]):
+        rt_ipc_recv_bytes(_NETSTACK_PORT, 64)
     _tls_debug("_net_send_direct reply_len={reply.len()}")
     if reply.len() < 4:
         return Err("short send reply")
@@ -403,13 +414,17 @@ fn _net_send_direct(fd: i32, data: [u8]) -> Result<u64, text>:
     Ok(wrote.to_u64())
 
 fn _net_recv_direct(fd: i32, max_len: u64) -> Result<[u8], text>:
+    if max_len == 0 or max_len > _TLS_MAX_RECORD_PAYLOAD:
+        return Err("invalid TLS IPC receive extent")
     var payload: [u8] = _byte_buf(8)
     _net_push_i32(payload, fd)
     _net_push_u32(payload, max_len.to_u32())
-    val send_rc = rt_ipc_send_bytes(_NETSTACK_PORT, _NET_RECV, payload)
+    val send_rc = unsafe(capabilities: [ffi]):
+        rt_ipc_send_bytes(_NETSTACK_PORT, _NET_RECV, payload)
     if send_rc < 0:
         return Err("ipc recv request failed")
-    val reply = rt_ipc_recv_bytes(_NETSTACK_PORT, (max_len + 16).to_i64())
+    val reply = unsafe(capabilities: [ffi]):
+        rt_ipc_recv_bytes(_NETSTACK_PORT, (max_len + 16).to_i64())
     _tls_debug("_net_recv_direct reply_len={reply.len()}")
     if reply.len() < 4:
         return Err("short recv reply")
@@ -436,7 +451,8 @@ fn _io_send(io: Tls13Io, data: [u8]) -> bool:
         var zero_writes: u64 = 0
         while sent < data.len():
             _tls_debug("_io_send loop sent={sent} total={data.len()}")
-            val wrote_i = rt_net_send_bytes(io.tcp_fd, data)
+            val wrote_i = unsafe(capabilities: [ffi]):
+                rt_net_send_bytes(io.tcp_fd, data)
             if wrote_i < 0:
                 _tls_debug("_io_send send err status={wrote_i}")
                 return false
@@ -446,7 +462,8 @@ fn _io_send(io: Tls13Io, data: [u8]) -> bool:
                 zero_writes = zero_writes + 1
                 if zero_writes > 100000:
                     return false
-                rt_thread_sleep(1)
+                unsafe(capabilities: [ffi]):
+                    rt_thread_sleep(1)
                 pass_dn
             else:
                 zero_writes = 0
@@ -481,13 +498,15 @@ fn _io_recv(io: Tls13Io, length: u64) -> [u8]:
                 Ok(data): data
                 Err(_): []
         else:
-            rt_net_recv_bytes(io.tcp_fd, remaining.to_i64())
+            unsafe(capabilities: [ffi]):
+                rt_net_recv_bytes(io.tcp_fd, remaining.to_i64())
         _tls_debug("_io_recv chunk_len={chunk.len()}")
         if chunk.len() == 0:
             empty_spins = empty_spins + 1
             if empty_spins > 100000:
                 return result
-            rt_thread_sleep(1)
+            unsafe(capabilities: [ffi]):
+                rt_thread_sleep(1)
             pass_dn
         else:
             empty_spins = 0
@@ -506,7 +525,8 @@ fn _io_recv_record(io: Tls13Io) -> [u8]:
     """Read one complete TLS record: 5-byte header + payload."""
     _tls_debug("_io_recv_record start")
     if io.kind == "fd":
-        return rt_tls13_recv_record(io.tcp_fd)
+        return unsafe(capabilities: [ffi]):
+            rt_tls13_recv_record(io.tcp_fd)
     val header = _io_recv(io, 5)
     if header.len() < 5:
         _tls_debug("_io_recv_record short_header={header.len()}")
@@ -514,7 +534,8 @@ fn _io_recv_record(io: Tls13Io) -> [u8]:
     val h0 = _u8_at(header, 0)
     val h3 = _u8_at(header, 3)
     val h4 = _u8_at(header, 4)
-    val pay_len_i = rt_tls13_record_payload_len(header)
+    val pay_len_i = unsafe(capabilities: [ffi]):
+        rt_tls13_record_payload_len(header)
     if pay_len_i <= 0:
         return []
     val pay_len = pay_len_i.to_u64()
@@ -619,4 +640,5 @@ fn _u16_be_at(buf: [u8], off: u64) -> u32:
 fn _u8_at_i64(buf: [u8], idx: u64) -> i64:
     """Return byte at idx as i64 — workaround for interpreter `push(u8)` bug
     (see doc/08_tracking/bug/interpreter_array_push_u8_literal_lost_2026-05-02.md)."""
-    rt_bytes_u8_at(buf, idx.to_i64())
+    unsafe(capabilities: [ffi]):
+        rt_bytes_u8_at(buf, idx.to_i64())
