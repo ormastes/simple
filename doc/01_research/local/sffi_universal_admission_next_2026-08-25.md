@@ -1397,6 +1397,29 @@ Estimated declaration totals remain 11,652 / 3,137 symbols. Unsafe-tagged rows
 increase from 1,920 to 2,001, untouched rows decrease from 9,534 to 9,453, and
 exact-artifact verified-and-signed admission remains zero.
 
+## Simple-core array raw-contract checkpoint
+
+All 24 allocator, memory, archive-level array, registry, and runtime-array
+externs in `core_array_ops.spl` now carry adjacent `unsafe(ffi)` metadata, with
+`raw_ptr` capability where raw allocation/header/item addresses cross the
+boundary. This includes extent-sensitive loads, stores, and `memcpy`, registry
+publication/invalidation, and allocation/status sentinels.
+
+One concrete leak is fixed: if the u64 array header allocation succeeds but its
+item allocation fails, the header is now freed before returning failure. A
+constant-time upper bound prevents `capacity * 8` overflow, and concatenation
+rejects signed length overflow before allocating. These add only failure-path
+cleanup and two O(1) guards—no traversal, copy, allocation, registry lookup, or
+dispatch. A static ratchet fixes the inventory and cleanup/overflow invariants.
+The focused `bin/simple check` completed, but that command identified its binary
+as the Rust bootstrap seed; it is recorded only as limited syntax evidence, not
+production verification. The Pure Simple optimizer was therefore not replaced
+with the seed and remains unavailable for this checkpoint.
+
+Estimated declaration totals remain 11,652 / 3,137 symbols. Unsafe-tagged rows
+increase from 2,104 to 2,128, untouched rows decrease from 9,350 to 9,326, and
+exact-artifact verified-and-signed admission remains zero.
+
 ## FTP/FTPS unbacked-boundary checkpoint
 
 The canonical FTP owner has 25 raw declarations and no C or Rust provider or

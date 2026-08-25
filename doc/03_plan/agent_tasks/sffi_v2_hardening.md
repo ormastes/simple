@@ -609,3 +609,7 @@ passing placeholder.
      Any future FTP/FTPS provider requires typed ownership/status contracts,
      TLS policy, exact signed admission, and no extra network/file operations,
      copies, allocations, lookups, locks, or generic dispatch on the hot path.
+120. Keep all 24 simple-core array allocator/pointer/archive externs explicitly
+     tagged `unsafe(ffi)` with `raw_ptr` where applicable. Retain allocation-
+     failure cleanup and constant-time capacity/concatenation overflow guards;
+     add no array traversal, copy, allocation, registry lookup, or dispatch.
