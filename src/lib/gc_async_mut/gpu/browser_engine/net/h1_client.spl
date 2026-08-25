@@ -21,7 +21,8 @@ use std.js.types.pair.{Pair}
 use std.nogc_sync_mut.io.browser_net_runtime.{browser_monotonic_ms, browser_runtime_string_free}
 
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_flush(fd: i64) -> bool
 extern fn rt_io_tcp_close(fd: i64) -> bool
@@ -515,16 +516,19 @@ fn read_tcp_response_bytes(fd: i64, deadline_ms: i64) -> Result<[u8]>:
         if remaining == 0:
             return Err(network_error("h1: TCP response deadline exceeded"))
         val _ = rt_io_tcp_set_read_timeout(fd, Some(remaining))
-        val chunk = rt_io_tcp_read(fd, 8192)
-        if chunk.len() == 0:
+        val chunk = unsafe(capabilities: [ffi]):
+            rt_io_tcp_read(fd, 8192)
+        if chunk == nil:
+            return Err(network_error("h1: TCP read failed"))
+        if chunk!.len() == 0:
             if h1_deadline_remaining_ms(
                 browser_monotonic_ms(), deadline_ms
             ) == 0:
                 return Err(network_error("h1: TCP response deadline exceeded"))
             break
-        if not h1_response_size_allowed(bytes.len(), chunk.len()):
+        if not h1_response_size_allowed(bytes.len(), chunk!.len()):
             return Err(network_error("h1: response exceeds 50 MiB limit"))
-        bytes = bytes + chunk
+        bytes = bytes + chunk!
     Ok(bytes)
 
 fn read_tls_response_bytes(

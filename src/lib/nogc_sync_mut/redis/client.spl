@@ -291,12 +291,15 @@ impl RedisClient:
             return Err(IoError(kind: IoErrorKind.Other, message: "not connected", source: nil))
         var buf: [u8] = []
         while true:
-            val chunk = rt_io_tcp_read(self.fd, 4096)
-            if chunk.len() == 0:
+            val chunk = unsafe(capabilities: [ffi]):
+                rt_io_tcp_read(self.fd, 4096)
+            if chunk == nil:
+                return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "reply read failed", source: nil))
+            if chunk!.len() == 0:
                 if buf.len() == 0:
                     return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "empty reply", source: nil))
                 return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "incomplete reply", source: nil))
-            buf = buf + chunk
+            buf = buf + chunk!
             val attempt = try_parse_resp(buf, 0)
             match attempt:
                 Some(parsed):
@@ -468,7 +471,8 @@ fn try_read_line_from(buf: [u8], start: i64) -> Option<LineResult>:
 
 extern fn rt_io_tcp_connect(addr: text) -> i64
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_close(fd: i64) -> bool
 use std.common.string_core.{bytes_to_text}

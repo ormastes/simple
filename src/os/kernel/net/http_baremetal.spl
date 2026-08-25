@@ -29,7 +29,8 @@ use os.kernel.net.http_route.{http_classify_request, HttpRoute, HttpRouteKind}
 
 extern fn rt_io_tcp_bind(addr: text) -> i64
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_close(fd: i64) -> bool
 extern fn rt_bytes_to_text(data: [u8]) -> text
@@ -82,7 +83,11 @@ fn start_http_server_baremetal():
     while true:
         val client = rt_io_tcp_accept_timeout(listener, 1)
         if client >= 0:
-            val request_bytes = rt_io_tcp_read(client, HTTP_MAX_REQUEST_BYTES)
-            val request = rt_bytes_to_text(request_bytes)
+            val request_bytes = unsafe(capabilities: [ffi]):
+                rt_io_tcp_read(client, HTTP_MAX_REQUEST_BYTES)
+            if request_bytes == nil:
+                rt_io_tcp_close(client)
+                continue
+            val request = rt_bytes_to_text(request_bytes!)
             rt_io_tcp_write_text(client, _http_route(request))
             rt_io_tcp_close(client)

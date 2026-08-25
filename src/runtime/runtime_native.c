@@ -12628,11 +12628,14 @@ int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
 }
 
 int64_t rt_io_tcp_read(int64_t fd, int64_t size) {
+    if (size < 0) return rt_core_nil();
+    if (size == 0) return (int64_t)(uintptr_t)rt_byte_array_new(0);
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    if (!ca || !ca->data) return rt_core_nil();
     ssize_t n = read((int)fd, ca->data, (size_t)size);
-    ca->len = n > 0 ? n : 0;
+    if (n < 0) return rt_core_nil();
+    ca->len = n;
     return (int64_t)(uintptr_t)arr;
 }
 
@@ -12812,15 +12815,15 @@ int64_t rt_io_tcp_accept(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_accept_timeout(int64_t f, int64_t m) { (void)f; (void)m; return -1; }
 int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
 int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; return -1; }
-int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
-int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
+int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
 int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_flush(int64_t f) { (void)f; return 0; }
 int64_t rt_io_tcp_close(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
+int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
 int64_t rt_io_tcp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
 int64_t rt_io_tcp_set_nodelay(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
 int64_t rt_io_tcp_set_reuseport(int64_t f, int64_t e) { (void)f; (void)e; return 0; }

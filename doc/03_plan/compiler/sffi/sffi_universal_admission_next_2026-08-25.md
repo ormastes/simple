@@ -179,6 +179,16 @@ optional contract and lexical authority. The refreshed full ledger is 12,070
 `rt_*` declaration rows / 3,171 distinct symbols, with 10,835 / 2,243 still
 untouched and zero production admissions.
 
+Checkpoint: the canonical TCP owner now tags 23 raw descriptor/read/write/
+option contracts and scopes every direct call to one FFI expression. The read
+ABI no longer fabricates empty bytes on failure: C, Rust, interpreter, and all
+20 Simple declarations use nil-for-error and empty-for-EOF. Safe `Result`
+wrappers lift nil to an error; server loops deliberately treat an error as
+connection termination. The source ledger advanced to 1,005 unsafe-tagged
+`rt_*` declaration rows / 720 tagged symbols, leaving 10,796 / 2,228 untouched.
+Focused Rust tests and the C compile gate passed once. Successful read call
+count, allocation shape, and algorithmic complexity are unchanged.
+
 For each row, prefer a pure-Simple owner. Otherwise require either:
 
 1. admitted exact evidence plus a typed safe wrapper; or

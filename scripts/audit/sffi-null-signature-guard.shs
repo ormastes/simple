@@ -74,6 +74,45 @@ do
     require_text 'raw nullable current-directory lookup' "$owner"
 done
 
+# The canonical TCP module keeps the raw ABI declarations and every direct
+# invocation in a one-expression ffi scope. This preserves the generated call
+# shape while preventing ambient authority from spreading through safe socket
+# wrappers.
+tcp_owner=src/lib/nogc_sync_mut/io/tcp.spl
+require_text 'raw listener descriptor; negative sentinel means bind failed' "$tcp_owner"
+require_text 'raw nullable line result; nil conflates EOF and read failure' "$tcp_owner"
+if ! awk '
+    /rt_io_tcp_[A-Za-z0-9_]+\(/ && $0 !~ /extern fn/ {
+        if (previous !~ /unsafe\(capabilities: \[ffi\]\):/) exit 1
+    }
+    { previous = $0 }
+' "$root/$tcp_owner"; then
+    echo 'SFFI lint: canonical TCP raw call escaped its minimal ffi scope' >&2
+    failed=1
+fi
+
+if rg -q --glob '*.spl' --glob '!**/vendor/**' \
+    '^\s*extern fn rt_io_tcp_read\([^)]*\) -> \[u8\]$' \
+    "$root/src" "$root/test"; then
+    echo 'SFFI lint: rt_io_tcp_read must preserve nil failure separately from empty EOF' >&2
+    failed=1
+fi
+require_text 'if \(n < 0\) return rt_core_nil\(\);' src/runtime/runtime_native.c
+require_text 'rt_io_tcp_read_line\(int64_t f\).*return rt_core_nil\(\);' \
+    src/runtime/runtime_native.c
+require_text 'rt_io_tcp_local_addr\(int64_t f\).*return rt_core_nil\(\);' \
+    src/runtime/runtime_native.c
+require_text 'rt_io_tcp_peer_addr\(int64_t f\).*return rt_core_nil\(\);' \
+    src/runtime/runtime_native.c
+require_text 'return crate::value::RuntimeValue::NIL;' \
+    src/compiler_rust/runtime/src/value/net_tcp.rs
+require_text 'Err\(_\) => Ok\(Value::Nil\)' \
+    src/compiler_rust/compiler/src/interpreter_native_net.rs
+require_text 'tcp_read_failure_is_nil_not_empty_bytes' \
+    src/compiler_rust/runtime/src/value/net_tcp.rs
+require_text 'tcp_read_failure_is_nil_not_empty_bytes' \
+    src/compiler_rust/compiler/src/interpreter_native_net.rs
+
 for owner in \
     src/compiler_rust/runtime/src/value/wsffi_native.rs \
     src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs \

@@ -77,6 +77,31 @@ the total wrapper maps provider failure to `"."` and replaces the former
 place calls inside lexical `unsafe(ffi)` scopes. Zero production symbols are
 cryptographically admitted, so global safety and verification remain false.
 
+### TCP descriptor/read contract checkpoint
+
+The canonical TCP module had ambient raw calls and an impossible safety check:
+`rt_io_tcp_read` returned `[u8]`, providers converted both read failure and EOF
+to `[]`, and `TcpStream.read` tested `data.len() < 0`. The repaired contract is
+`[u8]?`: `nil` is invalid input/provider/read failure, while `[]` is a valid
+zero-length request or EOF. C, Rust runtime, and interpreter now agree, and the
+Windows C fallback returns the runtime nil value rather than integer zero for
+TCP text/address objects. All 20 Simple declarations use the optional contract
+and every direct call is inside a one-expression `unsafe(ffi)` scope.
+
+The source ledger after this tranche reports 12,070 `rt_*` declaration rows,
+1,005 unsafe-tagged rows, 10,796 untouched rows, 3,171 distinct symbols, 720
+unsafe-tagged symbols, 2,228 untouched symbols, and zero admitted production
+symbols. Provider language counts remain those of the immediately preceding
+full census because this tranche changes contracts, not provider ownership.
+
+Successful TCP reads retain one provider call and the existing buffer work.
+The only hot-path addition is the required predictable nil check; there is no
+hash, lookup, lock, subprocess, generic dispatch, or new allocation. Focused
+Rust runtime and interpreter tests each passed once, and the C runtime compile
+gate compiled 118 files with zero errors (two dependency-gated skips). The
+self-hosted Simple/optimizer/cross-lane gates remain unavailable and are not
+claimed.
+
 ## Current enforcement boundary
 
 - Normal and bootstrap MIR lowering now reject non-unit fallthrough with

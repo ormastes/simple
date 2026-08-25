@@ -648,7 +648,11 @@ pub fn rt_dns_lookup_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    let size = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(4096).max(0) as usize;
+    let requested_size = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(4096);
+    if requested_size < 0 {
+        return Ok(Value::Nil);
+    }
+    let size = requested_size as usize;
     let mut buf = vec![0u8; size];
     match with_tcp_stream_mut(handle, |stream| stream.read(&mut buf)) {
         Ok(n) => {
@@ -657,7 +661,7 @@ pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
                 buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
             )))
         }
-        Err(_) => Ok(Value::Array(Arc::new(Vec::new()))),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -1281,4 +1285,16 @@ pub fn clear_net_state() {
         // Drop all socket handles (this closes them)
         handles.borrow_mut().clear();
     });
+}
+
+#[cfg(test)]
+mod tcp_read_contract_tests {
+    use super::*;
+
+    #[test]
+    fn tcp_read_failure_is_nil_not_empty_bytes() {
+        let result = rt_io_tcp_read_interp(&[Value::Int(-1), Value::Int(16)])
+            .expect("invalid descriptor is a provider result, not a bridge error");
+        assert!(matches!(result, Value::Nil));
+    }
 }

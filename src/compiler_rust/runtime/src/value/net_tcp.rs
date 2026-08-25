@@ -492,12 +492,18 @@ pub extern "C" fn rt_dns_lookup(hostname: crate::value::RuntimeValue) -> crate::
 
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_read(handle: i64, size: i64) -> crate::value::RuntimeValue {
-    if size <= 0 {
+    if size < 0 {
+        return crate::value::RuntimeValue::NIL;
+    }
+    if size == 0 {
         return crate::value::collections::rt_array_new(0);
     }
     let mut buffer = vec![0u8; size as usize];
     let (read, err) = unsafe { native_tcp_read(handle, buffer.as_mut_ptr() as i64, size) };
-    if err != NetError::Success as i64 || read <= 0 {
+    if err != NetError::Success as i64 {
+        return crate::value::RuntimeValue::NIL;
+    }
+    if read <= 0 {
         return crate::value::collections::rt_array_new(0);
     }
     unsafe { crate::value::sffi::file_io::rt_bytes_from_raw(buffer.as_ptr() as i64, read) }
@@ -695,4 +701,14 @@ pub extern "C" fn rt_io_tcp_set_write_timeout(handle: i64, ms: crate::value::Run
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_shutdown(handle: i64, how: i64) -> bool {
     native_tcp_shutdown(handle, how) == NetError::Success as i64
+}
+
+#[cfg(test)]
+mod tcp_read_contract_tests {
+    use super::*;
+
+    #[test]
+    fn tcp_read_failure_is_nil_not_empty_bytes() {
+        assert_eq!(rt_io_tcp_read(-1, 16), crate::value::RuntimeValue::NIL);
+    }
 }

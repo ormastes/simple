@@ -48,7 +48,8 @@ val _OP_SEND_BYTES: i64 = 15
 
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_write_bytes(fd: i64, data: [u8]) -> i64
 extern fn rt_io_tcp_close(fd: i64) -> bool
@@ -630,12 +631,18 @@ class IoDriver:
 
             elif ot == _OP_RECV:
                 val recv_ready = self._ready_contains(ready_fds, fd)
-                val bytes = rt_io_tcp_read(fd, self._p_size[i])
-                if bytes.len() > 0:
-                    val txt = bytes_to_text(bytes)
-                    self._store_recv_bytes(oid, bytes)
+                val bytes = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_read(fd, self._p_size[i])
+                if bytes == nil:
                     self._ev_complete_fd_interest(fd, oid)
-                    self._complete_fd_bytes(oid, bytes.len(), 0, txt, fd, bytes)
+                    self._complete_fd(oid, -1, 0, "", fd)
+                    i = i + 1
+                    continue
+                if bytes!.len() > 0:
+                    val txt = bytes_to_text(bytes!)
+                    self._store_recv_bytes(oid, bytes!)
+                    self._ev_complete_fd_interest(fd, oid)
+                    self._complete_fd_bytes(oid, bytes!.len(), 0, txt, fd, bytes!)
                     i = i + 1
                     continue
                 if ev_has_results and recv_ready:
