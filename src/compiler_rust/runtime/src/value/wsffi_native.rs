@@ -199,20 +199,41 @@ pub extern "C" fn spl_dynlib_snapshot_linux(path_rv: RuntimeValue) -> i64 {
 /// Returns the handle as a raw i64 (not tagged).
 #[no_mangle]
 pub extern "C" fn spl_dlopen(path_rv: RuntimeValue) -> i64 {
+    let mut handle = 0i64;
+    if spl_dlopen_checked(path_rv, &mut handle) == 0 {
+        handle
+    } else {
+        0
+    }
+}
+
+/// Status/out dynamic-library admission primitive.
+///
+/// Returns 0 only when `out_handle` receives a non-null library handle.
+/// Failure leaves `out_handle` initialized to zero.
+#[no_mangle]
+pub extern "C" fn spl_dlopen_checked(path_rv: RuntimeValue, out_handle: *mut i64) -> i64 {
+    if out_handle.is_null() {
+        return 1;
+    }
+    unsafe { out_handle.write(0) };
     let raw_ptr = rt_string_data(path_rv);
     if raw_ptr.is_null() {
-        return 0;
+        return 1;
     }
 
     // rt_string_data returns a pointer to the string bytes (not necessarily
     // null-terminated). We need a null-terminated C string for dlopen.
     let len = rt_string_len(path_rv);
-    if len < 0 {
-        return 0;
+    if len <= 0 {
+        return 1;
     }
 
     // Build a null-terminated copy
     let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len as usize) };
+    if slice.contains(&0) {
+        return 1;
+    }
     let mut buf = Vec::with_capacity(len as usize + 1);
     buf.extend_from_slice(slice);
     buf.push(0); // null terminator
@@ -220,12 +241,26 @@ pub extern "C" fn spl_dlopen(path_rv: RuntimeValue) -> i64 {
     #[cfg(unix)]
     {
         let handle = unsafe { libc::dlopen(buf.as_ptr() as *const libc::c_char, libc::RTLD_NOW) };
-        handle as i64
+        if handle.is_null() {
+            return 2;
+        }
+        unsafe { out_handle.write(handle as i64) };
+        0
     }
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
-        unsafe { LoadLibraryA(buf.as_ptr()) as i64 }
+        let handle = unsafe { LoadLibraryA(buf.as_ptr()) };
+        if handle == 0 {
+            return 2;
+        }
+        unsafe { out_handle.write(handle as i64) };
+        0
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = buf;
+        4
     }
 }
 
@@ -704,6 +739,15 @@ mod tests {
 
     unsafe extern "C" fn i64_zero() -> i64 {
         0
+    }
+
+    #[test]
+    fn checked_dynload_initializes_output_and_rejects_invalid_contracts() {
+        let empty = rt_string_new(std::ptr::NonNull::<u8>::dangling().as_ptr(), 0);
+        let mut handle = 99i64;
+        assert_eq!(spl_dlopen_checked(empty, &mut handle), 1);
+        assert_eq!(handle, 0);
+        assert_eq!(spl_dlopen_checked(empty, std::ptr::null_mut()), 1);
     }
 
     #[test]

@@ -2520,6 +2520,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_dlclose", wsffi::spl_dlclose);
     insert_simple!("spl_dynlib_snapshot_linux", wsffi::spl_dynlib_snapshot_linux);
     insert_simple!("spl_dlopen", wsffi::spl_dlopen);
+    insert_simple!("spl_dlopen_checked", wsffi::spl_dlopen_checked);
     insert_simple!("spl_dlsym", wsffi::spl_dlsym);
     insert_simple!("spl_f64_to_bits", wsffi::spl_f64_to_bits);
     insert_simple!("spl_i64_is_zero", memory::spl_i64_is_zero);

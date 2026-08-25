@@ -186,6 +186,32 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Interpreter implementation of the status/out dynload ABI.
+pub fn spl_dlopen_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "spl_dlopen_checked requires 2 arguments (path, out_handle)",
+        ));
+    }
+    let output = match &args[1] {
+        Value::BorrowMut(value) => value,
+        _ => {
+            return Err(CompileError::runtime(
+                "spl_dlopen_checked: output must be &mut i64",
+            ));
+        }
+    };
+    *output.inner_mut() = Value::Int(0);
+    match spl_dlopen(&args[..1]) {
+        Ok(Value::Int(handle)) if handle != 0 => {
+            *output.inner_mut() = Value::Int(handle);
+            Ok(Value::Int(0))
+        }
+        Ok(_) => Ok(Value::Int(2)),
+        Err(_) => Ok(Value::Int(2)),
+    }
+}
+
 /// Look up a symbol in a loaded library by name.
 ///
 /// Callable from Simple as: `spl_dlsym(handle: i64, name: text) -> i64`

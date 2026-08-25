@@ -120,13 +120,25 @@ static HMODULE runtime_dynload_open_utf8(const char *path) {
 #endif
 
 int64_t spl_dlopen(int64_t path_value) {
+    int64_t handle = 0;
+    return spl_dlopen_checked(path_value, &handle) == 0 ? handle : 0;
+}
+
+int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle) {
+    if (!out_handle) return 1;
+    *out_handle = 0;
     const char* path = rt_interp_cstr(path_value);
-    if (!path) return 0;
+    if (!path || !path[0]) return 1;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)runtime_dynload_open_utf8(path);
+    HMODULE handle = runtime_dynload_open_utf8(path);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #else
-    return (int64_t)(intptr_t)dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #endif
+    return 0;
 }
 
 int64_t spl_dlsym(int64_t handle, int64_t name_value) {

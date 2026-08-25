@@ -7903,6 +7903,28 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
  * missing library. Because the bundle links runtime_native.o BEFORE
  * runtime_dynload.o under -z muldefs, THIS weaker copy was the one that won.
  * rt_interp_cstr accepts both encodings and is a strict superset. */
+#ifdef _WIN32
+static HMODULE runtime_dynload_open_utf8(const char *path) {
+    int wide_len;
+    wchar_t *wide_path;
+    HMODULE handle;
+    if (!path || !path[0]) return NULL;
+    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            path, -1, wide_path, wide_len) != wide_len) {
+        free(wide_path);
+        return NULL;
+    }
+    handle = LoadLibraryW(wide_path);
+    free(wide_path);
+    return handle;
+}
+#endif
+
 int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
 #if defined(__linux__)
     const char* path = rt_interp_cstr(path_value);
@@ -7954,13 +7976,25 @@ int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
 }
 
 int64_t spl_dlopen(int64_t path_value) {
+    int64_t handle = 0;
+    return spl_dlopen_checked(path_value, &handle) == 0 ? handle : 0;
+}
+
+int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle) {
+    if (!out_handle) return 1;
+    *out_handle = 0;
     const char* path = rt_interp_cstr(path_value);
-    if (!path) return 0;
+    if (!path || !path[0]) return 1;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)LoadLibraryA(path);
+    HMODULE handle = runtime_dynload_open_utf8(path);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #else
-    return (int64_t)(intptr_t)dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #endif
+    return 0;
 }
 
 int64_t spl_dlsym(int64_t handle, int64_t name_value) {

@@ -72,6 +72,21 @@ valid empty text, rejects invalid handles/data/UTF-8, copies exactly once, and
 releases the consumed runtime string. The repaired focused guard passed once on
 2026-08-25; this is narrow source-contract evidence, not global SFFI proof.
 
+Checkpoint: C owner/fallback, Rust native, interpreter, codegen, and canonical
+Simple loader now share `spl_dlopen_checked(path, out_handle) -> status`.
+Every provider-load attempt initializes output to zero, returns success only
+with a non-null handle, and lifts the outcome into `Result` or deliberate
+optional availability. Legacy `spl_dlopen` remains an unsafe compatibility
+shim. The checked work happens once during provider loading; cached foreign
+calls receive no new branch, allocation, lookup, or signature work.
+
+Verification checkpoint: the expanded SFFI null/signature guard passes. The
+runtime duplicate-owner audit reports all six `same` bodies, including the new
+checked loader, as non-divergent. Its overall result remains red because twelve
+unrelated runtime/runtime-native or runtime/legacy-core duplicate symbols are
+above the current baseline; those symbols are outside this lane and were not
+silently folded into the SFFI change.
+
 ### 3. Complete resolved-HIR inventory
 
 Checkpoint: the bounded source ledgers now report 12,128 `rt_*` declaration
