@@ -1241,7 +1241,9 @@ impl MirInterpreter:
         Name + block/local counts alone collide when two functions share both
         but differ in const payloads, so fold the entry block's instruction
         kinds and const immediates into the key (cheap, no full encode)."""
-        var key = "{func.name}#{func.blocks.len()}#{func.locals.len()}"
+        # Build each byte-identical piece once, then flatten once. Repeated
+        # `key = key + piece` recopied the whole prefix for every instruction.
+        var key_parts: [text] = ["{func.name}#{func.blocks.len()}#{func.locals.len()}"]
         val entry_id = func.entry_block.id
         for block in func.blocks:
             if block.id.id == entry_id:
@@ -1257,8 +1259,12 @@ impl MirInterpreter:
                         case BinOp(dest, op, left, right): "|o{execir_binop_code(op)}"
                         case UnaryOp(dest, op, operand): "|u"
                         case _: "|x"
-                    key = key + piece
-        key
+                    key_parts.append(piece)
+                # MIR has one entry block. Stop here rather than scanning the
+                # remaining blocks; join preserves the prior key byte-for-byte.
+                return key_parts.join("")
+        # Malformed MIR with an absent entry retains the old base-only key.
+        key_parts.join("")
 
     me execute_function(func: MirFunction) -> (i64?, InterpError?):
         """Execute a MIR function and return result.
