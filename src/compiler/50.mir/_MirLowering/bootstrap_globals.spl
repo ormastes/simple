@@ -23,6 +23,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_entry_index, bootstrap_hir_module_name_at, bootstrap_hir_module_symbol_count, bootstrap_hir_module_symbol_at, bootstrap_hir_module_function_count, bootstrap_hir_module_function_at, bootstrap_hir_module_constant_count, bootstrap_hir_module_constant_at}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -126,6 +127,8 @@ var _bootstrap_mir_static_names: [text] = []
 var _bootstrap_mir_static_type_tags: [i64] = []
 var _bootstrap_mir_static_init_kinds: [i64] = []
 var _bootstrap_mir_static_init_payloads: [text] = []
+var _bootstrap_mir_static_alignments: [i64] = []
+var _bootstrap_mir_static_visibilities: [i64] = []
 var _bootstrap_function_value_names: [text] = []
 
 fn bootstrap_function_value_names_reset():
@@ -187,6 +190,8 @@ fn bootstrap_mir_functions_reset():
     _bootstrap_mir_static_type_tags = []
     _bootstrap_mir_static_init_kinds = []
     _bootstrap_mir_static_init_payloads = []
+    _bootstrap_mir_static_alignments = []
+    _bootstrap_mir_static_visibilities = []
 
 fn bootstrap_mir_functions_add(name: text, fn_: MirFunction, module_index: i64):
     val return_type_tag = bootstrap_mir_static_type_tag(fn_.signature.return_type)
@@ -254,6 +259,16 @@ fn bootstrap_mir_static_init_payload(value: MirConstValue) -> text:
         case Tuple(_): "zeroinitializer"
         case Struct(_): "zeroinitializer"
 
+fn bootstrap_mir_static_visibility_tag(visibility: Visibility) -> i64:
+    # Explicit stable wire values; never serialize enum discriminants.
+    match visibility:
+        case Visibility.Public: 0
+        case Visibility.Peer: 1
+        case Visibility.Up: 2
+        case Visibility.Internal: 3
+        case Visibility.Package: 4
+        case Visibility.Private: 5
+
 fn bootstrap_mir_modules_add(module: MirModule):
     val module_index = _bootstrap_mir_module_count_value
     # Accumulate into LOCALS inside the loop, reassign each module global
@@ -265,6 +280,8 @@ fn bootstrap_mir_modules_add(module: MirModule):
     var bs_type_tags = _bootstrap_mir_static_type_tags
     var bs_init_kinds = _bootstrap_mir_static_init_kinds
     var bs_init_payloads = _bootstrap_mir_static_init_payloads
+    var bs_alignments = _bootstrap_mir_static_alignments
+    var bs_visibilities = _bootstrap_mir_static_visibilities
     val bs_static_vals = module.statics.values()
     var bs_si = 0
     while bs_si < bs_static_vals.len():
@@ -287,6 +304,9 @@ fn bootstrap_mir_modules_add(module: MirModule):
         bs_type_tags = bs_type_tags.push(bootstrap_mir_static_type_tag(static_.type_))
         bs_init_kinds = bs_init_kinds.push(init_kind)
         bs_init_payloads = bs_init_payloads.push(init_payload)
+        val alignment = if static_.alignment > 0: static_.alignment else: static_.type_.alignment()
+        bs_alignments = bs_alignments.push(alignment)
+        bs_visibilities = bs_visibilities.push(bootstrap_mir_static_visibility_tag(static_.visibility))
         bs_si = bs_si + 1
     _bootstrap_mir_static_modules = bs_modules
     _bootstrap_mir_static_symbol_ids = bs_symbol_ids
@@ -294,6 +314,8 @@ fn bootstrap_mir_modules_add(module: MirModule):
     _bootstrap_mir_static_type_tags = bs_type_tags
     _bootstrap_mir_static_init_kinds = bs_init_kinds
     _bootstrap_mir_static_init_payloads = bs_init_payloads
+    _bootstrap_mir_static_alignments = bs_alignments
+    _bootstrap_mir_static_visibilities = bs_visibilities
     _bootstrap_mir_module_count_value = module_index + 1
 
 # The real HIR module for the bootstrap entry, set by the driver
@@ -540,6 +562,12 @@ fn bootstrap_mir_static_init_kind_at(index: i64) -> i64:
 
 fn bootstrap_mir_static_init_payload_at(index: i64) -> text:
     _bootstrap_mir_static_init_payloads[index]
+
+fn bootstrap_mir_static_alignment_at(index: i64) -> i64:
+    _bootstrap_mir_static_alignments[index]
+
+fn bootstrap_mir_static_visibility_at(index: i64) -> i64:
+    _bootstrap_mir_static_visibilities[index]
 
 fn bootstrap_mir_symbol_for_index(index: i64) -> SymbolId:
     if index == 0:

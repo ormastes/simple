@@ -208,6 +208,7 @@ fn vhdl_catalog_inst(inst: MirInst, rebase: Dict<i64, i64>) -> MirInst:
         case GetElementPtr(dest, base, indices): kind = MirInstKind.GetElementPtr(dest, vhdl_catalog_operand(base, rebase), vhdl_catalog_operands(indices, rebase))
         case LoadGlobal(dest, symbol): kind = MirInstKind.LoadGlobal(dest, vhdl_catalog_symbol(symbol, rebase))
         case StoreGlobal(symbol, value): kind = MirInstKind.StoreGlobal(vhdl_catalog_symbol(symbol, rebase), vhdl_catalog_operand(value, rebase))
+        case GlobalAddr(dest, symbol, mutable): kind = MirInstKind.GlobalAddr(dest, vhdl_catalog_symbol(symbol, rebase), mutable)
         case Aggregate(dest, aggregate, operands):
             val mapped_aggregate = match aggregate:
                 case Array(type_): AggregateKind.Array(vhdl_catalog_type(type_, rebase))
@@ -318,7 +319,8 @@ fn vhdl_catalog_static(static_: MirStatic, rebase: Dict<i64, i64>) -> MirStatic:
         case None: nil
     MirStatic(symbol: vhdl_catalog_symbol(static_.symbol, rebase),
         name: static_.name, type_: vhdl_catalog_type(static_.type_, rebase),
-        init: init, is_mutable: static_.is_mutable)
+        init: init, is_mutable: static_.is_mutable,
+        alignment: static_.alignment, visibility: static_.visibility)
 
 fn vhdl_catalog_validate_type_ref(ty: MirType, types: Dict<SymbolId, MirTypeDef>) -> Result<(), text>:
     match ty.kind:
@@ -985,7 +987,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
             for inst in block.instructions:
                 vhdl_catalog_mark_inst_types(inst, needed_types)
                 match inst.kind:
-                    case LoadGlobal(_, static_symbol) | StoreGlobal(static_symbol, _):
+                    case LoadGlobal(_, static_symbol) | StoreGlobal(static_symbol, _) | GlobalAddr(_, static_symbol, _):
                         if static_symbol.id < 0 or not rt_dict_contains(all_statics, static_symbol):
                             eprint("[vhdl-catalog-site] unmapped-static")
                             return Err("VHDL design catalog references unmapped global/static symbol {static_symbol.id} from `{func.name}`")

@@ -16,6 +16,7 @@ use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_instructions.{MirPlace}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
@@ -177,21 +178,89 @@ impl MirLowering:
     # (driven by the registry, not a literal name match).
     # Module symbol id -> the `MirStatic` entry from `self.builder.module.
     # statics` whose `.symbol.id` matches, `nil` if `symbol_id` isn't a
-    # mutable module-level `var`. Found by VALUE iteration deliberately, NOT
-    # a keyed `Dict<SymbolId,...>[...]`/`.has(...)` lookup with a
-    # freshly-built key -- see `global_symbol_ids`'s doc comment
-    # (mir_lowering_types.spl) for the struct-keyed-dict interpreter
-    # landmine that lookup style hits. Shared by the read hook below and
+    # mutable module-level `var`. The i64-keyed mirror avoids the seed's
+    # struct-keyed SymbolId lookup defect without allocating `.values()`.
+    # Shared by the read hook below and
     # mir_lowering_stmts.spl's write hook (StoreGlobal needs the same type
     # for a compound `g += y` assignment's LoadGlobal-and-combine sequence).
     me find_global_static(symbol_id: i64) -> MirStatic?:
-        val static_values = self.builder.module.statics.values()
-        var sti = 0
-        while sti < static_values.len():
-            if static_values[sti].symbol.id == symbol_id:
-                return Some(static_values[sti])
-            sti = sti + 1
+        if self.global_statics_by_id.contains(symbol_id):
+            return Some(self.global_statics_by_id[symbol_id])
         nil
+
+    fn folded_global_scalar_type(constant: MirConstant) -> MirType:
+        """Canonical scalar type shared by inline reads and address storage."""
+        match constant.value:
+            case Str(_): MirType(kind: MirTypeKind.Opaque("str"))
+            # Const Bool is rendered in the raw i64 value lane today.
+            case Bool(_): MirType.i64()
+            case _: constant.type_
+
+    me materialize_folded_global_static_for_address(symbol_id: i64) -> MirStatic?:
+        """Give an address-taken folded module `val` canonical storage.
+
+        Ordinary immutable reads remain inlined. Storage is created lazily
+        only for the rare unsafe reference operation, avoiding global-data
+        growth for constants whose address is never observed.
+        """
+        if not self.global_constants_by_id.contains(symbol_id):
+            return nil
+        val constant = self.global_constants_by_id[symbol_id]
+        val corrected_type = folded_global_scalar_type(constant)
+        var owner = self.builder.module.name
+        var visibility = Visibility.Private
+        if val symbol_info = self.symbols.get_symbol_raw(symbol_id):
+            visibility = symbol_info.visibility
+            if val defining_module = symbol_info.defining_module:
+                if defining_module != "": owner = defining_module
+        val owner_dots = owner.replace(".", "_")
+        val owner_slashes = owner_dots.replace("/", "_")
+        val owner_safe = owner_slashes.replace("-", "_")
+        val link_name = if owner_safe == "": constant.name else: "{owner_safe}__{constant.name}"
+        val corrected_constant = MirConstant(
+            symbol: constant.symbol, name: constant.name,
+            type_: corrected_type, value: constant.value)
+        val static_ = MirStatic(
+            symbol: constant.symbol,
+            name: link_name,
+            type_: corrected_type,
+            init: Some(corrected_constant),
+            is_mutable: false,
+            alignment: corrected_type.alignment(),
+            visibility: visibility
+        )
+        var b = self.builder
+        var module_ = b.module
+        var statics = module_.statics
+        statics[constant.symbol] = static_
+        module_.statics = statics
+        b.module = module_
+        self.builder = b
+        self.global_statics_by_id[symbol_id] = static_
+        Some(static_)
+
+    me try_lower_global_addr(operand: HirExpr, mutable: bool) -> LocalId?:
+        """Lower a resolved module-static identifier without first loading it."""
+        var symbol_id = -1
+        match operand.kind:
+            case Var(symbol): symbol_id = mir_expr_symbol_id_value(symbol)
+            case NamedVar(symbol, _): symbol_id = mir_expr_symbol_id_value(symbol)
+            case _: return nil
+        # Resolved local identity wins, preserving lexical shadowing exactly.
+        if symbol_id < 0 or self.find_local(symbol_id).id >= 0:
+            return nil
+        if not self.global_symbol_ids.contains(symbol_id):
+            return nil
+        var static_ = self.find_global_static(symbol_id)
+        if not static_.?:
+            static_ = self.materialize_folded_global_static_for_address(symbol_id)
+        if not static_.?:
+            return nil
+        val target = static_.unwrap()
+        var b = self.builder
+        val dest = b.emit_global_addr(target.symbol, target.type_, mutable)
+        self.builder = b
+        Some(dest)
 
     # B2 (bug cranelift_native_aggregate_return_nil_receiver_hosted_wm_
     # 2026-07-26): 952d2ca34d7's re-lowering fallback at the bottom of
@@ -292,55 +361,32 @@ impl MirLowering:
         # rt_array_new-based heap allocation), so inlining a compound value
         # through it produced a bad LLVM constant and crashed at runtime
         # (SIGSEGV, confirmed empirically with `val SIZES = [10,20,30]`).
-        val const_values = self.builder.module.constants.values()
-        var cvi = 0
-        while cvi < const_values.len():
-            val mir_const = const_values[cvi]
-            if mir_const.symbol.id == symbol_id:
-                var is_scalar = false
-                match mir_const.value:
-                    case Int(_): is_scalar = true
-                    case Float(_): is_scalar = true
-                    case Bool(_): is_scalar = true
-                    case Str(_): is_scalar = true
-                    case Zero: is_scalar = true
-                    case _: is_scalar = false
-                if is_scalar:
-                    # Derive the dest type from the VALUE kind, not
-                    # mir_const.type_: an unannotated module `val NAME = "s"`
-                    # carries Infer->i64 as its lowered type while the backend
-                    # renders the Str value as a ptr GEP -- inlining with the
-                    # i64 type then routes interpolation down the numeric
-                    # renderer and llc rejects `'%lN' defined with type 'ptr'
-                    # but expected 'i64'` (native_module_val_globals
-                    # 2026-07-23). Mirror emit_bootstrap_str_const for Str;
-                    # trust the declared type for the rest.
-                    var const_read_ty = mir_const.type_
-                    match mir_const.value:
-                        case Str(_):
-                            const_read_ty = MirType(kind: MirTypeKind.Opaque("str"))
-                        case Bool(_):
-                            # Raw 0/1 i64 lane: a bool-typed local is branched
-                            # as bare `br i1 %lN` while the backend renders the
-                            # Bool const as i64 arithmetic -- type it i64 so
-                            # branch lowering inserts the icmp-ne widening
-                            # (llc: "'%lN' defined with type 'i64' but
-                            # expected 'i1'").
-                            const_read_ty = MirType.i64()
-                        case _:
-                            pass
-                    var b_const_read = self.builder
-                    val const_dest = b_const_read.new_temp(const_read_ty)
-                    b_const_read.emit_const(const_dest, mir_const.value, const_read_ty)
-                    self.builder = b_const_read
-                    return Some(const_dest)
-                # Compound (Array/Tuple/Struct) match found in module.constants
-                # but not scalar -- fall through to the global_const_exprs
-                # re-lowering fallback below (outside this loop) instead of
-                # returning nil here.
-                cvi = const_values.len()
-            else:
-                cvi = cvi + 1
+        if self.global_constants_by_id.contains(symbol_id):
+            val mir_const = self.global_constants_by_id[symbol_id]
+            var is_scalar = false
+            match mir_const.value:
+                case Int(_): is_scalar = true
+                case Float(_): is_scalar = true
+                case Bool(_): is_scalar = true
+                case Str(_): is_scalar = true
+                case Zero: is_scalar = true
+                case _: is_scalar = false
+            if is_scalar:
+                # Derive the dest type from the VALUE kind, not
+                # mir_const.type_: an unannotated module `val NAME = "s"`
+                # carries Infer->i64 as its lowered type while the backend
+                # renders the Str value as a ptr GEP -- inlining with the
+                # i64 type then routes interpolation down the numeric
+                # renderer and llc rejects `'%lN' defined with type 'ptr'
+                # but expected 'i64'` (native_module_val_globals
+                # 2026-07-23). The helper is also the address-storage owner.
+                val const_read_ty = folded_global_scalar_type(mir_const)
+                var b_const_read = self.builder
+                val const_dest = b_const_read.new_temp(const_read_ty)
+                b_const_read.emit_const(const_dest, mir_const.value, const_read_ty)
+                self.builder = b_const_read
+                return Some(const_dest)
+            # Compound values fall through to global_const_exprs below.
         # array_global_2026-07-25: fallback for a COMPOUND immutable module
         # `val` (Array/Tuple/Struct/...), reached either because the loop
         # above found a non-scalar `mir_const` match, or -- more commonly --
@@ -3722,21 +3768,29 @@ impl MirLowering:
                 self.lower_binary_expr(expr_value, op, left, right)
 
             case Unary(op, operand):
-
-                val operand_local = self.lower_expr(operand)
-                var b = self.builder
-                val operand_type = self.local_mir_type_of(operand_local) ?? MirType.i64()
                 val op_disc = rt_enum_discriminant(op)
-                var unary_result: LocalId = 0
-                if op_disc == rt_enum_discriminant(HirUnaryOp.Ref):
-                    unary_result = b.emit_ref(MirPlace.local_place(operand_local), MirBorrowKind.Shared, operand_type)
-                elif op_disc == rt_enum_discriminant(HirUnaryOp.RefMut):
-                    unary_result = b.emit_ref(MirPlace.local_place(operand_local), MirBorrowKind.Mutable, operand_type)
+                val is_ref = op_disc == rt_enum_discriminant(HirUnaryOp.Ref)
+                val is_ref_mut = op_disc == rt_enum_discriminant(HirUnaryOp.RefMut)
+                val global_addr = if is_ref or is_ref_mut:
+                    self.try_lower_global_addr(operand, is_ref_mut)
                 else:
-                    val mir_op = self.lower_unaryop(op)
-                    unary_result = b.emit_unary(mir_op, mir_operand_copy(operand_local), operand_type)
-                self.builder = b
-                unary_result
+                    nil
+                if global_addr.?:
+                    global_addr.unwrap()
+                else:
+                    val operand_local = self.lower_expr(operand)
+                    var b = self.builder
+                    val operand_type = self.local_mir_type_of(operand_local) ?? MirType.i64()
+                    var unary_result: LocalId = 0
+                    if is_ref:
+                        unary_result = b.emit_ref(MirPlace.local_place(operand_local), MirBorrowKind.Shared, operand_type)
+                    elif is_ref_mut:
+                        unary_result = b.emit_ref(MirPlace.local_place(operand_local), MirBorrowKind.Mutable, operand_type)
+                    else:
+                        val mir_op = self.lower_unaryop(op)
+                        unary_result = b.emit_unary(mir_op, mir_operand_copy(operand_local), operand_type)
+                    self.builder = b
+                    unary_result
 
             case If(cond, then_, else_):
                 val expected_if_type: HirType? = if expr.has_type_ and expr.type_ != nil: expr.type_ else: nil

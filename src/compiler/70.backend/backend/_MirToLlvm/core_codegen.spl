@@ -9,6 +9,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at,
     bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at,
@@ -16,7 +17,8 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_function_param_type_tag_at,
     bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at,
     bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at,
-    bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at}
+    bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at,
+    bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at}
 use compiler.mir_opt.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
 use compiler.backend.backend_api.*
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
@@ -32,6 +34,19 @@ use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin
 
 extern fn rt_string_builder_len(handle: i64) -> i64
 extern fn rt_string_builder_push(handle: i64, value: text)
+
+fn llvm_static_linkage(visibility: Visibility) -> text:
+    match visibility:
+        case Visibility.Public: ""
+        case Visibility.Private: "internal "
+        # Scoped symbols remain linkable across closure objects, but are not
+        # exported through the final shared-object boundary.
+        case Visibility.Peer | Visibility.Up | Visibility.Internal | Visibility.Package: "hidden "
+
+fn bootstrap_llvm_static_linkage(visibility_tag: i64) -> text:
+    if visibility_tag == 0: return ""
+    if visibility_tag == 5: return "internal "
+    "hidden "
 
 # DS3 debug-info path split: NOT std.nogc_sync_mut.path.{basename, dirname} --
 # empirically, that dirname()'s rfind()-based fast path throws ("match
@@ -230,7 +245,9 @@ impl MirTextCodegen for MirToLlvm:
                             if g_ty == "i64":
                                 g_init = "ptrtoint (ptr {g_init} to i64)"
                         case _: ()
-                self.builder.emit("{g_name} = global {g_ty} {g_init}")
+                val g_alignment = if static_.alignment > 0: static_.alignment else: static_.type_.alignment()
+                val g_linkage = llvm_static_linkage(static_.visibility)
+                self.builder.emit("{g_name} = {g_linkage}global {g_ty} {g_init}, align {g_alignment}")
 
         if bootstrap_debug:
             print "[llvm-translate] keys"
@@ -363,7 +380,10 @@ impl MirTextCodegen for MirToLlvm:
                 if g_ty == "i64":
                     g_init = "ptrtoint (ptr {g_init} to i64)"
             if not emitted_names.contains(g_name):
-                val line = "{g_name} = global {g_ty} {g_init}"
+                val g_alignment = bootstrap_mir_static_alignment_at(index)
+                val g_linkage = bootstrap_llvm_static_linkage(
+                    bootstrap_mir_static_visibility_at(index))
+                val line = "{g_name} = {g_linkage}global {g_ty} {g_init}, align {g_alignment}"
                 val newline = "\n"
                 rt_string_builder_push(ir_handle, newline)
                 rt_string_builder_push(ir_handle, line)
@@ -694,6 +714,7 @@ impl MirTextCodegen for MirToLlvm:
             case Store(ptr, value): self.translate_store(ptr, value)
             # Indexed scalar fast paths above own LoadGlobal and StoreGlobal.
             case LoadGlobal(_, _) | StoreGlobal(_, _): ()
+            case GlobalAddr(_, _, _): self.emit_unsupported_panic("LLVM GlobalAddr lowering is not implemented")
             case GetElementPtr(dest, base, indices): self.translate_gep(dest, base, indices)
             case Aggregate(dest, kind, operands): self.translate_aggregate(dest, kind, operands)
             case GetField(dest, base, field): self.translate_get_field(dest, base, field)
@@ -890,7 +911,7 @@ impl MirTextCodegen for MirToLlvm:
     me mark_instruction_dest_defined_at(instructions: [MirInst], index: i64):
         val inst: MirInst = instructions[index]
         match inst.kind:
-            case Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Alloc(dest, _) | Load(dest, _) | LoadGlobal(dest, _) | GetElementPtr(dest, _, _) | Aggregate(dest, _, _) | GetField(dest, _, _) | Cast(dest, _, _) | Bitcast(dest, _, _) | PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _) | LayerConnect(dest, _, _) | Ref(dest, _, _) | CreatePromise(dest, _, _) | Await(dest, _) | Spawn(dest, _, _) | Receive(dest, _) | GpuGlobalId(dest, _) | GpuLocalId(dest, _) | GpuBlockId(dest, _) | GpuBlockDim(dest, _) | GpuGridDim(dest, _) | GpuSharedAlloc(dest, _, _) | GpuAtomicOp(dest, _, _, _) | GpuAtomicCas(dest, _, _, _) | VhdlResize(dest, _, _, _) | VhdlSlice(dest, _, _, _) | VhdlConcat(dest, _) | SimdAddF32x4(dest, _, _) | SimdSubF32x4(dest, _, _) | SimdMulF32x4(dest, _, _) | SimdDivF32x4(dest, _, _) | SimdFmaF32x4(dest, _, _, _) | SimdAddF32x8(dest, _, _) | SimdSubF32x8(dest, _, _) | SimdMulF32x8(dest, _, _) | SimdDivF32x8(dest, _, _) | SimdFmaF32x8(dest, _, _, _) | SimdAddF64x4(dest, _, _) | SimdSubF64x4(dest, _, _) | SimdMulF64x4(dest, _, _) | SimdDivF64x4(dest, _, _) | SimdFmaF64x4(dest, _, _, _) | SimdAddI32x4(dest, _, _) | SimdSubI32x4(dest, _, _) | SimdMulI32x4(dest, _, _) | SimdXorI32x4(dest, _, _) | SimdAndI32x4(dest, _, _) | SimdOrI32x4(dest, _, _) | SimdShlI32x4(dest, _, _) | SimdShrI32x4(dest, _, _) | SimdAddI32x8(dest, _, _) | SimdSubI32x8(dest, _, _) | SimdMulI32x8(dest, _, _) | SimdXorI32x8(dest, _, _) | SimdAndI32x8(dest, _, _) | SimdOrI32x8(dest, _, _) | SimdShlI32x8(dest, _, _) | SimdShrI32x8(dest, _, _) | SimdHaddF32x4(dest, _) | SimdHmaxF32x4(dest, _) | SimdHminF32x4(dest, _):
+            case Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Alloc(dest, _) | Load(dest, _) | LoadGlobal(dest, _) | GlobalAddr(dest, _, _) | GetElementPtr(dest, _, _) | Aggregate(dest, _, _) | GetField(dest, _, _) | Cast(dest, _, _) | Bitcast(dest, _, _) | PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _) | LayerConnect(dest, _, _) | Ref(dest, _, _) | CreatePromise(dest, _, _) | Await(dest, _) | Spawn(dest, _, _) | Receive(dest, _) | GpuGlobalId(dest, _) | GpuLocalId(dest, _) | GpuBlockId(dest, _) | GpuBlockDim(dest, _) | GpuGridDim(dest, _) | GpuSharedAlloc(dest, _, _) | GpuAtomicOp(dest, _, _, _) | GpuAtomicCas(dest, _, _, _) | VhdlResize(dest, _, _, _) | VhdlSlice(dest, _, _, _) | VhdlConcat(dest, _) | SimdAddF32x4(dest, _, _) | SimdSubF32x4(dest, _, _) | SimdMulF32x4(dest, _, _) | SimdDivF32x4(dest, _, _) | SimdFmaF32x4(dest, _, _, _) | SimdAddF32x8(dest, _, _) | SimdSubF32x8(dest, _, _) | SimdMulF32x8(dest, _, _) | SimdDivF32x8(dest, _, _) | SimdFmaF32x8(dest, _, _, _) | SimdAddF64x4(dest, _, _) | SimdSubF64x4(dest, _, _) | SimdMulF64x4(dest, _, _) | SimdDivF64x4(dest, _, _) | SimdFmaF64x4(dest, _, _, _) | SimdAddI32x4(dest, _, _) | SimdSubI32x4(dest, _, _) | SimdMulI32x4(dest, _, _) | SimdXorI32x4(dest, _, _) | SimdAndI32x4(dest, _, _) | SimdOrI32x4(dest, _, _) | SimdShlI32x4(dest, _, _) | SimdShrI32x4(dest, _, _) | SimdAddI32x8(dest, _, _) | SimdSubI32x8(dest, _, _) | SimdMulI32x8(dest, _, _) | SimdXorI32x8(dest, _, _) | SimdAndI32x8(dest, _, _) | SimdOrI32x8(dest, _, _) | SimdShlI32x8(dest, _, _) | SimdShrI32x8(dest, _, _) | SimdHaddF32x4(dest, _) | SimdHmaxF32x4(dest, _) | SimdHminF32x4(dest, _):
                 self.defined_locals[self.local_id_value(dest)] = true
             case Call(dest, _, _) | CallIndirect(dest, _, _, _) | Intrinsic(dest, _, _):
                 if dest.?:

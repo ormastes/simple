@@ -259,12 +259,13 @@ fn verification_region_effect_manifest_with_internal_calls_v1(
 
 fn verification_region_instruction_requires_span_v1(instruction: MirInstKind) -> bool:
     match instruction:
-        case MirInstKind.LoadGlobal(_, _) | MirInstKind.StoreGlobal(_, _): true
+        case MirInstKind.LoadGlobal(_, _) | MirInstKind.StoreGlobal(_, _) | MirInstKind.GlobalAddr(_, _, _): true
         case _: false
 
 fn verification_region_instruction_local_id_v1(instruction: MirInstKind) -> LocalId?:
     match instruction:
         case MirInstKind.LoadGlobal(dest, _): Some(dest)
+        case MirInstKind.GlobalAddr(dest, _, _): Some(dest)
         case MirInstKind.StoreGlobal(_, value):
             match value.kind:
                 case MirOperandKind.Copy(local) | MirOperandKind.Move(local): Some(local)
@@ -293,6 +294,13 @@ fn verification_region_effect_from_instruction_v1(
             Ok(Some(MirRegionEffectV1(
                 "global:" + symbol.id.to_string(), MirRegionAccessV1.Write,
                 type_identity, sha256_text(serialize_mir_inst_kind(instruction)), source_span)))
+        case MirInstKind.GlobalAddr(_, symbol, mutable):
+            if local_type_identity == "": return Err("FV2-E-REGION-ADDR-TYPE: global address destination has no exact MIR type")
+            if source_span == "": return Err("FV2-E-REGION-SPAN: global address requires exact source provenance")
+            val access = if mutable: MirRegionAccessV1.Write else: MirRegionAccessV1.Read
+            Ok(Some(MirRegionEffectV1(
+                "global:" + symbol.id.to_string(), access,
+                local_type_identity, sha256_text(serialize_mir_inst_kind(instruction)), source_span)))
         case MirInstKind.Const(_, _, _) | MirInstKind.Copy(_, _) | MirInstKind.Move(_, _) | MirInstKind.BinOp(_, _, _, _) | MirInstKind.UnaryOp(_, _, _) | MirInstKind.CheckedBinOp(_, _, _, _) | MirInstKind.Aggregate(_, _, _) | MirInstKind.GetField(_, _, _) | MirInstKind.Cast(_, _, _) | MirInstKind.Bitcast(_, _, _) | MirInstKind.DebugValue(_, _) | MirInstKind.Nop | MirInstKind.ResultMatchSemantic(_, _, _, _, _, _, _): Ok(nil)
         case MirInstKind.Call(_, callee, _):
             val name = verification_region_direct_call_name_v1(callee)
