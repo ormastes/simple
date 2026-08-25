@@ -244,17 +244,24 @@ impl FsDriver for NvfsPosixDriver:
 
     fn truncate(path: Path, length: i64) -> Result<(), FsError>:
         """Path-based truncate: CoW-reshape the arena to exactly `length`."""
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val idx = self._find_name(path)
         if idx < 0:
             return Err(FsError.NotFound)
         val arena_id = self.names[idx].arena_id
         val new_arena = self._truncate_arena(arena_id, length)?
-        self.names[idx] = NameEntry(path: path.raw, arena_id: new_arena)
-        val _ = arena_discard_impl(arena_id)
+        # A pathname, its hard links, and descriptors opened independently all
+        # identify one POSIX file.  Publish the CoW replacement to every alias
+        # before retiring the old arena; updating only this path leaves the
+        # other aliases pointing at discarded storage.
+        self._publish_arena(arena_id, new_arena)
         Ok(())
 
     fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>:
         """fd-based truncate: CoW-reshape; publish-flip on the fd slot."""
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val fd = self._fd_from_handle(handle)
         match self.fd_table.lookup(fd):
             case Some(e):
@@ -422,6 +429,11 @@ impl NvfsPosixDriver:
         if writer.refcount == 0 or writer.arena_id != old_arena:
             return
 
+        self._publish_arena(old_arena, new_arena)
+
+    fn _publish_arena(old_arena: i64, new_arena: i64):
+        """Atomically retarget every live POSIX identity for one CoW file."""
+
         # Publish to all independently opened descriptors for this file.  A
         # duplicated descriptor already shares one slot through refcount.
         var fd_idx: i64 = 1
@@ -470,12 +482,14 @@ impl NvfsPosixDriver:
                 val src = arena_readv_impl(arena_id, 0, length)
                 val n = arena_append_impl(new_arena, src, 0)
                 if n < 0:
+                    val _ = arena_discard_impl(new_arena)
                     return Err(FsError.IoError(0))
         else:
             if total > 0:
                 val src = arena_readv_impl(arena_id, 0, total)
                 val n = arena_append_impl(new_arena, src, 0)
                 if n < 0:
+                    val _ = arena_discard_impl(new_arena)
                     return Err(FsError.IoError(0))
             # Zero-pad the tail.
             val pad_len = length - total
@@ -486,5 +500,6 @@ impl NvfsPosixDriver:
                 i = i + 1
             val n = arena_append_impl(new_arena, pad, 0)
             if n < 0:
+                val _ = arena_discard_impl(new_arena)
                 return Err(FsError.IoError(0))
         Ok(new_arena)

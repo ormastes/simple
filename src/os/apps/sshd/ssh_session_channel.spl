@@ -454,24 +454,36 @@ impl SshSession:
         # CHANNEL_FAILURE when requested instead of silently stranding the
         # peer's ordered request/reply stream.
         if payload.len() < 10 or ssh_session_u8_at(payload, 0) != SSH_MSG_CHANNEL_REQUEST:
+            # CHANNEL_REQUEST is an ordered connection-layer message.  Once
+            # its encrypted packet has been consumed, silently dropping bad
+            # framing would leave request/reply and channel state ambiguous.
+            self.transition_closed()
             return
         val recipient = _read_u32_stable(payload, 1)
-        if 9 > payload.len():
-            return
         val request_len = _read_u32_stable(payload, 5).to_u64()
         val request_start: u64 = 9
-        val request_end = request_start + request_len
-        if request_end >= payload.len():
+        # Check the subtraction form before adding an attacker-controlled
+        # uint32 length.  This also proves that the want-reply byte exists.
+        if request_len >= payload.len() - request_start:
+            self.transition_closed()
             return
+        val request_end = request_start + request_len
         val want_reply = ssh_session_u8_at(payload, request_end) != 0
         val off = request_end + 1
         # ChannelTable is the sole mutable channel authority. Never dispatch a
         # request, spawn a process, or synthesize a reply channel from ambient
         # session state when the wire recipient is unknown or no longer open.
         if not self.channels.is_open_session(recipient):
+            # Other channel messages already fail closed for unknown, closed,
+            # or wrong-type recipients.  Apply the same rule here instead of
+            # letting a peer probe stale IDs or desynchronize ordered replies.
+            self.transition_closed()
             return
         val request_channel = self.channels.find(recipient)
         if request_channel == nil:
+            # Defensive consistency guard: is_open_session and find share the
+            # same sole owner, so disagreement means channel state is unsafe.
+            self.transition_closed()
             return
         val reply_remote_id = request_channel.remote_id
 

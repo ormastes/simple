@@ -169,22 +169,129 @@ fn _arm64_fallback_user_segments(native_data: [u8]) -> [UserLoadSegment]:
     """Recover ELF64 PT_LOAD records when the freestanding array result is empty."""
     var segments: [UserLoadSegment] = []
     val count = rt_arm_elf64_pt_load_count(native_data)
+    val source_len = _pi_byte_len(native_data)
+    # Bound the fallback independently of the foreign decoder. Never slice a
+    # decoder-supplied file range before proving it is inside the retained ELF.
+    if count == 0u32 or count > 64u32:
+        return segments
     var idx: u32 = 0u32
+    var retained_file_bytes = 0u64
     while idx < count:
         val file_offset = rt_arm_elf64_pt_load_offset(native_data, idx)
         val file_size = rt_arm_elf64_pt_load_filesz(native_data, idx)
         val mem_size = rt_arm_elf64_pt_load_memsz(native_data, idx)
-        if file_size <= mem_size:
-            segments.push(UserLoadSegment(
-                virt_addr: rt_arm_elf64_pt_load_vaddr(native_data, idx),
-                mem_size: mem_size,
-                file_size: file_size,
-                flags: rt_arm_elf64_pt_load_flags(native_data, idx),
-                align: rt_arm_elf64_pt_load_align(native_data, idx),
-                data: _pi_slice_bytes(native_data, file_offset, file_size)
-            ))
+        val virt_addr = rt_arm_elf64_pt_load_vaddr(native_data, idx)
+        val align = rt_arm_elf64_pt_load_align(native_data, idx)
+        if (file_size > mem_size or file_offset > source_len or
+            file_size > source_len - file_offset or
+            retained_file_bytes > source_len or
+            file_size > source_len - retained_file_bytes or
+            (align > 1u64 and file_offset % align != virt_addr % align)):
+            return []
+        retained_file_bytes = retained_file_bytes + file_size
+        segments.push(UserLoadSegment(
+            virt_addr: virt_addr,
+            mem_size: mem_size,
+            file_size: file_size,
+            flags: rt_arm_elf64_pt_load_flags(native_data, idx),
+            align: align,
+            data: _pi_slice_bytes(native_data, file_offset, file_size)
+        ))
         idx = idx + 1u32
     segments
+
+@cfg(arm64)
+fn _arm64_admit_direct_load_segments(
+    native_data: [u8], segments: [UserLoadSegment], entry: u64,
+    stack_top: u64, stack_size: u64
+) -> bool:
+    """Fail closed before an ARM64 direct-load image reaches the scheduler."""
+    val PAGE: u64 = 4096u64
+    val USER_MIN: u64 = 0x1000u64
+    val USER_LIMIT: u64 = 0x0000008000000000u64
+    val MAX_IMAGE_SPAN: u64 = 0x40000000u64
+    val PF_X: u32 = 1u32
+    val PF_W: u32 = 2u32
+    # Require a native little-endian ELF64 ET_EXEC for EM_AARCH64. The
+    # unchecked freestanding bridge otherwise trusts scalar answers from the
+    # runtime decoder without first binding them to the requested architecture.
+    if _pi_byte_len(native_data) < 64u64:
+        return false
+    val elf_type = (_pi_byte_at(native_data, 16) as u64) |
+        ((_pi_byte_at(native_data, 17) as u64) << 8u64)
+    val elf_machine = (_pi_byte_at(native_data, 18) as u64) |
+        ((_pi_byte_at(native_data, 19) as u64) << 8u64)
+    val elf_version = (_pi_byte_at(native_data, 20) as u64) |
+        ((_pi_byte_at(native_data, 21) as u64) << 8u64) |
+        ((_pi_byte_at(native_data, 22) as u64) << 16u64) |
+        ((_pi_byte_at(native_data, 23) as u64) << 24u64)
+    var encoded_entry = 0u64
+    var entry_byte = 0u64
+    while entry_byte < 8u64:
+        encoded_entry = encoded_entry |
+            ((_pi_byte_at(native_data, 24u64 + entry_byte) as u64) << (entry_byte * 8u64))
+        entry_byte = entry_byte + 1u64
+    if (not _has_elf_magic(native_data) or _pi_byte_at(native_data, 4) != 2u8 or
+        _pi_byte_at(native_data, 5) != 1u8 or _pi_byte_at(native_data, 6) != 1u8 or
+        elf_type != 2u64 or elf_machine != 183u64 or elf_version != 1u64 or
+        encoded_entry != entry):
+        return false
+    if (segments.len() == 0 or segments.len() > 64 or stack_size == 0u64 or
+        stack_size > stack_top or stack_top >= USER_LIMIT or
+        stack_top % 16u64 != 0u64 or entry % 4u64 != 0u64):
+        return false
+    val stack_bottom = stack_top - stack_size
+    var image_lo = USER_LIMIT
+    var image_hi = 0u64
+    var entry_is_file_backed_executable = false
+    var i: i64 = 0
+    while i < segments.len():
+        val segment = segments[i]
+        if ((segment.flags & 0xFFFFFFF8u32) != 0u32 or
+            (segment.flags & (PF_W | PF_X)) == (PF_W | PF_X) or
+            segment.file_size > segment.mem_size or
+            segment.data.len() as u64 != segment.file_size):
+            return false
+        if segment.mem_size == 0u64:
+            i = i + 1
+            continue
+        if (segment.virt_addr < USER_MIN or segment.virt_addr >= USER_LIMIT or
+            segment.mem_size > USER_LIMIT - segment.virt_addr):
+            return false
+        if (segment.align > 1u64 and
+            (segment.align & (segment.align - 1u64)) != 0u64):
+            return false
+        val segment_end = segment.virt_addr + segment.mem_size
+        if segment.virt_addr < stack_top and stack_bottom < segment_end:
+            return false
+        if segment.virt_addr < image_lo:
+            image_lo = segment.virt_addr
+        if segment_end > image_hi:
+            image_hi = segment_end
+        if ((segment.flags & PF_X) != 0u32 and segment.file_size > 0u64 and
+            entry >= segment.virt_addr and entry - segment.virt_addr < segment.file_size):
+            entry_is_file_backed_executable = true
+        var earlier: i64 = 0
+        while earlier < i:
+            val prior = segments[earlier]
+            if prior.mem_size > 0u64:
+                if (prior.virt_addr >= USER_LIMIT or
+                    prior.mem_size > USER_LIMIT - prior.virt_addr):
+                    return false
+                val prior_end = prior.virt_addr + prior.mem_size
+                if segment.virt_addr < prior_end and prior.virt_addr < segment_end:
+                    return false
+                val page_start = segment.virt_addr - segment.virt_addr % PAGE
+                val page_end = (segment_end + PAGE - 1u64) / PAGE * PAGE
+                val prior_page_start = prior.virt_addr - prior.virt_addr % PAGE
+                val prior_page_end = (prior_end + PAGE - 1u64) / PAGE * PAGE
+                if (page_start < prior_page_end and prior_page_start < page_end and
+                    (((segment.flags | prior.flags) & (PF_W | PF_X)) == (PF_W | PF_X))):
+                    return false
+            earlier = earlier + 1
+        i = i + 1
+    entry_is_file_backed_executable and image_hi >= image_lo and
+        image_hi - image_lo <= MAX_IMAGE_SPAN
 
 @cfg(arm32)
 fn _arm64_fallback_user_segments(native_data: [u8]) -> [UserLoadSegment]:
@@ -574,6 +681,8 @@ fn _build_arm64_user_process_image_from_native(
     elf_entry: u64,
     source_len: u64
 ) -> Result<UserProcessImage, text>:
+    if arch != Architecture.Arm64:
+        return Err("ARM64 direct-load architecture mismatch")
     val stack_top = ARM64_USER_STACK_TOP
     var stack_size = compute_stack_size(source_len)
     if stack_size == 0:
@@ -584,6 +693,9 @@ fn _build_arm64_user_process_image_from_native(
         effective_argv = [path]
 
     val segments = _arm64_fallback_user_segments(native_data)
+    if not _arm64_admit_direct_load_segments(
+        native_data, segments, elf_entry, stack_top, stack_size):
+        return Err("ARM64 direct-load segment admission failed")
 
     val frame_result = build_initial_stack_checked(
         stack_top, stack_size, 8u64, [], effective_argv, envp,
@@ -600,7 +712,7 @@ fn _build_arm64_user_process_image_from_native(
         argv: effective_argv,
         envp: envp,
         segments: segments,
-        segment_count: 1,
+        segment_count: segments.len().to_i32(),
         file_bytes: native_data,
         initial_sp: stack_frame.sp,
         initial_stack_bytes: stack_frame.bytes

@@ -383,18 +383,21 @@ pub class DbdTransactionOwnerV1:
     """Bounded per-session MULTI queue; the DbdServer remains commit owner."""
     active: bool
     failed: bool
+    queued_command_count: i64
     queued_bytes: i64
     commands: [[text]]
 
     pub static fn new() -> DbdTransactionOwnerV1:
         DbdTransactionOwnerV1(
-            active: false, failed: false, queued_bytes: 0, commands: [])
+            active: false, failed: false, queued_command_count: 0,
+            queued_bytes: 0, commands: [])
 
     pub me begin(args: [text]) -> bool:
         if self.active or args.len() != 1:
             return false
         self.active = true
         self.failed = false
+        self.queued_command_count = 0
         self.queued_bytes = 0
         self.commands = []
         true
@@ -405,37 +408,51 @@ pub class DbdTransactionOwnerV1:
     pub fn is_failed() -> bool:
         self.failed
 
+    me fail_queue():
+        # Once EXEC is guaranteed to abort, queued argument payloads have no
+        # remaining consumer. Release them immediately instead of retaining
+        # attacker-controlled text until EXEC, DISCARD, or connection close.
+        # Scalar accounting remains intact so later queue-limit replies keep
+        # the same bounded protocol behavior without copying doomed payloads.
+        self.failed = true
+        self.commands = []
+
     pub me queue(args: [text]) -> DbdTransactionQueueStatusV1:
         if not self.active:
             return DbdTransactionQueueStatusV1.NotActive
         if args.len() == 0 or args.len().to_i64() > DBD_MAX_JOURNAL_ARGS:
-            self.failed = true
+            self.fail_queue()
             return DbdTransactionQueueStatusV1.LimitExceeded
         val command = args[0].upper()
         if command == "MULTI" or command == "EXEC" or command == "DISCARD" or
             command == "WATCH" or command == "UNWATCH" or
             command == "AUTH" or command == "QUIT":
-            self.failed = true
+            self.fail_queue()
             return DbdTransactionQueueStatusV1.InvalidControl
         if dbd_command_is_mutating(command) and
             not dbd_command_has_durable_journal_semantics(command):
-            self.failed = true
+            self.fail_queue()
             return DbdTransactionQueueStatusV1.DurabilityUnsupported
         if dbd_command_has_durable_journal_semantics(command) and
             not dbd_journal_args_valid(args):
-            self.failed = true
+            self.fail_queue()
             return DbdTransactionQueueStatusV1.DurabilityUnsupported
         var command_bytes: i64 = 8
         for arg in args:
             if arg.len() > DBD_MAX_TRANSACTION_BYTES - command_bytes:
-                self.failed = true
+                self.fail_queue()
                 return DbdTransactionQueueStatusV1.LimitExceeded
             command_bytes = command_bytes + arg.len()
-        if self.commands.len().to_i64() >= DBD_MAX_TRANSACTION_COMMANDS or
+        if self.queued_command_count >= DBD_MAX_TRANSACTION_COMMANDS or
             command_bytes > DBD_MAX_TRANSACTION_BYTES - self.queued_bytes:
-            self.failed = true
+            self.fail_queue()
             return DbdTransactionQueueStatusV1.LimitExceeded
-        self.commands.push(args)
+        # A prior error already doomed this transaction. Preserve the normal
+        # QUEUED reply and bounded scalar accounting, but do not retain another
+        # argument graph that take_for_exec() can never dispatch.
+        if not self.failed:
+            self.commands.push(args)
+        self.queued_command_count = self.queued_command_count + 1
         self.queued_bytes = self.queued_bytes + command_bytes
         DbdTransactionQueueStatusV1.Queued
 
@@ -446,6 +463,7 @@ pub class DbdTransactionOwnerV1:
         val owned = self.commands
         self.active = false
         self.failed = false
+        self.queued_command_count = 0
         self.queued_bytes = 0
         self.commands = []
         owned
@@ -459,6 +477,7 @@ pub class DbdTransactionOwnerV1:
     pub me clear():
         self.active = false
         self.failed = false
+        self.queued_command_count = 0
         self.queued_bytes = 0
         self.commands = []
 
