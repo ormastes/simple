@@ -2339,3 +2339,40 @@ unsafe-bounded, not verified or signed.  No production optimizer or runtime
 benchmark was available in this worktree; performance evidence is limited to
 the unchanged direct-call source shape.  Verified-and-signed admission remains
 0.
+## SimpleOS socket facade SFFI checkpoint
+
+`src/os/kernel/net/rt_net_socket_facade.spl` is a Pure-Simple socket owner over
+19 boot/runtime declarations.  All declarations now carry explicit
+`@unsafe(... ffi)` metadata and all 50 calls use minimal lexical `unsafe(ffi)`
+scopes.  No C or Rust replacement was introduced.  The focused
+`os-net-socket-sffi-authority.shs` audit passed and ratchets declaration and
+call inventories while rejecting per-call admission, lookup, locks, and generic
+dispatch.
+
+The same checkpoint closes bounded-input defects before entering the provider:
+
+- reject ports outside 0..65535 before `u16` conversion while preserving port
+  zero for ephemeral binding;
+- cap exact SSH reads at 35,016 bytes and reject provider chunks larger than
+  the requested remainder;
+- cap the generic socket read request at 16 MiB;
+- reject plaintext SSH packet lengths above 35,000 bytes before allocation;
+- validate cached-payload slice signs and subtraction-first extents before
+  forming the end index.
+
+These are O(1) guards.  Normal paths keep the same direct calls, loop
+complexity, copies, and persistent socket layout; worst-case foreign-controlled
+allocation is reduced.  The authoritative call census changed exactly as
+expected:
+
+- missing authority: 17,641 -> 17,591
+- lexical unsafe: 2,617 -> 2,667
+- function unsafe: unchanged at 918
+
+The provider still uses legacy empty-array/empty-text error sentinels in APIs
+that cannot distinguish transport failure from valid empty data.  Correcting
+that requires an ABI-versioned `Result`/status contract across all consumers;
+this checkpoint does not fabricate a local distinction.  No production
+self-hosted runtime was available for executable optimizer or RSS evidence, so
+the lane is unsafe-bounded, not verified.  Verified-and-signed admission
+remains 0.
