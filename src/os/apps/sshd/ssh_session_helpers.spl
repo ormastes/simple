@@ -15,7 +15,6 @@ extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> 
 extern fn rt_ed25519_verify(message: [u8], pubkey: [u8], signature: [u8]) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_thread_sleep(ms: i64) -> i64
-extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
@@ -67,11 +66,10 @@ fn _zeroed_32_bytes() -> [u8]:
     out
 
 fn _copy_bytes_stable(data: [u8]) -> [u8]:
-    # Build with the intrinsic `.push` (inline packed-[u8] codegen) rather than
-    # the extern `rt_push_byte(out, ..) -> [u8]` reassignment form: on the
+    # Build with the intrinsic `.push` (inline packed-[u8] codegen). On the
     # x86_64 freestanding native-build, assigning an extern [u8] return back
     # into a [u8] local drops the BYTE_PACKED representation and corrupts the
-    # copy (see report: rt_push_byte-return-assignment hazard). `.push`
+    # copy (see the extern-return-assignment hazard report). `.push`
     # mutates in place and preserves the packed contract.
     var out: [u8] = []
     var i: u64 = 0
@@ -84,7 +82,7 @@ fn _copy_prefix_stable(data: [u8], limit: u64) -> [u8]:
     var out: [u8] = []
     var i: u64 = 0
     while i < data.len() and i < limit:
-        out = rt_push_byte(out, ssh_session_u8_at(data, i).to_i64())
+        out.push((ssh_session_u8_at(data, i).to_i64()) as u8)
         i = i + 1
     out
 
@@ -100,11 +98,11 @@ fn _build_plain_packet_header(payload_len: u64, block_size: u64) -> PlainPacketH
 
     var packet_length_u64: u64 = 1 + payload_len + padding_len
     var header: [u8] = []
-    header = rt_push_byte(header, ((packet_length_u64 >> 24) & 0xFF).to_i64())
-    header = rt_push_byte(header, ((packet_length_u64 >> 16) & 0xFF).to_i64())
-    header = rt_push_byte(header, ((packet_length_u64 >> 8) & 0xFF).to_i64())
-    header = rt_push_byte(header, (packet_length_u64 & 0xFF).to_i64())
-    header = rt_push_byte(header, padding_len.to_i64())
+    header.push((((packet_length_u64 >> 24) & 0xFF).to_i64()) as u8)
+    header.push((((packet_length_u64 >> 16) & 0xFF).to_i64()) as u8)
+    header.push((((packet_length_u64 >> 8) & 0xFF).to_i64()) as u8)
+    header.push(((packet_length_u64 & 0xFF).to_i64()) as u8)
+    header.push((padding_len.to_i64()) as u8)
     PlainPacketHeader(header: header, padding_len: padding_len)
 
 fn _zero_padding_bytes(count: u64) -> [u8]:
@@ -125,15 +123,15 @@ fn _copy_range_stable(data: [u8], start: u64, count: u64) -> [u8]:
 
 fn _push_u32_be_stable(buf: [u8], val_: u32) -> [u8]:
     var out = buf
-    out = rt_push_byte(out, ((val_ >> 24) & 0xFF).to_i64())
-    out = rt_push_byte(out, ((val_ >> 16) & 0xFF).to_i64())
-    out = rt_push_byte(out, ((val_ >> 8) & 0xFF).to_i64())
-    out = rt_push_byte(out, (val_ & 0xFF).to_i64())
+    out.push((((val_ >> 24) & 0xFF).to_i64()) as u8)
+    out.push((((val_ >> 16) & 0xFF).to_i64()) as u8)
+    out.push((((val_ >> 8) & 0xFF).to_i64()) as u8)
+    out.push(((val_ & 0xFF).to_i64()) as u8)
     out
 
 fn _build_channel_open_confirmation_stable(recipient: u32, sender: u32, window: u32, max_packet: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 91)
+    payload.push((91) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload = _push_u32_be_stable(payload, sender)
     payload = _push_u32_be_stable(payload, window)
@@ -142,45 +140,45 @@ fn _build_channel_open_confirmation_stable(recipient: u32, sender: u32, window: 
 
 fn _build_channel_success_stable(recipient: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 99)
+    payload.push((99) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload
 
 fn _build_channel_failure_stable(recipient: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 100)
+    payload.push((100) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload
 
 fn _build_channel_eof_stable(recipient: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 96)
+    payload.push((96) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload
 
 fn _build_channel_close_stable(recipient: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 97)
+    payload.push((97) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload
 
 fn _build_channel_exit_status_stable(recipient: u32, exit_status: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 98)
+    payload.push((98) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload = _push_u32_be_stable(payload, 11)
-    payload = rt_push_byte(payload, 0x65)
-    payload = rt_push_byte(payload, 0x78)
-    payload = rt_push_byte(payload, 0x69)
-    payload = rt_push_byte(payload, 0x74)
-    payload = rt_push_byte(payload, 0x2D)
-    payload = rt_push_byte(payload, 0x73)
-    payload = rt_push_byte(payload, 0x74)
-    payload = rt_push_byte(payload, 0x61)
-    payload = rt_push_byte(payload, 0x74)
-    payload = rt_push_byte(payload, 0x75)
-    payload = rt_push_byte(payload, 0x73)
-    payload = rt_push_byte(payload, 0)
+    payload.push((0x65) as u8)
+    payload.push((0x78) as u8)
+    payload.push((0x69) as u8)
+    payload.push((0x74) as u8)
+    payload.push((0x2D) as u8)
+    payload.push((0x73) as u8)
+    payload.push((0x74) as u8)
+    payload.push((0x61) as u8)
+    payload.push((0x74) as u8)
+    payload.push((0x75) as u8)
+    payload.push((0x73) as u8)
+    payload.push((0) as u8)
     payload = _push_u32_be_stable(payload, exit_status)
     payload
 

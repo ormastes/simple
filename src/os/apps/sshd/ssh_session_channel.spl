@@ -23,7 +23,6 @@ use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_regular_file_bounded_v1}
 
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_thread_sleep(ms: i64) -> i64
-extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
 extern fn serial_println(msg: text)
@@ -76,12 +75,11 @@ fn _ssh_advisory_payload_valid(payload: [u8], msg_type: u8) -> bool:
 
 fn _build_channel_data_stable(recipient: u32, data: [u8]) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 94)
+    payload.push((94) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload = _push_u32_be_stable(payload, data.len().to_u32())
-    # Copy the DATA via the `.push` intrinsic, NOT the `payload =
-    # rt_push_byte(payload, ..)` reassignment form: on x86_64 freestanding
-    # native-build the reassignment form drops the BYTE_PACKED representation
+    # Copy the DATA via the `.push` intrinsic. On x86_64 freestanding,
+    # assigning an extern [u8] return dropped the BYTE_PACKED representation
     # once the array grows large and corrupts the copy — this was the Inc-3
     # getfile 0x53-garbage bug (712-byte /hello.o delivered as garbage while
     # small handshake/exit packets, which stay inline-packed, delivered fine).
@@ -239,7 +237,7 @@ fn _scp_ctrl_line(size: i64, name_bytes: [u8]) -> [u8]:
     else:
         while v > 0:
             var db: [u8] = []
-            db = rt_push_byte(db, (v % 10) + 0x30)
+            db.push(((v % 10) + 0x30) as u8)
             digits = rt_bytes_concat(db, digits)
             v = v / 10
     var out = _copy_bytes_stable([0x43, 0x30, 0x36, 0x34, 0x34, 0x20])
@@ -273,7 +271,7 @@ fn _scp_read_file_bytes(path: text) -> ([u8], i64):
     var i: u64 = 0
     while i < fsize.to_u64():
         val b = mmio_read8(buf + i)
-        out = rt_push_byte(out, b.to_i64())
+        out.push((b.to_i64()) as u8)
         i = i + 1
     (out, fsize)
 
@@ -334,7 +332,7 @@ fn _scp_last_token_bytes(command: text) -> [u8]:
                 last = cur
                 cur = []
         else:
-            cur = rt_push_byte(cur, code)
+            cur.push((code) as u8)
         i = i + 1
     if cur.len() > 0:
         last = cur
@@ -1225,8 +1223,8 @@ impl SshSession:
     me _finish_exec_request(local_id: u32, remote_id: u32, exit_status: u32, output: [u8]):
         # Sends the command output as one channel-data packet, then
         # exit-status/eof/close. The real Inc-3 getfile fix was in
-        # _build_channel_data_stable (`.push` vs the rt_push_byte reassignment
-        # form — the latter dropped BYTE_PACKED for large [u8] and corrupted the
+        # _build_channel_data_stable (in-place `.push` vs an extern-return
+        # reassignment, which dropped BYTE_PACKED for large [u8] and corrupted the
         # payload). An earlier `output.len().to_u32()`→bound-var change here was
         # NOT necessary: this chained form is proven to deliver byte-exact (see
         # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md,
