@@ -11,7 +11,7 @@ use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, ChannelPee
 use os.apps.sshd.ssh_channel_open_request.{ssh_channel_open_request_classify_v1, ssh_channel_open_rejection_payload_v1, ssh_channel_open_transport_must_close_v1}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
-use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _copy_bytes_stable, _push_u32_be_stable, _read_u32_stable, _read_text_field_fast, _bytes_to_hex, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
+use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _copy_bytes_stable, _copy_range_stable, _push_u32_be_stable, _read_u32_stable, _read_text_field_fast, _bytes_to_hex, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
 use os.apps.sshd.ssh_global_request.{SshGlobalRequestDecisionV1, SSH_MSG_GLOBAL_REQUEST, ssh_global_request_classify, ssh_global_request_reply_payload}
 use os.kernel.log.klog_api.{log_info}
 use std.common.string_core.{text_to_bytes}
@@ -21,6 +21,12 @@ extern fn rt_thread_sleep(ms: i64) -> i64
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn serial_println(msg: text)
+
+# The receive owner advertises a two-megabyte channel window. Retaining at
+# most that much response data gives the session a hard memory bound even when
+# a peer stops returning send credit. Normal operation retains only one SFTP
+# response (at most 35004 bytes).
+val SSH_SFTP_TX_PENDING_CAP: u64 = DEFAULT_WINDOW_SIZE.to_u64()
 
 fn _build_channel_data_stable(recipient: u32, data: [u8]) -> [u8]:
     var payload: [u8] = []
@@ -353,6 +359,7 @@ impl SshSession:
                 if not self.channels.apply_remote_window_adjust(payload):
                     self.transition_closed()
                     return
+                self._pump_sftp_output([])
                 continue
             elif msg_type == 96:
                 # Peer EOF is half-close notification; retain the channel
@@ -379,6 +386,8 @@ impl SshSession:
                     self.sftp = SftpSessionV3.new()
                     self.sftp_enabled = false
                     self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
+                    self.sftp_tx_pending = []
+                    self.sftp_tx_head = 0u64
                 continue
             elif msg_type == 97:
                 self._handle_channel_close(payload)
@@ -488,6 +497,8 @@ impl SshSession:
             self.sftp_enabled = true
             self.capability_sftp_opened = true
             self.sftp_local_channel_id = recipient
+            self.sftp_tx_pending = []
+            self.sftp_tx_head = 0u64
             if want_reply:
                 self.send_packet(_build_channel_success_stable(reply_remote_id))
         elif self.sftp_enabled and self.sftp_local_channel_id == recipient:
@@ -700,6 +711,8 @@ impl SshSession:
             self.sftp = SftpSessionV3.new()
             self.sftp_enabled = false
             self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
+            self.sftp_tx_pending = []
+            self.sftp_tx_head = 0u64
             return
         val parsed = ssh_parse_channel_data(payload)
         if parsed.is_err():
@@ -720,19 +733,7 @@ impl SshSession:
                 admission.remote_id, admission.window_adjustment))
 
         if self.sftp_enabled and recipient == self.sftp_local_channel_id:
-            var response = self.sftp.handle_packet(data)
-            # Drain every complete coalesced frame already admitted by the
-            # bounded SFTP owner. Each iteration consumes at least one framed
-            # request, so work remains linear in the received bytes.
-            while response.len() > 0:
-                if response.len() > admission.remote_max_packet.to_u64():
-                    self.transition_closed()
-                    return
-                if not self.channels.consume_remote_window(recipient, response.len().to_u32()):
-                    self.transition_closed()
-                    return
-                self.send_packet(_build_channel_data_stable(admission.remote_id, response))
-                response = self.sftp.handle_packet([])
+            self._pump_sftp_output(self.sftp.handle_packet(data))
             return
 
         if self.scp_pending and recipient == self.scp_local_id:
@@ -803,6 +804,8 @@ impl SshSession:
             self.sftp = SftpSessionV3.new()
             self.sftp_enabled = false
             self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
+            self.sftp_tx_pending = []
+            self.sftp_tx_head = 0u64
         val remote_id = channel.remote_id
         val decision = self.channels.accept_peer_close(recipient)
         if decision == ChannelPeerCloseDecisionV1.Invalid:
@@ -813,6 +816,79 @@ impl SshSession:
         self.channels.remove_closed()
         if self.channels.channels.len() == 0:
             self.transition_closed()
+
+    me _append_sftp_output(response: [u8]) -> bool:
+        """Append one complete SFTP response to the bounded ordered stream."""
+        if response.len() == 0u64:
+            return true
+        val retained = self.sftp_tx_pending.len() - self.sftp_tx_head
+        if retained > SSH_SFTP_TX_PENDING_CAP:
+            return false
+        if response.len() > SSH_SFTP_TX_PENDING_CAP - retained:
+            return false
+        # Compact only at the append boundary. Packet fragmentation then walks
+        # a cursor without repeatedly copying the unsent suffix.
+        var joined = _copy_range_stable(
+            self.sftp_tx_pending, self.sftp_tx_head, retained)
+        var i: u64 = 0u64
+        while i < response.len():
+            joined.push(ssh_session_u8_at(response, i))
+            i = i + 1u64
+        self.sftp_tx_pending = joined
+        self.sftp_tx_head = 0u64
+        true
+
+    me _drain_sftp_output() -> bool:
+        """Emit packet-sized fragments while peer window credit remains."""
+        while self.sftp_tx_head < self.sftp_tx_pending.len():
+            val channel = self.channels.find(self.sftp_local_channel_id)
+            if channel == nil or channel.state != ChannelState.Open:
+                return false
+            if channel.remote_max_packet == 0u32:
+                return false
+            val remaining = self.sftp_tx_pending.len() - self.sftp_tx_head
+            var send_len = remaining
+            if send_len > channel.remote_max_packet.to_u64():
+                send_len = channel.remote_max_packet.to_u64()
+            if send_len > channel.remote_window.to_u64():
+                send_len = channel.remote_window.to_u64()
+            if send_len == 0u64:
+                return true
+            if not self.channels.consume_remote_window(
+                self.sftp_local_channel_id, send_len.to_u32()):
+                return false
+            val fragment = _copy_range_stable(
+                self.sftp_tx_pending, self.sftp_tx_head, send_len)
+            self.send_packet(_build_channel_data_stable(channel.remote_id, fragment))
+            self.sftp_tx_head = self.sftp_tx_head + send_len
+        self.sftp_tx_pending = []
+        self.sftp_tx_head = 0u64
+        true
+
+    me _pump_sftp_output(first_response: [u8]):
+        """Queue and drain SFTP replies without changing their byte stream.
+
+        Once a queued response is fully emitted, ask the bounded SFTP parser
+        for the next coalesced request. Window exhaustion retains the exact
+        suffix; SSH_MSG_CHANNEL_WINDOW_ADJUST resumes at that cursor.
+        """
+        if not self.sftp_enabled:
+            return
+        if not self._append_sftp_output(first_response):
+            self.transition_closed()
+            return
+        while true:
+            if not self._drain_sftp_output():
+                self.transition_closed()
+                return
+            if self.sftp_tx_pending.len() > 0u64:
+                return
+            val next_response = self.sftp.handle_packet([])
+            if next_response.len() == 0u64:
+                return
+            if not self._append_sftp_output(next_response):
+                self.transition_closed()
+                return
 
     me _mark_channel_shell(local_id: u32):
         var i: u64 = 0

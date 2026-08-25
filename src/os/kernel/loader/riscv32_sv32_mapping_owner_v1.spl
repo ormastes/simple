@@ -164,6 +164,40 @@ fn _rv32_page_end_v1(value: u64) -> u64:
     if value % 4096u64 == 0u64: return value
     value + (4096u64 - value % 4096u64)
 
+fn _rv32_mapping_layout_valid_v1(
+    handle: ExecutableImageHandleV1,
+    stack_top: u64,
+    stack_size: u64
+) -> bool:
+    """Preflight the complete Sv32 layout before allocating mapping state."""
+    if (stack_size == 0u64 or stack_top < stack_size or
+        stack_top > 0x80000000u64 or stack_top % 4096u64 != 0u64 or
+        stack_size % 4096u64 != 0u64):
+        return false
+    val stack_start = stack_top - stack_size
+    if stack_start < 4096u64: return false
+    val stack_pages = stack_size / 4096u64
+    if stack_pages > riscv32_sv32_mapping_max_pages_v1(): return false
+    var total_pages = stack_pages
+    for segment in handle.verified_load_ranges:
+        if (segment.memory_size == 0u64 or
+            segment.virtual_address >= 0x80000000u64 or
+            segment.memory_size > 0x80000000u64 - segment.virtual_address):
+            return false
+        val segment_start = _rv32_page_start_v1(segment.virtual_address)
+        val segment_end = _rv32_page_end_v1(
+            segment.virtual_address + segment.memory_size)
+        if segment_start < 4096u64 or segment_end > 0x80000000u64:
+            return false
+        if segment_start < stack_top and stack_start < segment_end:
+            return false
+        val segment_pages = (segment_end - segment_start) / 4096u64
+        if (segment_pages > riscv32_sv32_mapping_max_pages_v1() or
+            total_pages > riscv32_sv32_mapping_max_pages_v1() - segment_pages):
+            return false
+        total_pages = total_pages + segment_pages
+    true
+
 fn _rv32_copy_page_v1(
     phys: u64,
     page: u64,
@@ -280,12 +314,11 @@ pub(package) fn riscv32_sv32_mapping_prepare_v1(
 ) -> Riscv32Sv32MappingReceiptV1:
     if (not executable_image_handle_validate(handle).ok or
         not executable_riscv32_authenticated_mapping_evidence_v1(handle, entry_point) or
+        not _rv32_mapping_layout_valid_v1(handle, stack_top, stack_size) or
         authenticated_source.len() as u64 != handle.size_bytes or
         authenticated_source.len() == 0 or
         authenticated_source.len() as u64 > 67108864u64 or
         sha256_u8_hex(authenticated_source) != handle.image_hash or
-        stack_size == 0u64 or stack_top < stack_size or
-        stack_top > 0x80000000u64 or
         initial_stack_pointer < stack_top - stack_size or
         initial_stack_pointer > stack_top or
         initial_stack_bytes.len() as u64 != stack_top - initial_stack_pointer or

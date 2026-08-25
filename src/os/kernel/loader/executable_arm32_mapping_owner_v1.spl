@@ -38,6 +38,7 @@ pub enum ExecutableArm32MappingReadinessErrorV1:
     DigestMismatch
     ElfRejected
     LayoutMismatch
+    EntryPointInvalid
     AddressOutOfRange
     PageOverlap
     PageLimitExceeded
@@ -152,6 +153,7 @@ pub(package) fn executable_arm32_mapping_readiness_v1(
             ExecutableArm32MappingReadinessErrorV1.StackCollision)
     val stack_start = stack_top - stack_size
     var planned_pages = 0u64
+    var entry_covered = false
     var i = 0
     while i < layout.load_ranges.len():
         val actual = layout.load_ranges[i]
@@ -169,6 +171,13 @@ pub(package) fn executable_arm32_mapping_readiness_v1(
         if page_start < stack_top and stack_start < page_end:
             return _arm32_reject(
                 ExecutableArm32MappingReadinessErrorV1.StackCollision)
+        # An authenticated e_entry is not sufficient by itself: the first PC
+        # must name bytes in an executable PT_LOAD.  Otherwise scheduler
+        # adoption could publish a task whose initial instruction fetch faults
+        # or starts in non-executable data despite a valid image digest.
+        if (actual.executable and layout.entry_point >= actual.virtual_address and
+            layout.entry_point < raw_end):
+            entry_covered = true
         var earlier = 0
         while earlier < i:
             if _arm32_ranges_share_page(actual, layout.load_ranges[earlier]):
@@ -182,6 +191,10 @@ pub(package) fn executable_arm32_mapping_readiness_v1(
                 ExecutableArm32MappingReadinessErrorV1.PageLimitExceeded)
         planned_pages = planned_pages + pages
         i = i + 1
+
+    if layout.entry_point == 0u64 or not entry_covered:
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.EntryPointInvalid)
 
     ExecutableArm32MappingReadinessV1(
         candidate_ready: true,
