@@ -1336,3 +1336,29 @@ than protocol-fixed at 1,048,576/524,288/65,536; exported generic/raw
 constructors bypass typed-only schema builders; and execution is bootstrap-
 seed. No source/spec is accepted. Overall status remains `IN PROGRESS` and
 `W4-SRCH-31` remains `FAIL`.
+
+#### 13.9.9 Checked-BM25 and rejected DBFS evidence record
+
+Commit `2b9f25f8604` accepts only
+`src/lib/common/search/ranking.spl` and
+`test/01_unit/lib/common/search/ranking_spec.spl`. Highest-capability review is
+`PASS`. In a clean integration checkout the source check passed and the focused
+specification passed `30/30`; both receipts have bootstrap-seed/non-Stage-4
+runtime provenance. They are sufficient for the owned Lane C scorer slice but
+are not Stage 4 runtime qualification.
+
+The accompanying DBFS bundle is `FAIL` and `NOT-EVIDENCE`: the standalone
+`wave4_compatibility` implementation is a second fixture scorer rather than a
+facade over the accepted scorer; probe cells do not establish the contract;
+the reported clean/parity run was not executed and the claim is false;
+embeddings zero-use is unproved; and capability/statistics behavior is wrong.
+No DBFS source or test is accepted.
+
+The replacement DBFS evidence must exercise the real canonical-scorer facade,
+idempotent remove/re-add corpus statistics, deduplicated query terms, an honest
+`explain:false` capability until explanations exist, and equality against an
+independently rebuilt final corpus. The clean post-push lint invocation failed
+before any lint verdict because runtime/codegen dispatch could not resolve
+`Array.sort_by`; its bootstrap-seed provenance makes this a tooling blocker,
+not a scorer failure or pass. Duplicate check was not run. Wave 4 remains
+`IN PROGRESS`.

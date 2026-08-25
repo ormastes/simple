@@ -2207,3 +2207,37 @@ future minor versions may name at most 32 `IdText` leaf fields, but cannot make
 a required/semantic field optional. Unknown nested keys or a value exceeding a
 client hard maximum rejects initialization. Negotiated effective limits are
 the componentwise minima; they are recorded in generation identity.
+
+## 15. Wave 4 implementation evidence checkpoint (2026-08-25)
+
+Commit `2b9f25f8604` accepts only the Lane C canonical checked-BM25 slice:
+
+- `src/lib/common/search/ranking.spl`;
+- `test/01_unit/lib/common/search/ranking_spec.spl`.
+
+Highest-capability review is `PASS`. A clean integration checkout reported the
+ranking source check `PASS` and the focused specification `PASS 30/30`. That
+execution used bootstrap-seed/non-Stage-4 runtime provenance, so it proves the
+accepted scorer slice under that runtime only; it is not Stage 4 runtime
+qualification and does not close Wave 4.
+
+The proposed DBFS bundle is `FAIL` and `NOT-EVIDENCE`. Its standalone
+`wave4_compatibility` path is a duplicate fixture scorer rather than a facade
+over the canonical scorer; probe cells are too weak; asserted clean/parity
+evidence was not executed and is false as stated; embeddings zero-use is not
+proved; and capability/statistics behavior is defective. No DBFS file from
+that bundle is accepted.
+
+The next DBFS slice must be an actual compatibility facade over the canonical
+scorer. It must prove idempotent remove/re-add statistics, deduplicated query
+terms, advertise `explain:false` until explanation is implemented, and compare
+incremental results with an independently rebuilt final corpus. Wave 4 remains
+`IN PROGRESS`.
+
+Post-push lint is a separate tooling blocker, not a scorer failure: in the
+clean integration checkout,
+`bin/simple lint src/lib/common/search/ranking.spl` failed before producing a
+lint result because runtime/codegen dispatch could not resolve
+`Array.sort_by`. The command also had bootstrap-seed provenance. No duplicate
+check was run because the lint owner tool is unresolved and the same seed path
+is not qualified.

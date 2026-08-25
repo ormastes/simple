@@ -579,3 +579,29 @@ materialized or editor view may be misreported as OS-mount evidence.
 When the feature behavior becomes reachable, add/update the dedicated feature
 expert entry and link these adjacent experts to the canonical guide rather than
 duplicating the full contract.
+
+## 13. Current Wave 4 search evidence
+
+The checked canonical BM25 slice is accepted at commit `2b9f25f8604`, limited
+to `src/lib/common/search/ranking.spl` and
+`test/01_unit/lib/common/search/ranking_spec.spl`. Highest-capability review is
+`PASS`; a clean integration checkout produced source check `PASS` and focused
+specification `PASS 30/30`. The runtime was bootstrap-seed/non-Stage-4, so do
+not present these receipts as Stage 4 runtime qualification or as Wave 4
+completion.
+
+Do not use the rejected standalone DBFS `wave4_compatibility` bundle. It
+duplicates scoring instead of delegating to the canonical scorer, has weak
+probe coverage, lacks executed clean/parity and embeddings-zero-use evidence,
+and violates capability/statistics contracts. Its status is
+`FAIL`/`NOT-EVIDENCE`, and none of its files is accepted.
+
+The next DBFS implementation must be a real facade over the canonical scorer.
+Acceptance requires idempotent remove/re-add statistics, query-term
+deduplication, `explain:false` until explanations are implemented, and an
+independent final-corpus clean rebuild oracle. Wave 4 remains `IN PROGRESS`.
+
+The clean post-push lint attempt stopped before a lint verdict because the
+bootstrap runtime/codegen path could not resolve `Array.sort_by`. Record that
+as a tooling blocker, not a scorer failure or pass. No duplicate-check receipt
+exists for this slice.

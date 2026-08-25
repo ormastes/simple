@@ -461,3 +461,28 @@ ceiling `<= 1,048,576`; fix payload/page/explanation maxima at
 1,048,576/524,288/65,536 rather than caller input; and remove exported
 generic/raw construction paths that bypass typed builders. Its evidence is also
 bootstrap-seed. Overall remains `IN PROGRESS`; `W4-SRCH-31 FAIL` is unchanged.
+
+### 10.3 Wave 4 Lane C checked-BM25 checkpoint
+
+Commit `2b9f25f8604` accepts exactly
+`src/lib/common/search/ranking.spl` and
+`test/01_unit/lib/common/search/ranking_spec.spl`. Highest-capability review is
+`PASS`; clean integration evidence reports source check `PASS` and focused
+specification `PASS 30/30`. The evidence runtime is bootstrap-seed/non-Stage-4,
+so this closes only the owned Lane C scorer slice, not Stage 4 qualification or
+Wave 4.
+
+Reject the DBFS candidate bundle as `FAIL`/`NOT-EVIDENCE`: its standalone
+`wave4_compatibility` module duplicates a fixture scorer instead of adapting
+the canonical scorer, its probe cells are weak, its clean/parity claim was not
+executed and is false, embeddings zero-use is absent, and its capability and
+statistics contracts are defective. Accept none of its files.
+
+Lane E's next bounded task is to build the actual DBFS compatibility facade
+over the canonical scorer and prove idempotent remove/re-add statistics,
+deduplicated queries, honest `explain:false` until explanation exists, and
+parity with an independently rebuilt final corpus. A clean post-push lint
+attempt failed before a lint result at unresolved `Array.sort_by` runtime/codegen
+dispatch. Treat that bootstrap-seed result as a tooling blocker, not scorer
+evidence or scorer failure; do not claim a duplicate-check run. Overall Wave 4
+remains `IN PROGRESS`.
