@@ -646,14 +646,21 @@ impl MirLowering:
     me bootstrap_function_signature(name: text) -> MirSignature:
         MirSignature(params: [], return_type: self.bootstrap_call_return_type(name), is_variadic: false)
 
-    fn bootstrap_default_return_operand(return_type: MirType) -> MirOperand?:
+    me bootstrap_fallthrough_return_operand(
+        function_name: text,
+        return_type: MirType,
+        span: Span?,
+    ) -> MirOperand?:
         if return_type.kind == MirTypeKind.Unit:
             return nil
-        # Explicit tail: mixed return/implicit-tail returns 0 on the stage4
-        # native lane — non-unit bootstrap stubs then fed a garbage Ret
-        # payload into the adapter (SIGILL in cl_translate_operand). The Some
-        # box itself is CORRECT here (Ret payload consumers are box-paired).
-        return Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Zero, return_type)))
+        # SFFI v2 P0: bootstrap lowering must not manufacture the ABI default
+        # for a value-returning function. That would turn missing source or a
+        # lost tail expression into a valid-looking nil/zero/false result.
+        self.error_fatal(
+            "E-SFFI-016: missing return in non-unit function '" + function_name + "'",
+            span,
+        )
+        nil
 
     me lower_bootstrap_stub_function(symbol: SymbolId, name: text) -> MirFunction:
         if mir_lower_trace_enabled():
@@ -661,7 +668,8 @@ impl MirLowering:
         val signature = self.bootstrap_function_signature(name)
         var bldr = self.builder
         bldr.begin_function(symbol, name, signature, nil)
-        bldr.terminate_return(self.bootstrap_default_return_operand(signature.return_type))
+        bldr.terminate_return(self.bootstrap_fallthrough_return_operand(
+            name, signature.return_type, nil))
         val fn_result = bldr.end_function()
         self.builder = bldr
         if mir_lower_trace_enabled():
@@ -708,7 +716,8 @@ impl MirLowering:
             if result.?:
                 bldr2.terminate_return(Some(mir_operand_copy(result ?? LocalId(id: 0))))
             else:
-                bldr2.terminate_return(self.bootstrap_default_return_operand(signature.return_type))
+                bldr2.terminate_return(self.bootstrap_fallthrough_return_operand(
+                    name, signature.return_type, Some(body.span)))
         self.builder = bldr2
         var bldr3 = self.builder
         val fn_result = bldr3.end_function()

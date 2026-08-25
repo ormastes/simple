@@ -31,6 +31,13 @@ focused spec, so self-hosted acceptance and optimizer evidence remain open.
 
 Exit: interpreter/bootstrap/native negative cases agree on diagnostic category.
 
+Checkpoint: bootstrap source lowering now shares the `E-SFFI-016` fail-closed
+contract. Unit fallthrough remains operand-less; non-unit stub or flat-body
+fallthrough records a fatal diagnostic and never constructs typed zero. The
+validator runs only on fallthrough, so valid function return paths gain no
+branch, allocation, or dispatch. Self-hosted behavioral verification remains
+blocked by the unavailable admitted current-source runtime.
+
 ### 3. Complete resolved-HIR inventory
 
 - Extend compiler-owned extern identity through aliases, re-exports, methods,
