@@ -21,7 +21,7 @@ function projectRecord(input, workspaceUid) {
   const projectRoot = input.root ?? input.projectRoot;
   if (typeof projectRoot !== "string" || projectRoot.length === 0) throw new TypeError("project root is required");
   const root = canonicalRoot(projectRoot);
-  const uid = input.projectUid ?? input.project_uid ?? idFor("P", "project_v1", [workspaceUid, key]);
+  const uid = input.projectUid ?? input.project_uid ?? input.uid ?? idFor("P", "project_v1", [workspaceUid, key]);
   if (typeof uid !== "string" || !/^P-[A-Za-z0-9._~-]+$/.test(uid)) throw new TypeError("project UID must use the P- opaque-id form");
   const revision = input.revisionId ?? input.revision_id ?? input.revision ?? null;
   const record = {
@@ -42,9 +42,9 @@ function projectRecord(input, workspaceUid) {
  * worktree mount.
  */
 export class WorkspaceRegistry {
-  constructor({ workspaceUid = null, root, schemaVersion = 1 } = {}) {
+  constructor({ workspaceUid = null, workspace_id = null, workspaceId = null, root, schemaVersion = 1 } = {}) {
     if (typeof root !== "string" || root.length === 0) throw new TypeError("workspace root is required");
-    this.workspace_uid = workspaceUid ?? idFor("W", "workspace_v1", [canonicalRoot(String(root ?? ""))]);
+    this.workspace_uid = workspaceUid ?? workspace_id ?? workspaceId ?? idFor("W", "workspace_v1", [canonicalRoot(String(root ?? ""))]);
     if (!/^W-[A-Za-z0-9._~-]+$/.test(this.workspace_uid)) throw new TypeError("workspace UID must use the W- opaque-id form");
     this.root = canonicalRoot(String(root ?? ""));
     this.schema_version = schemaVersion;
@@ -84,6 +84,10 @@ export class WorkspaceRegistry {
   }
 
   registerLinkedProject(input) {
+    return this.registerRelation(input);
+  }
+
+  registerLink(input) {
     return this.registerRelation(input);
   }
 

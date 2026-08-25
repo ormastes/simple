@@ -105,7 +105,8 @@ function atomicWrite(path, text) {
 }
 
 export class ImmutableSnapshotStore {
-  constructor({ cacheRoot, repositoryId = "default" } = {}) {
+  constructor({ cacheRoot = null, root = null, repositoryId = "default" } = {}) {
+    cacheRoot ??= root;
     if (!cacheRoot) throw new TypeError("cacheRoot is required");
     this.cacheRoot = canonicalRoot(String(cacheRoot));
     this.repository_id = safeNamespace(String(repositoryId), "repository id");

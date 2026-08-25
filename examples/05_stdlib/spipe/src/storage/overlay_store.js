@@ -42,7 +42,9 @@ function writeAtomic(path, bytes) {
  * or shared current file is used.
  */
 export class WorktreeOverlayStore {
-  constructor({ cacheRoot, worktreeUid, load = true } = {}) {
+  constructor({ cacheRoot = null, root = null, worktreeUid = null, worktreeId = null, worktree_id = null, load = true } = {}) {
+    cacheRoot ??= root;
+    worktreeUid ??= worktreeId ?? worktree_id;
     if (!cacheRoot || !worktreeUid) throw new TypeError("cacheRoot and worktreeUid are required");
     this.worktree_uid = safeNamespace(String(worktreeUid), "worktree uid");
     this.layout = ensureWorktreeCacheLayout(cacheRoot, this.worktree_uid);

@@ -21,7 +21,7 @@ export function createWorktreeRecord(input) {
   const root = canonicalRoot(worktreeRoot);
   const gitCommonDir = input.gitCommonDir ?? input.git_common_dir ?? null;
   const gitDir = input.gitDir ?? input.git_dir ?? null;
-  const worktreeUid = deriveWorktreeUid({ projectUid, gitCommonDir: gitCommonDir ?? root, gitDir: gitDir ?? root, explicitUid: input.worktreeUid ?? input.worktree_uid });
+  const worktreeUid = deriveWorktreeUid({ projectUid, gitCommonDir: gitCommonDir ?? root, gitDir: gitDir ?? root, explicitUid: input.worktreeUid ?? input.worktree_uid ?? input.uid });
   const record = {
     worktree_uid: worktreeUid,
     project_uid: projectUid,

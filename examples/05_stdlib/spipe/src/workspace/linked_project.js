@@ -16,11 +16,11 @@ function memberOf(value, values, name) {
  */
 export function createProjectRelation(input) {
   if (!input || typeof input !== "object") throw new TypeError("relation must be an object");
-  const fromProjectUid = String(input.fromProjectUid ?? input.from_project_uid ?? "");
-  const toProjectUid = String(input.toProjectUid ?? input.to_project_uid ?? "");
+  const fromProjectUid = String(input.fromProjectUid ?? input.from_project_uid ?? input.from ?? "");
+  const toProjectUid = String(input.toProjectUid ?? input.to_project_uid ?? input.to ?? "");
   if (!fromProjectUid || !toProjectUid || fromProjectUid === toProjectUid) throw new TypeError("relation endpoints must be distinct");
   const semantic = memberOf(input.semantic ?? "independent", SEMANTIC_RELATIONS, "semantic relation");
-  const physical = memberOf(input.physical ?? input.linkage ?? "none", PHYSICAL_LINKAGES, "physical linkage");
+  const physical = memberOf(input.physical ?? input.physical_linkage ?? input.linkage ?? "none", PHYSICAL_LINKAGES, "physical linkage");
   const trust = memberOf(input.trust ?? "reviewed", TRUST_RELATIONS, "trust relation");
   const mount = input.mount === undefined || input.mount === null ? null : String(input.mount);
   const revision = input.revision === undefined || input.revision === null ? null : String(input.revision);
