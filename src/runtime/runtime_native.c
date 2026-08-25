@@ -12604,10 +12604,12 @@ int64_t rt_io_tcp_accept(int64_t fd) {
 }
 
 int64_t rt_io_tcp_accept_timeout(int64_t fd, int64_t ms) {
+    if (ms <= 0) return -1;
     struct pollfd pfd;
     memset(&pfd, 0, sizeof(pfd));
     pfd.fd = (int)fd; pfd.events = POLLIN;
-    if (poll(&pfd, 1, (int)ms) <= 0) return -1;
+    int timeout_ms = ms > INT_MAX ? INT_MAX : (int)ms;
+    if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
     return rt_io_tcp_accept(fd);
 }
 

@@ -17,7 +17,8 @@ use os.kernel.net.tcp_shim_state.{
     parse_host_port, make_sock_addr, sock_addr_to_text, HostPort
 }
 use os.services.netstack.netstack_init.{
-    net_tcp_available, net_tcp_bind, net_tcp_accept, net_tcp_connect,
+    net_tcp_available, net_tcp_bind, net_tcp_accept, net_tcp_accept_timeout,
+    net_tcp_connect,
     net_tcp_read, net_tcp_write, net_tcp_close
 }
 
@@ -99,6 +100,8 @@ fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64:
 
     Returns -1 on timeout or when the netstack is unavailable.
     """
+    if ms <= 0:
+        return -1
     val entry = shim_get(fd)
     if entry == nil:
         return -1
@@ -108,13 +111,19 @@ fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64:
         return -1
 
     if net_tcp_available():
-        var waited: i64 = 0
-        while waited <= ms:
-            val client_fd = rt_io_tcp_accept(fd)
-            if client_fd >= 0:
-                return client_fd
-            waited = waited + 1
-        return -1
+        val client_os_fd = net_tcp_accept_timeout(e.os_fd.to_i64(), ms.to_u64())
+        if client_os_fd < 0:
+            return -1
+        val shim_fd = shim_alloc_fd()
+        val client_entry = ShimFdEntry(
+            fd: shim_fd, os_fd: client_os_fd.to_i32(),
+            bound_addr: e.bound_addr, peer_addr_text: "",
+            is_listening: false, nonblocking: e.nonblocking,
+            nodelay: e.nodelay, read_timeout_ms: e.read_timeout_ms,
+            write_timeout_ms: e.write_timeout_ms
+        )
+        shim_set(shim_fd, client_entry)
+        return shim_fd
 
     -1
 

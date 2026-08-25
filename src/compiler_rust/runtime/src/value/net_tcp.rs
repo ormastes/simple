@@ -402,11 +402,11 @@ pub extern "C" fn rt_io_tcp_accept(handle: i64) -> i64 {
 /// Simple-facing TCP accept with timeout wrapper.
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_accept_timeout(handle: i64, ms: i64) -> i64 {
-    let deadline = if ms <= 0 {
-        None
-    } else {
-        Some(std::time::Instant::now() + Duration::from_millis(ms as u64))
-    };
+    if ms <= 0 {
+        return -(NetError::InvalidInput as i64);
+    }
+    let bounded_ms = ms.min(i32::MAX as i64) as u64;
+    let deadline = std::time::Instant::now() + Duration::from_millis(bounded_ms);
 
     loop {
         let accept_result = {
@@ -428,10 +428,8 @@ pub extern "C" fn rt_io_tcp_accept_timeout(handle: i64, ms: i64) -> i64 {
         match accept_result {
             Ok((stream, _peer)) => return register_tcp_stream(stream),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if let Some(limit) = deadline {
-                    if std::time::Instant::now() >= limit {
-                        return -(NetError::TimedOut as i64);
-                    }
+                if std::time::Instant::now() >= deadline {
+                    return -(NetError::TimedOut as i64);
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -713,6 +711,14 @@ mod tcp_read_contract_tests {
     fn connect_timeout_rejects_non_positive_budget_before_network_io() {
         assert_eq!(
             rt_io_tcp_connect_timeout(crate::value::RuntimeValue::NIL, 0),
+            -(NetError::InvalidInput as i64)
+        );
+    }
+
+    #[test]
+    fn accept_timeout_rejects_non_positive_budget_before_polling() {
+        assert_eq!(
+            rt_io_tcp_accept_timeout(-1, 0),
             -(NetError::InvalidInput as i64)
         );
     }

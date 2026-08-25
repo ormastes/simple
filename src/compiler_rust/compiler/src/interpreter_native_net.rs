@@ -577,12 +577,15 @@ pub fn rt_io_tcp_accept_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_io_tcp_accept_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
-    let deadline = if timeout_ms <= 0 {
-        None
-    } else {
-        Some(std::time::Instant::now() + Duration::from_millis(timeout_ms as u64))
-    };
+    let timeout_ms = args
+        .get(1)
+        .and_then(|v| v.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(1, "i64"))?;
+    if timeout_ms <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let bounded_ms = timeout_ms.min(i32::MAX as i64) as u64;
+    let deadline = std::time::Instant::now() + Duration::from_millis(bounded_ms);
     loop {
         let accept_result = with_tcp_listener(handle, |listener| {
             listener.set_nonblocking(true).ok();
@@ -593,10 +596,8 @@ pub fn rt_io_tcp_accept_timeout_interp(args: &[Value]) -> Result<Value, CompileE
         match accept_result {
             Ok((stream, _)) => return Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if let Some(limit) = deadline {
-                    if std::time::Instant::now() >= limit {
-                        return Ok(Value::Int(-1));
-                    }
+                if std::time::Instant::now() >= deadline {
+                    return Ok(Value::Int(-1));
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -1315,6 +1316,19 @@ mod tcp_read_contract_tests {
         assert!(rt_io_tcp_connect_timeout_interp(&[address.clone(), Value::text("bad")]).is_err());
         assert!(matches!(
             rt_io_tcp_connect_timeout_interp(&[address, Value::Int(0)]),
+            Ok(Value::Int(-1))
+        ));
+    }
+
+    #[test]
+    fn tcp_accept_timeout_rejects_invalid_budget_before_polling() {
+        assert!(rt_io_tcp_accept_timeout_interp(&[
+            Value::Int(-1),
+            Value::text("bad"),
+        ])
+        .is_err());
+        assert!(matches!(
+            rt_io_tcp_accept_timeout_interp(&[Value::Int(-1), Value::Int(0)]),
             Ok(Value::Int(-1))
         ));
     }
