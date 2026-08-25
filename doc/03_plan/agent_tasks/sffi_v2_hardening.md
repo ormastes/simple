@@ -540,3 +540,7 @@ passing placeholder.
      `unsafe(ffi)`. Enforce pointer extents, signal-handler validity, post-fork
      restrictions, and owned argument-value transfer without extra allocation,
      process calls, or copies; bind exact libc/runtime identity before admission.
+104. Keep all 35 simple-core string/stdio declarations explicitly tagged
+     `unsafe(ffi)`. Enforce memory and I/O extents, parsing end-pointer validity,
+     array item-pointer lifetime, and enum payload borrowing without extra
+     scans, allocations, copies, syscalls, or string-registry work.

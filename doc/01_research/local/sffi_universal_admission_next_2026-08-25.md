@@ -1127,3 +1127,26 @@ Unsafe-tagged rows increase from 1,648 to 1,684, untouched rows decrease from
 9,830 to 9,794, and exact-artifact verified-and-signed admission remains zero.
 Signal-handler validity, pointer extents, post-fork restrictions, and exact
 libc/runtime identity still require executable policy and admission evidence.
+
+## Simple-core string/stdio raw-contract checkpoint
+
+All 35 raw declarations in `simple-core` string and string-backed stdio now
+carry adjacent, operation-specific `@unsafe(... capabilities: [ffi])` metadata.
+The contracts cover heap ownership, memory copy/compare extents, integer/float
+parsing with end-pointer outputs, NUL-terminated strings, file-descriptor
+pointer/count I/O, unchecked pointer/offset access, tagged array/dictionary
+handles, borrowed array item pointers, owned value construction, and enum
+identity/discriminant/borrowed-payload projections.
+
+A static ratchet fixes the inventory at 35 and requires every declaration to
+retain its tag. It passed with the whitespace check. This pass changes no ABI
+signature, registry scan, allocation/reallocation/free, parsing operation,
+syscall, memory copy, collection traversal, branch, value layout, or dispatch.
+The compact string registry and all string hot paths remain unchanged;
+production Simple and optimizer verification remain unavailable.
+
+Estimated totals remain 11,736 `rt_*` declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,684 to 1,719, untouched rows decrease from
+9,794 to 9,759, and exact-artifact verified-and-signed admission remains zero.
+Pointer extents, parsing end-pointer validity, and borrowed payload lifetimes
+still require executable validation and exact provider admission.
