@@ -214,13 +214,18 @@ block/quantum/end-boundary partitions plus multiple deterministic fixed-seed
 irregular partitions crossing SHA block boundaries. Frozen
 receipt/replay/candidate/payload and domain-input preimages must flow through
 their authoritative exported builders with exact digest/canonical-byte parity,
-alongside injected charge/checkpoint failure with no digest publication.
+alongside injected charge/checkpoint failure with no digest publication. SHA
+state owns one fixed reusable owner-local 64-word message-schedule workspace in
+addition to the digest words and partial block. It remains O(1), is never
+passed/returned, is not reallocated per block, and makes no zero-copy claim.
 Both must show an executed post-fix PASS; static correction or source review
 is insufficient. Current status is: work-control accepted and pushed;
 request-control has a fresh focused PASS 9/9; UTF-8 has a fresh focused PASS
-7/7; and SHA is static-reviewed with the last focused run at 4/5. The merge
-owner therefore keeps Wave 4S-C open pending SHA and integrated production
-evidence.
+7/7; and the accepted SHA workspace optimization has 4,097-byte
+full-versus-bounded parity plus a bounded cycle-3 guard-probe PASS at 1.26 s/
+43,852 KiB. The full qualified 1-MiB `W4-SRCH-31` oracle remains `FAIL`; the
+merge owner therefore keeps Wave 4S-C open pending SHA and integrated
+production evidence.
 
 Budget admission in this wave uses the exact
 `ProviderBudgetPort.charge_all(charges: [ProviderBudgetChargeV1])` owner
@@ -325,7 +330,9 @@ Final sequence:
 ## 8. Active Wave 4S-C SHA blocker
 
 `W4-SRCH-31` remains `FAIL`: cycle 2 was terminated at approximately 3:09 with
-zero output after the 180-second ceiling. Profile and remove value-semantic
-payload-copy amplification without weakening the 1 MiB oracle. Two cycles are
-consumed and no third run is authorized in this session. See
+zero output after the 180-second ceiling. The accepted reusable-schedule
+optimization has 4,097-byte full-versus-bounded parity; its bounded cycle-3
+guard probe passed in 1.26 s at 43,852 KiB. That probe is not the qualified
+1-MiB oracle and cannot close the row. No further verification cycle is
+authorized in this session. See
 `doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.

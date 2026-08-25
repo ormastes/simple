@@ -345,8 +345,9 @@ requires payload length before output.
 
 ```simple
 class Sha256StreamV1:
-    # private: eight state words, 64-byte partial block, partial length,
-    # checked total length, finalized flag
+    # private: eight state words, 64-byte partial block, one fixed reusable
+    # owner-local 64-word message schedule, partial length, checked total
+    # length, finalized flag
     static fn begin(domain: [u8]) -> Result<Sha256StreamV1, text>
     me update(bytes: [u8], offset: i64, count: i64,
               budget: ProviderBudgetPort,
@@ -356,7 +357,10 @@ class Sha256StreamV1:
 ```
 
 The state processes complete 64-byte blocks incrementally and retains at most
-one partial block. `finish` applies SHA padding and the checked bit length
+one partial block plus one fixed 64-word schedule workspace. The workspace is
+owner-local O(1) state: it is never passed or returned and is not reallocated
+per compression block. This removes repeated schedule allocation but does not
+claim zero-copy processing. `finish` applies SHA padding and the checked bit length
 without materializing `domain + payload + padding`. Calling update/finish after
 finalization or overflowing the declared byte budget fails closed.
 
@@ -815,9 +819,11 @@ These subwaves refine parent Wave 4 and precede any accepted `cancel:true`.
   focused tests execute and PASS. Static correction or review alone cannot
   close the gate.
 - **Current status:** work-control is accepted and pushed; request-control has
-  a fresh focused PASS 9/9; and UTF-8 has a fresh focused PASS 7/7. SHA source
-  static review is complete, while its last focused execution was 4/5. These
-  focused results do not prove the integrated pipeline; Wave 4S-C is open.
+  a fresh focused PASS 9/9; and UTF-8 has a fresh focused PASS 7/7. The accepted
+  reusable-schedule optimization has 4,097-byte full-versus-bounded parity and
+  a cycle-3 bounded guard-probe PASS at 1.26 s/43,852 KiB. The full qualified
+  1-MiB `W4-SRCH-31` oracle remains `FAIL`; these focused results do not prove
+  the integrated pipeline, so Wave 4S-C is open.
 
 ### Wave 4S-D — Streaming analyzer and lexical cache
 
@@ -888,7 +894,7 @@ Required evidence includes:
 | raw framing | every header/payload split, coalesced frames, short/zero/would-block read/write, timeout/EOF/error; exactly one header event precedes contiguous nonempty bounded owned payload chunks; concatenated chunk bytes equal the declared payload once with no gap/overlap/replay; completion returns metadata only |
 | prebinding safety | oversize, malformed header, invalid UTF-8, noncanonical JSON silently close with no reflected content |
 | iterative JSON | depth/token/member/string limits, duplicate/out-of-order keys, integer/escape canonicality, no recursion |
-| incremental SHA | lengths 0/1/55/56/63/64/65 exercise every single split; 4095/4096/4097/1 MiB exercise exact block/quantum/end boundaries plus multiple deterministic fixed-seed irregular partitions crossing SHA block boundaries; frozen receipt/replay/candidate/payload and domain-input preimages flow through their authoritative exported builders, and every partition preserves exact digest/canonical-byte parity rather than merely comparing a one-shot output; negative offset/count and `offset > len` reject before reading/charging bytes, output, or buffered/compressed-content mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed or digest published by rejection; charge failure prevents its compression, while checkpoint failure terminalizes the stream without digest publication and need not roll back prior compressed state; acceptance records an executed post-fix PASS rather than a static correction |
+| incremental SHA | state owns eight digest words, one partial 64-byte block, and one fixed reusable owner-local 64-word message schedule that remains O(1), is never passed/returned, and is not reallocated per block; this is not a zero-copy claim; lengths 0/1/55/56/63/64/65 exercise every single split; 4095/4096/4097/1 MiB exercise exact block/quantum/end boundaries plus multiple deterministic fixed-seed irregular partitions crossing SHA block boundaries; frozen receipt/replay/candidate/payload and domain-input preimages flow through their authoritative exported builders, and every partition preserves exact digest/canonical-byte parity rather than merely comparing a one-shot output; negative offset/count and `offset > len` reject before reading/charging bytes, output, or buffered/compressed-content mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed or digest published by rejection; charge failure prevents its compression, while checkpoint failure terminalizes the stream without digest publication and need not roll back prior compressed state; 4,097-byte full-versus-bounded parity and the cycle-3 guard-probe PASS at 1.26 s/43,852 KiB are bounded optimization evidence only; acceptance still requires the full qualified 1-MiB post-fix PASS |
 | incremental UTF-8 | every single split plus deterministic mixed/random partition sequences preserve valid decoded bytes; negative offset/count and `offset > len` reject before reading/charging bytes, output, or carry mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed; malformed/truncated input fails identically in an executed post-fix PASS |
 | Unicode | NFC split sequences, Hangul, combining reorder/compose, U+0130 expansion, Final_Sigma lookahead across chunks, long carry failure |
 | analyzer/search | token/position/length/TF/corpus-stat/score/order/explanation parity and targeted invalidation |

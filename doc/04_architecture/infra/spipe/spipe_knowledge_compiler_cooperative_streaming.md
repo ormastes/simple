@@ -354,9 +354,12 @@ delegate unchecked growth.
 
 ### 7.2 Incremental SHA-256
 
-SHA state owns eight working words, a partial 64-byte block, and a checked total
-byte count. Domain bytes, length binding, and canonical payload bytes are fed in
-order. Construction accepts a fixed raw-byte domain separator of at most 63
+SHA state owns eight working words, a partial 64-byte block, one fixed reusable
+owner-local 64-word message-schedule workspace, and a checked total byte count.
+The schedule remains O(1), is never passed or returned, and is not reallocated
+per block; this is bounded reuse, not a zero-copy claim. Domain bytes, length
+binding, and canonical payload bytes are fed in order. Construction accepts a
+fixed raw-byte domain separator of at most 63
 bytes so it cannot perform an unbudgeted compression. Updates charge one
 `hash_blocks` unit immediately before each bounded block and checkpoint;
 finalization pads the partial block, then charges and checkpoints each padding
@@ -488,10 +491,12 @@ does not create a compatibility fallback inside a new hot path.
 Current Wave 4S-C evidence status is deliberately non-transitive: the
 work-control prerequisite is accepted and pushed; the request-control focused
 spec has a fresh executed PASS 9/9; and the UTF-8 focused spec has a fresh
-executed PASS 7/7. The SHA source has passed static review, but its last
-executed focused run was 4/5. Consequently Wave 4S-C remains open: focused
-request-control and UTF-8 evidence does not close the SHA cell or prove the
-integrated production pipeline.
+executed PASS 7/7. The accepted SHA workspace optimization has 4,097-byte
+full-versus-bounded parity and a cycle-3 bounded guard-probe PASS at 1.26 s and
+43,852 KiB; the full qualified 1-MiB `W4-SRCH-31` oracle has not passed.
+Consequently Wave 4S-C remains open: focused request-control, UTF-8, and bounded
+SHA evidence does not close the SHA cell or prove the integrated production
+pipeline.
 
 The `cancel:true` gate requires an actual protocol 1.0 session test: transmit a
 bounded long-running request, then a real framed canonical `cancel` operation
@@ -517,6 +522,8 @@ in negotiated limits and is accepted.
 
 `W4-SRCH-31` remains `FAIL`: fresh interpreter verification cycle 2 was
 terminated at approximately 3:09 with zero output against a 180-second ceiling.
-The repair direction is an owner-local fixed 64-byte block and bounded
-immutable byte loans, guided by allocation/copy profiling. The 1 MiB oracle is
-mandatory. See `doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.
+The accepted owner-local reusable 64-word schedule optimization has 4,097-byte
+full-versus-bounded parity, and its cycle-3 bounded guard probe passed in 1.26 s
+at 43,852 KiB. This is not the mandatory full qualified 1-MiB oracle and does
+not close `W4-SRCH-31`. See
+`doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.
