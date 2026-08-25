@@ -29,6 +29,18 @@ lint) lanes.
 - Timer: `scripts/setup/install-scv-migration-timer.shs`
 - Source under migration: `src/lib/scv/**`, `src/app/scv/main.spl` (scv lane, do not edit here)
 
+## Status (2026-08-25, post week-3)
+
+- Weeks W1–W3 are DONE: ledger steps SCV-MIG-01..20 all `done` (20/20 green)
+  in `.spipe/scv-migration/todo.sdn`; SCV-MIG-21..25 (W4) still `pending`.
+- Gap work landed in the scv lane: `FileEntityId`
+  (`src/lib/scv/identity.spl`), parser provenance, and structural roots
+  (see the scv feature-expert wiki for detail).
+- The completion roadmap exists:
+  `doc/03_plan/app/tools/scv_complete_impl_plan.md` (6 tracks /
+  44 `SCV-IMPL-*` items).
+- Pending: W4 of the month plan, then Wave 1 of the complete-impl plan.
+
 ## Constraints / Handoff Notes (2026-08-25)
 
 - Fail-closed rule: the checker NEVER executes a step script that does not verify
