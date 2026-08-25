@@ -5516,3 +5516,33 @@ allocation, hash, signature check, lock, library search, or generic dispatch
 was added. The text lift remains interpreter-only, exact artifacts remain
 unsigned, and the wider SFFI estate is not globally safe or verified;
 verified-and-signed admission remains 0.
+
+## Legacy FTP wrapper authority checkpoint
+
+All 25 FTP/FTPS declarations already described themselves as unbacked raw
+interfaces, but their 25 direct wrappers remained apparently safe. No FTP
+symbol is registered in either the typed-native registry or interpreter
+registry, and no provider, handle ownership contract, error contract, TLS
+policy, artifact identity, or signature evidence exists. Each exact wrapper is
+therefore now explicitly `unsafe(ffi)` rather than pretending that handle
+positivity or a boolean return establishes safety.
+
+The focused `ftp-sffi-authority.shs` audit passed. It pins 25 declarations, 25
+direct call sites, 25 wrapper authorities, zero registered providers, and the
+absence of new wrapper layers or forced inlining. Existing semantic booleans,
+text/list results, and the legacy `-1` size sentinel are preserved; changing
+those APIs to `Result` without a provider error ABI would invent semantics.
+
+The authoritative census changed as follows:
+
+- raw call sites: unchanged at 18,519
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,087
+- missing authority: 13,493 -> 13,468
+- lexical unsafe: unchanged at 3,428
+- function unsafe: 1,598 -> 1,623
+
+Annotations add no runtime branch, allocation, copy, lookup, lock, hash,
+signature operation, dispatch, or data-layout change. This adapter remains
+unusable in safe or critical code until a real provider and typed contract are
+implemented and admitted. Verified-and-signed admission remains 0.

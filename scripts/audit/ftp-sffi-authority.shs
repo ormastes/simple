@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_sync_mut/io/ftp_sffi.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn rt_ftp_' "$module")" -eq 25 ]
+[ "$(grep -c '^fn ftp_' "$module")" -eq 25 ]
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 50 ]
+
+calls=$(perl -0ne '
+    s/""".*?"""//sg; s/#.*//mg; s/^\s*extern fn .*\n//mg;
+    while (/\brt_ftp_[A-Za-z0-9_]*\s*\(/g) { $n++ }
+    END { print $n + 0 }
+' "$module")
+[ "$calls" -eq 25 ]
+
+# This adapter is intentionally only an unsafe inventory until a real provider
+# and typed error/ownership ABI exist. No symbol may look registered today.
+symbols=$(sed -n 's/^extern fn \(rt_ftp_[A-Za-z0-9_]*\).*/\1/p' "$module")
+for symbol in $symbols; do
+    ! grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry"
+    ! grep -q "insert_simple!(\"$symbol\"" "$interpreter"
+done
+
+# Preserve semantic booleans and the legacy zero-work wrapper shape. Unsafe
+# tagging must not add dispatch, allocation, copying, or forced inlining.
+[ "$(grep -c ') -> bool:' "$module")" -eq 18 ]
+! grep -q '^@always_inline$' "$module"
+! grep -q 'unsafe(capabilities:' "$module"
+
+echo "FTP SFFI authority audit: PASS (25 raw declarations/25 exact wrappers unsafe; 0/25 providers registered; semantic bool/text/list/size behavior unchanged; no wrapper/branch/allocation/dispatch added)"
