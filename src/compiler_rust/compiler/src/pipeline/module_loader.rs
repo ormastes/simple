@@ -528,6 +528,31 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
     None
 }
 
+/// Resolve the last-resort stdlib search without letting the worktree that
+/// built the seed override the worktree invoking it. The source file walk is
+/// still authoritative; this helper is reached only for sources outside a
+/// repository (for example generated doctest composites).
+fn resolve_from_stdlib_fallbacks(
+    runtime_root: PathBuf,
+    manifest_root: &Path,
+    parts: &[String],
+    use_stmt: &UseStmt,
+) -> Option<PathBuf> {
+    let repo_root = manifest_root.join("..").join("..").join("..");
+    for fallback_root in [
+        runtime_root,
+        repo_root,
+        manifest_root.join("..").join(".."),
+        manifest_root.join(".."),
+        manifest_root.to_path_buf(),
+    ] {
+        if let Some(resolved) = resolve_from_stdlib_root(&fallback_root, parts, use_stmt) {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
 /// Splices `module`'s items into the caller's flat item list for the
 /// `bin/simple run`/`-c` interpreted entry path. This is also the point where
 /// each retained free function is tagged with its true owning-module path via a
@@ -2519,21 +2544,12 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             current = parent.to_path_buf();
         }
 
-        let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo_root = manifest_root.join("..").join("..").join("..");
-        for fallback_root in [
-            repo_root,
-            manifest_root.join("..").join(".."),
-            manifest_root.join(".."),
-            manifest_root.to_path_buf(),
+        resolve_from_stdlib_fallbacks(
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        ] {
-            if let Some(resolved) = resolve_from_stdlib_root(&fallback_root, parts, use_stmt) {
-                return Some(resolved);
-            }
-        }
-
-        None
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            parts,
+            use_stmt,
+        )
     };
 
     if let Some(resolved) = resolve_parts(&parts) {
@@ -2777,6 +2793,37 @@ mod tests {
             is_type_only: false,
             is_lazy: false,
         }
+    }
+
+    #[test]
+    fn stdlib_fallback_prefers_runtime_worktree_over_seed_build_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("runtime-worktree");
+        let seed_manifest = temp.path().join("seed-worktree/src/compiler_rust/compiler");
+        let seed_root = temp.path().join("seed-worktree");
+        let relative_module = Path::new("src/lib/common/probe.spl");
+        let runtime_module = runtime_root.join(relative_module);
+        let seed_module = seed_root.join(relative_module);
+        fs::create_dir_all(runtime_module.parent().unwrap()).unwrap();
+        fs::create_dir_all(seed_module.parent().unwrap()).unwrap();
+        fs::create_dir_all(&seed_manifest).unwrap();
+        fs::write(&runtime_module, "# runtime worktree\n").unwrap();
+        fs::write(&seed_module, "# seed build worktree\n").unwrap();
+
+        let parts = ["std".to_string(), "probe".to_string()];
+        let import = use_stmt(&["std", "probe"], ImportTarget::Glob);
+        assert_eq!(resolve_from_stdlib_root(&runtime_root, &parts, &import), Some(runtime_module.clone()));
+        assert_eq!(resolve_from_stdlib_root(&seed_root, &parts, &import), Some(seed_module));
+
+        let resolved = resolve_from_stdlib_fallbacks(
+            runtime_root,
+            &seed_manifest,
+            &parts,
+            &import,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, runtime_module);
     }
 
     #[test]
