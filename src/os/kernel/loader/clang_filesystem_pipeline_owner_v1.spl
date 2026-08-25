@@ -105,6 +105,7 @@ pub(package) struct ClangFilesystemPipelineDispatchV1:
     actor: TaskExecutionInstanceV1
     target: ManifestTarget
     target_triple: text
+    filesystem: ClangFilesystemPipelineFilesystemV1
     clang_path: text
     clang_sha256: text
     lld_path: text
@@ -137,6 +138,7 @@ pub(package) struct ClangFilesystemTerminalHandleV1:
 pub struct ClangFilesystemTerminalReceiptV1:
     actor: TaskExecutionInstanceV1
     target: ManifestTarget
+    filesystem: ClangFilesystemPipelineFilesystemV1
     source_path: text
     object_path: text
     executable_path: text
@@ -293,9 +295,6 @@ fn _filesystem_supported_v1(
     filesystem == ClangFilesystemPipelineFilesystemV1.Dbfs or
         filesystem == ClangFilesystemPipelineFilesystemV1.Nvfs
 
-fn _inside_root_v1(path: text, root: text) -> bool:
-    path.starts_with(root + "/")
-
 fn _actor_valid_v1(actor: TaskExecutionInstanceV1) -> bool:
     actor.task_id != 0u64 and actor.lifecycle_generation != 0u64 and
         actor.exec_generation != 0u64
@@ -308,14 +307,18 @@ pub fn clang_filesystem_pipeline_request_valid_v1(
         return false
     if not _filesystem_supported_v1(request.filesystem): return false
     val root = _filesystem_root_v1(request.filesystem)
-    val paths = [request.source_path, request.object_path,
-                 request.executable_path, request.working_directory]
-    for path in paths:
-        if not _path_valid_v1(path) or not _inside_root_v1(path, root):
-            return false
-    if request.source_path == request.object_path or
-       request.source_path == request.executable_path or
-       request.object_path == request.executable_path:
+    val work = root + "/work"
+    # These exact names are part of the signed pipeline protocol.  Allowing
+    # arbitrary descendants would make a fixed spawn recipe authorize a
+    # different source or generated executable than the owner reviewed.
+    if request.working_directory != work or
+       request.source_path != work + "/hello.c" or
+       request.object_path != work + "/hello.o" or
+       request.executable_path != work + "/hello.elf" or
+       not _path_valid_v1(request.working_directory) or
+       not _path_valid_v1(request.source_path) or
+       not _path_valid_v1(request.object_path) or
+       not _path_valid_v1(request.executable_path):
         return false
     if not hash256_hex_valid(request.include_tree_sha256) or
        hash256_is_zero(request.include_tree_sha256):
@@ -506,6 +509,7 @@ pub(package) fn clang_filesystem_pipeline_dispatch_v1(
     val result = ClangFilesystemPipelineDispatchV1(
         reservation: reservation, actor: caller, target: slot.target,
         target_triple: slot.request.target_triple,
+        filesystem: slot.request.filesystem,
         clang_path: "/usr/bin/clang", clang_sha256: slot.clang_sha256,
         lld_path: "/usr/bin/ld.lld", lld_sha256: slot.lld_sha256,
         sysroot_sha256: slot.sysroot_sha256,
@@ -549,6 +553,7 @@ fn _dispatch_matches_slot_v1(
     slot: ClangFilesystemPipelineSlotV1
 ) -> bool:
     slot.request.actor == dispatch.actor and slot.target == dispatch.target and
+        slot.request.filesystem == dispatch.filesystem and
         slot.request.target_triple == dispatch.target_triple and
         slot.request.source_path == dispatch.source_path and
         slot.request.object_path == dispatch.object_path and
@@ -591,11 +596,11 @@ pub(package) fn clang_filesystem_pipeline_begin_current_v1(
         return Err("unsupported-linker-emulation")
     val command = ClangFilesystemBackendCommandV1(
         dispatch: dispatch,
-        compile_argv: [dispatch.clang_path,
-            "--target=" + dispatch.target_triple,
-            "--sysroot=/usr", "-D__simpleos__=1", "-ffreestanding",
-            "-nostdlib", "-fno-stack-protector", "-I/usr/include",
-            "-c", dispatch.source_path, "-o", dispatch.object_path],
+        # Ring-3 FS exec has no fork. Invoke the proven in-process frontend
+        # form directly; driver mode would need to spawn a second clang.
+        compile_argv: [dispatch.clang_path, "-cc1", "-triple",
+            dispatch.target_triple, "-emit-obj", "-o", dispatch.object_path,
+            "-x", "c", dispatch.source_path],
         # Invoke LLD directly, so spell every target/startup/runtime input that
         # the Clang driver would otherwise contribute.  In particular, an
         # object file alone can link while still producing a non-runnable ELF
@@ -632,6 +637,7 @@ fn _terminal_receipt_v1(
         return Err("successful-outcome-evidence-mismatch")
     Ok(ClangFilesystemTerminalReceiptV1(
         actor: outcome.actor, target: command.dispatch.target,
+        filesystem: command.dispatch.filesystem,
         source_path: command.dispatch.source_path,
         object_path: command.dispatch.object_path,
         executable_path: command.dispatch.executable_path,

@@ -31,11 +31,17 @@
 
 use os.kernel.types.capability_types.{
     CapabilitySet, CapabilityToken, CapabilityKind,
-    CAP_RIGHT_READ, CAP_RIGHT_EXEC
+    CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_EXEC
 }
 use os.kernel.ipc.cspace_spawn.{SpawnSpec, CapGrant, AttenuationSpec}
 use os.kernel.loader.server_launch_grants.{
     SIMPLEOS_SERVER_EXECUTABLE_V1, server_launch_grants_v1
+}
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE, SIMPLEOS_TARGET_V1_I686_TRIPLE,
+    SIMPLEOS_TARGET_V1_AARCH64_TRIPLE, SIMPLEOS_TARGET_V1_ARMV7_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE
 }
 
 # ============================================================================
@@ -50,9 +56,38 @@ pub val SPAWN_RECIPE_SHELL: i64 = 1
 pub val SPAWN_RECIPE_CONSOLE_SHELL: i64 = 2
 pub val SPAWN_RECIPE_APP_LAUNCHER: i64 = 3
 pub val SPAWN_RECIPE_AUTHENTICATED_SERVER: i64 = 4
+pub val SPAWN_RECIPE_CLANG_COMPILE_DBFS: i64 = 5
+pub val SPAWN_RECIPE_LLD_LINK_DBFS: i64 = 6
+pub val SPAWN_RECIPE_CLANG_HELLO_DBFS: i64 = 7
+pub val SPAWN_RECIPE_CLANG_COMPILE_NVFS: i64 = 8
+pub val SPAWN_RECIPE_LLD_LINK_NVFS: i64 = 9
+pub val SPAWN_RECIPE_CLANG_HELLO_NVFS: i64 = 10
 
 pub val SPAWN_RECIPE_FIRST: i64 = 1
-pub val SPAWN_RECIPE_LAST: i64 = 4
+pub val SPAWN_RECIPE_LAST: i64 = 10
+
+fn _clang_compile_recipe(recipe: i64) -> bool:
+    recipe == SPAWN_RECIPE_CLANG_COMPILE_DBFS or
+        recipe == SPAWN_RECIPE_CLANG_COMPILE_NVFS
+
+fn _clang_link_recipe(recipe: i64) -> bool:
+    recipe == SPAWN_RECIPE_LLD_LINK_DBFS or
+        recipe == SPAWN_RECIPE_LLD_LINK_NVFS
+
+fn _clang_execute_recipe(recipe: i64) -> bool:
+    recipe == SPAWN_RECIPE_CLANG_HELLO_DBFS or
+        recipe == SPAWN_RECIPE_CLANG_HELLO_NVFS
+
+fn _clang_recipe_root(recipe: i64) -> text:
+    if recipe == SPAWN_RECIPE_CLANG_COMPILE_DBFS or
+       recipe == SPAWN_RECIPE_LLD_LINK_DBFS or
+       recipe == SPAWN_RECIPE_CLANG_HELLO_DBFS:
+        return "/dbfs/work"
+    if recipe == SPAWN_RECIPE_CLANG_COMPILE_NVFS or
+       recipe == SPAWN_RECIPE_LLD_LINK_NVFS or
+       recipe == SPAWN_RECIPE_CLANG_HELLO_NVFS:
+        return "/nvfs/work"
+    ""
 
 pub fn spawn_recipe_is_migrated(recipe: i64) -> bool:
     """True when `recipe` names a migrated caller with a real recipe.
@@ -73,6 +108,12 @@ pub fn spawn_recipe_name(recipe: i64) -> text:
         return "app-launcher"
     if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
         return "authenticated-server"
+    if recipe == SPAWN_RECIPE_CLANG_COMPILE_DBFS: return "clang-compile-dbfs"
+    if recipe == SPAWN_RECIPE_LLD_LINK_DBFS: return "lld-link-dbfs"
+    if recipe == SPAWN_RECIPE_CLANG_HELLO_DBFS: return "clang-hello-dbfs"
+    if recipe == SPAWN_RECIPE_CLANG_COMPILE_NVFS: return "clang-compile-nvfs"
+    if recipe == SPAWN_RECIPE_LLD_LINK_NVFS: return "lld-link-nvfs"
+    if recipe == SPAWN_RECIPE_CLANG_HELLO_NVFS: return "clang-hello-nvfs"
     "none"
 
 # ============================================================================
@@ -93,6 +134,9 @@ pub fn spawn_recipe_exec_prefix(recipe: i64) -> text:
         return "/sys/apps/"
     if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
         return SIMPLEOS_SERVER_EXECUTABLE_V1
+    if _clang_compile_recipe(recipe): return "/usr/bin/clang"
+    if _clang_link_recipe(recipe): return "/usr/bin/ld.lld"
+    if _clang_execute_recipe(recipe): return _clang_recipe_root(recipe) + "/hello.elf"
     ""
 
 pub fn spawn_recipe_read_prefix(recipe: i64) -> text:
@@ -106,6 +150,9 @@ pub fn spawn_recipe_read_prefix(recipe: i64) -> text:
         return "/sys/apps/"
     if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
         return ""
+    if _clang_compile_recipe(recipe): return _clang_recipe_root(recipe) + "/hello.c"
+    if _clang_link_recipe(recipe): return _clang_recipe_root(recipe) + "/hello.o"
+    if _clang_execute_recipe(recipe): return _clang_recipe_root(recipe) + "/hello.elf"
     ""
 
 pub fn spawn_recipe_rights_mask(recipe: i64) -> u32:
@@ -118,9 +165,49 @@ pub fn spawn_recipe_rights_mask(recipe: i64) -> u32:
     the operator on the current backends."""
     if not spawn_recipe_is_migrated(recipe):
         return 0u32
-    # Every migrated caller spawns an executable it must first read: READ|EXEC.
-    # None of them needs WRITE, ADMIN, MOUNT, MAP, or queue rights.
+    # The Clang compile/link stages additionally need WRITE for their one exact
+    # output. No recipe receives ADMIN, MOUNT, MAP, or queue rights.
+    if _clang_compile_recipe(recipe) or _clang_link_recipe(recipe):
+        return CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
     CAP_RIGHT_READ | CAP_RIGHT_EXEC
+
+fn _clang_target_valid(triple: text) -> bool:
+    triple == SIMPLEOS_TARGET_V1_X86_64_TRIPLE or
+        triple == SIMPLEOS_TARGET_V1_I686_TRIPLE or
+        triple == SIMPLEOS_TARGET_V1_AARCH64_TRIPLE or
+        triple == SIMPLEOS_TARGET_V1_ARMV7_TRIPLE or
+        triple == SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE or
+        triple == SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE
+
+fn _clang_compile_contract(recipe: i64, path: text, argv: [text]) -> bool:
+    val root = _clang_recipe_root(recipe)
+    path == "/usr/bin/clang" and argv.len() == 10 and argv[0] == path and
+        argv[1] == "-cc1" and argv[2] == "-triple" and
+        _clang_target_valid(argv[3]) and argv[4] == "-emit-obj" and
+        argv[5] == "-o" and argv[6] == root + "/hello.o" and
+        argv[7] == "-x" and argv[8] == "c" and
+        argv[9] == root + "/hello.c"
+
+fn _clang_link_contract(recipe: i64, path: text, argv: [text]) -> bool:
+    val root = _clang_recipe_root(recipe)
+    if path != "/usr/bin/ld.lld" or argv.len() != 23 or argv[0] != path:
+        return false
+    val emulation = argv[2]
+    val emulation_valid = (
+        emulation == "elf_x86_64" or emulation == "elf_i386" or
+        emulation == "aarch64elf" or emulation == "armelf_linux_eabi" or
+        emulation == "elf64lriscv" or emulation == "elf32lriscv")
+    emulation_valid and argv[1] == "-m" and argv[3] == "-static" and
+        argv[4] == "-no-pie" and argv[5] == "--gc-sections" and
+        argv[6] == "--export-dynamic" and argv[7] == "--defsym=__bss_end=_end" and
+        argv[8] == "-T" and argv[9] == "/usr/share/simpleos/simpleos.ld" and
+        argv[10] == "-e" and argv[11] == "_start" and
+        argv[12] == "/usr/lib/crt0.o" and argv[13] == root + "/hello.o" and
+        argv[14] == "-L" and argv[15] == "/usr/lib" and
+        argv[16] == "--start-group" and argv[17] == "-lsimpleos_c" and
+        argv[18] == "-lsimple_runtime" and argv[19] == "-lm" and
+        argv[20] == "--end-group" and argv[21] == "-o" and
+        argv[22] == root + "/hello.elf"
 
 pub fn spawn_recipe_launch_contract_valid(
     recipe: i64,
@@ -136,12 +223,26 @@ pub fn spawn_recipe_launch_contract_valid(
     and no ambient environment.  Other recipes retain their existing launch
     shapes; their path authority remains bounded by their FileExec grants.
     """
-    if recipe != SPAWN_RECIPE_AUTHENTICATED_SERVER:
-        return true
-    path == SIMPLEOS_SERVER_EXECUTABLE_V1 and
+    if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
+        return path == SIMPLEOS_SERVER_EXECUTABLE_V1 and
         argv.len() == 1 and
         argv[0] == SIMPLEOS_SERVER_EXECUTABLE_V1 and
         envp.len() == 0
+    if _clang_compile_recipe(recipe):
+        # Preparation binds only the immutable executable identity; submission
+        # later validates the complete command before consuming authority.
+        if argv.len() == 1 and argv[0] == path:
+            return envp.len() == 0 and path == "/usr/bin/clang"
+        return envp.len() == 0 and _clang_compile_contract(recipe, path, argv)
+    if _clang_link_recipe(recipe):
+        if argv.len() == 1 and argv[0] == path:
+            return envp.len() == 0 and path == "/usr/bin/ld.lld"
+        return envp.len() == 0 and _clang_link_contract(recipe, path, argv)
+    if _clang_execute_recipe(recipe):
+        val executable = _clang_recipe_root(recipe) + "/hello.elf"
+        return envp.len() == 0 and path == executable and
+            argv.len() == 1 and argv[0] == executable
+    true
 
 # ============================================================================
 # The recipes
@@ -160,6 +261,11 @@ fn _atten_rights(mask: u32) -> AttenuationSpec:
     asserts."""
     AttenuationSpec(rights_mask: mask, path_prefix: "", depth_limit: -1, single_use: false)
 
+fn _atten_leaf_rights(mask: u32) -> AttenuationSpec:
+    """Non-delegable attenuation for one pipeline stage's exact child pouch."""
+    AttenuationSpec(
+        rights_mask: mask, path_prefix: "", depth_limit: 0, single_use: false)
+
 pub fn spawn_recipe_grants(recipe: i64) -> [CapGrant]:
     """The grant list for `recipe` — exactly the authority the caller needs.
 
@@ -170,6 +276,60 @@ pub fn spawn_recipe_grants(recipe: i64) -> [CapGrant]:
         return grants
     if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
         return server_launch_grants_v1(SIMPLEOS_SERVER_EXECUTABLE_V1)
+    if _clang_compile_recipe(recipe):
+        val root = _clang_recipe_root(recipe)
+        grants.push(CapGrant(
+            label: "clang.exec",
+            requested: CapabilityKind.FileExec(path_prefix: "/usr/bin/clang"),
+            atten: _atten_leaf_rights(CAP_RIGHT_EXEC)))
+        grants.push(CapGrant(
+            label: "source.read",
+            requested: CapabilityKind.FileRead(path_prefix: root + "/hello.c"),
+            atten: _atten_leaf_rights(CAP_RIGHT_READ)))
+        grants.push(CapGrant(
+            label: "object.write",
+            requested: CapabilityKind.FileWrite(path_prefix: root + "/hello.o"),
+            atten: _atten_leaf_rights(CAP_RIGHT_WRITE)))
+        grants.push(CapGrant(
+            label: "object.create",
+            requested: CapabilityKind.FileCreate(path_prefix: root + "/hello.o"),
+            atten: _atten_leaf_rights(CAP_RIGHT_WRITE)))
+        return grants
+    if _clang_link_recipe(recipe):
+        val root = _clang_recipe_root(recipe)
+        grants.push(CapGrant(
+            label: "lld.exec",
+            requested: CapabilityKind.FileExec(path_prefix: "/usr/bin/ld.lld"),
+            atten: _atten_leaf_rights(CAP_RIGHT_EXEC)))
+        val read_paths = [
+            root + "/hello.o", "/usr/share/simpleos/simpleos.ld",
+            "/usr/lib/crt0.o", "/usr/lib/libsimpleos_c.a",
+            "/usr/lib/libsimple_runtime.a", "/usr/lib/libm.a"]
+        for read_path in read_paths:
+            grants.push(CapGrant(
+                label: "link.input.read",
+                requested: CapabilityKind.FileRead(path_prefix: read_path),
+                atten: _atten_leaf_rights(CAP_RIGHT_READ)))
+        grants.push(CapGrant(
+            label: "hello.write",
+            requested: CapabilityKind.FileWrite(path_prefix: root + "/hello.elf"),
+            atten: _atten_leaf_rights(CAP_RIGHT_WRITE)))
+        grants.push(CapGrant(
+            label: "hello.create",
+            requested: CapabilityKind.FileCreate(path_prefix: root + "/hello.elf"),
+            atten: _atten_leaf_rights(CAP_RIGHT_WRITE)))
+        return grants
+    if _clang_execute_recipe(recipe):
+        val executable = _clang_recipe_root(recipe) + "/hello.elf"
+        grants.push(CapGrant(
+            label: "hello.exec",
+            requested: CapabilityKind.FileExec(path_prefix: executable),
+            atten: _atten_leaf_rights(CAP_RIGHT_EXEC)))
+        grants.push(CapGrant(
+            label: "hello.read",
+            requested: CapabilityKind.FileRead(path_prefix: executable),
+            atten: _atten_leaf_rights(CAP_RIGHT_READ)))
+        return grants
     val exec_prefix = spawn_recipe_exec_prefix(recipe)
     val read_prefix = spawn_recipe_read_prefix(recipe)
     val mask = spawn_recipe_rights_mask(recipe)
@@ -239,16 +399,9 @@ pub fn spawn_recipe_seed_parent_caps(recipe: i64, owner: u64) -> CapabilitySet:
     var tokens: [CapabilityToken] = []
     if not spawn_recipe_is_migrated(recipe):
         return CapabilitySet(caps: tokens, is_pledged: true)
-    if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
-        val grants = server_launch_grants_v1(SIMPLEOS_SERVER_EXECUTABLE_V1)
-        var token_id: u64 = 1u64
-        for grant in grants:
-            tokens.push(_root_token(grant.requested, owner, token_id))
-            token_id = token_id + 1u64
-        return CapabilitySet(caps: tokens, is_pledged: true)
-    val exec_prefix = spawn_recipe_exec_prefix(recipe)
-    val read_prefix = spawn_recipe_read_prefix(recipe)
-    tokens.push(_root_token(CapabilityKind.FileExec(path_prefix: exec_prefix), owner, 1u64))
-    tokens.push(_root_token(CapabilityKind.FileRead(path_prefix: read_prefix), owner, 2u64))
-    tokens.push(_root_token(CapabilityKind.ProcessSpawn, owner, 3u64))
+    val grants = spawn_recipe_grants(recipe)
+    var token_id: u64 = 1u64
+    for grant in grants:
+        tokens.push(_root_token(grant.requested, owner, token_id))
+        token_id = token_id + 1u64
     CapabilitySet(caps: tokens, is_pledged: true)

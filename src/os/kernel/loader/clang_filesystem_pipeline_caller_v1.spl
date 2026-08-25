@@ -25,12 +25,18 @@ use os.kernel.loader.clang_filesystem_scheduler_backend_v1.{
 }
 use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
     AuthenticatedFsExecSubmissionV1,
+    authenticated_fs_exec_prepare_generated_artifact_online_v1,
     authenticated_fs_exec_submit_with_argv_file_v1
 }
 use os.kernel.loader.authenticated_argv_file_binding_owner_v1.{
-    authenticated_argv_file_binding_acquire_v1
+    authenticated_argv_file_binding_acquire_v1,
+    authenticated_argv_file_binding_cancel_v1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1
 }
 use os.kernel.loader.executable_admission_pipeline.{executable_loader_revoke}
+use os.kernel.loader.spawn_recipes.{spawn_recipe_launch_contract_valid}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerExecutionEvidenceTokenV1,
@@ -81,17 +87,36 @@ fn _consume_failed_evidence_if_any_v1(
     if not token.?: return true
     scheduler_execution_evidence_consume_once_v2(token.unwrap()).is_some()
 
+fn _generated_hello_launch_contract_v1(
+    plan: ClangFilesystemSchedulerLaunchPlanV1,
+    immutable_reference_path: text,
+    execute_recipe: i64
+) -> bool:
+    # The build image installs one immutable, signed reproducibility reference.
+    # Backend-specific generated paths may vary, but must never select their own
+    # expected digest or smuggle a different argv shape into the spawn recipe.
+    immutable_reference_path == "/work/hello.elf" and
+        plan.execute_path == plan.command.dispatch.executable_path and
+        plan.execute_argv.len() == 1 and
+        plan.execute_argv[0] == plan.execute_path and
+        spawn_recipe_launch_contract_valid(
+            execute_recipe, plan.execute_path, plan.execute_argv, [])
+
 pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
     scheduler: Scheduler,
     table: MountTable,
     plan: ClangFilesystemSchedulerLaunchPlanV1,
     compile_submission: AuthenticatedFsExecSubmissionV1,
     link_submission: AuthenticatedFsExecSubmissionV1,
-    execute_submission: AuthenticatedFsExecSubmissionV1
+    execute_authorities: ExecutableAuthorityRegistryV1,
+    execute_recipe: i64,
+    immutable_execute_reference_path: text
 ) -> Result<ClangFilesystemTerminalReceiptV1, text>:
     """Submit the exact three-stage plan and consume its terminal receipt.
 
-    Loader-issued authority is supplied independently for each executable.
+    Clang and LLD arrive as installed-artifact submissions. The generated hello
+    authority is deliberately absent until LLD succeeds: only then does the
+    loader bind a fresh execute-open to the immutable signed reference record.
     Scheduler evidence is accepted only from the authenticated execution
     service, and the terminal pipeline row is consumed before returning.
     """
@@ -103,9 +128,9 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             table, compile_submission)
         val link_retired = _revoke_unused_submission_v1(
             table, link_submission)
-        val execute_retired = _revoke_unused_submission_v1(
-            table, execute_submission)
-        if not compile_retired or not link_retired or not execute_retired:
+        val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            plan.command.dispatch)
+        if not compile_retired or not link_retired or pipeline_retired.is_err():
             return Err("clang-source-binding-cleanup-indeterminate")
         return Err(compile_source.unwrap_err())
     val compile_run = authenticated_fs_exec_submit_with_argv_file_v1(
@@ -116,13 +141,11 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             _consume_failed_evidence_if_any_v1(compile_run.evidence)
         val link_retired = _revoke_unused_submission_v1(
             table, link_submission)
-        val execute_retired = _revoke_unused_submission_v1(
-            table, execute_submission)
         val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
             plan.command.dispatch)
         if compile_run.cleanup_indeterminate or
            not compile_evidence_retired or not link_retired or
-           not execute_retired or pipeline_retired.is_err():
+           pipeline_retired.is_err():
             return Err("clang-submit-cleanup-indeterminate")
         return Err("clang-authenticated-submit-failed")
 
@@ -133,12 +156,10 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
         val compile_evidence_retired =
             _consume_failed_evidence_if_any_v1(compile_run.evidence)
         val link_retired = _revoke_unused_submission_v1(table, link_submission)
-        val execute_retired = _revoke_unused_submission_v1(
-            table, execute_submission)
         val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
             plan.command.dispatch)
         if not compile_evidence_retired or not link_retired or
-           not execute_retired or pipeline_retired.is_err():
+           pipeline_retired.is_err():
             return Err("lld-object-binding-cleanup-indeterminate")
         return Err(link_object.unwrap_err())
     val link_run = authenticated_fs_exec_submit_with_argv_file_v1(
@@ -149,13 +170,11 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             _consume_failed_evidence_if_any_v1(compile_run.evidence)
         val link_evidence_retired =
             _consume_failed_evidence_if_any_v1(link_run.evidence)
-        val execute_retired = _revoke_unused_submission_v1(
-            table, execute_submission)
         val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
             plan.command.dispatch)
         if link_run.cleanup_indeterminate or
            not compile_evidence_retired or not link_evidence_retired or
-           not execute_retired or pipeline_retired.is_err():
+           pipeline_retired.is_err():
             return Err("lld-submit-cleanup-indeterminate")
         return Err("lld-authenticated-submit-failed")
 
@@ -167,17 +186,50 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             _consume_failed_evidence_if_any_v1(compile_run.evidence)
         val link_evidence_retired =
             _consume_failed_evidence_if_any_v1(link_run.evidence)
-        val execute_retired = _revoke_unused_submission_v1(
-            table, execute_submission)
         val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
             plan.command.dispatch)
         if not compile_evidence_retired or not link_evidence_retired or
-           not execute_retired or pipeline_retired.is_err():
+           pipeline_retired.is_err():
             return Err("hello-artifact-binding-cleanup-indeterminate")
         return Err(execute_artifact.unwrap_err())
+    val execute_binding = execute_artifact.unwrap()
+    if not _generated_hello_launch_contract_v1(
+        plan, immutable_execute_reference_path, execute_recipe):
+        val binding_retired = authenticated_argv_file_binding_cancel_v1(
+            table, execute_binding)
+        val compile_evidence_retired =
+            _consume_failed_evidence_if_any_v1(compile_run.evidence)
+        val link_evidence_retired =
+            _consume_failed_evidence_if_any_v1(link_run.evidence)
+        val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            plan.command.dispatch)
+        if not binding_retired or not compile_evidence_retired or
+           not link_evidence_retired or pipeline_retired.is_err():
+            return Err("hello-admission-contract-cleanup-indeterminate")
+        return Err("hello-admission-contract-denied")
+    val execute_prepared =
+        authenticated_fs_exec_prepare_generated_artifact_online_v1(
+            table, execute_authorities,
+            plan.command.dispatch.actor.task_id as i64,
+            plan.execute_path, immutable_execute_reference_path,
+            plan.command.dispatch.target, execute_recipe)
+    if execute_prepared.is_err():
+        val binding_retired = authenticated_argv_file_binding_cancel_v1(
+            table, execute_binding)
+        val compile_evidence_retired =
+            _consume_failed_evidence_if_any_v1(compile_run.evidence)
+        val link_evidence_retired =
+            _consume_failed_evidence_if_any_v1(link_run.evidence)
+        val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            plan.command.dispatch)
+        if not binding_retired or not compile_evidence_retired or
+           not link_evidence_retired or pipeline_retired.is_err():
+            return Err("hello-admission-prepare-cleanup-indeterminate")
+        return Err("hello-generated-admission-denied")
+    val execute_submission = execute_prepared.unwrap()
     val execute_run = authenticated_fs_exec_submit_with_argv_file_v1(
         scheduler, table, execute_submission,
-        plan.execute_path, plan.execute_argv, execute_artifact.unwrap())
+        plan.execute_path, plan.execute_argv, execute_binding)
     if execute_run.exit_code != 0 or not execute_run.evidence.?:
         val compile_evidence_retired =
             _consume_failed_evidence_if_any_v1(compile_run.evidence)
