@@ -15,7 +15,9 @@ use std.nogc_sync_mut.io.sffi_common.{is_valid_handle, is_invalid_handle}
 
 # --- TLS Client ---
 
+@unsafe(reason: "raw rustls connection-handle ABI; negative sentinel means validation, DNS, TCP, TLS, or trust failure", capabilities: [ffi])
 extern fn rt_tls_client_connect(host: text, port: i64) -> i64
+@unsafe(reason: "raw rustls SNI connection-handle ABI; negative sentinel means validation, TCP, TLS, or trust failure", capabilities: [ffi])
 extern fn rt_tls_client_connect_with_sni(host: text, port: i64, server_name: text) -> i64
 @unsafe(reason: "raw rustls write-count ABI; negative sentinel means contract or I/O failure", capabilities: [ffi])
 extern fn rt_tls_client_write(conn: i64, data: text) -> i64
@@ -28,6 +30,7 @@ extern fn rt_tls_client_close(conn: i64) -> bool
 
 # --- TLS Server ---
 
+@unsafe(reason: "raw rustls listener-handle ABI; negative sentinel means invalid certificate, key, address, or bind failure", capabilities: [ffi])
 extern fn rt_tls_server_create(port: i64, cert_path: text, key_path: text) -> i64
 @unsafe(reason: "raw rustls accept-handle ABI; negative sentinel means invalid listener or accept failure", capabilities: [ffi])
 extern fn rt_tls_server_accept(server: i64) -> i64  # Returns client connection
@@ -41,6 +44,7 @@ extern fn rt_tls_server_read(conn: i64, max_bytes: i64) -> text
 extern fn rt_tls_server_read_checked(conn: i64, max_bytes: i64) -> text?
 @unsafe(reason: "raw rustls close-status ABI; false means invalid, stale, or already closed handle", capabilities: [ffi])
 extern fn rt_tls_server_close_connection(conn: i64) -> bool
+@unsafe(reason: "raw rustls listener shutdown status ABI; false means invalid, stale, or already closed handle", capabilities: [ffi])
 extern fn rt_tls_server_shutdown(server: i64) -> bool
 
 # --- Certificate Management ---
@@ -123,7 +127,7 @@ struct TlsConnectionInfo:
 
 # --- TLS Client ---
 
-fn tls_connect(host: text, port: i64) -> TlsClientConnection:
+fn tls_connect(host: text, port: i64) -> Result<TlsClientConnection, text>:
     """Connect to TLS server
 
     Args:
@@ -133,15 +137,17 @@ fn tls_connect(host: text, port: i64) -> TlsClientConnection:
     Returns: TlsClientConnection (check is_valid)
 
     Example:
-        conn = tls_connect("example.com", 443)
-        if conn.is_valid:
-            tls_write(conn, "GET / HTTP/1.1\r\n\r\n")
-            response = tls_read(conn, 4096)
+        match tls_connect("example.com", 443):
+            Ok(conn):
+                val _ = tls_write(conn, "GET / HTTP/1.1\r\n\r\n")
+            Err(_): pass
     """
     val handle = rt_tls_client_connect(host, port)
-    TlsClientConnection(handle: handle, host: host, port: port, is_valid: is_valid_handle(handle))
+    if is_invalid_handle(handle):
+        return Err("TLS connect failed: {host}:{port}")
+    Ok(TlsClientConnection(handle: handle, host: host, port: port, is_valid: true))
 
-fn tls_connect_with_sni(host: text, port: i64, server_name: text) -> TlsClientConnection:
+fn tls_connect_with_sni(host: text, port: i64, server_name: text) -> Result<TlsClientConnection, text>:
     """Connect to TLS server with custom SNI (Server Name Indication)
 
     Args:
@@ -153,10 +159,12 @@ fn tls_connect_with_sni(host: text, port: i64, server_name: text) -> TlsClientCo
 
     Example:
         # Connect to CDN with specific SNI
-        conn = tls_connect_with_sni("192.0.2.1", 443, "cdn.example.com")
+        result = tls_connect_with_sni("192.0.2.1", 443, "cdn.example.com")
     """
     val handle = rt_tls_client_connect_with_sni(host, port, server_name)
-    TlsClientConnection(handle: handle, host: host, port: port, is_valid: is_valid_handle(handle))
+    if is_invalid_handle(handle):
+        return Err("TLS SNI connect failed: {host}:{port}")
+    Ok(TlsClientConnection(handle: handle, host: host, port: port, is_valid: true))
 
 fn tls_write(conn: TlsClientConnection, data: text) -> Result<i64, text>:
     """Write data to TLS connection
@@ -208,7 +216,7 @@ fn tls_close(conn: TlsClientConnection) -> Result<(), text>:
 
 # --- TLS Server ---
 
-fn tls_server_create(port: i64, cert_path: text, key_path: text) -> TlsServer:
+fn tls_server_create(port: i64, cert_path: text, key_path: text) -> Result<TlsServer, text>:
     """Create TLS server
 
     Args:
@@ -219,12 +227,12 @@ fn tls_server_create(port: i64, cert_path: text, key_path: text) -> TlsServer:
     Returns: TlsServer (check is_valid)
 
     Example:
-        server = tls_server_create(8443, "cert.pem", "key.pem")
-        if server.is_valid:
-            conn = tls_server_accept(server)
+        result = tls_server_create(8443, "cert.pem", "key.pem")
     """
     val handle = rt_tls_server_create(port, cert_path, key_path)
-    TlsServer(handle: handle, port: port, is_valid: is_valid_handle(handle))
+    if is_invalid_handle(handle):
+        return Err("TLS server create failed on port {port}")
+    Ok(TlsServer(handle: handle, port: port, is_valid: true))
 
 fn tls_server_accept(server: TlsServer) -> Result<TlsServerConnection, text>:
     """Accept incoming TLS connection
@@ -273,12 +281,14 @@ fn tls_server_close_connection(conn: TlsServerConnection) -> Result<(), text>:
         return Err("TLS server close failed")
     Ok(())
 
-fn tls_server_shutdown(server: TlsServer) -> bool:
+fn tls_server_shutdown(server: TlsServer) -> Result<(), text>:
     """Shutdown TLS server"""
     if is_invalid_handle(server.handle):
-        return false
+        return Err("TLS shutdown: invalid server handle")
 
-    rt_tls_server_shutdown(server.handle)
+    if not rt_tls_server_shutdown(server.handle):
+        return Err("TLS shutdown failed")
+    Ok(())
 
 # --- Certificate Management ---
 

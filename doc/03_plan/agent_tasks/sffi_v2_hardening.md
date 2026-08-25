@@ -433,3 +433,9 @@ passing placeholder.
     declarations must retain minimal `unsafe(ffi)` tags. Next type connect,
     server create/shutdown, certificate, and configuration families; signed
     exact-artifact admission remains zero.
+82. Keep TLS connect/SNI connect/server-create wrappers Result-bearing and
+    server shutdown `Result<()>`; never restore invalid resource objects or an
+    ambiguous safe boolean. Preserve provider-native negative handles and
+    semantic boolean status, with one call and one branch on success. Next
+    remove fabricated certificate/configuration handles and truthful-status
+    stubs; exact-artifact admission remains zero.

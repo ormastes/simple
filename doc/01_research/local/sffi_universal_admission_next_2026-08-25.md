@@ -675,3 +675,24 @@ evidence remain unavailable under the repository runtime policy. The estimate
 is now 11,944 declaration rows / 3,158 symbols, 1,199 tagged declarations, 647
 `unsafe_contract_declared`, 10,479 untouched, and zero exact-artifact
 verified-and-signed.
+
+## TLS constructor and shutdown typed-wrapper checkpoint
+
+Canonical client connect/SNI connect and server create no longer return invalid
+resource objects on provider failure; they return typed `Result` values.
+Server shutdown similarly maps the provider's semantic boolean to `Result<()>`
+instead of exposing false as an ambiguous safe outcome. Mail and web startup
+callers now pattern-match those results. Raw provider semantics remain negative
+handle sentinels and boolean shutdown status; no boolean was converted to an
+integer and no new ABI was introduced.
+
+Each success path still performs one provider call and its existing handle or
+boolean branch. Result construction adds no payload copy, retry, lookup,
+descriptor, generic dispatch, or foreign allocation. The four raw constructor/
+shutdown declarations now carry minimal `unsafe(ffi)` contract tags. The
+focused static ratchet passed; production Simple/optimizer evidence remains
+unavailable under policy.
+
+The estimate remains 11,944 declaration rows / 3,158 symbols, with 1,203 tagged
+declarations, 651 `unsafe_contract_declared`, 10,475 untouched, and zero
+exact-artifact verified-and-signed.
