@@ -598,6 +598,20 @@ perf script. Do not rewrite Simple features in C/Rust to claim C-level speed; if
 parity is blocked by runtime/compiler behavior, record a measured blocker under
 `doc/08_tracking/bug/`.
 
+Performance and memory lanes use the four-tier contract in
+`doc/07_guide/compiler/performance_diagnostics.md`: fast typed lints, MIR
+transforms plus remarks, bounded deep analysis, and profile-guided diagnosis.
+Start with algorithmic complexity, then allocations/copies, layout/locality,
+loop-invariant work, and dispatch overhead. A source-level bound is static
+evidence, not a timing or RSS result; record `unverified` or
+`AnalysisIncomplete(reason)` when execution or proof is unavailable. Risky
+optimizer changes need paired semantic and structural SSpec evidence, while a
+missed optimization normally belongs in a remark rather than a default warning.
+Keep the local audit, architecture, detail design, agent plan, relevant
+`doc/07_guide` page, executable SSpec, and mirrored `doc/06_spec` manual current
+in the same lane. The canonical research baseline is
+`doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`.
+
 Minimize runtime coupling first in SPipe lanes. App, GUI, web, 2D, MCP/LSP, and
 benchmark code should use Simple facades instead of new raw runtime calls,
 env/CLI shortcuts, direct backend field poking, or tool-local runtime aliases.
