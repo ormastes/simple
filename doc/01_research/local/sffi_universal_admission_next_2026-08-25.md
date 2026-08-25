@@ -1751,3 +1751,33 @@ and cross-lane tests replace the handwritten partial stubs.
 Estimated repository totals remain 11,639 declarations / 3,141 symbols.
 Unsafe-tagged rows increase from 2,319 to 2,343, untouched rows decrease from
 9,141 to 9,117, and exact-artifact verified-and-signed admission remains zero.
+## Engine2D CUDA dynamic-contract checkpoint
+
+The Engine2D CUDA facade owns 23 static declarations and an optional dynamic
+driver path. All declarations now carry explicit `unsafe(ffi)` metadata, with
+`raw_ptr` for contexts, modules, device memory, argument packs, launches, and
+pixel spans. Every static call is lexically scoped and the facade class itself
+is unsafe because generationless handles and generic dynamic calls cannot
+establish its public invariants.
+
+The dynamic path previously called `cuInit` with no flags argument and treated
+the status return of `cuDeviceGetCount`, `cuCtxCreate`, and `cuMemAlloc` as the
+requested count/context/pointer even though those APIs return data through out
+pointers. Availability now uses `cuInit(0)` and confirms a typed device count;
+the three out-parameter operations use their typed static thunks until typed
+dynamic thunks exist. Dynamic shutdown no longer fabricates success for an API
+the lane cannot perform. Six declared shutdown/argument-pack/pixel-helper
+symbols remain wholly unbacked and are pinned by the audit.
+
+Pixel helper wrappers reject invalid handles, negative/misaligned byte extents,
+and spans shorter than the requested transfer before entering foreign code.
+Context, module, kernel, memory, and launch wrappers reject invalid scalar
+contracts in constant time. No valid launch or transfer gains another provider
+call, allocation, copy, lock, hash, signature operation, lookup, or generic
+dispatch; incorrect dynamic out-parameter calls are removed. This family is
+still unsafe and unsigned pending typed provider admission and removal or
+implementation of the six missing symbols.
+
+Estimated repository totals remain 11,639 declarations / 3,141 symbols.
+Unsafe-tagged rows increase from 2,343 to 2,366, untouched rows decrease from
+9,117 to 9,094, and exact-artifact verified-and-signed admission remains zero.

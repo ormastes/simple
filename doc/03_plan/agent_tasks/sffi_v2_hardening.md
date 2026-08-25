@@ -684,3 +684,13 @@ passing placeholder.
      allocation, queue, module, kernel, span, and error contracts to exact
      signed admission without adding per-launch hashing, signing, discovery,
      lookup, allocation, copy, lock, or generic dispatch.
+131. Keep all 23 Engine2D CUDA declarations explicitly tagged and every static
+     call lexically scoped. Keep the facade class unsafe until handles, spans,
+     dynamic symbols, and ownership are generated typed contracts. Never use
+     generic all-integer dynamic calls for CUDA out-parameter APIs; availability
+     may call `cuInit(0)` directly, while device count, context creation, and
+     allocation use typed static thunks until typed dynamic thunks exist. Keep
+     the six unbacked shutdown/argument-pack/pixel-helper symbols visible and
+     fail closed. Preserve direct launch/copy paths with constant-time extent
+     guards and no per-call hashing, signing, discovery, extra allocation,
+     copy, lock, lookup, or generic dispatch.
