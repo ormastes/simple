@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+facade="$root/src/os/tls13/_Tls13/handshake.spl"
+
+if [ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$facade")" -ne 49 ]; then
+    echo "TLS handshake lexical authority inventory changed" >&2
+    exit 1
+fi
+
+calls=$(awk '
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / && !/^[[:space:]]*fn / {
+        line = $0
+        while (match(line, /(^|[^A-Za-z0-9_])rt_[A-Za-z0-9_]+[(]/)) {
+            calls += 1
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    END { print calls + 0 }
+' "$facade")
+if [ "$calls" -ne 49 ]; then
+    echo "TLS handshake raw-call inventory changed" >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    NF && unsafe_indent >= 0 &&
+    $0 !~ /unsafe\(capabilities: \[[^]]*ffi[^]]*\]\):$/ && indent($0) <= unsafe_indent {
+        unsafe_indent = -1
+    }
+    /unsafe\(capabilities: \[[^]]*ffi[^]]*\]\):$/ {
+        unsafe_indent = indent($0)
+        next
+    }
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / && !/^[[:space:]]*fn / &&
+    /(^|[^A-Za-z0-9_])rt_[A-Za-z0-9_]+[(]/ {
+        if (unsafe_indent < 0 || indent($0) <= unsafe_indent) {
+            print "TLS handshake raw call lacks lexical FFI authority: " NR ":" $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    BEGIN { unsafe_indent = -1 }
+    END { if (failed) exit 1 }
+' "$facade"
+
+grep -q 'sh_pay_len > sh_raw.len() - 5' "$facade"
+grep -q 'if cert_msg.len() >= 4:' "$facade"
+grep -q 'if cv_msg.len() >= 4:' "$facade"
+grep -q 'if fin_msg.len() >= 4:' "$facade"
+grep -q 'if expected_fin.len() != 32 or server_verify_data.len() != 32:' "$facade"
+grep -q 'if sh.cipher_suite != 0x1301u16:' "$facade"
+grep -q 'if raw_server_key.len() != 16 or raw_server_iv.len() != 12:' "$facade"
+grep -q 'if raw_client_key.len() != 16 or raw_client_iv.len() != 12:' "$facade"
+
+if grep -E '(sha256_manifest|dlsym|dlopen|registry_lookup|mutex)' "$facade" >/dev/null; then
+    echo "TLS handshake hot path gained admission or dynamic lookup work" >&2
+    exit 1
+fi
+
+echo "TLS 1.3 handshake SFFI contract audit: PASS (49 calls in minimal scopes; record/message/secret/key/Finished bounds fail closed; no admission work in hot path)"

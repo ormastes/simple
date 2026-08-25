@@ -2456,6 +2456,41 @@ generic dispatch, or long-lived allocation.  Ptrace/DWARF and 15 debugger
 operations are still unavailable, so the module is not verified or signed;
 verified-and-signed admission remains 0.
 
+## TLS 1.3 handshake SFFI checkpoint
+
+All 49 raw calls in the TLS 1.3 handshake driver now have minimal lexical
+`unsafe(ffi)` scopes.  The focused `tls13-handshake-sffi-contract.shs` ratchet
+passed and uses an identifier-boundary matcher so ordinary names containing an
+`rt_` substring are not counted as foreign calls.
+
+Foreign-result review closed several fail-open and bounds defects:
+
+- ServerHello and post-HRR payload lengths must be at least a handshake header,
+  no larger than 18,432 bytes, and fit within the returned record before any
+  subtraction or copy;
+- ClientHello records must contain the five-byte TLS record header;
+- the implemented handshake accepts only its documented
+  `TLS_AES_128_GCM_SHA256` suite;
+- X25519 keys, SHA-256 hashes, derived secrets, traffic keys/IVs, and Finished
+  keys/data must have their exact contract lengths;
+- foreign handshake messages must contain at least their four-byte header
+  before body slicing;
+- empty expected and received Finished values can no longer compare equal and
+  authenticate a server.
+
+The authoritative census changed exactly by the 49 newly bounded calls:
+
+- missing authority: 17,353 -> 17,304
+- lexical unsafe: 2,904 -> 2,953
+- function unsafe: unchanged at 919
+
+The valid path adds scalar length/discriminant comparisons only; it adds no
+allocation, copy, lookup, lock, hashing, signature verification, discovery, or
+generic dispatch.  A redundant post-validation Finished comparison was
+removed.  The fixed bootstrap key path, remaining TLS call sites, provider
+proof obligations, and exact-artifact signatures remain unresolved, so TLS is
+not globally verified or signed; verified-and-signed admission remains 0.
+
 ## TLS 1.3 context-I/O call-authority checkpoint
 
 The TLS 1.3 context owner retains 48 operation-specific raw declarations and
