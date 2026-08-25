@@ -5478,3 +5478,41 @@ or dispatch; raw-line logging remains O(1) apart from the existing foreign
 output cost. Serial output is still interpreter-only and its exact artifact is
 not authenticated. The wider SFFI estate is not globally safe, verified, or
 signed; verified-and-signed admission remains 0.
+
+## Bare-metal HTTP canonical network-owner checkpoint
+
+The boot HTTP server duplicated seven socket declarations and a raw logger even
+though the canonical pure-Simple socket facade and kernel logger already own
+those boundaries. The duplicates are removed and HTTP now imports both owners.
+The one remaining byte-array-to-text lift has explicit `ffi` authority and a
+lexical wrapper that rejects a non-empty input becoming empty output.
+
+Two concrete resource/error defects were also fixed. A socket is now closed if
+bind or listen fails, and both plaintext and TLS response loops observe the
+canonical facade's exact-write result instead of continuing after a failed or
+partial send. Semantic accept/handled booleans are unchanged. Existing receive
+chunk, total-request, receive-iteration, and keepalive limits remain intact.
+
+The focused `http-baremetal-sffi-authority.shs` audit passed. It pins canonical
+owner imports, the single remaining lexical raw lift, exact-send checks,
+failure cleanup, loop bounds, and the lift's interpreter-only provider status.
+Registration still does not prove the native/freestanding ABI or authenticate
+the provider artifact.
+
+The authoritative census changed as follows:
+
+- raw call sites: 18,542 -> 18,519
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,087
+- missing authority: 13,517 -> 13,493
+- lexical unsafe: 3,427 -> 3,428
+- function unsafe: unchanged at 1,598
+
+Canonical socket calls retain their existing linear scan over the bounded
+active-socket table and bounded network operations; importing the owner does
+not add another dispatch layer. The text validator is mandatory-inline and
+the new checks are constant branches; no buffer copy,
+allocation, hash, signature check, lock, library search, or generic dispatch
+was added. The text lift remains interpreter-only, exact artifacts remain
+unsigned, and the wider SFFI estate is not globally safe or verified;
+verified-and-signed admission remains 0.
