@@ -328,24 +328,38 @@ fn vfs_state_positioned_open(path: text, flags: OpenFlags) -> Result<FileHandle,
     var table = g_mount_table.unwrap()
     val result = table.open(path, flags)
     g_mount_table = Some(table)
+    # Bind the include mutation lease to its handle while the same owner lock
+    # still excludes close. Publishing the handle before these parallel arrays
+    # were updated let concurrent close lose or consume the wrong lease.
+    var include_ticket_registered = false
+    if result.is_ok() and include_ticket.?:
+        g_include_positioned_handle_ids_v1.push(result.unwrap().id)
+        g_include_positioned_tickets_v1.push(include_ticket.unwrap())
+        include_ticket_registered = true
     if not vfs_state_mount_table_unlock_v1():
-        _ = vfs_include_mutation_finish_v1(include_ticket)
+        # A registered lease remains pinned when unlock quarantines the table;
+        # finishing it here would falsely declare immutable-include stability
+        # while the corresponding writable handle is still live.
+        if not include_ticket_registered:
+            _ = vfs_include_mutation_finish_v1(include_ticket)
         return Err(FsError.IoError(code: 0u32))
     if result.is_err():
         _ = vfs_include_mutation_finish_v1(include_ticket)
         return result
-    if include_ticket.?:
-        g_include_positioned_handle_ids_v1.push(result.unwrap().id)
-        g_include_positioned_tickets_v1.push(include_ticket.unwrap())
     result
 
 fn vfs_state_positioned_close(handle: FileHandle) -> Result<(), FsError>:
-    val include_ticket = _include_positioned_ticket_take_v1(handle.id)
     if not vfs_state_mount_table_lock_v1():
-        _ = vfs_include_mutation_finish_v1(include_ticket)
         return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table.unwrap()
     val result = table.close(handle)
+    # A driver-close failure leaves the handle live in MountTable. Retain its
+    # include mutation lease in that case; only a successful close may declare
+    # the guarded tree stable again.
+    val include_ticket = if result.is_ok():
+        _include_positioned_ticket_take_v1(handle.id)
+    else:
+        nil
     g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1():
         _ = vfs_include_mutation_finish_v1(include_ticket)
