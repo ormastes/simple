@@ -32,12 +32,20 @@
 #   MCR p15,0,r0,c8,c7,0 — TLBIALL (Invalidate entire TLB)
 #   MCR p15,0,r0,c8,c7,1 — TLBIMVA (Invalidate TLB by MVA)
 
+use os.kernel.smp.cpu_topology_identity_owner_v1.{
+    CpuHardwareIdentityKindV1,
+}
+use os.kernel.smp.cpu_identity_runtime_surface_v1.{
+    cpu_identity_runtime_resolve_or_unresolved_v1,
+}
+
 # ============================================================================
 # ARMv7-A Coprocessor Register Access (extern — implemented in asm/C runtime)
 # ============================================================================
 
 extern fn rt_arm32_mrc_midr() -> u32
-extern fn rt_arm32_mrc_mpidr() -> u32
+extern fn rt_arm32_mrc_mpidr_low16() -> u32
+extern fn rt_arm32_mrc_mpidr_high16() -> u32
 extern fn rt_arm32_mrc_sctlr() -> u32
 extern fn rt_arm32_mcr_sctlr(value: u32)
 extern fn rt_arm32_mrc_ttbr0() -> u32
@@ -74,7 +82,11 @@ fn mrc_mpidr() -> u32:
 
     Bits [7:0] = Aff0 (core ID within cluster).
     """
-    rt_arm32_mrc_mpidr()
+    (rt_arm32_mrc_mpidr_high16() << 16) | rt_arm32_mrc_mpidr_low16()
+
+pub fn arm32_current_mpidr_v1() -> u64:
+    """Return the full raw ARMv7 MPIDR without truncating affinity fields."""
+    mrc_mpidr() as u64
 
 fn mrc_sctlr() -> u32:
     """Read SCTLR — System Control Register."""
@@ -205,8 +217,9 @@ struct Arm32Cpu:
 
 impl Arm32Cpu:
     fn cpu_id() -> u64:
-        """Return current CPU core ID from MPIDR Aff0 field."""
-        (mrc_mpidr() & 0xFF) as u64
+        """Resolve the full current MPIDR through the boot-sealed census."""
+        cpu_identity_runtime_resolve_or_unresolved_v1(
+            CpuHardwareIdentityKindV1.ArmMpidr, arm32_current_mpidr_v1())
 
     fn cpu_address_width() -> u64:
         """Return virtual address width in bits (32 for ARMv7-A)."""

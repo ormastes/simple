@@ -42,6 +42,12 @@ val HDR_SIZE_DT_STRUCT: u64  = 36
 # Minimum supported FDT version
 val FDT_MIN_VERSION: u32 = 17
 
+# Firmware controls this blob.  Bound every walk before dereferencing offsets;
+# a normal QEMU virt tree is only tens of KiB.
+val FDT_MAX_TOTAL_SIZE: u64 = 0x00200000
+val FDT_CPU_CENSUS_CAPACITY: i32 = 32
+val FDT_CPU_MAX_DEPTH: u32 = 32
+
 # ============================================================================
 # DtbDeviceInfo — parsed device tree result
 # ============================================================================
@@ -90,6 +96,15 @@ struct FdtHeader:
     boot_cpuid: u32
     size_dt_strings: u32
     size_dt_struct: u32
+
+pub struct DtbCpuMpidrCensus:
+    """Exact enabled CPU-node MPIDRs in firmware order."""
+    valid: bool
+    boot_cpuid: u32
+    mpidrs: [u64]
+
+fn _empty_cpu_mpidr_census() -> DtbCpuMpidrCensus:
+    DtbCpuMpidrCensus(valid: false, boot_cpuid: 0u32, mpidrs: [])
 
 # ============================================================================
 # Big-Endian Byte Swap Helpers
@@ -184,6 +199,41 @@ fn _mem_str_starts_with(addr: u64, prefix: text) -> bool:
             return false
         i = i + 1
     true
+
+fn _bounded_mem_str_eq(addr: u64, available: u64, expected: text) -> bool:
+    val expected_len = expected.len() as u64
+    if expected_len >= available:
+        return false
+    var i: u64 = 0
+    while i < expected_len:
+        if mmio_read8(addr + i) != expected.byte_at(i as i64) as u8:
+            return false
+        i = i + 1
+    mmio_read8(addr + expected_len) == 0
+
+fn _bounded_mem_str_starts_with(addr: u64, available: u64, prefix: text) -> bool:
+    val prefix_len = prefix.len() as u64
+    if prefix_len >= available:
+        return false
+    var i: u64 = 0
+    while i < prefix_len:
+        if mmio_read8(addr + i) != prefix.byte_at(i as i64) as u8:
+            return false
+        i = i + 1
+    true
+
+fn _bounded_property_string_eq(addr: u64, length: u64, expected: text) -> bool:
+    if length != (expected.len() as u64) + 1u64:
+        return false
+    _bounded_mem_str_eq(addr, length, expected)
+
+fn _bounded_mem_str_len(addr: u64, available: u64) -> u64?:
+    var length: u64 = 0
+    while length < available:
+        if mmio_read8(addr + length) == 0:
+            return Some(length)
+        length = length + 1
+    nil
 
 # ============================================================================
 # Node Name Classification
@@ -559,3 +609,183 @@ fn dtb_has_device(info: DtbDeviceInfo, kind: text) -> bool:
         return info.ram_base != 0
 
     false
+
+pub fn parse_dtb_cpu_mpidr_census(dtb_addr: u64) -> DtbCpuMpidrCensus:
+    """Parse a bounded, exact `/cpus/cpu@*/reg` census.
+
+    Malformed bounds, excessive nesting/cpu count, and enabled nodes missing
+    `reg` fail closed. Disabled nodes are excluded. No MPIDR is inferred from
+    a node name or loop index.
+    """
+    if dtb_addr == 0:
+        return _empty_cpu_mpidr_census()
+    val hdr_opt = _parse_fdt_header(dtb_addr)
+    if hdr_opt == nil:
+        return _empty_cpu_mpidr_census()
+    val hdr = hdr_opt.unwrap()
+    val total = hdr.totalsize as u64
+    val struct_off = hdr.off_dt_struct as u64
+    val struct_size = hdr.size_dt_struct as u64
+    val strings_off = hdr.off_dt_strings as u64
+    val strings_size = hdr.size_dt_strings as u64
+    if total < 40u64 or total > FDT_MAX_TOTAL_SIZE:
+        return _empty_cpu_mpidr_census()
+    if struct_size == 0 or struct_off > total or struct_size > total - struct_off:
+        return _empty_cpu_mpidr_census()
+    if strings_off > total or strings_size > total - strings_off:
+        return _empty_cpu_mpidr_census()
+
+    val struct_base = dtb_addr + struct_off
+    val strings_base = dtb_addr + strings_off
+    var offset: u64 = 0
+    var depth: u32 = 0
+    var root_seen = false
+    var root_closed = false
+    var cpus_seen = false
+    var cpus_depth: u32 = 0
+    var cpu_depth: u32 = 0
+    var cpu_addr_cells: u32 = 0
+    var cpu_addr_cells_seen = false
+    var cpu_size_cells_seen = false
+    var cpu_has_reg = false
+    var cpu_has_device_type = false
+    var cpu_has_status = false
+    var cpu_enabled = true
+    var cpu_mpidr: u64 = 0
+    var mpidrs: [u64] = []
+    var saw_end = false
+
+    while offset < struct_size:
+        if struct_size - offset < 4:
+            return _empty_cpu_mpidr_census()
+        val token = _read_be_u32(struct_base + offset)
+        offset = offset + 4
+        if token == FDT_BEGIN_NODE:
+            val name_len_opt = _bounded_mem_str_len(
+                struct_base + offset, struct_size - offset)
+            if name_len_opt == nil or depth >= FDT_CPU_MAX_DEPTH:
+                return _empty_cpu_mpidr_census()
+            val name_len = name_len_opt.unwrap()
+            val name_addr = struct_base + offset
+            val next_offset = _align4(offset + name_len + 1)
+            if next_offset > struct_size:
+                return _empty_cpu_mpidr_census()
+
+            if depth == 0:
+                if root_seen or name_len != 0:
+                    return _empty_cpu_mpidr_census()
+                root_seen = true
+            else if depth == 1u32 and cpus_depth == 0 and _bounded_mem_str_eq(
+                name_addr, name_len + 1, "cpus"):
+                if cpus_seen:
+                    return _empty_cpu_mpidr_census()
+                cpus_seen = true
+                cpus_depth = depth + 1u32
+                cpu_addr_cells = 0u32
+                cpu_addr_cells_seen = false
+                cpu_size_cells_seen = false
+            else if (cpus_depth != 0 and depth == cpus_depth and
+                     _bounded_mem_str_starts_with(
+                         name_addr, name_len + 1, "cpu@")):
+                if (cpu_depth != 0 or not cpu_addr_cells_seen or
+                    not cpu_size_cells_seen):
+                    return _empty_cpu_mpidr_census()
+                cpu_depth = depth + 1u32
+                cpu_has_reg = false
+                cpu_has_device_type = false
+                cpu_has_status = false
+                cpu_enabled = true
+                cpu_mpidr = 0
+            depth = depth + 1u32
+            offset = next_offset
+        else if token == FDT_END_NODE:
+            if depth == 0:
+                return _empty_cpu_mpidr_census()
+            if cpu_depth == depth:
+                if not cpu_has_device_type:
+                    return _empty_cpu_mpidr_census()
+                if cpu_enabled:
+                    if not cpu_has_reg or mpidrs.len() >= FDT_CPU_CENSUS_CAPACITY:
+                        return _empty_cpu_mpidr_census()
+                    mpidrs.push(cpu_mpidr)
+                cpu_depth = 0
+            if cpus_depth == depth:
+                cpus_depth = 0
+            if depth == 1u32:
+                root_closed = true
+            depth = depth - 1u32
+        else if token == FDT_PROP:
+            if depth == 0 or root_closed or struct_size - offset < 8:
+                return _empty_cpu_mpidr_census()
+            val prop_len = _read_be_u32(struct_base + offset)
+            val nameoff = _read_be_u32(struct_base + offset + 4)
+            offset = offset + 8
+            val data_len = prop_len as u64
+            if data_len > struct_size - offset or (nameoff as u64) >= strings_size:
+                return _empty_cpu_mpidr_census()
+            val name_addr = strings_base + (nameoff as u64)
+            val name_available = strings_size - (nameoff as u64)
+            val data_addr = struct_base + offset
+
+            if cpus_depth == depth and _bounded_mem_str_eq(
+                name_addr, name_available, "#address-cells"):
+                if prop_len != 4 or cpu_addr_cells_seen:
+                    return _empty_cpu_mpidr_census()
+                cpu_addr_cells = _read_be_u32(data_addr)
+                if cpu_addr_cells != 1u32 and cpu_addr_cells != 2u32:
+                    return _empty_cpu_mpidr_census()
+                cpu_addr_cells_seen = true
+            else if cpus_depth == depth and _bounded_mem_str_eq(
+                name_addr, name_available, "#size-cells"):
+                if prop_len != 4 or cpu_size_cells_seen:
+                    return _empty_cpu_mpidr_census()
+                if _read_be_u32(data_addr) != 0u32:
+                    return _empty_cpu_mpidr_census()
+                cpu_size_cells_seen = true
+            else if cpu_depth == depth and _bounded_mem_str_eq(
+                name_addr, name_available, "reg"):
+                val required = (cpu_addr_cells as u64) * 4u64
+                if data_len != required or cpu_has_reg:
+                    return _empty_cpu_mpidr_census()
+                if cpu_addr_cells == 2u32:
+                    cpu_mpidr = _read_be_u64(data_addr)
+                else:
+                    cpu_mpidr = _read_be_u32(data_addr) as u64
+                cpu_has_reg = true
+            else if cpu_depth == depth and _bounded_mem_str_eq(
+                name_addr, name_available, "device_type"):
+                if cpu_has_device_type or not _bounded_property_string_eq(
+                    data_addr, data_len, "cpu"):
+                    return _empty_cpu_mpidr_census()
+                cpu_has_device_type = true
+            else if cpu_depth == depth and _bounded_mem_str_eq(
+                name_addr, name_available, "status"):
+                if cpu_has_status:
+                    return _empty_cpu_mpidr_census()
+                cpu_has_status = true
+                if _bounded_property_string_eq(data_addr, data_len, "disabled"):
+                    cpu_enabled = false
+                else if (_bounded_property_string_eq(data_addr, data_len, "okay") or
+                         _bounded_property_string_eq(data_addr, data_len, "ok")):
+                    cpu_enabled = true
+                else:
+                    return _empty_cpu_mpidr_census()
+
+            val next_offset = _align4(offset + data_len)
+            if next_offset > struct_size:
+                return _empty_cpu_mpidr_census()
+            offset = next_offset
+        else if token == FDT_NOP:
+            pass_dn
+        else if token == FDT_END:
+            if (not root_seen or not root_closed or not cpus_seen or depth != 0 or
+                cpu_depth != 0 or cpus_depth != 0):
+                return _empty_cpu_mpidr_census()
+            saw_end = true
+            break
+        else:
+            return _empty_cpu_mpidr_census()
+
+    if not saw_end or mpidrs.len() == 0:
+        return _empty_cpu_mpidr_census()
+    DtbCpuMpidrCensus(valid: true, boot_cpuid: hdr.boot_cpuid, mpidrs: mpidrs)

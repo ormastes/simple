@@ -109,6 +109,32 @@ RuntimeValue arm32_harden_print_canary(void)
 #define TRUE_VALUE     ENCODE_INT(1)
 #define FALSE_VALUE    ENCODE_INT(0)
 
+extern uint32_t rt_arm32_boot_dtb_physical_storage;
+
+RuntimeValue rt_arm32_boot_dtb_low16(void)
+{
+    return ENCODE_INT(rt_arm32_boot_dtb_physical_storage & 0xffffU);
+}
+
+RuntimeValue rt_arm32_boot_dtb_high16(void)
+{
+    return ENCODE_INT(rt_arm32_boot_dtb_physical_storage >> 16);
+}
+
+RuntimeValue rt_arm32_mrc_mpidr_low16(void)
+{
+    uint32_t mpidr;
+    __asm__ volatile("mrc p15, 0, %0, c0, c0, 5" : "=r"(mpidr));
+    return ENCODE_INT(mpidr & 0xffffU);
+}
+
+RuntimeValue rt_arm32_mrc_mpidr_high16(void)
+{
+    uint32_t mpidr;
+    __asm__ volatile("mrc p15, 0, %0, c0, c0, 5" : "=r"(mpidr));
+    return ENCODE_INT(mpidr >> 16);
+}
+
 typedef struct {
     uint32_t type;
     uint32_t size;
