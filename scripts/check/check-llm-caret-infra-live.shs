@@ -112,17 +112,21 @@ classify_log() {
     echo "FAIL — $v_failed live row(s) failed against a real server, $live_executed executed ($results; $verdict)"
     return 1
   fi
-  # Exactly one skipped example is the permanently-BLOCKED ftp row.
-  extra=$((v_skipped - 1)); [ "$extra" -lt 0 ] && extra=0
+  # The two gated live rows (mail, storage) must BOTH have executed for real:
+  # live rows executed = passed - skipped (a pending row counts in both).
+  # Permanently-BLOCKED rows (ftp; wiki since 2026-08-25) may skip in any
+  # number — a gated live row that silently goes pending still drops
+  # live_executed below 2, and a blocked row that starts passing raises it
+  # above 2, so both drifts stay FAIL without a hardcoded skip count.
   if [ "$live_executed" -eq 0 ]; then
     echo "ERROR — nothing was checked (0 live rows executed, $v_skipped skipped$skip_reasons; $results)"
     return 2
   fi
-  if [ "$v_skipped" -ne 1 ] || [ "$live_executed" -ne 2 ] || [ "$live_expected" -ne 2 ]; then
-    echo "FAIL — $live_executed live row(s) executed, $extra live row(s) skipped, 0 failed (need 2 live + the 1 permanently-blocked ftp row)$skip_reasons ($results; $verdict)"
+  if [ "$live_executed" -ne 2 ] || [ "$live_expected" -ne 2 ]; then
+    echo "FAIL — $live_executed live row(s) executed, $v_skipped row(s) skipped, 0 failed (need exactly the 2 gated live rows: mail + storage)$skip_reasons ($results; $verdict)"
     return 1
   fi
-  echo "PASS — $live_executed live row(s) executed, 0 skipped, 0 failed (mail + storage live; 1 permanently-blocked ftp row excluded; $results; $verdict)"
+  echo "PASS — $live_executed live row(s) executed, 0 failed (mail + storage live; $v_skipped permanently-blocked row(s) excluded; $results; $verdict)"
   return 0
 }
 
@@ -154,6 +158,12 @@ selftest() {
   chk mail-skipped 1 "SKIP: no IMAP image pulled in 120s" live "$d/mail_skip.log"
   # 4b. both gates exported but the mail row still went pending (gate did not take) -> FAIL
   chk gate-did-not-take 1 live live "$d/mail_skip.log"
+  # 4c. two permanently-blocked rows (ftp + wiki, the shape since 2026-08-25) -> PASS
+  printf 'Results: 6 total, 6 passed, 0 failed, 2 skipped\n%s executed=6 passed=4 failed=0 skipped=2 dropped=0\n' "$V" > "$d/two_blocked.log"
+  chk two-blocked-rows-pass 0 live live "$d/two_blocked.log"
+  # 4d. a blocked row started passing for real (3 live rows) -> FAIL until the wrapper is reviewed
+  printf 'Results: 6 total, 6 passed, 0 failed, 1 skipped\n%s executed=6 passed=4 failed=0 skipped=1 dropped=0\n' "$V" > "$d/blocked_went_live.log"
+  chk blocked-row-went-live 1 live live "$d/blocked_went_live.log"
   # 5. no Results line at all (crash / timeout)
   printf 'Session setup...\nsegfault\n' > "$d/noresults.log"
   chk no-results 2 live live "$d/noresults.log"
