@@ -2416,3 +2416,42 @@ was added.  Production Simple optimizer/performance evidence remains
 unavailable in this worktree.  Glob/find/walk and some legacy unsafe helpers
 still have empty-result ambiguity, so this lane is not globally verified or
 signed; verified-and-signed admission remains 0.
+## Debug/ptrace/DWARF SFFI checkpoint
+
+`src/lib/nogc_sync_mut/sffi/debug.spl` has 43 raw declarations and calls.
+Every call now has a minimal lexical `unsafe(ffi)` scope; the pre-existing raw
+DWARF handle wrapper remains function-level unsafe.  The focused
+`debug-sffi-authority.shs` audit passed.  It records 14 observed Rust debugger
+providers and 29 declarations with no repository-owned provider.  Missing
+debugger, ptrace, and DWARF providers remain raw/unsafe and link-fail-closed;
+no nil/zero stub was added.
+
+Breakpoint ABI review corrected three concrete defects:
+
+- add now uses the provider's three-argument signature and signed ID/status
+  result rather than passing an invented fourth ID argument;
+- remove now declares its signed status result, and clear uses the actual
+  `rt_debug_remove_all_breakpoints` symbol;
+- the Rust add/remove/query providers reject null, negative/unrepresentable
+  extents, invalid lines, and invalid UTF-8 instead of constructing unchecked
+  slices and calling `from_utf8_unchecked`.
+
+A semantic `rt_debug_has_breakpoint` provider was added without mutating hit
+counters.  Boolean wrappers use an inline total 0/1 contract and fail closed on
+invalid discriminants rather than treating every nonzero integer—including an
+error sentinel—as true.  Nonexistent raw exports were removed from the facade.
+
+The authoritative census changed as expected for the 42 previously missing
+calls (the DWARF load call was already function-unsafe):
+
+- missing authority: 17,540 -> 17,498
+- lexical unsafe: 2,718 -> 2,760
+- function unsafe: unchanged at 918
+- distinct called symbols: 3,267 -> 3,266 after consolidating the clear symbol
+
+The focused Rust breakpoint contract test passed (`1 passed`, 1,227 filtered).
+Normal debugger state calls remain direct.  The new validation is limited to
+breakpoint mutation/query boundaries and adds no hashing, signing, discovery,
+generic dispatch, or long-lived allocation.  Ptrace/DWARF and 15 debugger
+operations are still unavailable, so the module is not verified or signed;
+verified-and-signed admission remains 0.
