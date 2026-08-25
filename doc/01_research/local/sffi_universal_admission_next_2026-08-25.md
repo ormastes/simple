@@ -5237,3 +5237,46 @@ identity, signature trust, and evidence admission remain unresolved.  No
 production self-hosted optimizer or benchmark was available, so this module
 and the wider SFFI estate are not globally verified or signed;
 verified-and-signed admission remains 0.
+
+## AES-128-GCM canonical/NVFS authority checkpoint
+
+The canonical AES-128-GCM implementation and its divergent NVFS adapter now
+consolidate runtime array allocation through mandatory-inline owners while
+preserving every remaining capacity hint. Unchecked byte access and validated
+crypto cores carry explicit FFI authority; checked public wrappers
+retain the existing API. Encryption fails closed on invalid fixed key/nonce
+extents because its legacy array return cannot encode an error. Decryption
+rejects invalid key, nonce, and tag extents with typed `Aes128GcmResult.Err`
+before entering the 16-byte constant-time tag comparison.
+
+Provider review found that the interpreter's out-parameter AES block helper
+cannot mutate the caller's array but reported success. The NVFS adapter now
+uses the existing pure-result AES block provider, requires an exact 16-byte
+result, and passes the already validated key directly. It no longer builds an
+unused 176-byte expanded schedule, allocates/copies a 16-byte key per block, or
+allocates/fills a redundant zero output array. The dead AES table providers
+and unused serial byte-dump surface were removed. The focused
+`aes128-gcm-sffi-authority.shs` audit passed and pins the allocation counts,
+fixed input guards, constant-time accumulator, provider coverage, and absence
+of the broken out-parameter path.
+
+The authoritative census changed as follows:
+
+- raw call sites: 18,671 -> 18,636
+- distinct called symbols: 3,260 -> 3,257
+- caller files: unchanged at 3,088
+- missing authority: 13,768 -> 13,728
+- lexical unsafe: 3,411 -> 3,413
+- function unsafe: 1,492 -> 1,495
+
+The hot GCM/GHASH loop counts are unchanged. Allocation capacity and linear
+copy behavior are retained. The NVFS operation removes one 176-byte expanded
+schedule; each AES block removes one 16-byte key allocation/copy and 16 zero
+pushes while the pure-result provider owns the required output allocation. No
+lookup, lock, hash, signature operation, or
+generic dispatch was added. The one executable NIST-vector test
+attempt was blocked before loading the spec by the unrelated hosted
+environment parse bug recorded in
+`doc/08_tracking/bug/aes128_gcm_verification_blocked_by_env_access_parse_2026-08-25.md`.
+Therefore executable verification is missing, exact artifact/signature
+evidence remains absent, and verified-and-signed admission remains 0.
