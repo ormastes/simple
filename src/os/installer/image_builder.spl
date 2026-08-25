@@ -7,10 +7,12 @@ use os.installer.image_package_payload_policy.{IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1
 use os.installer.image_builder_payloads.{
     IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS, IMAGE_CLANG_GUEST_BIN_PATHS,
     IMAGE_RUSTC_GUEST_BIN_PATHS, image_target_architecture,
+    image_target_triple_v1,
     image_effective_simple_binary, image_validate_simple_binary,
     image_load_validated_simple_binary,
     image_effective_clang_binary, image_effective_rustc_binary,
     image_effective_sysroot_dir, image_copy_tree,
+    image_clang_sysroot_complete_v1,
     image_simple_toolchain_manifest, image_clang_fixture_payload,
     image_clang_embedded_payload, image_rust_fixture_payload,
     image_rust_embedded_payload, image_fstab_payload,
@@ -19,6 +21,9 @@ use os.installer.image_builder_payloads.{
     image_default_bootloader_config, image_installer_bootloader_config,
 }
 use os.installer.image_bounded_file_reader.{IMAGE_MAX_PACKAGE_ARCHIVE_BYTES_V1, IMAGE_MAX_BUILD_STAMP_BYTES_V1, image_read_file_bounded_v1, image_read_text_bounded_v1}
+use os.port.clang_sysroot_include_manifest_v1.{
+    clang_include_manifest_build_v1
+}
 use os.tools.simplebox.simplebox_artifact_contract.{SIMPLEBOX_CANONICAL_PATH_V1, simplebox_canonical_aliases_v1}
 use std.common.crypto.sha256.{sha256_u8_hex}
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -521,21 +526,48 @@ impl ImageBuilder:
                     manifest = manifest + image_package_payload_decision_v1(
                         "simpleos-tools", guest_path, [], architecture).inventory_row
 
-        val sysroot = image_effective_sysroot_dir()
+        val sysroot = image_effective_sysroot_dir(self.config.arch)
         var sysroot_embedded = false
-        if sysroot != "" and rt_file_exists(sysroot):
+        var include_root_sha256 = ""
+        if image_clang_sysroot_complete_v1(sysroot):
+            _ensure_dir("{rootfs_root}/usr/include")
             _ensure_dir("{rootfs_root}/usr/lib")
             _ensure_dir("{rootfs_root}/usr/share/simpleos")
-            val libs_ok = image_copy_tree("{sysroot}/lib", "{rootfs_root}/usr/lib")
-            val sysroot_ok = image_copy_tree(sysroot, "{rootfs_root}/usr/share/simpleos")
-            sysroot_embedded = libs_ok and sysroot_ok
+            val includes_ok = image_copy_tree(
+                "{sysroot}/include", "{rootfs_root}/usr/include")
+            val libs_ok = image_copy_tree(
+                "{sysroot}/lib", "{rootfs_root}/usr/lib")
+            val linker_ok = image_copy_tree(
+                "{sysroot}/share/simpleos", "{rootfs_root}/usr/share/simpleos")
+            val include_manifest = clang_include_manifest_build_v1(
+                "{sysroot}/include", image_target_triple_v1(self.config.arch))
+            var include_manifest_ok = false
+            if includes_ok and include_manifest.ok:
+                include_manifest_ok = write_text(
+                    "{rootfs_root}/usr/include/.simpleos-sysroot.merkle",
+                    include_manifest.content)
+                if include_manifest_ok:
+                    include_root_sha256 = include_manifest.root_sha256
+            sysroot_embedded = include_manifest_ok and libs_ok and linker_ok
+            if include_manifest_ok:
+                manifest = manifest + _manifest_file(
+                    "/usr/include", "clang-sysroot-headers", "simpleos-tools")
+                manifest = manifest + _manifest_file(
+                    "/usr/include/.simpleos-sysroot.merkle",
+                    "clang-sysroot-header-proof", "simpleos-tools")
             if libs_ok:
                 manifest = manifest + _manifest_file("/usr/lib", "clang-sysroot-libs", "simpleos-tools")
-            if sysroot_ok:
-                manifest = manifest + _manifest_file("/usr/share/simpleos", "clang-sysroot", "simpleos-tools")
+            if linker_ok:
+                manifest = manifest + _manifest_file(
+                    "/usr/share/simpleos/simpleos.ld",
+                    "clang-sysroot-linker-script", "simpleos-tools")
 
         _ensure_dir("{rootfs_root}/SYS")
-        write_text("{rootfs_root}/SYS/CLANGTOOL.SDN", image_clang_embedded_payload(clang_binary, sysroot, sysroot_embedded))
+        write_text(
+            "{rootfs_root}/SYS/CLANGTOOL.SDN",
+            image_clang_embedded_payload(
+                clang_binary, sysroot, sysroot_embedded, self.config.arch,
+                include_root_sha256))
         manifest = manifest + _manifest_file("/SYS/CLANGTOOL.SDN", "clang-toolchain-manifest", "simpleos-tools")
         manifest
 

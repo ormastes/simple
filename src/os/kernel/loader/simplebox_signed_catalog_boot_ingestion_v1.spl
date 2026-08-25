@@ -8,9 +8,6 @@ opens the irreversible catalog session.
 """
 
 use std.common.crypto.sha256.{sha256_u8_hex}
-use std.common.contracts.execution.simpleos_executable_v1.{
-    ManifestTarget, SimpleArtifactManifest
-}
 use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
     encode_simple_artifact_manifest_v1_signing_bytes
 }
@@ -20,15 +17,16 @@ use os.installer.hosted_safe_artifact_io_v1.{
 }
 use os.installer.simplebox_signed_catalog_provisioner_v1.{
     SimpleboxSignedCatalogProvisionErrorV1,
-    SimpleboxSignedCatalogProvisionResultV1,
-    simplebox_signed_catalog_provision_from_safe_root_v1
-}
-use os.kernel.loader.executable_manifest_signature_verifier.{
-    ExecutableManifestTrustedSignerV1
+    SimpleboxSignedCatalogProvisionResultV1
 }
 use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
-    InstalledArtifactBootPopulationErrorV1,
-    installed_artifact_catalog_populate_from_boot_policy_v1
+    InstalledArtifactBootPopulationErrorV1
+}
+use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{
+    ClangSysrootCatalogBundleV1
+}
+use os.kernel.loader.installed_artifact_boot_composition_v1.{
+    installed_artifact_boot_compose_and_populate_v1
 }
 use os.kernel.loader.simplebox_primary_tool_catalog_bundle_v1.{
     SIMPLEBOX_PRIMARY_TOOL_PAYLOAD_RECORDS_V1,
@@ -100,8 +98,9 @@ pub fn simplebox_signed_catalog_boot_ingestion_shape_valid_v1(
         _ingestion_receipt_valid_v1(provisioned) and
         simplebox_primary_tool_catalog_bundle_plan_valid_v1(provisioned.plan)
 
-pub(package) fn simplebox_signed_catalog_boot_ingest_provisioned_v1(
+pub(package) fn simplebox_signed_catalog_boot_ingest_composed_v1(
     provisioned: SimpleboxSignedCatalogProvisionResultV1,
+    clang: ClangSysrootCatalogBundleV1?
 ) -> SimpleboxSignedCatalogBootIngestionResultV1:
     """Authenticate and atomically ingest one externally provisioned bundle."""
     if not provisioned.ok or
@@ -115,30 +114,15 @@ pub(package) fn simplebox_signed_catalog_boot_ingest_provisioned_v1(
         provisioned.plan):
         return _ingestion_fail_v1(
             SimpleboxSignedCatalogBootIngestionErrorV1.BundleRejected)
-    val populated = installed_artifact_catalog_populate_from_boot_policy_v1(
-        provisioned.plan.policy, provisioned.plan.records)
+    val populated = installed_artifact_boot_compose_and_populate_v1(
+        Some(provisioned), clang)
     if not populated.ok:
         return _ingestion_fail_v1(
             SimpleboxSignedCatalogBootIngestionErrorV1.PopulationRejected,
-            populated.error)
+            populated.population_error)
     SimpleboxSignedCatalogBootIngestionResultV1(
         ok: true, error: SimpleboxSignedCatalogBootIngestionErrorV1.None,
         population_error: InstalledArtifactBootPopulationErrorV1.None,
         accepted_records: populated.accepted_records,
         artifact_sha256: provisioned.receipt.artifact_sha256,
         signed_record_sha256: provisioned.receipt.signed_record_sha256)
-
-pub(package) fn simplebox_signed_catalog_boot_ingest_from_safe_root_v1(
-    trusted_absolute_root: text,
-    artifact_relative_path: text,
-    signed_record_relative_path: text,
-    target: ManifestTarget,
-    trust_roots: [ExecutableManifestTrustedSignerV1],
-    manifest_projection: SimpleArtifactManifest,
-) -> SimpleboxSignedCatalogBootIngestionResultV1:
-    """Read, bind, authenticate, and populate through one boot-owned entry."""
-    val provisioned = simplebox_signed_catalog_provision_from_safe_root_v1(
-        trusted_absolute_root, artifact_relative_path,
-        signed_record_relative_path, target, trust_roots,
-        manifest_projection)
-    simplebox_signed_catalog_boot_ingest_provisioned_v1(provisioned)

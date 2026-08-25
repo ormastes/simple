@@ -16,6 +16,10 @@ use std.nogc_sync_mut.ffi.io.{
 }
 use std.common.structural.digest.hash256.{hash256_hex_valid}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{bytes_to_text}
+use os.port.clang_sysroot_include_manifest_v1.{
+    clang_include_manifest_build_v1
+}
 use os.port.initramfs_validate.{
     MAX_INITRAMFS_COMPRESSED_BYTES,
     MAX_INITRAMFS_EXPANDED_BYTES,
@@ -443,17 +447,42 @@ fn populate_staging(config: PackConfig):
         val src_path = "{config.llvm_prefix}/{tool}"
         stage_file(src: src_path, dst: "{s}/usr/bin/{tool}", optional: true)
 
-    stage_tree(src: "{config.sysroot}/include", dst: "{s}/usr/include", optional: true)
+    # Clang is only useful when its complete fixed sysroot is present.  These
+    # inputs are required rather than best-effort so an image cannot advertise
+    # a filesystem compiler that will silently search ambient host paths.
+    stage_tree(src: "{config.sysroot}/include", dst: "{s}/usr/include", optional: false)
+    val target_marker = file_read_bytes(
+        "{config.sysroot}/share/simpleos/target-triple.txt")
+    if target_marker.len() == 0:
+        print "error: required sysroot target-triple marker missing"
+        process.exit(1)
+    val include_manifest = clang_include_manifest_build_v1(
+        "{config.sysroot}/include", bytes_to_text(target_marker).trim())
+    if not include_manifest.ok or not file_write_text(
+        "{s}/usr/include/.simpleos-sysroot.merkle",
+        include_manifest.content):
+        print "error: failed to build bounded authenticated include-tree manifest"
+        process.exit(1)
 
     stage_file(
         src: "{config.sysroot}/lib/libsimpleos_c.a",
         dst: "{s}/usr/lib/libsimpleos_c.a",
-        optional: true,
+        optional: false,
     )
     stage_file(
         src: "{config.sysroot}/lib/crt0.o",
         dst: "{s}/usr/lib/crt0.o",
-        optional: true,
+        optional: false,
+    )
+    stage_file(
+        src: "{config.sysroot}/lib/libsimple_runtime.a",
+        dst: "{s}/usr/lib/libsimple_runtime.a",
+        optional: false,
+    )
+    stage_file(
+        src: "{config.sysroot}/lib/libm.a",
+        dst: "{s}/usr/lib/libm.a",
+        optional: false,
     )
 
     val rt_src = "{config.sysroot}/lib/clang/{CLANG_RESOURCE_VER}/lib/simpleos/libclang_rt.builtins-x86_64.a"
@@ -463,7 +492,7 @@ fn populate_staging(config: PackConfig):
     stage_file(
         src: "{config.sysroot}/share/simpleos/simpleos.ld",
         dst: "{s}/usr/share/simpleos/simpleos.ld",
-        optional: true,
+        optional: false,
     )
 
     stage_tree(src: config.source_tree, dst: "{s}/src", optional: false)

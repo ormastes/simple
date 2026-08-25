@@ -34,6 +34,10 @@ use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mm
 use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.services.vfs.vfs_immutable_include_tree_state_v1.{
+    VfsIncludeMutationTicketV1, vfs_include_mutation_begin_v1,
+    vfs_include_mutation_finish_v1
+}
 use std.fs_driver.mount_table.{
     MountTable, MountId, DbfsRootMountSealV1, DbfsRootMountSealInfoV1
 }
@@ -75,6 +79,26 @@ var g_vfs_boot_storage_pure_simple: bool = false
 var g_mount_table: MountTable = MountTable.new()
 val g_mount_table_mutex_v1: i64 = mutex_raw_create()
 var g_mount_table_quarantined_v1: bool = false
+var g_include_positioned_handle_ids_v1: [u64] = []
+var g_include_positioned_tickets_v1: [VfsIncludeMutationTicketV1] = []
+
+fn _positioned_open_may_write_v1(flags: OpenFlags) -> bool:
+    (flags.bits & (1 | 2 | 64 | 512 | 1024)) != 0
+
+fn _mount_affects_include_v1(path: text) -> bool:
+    path == "/" or path == "/usr" or path == "/usr/include" or
+        path.starts_with("/usr/include/")
+
+fn _include_positioned_ticket_take_v1(handle_id: u64) -> VfsIncludeMutationTicketV1?:
+    var index: i64 = 0
+    while index < g_include_positioned_handle_ids_v1.len():
+        if g_include_positioned_handle_ids_v1[index] == handle_id:
+            val ticket = g_include_positioned_tickets_v1[index]
+            g_include_positioned_handle_ids_v1.remove(index)
+            g_include_positioned_tickets_v1.remove(index)
+            return Some(ticket)
+        index = index + 1
+    nil
 
 fn vfs_state_mount_table_lock_v1() -> bool:
     if g_mount_table_mutex_v1 <= 0 or g_mount_table_quarantined_v1:
@@ -124,7 +148,11 @@ pub fn vfs_state_close_dbfs_root_mount_seal_v1(
 # Owner APIs for mutable root and MountTable state. Callers may work on a
 # value-semantic driver copy, but only this declaring module commits it.
 fn vfs_state_reset_rootfs():
-    if not vfs_state_mount_table_lock_v1(): return
+    val ticket = vfs_include_mutation_begin_v1("/usr/include")
+    if ticket.is_err(): return
+    if not vfs_state_mount_table_lock_v1():
+        _ = vfs_include_mutation_finish_v1(ticket.unwrap())
+        return
     g_root_fat32 = nil
     g_root_nvfs_hosted = nil
     g_mount_table = MountTable.new()
@@ -132,6 +160,7 @@ fn vfs_state_reset_rootfs():
     g_vfs_boot_storage_provider = "not-mounted"
     g_vfs_boot_storage_pure_simple = false
     _ = vfs_state_mount_table_unlock_v1()
+    _ = vfs_include_mutation_finish_v1(ticket.unwrap())
 
 fn vfs_state_mark_rootfs_ready():
     g_vfs_initialized = true
@@ -140,35 +169,81 @@ fn vfs_state_commit_root_nvfs(driver: NvfsPosixDriver):
     g_root_nvfs_hosted = Some(driver)
 
 fn vfs_state_mount(path: text, driver: DriverInstance, options: MountOptions) -> Result<MountId, FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
+    val ticket = if _mount_affects_include_v1(path):
+        val begun = vfs_include_mutation_begin_v1("/usr/include")
+        if begun.is_err(): return Err(FsError.Permission)
+        begun.unwrap()
+    else:
+        nil
+    if not vfs_state_mount_table_lock_v1():
+        _ = vfs_include_mutation_finish_v1(ticket)
+        return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.mount(path, driver, options)
     g_mount_table = table
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    if not vfs_state_mount_table_unlock_v1():
+        _ = vfs_include_mutation_finish_v1(ticket)
+        return Err(FsError.IoError(code: 0u32))
+    if not vfs_include_mutation_finish_v1(ticket):
+        return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_unmount(path: text) -> Result<(), FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
+    val ticket = if _mount_affects_include_v1(path):
+        val begun = vfs_include_mutation_begin_v1("/usr/include")
+        if begun.is_err(): return Err(FsError.Permission)
+        begun.unwrap()
+    else:
+        nil
+    if not vfs_state_mount_table_lock_v1():
+        _ = vfs_include_mutation_finish_v1(ticket)
+        return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.unmount(path)
     g_mount_table = table
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    if not vfs_state_mount_table_unlock_v1():
+        _ = vfs_include_mutation_finish_v1(ticket)
+        return Err(FsError.IoError(code: 0u32))
+    if not vfs_include_mutation_finish_v1(ticket):
+        return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_positioned_open(path: text, flags: OpenFlags) -> Result<FileHandle, FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
+    var include_ticket: VfsIncludeMutationTicketV1? = nil
+    if _positioned_open_may_write_v1(flags):
+        val begun = vfs_include_mutation_begin_v1(path)
+        if begun.is_err(): return Err(FsError.Permission)
+        include_ticket = begun.unwrap()
+    if not vfs_state_mount_table_lock_v1():
+        _ = vfs_include_mutation_finish_v1(include_ticket)
+        return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.open(path, flags)
     g_mount_table = table
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    if not vfs_state_mount_table_unlock_v1():
+        _ = vfs_include_mutation_finish_v1(include_ticket)
+        return Err(FsError.IoError(code: 0u32))
+    if result.is_err():
+        _ = vfs_include_mutation_finish_v1(include_ticket)
+        return result
+    if include_ticket.?:
+        g_include_positioned_handle_ids_v1.push(result.unwrap().id)
+        g_include_positioned_tickets_v1.push(include_ticket.unwrap())
     result
 
 fn vfs_state_positioned_close(handle: FileHandle) -> Result<(), FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
+    val include_ticket = _include_positioned_ticket_take_v1(handle.id)
+    if not vfs_state_mount_table_lock_v1():
+        _ = vfs_include_mutation_finish_v1(include_ticket)
+        return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.close(handle)
     g_mount_table = table
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    if not vfs_state_mount_table_unlock_v1():
+        _ = vfs_include_mutation_finish_v1(include_ticket)
+        return Err(FsError.IoError(code: 0u32))
+    if not vfs_include_mutation_finish_v1(include_ticket):
+        return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_fsync(handle: FileHandle) -> Result<(), FsError>:

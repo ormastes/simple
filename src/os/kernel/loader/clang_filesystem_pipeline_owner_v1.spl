@@ -27,6 +27,14 @@ use os.kernel.scheduler.scheduler_types.{
 use os.kernel.loader.installed_artifact_catalog_v1.{
     installed_artifact_catalog_lookup_target_v1
 }
+use os.kernel.loader.clang_sysroot_launch_grants_v1.{
+    CLANG_SYSROOT_READ_GRANT_COUNT_V1,
+    clang_sysroot_caps_exact_v1,
+    clang_sysroot_catalog_projection_v1
+}
+use os.services.vfs.vfs_include_tree_proof_v1.{
+    vfs_include_tree_prove_and_seal_v1
+}
 
 pub const CLANG_FILESYSTEM_PIPELINE_SLOT_LIMIT_V1: i32 = 32
 pub const CLANG_FILESYSTEM_PIPELINE_PATH_MAX_V1: i64 = 512
@@ -85,6 +93,7 @@ pub struct ClangFilesystemPipelineRequestV1:
     object_path: text
     executable_path: text
     working_directory: text
+    include_tree_sha256: text
 
 pub(package) struct ClangFilesystemPipelineReservationV1:
     _slot: i32
@@ -100,6 +109,7 @@ pub(package) struct ClangFilesystemPipelineDispatchV1:
     clang_sha256: text
     lld_path: text
     lld_sha256: text
+    sysroot_sha256: [text]
     source_path: text
     object_path: text
     executable_path: text
@@ -147,6 +157,7 @@ struct ClangFilesystemPipelineSlotV1:
     target: ManifestTarget
     clang_sha256: text
     lld_sha256: text
+    sysroot_sha256: [text]
     receipt: ClangFilesystemTerminalReceiptV1?
 
 struct ClangFilesystemPipelineOwnerV1:
@@ -168,14 +179,14 @@ fn _empty_request_v1() -> ClangFilesystemPipelineRequestV1:
         actor: _empty_actor_v1(), target_triple: "",
         filesystem: ClangFilesystemPipelineFilesystemV1.Fat32,
         source_path: "", object_path: "", executable_path: "",
-        working_directory: "")
+        working_directory: "", include_tree_sha256: "")
 
 fn _empty_slot_v1(generation: u32) -> ClangFilesystemPipelineSlotV1:
     ClangFilesystemPipelineSlotV1(
         state: ClangFilesystemPipelineStateV1.Free,
         generation: generation, nonce: 0u64,
         request: _empty_request_v1(), target: _empty_target_v1(),
-        clang_sha256: "", lld_sha256: "", receipt: nil)
+        clang_sha256: "", lld_sha256: "", sysroot_sha256: [], receipt: nil)
 
 fn _new_slots_v1() -> [ClangFilesystemPipelineSlotV1]:
     var result: [ClangFilesystemPipelineSlotV1] = []
@@ -294,7 +305,12 @@ pub fn clang_filesystem_pipeline_request_valid_v1(
        request.source_path == request.executable_path or
        request.object_path == request.executable_path:
         return false
-    if not caps.is_pledged or caps.caps.len() != 8:
+    if not hash256_hex_valid(request.include_tree_sha256) or
+       hash256_is_zero(request.include_tree_sha256):
+        return false
+    if not caps.is_pledged or
+       caps.caps.len() != 8 + CLANG_SYSROOT_READ_GRANT_COUNT_V1 or
+       not clang_sysroot_caps_exact_v1(caps):
         return false
     var token_index: i64 = 0
     while token_index < caps.caps.len():
@@ -379,6 +395,24 @@ pub(package) fn clang_filesystem_pipeline_reserve_v1(
         "/usr/bin/clang", target) ?? return Err("clang-not-authenticated")
     val lld_record = installed_artifact_catalog_lookup_target_v1(
         "/usr/bin/ld.lld", target) ?? return Err("lld-not-authenticated")
+    val sysroot = clang_sysroot_catalog_projection_v1(target) ??
+        return Err("sysroot-not-authenticated")
+    val include_proof = vfs_include_tree_prove_and_seal_v1(
+        request.target_triple, sysroot.include_manifest.content_sha256,
+        request.include_tree_sha256,
+        ["/usr/share/simpleos/simpleos.ld", "/usr/lib/crt0.o",
+         "/usr/lib/libsimpleos_c.a", "/usr/lib/libsimple_runtime.a",
+         "/usr/lib/libm.a"],
+        [sysroot.linker_script.content_sha256, sysroot.crt0.content_sha256,
+         sysroot.libc.content_sha256, sysroot.runtime.content_sha256,
+         sysroot.libm.content_sha256])
+    if include_proof.is_err(): return Err(include_proof.unwrap_err())
+    val sysroot_sha256 = [
+        sysroot.include_manifest.content_sha256,
+        sysroot.linker_script.content_sha256, sysroot.crt0.content_sha256,
+        sysroot.libc.content_sha256, sysroot.runtime.content_sha256,
+        sysroot.libm.content_sha256,
+    ]
     if not _lock_v1(): return Err("serialization-unavailable")
     if not _request_available_locked_v1(request):
         _ = _unlock_v1()
@@ -406,7 +440,8 @@ pub(package) fn clang_filesystem_pipeline_reserve_v1(
         state: reserved_state.unwrap(),
         generation: generation, nonce: nonce, request: request,
         target: target, clang_sha256: clang_record.content_sha256,
-        lld_sha256: lld_record.content_sha256, receipt: nil)
+        lld_sha256: lld_record.content_sha256,
+        sysroot_sha256: sysroot_sha256, receipt: nil)
     val result = ClangFilesystemPipelineReservationV1(
         _slot: index, _generation: generation, _nonce: nonce)
     if not _unlock_v1(): return Err("committed-unknown")
@@ -439,6 +474,7 @@ pub(package) fn clang_filesystem_pipeline_dispatch_v1(
         target_triple: slot.request.target_triple,
         clang_path: "/usr/bin/clang", clang_sha256: slot.clang_sha256,
         lld_path: "/usr/bin/ld.lld", lld_sha256: slot.lld_sha256,
+        sysroot_sha256: slot.sysroot_sha256,
         source_path: slot.request.source_path,
         object_path: slot.request.object_path,
         executable_path: slot.request.executable_path,
@@ -485,7 +521,8 @@ fn _dispatch_matches_slot_v1(
         slot.request.executable_path == dispatch.executable_path and
         slot.request.working_directory == dispatch.working_directory and
         slot.clang_sha256 == dispatch.clang_sha256 and
-        slot.lld_sha256 == dispatch.lld_sha256
+        slot.lld_sha256 == dispatch.lld_sha256 and
+        slot.sysroot_sha256 == dispatch.sysroot_sha256
 
 pub(package) fn clang_filesystem_pipeline_begin_current_v1(
     admission: SchedulerCurrentTaskAdmissionV1,

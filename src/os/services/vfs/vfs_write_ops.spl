@@ -13,6 +13,9 @@ use os.services.vfs.vfs_boot_init.{
     vfs_ambient_allows, vfs_ambient_in_container,
     vfs_state_commit_root_nvfs, vfs_state_mount, vfs_state_unmount
 }
+use os.services.vfs.vfs_immutable_include_tree_state_v1.{
+    vfs_include_mutation_begin_v1, vfs_include_mutation_finish_v1
+}
 use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_write_file_text, g_vfs_dispatch_write_file_bytes,
     g_vfs_dispatch_delete_file, g_vfs_dispatch_file_exists
@@ -152,7 +155,7 @@ pub fn g_vfs_clear_selected_file():
 # is pure liability, so it was removed rather than gated. The cursor itself
 # (select/get/clear above) touches no filesystem and stays.
 
-pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
+fn _g_vfs_write_file_text_unsealed_v1(name: text, content: text) -> bool:
     """Write content as UTF-8 text to name via the mount table.
 
     Accepts bare FAT32 names or absolute paths.
@@ -189,7 +192,14 @@ pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
         return false
     g_vfs_dispatch_write_file_text(driver_r.unwrap(), relpath, content)
 
-pub fn g_vfs_write_file_bytes(name: text, data: [u8]) -> bool:
+pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
+    val ticket = vfs_include_mutation_begin_v1(g_vfs_root_path(name))
+    if ticket.is_err(): return false
+    val result = _g_vfs_write_file_text_unsealed_v1(name, content)
+    if not vfs_include_mutation_finish_v1(ticket.unwrap()): return false
+    result
+
+fn _g_vfs_write_file_bytes_unsealed_v1(name: text, data: [u8]) -> bool:
     """Write raw bytes to name via the mount table.
 
     Accepts bare FAT32 names or absolute paths.
@@ -222,7 +232,14 @@ pub fn g_vfs_write_file_bytes(name: text, data: [u8]) -> bool:
         return false
     g_vfs_dispatch_write_file_bytes(driver_r.unwrap(), relpath, data)
 
-pub fn g_vfs_delete_file(name: text) -> bool:
+pub fn g_vfs_write_file_bytes(name: text, data: [u8]) -> bool:
+    val ticket = vfs_include_mutation_begin_v1(g_vfs_root_path(name))
+    if ticket.is_err(): return false
+    val result = _g_vfs_write_file_bytes_unsealed_v1(name, data)
+    if not vfs_include_mutation_finish_v1(ticket.unwrap()): return false
+    result
+
+fn _g_vfs_delete_file_unsealed_v1(name: text) -> bool:
     """Delete a file by name via the mount table.
 
     Accepts bare FAT32 names or absolute paths.
@@ -261,6 +278,13 @@ pub fn g_vfs_delete_file(name: text) -> bool:
     if driver_r.is_err():
         return false
     g_vfs_dispatch_delete_file(driver_r.unwrap(), relpath)
+
+pub fn g_vfs_delete_file(name: text) -> bool:
+    val ticket = vfs_include_mutation_begin_v1(g_vfs_root_path(name))
+    if ticket.is_err(): return false
+    val result = _g_vfs_delete_file_unsealed_v1(name)
+    if not vfs_include_mutation_finish_v1(ticket.unwrap()): return false
+    result
 
 pub fn g_vfs_readdir(path: text) -> [DirEntry]:
     """List directory contents via the global VFS manager. Returns [] on error."""
