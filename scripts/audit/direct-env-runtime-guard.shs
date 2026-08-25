@@ -30,6 +30,22 @@ esac
 
 FORBIDDEN_DIRECT_ENV_PROCESS_RE='extern fn rt_env_(get|cwd)[[:space:]]*\(|rt_env_(get|cwd)[[:space:]]*\(|extern fn rt_process_(run(_timeout|_bounded|_inherit)?|spawn_async|spawn_inherit|wait|is_running|is_alive|kill)[[:space:]]*\(|rt_process_(run(_timeout|_bounded|_inherit)?|spawn_async|spawn_inherit|wait|is_running|is_alive|kill)[[:space:]]*\(|^(use|import|from|export[[:space:]]+use)[[:space:]].*rt_env_(get|cwd)([^[:alnum:]_]|$)|^(use|import|from|export[[:space:]]+use)[[:space:]].*rt_process_(run(_timeout|_bounded|_inherit)?|spawn_async|spawn_inherit|wait|is_running|is_alive|kill)([^[:alnum:]_]|$)'
 
+print_remediation() {
+    cat <<'EOF'
+Fix: replace leaf runtime calls with canonical facades:
+  rt_env_get / rt_env_cwd -> app.io.env_ops.{env_get,cwd}
+  run/spawn/wait/kill     -> app.io.process_ops
+  rt_process_is_alive     -> app.io.process_env_ops.{process_is_alive}
+Keep raw rt_* declarations only in the designated owner modules listed by this guard.
+Candidate/auto-fix preview for the supported std.io_runtime subset
+(rt_env_get, rt_process_run, rt_process_run_timeout, rt_process_is_running):
+  sh scripts/spipe/rt_migration_cycle.shs --dry-run
+The dry-run does not mutate. Review its candidates before running the migration
+cycle without --dry-run, which edits and commits selected files. Unsupported or
+ambiguous sites require manual facade selection.
+EOF
+}
+
 self_test() {
     tmp_dir="${TMPDIR:-/tmp}/direct-env-runtime-guard.$$"
     mkdir -p "$tmp_dir"
@@ -70,6 +86,35 @@ self_test() {
         echo "STATUS: FAIL direct-env-runtime-guard self-test env handle owner rejected" >&2
         exit 1
     fi
+    remediation="$(print_remediation)"
+    printf '%s\n' "$remediation" | grep -F 'rt_env_get / rt_env_cwd -> app.io.env_ops.{env_get,cwd}' >/dev/null || {
+        echo "STATUS: FAIL direct-env-runtime-guard self-test env remediation missing" >&2
+        exit 1
+    }
+    printf '%s\n' "$remediation" | grep -F 'run/spawn/wait/kill     -> app.io.process_ops' >/dev/null || {
+        echo "STATUS: FAIL direct-env-runtime-guard self-test remediation facade missing" >&2
+        exit 1
+    }
+    printf '%s\n' "$remediation" | grep -F 'rt_process_is_alive     -> app.io.process_env_ops.{process_is_alive}' >/dev/null || {
+        echo "STATUS: FAIL direct-env-runtime-guard self-test is-alive facade missing" >&2
+        exit 1
+    }
+    printf '%s\n' "$remediation" | grep -F '(rt_env_get, rt_process_run, rt_process_run_timeout, rt_process_is_running)' >/dev/null || {
+        echo "STATUS: FAIL direct-env-runtime-guard self-test auto-fix scope missing" >&2
+        exit 1
+    }
+    printf '%s\n' "$remediation" | grep -F 'rt_migration_cycle.shs --dry-run' >/dev/null || {
+        echo "STATUS: FAIL direct-env-runtime-guard self-test remediation auto-fix preview missing" >&2
+        exit 1
+    }
+    printf '%s\n' "$remediation" | grep -F 'The dry-run does not mutate.' >/dev/null || {
+        echo "STATUS: FAIL direct-env-runtime-guard self-test dry-run safety missing" >&2
+        exit 1
+    }
+    printf '%s\n' "$remediation" | grep -F 'which edits and commits selected files.' >/dev/null || {
+        echo "STATUS: FAIL direct-env-runtime-guard self-test mutation warning missing" >&2
+        exit 1
+    }
 
     echo "STATUS: PASS direct-env-runtime-guard self-test"
 }
@@ -130,6 +175,7 @@ rm -f /tmp/direct-env-runtime-guard.$$
 
 if [ -n "$failures" ]; then
     printf '%s' "$failures" >&2
+    print_remediation >&2
     echo "STATUS: FAIL direct env/process runtime call outside owners" >&2
     exit 1
 fi
