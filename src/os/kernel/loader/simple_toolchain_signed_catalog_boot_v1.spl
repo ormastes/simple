@@ -26,7 +26,9 @@ use os.kernel.loader.simple_toolchain_filesystem_receipt_caller_v1.{
     simple_toolchain_filesystem_launch_and_receipt_v1}
 use os.kernel.loader.simple_toolchain_terminal_receipt_owner_v1.{
     SimpleToolchainTerminalReceiptV1}
-use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
+use os.kernel.loader.spawn_recipes.{
+    SPAWN_RECIPE_APP_LAUNCHER, spawn_recipe_seed_parent_caps
+}
 use os.services.vfs.vfs_boot_state.{
     vfs_state_mount_table_owner_handle_v1,
     vfs_state_mount_table_lease_begin_v1,
@@ -38,8 +40,10 @@ pub struct SimpleToolchainSignedCatalogBootResultV1:
     launched: bool
     reason: text
     receipt: SimpleToolchainTerminalReceiptV1?
+    scheduler: Scheduler
 
 fn _result_v1(
+    scheduler: Scheduler,
     present: bool,
     launched: bool,
     reason: text,
@@ -47,7 +51,7 @@ fn _result_v1(
 ) -> SimpleToolchainSignedCatalogBootResultV1:
     SimpleToolchainSignedCatalogBootResultV1(
         catalog_present: present, launched: launched,
-        reason: reason, receipt: receipt)
+        reason: reason, receipt: receipt, scheduler: scheduler)
 
 fn _tool_paths_v1() -> [text]:
     ["/sys/apps/simple_interpreter.smf",
@@ -117,36 +121,36 @@ pub(package) fn simple_toolchain_signed_catalog_boot_launch_v1(
 ) -> SimpleToolchainSignedCatalogBootResultV1:
     """Run interpreter, compiler, and loader from three signed FS records."""
     if not simple_toolchain_signed_catalog_available_v1():
-        return _result_v1(false, false, "signed-toolchain-catalog-absent")
+        return _result_v1(scheduler, false, false, "signed-toolchain-catalog-absent")
     if not _toolchain_catalog_triplet_bound_v1():
-        return _result_v1(
+        return _result_v1(scheduler,
             true, false, "signed-toolchain-catalog-triplet-mismatch")
     if caller <= 0:
-        return _result_v1(true, false, "invalid-parent-task")
+        return _result_v1(scheduler, true, false, "invalid-parent-task")
     if not executable_authority_owner_valid(authorities):
-        return _result_v1(true, false, "authority-owner-unavailable")
+        return _result_v1(scheduler, true, false, "authority-owner-unavailable")
     val plan = simple_toolchain_filesystem_launch_plan_v1(
         source_path, artifact_path)
     if plan.is_err():
-        return _result_v1(true, false, plan.unwrap_err())
+        return _result_v1(scheduler, true, false, plan.unwrap_err())
     val owner = vfs_state_mount_table_owner_handle_v1()
-    if not owner.?: return _result_v1(true, false, "vfs-owner-unavailable")
+    if not owner.?: return _result_v1(scheduler, true, false, "vfs-owner-unavailable")
     val leased = vfs_state_mount_table_lease_begin_v1(owner.unwrap())
-    if not leased.?: return _result_v1(true, false, "vfs-owner-busy")
+    if not leased.?: return _result_v1(scheduler, true, false, "vfs-owner-busy")
     var lease = leased.unwrap()
     val paths = _tool_paths_v1()
     val interpreter = _prepare_v1(
         lease.table, authorities, caller, paths[0])
     if interpreter.is_err():
         val restored = vfs_state_mount_table_lease_restore_v1(lease)
-        return _result_v1(true, false,
+        return _result_v1(scheduler, true, false,
             if restored: "interpreter-admission-failed" else: "vfs-restore-failed")
     val compiler = _prepare_v1(
         lease.table, authorities, caller, paths[1])
     if compiler.is_err():
         val retired = _revoke_v1(lease.table, interpreter.unwrap())
         val restored = vfs_state_mount_table_lease_restore_v1(lease)
-        return _result_v1(true, false,
+        return _result_v1(scheduler, true, false,
             if retired and restored: "compiler-admission-failed"
             else: "toolchain-cleanup-indeterminate")
     val loader = _prepare_v1(
@@ -155,18 +159,27 @@ pub(package) fn simple_toolchain_signed_catalog_boot_launch_v1(
         val interpreter_retired = _revoke_v1(lease.table, interpreter.unwrap())
         val compiler_retired = _revoke_v1(lease.table, compiler.unwrap())
         val restored = vfs_state_mount_table_lease_restore_v1(lease)
-        return _result_v1(true, false,
+        return _result_v1(scheduler, true, false,
             if interpreter_retired and compiler_retired and restored:
                 "loader-admission-failed"
             else:
                 "toolchain-cleanup-indeterminate")
     val receipt = simple_toolchain_filesystem_launch_and_receipt_v1(
-        scheduler, lease.table, plan.unwrap(), interpreter.unwrap(),
+        scheduler,
+        spawn_recipe_seed_parent_caps(
+            SPAWN_RECIPE_APP_LAUNCHER, caller.to_u64()),
+        lease.table, plan.unwrap(), interpreter.unwrap(),
         compiler.unwrap(), loader.unwrap())
     val restored = vfs_state_mount_table_lease_restore_v1(lease)
     if not restored:
-        return _result_v1(true, false, "vfs-restore-failed")
+        val restore_scheduler = if receipt.is_ok():
+            receipt.unwrap().scheduler
+        else:
+            receipt.unwrap_err().scheduler
+        return _result_v1(
+            restore_scheduler, true, false, "vfs-restore-failed")
     if receipt.is_err():
-        return _result_v1(true, false, receipt.unwrap_err())
+        val failed = receipt.unwrap_err()
+        return _result_v1(failed.scheduler, true, false, failed.reason)
     val accepted = receipt.unwrap()
-    _result_v1(true, true, "", Some(accepted))
+    _result_v1(accepted.scheduler, true, true, "", Some(accepted.receipt))

@@ -12,6 +12,7 @@ attaches their bounded identities to the consume-once scheduler observation.
 
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
     AuthenticatedFsExecSubmissionV1
 }
@@ -24,17 +25,35 @@ use os.kernel.loader.simple_toolchain_terminal_receipt_owner_v1.{
     simple_toolchain_terminal_receipt_consume_once_v1
 }
 
+pub(package) struct SimpleToolchainFilesystemReceiptResultV1:
+    receipt: SimpleToolchainTerminalReceiptV1
+    scheduler: Scheduler
+
+pub(package) struct SimpleToolchainFilesystemReceiptErrorV1:
+    reason: text
+    scheduler: Scheduler
+
 pub(package) fn simple_toolchain_filesystem_launch_and_receipt_v1(
     scheduler: Scheduler,
+    caller_caps: CapabilitySet,
     table: MountTable,
     plan: SimpleToolchainFilesystemLaunchPlanV1,
     interpreter_submission: AuthenticatedFsExecSubmissionV1,
     compiler_submission: AuthenticatedFsExecSubmissionV1,
     loader_submission: AuthenticatedFsExecSubmissionV1
-) -> Result<SimpleToolchainTerminalReceiptV1, text>:
+) -> Result<SimpleToolchainFilesystemReceiptResultV1,
+            SimpleToolchainFilesystemReceiptErrorV1>:
     val launched = simple_toolchain_filesystem_launch_authenticated_v1(
-        scheduler, table, plan, interpreter_submission,
+        scheduler, caller_caps, table, plan, interpreter_submission,
         compiler_submission, loader_submission)
-    if launched.is_err(): return Err(launched.unwrap_err())
-    simple_toolchain_terminal_receipt_consume_once_v1(
-        plan, launched.unwrap())
+    if launched.is_err():
+        val failed = launched.unwrap_err()
+        return Err(SimpleToolchainFilesystemReceiptErrorV1(
+            reason: failed.reason, scheduler: failed.scheduler))
+    val launch = launched.unwrap()
+    val receipt = simple_toolchain_terminal_receipt_consume_once_v1(plan, launch)
+    if receipt.is_err():
+        return Err(SimpleToolchainFilesystemReceiptErrorV1(
+            reason: receipt.unwrap_err(), scheduler: launch.scheduler))
+    Ok(SimpleToolchainFilesystemReceiptResultV1(
+        receipt: receipt.unwrap(), scheduler: launch.scheduler))

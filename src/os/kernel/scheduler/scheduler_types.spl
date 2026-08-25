@@ -32,7 +32,7 @@ use os.kernel.types.x86_32_mapping_handle_v1.{
 }
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use os.kernel.scheduler.scheduler_capability_snapshot_lease_v1.{
-    SchedulerCapabilitySnapshotLeaseV1,
+    SchedulerCurrentExecutionSnapshotV1,
     scheduler_capability_snapshot_issue_v1
 }
 export use os.kernel.scheduler.scheduler_executable_adoption_state.{
@@ -762,11 +762,8 @@ pub class Scheduler:
     green_parallelism_state: GreenCarrierParallelismState
 
 impl Scheduler:
-    pub(package) fn current_capability_snapshot_lease_v1(
-        task_id: u64,
-        lifecycle_generation: u64,
-        exec_generation: u64
-    ) -> SchedulerCapabilitySnapshotLeaseV1?:
+    pub fn current_execution_snapshot_v1(
+    ) -> SchedulerCurrentExecutionSnapshotV1?:
         """Snapshot the exact current execution while the Scheduler owns its TCB.
 
         Lock order: caller holds the exclusive Scheduler/TCB owner first; this
@@ -778,9 +775,9 @@ impl Scheduler:
         val maybe_task = self.tasks[slot]
         if maybe_task == nil: return nil
         val task = maybe_task.unwrap()
-        if (task.id.id != self.current.id or task.id.id != task_id or
-            task.lifecycle_generation != lifecycle_generation or
-            task.exec_generation != exec_generation):
+        if (task.id.id != self.current.id or
+            task.lifecycle_generation == 0u64 or
+            task.exec_generation == 0u64):
             return nil
         val admitted = match task.state:
             case TaskState.Ready: true
@@ -789,9 +786,16 @@ impl Scheduler:
             case TaskState.PreparingExit: false
             case TaskState.Zombie: false
         if not admitted: return nil
-        scheduler_capability_snapshot_issue_v1(
+        val lease = scheduler_capability_snapshot_issue_v1(
             task.id.id, task.lifecycle_generation, task.exec_generation,
             task.capabilities)
+        if not lease.?: return nil
+        Some(SchedulerCurrentExecutionSnapshotV1(
+            task_id: task.id.id,
+            lifecycle_generation: task.lifecycle_generation,
+            exec_generation: task.exec_generation,
+            admitted: true,
+            lease: lease.unwrap()))
 
     pub(package) fn current_task_admission_v1() -> SchedulerCurrentTaskAdmissionV1?:
         val slot = self.current_slot

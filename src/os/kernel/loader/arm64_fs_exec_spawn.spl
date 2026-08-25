@@ -125,13 +125,14 @@ pub fn arm64_fs_exec_spawn_authenticated_v1(
     consumer: ExecutableLoadConsumerV1,
     entry_point: u64,
     caller: i64,
+    caller_caps: CapabilitySet,
     path: text,
     recipe: i64
 ) -> i64:
     """Compatibility launch with path as argv[0] and no environment."""
     arm64_fs_exec_spawn_authenticated_with_launch_v1(
         scheduler, table, authorities, token, consumer, entry_point,
-        caller, path, [path], [], recipe).exit_code
+        caller, caller_caps, path, [path], [], recipe).exit_code
 
 pub fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
     scheduler: Scheduler,
@@ -141,6 +142,7 @@ pub fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
     consumer: ExecutableLoadConsumerV1,
     entry_point: u64,
     caller: i64,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text],
     envp: [text],
@@ -149,10 +151,10 @@ pub fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
     """Consume authority, execute EL0, and return scheduler-owned evidence."""
     val prepared = fs_exec_adopt_authenticated_with_launch_v1(
         scheduler, table, authorities, token, consumer, entry_point,
-        caller, path, argv, envp, recipe)
+        caller, caller_caps, path, argv, envp, recipe)
     if prepared.pid <= 0:
         return FsExecAuthenticatedRunResultV1(
-            exit_code: prepared.pid, evidence: nil)
+            exit_code: prepared.pid, evidence: nil, scheduler: prepared.scheduler)
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
     val child = TaskId(id: prepared.pid.to_u64())
     val exit_code = dispatch_fs_exec_user_handoff(
@@ -165,13 +167,13 @@ pub fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
        wait_collect_result_pid(collected) != child.id or
        wait_collect_result_status(collected) != exit_code.to_i32():
         _ = scheduler_execution_discard_terminal_v2(child.id)
-        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
     val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
         child.id, path, argv)
     if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
         _ = scheduler_execution_discard_terminal_v2(child.id)
-        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil)
-    FsExecAuthenticatedRunResultV1(exit_code: exit_code, evidence: delivered.token)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
+    FsExecAuthenticatedRunResultV1(exit_code: exit_code, evidence: delivered.token, scheduler: owner)
 
 pub fn arm64_fs_exec_load_and_launch_hello_world() -> i64:
     """Load `/sys/apps/hello_world.smf` and emit genuine load + launch proofs.

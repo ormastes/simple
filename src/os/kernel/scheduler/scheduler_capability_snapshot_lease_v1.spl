@@ -20,6 +20,49 @@ pub(package) struct SchedulerPinnedCapabilitySnapshotV1:
     # CapabilitySet and no registry locator crosses the scheduler package.
     _concrete_tokens: [CapabilityToken]
 
+pub struct SchedulerCurrentExecutionSnapshotV1:
+    """Atomic Scheduler view used by authenticated syscall ingress.
+
+    The coordinates and pledged capability lease are copied from one current
+    TCB observation.  Consumers cannot substitute independently sampled task
+    identity or generation values.
+    """
+    task_id: u64
+    lifecycle_generation: u64
+    exec_generation: u64
+    admitted: bool
+    lease: SchedulerCapabilitySnapshotLeaseV1
+
+pub fn scheduler_current_execution_snapshot_task_id_v1(
+    snapshot: SchedulerCurrentExecutionSnapshotV1
+) -> u64:
+    snapshot.task_id
+
+pub fn scheduler_current_execution_snapshot_lifecycle_generation_v1(
+    snapshot: SchedulerCurrentExecutionSnapshotV1
+) -> u64:
+    snapshot.lifecycle_generation
+
+pub fn scheduler_current_execution_snapshot_exec_generation_v1(
+    snapshot: SchedulerCurrentExecutionSnapshotV1
+) -> u64:
+    snapshot.exec_generation
+
+pub fn scheduler_current_execution_snapshot_admitted_v1(
+    snapshot: SchedulerCurrentExecutionSnapshotV1
+) -> bool:
+    snapshot.admitted
+
+pub(package) fn scheduler_current_execution_snapshot_lease_v1(
+    snapshot: SchedulerCurrentExecutionSnapshotV1
+) -> SchedulerCapabilitySnapshotLeaseV1:
+    snapshot.lease
+
+pub(package) fn scheduler_pinned_capability_snapshot_caps_v1(
+    snapshot: SchedulerPinnedCapabilitySnapshotV1
+) -> CapabilitySet:
+    CapabilitySet(caps: snapshot._concrete_tokens, is_pledged: true)
+
 enum _SnapshotSlotStateV1:
     Free
     Active
@@ -155,6 +198,29 @@ pub(package) fn scheduler_capability_snapshot_consume_once_v1(
     if not _snapshot_unlock_v1(): return nil
     Some(snapshot)
 
+pub(package) fn scheduler_capability_snapshot_validate_v1(
+    lease: SchedulerCapabilitySnapshotLeaseV1,
+    task_id: u64,
+    lifecycle_generation: u64,
+    exec_generation: u64
+) -> bool:
+    """Validate exact live coordinates without consuming the one-shot lease."""
+    if (task_id == 0u64 or lifecycle_generation == 0u64 or
+        exec_generation == 0u64 or _snapshot_mutex_v1 <= 0 or
+        _snapshot_poisoned_v1 or not mutex_raw_lock(_snapshot_mutex_v1)):
+        return false
+    if lease._slot < 0 or lease._slot >= _snapshot_slots_v1.len():
+        _ = _snapshot_unlock_v1()
+        return false
+    val slot = _snapshot_slots_v1[lease._slot]
+    val valid = slot.state == _SnapshotSlotStateV1.Active and
+        slot.generation == lease._generation and slot.nonce == lease._nonce and
+        slot.task_id == task_id and
+        slot.lifecycle_generation == lifecycle_generation and
+        slot.exec_generation == exec_generation
+    if not _snapshot_unlock_v1(): return false
+    valid
+
 pub(package) fn scheduler_capability_snapshot_retire_v1(
     lease: SchedulerCapabilitySnapshotLeaseV1,
     task_id: u64,
@@ -190,7 +256,15 @@ pub(package) fn scheduler_capability_snapshot_retire_v1(
 
 export SchedulerCapabilitySnapshotLeaseV1
 export SchedulerPinnedCapabilitySnapshotV1
+export SchedulerCurrentExecutionSnapshotV1
+export scheduler_current_execution_snapshot_task_id_v1
+export scheduler_current_execution_snapshot_lifecycle_generation_v1
+export scheduler_current_execution_snapshot_exec_generation_v1
+export scheduler_current_execution_snapshot_admitted_v1
+export scheduler_current_execution_snapshot_lease_v1
+export scheduler_pinned_capability_snapshot_caps_v1
 export scheduler_capability_snapshot_max_leases_v1
 export scheduler_capability_snapshot_issue_v1
 export scheduler_capability_snapshot_consume_once_v1
+export scheduler_capability_snapshot_validate_v1
 export scheduler_capability_snapshot_retire_v1

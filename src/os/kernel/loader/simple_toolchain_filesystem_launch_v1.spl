@@ -8,6 +8,7 @@ opens executable bytes, or manufactures authority from a pathname.
 
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerExecutionEvidenceTokenV1,
     scheduler_execution_evidence_consume_once_v2
@@ -34,6 +35,18 @@ pub(package) struct SimpleToolchainFilesystemLaunchEvidenceV1:
     interpreter: SchedulerExecutionEvidenceTokenV1
     compiler: SchedulerExecutionEvidenceTokenV1
     loader: SchedulerExecutionEvidenceTokenV1
+    scheduler: Scheduler
+
+pub(package) struct SimpleToolchainFilesystemLaunchErrorV1:
+    reason: text
+    scheduler: Scheduler
+
+fn _launch_error_v1(
+    reason: text, scheduler: Scheduler
+) -> Result<SimpleToolchainFilesystemLaunchEvidenceV1,
+            SimpleToolchainFilesystemLaunchErrorV1>:
+    Err(SimpleToolchainFilesystemLaunchErrorV1(
+        reason: reason, scheduler: scheduler))
 
 fn _canonical_path_v1(path: text) -> bool:
     path.len() > 1 and path.len() <= SIMPLE_TOOLCHAIN_FILESYSTEM_PATH_MAX_V1 and
@@ -84,12 +97,14 @@ fn _cancel_binding_v1(
 
 pub(package) fn simple_toolchain_filesystem_launch_authenticated_v1(
     scheduler: Scheduler,
+    caller_caps: CapabilitySet,
     table: MountTable,
     plan: SimpleToolchainFilesystemLaunchPlanV1,
     interpreter_submission: AuthenticatedFsExecSubmissionV1,
     compiler_submission: AuthenticatedFsExecSubmissionV1,
     loader_submission: AuthenticatedFsExecSubmissionV1
-) -> Result<SimpleToolchainFilesystemLaunchEvidenceV1, text>:
+) -> Result<SimpleToolchainFilesystemLaunchEvidenceV1,
+            SimpleToolchainFilesystemLaunchErrorV1>:
     """Launch an exact interpret, compile, then load sequence.
 
     The returned scheduler tokens remain consume-once authority.  A loader
@@ -107,8 +122,9 @@ pub(package) fn simple_toolchain_filesystem_launch_authenticated_v1(
         val compiler_retired = _revoke_unused_v1(table, compiler_submission)
         val loader_retired = _revoke_unused_v1(table, loader_submission)
         if not interpreter_retired or not compiler_retired or not loader_retired:
-            return Err("simple-interpreter-binding-cleanup-indeterminate")
-        return Err(interpreter_source.unwrap_err())
+            return _launch_error_v1(
+                "simple-interpreter-binding-cleanup-indeterminate", scheduler)
+        return _launch_error_v1(interpreter_source.unwrap_err(), scheduler)
 
     # Reserve both source snapshots before either executable runs.  Acquiring
     # the compiler lease only after interpretation would leave a pathname
@@ -124,11 +140,12 @@ pub(package) fn simple_toolchain_filesystem_launch_authenticated_v1(
         val loader_retired = _revoke_unused_v1(table, loader_submission)
         if not interpreter_binding_retired or not interpreter_retired or
            not compiler_retired or not loader_retired:
-            return Err("simple-source-binding-cleanup-indeterminate")
-        return Err(compiler_source.unwrap_err())
+            return _launch_error_v1(
+                "simple-source-binding-cleanup-indeterminate", scheduler)
+        return _launch_error_v1(compiler_source.unwrap_err(), scheduler)
 
     val interpreted = authenticated_fs_exec_submit_with_argv_file_v1(
-        scheduler, table, interpreter_submission,
+        scheduler, table, interpreter_submission, caller_caps,
         interpreter_path, [plan.source_path], interpreter_source.unwrap())
     if interpreted.exit_code != 0 or not interpreted.evidence.?:
         val compiler_binding_retired = _cancel_binding_v1(
@@ -138,11 +155,13 @@ pub(package) fn simple_toolchain_filesystem_launch_authenticated_v1(
         val loader_retired = _revoke_unused_v1(table, loader_submission)
         if interpreted.cleanup_indeterminate or not compiler_binding_retired or
            not interpreted_retired or not compiler_retired or not loader_retired:
-            return Err("simple-interpreter-cleanup-indeterminate")
-        return Err("simple-interpreter-authenticated-launch-failed")
+            return _launch_error_v1(
+                "simple-interpreter-cleanup-indeterminate", interpreted.scheduler)
+        return _launch_error_v1(
+            "simple-interpreter-authenticated-launch-failed", interpreted.scheduler)
 
     val compiled = authenticated_fs_exec_submit_with_argv_file_v1(
-        scheduler, table, compiler_submission,
+        interpreted.scheduler, table, compiler_submission, caller_caps,
         compiler_path, [plan.source_path, "--output", plan.artifact_path],
         compiler_source.unwrap())
     if compiled.exit_code != 0 or not compiled.evidence.?:
@@ -151,8 +170,10 @@ pub(package) fn simple_toolchain_filesystem_launch_authenticated_v1(
         val loader_retired = _revoke_unused_v1(table, loader_submission)
         if compiled.cleanup_indeterminate or not interpreted_retired or
            not compiled_retired or not loader_retired:
-            return Err("simple-compiler-cleanup-indeterminate")
-        return Err("simple-compiler-authenticated-launch-failed")
+            return _launch_error_v1(
+                "simple-compiler-cleanup-indeterminate", compiled.scheduler)
+        return _launch_error_v1(
+            "simple-compiler-authenticated-launch-failed", compiled.scheduler)
 
     val loader_artifact = authenticated_argv_file_binding_acquire_v1(
         table, plan.artifact_path, SchedulerArgvFileRoleV1.ArtifactInput, 0)
@@ -161,10 +182,11 @@ pub(package) fn simple_toolchain_filesystem_launch_authenticated_v1(
         val compiled_retired = _consume_evidence_if_any_v1(compiled.evidence)
         val loader_retired = _revoke_unused_v1(table, loader_submission)
         if not interpreted_retired or not compiled_retired or not loader_retired:
-            return Err("simple-loader-binding-cleanup-indeterminate")
-        return Err(loader_artifact.unwrap_err())
+            return _launch_error_v1(
+                "simple-loader-binding-cleanup-indeterminate", compiled.scheduler)
+        return _launch_error_v1(loader_artifact.unwrap_err(), compiled.scheduler)
     val loaded = authenticated_fs_exec_submit_with_argv_file_v1(
-        scheduler, table, loader_submission,
+        compiled.scheduler, table, loader_submission, caller_caps,
         loader_path, [plan.artifact_path], loader_artifact.unwrap())
     if loaded.exit_code != 0 or not loaded.evidence.?:
         val interpreted_retired = _consume_evidence_if_any_v1(interpreted.evidence)
@@ -172,12 +194,15 @@ pub(package) fn simple_toolchain_filesystem_launch_authenticated_v1(
         val loaded_retired = _consume_evidence_if_any_v1(loaded.evidence)
         if loaded.cleanup_indeterminate or not interpreted_retired or
            not compiled_retired or not loaded_retired:
-            return Err("simple-loader-cleanup-indeterminate")
-        return Err("simple-loader-authenticated-launch-failed")
+            return _launch_error_v1(
+                "simple-loader-cleanup-indeterminate", loaded.scheduler)
+        return _launch_error_v1(
+            "simple-loader-authenticated-launch-failed", loaded.scheduler)
 
     Ok(SimpleToolchainFilesystemLaunchEvidenceV1(
         interpreter: interpreted.evidence.unwrap(),
         compiler: compiled.evidence.unwrap(),
-        loader: loaded.evidence.unwrap()))
+        loader: loaded.evidence.unwrap(),
+        scheduler: loaded.scheduler))
 
 export SIMPLE_TOOLCHAIN_FILESYSTEM_PATH_MAX_V1

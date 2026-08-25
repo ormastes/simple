@@ -38,6 +38,21 @@ use os.kernel.loader.executable_online_reattestation_owner_v1.{
     executable_online_reattest_open_binding_v1
 }
 use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.scheduler_capability_snapshot_lease_v1.{
+    SchedulerCurrentExecutionSnapshotV1,
+    SchedulerCapabilitySnapshotLeaseV1,
+    scheduler_current_execution_snapshot_task_id_v1,
+    scheduler_current_execution_snapshot_lifecycle_generation_v1,
+    scheduler_current_execution_snapshot_exec_generation_v1,
+    scheduler_current_execution_snapshot_admitted_v1,
+    scheduler_current_execution_snapshot_lease_v1,
+    scheduler_capability_snapshot_validate_v1,
+    scheduler_capability_snapshot_consume_once_v1,
+    scheduler_capability_snapshot_retire_v1,
+    scheduler_pinned_capability_snapshot_caps_v1
+}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerExecutionEvidenceTokenV1,
     scheduler_execution_attach_argv_file_bindings_v1,
@@ -313,6 +328,7 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
         scheduler: Scheduler,
         mut table: MountTable,
         caller: i64,
+        caller_caps: CapabilitySet,
         canonical_path: text,
         argv: [text],
         recipe: i64
@@ -321,15 +337,17 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
         if reserved.is_err():
             return AuthenticatedFsExecSubmissionResultV1(
                 exit_code: reserved.unwrap_err(), evidence: nil,
-                cleanup_indeterminate: false)
+                cleanup_indeterminate: false, scheduler: scheduler)
         val reservation = reserved.unwrap()
         val result = authenticated_fs_exec_submit_v1(
-            scheduler, table, reservation.submission, canonical_path, argv)
+            scheduler, table, reservation.submission, caller_caps,
+            canonical_path, argv)
         val retired = self.finish(reservation)
         AuthenticatedFsExecSubmissionResultV1(
             exit_code: result.exit_code,
             evidence: if retired: result.evidence else: nil,
-            cleanup_indeterminate: result.cleanup_indeterminate or not retired)
+            cleanup_indeterminate: result.cleanup_indeterminate or not retired,
+            scheduler: result.scheduler)
 
 # The checked-mutex capsule is the sole owner of these globals. No authority or
 # namespace object is constructed by module initialization: syscall submission
@@ -528,32 +546,81 @@ pub(package) fn authenticated_fs_exec_user_pre_admit_online_batch_v1(
     AuthenticatedFsExecOnlineBatchResultV1(
         ok: armed_count == count, armed_count: armed_count, reason: reason)
 
+pub struct AuthenticatedFsExecUserSyscallResultV1:
+    exit_code: i64
+    scheduler: Scheduler
+
+fn _authenticated_fs_exec_snapshot_retire_v1(
+    lease: SchedulerCapabilitySnapshotLeaseV1,
+    task_id: u64,
+    lifecycle_generation: u64,
+    exec_generation: u64
+) -> bool:
+    if scheduler_capability_snapshot_retire_v1(
+        lease, task_id, lifecycle_generation, exec_generation):
+        return true
+    _authenticated_fs_exec_user_quarantine_synchronized_v1()
+    false
+
+fn _authenticated_fs_exec_user_result_v1(
+    exit_code: i64, scheduler: Scheduler
+) -> AuthenticatedFsExecUserSyscallResultV1:
+    AuthenticatedFsExecUserSyscallResultV1(
+        exit_code: exit_code, scheduler: scheduler)
+
 pub fn authenticated_fs_exec_user_submit_syscall_v1(
     scheduler: Scheduler,
+    execution: SchedulerCurrentExecutionSnapshotV1,
     caller: i64,
     canonical_path: text,
     argv: [text],
     recipe: i64
-) -> i64:
+) -> AuthenticatedFsExecUserSyscallResultV1:
     """Serialized syscall ingress; returns an actual exit/error code, not pid.
 
     Authority remains in the loader globals above.  Absence of boot-owned table
     installation or of an exact caller/path/recipe admission is EACCES.
     """
+    val task_id = scheduler_current_execution_snapshot_task_id_v1(execution)
+    val lifecycle_generation =
+        scheduler_current_execution_snapshot_lifecycle_generation_v1(execution)
+    val exec_generation =
+        scheduler_current_execution_snapshot_exec_generation_v1(execution)
+    val snapshot_lease = scheduler_current_execution_snapshot_lease_v1(execution)
+    if (not scheduler_current_execution_snapshot_admitted_v1(execution) or
+        caller < 0 or caller.to_u64() != task_id):
+        val retired = _authenticated_fs_exec_snapshot_retire_v1(
+            snapshot_lease, task_id, lifecycle_generation, exec_generation)
+        return _authenticated_fs_exec_user_result_v1(
+            if retired: -13 else: -5, scheduler)
+    if not scheduler_capability_snapshot_validate_v1(
+        snapshot_lease, task_id, lifecycle_generation, exec_generation):
+        val retired = _authenticated_fs_exec_snapshot_retire_v1(
+            snapshot_lease, task_id, lifecycle_generation, exec_generation)
+        return _authenticated_fs_exec_user_result_v1(
+            if retired: -13 else: -5, scheduler)
     # Phase 1: acquire a unique generational loan from the canonical VFS owner,
     # then reserve the exact slot. A busy VFS cannot burn one-shot authority;
     # other VFS calls fail closed only after the loan is active.
     if not _authenticated_fs_exec_user_lock_v1():
-        return -5
+        _ = _authenticated_fs_exec_snapshot_retire_v1(
+            snapshot_lease, task_id, lifecycle_generation, exec_generation)
+        return _authenticated_fs_exec_user_result_v1(-5, scheduler)
     if not g_authenticated_fs_exec_user_service_v1.? or
         not g_authenticated_fs_exec_user_vfs_owner_v1.?:
         val _released = _authenticated_fs_exec_user_unlock_v1()
-        return -13
+        val retired = _authenticated_fs_exec_snapshot_retire_v1(
+            snapshot_lease, task_id, lifecycle_generation, exec_generation)
+        return _authenticated_fs_exec_user_result_v1(
+            if retired: -13 else: -5, scheduler)
     val lease_opt = vfs_state_mount_table_lease_begin_v1(
         g_authenticated_fs_exec_user_vfs_owner_v1.unwrap())
     if not lease_opt.?:
         val released = _authenticated_fs_exec_user_unlock_v1()
-        return if released: -16 else: -5
+        val retired = _authenticated_fs_exec_snapshot_retire_v1(
+            snapshot_lease, task_id, lifecycle_generation, exec_generation)
+        return _authenticated_fs_exec_user_result_v1(
+            if released and retired: -16 else: -5, scheduler)
     var lease = lease_opt.unwrap()
     var service = g_authenticated_fs_exec_user_service_v1.unwrap()
     val reserved = service.reserve(caller, canonical_path, argv, recipe)
@@ -562,34 +629,62 @@ pub fn authenticated_fs_exec_user_submit_syscall_v1(
         if not vfs_state_mount_table_lease_restore_v1(lease):
             g_authenticated_fs_exec_user_quarantined_v1 = true
             val _released = _authenticated_fs_exec_user_unlock_v1()
-            return -5
+            _ = _authenticated_fs_exec_snapshot_retire_v1(
+                snapshot_lease, task_id, lifecycle_generation, exec_generation)
+            return _authenticated_fs_exec_user_result_v1(-5, scheduler)
         val released = _authenticated_fs_exec_user_unlock_v1()
-        return if released: reserved.unwrap_err() else: -5
+        val retired = _authenticated_fs_exec_snapshot_retire_v1(
+            snapshot_lease, task_id, lifecycle_generation, exec_generation)
+        return _authenticated_fs_exec_user_result_v1(
+            if released and retired: reserved.unwrap_err() else: -5, scheduler)
+
+    # Burn caller authority only after the exact loader slot is reserved.
+    val reservation = reserved.unwrap()
+    val pinned = scheduler_capability_snapshot_consume_once_v1(
+        snapshot_lease, task_id, lifecycle_generation, exec_generation)
+    if not pinned.?:
+        val finished = service.finish(reservation)
+        g_authenticated_fs_exec_user_service_v1 = Some(service)
+        val restored = vfs_state_mount_table_lease_restore_v1(lease)
+        val released = _authenticated_fs_exec_user_unlock_v1()
+        return _authenticated_fs_exec_user_result_v1(
+            if finished and restored and released: -13 else: -5, scheduler)
+    val caller_caps =
+        scheduler_pinned_capability_snapshot_caps_v1(pinned.unwrap())
+    if exec_cap_check_caps(caller_caps, canonical_path) != 0:
+        val finished = service.finish(reservation)
+        g_authenticated_fs_exec_user_service_v1 = Some(service)
+        val restored = vfs_state_mount_table_lease_restore_v1(lease)
+        val released = _authenticated_fs_exec_user_unlock_v1()
+        return _authenticated_fs_exec_user_result_v1(
+            if finished and restored and released: -13 else: -5, scheduler)
     if not _authenticated_fs_exec_user_unlock_v1():
+        _ = service.finish(reservation)
+        g_authenticated_fs_exec_user_service_v1 = Some(service)
         _ = vfs_state_mount_table_lease_restore_v1(lease)
-        return -5
+        return _authenticated_fs_exec_user_result_v1(-5, scheduler)
 
     # Phase 2: architecture execution can block without holding a raw mutex.
-    val reservation = reserved.unwrap()
     val result = authenticated_fs_exec_submit_v1(
-        scheduler, lease.table, reservation.submission, canonical_path, argv)
+        scheduler, lease.table, reservation.submission, caller_caps,
+        canonical_path, argv)
 
     # Phase 3: restore canonical VFS ownership before touching broker state.
     if not vfs_state_mount_table_lease_restore_v1(lease):
         _authenticated_fs_exec_user_quarantine_synchronized_v1()
-        return -5
+        return _authenticated_fs_exec_user_result_v1(-5, result.scheduler)
     if not _authenticated_fs_exec_user_lock_v1():
-        return -5
+        return _authenticated_fs_exec_user_result_v1(-5, result.scheduler)
     if not g_authenticated_fs_exec_user_service_v1.?:
         g_authenticated_fs_exec_user_quarantined_v1 = true
         val _released = _authenticated_fs_exec_user_unlock_v1()
-        return -5
+        return _authenticated_fs_exec_user_result_v1(-5, result.scheduler)
     var completed_service = g_authenticated_fs_exec_user_service_v1.unwrap()
     val retired = completed_service.finish(reservation)
     g_authenticated_fs_exec_user_service_v1 = Some(completed_service)
     if not retired or not _authenticated_fs_exec_user_unlock_v1():
-        return -5
-    result.exit_code
+        return _authenticated_fs_exec_user_result_v1(-5, result.scheduler)
+    _authenticated_fs_exec_user_result_v1(result.exit_code, result.scheduler)
 
 @cfg(x86_64)
 use os.kernel.loader.x86_64_fs_exec_spawn.{
@@ -628,6 +723,7 @@ pub(package) struct AuthenticatedFsExecSubmissionResultV1:
     exit_code: i64
     evidence: SchedulerExecutionEvidenceTokenV1?
     cleanup_indeterminate: bool
+    scheduler: Scheduler
 
 pub(package) fn authenticated_fs_exec_prepare_installed_artifact_online_v1(
     mut table: MountTable,
@@ -786,25 +882,28 @@ pub(package) fn authenticated_fs_exec_submit_with_argv_file_v1(
     scheduler: Scheduler,
     mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text],
     argv_file: AuthenticatedArgvFileLeaseV1
 ) -> AuthenticatedFsExecSubmissionResultV1:
     """Run while one owner-issued argv snapshot remains generation-live."""
     val result = authenticated_fs_exec_submit_v1(
-        scheduler, table, submission, path, argv)
+        scheduler, table, submission, caller_caps, path, argv)
     val binding = authenticated_argv_file_binding_finish_v1(table, argv_file)
     if result.exit_code != 0 or not result.evidence.?:
         return AuthenticatedFsExecSubmissionResultV1(
             exit_code: result.exit_code, evidence: result.evidence,
-            cleanup_indeterminate: result.cleanup_indeterminate or binding.is_err())
+            cleanup_indeterminate: result.cleanup_indeterminate or binding.is_err(),
+            scheduler: result.scheduler)
     if binding.is_err() or not scheduler_execution_attach_argv_file_bindings_v1(
         result.evidence.unwrap(), [binding.unwrap()]):
         val retired = scheduler_execution_evidence_consume_once_v2(
             result.evidence.unwrap()).is_some()
         return AuthenticatedFsExecSubmissionResultV1(
             exit_code: -10, evidence: nil,
-            cleanup_indeterminate: binding.is_err() or not retired)
+            cleanup_indeterminate: binding.is_err() or not retired,
+            scheduler: result.scheduler)
     result
 
 fn _retire_failed_submission_v1(
@@ -828,19 +927,21 @@ fn _retire_failed_submission_v1(
         true
     AuthenticatedFsExecSubmissionResultV1(
         exit_code: result.exit_code, evidence: result.evidence,
-        cleanup_indeterminate: failed and not retired)
+        cleanup_indeterminate: failed and not retired,
+        scheduler: result.scheduler)
 
 @cfg(x86_64)
 pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
     mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text]
 ) -> AuthenticatedFsExecSubmissionResultV1:
     val result = x86_64_fs_exec_spawn_authenticated_with_launch_v1(
         scheduler, table, submission.authorities, submission.token,
-        submission.consumer, submission.entry_point, submission.caller,
+        submission.consumer, submission.entry_point, submission.caller, caller_caps,
         path, argv, [], submission.recipe)
     _retire_failed_submission_v1(table, submission, result)
 
@@ -849,12 +950,13 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
     mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text]
 ) -> AuthenticatedFsExecSubmissionResultV1:
     val result = arm64_fs_exec_spawn_authenticated_with_launch_v1(
         scheduler, table, submission.authorities, submission.token,
-        submission.consumer, submission.entry_point, submission.caller,
+        submission.consumer, submission.entry_point, submission.caller, caller_caps,
         path, argv, [], submission.recipe)
     _retire_failed_submission_v1(table, submission, result)
 
@@ -863,29 +965,32 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
     mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text]
 ) -> AuthenticatedFsExecSubmissionResultV1:
     val result = riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         scheduler, table, submission.authorities, submission.token,
-        submission.consumer, submission.entry_point, submission.caller,
+        submission.consumer, submission.entry_point, submission.caller, caller_caps,
         path, argv, [], submission.recipe)
     _retire_failed_submission_v1(
         table, submission,
         FsExecAuthenticatedRunResultV1(
-            exit_code: result.exit_code, evidence: result.evidence))
+            exit_code: result.exit_code, evidence: result.evidence,
+            scheduler: result.scheduler))
 
 @cfg(x86)
 pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
     mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text]
 ) -> AuthenticatedFsExecSubmissionResultV1:
     val result = x86_32_fs_exec_spawn_authenticated_with_launch_v1(
         scheduler, table, submission.authorities, submission.token,
-        submission.consumer, submission.entry_point, submission.caller,
+        submission.consumer, submission.entry_point, submission.caller, caller_caps,
         path, argv, [], submission.recipe)
     _retire_failed_submission_v1(table, submission, result)
 
@@ -894,12 +999,13 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
     mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text]
 ) -> AuthenticatedFsExecSubmissionResultV1:
     val result = arm32_fs_exec_spawn_authenticated_with_launch_v1(
         scheduler, table, submission.authorities, submission.token,
-        submission.consumer, submission.entry_point, submission.caller,
+        submission.consumer, submission.entry_point, submission.caller, caller_caps,
         path, argv, [], submission.recipe)
     _retire_failed_submission_v1(table, submission, result)
 
@@ -908,11 +1014,12 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
     mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text]
 ) -> AuthenticatedFsExecSubmissionResultV1:
     val result = riscv32_fs_exec_spawn_authenticated_with_launch_v1(
         scheduler, table, submission.authorities, submission.token,
-        submission.consumer, submission.entry_point, submission.caller,
+        submission.consumer, submission.entry_point, submission.caller, caller_caps,
         path, argv, [], submission.recipe)
     _retire_failed_submission_v1(table, submission, result)

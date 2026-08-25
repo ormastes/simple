@@ -6,7 +6,7 @@
 # optional live handoff hook.
 
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.loader.cap_exec_gate.{exec_cap_check}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check, exec_cap_check_caps}
 use os.kernel.loader.byte_utils.{byte_len}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{
@@ -88,6 +88,7 @@ pub struct FsExecAuthenticatedRunResultV1:
     """Terminal status plus one generation-bound scheduler evidence lease."""
     exit_code: i64
     evidence: SchedulerExecutionEvidenceTokenV1?
+    scheduler: Scheduler
 
 fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
     """Create the one-CPU scheduler state fs-exec needs without importing the full scheduler hub."""
@@ -184,6 +185,7 @@ pub fn fs_exec_adopt_authenticated_with_launch_v1(
     consumer: ExecutableLoadConsumerV1,
     entry_point: u64,
     caller: i64,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text],
     envp: [text],
@@ -218,14 +220,13 @@ pub fn fs_exec_adopt_authenticated_with_launch_v1(
     if not spawn_recipe_launch_contract_valid(
         recipe, launch.path, launch.argv, launch.envp):
         return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
-    val gate = exec_cap_check(caller, launch.path)
+    val gate = exec_cap_check_caps(caller_caps, launch.path)
     if gate != 0:
         return FsExecPrepareResult(scheduler: scheduler, pid: gate as i64, entry: 0)
     val allowed = spawn_authority_check_spawn(caller, recipe)
     if allowed != 0:
         return FsExecPrepareResult(scheduler: scheduler, pid: allowed as i64, entry: 0)
-    val caps = spawn_authority_spawn_caps(
-        caller, recipe, _fs_exec_parent_caps(caller, recipe))
+    val caps = spawn_authority_spawn_caps(caller, recipe, caller_caps)
     var owner = scheduler
     val adopted: SchedulerExecutableAdoptionResultV1 =
         owner.adopt_authenticated_executable_pid_with_launch_v1(
@@ -250,7 +251,7 @@ pub fn fs_exec_adopt_authenticated_v1(
     """Compatibility entrypoint with path as argv[0] and an empty environment."""
     fs_exec_adopt_authenticated_with_launch_v1(
         scheduler, table, authorities, token, consumer, entry_point,
-        caller, path, [path], [], recipe)
+        caller, _fs_exec_parent_caps(caller, recipe), path, [path], [], recipe)
 
 pub fn fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     """Reject unauthenticated live handoff through the same canonical gate."""
@@ -293,8 +294,7 @@ fn _fs_exec_parent_caps(caller: i64, recipe: i64) -> CapabilitySet:
     bound rather than the recipe's own declaration. Must land with the boot-side
     seeder in the arming session; the seal is safe to arm either way (the child is
     attenuated in both cases), but the parent bound is only real afterwards."""
-    if not spawn_recipe_is_migrated(recipe):
-        return CapabilitySet.full()
+    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.empty()
     val owner = if caller < 0: 0u64 else: caller.to_u64()
     spawn_recipe_seed_parent_caps(recipe, owner)
 

@@ -21,6 +21,10 @@ use os.kernel.scheduler.process_stdout_capture.{
     rv64_process_stdout_finish
 }
 use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.spawn_recipes.{
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps
+}
 use os.kernel.scheduler.scheduler.{
     wait_collect_result_error, wait_collect_result_pid,
     wait_collect_result_status
@@ -31,11 +35,17 @@ extern fn serial_println(msg: text)
 pub struct Rv64AuthenticatedExecutionResultV1:
     exit_code: i64
     evidence: SchedulerExecutionEvidenceTokenV1?
+    scheduler: Scheduler
 
 fn _discard_execution_observation(child_id: u64):
     # Terminal cleanup is one scheduler-owner transaction and never issues an
     # evidence token to an adapter failure path.
     _ = scheduler_execution_discard_terminal_v2(child_id)
+
+fn _rv64_parent_caps_v1(caller: i64, recipe: i64) -> CapabilitySet:
+    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.empty()
+    val owner = if caller < 0: 0u64 else: caller.to_u64()
+    spawn_recipe_seed_parent_caps(recipe, owner)
 
 pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
     scheduler: Scheduler,
@@ -45,6 +55,7 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
     consumer: ExecutableLoadConsumerV1,
     entry_point: u64,
     caller: i64,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text],
     envp: [text],
@@ -53,16 +64,19 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
     """Authenticated RV64 adoption, stdout capture, exit, reap, and token handoff."""
     val capture_session = rv64_process_stdout_begin()
     if not capture_session.?:
-        return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: -10, evidence: nil, scheduler: scheduler)
     val prepared = fs_exec_adopt_authenticated_with_launch_v1(
         scheduler, table, authorities, token, consumer, entry_point,
-        caller, path, argv, envp, recipe)
+        caller, caller_caps, path, argv, envp, recipe)
     if prepared.pid <= 0:
         val failed_capture = rv64_process_stdout_finish(capture_session.unwrap(), prepared.pid)
         if not failed_capture.?:
-            return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+            return Rv64AuthenticatedExecutionResultV1(
+                exit_code: -10, evidence: nil, scheduler: prepared.scheduler)
         return Rv64AuthenticatedExecutionResultV1(
-            exit_code: failed_capture.unwrap().exit_code, evidence: nil)
+            exit_code: failed_capture.unwrap().exit_code, evidence: nil,
+            scheduler: prepared.scheduler)
     if not rv64_process_stdout_bind_child(capture_session.unwrap(), prepared.pid.to_u64(), true):
         val failed_child = TaskId(id: prepared.pid.to_u64())
         var failed_owner = prepared.scheduler
@@ -71,9 +85,11 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         _discard_execution_observation(failed_child.id)
         val failed_capture = rv64_process_stdout_finish(capture_session.unwrap(), -10)
         if not failed_capture.?:
-            return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+            return Rv64AuthenticatedExecutionResultV1(
+                exit_code: -10, evidence: nil, scheduler: failed_owner)
         return Rv64AuthenticatedExecutionResultV1(
-            exit_code: failed_capture.unwrap().exit_code, evidence: nil)
+            exit_code: failed_capture.unwrap().exit_code, evidence: nil,
+            scheduler: failed_owner)
     serial_println("RV64_AUTH_EXEC_ADOPTION status=authorized")
     val child = TaskId(id: prepared.pid.to_u64())
     val exit_code = dispatch_fs_exec_user_handoff(Architecture.Riscv64, child.id, prepared.scheduler)
@@ -83,19 +99,22 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         _ = owner.wait_for_collect(TaskId(id: 0), child, false)
         _discard_execution_observation(child.id)
         _ = rv64_process_stdout_finish(capture_session.unwrap(), -10)
-        return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0), child, false)
     val captured_result = rv64_process_stdout_finish(capture_session.unwrap(), exit_code)
     if not captured_result.?:
         _discard_execution_observation(child.id)
-        return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
     val captured = captured_result.unwrap()
     if wait_collect_result_error(collected) != 0 or
        wait_collect_result_pid(collected) != child.id or
        wait_collect_result_status(collected) != exit_code.to_i32():
         _discard_execution_observation(child.id)
-        return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
     serial_println("RV64_AUTH_EXEC_EXIT code={captured.exit_code}")
     val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
         child.id, path, argv)
@@ -109,7 +128,8 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         _discard_execution_observation(child.id)
     Rv64AuthenticatedExecutionResultV1(
         exit_code: captured.exit_code,
-        evidence: evidence)
+        evidence: evidence,
+        scheduler: owner)
 
 pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
     scheduler: Scheduler,
@@ -125,7 +145,7 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
     """Compatibility capture with path as argv[0] and an empty environment."""
     riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         scheduler, table, authorities, token, consumer, entry_point,
-        caller, path, [path], [], recipe)
+        caller, _rv64_parent_caps_v1(caller, recipe), path, [path], [], recipe)
 
 pub fn riscv64_authenticated_execution_acceptance_fixture_with_launch_v1(
     scheduler: Scheduler, table: MountTable,
@@ -139,7 +159,8 @@ pub fn riscv64_authenticated_execution_acceptance_fixture_with_launch_v1(
         return false
     val run = riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         scheduler, table, authorities, token, consumer, entry_point,
-        caller, path, argv, envp, recipe)
+        caller, _rv64_parent_caps_v1(caller, recipe),
+        path, argv, envp, recipe)
     if run.exit_code != 0 or not run.evidence.?:
         return false
     val evidence_token = run.evidence.unwrap()

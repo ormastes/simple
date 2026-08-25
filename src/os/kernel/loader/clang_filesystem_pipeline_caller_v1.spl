@@ -43,6 +43,21 @@ use os.kernel.scheduler.process_execution_observation.{
     SchedulerArgvFileRoleV1,
     scheduler_execution_evidence_consume_once_v2
 }
+
+pub(package) struct ClangFilesystemPipelineSubmissionResultV1:
+    receipt: ClangFilesystemTerminalReceiptV1
+    scheduler: Scheduler
+
+pub(package) struct ClangFilesystemPipelineSubmissionErrorV1:
+    reason: text
+    scheduler: Scheduler
+
+fn _submission_error_v1(
+    reason: text, scheduler: Scheduler
+) -> Result<ClangFilesystemPipelineSubmissionResultV1,
+            ClangFilesystemPipelineSubmissionErrorV1>:
+    Err(ClangFilesystemPipelineSubmissionErrorV1(
+        reason: reason, scheduler: scheduler))
 use std.fs_driver.mount_table.{MountTable}
 
 pub(package) fn clang_filesystem_pipeline_prepare_scheduler_backend_v1(
@@ -104,6 +119,7 @@ fn _generated_hello_launch_contract_v1(
 
 pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
     scheduler: Scheduler,
+    caller_caps: CapabilitySet,
     table: MountTable,
     plan: ClangFilesystemSchedulerLaunchPlanV1,
     compile_submission: AuthenticatedFsExecSubmissionV1,
@@ -111,7 +127,8 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
     execute_authorities: ExecutableAuthorityRegistryV1,
     execute_recipe: i64,
     immutable_execute_reference_path: text
-) -> Result<ClangFilesystemTerminalReceiptV1, text>:
+) -> Result<ClangFilesystemPipelineSubmissionResultV1,
+            ClangFilesystemPipelineSubmissionErrorV1>:
     """Submit the exact three-stage plan and consume its terminal receipt.
 
     Clang and LLD arrive as installed-artifact submissions. The generated hello
@@ -131,10 +148,11 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
         val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
             plan.command.dispatch)
         if not compile_retired or not link_retired or pipeline_retired.is_err():
-            return Err("clang-source-binding-cleanup-indeterminate")
-        return Err(compile_source.unwrap_err())
+            return _submission_error_v1(
+                "clang-source-binding-cleanup-indeterminate", scheduler)
+        return _submission_error_v1(compile_source.unwrap_err(), scheduler)
     val compile_run = authenticated_fs_exec_submit_with_argv_file_v1(
-        scheduler, table, compile_submission,
+        scheduler, table, compile_submission, caller_caps,
         plan.compile_path, plan.compile_argv, compile_source.unwrap())
     if compile_run.exit_code != 0 or not compile_run.evidence.?:
         val compile_evidence_retired =
@@ -146,8 +164,10 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
         if compile_run.cleanup_indeterminate or
            not compile_evidence_retired or not link_retired or
            pipeline_retired.is_err():
-            return Err("clang-submit-cleanup-indeterminate")
-        return Err("clang-authenticated-submit-failed")
+            return _submission_error_v1(
+                "clang-submit-cleanup-indeterminate", compile_run.scheduler)
+        return _submission_error_v1(
+            "clang-authenticated-submit-failed", compile_run.scheduler)
 
     val link_object = authenticated_argv_file_binding_acquire_v1(
         table, plan.command.dispatch.object_path,
@@ -160,10 +180,12 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             plan.command.dispatch)
         if not compile_evidence_retired or not link_retired or
            pipeline_retired.is_err():
-            return Err("lld-object-binding-cleanup-indeterminate")
-        return Err(link_object.unwrap_err())
+            return _submission_error_v1(
+                "lld-object-binding-cleanup-indeterminate", compile_run.scheduler)
+        return _submission_error_v1(link_object.unwrap_err(), compile_run.scheduler)
     val link_run = authenticated_fs_exec_submit_with_argv_file_v1(
-        scheduler, table, link_submission, plan.link_path, plan.link_argv,
+        compile_run.scheduler, table, link_submission, caller_caps,
+        plan.link_path, plan.link_argv,
         link_object.unwrap())
     if link_run.exit_code != 0 or not link_run.evidence.?:
         val compile_evidence_retired =
@@ -175,8 +197,10 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
         if link_run.cleanup_indeterminate or
            not compile_evidence_retired or not link_evidence_retired or
            pipeline_retired.is_err():
-            return Err("lld-submit-cleanup-indeterminate")
-        return Err("lld-authenticated-submit-failed")
+            return _submission_error_v1(
+                "lld-submit-cleanup-indeterminate", link_run.scheduler)
+        return _submission_error_v1(
+            "lld-authenticated-submit-failed", link_run.scheduler)
 
     val execute_artifact = authenticated_argv_file_binding_acquire_v1(
         table, plan.command.dispatch.executable_path,
@@ -190,8 +214,9 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             plan.command.dispatch)
         if not compile_evidence_retired or not link_evidence_retired or
            pipeline_retired.is_err():
-            return Err("hello-artifact-binding-cleanup-indeterminate")
-        return Err(execute_artifact.unwrap_err())
+            return _submission_error_v1(
+                "hello-artifact-binding-cleanup-indeterminate", link_run.scheduler)
+        return _submission_error_v1(execute_artifact.unwrap_err(), link_run.scheduler)
     val execute_binding = execute_artifact.unwrap()
     if not _generated_hello_launch_contract_v1(
         plan, immutable_execute_reference_path, execute_recipe):
@@ -205,8 +230,10 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             plan.command.dispatch)
         if not binding_retired or not compile_evidence_retired or
            not link_evidence_retired or pipeline_retired.is_err():
-            return Err("hello-admission-contract-cleanup-indeterminate")
-        return Err("hello-admission-contract-denied")
+            return _submission_error_v1(
+                "hello-admission-contract-cleanup-indeterminate", link_run.scheduler)
+        return _submission_error_v1(
+            "hello-admission-contract-denied", link_run.scheduler)
     val execute_prepared =
         authenticated_fs_exec_prepare_generated_artifact_online_v1(
             table, execute_authorities,
@@ -224,11 +251,13 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             plan.command.dispatch)
         if not binding_retired or not compile_evidence_retired or
            not link_evidence_retired or pipeline_retired.is_err():
-            return Err("hello-admission-prepare-cleanup-indeterminate")
-        return Err("hello-generated-admission-denied")
+            return _submission_error_v1(
+                "hello-admission-prepare-cleanup-indeterminate", link_run.scheduler)
+        return _submission_error_v1(
+            "hello-generated-admission-denied", link_run.scheduler)
     val execute_submission = execute_prepared.unwrap()
     val execute_run = authenticated_fs_exec_submit_with_argv_file_v1(
-        scheduler, table, execute_submission,
+        link_run.scheduler, table, execute_submission, caller_caps,
         plan.execute_path, plan.execute_argv, execute_binding)
     if execute_run.exit_code != 0 or not execute_run.evidence.?:
         val compile_evidence_retired =
@@ -242,8 +271,10 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
         if execute_run.cleanup_indeterminate or
            not compile_evidence_retired or not link_evidence_retired or
            not execute_evidence_retired or pipeline_retired.is_err():
-            return Err("hello-submit-cleanup-indeterminate")
-        return Err("hello-authenticated-submit-failed")
+            return _submission_error_v1(
+                "hello-submit-cleanup-indeterminate", execute_run.scheduler)
+        return _submission_error_v1(
+            "hello-authenticated-submit-failed", execute_run.scheduler)
 
     val terminal = clang_filesystem_scheduler_finish_success_v1(
         plan,
@@ -251,5 +282,8 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             compile: compile_run.evidence.unwrap(),
             link: link_run.evidence.unwrap(),
             execute: execute_run.evidence.unwrap()))
-    if terminal.is_err(): return Err(terminal.unwrap_err())
-    Ok(terminal.unwrap())
+    if terminal.is_err():
+        return _submission_error_v1(
+            terminal.unwrap_err(), execute_run.scheduler)
+    Ok(ClangFilesystemPipelineSubmissionResultV1(
+        receipt: terminal.unwrap(), scheduler: execute_run.scheduler))

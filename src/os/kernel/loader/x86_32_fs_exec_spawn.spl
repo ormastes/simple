@@ -22,7 +22,7 @@ use os.kernel.loader.executable_launch_arguments_v1.{
     executable_launch_arguments_v1_errno,
     executable_launch_arguments_v1_validate
 }
-use os.kernel.loader.cap_exec_gate.{exec_cap_check}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps}
 use os.kernel.loader.spawn_authority.{
     spawn_authority_check_spawn, spawn_authority_spawn_caps
 }
@@ -54,7 +54,7 @@ use os.kernel.scheduler.process_execution_observation.{
 }
 
 fn _x86_32_parent_caps_v1(caller: i64, recipe: i64) -> CapabilitySet:
-    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.full()
+    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.empty()
     val owner = if caller < 0: 0u64 else: caller.to_u64()
     spawn_recipe_seed_parent_caps(recipe, owner)
 
@@ -70,6 +70,7 @@ pub fn x86_32_fs_exec_spawn_authenticated_with_launch_v1(
     consumer: ExecutableLoadConsumerV1,
     entry_point: u64,
     caller: i64,
+    caller_caps: CapabilitySet,
     path: text,
     argv: [text],
     envp: [text],
@@ -81,23 +82,23 @@ pub fn x86_32_fs_exec_spawn_authenticated_with_launch_v1(
         return FsExecAuthenticatedRunResultV1(
             exit_code: executable_launch_arguments_v1_errno(
                 checked.unwrap_err()) as i64,
-            evidence: nil)
+            evidence: nil, scheduler: scheduler)
     val launch = checked.unwrap()
     if not spawn_recipe_launch_contract_valid(
         recipe, launch.path, launch.argv, launch.envp):
-        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil)
-    val gate = exec_cap_check(caller, launch.path)
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
+    val gate = exec_cap_check_caps(caller_caps, launch.path)
     if gate != 0:
         return FsExecAuthenticatedRunResultV1(
-            exit_code: gate as i64, evidence: nil)
+            exit_code: gate as i64, evidence: nil, scheduler: scheduler)
     val allowed = spawn_authority_check_spawn(caller, recipe)
     if allowed != 0:
         return FsExecAuthenticatedRunResultV1(
-            exit_code: allowed as i64, evidence: nil)
+            exit_code: allowed as i64, evidence: nil, scheduler: scheduler)
     val snapshot = executable_authority_snapshot_armed_preparation_v1(
         authorities, token)
     if snapshot.is_err():
-        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil)
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
     val preparation = snapshot.unwrap()
     if (not preparation.identity.has_entry_identity or
         preparation.identity.entry_point != entry_point or
@@ -105,15 +106,15 @@ pub fn x86_32_fs_exec_spawn_authenticated_with_launch_v1(
         preparation.identity.target.os != "simpleos" or
         preparation.identity.target.arch != "x86" or
         preparation.identity.target.abi != "simpleos"):
-        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil)
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
     val source = executable_prepare_read_exact_v1(
         table, preparation.image_handle)
     if source == nil:
-        return FsExecAuthenticatedRunResultV1(exit_code: -5, evidence: nil)
+        return FsExecAuthenticatedRunResultV1(exit_code: -5, evidence: nil, scheduler: scheduler)
     val joint = executable_loader_begin_joint_reservation_v1(
         authorities, token, consumer, entry_point, launch.path)
     if joint.is_err():
-        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil)
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
     val joint_reservation = joint.unwrap()
     val mapped = x86_32_authenticated_mapping_prepare_v1(
         preparation.image_handle, source.unwrap(), launch)
@@ -121,9 +122,8 @@ pub fn x86_32_fs_exec_spawn_authenticated_with_launch_v1(
         mapped.error != X8632AuthenticatedMappingErrorV1.None):
         _ = executable_loader_abort_joint_reservation_v1(
             authorities, joint_reservation.lease)
-        return FsExecAuthenticatedRunResultV1(exit_code: -8, evidence: nil)
-    val caps = spawn_authority_spawn_caps(
-        caller, recipe, _x86_32_parent_caps_v1(caller, recipe))
+        return FsExecAuthenticatedRunResultV1(exit_code: -8, evidence: nil, scheduler: scheduler)
+    val caps = spawn_authority_spawn_caps(caller, recipe, caller_caps)
     val adopted = scheduler_x86_32_adopt_authenticated_mapping_v1(
         scheduler, table, authorities, token, joint_reservation.lease,
         consumer, mapped,
@@ -135,7 +135,7 @@ pub fn x86_32_fs_exec_spawn_authenticated_with_launch_v1(
         _ = executable_loader_abort_joint_reservation_v1(
             authorities, joint_reservation.lease)
         return FsExecAuthenticatedRunResultV1(
-            exit_code: adopted.pid, evidence: nil)
+            exit_code: adopted.pid, evidence: nil, scheduler: adopted.scheduler)
 
     val child = TaskId(id: adopted.pid.to_u64())
     val exit_code = dispatch_fs_exec_user_handoff(
@@ -147,12 +147,12 @@ pub fn x86_32_fs_exec_spawn_authenticated_with_launch_v1(
        wait_collect_result_pid(collected) != child.id or
        wait_collect_result_status(collected) != exit_code.to_i32():
         _ = scheduler_execution_discard_terminal_v2(child.id)
-        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
 
     val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
         child.id, path, argv)
     if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
         _ = scheduler_execution_discard_terminal_v2(child.id)
-        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
     FsExecAuthenticatedRunResultV1(
-        exit_code: exit_code, evidence: delivered.token)
+        exit_code: exit_code, evidence: delivered.token, scheduler: owner)
