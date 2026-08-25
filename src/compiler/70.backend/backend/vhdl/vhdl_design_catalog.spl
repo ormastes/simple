@@ -16,10 +16,34 @@ use compiler.mir.mir_types.{MirType}
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
+@unsafe(reason: "raw dictionary membership ABI", capabilities: [ffi])
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
+@unsafe(reason: "raw tagged-value discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
+@unsafe(reason: "raw tagged-value payload ABI", capabilities: [ffi])
 extern fn rt_enum_payload(value: Any) -> i64
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+
+@always_inline
+fn _sffi_dict_contains(dict: i64, key: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_dict_contains(dict, key)
+
+@always_inline
+fn _sffi_enum_discriminant(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+@always_inline
+fn _sffi_enum_payload(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_payload(value)
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
 
 struct VhdlCatalogFunctionSource:
     symbol: i64
@@ -99,7 +123,7 @@ fn vhdl_catalog_metadata_key(module_name: text, function_name: text) -> text:
 
 fn vhdl_catalog_metadata_index_record(mut rows: Dict<text, i64>,
                                       key: text, row_index: i64):
-    if rt_dict_contains(rows, key):
+    if _sffi_dict_contains(rows, key):
         rows[key] = -2
     else:
         rows[key] = row_index
@@ -325,7 +349,7 @@ fn vhdl_catalog_static(static_: MirStatic, rebase: Dict<i64, i64>) -> MirStatic:
 fn vhdl_catalog_validate_type_ref(ty: MirType, types: Dict<SymbolId, MirTypeDef>) -> Result<(), text>:
     match ty.kind:
         case Struct(symbol) | Enum(symbol):
-            if not rt_dict_contains(types, symbol):
+            if not _sffi_dict_contains(types, symbol):
                 return Err("VHDL design catalog references missing type symbol {symbol.id}")
         case Array(element, _) | Slice(element):
             return vhdl_catalog_validate_type_ref(element, types)
@@ -352,7 +376,7 @@ fn vhdl_catalog_validate_type_ref(ty: MirType, types: Dict<SymbolId, MirTypeDef>
 
 fn vhdl_catalog_type_ready(ty: MirType, emitted: Dict<i64, bool>) -> bool:
     match ty.kind:
-        case Struct(symbol) | Enum(symbol): rt_dict_contains(emitted, symbol.id)
+        case Struct(symbol) | Enum(symbol): _sffi_dict_contains(emitted, symbol.id)
         case Array(element, _) | Slice(element): vhdl_catalog_type_ready(element, emitted)
         case Tuple(elements) | Union(elements):
             for element in elements:
@@ -416,7 +440,7 @@ fn vhdl_catalog_type_order(types: Dict<SymbolId, MirTypeDef>) -> Result<[SymbolI
     while order.len() < ordered_type_symbols.len():
         var progressed = false
         for symbol in ordered_type_symbols:
-            if rt_dict_contains(emitted, symbol.id):
+            if _sffi_dict_contains(emitted, symbol.id):
                 continue
             if vhdl_catalog_type_def_ready(types[symbol], emitted):
                 order = order.push(symbol)
@@ -429,7 +453,7 @@ fn vhdl_catalog_type_order(types: Dict<SymbolId, MirTypeDef>) -> Result<[SymbolI
 fn vhdl_catalog_type_identity(module_name: text, raw_symbol: i64,
                               fallback_name: text,
                               hir_modules: Dict<text, HirModule>) -> text:
-    if rt_dict_contains(hir_modules, module_name):
+    if _sffi_dict_contains(hir_modules, module_name):
         val hir_module = hir_modules[module_name]
         if val symbol = hir_module.symbols.get_symbol_raw(raw_symbol):
             match symbol.kind:
@@ -442,7 +466,7 @@ fn vhdl_catalog_type_identity(module_name: text, raw_symbol: i64,
 fn vhdl_catalog_static_identity(module_name: text, raw_symbol: i64,
                                 fallback_name: text,
                                 hir_modules: Dict<text, HirModule>) -> text:
-    if rt_dict_contains(hir_modules, module_name):
+    if _sffi_dict_contains(hir_modules, module_name):
         val hir_module = hir_modules[module_name]
         if val symbol = hir_module.symbols.get_symbol_raw(raw_symbol):
             match symbol.kind:
@@ -481,7 +505,7 @@ fn vhdl_catalog_target_index_key(hardware_only: bool, qualified: bool,
 fn vhdl_catalog_target_index_record(mut symbol_ids: Dict<text, i64>,
                                     mut match_counts: Dict<text, i64>,
                                     key: text, symbol_id: i64):
-    val previous = if rt_dict_contains(match_counts, key):
+    val previous = if _sffi_dict_contains(match_counts, key):
         match_counts[key]
     else:
         0
@@ -496,7 +520,7 @@ fn vhdl_catalog_resolve_target(target: text,
                                target_kind: text) -> Result<SymbolId?, text>:
     val qualified = target.contains("::")
     val key = vhdl_catalog_target_index_key(hardware_only, qualified, target)
-    val matches = if rt_dict_contains(target_match_counts, key):
+    val matches = if _sffi_dict_contains(target_match_counts, key):
         target_match_counts[key]
     else:
         0
@@ -659,7 +683,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
     var root_set: Dict<text, bool> = {}
 
     for root_module in root_modules:
-        if not rt_dict_contains(modules, root_module):
+        if not _sffi_dict_contains(modules, root_module):
             eprint("[vhdl-catalog-site] unknown-root")
             return Err("VHDL design catalog selected unknown root module `{root_module}`")
         root_set[root_module] = true
@@ -667,7 +691,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
     if selected_roots.len() == 0:
         eprint("[vhdl-catalog-site] no-explicit-root")
         return Err("VHDL design catalog requires one explicit root module")
-    val trace_enabled = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    val trace_enabled = (_sffi_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
     # Join sidecar metadata by exact raw identity or by an alias only when the
     # row's module spelling is absent from the loaded design. -2 retains every
@@ -682,7 +706,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
             vhdl_catalog_metadata_key(
                 metadata_row.module_name, metadata_row.function_name),
             metadata_row_index)
-        if not rt_dict_contains(modules, metadata_row.module_name):
+        if not _sffi_dict_contains(modules, metadata_row.module_name):
             vhdl_catalog_metadata_index_record(
                 metadata_alias_rows,
                 vhdl_catalog_metadata_key(
@@ -701,7 +725,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
             val type_def = module.types[symbol]
             val identity = vhdl_catalog_type_identity(module_name, symbol.id,
                 type_def.name, hir_modules)
-            if not rt_dict_contains(global_type_symbols, identity):
+            if not _sffi_dict_contains(global_type_symbols, identity):
                 global_type_symbols[identity] = next_symbol
                 next_symbol = next_symbol + 1
                 val folded_name = vhdl_sanitize_identifier(type_def.name).to_lower()
@@ -714,7 +738,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
             val static_ = module.statics[symbol]
             val identity = vhdl_catalog_static_identity(module_name, symbol.id,
                 static_.name, hir_modules)
-            if not rt_dict_contains(global_static_symbols, identity):
+            if not _sffi_dict_contains(global_static_symbols, identity):
                 global_static_symbols[identity] = next_symbol
                 next_symbol = next_symbol + 1
 
@@ -735,7 +759,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
         var rebase: Dict<i64, i64> = {}
         for canonical_symbol in global_canonical_type_symbols.keys():
             rebase[canonical_symbol] = global_canonical_type_symbols[canonical_symbol]
-        if rt_dict_contains(hir_modules, module_name):
+        if _sffi_dict_contains(hir_modules, module_name):
             val hir_module = hir_modules[module_name]
             for hir_symbol_key in hir_module.symbols.symbols.keys():
                 val hir_symbol = hir_module.symbols.symbols[hir_symbol_key]
@@ -743,16 +767,16 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                     case SymbolKind.Struct | SymbolKind.Enum:
                         val identity = vhdl_catalog_type_identity(module_name,
                             hir_symbol.id.id, hir_symbol.name, hir_modules)
-                        if rt_dict_contains(global_type_symbols, identity):
+                        if _sffi_dict_contains(global_type_symbols, identity):
                             rebase[hir_symbol.id.id] = global_type_symbols[identity]
                     case SymbolKind.Variable:
                         val identity = vhdl_catalog_static_identity(module_name,
                             hir_symbol.id.id, hir_symbol.name, hir_modules)
-                        if rt_dict_contains(global_static_symbols, identity):
+                        if _sffi_dict_contains(global_static_symbols, identity):
                             rebase[hir_symbol.id.id] = global_static_symbols[identity]
                     case _: ()
         for symbol in ordered_function_symbols:
-            if not rt_dict_contains(rebase, symbol.id):
+            if not _sffi_dict_contains(rebase, symbol.id):
                 rebase[symbol.id] = next_symbol
                 next_symbol = next_symbol + 1
         for symbol in ordered_static_symbols:
@@ -761,7 +785,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                 static_.name, hir_modules)
             rebase[symbol.id] = global_static_symbols[identity]
         for symbol in ordered_constant_symbols:
-            if not rt_dict_contains(rebase, symbol.id):
+            if not _sffi_dict_contains(rebase, symbol.id):
                 rebase[symbol.id] = next_symbol
                 next_symbol = next_symbol + 1
         for symbol in ordered_type_symbols:
@@ -777,12 +801,12 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                 module_name, func.name)
             val metadata_alias_key = vhdl_catalog_metadata_key(
                 module_alias_key, func.name)
-            val metadata_exact_index = if rt_dict_contains(
+            val metadata_exact_index = if _sffi_dict_contains(
                     metadata_exact_rows, metadata_exact_key):
                 metadata_exact_rows[metadata_exact_key]
             else:
                 -1
-            val metadata_alias_index = if rt_dict_contains(
+            val metadata_alias_index = if _sffi_dict_contains(
                     metadata_alias_rows, metadata_alias_key):
                 metadata_alias_rows[metadata_alias_key]
             else:
@@ -899,7 +923,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
     for symbol in vhdl_catalog_sorted_symbols(all_functions.keys()):
         val func = all_functions[symbol]
         val function_module = all_function_modules[symbol.id]
-        val is_root = rt_dict_contains(root_set, function_module)
+        val is_root = _sffi_dict_contains(root_set, function_module)
         val is_hardware = vhdl_function_is_hardware_entity(func)
         if trace_enabled and func.name.starts_with("core32_"):
             eprint("[vhdl-catalog] candidate module={function_module} function={func.name} root={is_root} hardware={is_hardware}")
@@ -927,28 +951,28 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                             val resolved_result = vhdl_catalog_resolve_target(target,
                                 target_symbol_ids, target_match_counts, false,
                                 "design call target")
-                            if rt_enum_discriminant(resolved_result) == rt_enum_discriminant(Err("")):
+                            if _sffi_enum_discriminant(resolved_result) == _sffi_enum_discriminant(Err("")):
                                 eprint("[vhdl-catalog-site] call-target-resolution")
-                                val resolved_error: text = rt_enum_payload(resolved_result)
+                                val resolved_error: text = _sffi_enum_payload(resolved_result)
                                 return Err(resolved_error)
-                            val resolved: SymbolId? = rt_enum_payload(resolved_result)
+                            val resolved: SymbolId? = _sffi_enum_payload(resolved_result)
                             if val callee_symbol = resolved:
                                 val callee_name = all_functions[callee_symbol].name
                                 inst = MirInst(kind: MirInstKind.Call(dest,
                                     vhdl_catalog_operand_with_target(operand, callee_name),
                                     args), span: inst.span)
-                                if not rt_dict_contains(reachable, callee_symbol.id):
+                                if not _sffi_dict_contains(reachable, callee_symbol.id):
                                     reachable[callee_symbol.id] = true
                                     queue = queue.push(callee_symbol)
                     case VhdlPortMap(entity, instance, connections):
                         val resolved_result = vhdl_catalog_resolve_target(entity,
                             target_symbol_ids, target_match_counts, true,
                             "port-map entity")
-                        if rt_enum_discriminant(resolved_result) == rt_enum_discriminant(Err("")):
+                        if _sffi_enum_discriminant(resolved_result) == _sffi_enum_discriminant(Err("")):
                             eprint("[vhdl-catalog-site] port-map-resolution")
-                            val resolved_error: text = rt_enum_payload(resolved_result)
+                            val resolved_error: text = _sffi_enum_payload(resolved_result)
                             return Err(resolved_error)
-                        val resolved: SymbolId? = rt_enum_payload(resolved_result)
+                        val resolved: SymbolId? = _sffi_enum_payload(resolved_result)
                         if not resolved.?:
                             eprint("[vhdl-catalog-site] unresolved-port-map")
                             return Err("Unresolved VHDL port-map entity `{entity}`")
@@ -956,7 +980,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                         val entity_name = all_functions[entity_symbol].name
                         inst = MirInst(kind: MirInstKind.VhdlPortMap(entity_name,
                             instance, connections), span: inst.span)
-                        if not rt_dict_contains(reachable, entity_symbol.id):
+                        if not _sffi_dict_contains(reachable, entity_symbol.id):
                             reachable[entity_symbol.id] = true
                             queue = queue.push(entity_symbol)
                     case _: ()
@@ -967,11 +991,11 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
         all_functions[caller_symbol] = caller
 
     for symbol in vhdl_catalog_sorted_symbols(all_functions.keys()):
-        if not rt_dict_contains(reachable, symbol.id):
+        if not _sffi_dict_contains(reachable, symbol.id):
             continue
         val func = all_functions[symbol]
         val emitted_name = vhdl_sanitize_identifier(func.name).to_lower()
-        if rt_dict_contains(function_names, emitted_name):
+        if _sffi_dict_contains(function_names, emitted_name):
             eprint("[vhdl-catalog-site] conflicting-function-name")
             return Err("Conflicting VHDL function/entity name `{emitted_name}` from `{function_names[emitted_name]}` and `{all_function_modules[symbol.id]}.{func.name}`")
         function_names[emitted_name] = "{all_function_modules[symbol.id]}.{func.name}"
@@ -988,7 +1012,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                 vhdl_catalog_mark_inst_types(inst, needed_types)
                 match inst.kind:
                     case LoadGlobal(_, static_symbol) | StoreGlobal(static_symbol, _) | GlobalAddr(_, static_symbol, _):
-                        if static_symbol.id < 0 or not rt_dict_contains(all_statics, static_symbol):
+                        if static_symbol.id < 0 or not _sffi_dict_contains(all_statics, static_symbol):
                             eprint("[vhdl-catalog-site] unmapped-static")
                             return Err("VHDL design catalog references unmapped global/static symbol {static_symbol.id} from `{func.name}`")
                         val static_ = all_statics[static_symbol]
@@ -998,7 +1022,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                             if init.symbol.id < 0:
                                 eprint("[vhdl-catalog-site] unmapped-static-init")
                                 return Err("VHDL design catalog retained an unmapped static initializer symbol from `{static_.name}`")
-                            if rt_dict_contains(all_constants, init.symbol):
+                            if _sffi_dict_contains(all_constants, init.symbol):
                                 constants[init.symbol] = all_constants[init.symbol]
                             vhdl_catalog_mark_type(init.type_, needed_types)
                     case _: ()
@@ -1008,13 +1032,13 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
     while type_progress:
         type_progress = false
         for symbol in vhdl_catalog_sorted_symbols(all_types.keys()):
-            if rt_dict_contains(needed_types, symbol.id) and not rt_dict_contains(types, symbol):
+            if _sffi_dict_contains(needed_types, symbol.id) and not _sffi_dict_contains(types, symbol):
                 val type_def = all_types[symbol]
                 types[symbol] = type_def
                 vhdl_catalog_type_def_mark_dependencies(type_def, needed_types)
                 type_progress = true
     for type_id in needed_types.keys():
-        if type_id < 0 or not rt_dict_contains(types, SymbolId(id: type_id)):
+        if type_id < 0 or not _sffi_dict_contains(types, SymbolId(id: type_id)):
             eprint("[vhdl-catalog-site] unmapped-type")
             return Err("VHDL design catalog references unmapped type symbol {type_id}")
 
@@ -1022,24 +1046,24 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
     for symbol in vhdl_catalog_sorted_symbols(types.keys()):
         val type_def = types[symbol]
         val emitted_name = vhdl_sanitize_identifier(type_def.name).to_lower()
-        if rt_dict_contains(package_names, emitted_name):
+        if _sffi_dict_contains(package_names, emitted_name):
             eprint("[vhdl-catalog-site] conflicting-package-type")
             return Err("Conflicting reachable VHDL package type `{emitted_name}`")
         package_names[emitted_name] = type_def.name
     for symbol in vhdl_catalog_sorted_symbols(constants.keys()):
         val constant = constants[symbol]
         val emitted_name = vhdl_sanitize_identifier(constant.name).to_lower()
-        if rt_dict_contains(package_names, emitted_name):
+        if _sffi_dict_contains(package_names, emitted_name):
             eprint("[vhdl-catalog-site] conflicting-package-declaration")
             return Err("Conflicting reachable VHDL package declaration `{emitted_name}`")
         package_names[emitted_name] = constant.name
 
     val order_result = vhdl_catalog_type_order(types)
-    if rt_enum_discriminant(order_result) == rt_enum_discriminant(Err("")):
+    if _sffi_enum_discriminant(order_result) == _sffi_enum_discriminant(Err("")):
         eprint("[vhdl-catalog-site] type-order")
-        val order_error: text = rt_enum_payload(order_result)
+        val order_error: text = _sffi_enum_payload(order_result)
         return Err(order_error)
-    val order: [SymbolId] = rt_enum_payload(order_result)
+    val order: [SymbolId] = _sffi_enum_payload(order_result)
 
     var function_sources: [VhdlCatalogFunctionSource] = []
     var reachable_module_set: Dict<text, bool> = {}
@@ -1079,7 +1103,7 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
     var source_rows: [VhdlCatalogSourceRow] = []
     for source_module in reachable_source_modules:
         source_rows = source_rows.push(VhdlCatalogSourceRow(
-            module_name: source_module, is_root: rt_dict_contains(root_set, source_module),
+            module_name: source_module, is_root: _sffi_dict_contains(root_set, source_module),
             function_count: (if module_function_counts.contains_key(source_module): module_function_counts[source_module] else: 0),
             hardware_entity_count: (if module_entity_counts.contains_key(source_module): module_entity_counts[source_module] else: 0),
             helper_function_count: (if module_helper_counts.contains_key(source_module): module_helper_counts[source_module] else: 0),

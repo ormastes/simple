@@ -73,6 +73,34 @@ authority.  Because eleven production providers are still unbacked and no
 exact artifact is signed, this lane remains explicitly unsafe;
 verified-and-signed admission remains 0.
 
+## VHDL design-catalog authority checkpoint
+
+The design-wide VHDL catalog now confines its four foreign ABI families to
+mandatory-inline lexical `unsafe(ffi)` owners.  The environment read is
+truthfully nullable; dictionary membership remains a semantic boolean, and
+tagged-value discriminant/payload retain their signed runtime-word contracts.
+
+Catalog construction contains nested scans and repeated dictionary probes, so
+the performance ratchet pins the owners as direct-inline primitives.  The
+change adds no lookup structure, allocation, copy, hash, lock, branch, loop,
+or foreign call on the valid path and does not alter the catalog algorithms or
+their asymptotic complexity.
+
+The authoritative census changed exactly by routing 41 recognized direct
+calls through four owners:
+
+- raw call sites: 19,085 -> 19,048
+- missing authority: 14,889 -> 14,848
+- lexical unsafe: 3,277 -> 3,281
+- function unsafe: unchanged at 919
+
+All four symbols are present in both the typed native registry and interpreter
+registration.  Provider registration still does not prove dictionary handle
+validity, tagged-value layout, artifact identity, signatures, or provenance.
+No production self-hosted optimizer or benchmark was available, so this
+module and the wider SFFI estate are not globally verified or signed;
+verified-and-signed admission remains 0.
+
 ## LLVM-library expression translation authority checkpoint
 
 `llvm_lib_translate_expr.spl` had six local declarations; unused
