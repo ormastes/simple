@@ -2131,3 +2131,28 @@ function-scoped authorities; the `rt_rapier2d` family now has 48 explicit and
 zero missing call sites. Focused Rust verification passed four fail-closed
 provider tests with zero failures. Exact-artifact verified-and-signed admission
 remains zero.
+
+## GPU physics CUDA solver authority checkpoint
+
+The GPU physics solver privately redeclared 12 `rt_cuda_*` operations without
+unsafe metadata and invoked them 55 times across compilation, device-buffer
+growth, upload, kernel dispatch, download, and destruction. The declarations
+and nine raw-calling methods now carry FFI authority; the single top-level
+`solve` method propagates that authority because it orchestrates those raw
+methods. Pure-Simple spatial hashing, graph coloring, SoA storage, and PTX
+kernel material remain unchanged.
+
+This checkpoint is compile-time authority metadata only. It adds no runtime
+branch, call, allocation, copy, lookup, lock, hash, signing operation, or
+dispatch, and does not change kernel batching or buffer reuse. Review also
+found that transfer, launch, synchronization, unload, and free booleans are
+ignored, allocation failure can lose capacity truth, and repeated destruction
+does not clear every buffer handle. Those are retained as explicit unsafe
+obligations rather than being mislabeled verified; they require a separate
+fail-closed state-machine patch with measured hot-path evidence.
+
+The source census measured missing authority decreasing by exactly 55: 17,971
+to 17,916 repository-wide and 9,802 to 9,747 in production. All 55 became
+function-scoped authorities. The broader `rt_cuda` family now has 109 explicit
+and 337 missing call sites. Twelve declaration rows moved from untouched to
+unsafe-tagged. Exact-artifact verified-and-signed admission remains zero.
