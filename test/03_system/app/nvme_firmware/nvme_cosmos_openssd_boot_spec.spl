@@ -69,6 +69,16 @@ deployed `bin/simple` exists and this spec has not been executed or doc-generate
 use std.spec.*
 use std.io_runtime.{process_run}
 use app.io.mod.{file_read_text}
+use os.kernel.arch.arm32.platform.cosmos_openssd.cosmos_fsbl_handoff_valid_registers
+
+struct FsblVector:
+    locksta: u32
+    arm_clk: u32
+    ddr_clk: u32
+    pss_rst: u32
+    a9_rst: u32
+    devcfg_int_sts: u32
+    expected: bool
 
 val BUILD: text = "src/os/kernel/arch/arm32/cosmos/build.shs"
 val PACKAGE: text = "src/os/kernel/arch/arm32/cosmos/package_boot.shs"
@@ -115,6 +125,28 @@ fn _expect_absent(output: text, marker: text, label: text):
         fail(label + " emitted forbidden marker: " + marker)
 
 describe "Cosmos+ OpenSSD production HAL":
+    it "keeps the Pure-Simple FSBL decision core in MC/DC parity with C":
+        step("Evaluate the shared seven-vector FSBL register decision table")
+        val vectors: [FsblVector] = [
+            FsblVector(locksta: 1u32, arm_clk: 0x1f000000u32, ddr_clk: 3u32, pss_rst: 0u32, a9_rst: 0u32, devcfg_int_sts: 4u32, expected: true),
+            FsblVector(locksta: 0u32, arm_clk: 0x1f000000u32, ddr_clk: 3u32, pss_rst: 0u32, a9_rst: 0u32, devcfg_int_sts: 4u32, expected: false),
+            FsblVector(locksta: 1u32, arm_clk: 0x1e000000u32, ddr_clk: 3u32, pss_rst: 0u32, a9_rst: 0u32, devcfg_int_sts: 4u32, expected: false),
+            FsblVector(locksta: 1u32, arm_clk: 0x1f000000u32, ddr_clk: 2u32, pss_rst: 0u32, a9_rst: 0u32, devcfg_int_sts: 4u32, expected: false),
+            FsblVector(locksta: 1u32, arm_clk: 0x1f000000u32, ddr_clk: 3u32, pss_rst: 1u32, a9_rst: 0u32, devcfg_int_sts: 4u32, expected: false),
+            FsblVector(locksta: 1u32, arm_clk: 0x1f000000u32, ddr_clk: 3u32, pss_rst: 0u32, a9_rst: 1u32, devcfg_int_sts: 4u32, expected: false),
+            FsblVector(locksta: 1u32, arm_clk: 0x1f000000u32, ddr_clk: 3u32, pss_rst: 0u32, a9_rst: 0u32, devcfg_int_sts: 0u32, expected: false)
+        ]
+        for vector in vectors:
+            val actual = cosmos_fsbl_handoff_valid_registers(
+                vector.locksta,
+                vector.arm_clk,
+                vector.ddr_clk,
+                vector.pss_rst,
+                vector.a9_rst,
+                vector.devcfg_int_sts
+            )
+            expect(actual).to_equal(vector.expected)
+
     # REQ-001..004, REQ-008, REQ-011; NFR-001..004, NFR-009..010, NFR-012.
     it "should execute the host FSBL, NFC, and PCIe MMIO state machines":
         # @req: REQ-001 REQ-002 REQ-003 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 REQ-010 REQ-012 REQ-001..004 REQ-003..004 REQ-006..007 REQ-008..009 REQ-004..005 REQ-010..011
