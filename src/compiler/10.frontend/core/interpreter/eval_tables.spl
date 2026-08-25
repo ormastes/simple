@@ -276,6 +276,80 @@ fn func_table_lookup(name: text) -> i64:
         idx = ft_nexts[idx]
     -1
 
+# ===== (module path, name)-keyed function resolution =====
+#
+# Pure-Simple mirror of the seed's cross-module duplicate-function policy
+# (module_loader.rs doc comment "key the registry on (module path, name)";
+# interpreter_call/mod.rs `filter_overloads_by_caller_binding`, 2026-08-25):
+# a bare-name call resolves through the CALLING module first — its own
+# definition, then its selective-import binding — and only then falls back to
+# the flat bare-name table's historical last-write-wins pick. This is what
+# stops two co-compiled modules that each define the same free function
+# (extract_json_string, char_from_code — the two 2026-08-25 llm_caret
+# incidents) from silently hijacking each other by load order.
+#
+# Composite keys embed "\u{01}", which no legal identifier or module path
+# contains, so they can never collide with real bare names in the shared
+# hash arrays.
+
+fn _owned_fn_key(owner: text, name: text) -> text:
+    owner + "\u{01}" + name
+
+fn func_table_register_owned(owner: text, name: text, decl_id: i64):
+    if owner == "":
+        return
+    val key = _owned_fn_key(owner, name)
+    val bucket = hm_hash_text(key) % HM_SIZE
+    var idx = ft_buckets[bucket]
+    while idx != -1:
+        if ft_keys[idx] == key:
+            ft_vals[idx] = decl_id
+            return
+        idx = ft_nexts[idx]
+    val new_idx = ft_keys.len()
+    ft_keys.push(key)
+    ft_vals.push(decl_id)
+    ft_nexts.push(ft_buckets[bucket])
+    ft_buckets[bucket] = new_idx
+
+fn func_table_lookup_owned(owner: text, name: text) -> i64:
+    if owner == "":
+        return -1
+    func_table_lookup(_owned_fn_key(owner, name))
+
+# Selective-import bindings: (importer file, local name) -> source module FILE
+# path, recorded when DECL_USE loads a selective import (eval_decls.spl).
+var _fn_import_binding = {}
+
+fn func_import_binding_register(importer: text, name: text, source_file: text):
+    if importer == "" or source_file == "":
+        return
+    _fn_import_binding[_owned_fn_key(importer, name)] = source_file
+
+fn func_import_binding_lookup(importer: text, name: text) -> text:
+    val key = _owned_fn_key(importer, name)
+    if _fn_import_binding.has(key):
+        return _fn_import_binding[key]
+    ""
+
+fn func_import_binding_reset():
+    _fn_import_binding = {}
+
+# Caller-aware resolution: the calling module's own definition wins, then its
+# selective-import binding; -1 means "no owned route — use the flat table".
+fn func_resolve_for_caller(caller_owner: text, name: text) -> i64:
+    if caller_owner == "" or caller_owner == "<entry>":
+        return -1
+    val own_decl = func_table_lookup_owned(caller_owner, name)
+    if own_decl >= 0:
+        return own_decl
+    val bound_src = func_import_binding_lookup(caller_owner, name)
+    if bound_src != "":
+        val bound_decl = func_table_lookup_owned(bound_src, name)
+        if bound_decl >= 0:
+            return bound_decl
+    -1
+
 fn func_table_remove(name: text) -> bool:
     val bucket = hm_hash_text(name) % HM_SIZE
     var prev: i64 = -1

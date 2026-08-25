@@ -228,6 +228,215 @@ fn select_overload(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<
     best.map(|(_, func)| func)
 }
 
+/// Resolve a bare-name call's candidate set through the CALLING module's
+/// import bindings, BEFORE any arity/type scoring.
+///
+/// This is the interpreter half of keying the co-compiled registry on
+/// (module path, name) instead of the name alone (see the doc comment above
+/// `warn_duplicate_private_signatures` in `pipeline/module_loader.rs`): the
+/// flat `FUNCTION_OVERLOADS` table still holds every same-named definition,
+/// but the caller's own module and its recorded import bindings
+/// (`owner_bindings`, built from the `__simple_flatten_import_binding__=`
+/// markers) decide which owners' candidates are even eligible.
+///
+/// Returns:
+/// - `Ok(Some(filtered))` — a binding route resolved; score only these.
+/// - `Ok(None)` — no binding information applies; legacy behavior.
+/// - `Err(..)` — the caller neither defines nor imports `name`, and two or
+///   more equally-scoring candidates from DISTINCT modules remain: the old
+///   silent first-import-wins pick is now a hard ambiguity error.
+fn filter_overloads_by_caller_binding(
+    name: &str,
+    candidates: &[Arc<FunctionDef>],
+    values: &[Value],
+) -> Result<Option<Vec<Arc<FunctionDef>>>, CompileError> {
+    let Some(current) = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone()) else {
+        return Ok(None);
+    };
+    let owners: Vec<Option<Arc<str>>> = candidates.iter().map(function_module_owner).collect();
+    // 1. The calling module's own definition(s) always win (keep ALL of that
+    //    owner's overloads — same-module arity overloading must keep working).
+    let own: Vec<Arc<FunctionDef>> = candidates
+        .iter()
+        .zip(&owners)
+        .filter(|(_, owner)| owner.as_deref() == Some(current.as_ref()))
+        .map(|(func, _)| Arc::clone(func))
+        .collect();
+    if !own.is_empty() {
+        return Ok(Some(own));
+    }
+    // 2. An explicit `use m.{name}` binding recorded for the calling module.
+    let bindings = crate::interpreter::owner_bindings(&current);
+    if let Some(bindings) = &bindings {
+        if let Some((owner0, name0)) = bindings.get(name) {
+            // The binding may name a re-export FACADE (`std.string_core` ->
+            // `src/lib/string_core.spl`) while the candidate's owner tag names
+            // the module that actually DECLARES the function. Walk the facade's
+            // own binding table toward the declarer, bounded against cycles.
+            let mut source_owner: Arc<str> = Arc::clone(owner0);
+            let mut source_name: String = name0.clone();
+            for _ in 0..16 {
+                let matched: Vec<Arc<FunctionDef>> = candidates
+                    .iter()
+                    .zip(&owners)
+                    .filter(|(func, owner)| {
+                        owner.as_deref() == Some(source_owner.as_ref()) && func.name == source_name
+                    })
+                    .map(|(func, _)| Arc::clone(func))
+                    .collect();
+                if !matched.is_empty() {
+                    return Ok(Some(matched));
+                }
+                let next = crate::interpreter::owner_bindings(&source_owner)
+                    .and_then(|b| b.get(&source_name).cloned());
+                match next {
+                    Some((next_owner, next_name))
+                        if !(next_owner == source_owner && next_name == source_name) =>
+                    {
+                        source_owner = next_owner;
+                        source_name = next_name;
+                    }
+                    _ => {
+                        // A facade that re-exports via glob (`export use m.*`)
+                        // has no per-name binding; its glob sources are
+                        // recorded under `"*<owner>"` keys. Match candidates
+                        // from those owners directly.
+                        let facade_globs: Vec<Arc<str>> = crate::interpreter::owner_bindings(&source_owner)
+                            .map(|b| {
+                                b.iter()
+                                    .filter(|(local, _)| local.starts_with('*'))
+                                    .map(|(_, (owner, _))| Arc::clone(owner))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let matched: Vec<Arc<FunctionDef>> = candidates
+                            .iter()
+                            .zip(&owners)
+                            .filter(|(func, owner)| {
+                                func.name == source_name
+                                    && owner
+                                        .as_deref()
+                                        .is_some_and(|o| facade_globs.iter().any(|g| g.as_ref() == o))
+                            })
+                            .map(|(func, _)| Arc::clone(func))
+                            .collect();
+                        if !matched.is_empty() {
+                            return Ok(Some(matched));
+                        }
+                        // Single glob source: keep walking through it.
+                        if facade_globs.len() == 1 {
+                            source_owner = Arc::clone(&facade_globs[0]);
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+            // The binding chain reaches no registered candidate — fall back.
+            return Ok(None);
+        }
+        // 3. Glob imports (`use m.*`): markers record a `"*<owner>"` entry per
+        //    glob source; candidates from those owners are eligible.
+        let glob_owners: Vec<&str> = bindings
+            .iter()
+            .filter(|(local, _)| local.starts_with('*'))
+            .map(|(_, (owner, _))| owner.as_ref())
+            .collect();
+        if !glob_owners.is_empty() {
+            let matched: Vec<Arc<FunctionDef>> = candidates
+                .iter()
+                .zip(&owners)
+                .filter(|(_, owner)| owner.as_deref().is_some_and(|o| glob_owners.contains(&o)))
+                .map(|(func, _)| Arc::clone(func))
+                .collect();
+            if !matched.is_empty() {
+                let mut matched_owner_set: Vec<Arc<str>> = Vec::new();
+                for func in &matched {
+                    if let Some(owner) = function_module_owner(func) {
+                        if !matched_owner_set.iter().any(|o| *o == owner) {
+                            matched_owner_set.push(owner);
+                        }
+                    }
+                }
+                if matched_owner_set.len() >= 2 {
+                    // Two different glob imports each provide `name`: there is
+                    // no legacy winner that is defensible here — hard error.
+                    let ctx = ErrorContext::new().with_help(format!(
+                        "import `{name}` explicitly (e.g. `use <module>.{{{name}}}`) in the calling module"
+                    ));
+                    return Err(CompileError::semantic_with_context(
+                        format!(
+                            "ambiguous call to `{name}` from module `{current}`: glob imports of {} each define it",
+                            matched_owner_set
+                                .iter()
+                                .map(|o| o.as_ref())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        ctx,
+                    ));
+                }
+                return Ok(Some(matched));
+            }
+        }
+    }
+    // 4. No route resolved. If ≥2 equal-best-score candidates from distinct,
+    //    KNOWN owners remain, the pick would be load-order luck — error out.
+    let mut best: Option<usize> = None;
+    for func in candidates {
+        if let Some(score) = overload_score(func, values) {
+            // Mirrors `select_overload`: HIGHER score wins.
+            if best.map_or(true, |b| score > b) {
+                best = Some(score);
+            }
+        }
+    }
+    let Some(best) = best else { return Ok(None) };
+    let mut tied_owners: Vec<&str> = Vec::new();
+    let mut has_unknown_owner = false;
+    for (func, owner) in candidates.iter().zip(&owners) {
+        if overload_score(func, values) != Some(best) {
+            continue;
+        }
+        match owner {
+            Some(owner) => {
+                if !tied_owners.contains(&owner.as_ref()) {
+                    tied_owners.push(owner.as_ref());
+                }
+            }
+            None => has_unknown_owner = true,
+        }
+    }
+    if !has_unknown_owner && tied_owners.len() >= 2 {
+        // Intended to be a HARD error, but the tree still carries the
+        // 350-symbol same-signature sync/async stdlib mirror family
+        // (co_compiled_symbol_collision_decision_2026-08-09.md §3 — e.g.
+        // `step` in nogc_sync_mut/spec.spl vs nogc_async_mut/spec/__init__.spl,
+        // reachable from virtually every spec through the prelude), so a fatal
+        // diagnostic here breaks routine specs (measured:
+        // type_domain_resolver_spec 0/4). Warn once per (caller, name) and
+        // fall back to the historical first-registered pick; promote to an
+        // error once the mirror family is namespaced.
+        use std::sync::{Mutex, OnceLock};
+        static WARNED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+        let key = format!("{current}\u{1}{name}");
+        let fresh = WARNED
+            .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+            .lock()
+            .map(|mut set| set.insert(key))
+            .unwrap_or(false);
+        if fresh {
+            eprintln!(
+                "warning: ambiguous call to `{name}` from module `{current}`: equally applicable definitions in {}; \
+                 the caller neither defines nor imports it — falling back to the first-registered definition. \
+                 Import `{name}` explicitly to pin the callee.",
+                tied_owners.join(", ")
+            );
+        }
+    }
+    Ok(None)
+}
+
 fn select_named_static_overload<'a, I, F>(
     candidates: I,
     method_name: &str,
@@ -575,7 +784,14 @@ pub(crate) fn evaluate_call(
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_overload(&overloads, &evaluated_args) {
+                // Cross-module (module path, name) resolution: the calling
+                // module's own definitions and import bindings pre-filter the
+                // flat candidate set; see `filter_overloads_by_caller_binding`.
+                let candidates = filter_overloads_by_caller_binding(name, &overloads, &evaluated_args)?
+                    .unwrap_or_else(|| overloads.clone());
+                if let Some(func) =
+                    select_overload(&candidates, &evaluated_args).or_else(|| select_overload(&overloads, &evaluated_args))
+                {
                     return core::exec_function_with_values_and_writeback(
                         &func,
                         &evaluated_args,

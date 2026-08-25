@@ -23,7 +23,7 @@ use compiler.core.ast.{
 }
 use compiler.common.gc_config.{is_nogc_family, is_gc_family, is_noalloc_family, is_allocating_family}
 use compiler.core.interpreter.eval.{eval_warnings}
-use compiler.core.interpreter.eval_tables.{func_register_return_type, func_table_lookup, func_table_register, struct_table_lookup, struct_table_register, decl_owner_file_set}
+use compiler.core.interpreter.eval_tables.{func_register_return_type, func_table_lookup, func_table_register, func_table_register_owned, struct_table_lookup, struct_table_register, decl_owner_file_set}
 use compiler.core.interpreter.interp_resource_tracker.{
     irt_begin_module,
     irt_init,
@@ -328,6 +328,11 @@ fn register_module_functions():
             val name = decl_get_name(did)
             val ret_type = decl_get_ret_type(did)
             func_table_register(name, did)
+            # (module path, name)-keyed twin registration: caller-aware
+            # resolution (func_resolve_for_caller) reads this, so a bare-name
+            # collision between co-compiled modules cannot hijack a caller
+            # that defines or imports the name. Seed-policy mirror, 2026-08-25.
+            func_table_register_owned(mod_path, name, did)
             func_register_return_type(name, ret_type)
             # pure_interp_registry_2026-07-17: record the owning decl_id so a
             # later bare-name collision from another module doesn't let this
@@ -354,6 +359,7 @@ fn register_module_functions():
             for method_id in decl_get_body(did):
                 val method_name = decl_get_name(method_id)
                 func_table_register(method_name, method_id)
+                func_table_register_owned(mod_path, method_name, method_id)
                 func_register_return_type(method_name, decl_get_ret_type(method_id))
                 irt_track_func_owned(mod_path, method_name, method_id)
                 # coverage owner-attribution — impl-block methods (RC1 equivalent).

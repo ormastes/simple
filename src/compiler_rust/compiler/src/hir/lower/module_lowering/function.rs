@@ -511,6 +511,18 @@ impl Lowerer {
         let previous_function_name = self.current_function_name.clone();
         let previous_function_line = self.current_function_line;
         self.current_function_name = Some(func_name.clone());
+        // Owner of this body, for per-caller duplicate-function resolution
+        // (`resolve_duplicate_fn_symbol`). The flatten pass stamps every
+        // imported function (and method) with its owning module; entry-file
+        // definitions carry no attribute and use the "<entry>" sentinel.
+        let previous_function_owner = self.current_function_owner.take();
+        self.current_function_owner = Some(
+            f.attributes
+                .iter()
+                .find_map(|a| a.name.strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX))
+                .unwrap_or("<entry>")
+                .to_string(),
+        );
         // Attribution anchor for the `lenient_types` unresolved-name fallback:
         // `Expr::Identifier` has no span, so the enclosing function's
         // declaration line is the tightest source location available.
@@ -783,10 +795,21 @@ impl Lowerer {
         self.current_class_type = previous_class_type;
         self.current_function_name = previous_function_name;
         self.current_function_line = previous_function_line;
+        let lowered_owner = self.current_function_owner.take();
+        self.current_function_owner = previous_function_owner;
 
         // Use qualified name for methods (ClassName.method) for DI compatibility
         let name = if let Some(owner) = owner_type {
             format!("{}.{}", owner, f.name)
+        } else if let Some(symbol) = lowered_owner
+            .as_deref()
+            .and_then(|owner| self.duplicate_fn_owner_symbols.get(&(owner.to_string(), f.name.clone())))
+        {
+            // A duplicated bare name: emit this definition under its
+            // owner-unique symbol so no definition silently shadows another.
+            // Call sites are rewritten per caller by
+            // `resolve_duplicate_fn_symbol` (see `lower_identifier`).
+            symbol.clone()
         } else {
             f.name.clone()
         };
