@@ -21,7 +21,10 @@ use os.kernel.scheduler.process_stdout_capture.{
     rv64_process_stdout_finish
 }
 use os.kernel.types.task_types.{TaskId}
-use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
+use os.kernel.scheduler.scheduler.{
+    wait_collect_result_error, wait_collect_result_pid,
+    wait_collect_result_status
+}
 
 extern fn serial_println(msg: text)
 
@@ -89,6 +92,7 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
     val captured = captured_result.unwrap()
     if wait_collect_result_error(collected) != 0 or
+       wait_collect_result_pid(collected) != child.id or
        wait_collect_result_status(collected) != exit_code.to_i32():
         _discard_execution_observation(child.id)
         return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
@@ -204,6 +208,10 @@ pub fn riscv64_fs_exec_spawn_capture(path: text, argv: [text], envp: [text]) -> 
     scheduler.exit_task_by_id(child, exit_code as i32)
     val collected = scheduler.wait_for_collect(TaskId(id: 0), child, false)
     if wait_collect_result_error(collected) != 0:
+        val failed = rv64_process_stdout_finish(capture_session.unwrap(), -10)
+        if not failed.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
+        return failed.unwrap()
+    if wait_collect_result_pid(collected) != child.id:
         val failed = rv64_process_stdout_finish(capture_session.unwrap(), -10)
         if not failed.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
         return failed.unwrap()

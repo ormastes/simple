@@ -377,6 +377,13 @@ class Compositor:
         )
 
     me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> i32:
+        # No contained geometry exists until the display owner publishes both
+        # dimensions.  Fail before consuming an id or disturbing the current
+        # focus/input epoch; move/resize use the same unavailable-display
+        # contract.  Window id zero is already the compositor's invalid-id
+        # sentinel, so wrappers can safely retain their existing no-op flow.
+        if self.screen_width <= 0 or self.screen_height <= 0:
+            return 0
         # Creating a window transfers keyboard ownership to it.  Backend
         # events already waiting in the ring were observed under the previous
         # focus epoch and have no target identity of their own, so they cannot
@@ -388,13 +395,36 @@ class Compositor:
         self.input_queue.clear()
         val id = self.next_id
         self.next_id = self.next_id + 1
+        # Filesystem launch metadata, remote clients, and local applications
+        # all enter through this owner.  Admit only display-contained geometry
+        # here: waiting for a later move/resize leaves an oversized or wholly
+        # unreachable surface in compositor state and in the first frame.
+        # Subtraction-based maxima avoid overflowing hostile i32 coordinates.
+        val bounded_width = wm_lifecycle_bounded_window_width(
+            width, self.screen_width
+        )
+        val bounded_height = wm_lifecycle_bounded_window_height(
+            height, self.screen_height
+        )
+        var bounded_x = x
+        var bounded_y = y
+        val max_x = self.screen_width - bounded_width
+        val max_y = self.screen_height - bounded_height
+        if bounded_x < 0:
+            bounded_x = 0
+        elif bounded_x > max_x:
+            bounded_x = max_x
+        if bounded_y < 0:
+            bounded_y = 0
+        elif bounded_y > max_y:
+            bounded_y = max_y
         self.surfaces.push(WindowSurface(
             id: id,
             title: title,
-            x: x,
-            y: y,
-            width: width,
-            height: height,
+            x: bounded_x,
+            y: bounded_y,
+            width: bounded_width,
+            height: bounded_height,
             visible: true,
             content_kind: WM_CONTENT_KIND_EMPTY,
             content_handle: 0,

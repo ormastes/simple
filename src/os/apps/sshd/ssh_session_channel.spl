@@ -334,6 +334,41 @@ fn _scp_basename_bytes(path_bytes: [u8]) -> [u8]:
         j = j + 1
     out
 
+fn _scp_source_path_admitted(path_bytes: [u8]) -> bool:
+    """Admit one absolute SCP source path safe for its control record.
+
+    The basename is copied verbatim into `C0644 ... <name>\n`; control bytes
+    would therefore let a peer inject a second SCP record.  Validate the raw
+    bytes before text conversion or filesystem access, and reject lexical
+    parent/current components at the same boundary.
+    """
+    val path_len = path_bytes.len()
+    if path_len < 2u64 or path_len > 4096u64 or
+        rt_bytes_u8_at(path_bytes, 0) != 0x2Fu8:
+        return false
+    var component_len: u64 = 0u64
+    var component_dots: u64 = 0u64
+    var index: u64 = 1u64
+    while index < path_len:
+        val byte = rt_bytes_u8_at(path_bytes, index.to_i64())
+        if byte < 0x20u8 or byte == 0x7Fu8:
+            return false
+        if byte == 0x2Fu8:
+            if component_len == 0u64 or
+                (component_len == 1u64 and component_dots == 1u64) or
+                (component_len == 2u64 and component_dots == 2u64):
+                return false
+            component_len = 0u64
+            component_dots = 0u64
+        else:
+            component_len = component_len + 1u64
+            if byte == 0x2Eu8 and component_dots + 1u64 == component_len:
+                component_dots = component_dots + 1u64
+        index = index + 1u64
+    component_len > 0u64 and
+        not (component_len == 1u64 and component_dots == 1u64) and
+        not (component_len == 2u64 and component_dots == 2u64)
+
 # ============================================================================
 # Types
 # ============================================================================
@@ -745,6 +780,11 @@ impl SshSession:
             ssh_session_u8_at(payload, off + 7) == 0x20u8):
             serial_println("[sshd-session] exec scp-source command={command}")
             val path_bytes = _scp_last_token_bytes(command)
+            if not _scp_source_path_admitted(path_bytes):
+                if want_reply:
+                    self.send_packet(_build_channel_failure_stable(remote_id))
+                self._finish_exec_request(local_id, remote_id, 1, [])
+                return
             val name_bytes = _scp_basename_bytes(path_bytes)
             val path_text = rt_string_from_byte_array(path_bytes)
             val (file_bytes, fsize) = _scp_read_file_bytes(path_text)

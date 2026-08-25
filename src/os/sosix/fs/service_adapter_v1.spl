@@ -23,6 +23,10 @@ pub val SOSIX_FS_SERVICE_STATUS_DENIED_V1: i32 = -13
 pub val SOSIX_FS_SERVICE_STATUS_STALE_V1: i32 = -116
 pub val SOSIX_FS_SERVICE_MAX_CAPABILITIES_V1: u64 = 1024
 pub val SOSIX_FS_SERVICE_MAX_BUFFERS_V1: u64 = 1024
+# Per positioned request, not per file.  Large filesystem artifacts (including
+# the documented 150--280 MiB toolchain images) remain accessible by advancing
+# resource_offset and buffer_offset across multiple bounded requests.
+pub val SOSIX_FS_SERVICE_MAX_TRANSFER_BYTES_V1: u64 = 16u64 * 1024u64 * 1024u64
 
 pub struct SosixFsIpcReceiveFactsV1:
     source_authenticated: bool
@@ -88,6 +92,7 @@ export SOSIX_FS_SERVICE_BUFFER_READ_V1, SOSIX_FS_SERVICE_BUFFER_WRITE_V1
 export SOSIX_FS_SERVICE_STATUS_INVALID_V1, SOSIX_FS_SERVICE_STATUS_DENIED_V1
 export SOSIX_FS_SERVICE_STATUS_STALE_V1
 export SOSIX_FS_SERVICE_MAX_CAPABILITIES_V1, SOSIX_FS_SERVICE_MAX_BUFFERS_V1
+export SOSIX_FS_SERVICE_MAX_TRANSFER_BYTES_V1
 export SosixFsIpcReceiveFactsV1, SosixFsCapabilityEntryV1
 export SosixFsBufferEntryV1, SosixFsServiceRegistryV1
 export SosixFsServiceDispatchPlanV1, SosixFsServicePrepareResultV1
@@ -187,6 +192,11 @@ pub fn sosix_fs_service_prepare_v1(
         return _rejected_service_prepare_v1("invalid-buffer-registration", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
     if buffer_owner != facts.source_process_id:
         return _rejected_service_prepare_v1("buffer-owner-mismatch", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
+    # Bound the allocation and copy work performed by this positioned request.
+    # The dispatch owner repeats this check because callers can construct plans
+    # directly without passing through this admission function.
+    if request.length > SOSIX_FS_SERVICE_MAX_TRANSFER_BYTES_V1:
+        return _rejected_service_prepare_v1("transfer-too-large", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
     val required_access = if request.api_id == SOSIX_FS_READ_AT:
         SOSIX_FS_SERVICE_BUFFER_WRITE_V1
     else:

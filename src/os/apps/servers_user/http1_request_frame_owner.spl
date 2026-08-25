@@ -30,6 +30,18 @@ fn _http_field_token_byte(byte: u8) -> bool:
         byte == 45u8 or byte == 46u8 or byte == 94u8 or byte == 95u8 or
         byte == 96u8 or byte == 124u8 or byte == 126u8
 
+fn _http_request_method_token_valid(line_bytes: [u8]) -> bool:
+    # RFC 9110 method is a non-empty ASCII token. Validate the method directly
+    # in the bounded request-line snapshot already owned by the framer, before
+    # the text parser or route owner can observe it. This avoids allocating a
+    # second method byte array on the connection hot path.
+    var index: u64 = 0u64
+    while index < line_bytes.len() and line_bytes[index] != 32u8:
+        if not _http_field_token_byte(line_bytes[index]):
+            return false
+        index = index + 1u64
+    index > 0u64 and index < line_bytes.len()
+
 fn _http_field_name_is_host(line_bytes: [u8], colon: i64) -> bool:
     # Header names are already restricted to ASCII tchar bytes.  Compare the
     # four Host bytes directly so the incremental hot path does not allocate a
@@ -550,11 +562,14 @@ class Http1RequestFrameOwner:
 
     me _finish_line(line_end: i64):
         val line_bytes = self.retained.slice(self.line_start as u64, line_end as u64)
-        val line = bytes_to_string(line_bytes)
         if not self.request_line_seen:
-            if line == "":
+            if line_bytes.len() == 0u64:
                 self._fail("400 Empty request line")
                 return
+            if not _http_request_method_token_valid(line_bytes):
+                self._fail("400 Invalid HTTP method token")
+                return
+            val line = bytes_to_string(line_bytes)
             val parsed = parse_request_line(line)
             if parsed.0 == "" or parsed.1 == "" or parsed.2 == "":
                 self._fail("400 Malformed request line")
@@ -570,6 +585,7 @@ class Http1RequestFrameOwner:
             self.request_line_seen = true
             return
 
+        val line = bytes_to_string(line_bytes)
         if line == "":
             # Upgrade alone is not a WebSocket handoff. RFC 6455 requires GET
             # over HTTP/1.1 and RFC 9110 requires the matching Connection
