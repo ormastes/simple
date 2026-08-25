@@ -5280,3 +5280,38 @@ environment parse bug recorded in
 `doc/08_tracking/bug/aes128_gcm_verification_blocked_by_env_access_parse_2026-08-25.md`.
 Therefore executable verification is missing, exact artifact/signature
 evidence remains absent, and verified-and-signed admission remains 0.
+
+## x86_64 boot network-services authority checkpoint
+
+The x86_64 boot network probe's seven baremetal runtime families now carry
+explicit FFI authority and route through seven mandatory-inline owners. The
+provider-reported PCI count is accepted only in the concrete C runtime's
+0-through-32 device range before enumeration. Negative or excessive counts
+fail closed as network unavailable; invalid field projections remain unable
+to match the exact Ethernet/VirtIO identifiers.
+
+Initialization, TX, RX, and statistics probes retain signed status values and
+must all be nonnegative before readiness becomes exactly `1`. The public
+readiness API remains semantic `bool`; no numeric boolean workaround or
+zero/true provider fallback was introduced. The focused
+`x86-64-boot-services-sffi-authority.shs` audit passed. It records that logging
+is interpreter-only and that all six PCI/network operations are absent from
+both hosted typed registries; this baremetal provider gap is not proof.
+
+The authoritative census changed as follows:
+
+- raw call sites: 18,636 -> 18,615
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,088
+- missing authority: 13,728 -> 13,700
+- lexical unsafe: 3,413 -> 3,420
+- function unsafe: unchanged at 1,495
+
+Runtime complexity remains `O(min(provider_count, 32))`. Mandatory inlining
+preserves direct primitive calls; the only new runtime work is one constant
+range check before enumeration. There is no allocation, copy, lookup, lock,
+hash, signature operation, generic dispatch, or per-device validation branch.
+The executable system test remains blocked by the previously recorded hosted
+environment parser failure. Exact x86 provider artifact identity, signed
+admission, and device-level proof remain absent, so verified-and-signed
+admission remains 0.
