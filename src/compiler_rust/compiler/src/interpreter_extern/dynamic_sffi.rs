@@ -667,17 +667,9 @@ fn dlsym_lookup(handle: usize, name: &str) -> Option<usize> {
 /// the narrow integer ABI supported by this legacy path. Other values must use
 /// a typed interpreter adapter.
 /// - Int -> direct i64
-/// - Bool -> 0 or 1
 fn value_to_i64(val: &Value) -> Result<i64, CompileError> {
     match val {
         Value::Int(n) => Ok(*n),
-        Value::Bool(b) => {
-            if *b {
-                Ok(1)
-            } else {
-                Ok(0)
-            }
-        }
         other => Err(unsupported_conversion(format!(
             "dynamic SFFI dispatch does not admit argument type '{}' without a typed ABI contract",
             other.type_name()
@@ -1218,15 +1210,12 @@ mod tests {
     }
 
     #[test]
-    fn generic_dispatch_retains_integer_and_bool_scalars() {
+    fn generic_dispatch_accepts_integers_and_rejects_boolean_coercion() {
         assert_eq!(
             call_fptr(echo_i64 as usize, "echo_i64", &[Value::Int(42)]).unwrap(),
             Value::Int(42)
         );
-        assert_eq!(
-            call_fptr(echo_i64 as usize, "echo_i64", &[Value::Bool(true)]).unwrap(),
-            Value::Int(1)
-        );
+        assert!(call_fptr(echo_i64 as usize, "echo_i64", &[Value::Bool(true)]).is_err());
     }
 
     #[test]
