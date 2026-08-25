@@ -1,7 +1,9 @@
 # LLM Caret JSON parse path: `json_parse` nil-contract + `any?` Option-wrap — 2026-08-25
 
-Status: OPEN (P1) — std/seed defect surfacing in `src/app/llm_caret`; caret code
-is NOT changed (see "Why not worked around" below).
+Status: FIXED (std layer, 2026-08-25, uncommitted) — see "Fix and evidence" below.
+The parse-nil-contract and `any?` Option-wrap class is closed in std; caret
+code is NOT changed. Residual reds in `claude_cli_spec` / `provider_spec` are
+DIFFERENT defect classes, split out at the bottom.
 
 ## Affected specs (all RED, fresh seed built from origin/main `684fadabcae`)
 
@@ -65,6 +67,10 @@ own documented one. Per `.claude/rules/testing.md` the specs stay RED.
 
 ## Unblock condition
 
+**Superseded 2026-08-25** — closed at the std layer by unannotating the
+accessors (see "Fix and evidence"); the seed defect itself stands, tracked in
+`free_fn_optional_wrap_2026-06-26.md`.
+
 Seed: free-function `T?`/`any?` returns must not Option-wrap (see
 `doc/08_tracking/bug/free_fn_optional_wrap_2026-06-26.md`), after which
 `json_parse` can be declared `-> any?` and `parsers_json_core_spec` +
@@ -72,3 +78,73 @@ the five specs above go green together. Re-verify with
 `bin/simple test test/01_unit/app/llm_caret/claude_cli_spec.spl`.
 
 Related: `doc/08_tracking/bug/non_optional_wrappers_return_nil_sweep_2026-08-21.md`.
+
+## Fix and evidence (2026-08-25)
+
+Measured first on the fresh seed (clean origin/main `684fadabcae` checkout) with
+a 6-example probe: `-> any` returning nil traps
+(`nil is forbidden by the non-optional return contract`), `-> any?` returning
+a value Option-wraps it (`cannot convert enum to float`, `as i64` == 0), and an
+**unannotated** return passes both legs. So the fix is to drop the return
+annotation on every JSON accessor whose documented contract is
+value-or-nil; the (tag, payload) tuple representation and nil-on-failure
+contract are unchanged, and no caller was edited (125 call sites counted;
+18 sampled across 8 files, all value-or-nil usage: `== nil`, `as i64`,
+arithmetic on the unwrapped value).
+
+Files (std only, zero `src/app/llm_caret` edits):
+- `src/lib/common/json/parser.spl` — `json_parse` (`-> any` dropped; comment rewritten)
+- `src/lib/common/json/types.spl` — `json_to_boolean/number/string/array/object` (`-> any?` dropped)
+- `src/lib/common/json/object_ops.spl` — `json_object_get`, `json_object_find`
+- `src/lib/common/json/array_ops.spl` — `json_array_get`, `json_array_last`, `json_array_find`
+- `src/lib/common/json/path_ops.spl` — `json_path_get`
+- `src/lib/common/json/validation.spl` — `json_deep_clone`
+- new reproducer: `test/01_unit/lib/common/parsers_json_return_contract_spec.spl`
+  (before fix: `Results: 10 total, 3 passed, 7 failed` — quoting
+  `semantic: nil is forbidden by the non-optional return contract of 'json_parse'`,
+  `semantic: type mismatch: cannot convert enum to float`, `expected 0 to equal 2`;
+  after: `Results: 10 total, 10 passed, 0 failed`). The before-line is the
+  initial revision of the spec; its nested-null example was later rebuilt via
+  `+` concatenation to dodge the separately-filed `}}` lexer bug, the other 6
+  failures are the contract class verbatim.
+
+Before/after `Results:` lines (same seed, same tree, one spec per run):
+
+| spec | before | after |
+|---|---|---|
+| `test/01_unit/lib/common/parsers_json_core_spec.spl` | `94 total, 92 passed, 2 failed` | `94 total, 94 passed, 0 failed` |
+| `test/01_unit/app/llm_caret/claude_cli_spec.spl` | `84 total, 54 passed, 30 failed` | `84 total, 66 passed, 18 failed` (residual, see below) |
+| `test/01_unit/app/llm_caret/provider_spec.spl` | `36 total, 29 passed, 7 failed` | `36 total, 35 passed, 1 failed` (residual, see below) |
+| `test/03_system/app/llm_caret/feature/llm_caret_claude_cli_stream_spec.spl` | `3 total, 1 passed, 2 failed` | `3 total, 3 passed, 0 failed` |
+| `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` | `3 total, 2 passed, 1 failed` | `3 total, 3 passed, 0 failed` |
+| `test/01_unit/app/llm_caret/opencode_cli_spec.spl` | `15 total, 13 passed, 2 failed` | `15 total, 15 passed, 0 failed` |
+| `test/01_unit/lib/common/parsers_json_ops_spec.spl` | — | `64 total, 64 passed, 0 failed` |
+| `test/01_unit/lib/common/json_logic_spec.spl` | — | `22 total, 22 passed, 0 failed` |
+| `test/01_unit/lib/common/json_coverage_spec.spl` | — | `187 total, 187 passed, 0 failed` |
+
+All six `cannot convert enum to float` examples and every nil-contract trap are
+gone. Lint: parser/types/array_ops/validation 0 errors; object_ops and
+path_ops each report pre-existing COLL001/COLL006 errors that are present
+byte-identically on the HEAD versions (verified by linting `git show HEAD:`
+copies) — not introduced here.
+
+### Residual (NOT this class — left RED, filed separately)
+
+1. **`}}` string-literal collapse (lexer)** —
+   `doc/08_tracking/bug/string_literal_double_brace_collapse_2026-06-16.md`.
+   `claude_cli_spec.spl` has 20 raw `}}` literals; each loses a brace at lex
+   time, so `parse_claude_stream_line` correctly reports
+   `invalid JSON in claude CLI stream` and the example fails with
+   `expected 0 to equal 1/15/4/6`, `expected invalid JSON ... to contain must be numeric`, etc.
+   Proven: the identical line built with `+ "}" + "}"` parses to
+   `type=message_start in=25 out=1` on the fixed std. This is what the nil
+   trap was masking. Fix belongs to the lexer, or the spec must build the
+   literals via concatenation as `parsers_json_core_spec.spl` already does.
+2. **`json_serialize` emits ints as floats and reorders keys**
+   (`{"answer":42.0,...}` vs `{"answer":42,...}`) — 2 examples, std serializer,
+   separate class.
+3. **`provider_spec` "should preserve Claude CLI fields through advanced
+   dispatch"** — `expected  to equal advanced-session`. `claude_cli_send`
+   itself returns `session=[advanced-session]` on the fixed std (probed
+   directly), so the field is dropped in `src/app/llm_caret/provider.spl`'s
+   `dispatch_send_advanced` path — caret-owned.
