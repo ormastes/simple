@@ -2415,6 +2415,30 @@ Production timing/RSS and exact-artifact proof remain unavailable; the file
 still has lower-volume unbounded calls and verified-and-signed admission
 remains 0.
 
+## simple-core process high-volume authority checkpoint
+
+Six operations account for 75 source occurrences in `core_process.spl`: heap
+release, raw i64 load, signal delivery, process termination, microsecond sleep,
+and tagged-string construction.  Each now has one `@always_inline` minimal
+owner.  Pointer-bearing release/load/string operations require `ffi, raw_ptr`;
+PID/status-only operations retain `ffi`.  `kill` and `usleep` keep their signed
+status results, and no status is converted to a boolean.
+
+`simple-core-process-authority.shs` passed, pinning raw-call confinement,
+mandatory inlining, exact source inventory, and both native load-intrinsic
+lowerings.  The authoritative census recognized 69 of the 75 occurrences:
+
+- raw call sites: 19,990 -> 19,927
+- missing authority: 15,985 -> 15,916
+- lexical unsafe: 3,086 -> 3,092
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Mandatory inlining preserves every release/load/signal/exit/sleep/string
+operation and adds no dispatch, allocation, copy, scan, lookup, lock, hash, or
+signature check.  Lower-volume process boundaries and exact-artifact proof
+remain outstanding; verified-and-signed admission remains 0.
+
 ## simple-core filesystem open/seek authority checkpoint
 
 The next 40 `core_fs.spl` operations—heap allocation, FILE/path opening,

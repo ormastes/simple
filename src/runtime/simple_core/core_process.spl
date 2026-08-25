@@ -16,9 +16,9 @@ extern fn clock_gettime(clk_id: i64, tp: i64) -> i64
 extern fn malloc(size: i64) -> i64
 @unsafe(reason: "raw libc zeroed heap allocation ABI; count-size product must not overflow", capabilities: [ffi])
 extern fn calloc(count: i64, size: i64) -> i64
-@unsafe(reason: "raw libc owned heap-pointer release ABI", capabilities: [ffi])
+@unsafe(reason: "raw libc owned heap-pointer release ABI", capabilities: [ffi, raw_ptr])
 extern fn free(ptr: i64)
-@unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi])
+@unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
 @unsafe(reason: "raw pointer/offset byte load ABI", capabilities: [ffi])
 extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
@@ -44,7 +44,7 @@ extern fn rt_value_int(value: i64) -> i64
 extern fn rt_string_data(value: i64) -> i64
 @unsafe(reason: "raw tagged-string length ABI", capabilities: [ffi])
 extern fn rt_string_len(value: i64) -> i64
-@unsafe(reason: "raw borrowed byte pointer/length and owned tagged-string ABI", capabilities: [ffi])
+@unsafe(reason: "raw borrowed byte pointer/length and owned tagged-string ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_string_new(bytes: i64, len: i64) -> i64
 @unsafe(reason: "raw tagged-string stderr output-status ABI", capabilities: [ffi])
 extern fn rt_stderr_write(value: i64) -> i64
@@ -73,6 +73,36 @@ extern fn sysconf(name: i64) -> i64
 @unsafe(reason: "raw NUL-terminated string pointer length ABI", capabilities: [ffi])
 extern fn strlen(ptr: i64) -> i64
 
+@always_inline
+fn _sffi_exit(code: i64):
+    unsafe(capabilities: [ffi]):
+        exit(code)
+
+@always_inline
+fn _sffi_usleep(usec: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        usleep(usec)
+
+@always_inline
+fn _sffi_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
+fn _sffi_load_i64(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_i64(ptr, offset)
+
+@always_inline
+fn _sffi_rt_string_new(bytes: i64, len: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_string_new(bytes, len)
+
+@always_inline
+fn _sffi_kill(pid: i64, signal_num: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        kill(pid, signal_num)
+
 var _rt_cli_argc: i64 = 0
 var _rt_cli_argv: i64 = 0
 
@@ -88,7 +118,7 @@ pub fn rt_is_interpreter_runtime() -> bool:
     false
 
 pub fn rt_exit(code: i64) -> i64:
-    exit(code)
+    _sffi_exit(code)
     return 0
 
 pub fn rt_set_args(argc: i64, argv: i64) -> i64:
@@ -105,7 +135,7 @@ pub fn spl_arg_count() -> i64:
 pub fn spl_get_arg(index: i64) -> i64:
     if index < 0 or index >= _rt_cli_argc or _rt_cli_argv < 1:
         return 0
-    return spl_load_i64(_rt_cli_argv, index * 8)
+    return _sffi_load_i64(_rt_cli_argv, index * 8)
 
 pub fn rt_get_argc() -> i64:
     return _rt_cli_argc
@@ -116,8 +146,8 @@ pub fn rt_cli_get_args() -> i64:
         return 3
     var i = 0
     while i < _rt_cli_argc:
-        val cstr = spl_load_i64(_rt_cli_argv, i * 8)
-        val value = if cstr < 1: rt_string_new(0, 0) else: rt_string_new(cstr, strlen(cstr))
+        val cstr = _sffi_load_i64(_rt_cli_argv, i * 8)
+        val value = if cstr < 1: _sffi_rt_string_new(0, 0) else: _sffi_rt_string_new(cstr, strlen(cstr))
         if rt_simple_core_argv_array_push_owned(out, value) < 1:
             return 3
         i = i + 1
@@ -137,11 +167,11 @@ pub fn rt_cli_arg_count() -> i64:
 
 pub fn rt_cli_arg_at(index: i64) -> i64:
     if index < 0 or index >= _rt_cli_argc or _rt_cli_argv < 1:
-        return rt_string_new(0, 0)
-    val cstr = spl_load_i64(_rt_cli_argv, index * 8)
+        return _sffi_rt_string_new(0, 0)
+    val cstr = _sffi_load_i64(_rt_cli_argv, index * 8)
     if cstr < 1:
-        return rt_string_new(0, 0)
-    return rt_string_new(cstr, strlen(cstr))
+        return _sffi_rt_string_new(0, 0)
+    return _sffi_rt_string_new(cstr, strlen(cstr))
 
 pub fn rt_time_now_unix() -> i64:
     return time(0)
@@ -153,11 +183,11 @@ pub fn rt_time_now_unix_micros() -> i64:
         return 0
     val result = gettimeofday(tv, 0)
     if result < 0:
-        free(tv)
+        _sffi_free(tv)
         return 0
-    val sec = spl_load_i64(tv, 0)
-    val usec = spl_load_i64(tv, 8)
-    free(tv)
+    val sec = _sffi_load_i64(tv, 0)
+    val usec = _sffi_load_i64(tv, 8)
+    _sffi_free(tv)
     return sec * 1000000 + usec
 
 pub fn rt_time_now_nanos() -> i64:
@@ -168,11 +198,11 @@ pub fn rt_time_now_nanos() -> i64:
         return 0
     val result = clock_gettime(1, ts)
     if result < 0:
-        free(ts)
+        _sffi_free(ts)
         return 0
-    val sec = spl_load_i64(ts, 0)
-    val nsec = spl_load_i64(ts, 8)
-    free(ts)
+    val sec = _sffi_load_i64(ts, 0)
+    val nsec = _sffi_load_i64(ts, 8)
+    _sffi_free(ts)
     return sec * 1000000000 + nsec
 
 pub fn rt_time_now_micros() -> i64:
@@ -182,11 +212,11 @@ pub fn rt_time_now_micros() -> i64:
         return 0
     val result = clock_gettime(1, ts)
     if result < 0:
-        free(ts)
+        _sffi_free(ts)
         return 0
-    val sec = spl_load_i64(ts, 0)
-    val nsec = spl_load_i64(ts, 8)
-    free(ts)
+    val sec = _sffi_load_i64(ts, 0)
+    val nsec = _sffi_load_i64(ts, 8)
+    _sffi_free(ts)
     return sec * 1000000 + nsec / 1000
 
 pub fn rt_time_now_monotonic_ms() -> i64:
@@ -209,8 +239,8 @@ pub fn rt_term_read_timeout(max_len: i64, timeout_ms: i64) -> text:
 
 fn _process_result(exit_code: i64) -> i64:
     val result = rt_tuple_new(3)
-    rt_tuple_set(result, 0, rt_string_new(0, 0))
-    rt_tuple_set(result, 1, rt_string_new(0, 0))
+    rt_tuple_set(result, 0, _sffi_rt_string_new(0, 0))
+    rt_tuple_set(result, 1, _sffi_rt_string_new(0, 0))
     rt_tuple_set(result, 2, rt_value_int(exit_code))
     result
 
@@ -229,7 +259,7 @@ fn _process_run_inherit(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     val argc = rt_array_len(args)
     val argv = calloc(argc + 2, 8)
     if argv < 1:
-        free(command)
+        _sffi_free(command)
         return -1
     spl_store_i64(argv, 0, command)
     i = 0
@@ -239,25 +269,25 @@ fn _process_run_inherit(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
 
     val status = calloc(1, 8)
     if status < 1:
-        free(argv)
-        free(command)
+        _sffi_free(argv)
+        _sffi_free(command)
         return -1
     val pid = fork()
     if pid == 0:
         execvp(command, argv)
-        exit(127)
+        _sffi_exit(127)
         return 127
     if pid < 1:
-        free(status)
-        free(argv)
-        free(command)
+        _sffi_free(status)
+        _sffi_free(argv)
+        _sffi_free(command)
         return -1
 
     val waited = waitpid(pid, status, 0)
-    val exit_code = if waited < 1: -1 else: (spl_load_i64(status, 0) >> 8) & 255
-    free(status)
-    free(argv)
-    free(command)
+    val exit_code = if waited < 1: -1 else: (_sffi_load_i64(status, 0) >> 8) & 255
+    _sffi_free(status)
+    _sffi_free(argv)
+    _sffi_free(command)
     exit_code
 
 pub fn rt_process_run_inherit(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
@@ -272,12 +302,12 @@ pub fn rt_process_run(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
     _process_result(_process_run_inherit(cmd_ptr, cmd_len, args))
 
 pub fn rt_sleep_ms(ms: i64) -> i64:
-    usleep(ms * 1000)
+    _sffi_usleep(ms * 1000)
     return 0
 
 pub fn rt_thread_sleep(ms: i64):
     if ms > 0:
-        usleep(ms * 1000)
+        _sffi_usleep(ms * 1000)
 
 pub fn spl_thread_cpu_count() -> i64:
     # Darwin exposes _SC_NPROCESSORS_ONLN as 58. Fail closed to one worker if
@@ -293,7 +323,7 @@ pub fn rt_signal_check(signal_num: i64) -> i64:
         return 0
     val queried = sigpending(pending)
     val present = if queried == 0: sigismember(pending, signal_num) else: 0
-    free(pending)
+    _sffi_free(pending)
     if present > 0: 1 else: 0
 
 pub fn rt_atexit_check() -> i64:
@@ -302,57 +332,57 @@ pub fn rt_atexit_check() -> i64:
 fn _process_stop_group(pid: i64, worker_live: bool):
     if pid <= 0:
         return
-    if kill(0 - pid, 15) != 0 and (not worker_live or kill(pid, 15) != 0):
+    if _sffi_kill(0 - pid, 15) != 0 and (not worker_live or _sffi_kill(pid, 15) != 0):
         return
-    usleep(100000)
-    kill(0 - pid, 9)
+    _sffi_usleep(100000)
+    _sffi_kill(0 - pid, 9)
     if worker_live:
-        kill(pid, 9)
+        _sffi_kill(pid, 9)
 
 fn _process_guard_exec(command: i64, argv: i64, expected_parent: i64):
     val worker = fork()
     if worker == 0:
         setpgid(0, 0)
         execvp(command, argv)
-        exit(127)
+        _sffi_exit(127)
         return
     if worker < 0:
-        exit(127)
+        _sffi_exit(127)
         return
     setpgid(worker, worker)
     val status = calloc(1, 8)
     if status < 1:
         _process_stop_group(worker, true)
-        exit(127)
+        _sffi_exit(127)
         return
     var wait_errors = 0
     while true:
         val waited = waitpid(worker, status, 1)
         if waited == worker:
-            val raw_status = spl_load_i64(status, 0)
+            val raw_status = _sffi_load_i64(status, 0)
             _process_stop_group(worker, false)
-            free(status)
+            _sffi_free(status)
             if (raw_status & 127) != 0:
                 val signal_num = raw_status & 127
                 signal(signal_num, 0)
-                kill(getpid(), signal_num)
-                exit(127)
-            exit((raw_status >> 8) & 255)
+                _sffi_kill(getpid(), signal_num)
+                _sffi_exit(127)
+            _sffi_exit((raw_status >> 8) & 255)
             return
         if waited < 0:
             wait_errors = wait_errors + 1
             if wait_errors <= 3:
-                usleep(10000)
+                _sffi_usleep(10000)
                 continue
         else:
             wait_errors = 0
         if waited < 0 or getppid() != expected_parent:
             _process_stop_group(worker, true)
             waitpid(worker, status, 0)
-            free(status)
-            exit(143)
+            _sffi_free(status)
+            _sffi_exit(143)
             return
-        usleep(10000)
+        _sffi_usleep(10000)
 
 fn _process_spawn(cmd_ptr: i64, cmd_len: i64, args: i64, guarded: bool) -> i64:
     if cmd_ptr < 1 or cmd_len < 1:
@@ -368,7 +398,7 @@ fn _process_spawn(cmd_ptr: i64, cmd_len: i64, args: i64, guarded: bool) -> i64:
     val argc = rt_array_len(args)
     val argv = calloc(argc + 2, 8)
     if argv < 1:
-        free(command)
+        _sffi_free(command)
         return -1
     spl_store_i64(argv, 0, command)
     i = 0
@@ -382,10 +412,10 @@ fn _process_spawn(cmd_ptr: i64, cmd_len: i64, args: i64, guarded: bool) -> i64:
             _process_guard_exec(command, argv, expected_parent)
         else:
             execvp(command, argv)
-            exit(127)
+            _sffi_exit(127)
             return -1
-    free(argv)
-    free(command)
+    _sffi_free(argv)
+    _sffi_free(command)
     pid
 
 pub fn rt_process_spawn_async(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
@@ -407,40 +437,40 @@ pub fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64:
         return -1
     if timeout_ms <= 0:
         val waited = waitpid(pid, status, 0)
-        val code = if waited == pid: _process_exit_code(spl_load_i64(status, 0)) else: -1
-        free(status)
+        val code = if waited == pid: _process_exit_code(_sffi_load_i64(status, 0)) else: -1
+        _sffi_free(status)
         return code
     var elapsed = 0
     while elapsed < timeout_ms:
         val waited = waitpid(pid, status, 1)
         if waited == pid:
-            val code = _process_exit_code(spl_load_i64(status, 0))
-            free(status)
+            val code = _process_exit_code(_sffi_load_i64(status, 0))
+            _sffi_free(status)
             return code
         if waited < 0:
-            free(status)
+            _sffi_free(status)
             return -1
-        usleep(10000)
+        _sffi_usleep(10000)
         elapsed = elapsed + 10
-    free(status)
+    _sffi_free(status)
     -2
 
 pub fn rt_process_is_running(pid: i64) -> i8:
-    if pid <= 0: 0 else: (if kill(pid, 0) == 0: 1 else: 0)
+    if pid <= 0: 0 else: (if _sffi_kill(pid, 0) == 0: 1 else: 0)
 
 pub fn rt_process_kill(pid: i64) -> i8:
     if pid <= 0:
         return 0
-    if kill(pid, 15) != 0:
+    if _sffi_kill(pid, 15) != 0:
         return 0
-    usleep(100000)
-    if kill(pid, 0) == 0:
-        if kill(pid, 9) != 0:
+    _sffi_usleep(100000)
+    if _sffi_kill(pid, 0) == 0:
+        if _sffi_kill(pid, 9) != 0:
             return 0
     val status = calloc(1, 8)
     if status > 0:
         waitpid(pid, status, 0)
-        free(status)
+        _sffi_free(status)
     1
 
 pub fn rt_panic(msg: i64) -> i64:
