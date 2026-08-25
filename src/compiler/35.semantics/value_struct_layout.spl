@@ -44,16 +44,14 @@ fn validate_value_struct_layouts(
     var structs: Dict<text, HirStruct> = {}
     var owner_module_indices: Dict<text, i64> = {}
     var roots: [text] = []
-    var seen_module_keys: [text] = []
+    # Keep the array as the authoritative traversal order, and use the
+    # dictionary only as a membership index.  Traversing dictionary keys here
+    # would make first-cycle selection depend on hash iteration order.
+    var root_keys: Dict<text, bool> = {}
 
     var module_index = 0
     while module_index < module_keys.len():
         val module_key: text = module_keys[module_index]
-        # Multiple physical source fragments may share one canonical module
-        # key. They contribute to the same value-layout graph; rejecting the
-        # second fragment turns valid bootstrap aliases into an internal error.
-        if not seen_module_keys.contains(module_key):
-            seen_module_keys.push(module_key)
         val module: HirModule = module_values[module_index]
         val struct_names: [text] = module.structs.keys()
         var struct_index = 0
@@ -68,8 +66,9 @@ fn validate_value_struct_layouts(
             val canonical = value_layout_node_key(module_key, struct_.name)
             structs[canonical] = struct_
             owner_module_indices[canonical] = module_index
-            if not roots.contains(canonical):
+            if not root_keys.has(canonical):
                 roots.push(canonical)
+                root_keys[canonical] = true
             struct_index = struct_index + 1
         module_index = module_index + 1
 
@@ -77,14 +76,17 @@ fn validate_value_struct_layouts(
     # replace with a color-map DFS only if dense graphs make this measurable.
     for root in roots:
         var pending: [ValueStructLayoutWalk] = [ValueStructLayoutWalk(node_key: root, path: "")]
-        var visited: [text] = []
+        # This index is membership-only; pending and field arrays remain the
+        # sole traversal-order owners so diagnostics and cycle choice stay
+        # stable while repeated membership checks are expected O(1).
+        var visited: Dict<text, bool> = {}
         var pending_idx = 0
         while pending_idx < pending.len():
             val walk = pending[pending_idx]
             pending_idx = pending_idx + 1
-            if visited.contains(walk.node_key):
+            if visited.has(walk.node_key):
                 continue
-            visited.push(walk.node_key)
+            visited[walk.node_key] = true
 
             val struct_ = structs[walk.node_key]
             val owner_module_index = owner_module_indices[walk.node_key]
@@ -113,7 +115,7 @@ fn validate_value_struct_layouts(
                 val next_path = if walk.path == "": edge else: walk.path + " -> " + edge
                 if target == root:
                     return ["recursive by-value struct layout: " + next_path + " -> " + structs[root].name]
-                if not visited.contains(target):
+                if not visited.has(target):
                     pending.push(ValueStructLayoutWalk(node_key: target, path: next_path))
     []
 
