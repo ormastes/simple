@@ -60,7 +60,8 @@ use os.kernel.scheduler.scheduler_types.{
 # Task management free functions
 use os.kernel.scheduler.scheduler_task_mgmt.{
     sched_create_task_impl,
-    sched_exit_task_by_id_with_code_impl,
+    sched_prepare_exit_task_by_id_impl,
+    sched_finalize_exit_task_by_id_with_code_impl,
     sched_block_task_impl, sched_unblock_task_impl,
     sched_wake_expired_sleepers_impl,
     sched_set_task_name_impl,
@@ -231,9 +232,12 @@ impl Scheduler:
 
     me exit_task_by_id(id: TaskId, code: i32):
         scheduler_execution_observe_exit_v1(id.id, code)
-        val new_tasks = sched_exit_task_by_id_with_code_impl(self.tasks, id, code)
-        self.tasks = new_tasks
+        # The scheduler is the canonical TCB/ready-queue owner. Publish the
+        # non-runnable admission fence before any external cleanup owner runs.
+        self.tasks = sched_prepare_exit_task_by_id_impl(self.tasks, id)
         self._remove_ready(id)
+        self.tasks = sched_finalize_exit_task_by_id_with_code_impl(
+            self.tasks, id, code)
         self._wake_exit_waiters(id)
 
     me yield_current():

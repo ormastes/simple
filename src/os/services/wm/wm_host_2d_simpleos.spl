@@ -59,7 +59,7 @@ WHY PS/2 AND NOT CLIENT IPC
 
 use nogc_async_mut.wm.host.{WmHost2d, WmHostSurface, WmHostStatus, WmHostEventPoll}
 use std.common.window_protocol.window_protocol.{WmInputEvent}
-use std.common.window_protocol.geometry.{WindowId, Point, KeyCode, Modifiers}
+use std.common.window_protocol.geometry.{WindowId, Point, KeyCode, Modifiers, WmEventType}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color as FbColor}
 
 extern fn rt_port_inb(port: u64) -> u64
@@ -148,6 +148,8 @@ class WmHost2dSimpleOs:
     fb: FramebufferDriver
     surface_ctr: u64
     live_surface: u64
+    live_width: u32
+    live_height: u32
     present_count: i64
     verified_pixel: u32
     probe_argb: u32
@@ -158,6 +160,8 @@ pub fn wm_host_2d_simpleos(fb: FramebufferDriver) -> WmHost2dSimpleOs:
         fb: fb,
         surface_ctr: 0,
         live_surface: 0,
+        live_width: 0,
+        live_height: 0,
         present_count: 0,
         verified_pixel: 0,
         probe_argb: 0xFF2D7DD2
@@ -199,6 +203,10 @@ impl WmHost2d for WmHost2dSimpleOs:
             return WmHostSurface(ok: false, state: "invalid-size", id: 0, width: 0, height: 0)
         if height == 0:
             return WmHostSurface(ok: false, state: "invalid-size", id: 0, width: 0, height: 0)
+        if self.live_surface != 0u64:
+            return WmHostSurface(ok: false, state: "surface-already-live", id: 0, width: 0, height: 0)
+        if self.surface_ctr == 18446744073709551615u64:
+            return WmHostSurface(ok: false, state: "surface-id-exhausted", id: 0, width: 0, height: 0)
         self.surface_ctr = self.surface_ctr + (1 as u64)
         self.live_surface = self.surface_ctr
         var w = width
@@ -207,6 +215,8 @@ impl WmHost2d for WmHost2dSimpleOs:
         var h = height
         if h > self.fb.height:
             h = self.fb.height
+        self.live_width = w
+        self.live_height = h
         WmHostSurface(ok: true, state: "acquired", id: self.live_surface, width: w, height: h)
 
     me surface_present(surface_id: u64, byte_len: i64) -> WmHostStatus:
@@ -223,38 +233,39 @@ impl WmHost2d for WmHost2dSimpleOs:
             return WmHostStatus(ok: false, state: "unknown-surface")
         if byte_len <= 0:
             return WmHostStatus(ok: false, state: "empty-frame")
+        if byte_len % 4 != 0:
+            return WmHostStatus(ok: false, state: "unaligned-frame")
+        if self.live_width == 0u32 or self.live_height == 0u32:
+            return WmHostStatus(ok: false, state: "invalid-live-surface")
 
         # A frame is 4 bytes per pixel; never write past the acquired surface.
         var pixels = byte_len / 4
-        val capacity = (self.fb.width.to_i64()) * (self.fb.height.to_i64())
+        val capacity = self.live_width.to_i64() * self.live_height.to_i64()
         if pixels > capacity:
             pixels = capacity
         if pixels <= 0:
             return WmHostStatus(ok: false, state: "empty-frame")
 
         val fill = framebuffer_argb_to_color_local(self.probe_argb)
-        var rows = pixels / self.fb.width.to_i64()
-        if rows <= 0:
-            rows = 1
-        if rows > self.fb.height.to_i64():
-            rows = self.fb.height.to_i64()
-        self.fb.fill_rect(0, 0, self.fb.width, rows.to_u32(), fill)
+        val full_rows = pixels / self.live_width.to_i64()
+        val tail_pixels = pixels % self.live_width.to_i64()
+        if full_rows > 0:
+            self.fb.fill_rect(0, 0, self.live_width, full_rows.to_u32(), fill)
+        if tail_pixels > 0 and full_rows < self.live_height.to_i64():
+            self.fb.fill_rect(0, full_rows.to_u32(), tail_pixels.to_u32(), 1u32, fill)
 
-        # Readback is the proof. Sample the first pixel and one interior pixel
-        # so a single stuck word cannot fake a full-surface write.
+        # Readback is the proof. Sample both ends of the exact written span so
+        # a rounded-up row or a single stuck word cannot fake this present.
         val first = self.fb.read_pixel(0, 0)
-        var mid_y = (rows / 2).to_u32()
-        if mid_y >= self.fb.height:
-            mid_y = 0
-        var mid_x = self.fb.width / 2
-        if mid_x >= self.fb.width:
-            mid_x = 0
-        val mid = self.fb.read_pixel(mid_x, mid_y)
+        val last_pixel = pixels - 1
+        val last_y = (last_pixel / self.live_width.to_i64()).to_u32()
+        val last_x = (last_pixel % self.live_width.to_i64()).to_u32()
+        val last = self.fb.read_pixel(last_x, last_y)
         self.verified_pixel = first
 
         if first != self.probe_argb:
             return WmHostStatus(ok: false, state: "present-readback-mismatch")
-        if mid != self.probe_argb:
+        if last != self.probe_argb:
             return WmHostStatus(ok: false, state: "present-readback-partial")
         self.present_count = self.present_count + 1
         WmHostStatus(ok: true, state: "presented")
@@ -267,6 +278,8 @@ impl WmHost2d for WmHost2dSimpleOs:
         if surface_id != self.live_surface:
             return WmHostStatus(ok: false, state: "unknown-surface")
         self.live_surface = 0
+        self.live_width = 0
+        self.live_height = 0
         WmHostStatus(ok: true, state: "released")
 
     me event_poll() -> WmHostEventPoll:
@@ -294,10 +307,15 @@ impl WmHost2d for WmHost2dSimpleOs:
             return WmHostEventPoll(
                 ok: true,
                 state: "key-up",
-                event: WmInputEvent.mouse_up(
-                    WindowId(value: 0u64),
-                    Point.xy(code.to_i32(), 0),
-                    Modifiers.none()
+                event: WmInputEvent(
+                    event_type: WmEventType.KeyUp,
+                    window_id: WindowId(value: 0u64),
+                    point: Point.xy(0, 0),
+                    key_code: KeyCode(code: code, name: "ps2"),
+                    modifiers: Modifiers.none(),
+                    scroll_dx: 0.0,
+                    scroll_dy: 0.0,
+                    committed_text: ""
                 )
             )
         WmHostEventPoll(

@@ -151,7 +151,15 @@ pub fn sched_exit_task_by_id_with_code_impl(
     id: TaskId,
     code: i32
 ) -> [TaskControlBlock?]:
-    """Mark a task as Zombie with an exit code."""
+    """Compatibility one-shot exit transition for non-owner callers."""
+    val prepared_tasks = sched_prepare_exit_task_by_id_impl(tasks, id)
+    sched_finalize_exit_task_by_id_with_code_impl(prepared_tasks, id, code)
+
+pub fn sched_prepare_exit_task_by_id_impl(
+    tasks: [TaskControlBlock?],
+    id: TaskId
+) -> [TaskControlBlock?]:
+    """Close task admission while retaining its exact lifecycle identity."""
     val slot = _find_slot_in(tasks, id)
     if slot < 0:
         return tasks
@@ -164,16 +172,37 @@ pub fn sched_exit_task_by_id_with_code_impl(
         case _: false
     if already_terminal:
         return tasks
-    # Preserve the exact lifecycle identity while cleanup runs and prevent
-    # later scheduler mutations from treating this task as runnable work.
     task.state = TaskState.PreparingExit
     var new_tasks = tasks
     new_tasks[slot] = task
+    new_tasks
+
+pub fn sched_finalize_exit_task_by_id_with_code_impl(
+    tasks: [TaskControlBlock?],
+    id: TaskId,
+    code: i32
+) -> [TaskControlBlock?]:
+    """Clean and publish Zombie only for a previously prepared lifecycle."""
+    val slot = _find_slot_in(tasks, id)
+    if slot < 0:
+        return tasks
+    val tcb = tasks[slot]
+    if tcb == nil:
+        return tasks
+    var task = tcb
+    val can_finalize = match task.state:
+        case TaskState.PreparingExit: true
+        case _: false
+    if not can_finalize:
+        return tasks
+    # Cleanup keys remain captured from the TCB published by the scheduler
+    # owner; task IDs alone never authorize resources from another lifetime.
     posix_close_task_fds_with_backends(id.id, task.lifecycle_generation)
     _ = server_data_launch_grant_revoke_task_lifecycle_v1(
         task.id.id, task.lifecycle_generation)
     task.state = TaskState.Zombie
     task.exit_code = code
+    var new_tasks = tasks
     new_tasks[slot] = task
     new_tasks
 

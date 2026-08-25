@@ -31,13 +31,22 @@ use os.apps.servers_user.rfc6455_server_owner.{
     Rfc6455ServerConnectionOwner, Rfc6455ServerEvent,
     validate_rfc6455_server_handshake
 }
+use os.kernel.loader.server_launch_grants.{
+    SIMPLEOS_SERVER_EXECUTABLE_V1,
+    SIMPLEOS_SERVER_DB_KEY_V1,
+    SIMPLEOS_SERVER_DB_CERTIFICATE_V1,
+    SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1,
+    SIMPLEOS_SERVER_HTTP_PORT_V1,
+    SIMPLEOS_SERVER_DATABASE_PORT_V1,
+    simpleos_server_public_file_path_v1
+}
 
-val HTTP_PORT: u16 = 8080u16
-val DB_PORT: u16 = 5433u16
+val HTTP_PORT: u16 = SIMPLEOS_SERVER_HTTP_PORT_V1
+val DB_PORT: u16 = SIMPLEOS_SERVER_DATABASE_PORT_V1
 val MAX_IDLE_POLLS: i64 = 10000000
-val DB_CREDENTIAL_PATH: text = "/SYS/SRVDB.KEY"
-val DB_CERTIFICATE_PATH: text = "/SYS/SRVDB.CRT"
-val DB_PRIVATE_KEY_PATH: text = "/SYS/SRVDB.PK8"
+val DB_CREDENTIAL_PATH: text = SIMPLEOS_SERVER_DB_KEY_V1
+val DB_CERTIFICATE_PATH: text = SIMPLEOS_SERVER_DB_CERTIFICATE_V1
+val DB_PRIVATE_KEY_PATH: text = SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1
 val MAX_DB_CREDENTIAL_BYTES: u64 = 128u64
 val MAX_WIRE_RESPONSE: u64 = 65536
 val MAX_WEBSOCKET_READS: i32 = 200
@@ -154,9 +163,16 @@ fn http_response(request: text) -> HttpWireParts:
                 body: "{\"status\":\"ok\",\"server\":\"SimpleOS\"}\n"
             )
         case HttpRouteKind.File:
-            # /files/X is the public route; the immutable system document is
-            # stored under /SYS/X on the mounted FAT32 image.
-            val mounted_path = "/SYS" + route.file_path
+            # The combined image also owns private database provisioning
+            # files. Resolve public assets through the launch grant manifest;
+            # never derive an arbitrary /SYS path from network input.
+            val public_path = simpleos_server_public_file_path_v1(route.file_path)
+            if public_path == nil:
+                return _text_response_parts(with_default_security_headers(
+                    HttpResponse(
+                        status: HttpStatus.NotFound, headers: [],
+                        body: "ERR file not found\n"), false))
+            val mounted_path = public_path.unwrap()
             match read_file_bytes_direct(mounted_path, 65536):
                 Err(_):
                     response = HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR file not found\n")
@@ -386,7 +402,8 @@ fn main() -> i64:
         return 3
     val http_listener = http_result.unwrap()
 
-    debug_line("[simpleos-servers-user] executable=/SERVERS.ELF launch=ok")
+    debug_line("[simpleos-servers-user] executable=" +
+        SIMPLEOS_SERVER_EXECUTABLE_V1 + " launch=ok")
     debug_line("[simpleos-servers-user] http=:8080 db=:5433 ready=ok")
 
     var idle_polls: i64 = 0

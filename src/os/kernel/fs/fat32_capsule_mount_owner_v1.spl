@@ -8,6 +8,7 @@ lease so copied values cannot dispatch after unmount.
 """
 
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use std.fs_driver.block_device.{BlockDevice}
 use os.kernel.fs.fat32.{
     Fat32Filesystem, Fat32Bpb, parse_bpb, cluster_to_lba,
     AtomicReplaceRecoveryCaps, AtomicReplaceRecoveryLevel,
@@ -65,6 +66,42 @@ impl Fat32CapsuleMountOperationV1:
             _mount: Fat32CapsuleMountSealV1.invalid_probe(),
             _slot: -1, _generation: 0u64, _nonce: 0u64)
     pub fn mount_generation() -> u64: self._mount._generation
+
+pub class Fat32CapsuleOperationDeviceV1:
+    """BlockDevice view bound to one authenticated mount operation.
+
+    The view contains no backend object or registry selector. Every dispatch
+    revalidates the operation and routes through the mount-owned backend lease,
+    so a copied view becomes inert when its operation is released.
+    """
+    _operation: Fat32CapsuleMountOperationV1
+
+impl BlockDevice for Fat32CapsuleOperationDeviceV1:
+    me read_sector(lba: u64) -> Result<[u8], text>:
+        match fat32_capsule_mount_read_v1(self._operation, lba):
+            Ok(bytes): Ok(bytes)
+            Err(_): Err("fat32 capsule read rejected")
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        match fat32_capsule_mount_write_v1(self._operation, lba, data):
+            Ok(ok): Ok(ok)
+            Err(_): Err("fat32 capsule write rejected")
+
+    me fn sector_size() -> u32: 512u32
+
+    me flush() -> Result<bool, text>:
+        match fat32_capsule_mount_flush_v1(self._operation):
+            Ok(ok): Ok(ok)
+            Err(_): Err("fat32 capsule flush rejected")
+
+pub fn fat32_capsule_mount_operation_device_v1(
+    operation: Fat32CapsuleMountOperationV1
+) -> Result<Fat32CapsuleOperationDeviceV1, Fat32CapsuleMountErrorV1>:
+    """Issue a backend-free device view for one live operation reservation."""
+    val live = mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
+        _fat32_capsule_operation_valid_v1(operation, state))
+    if not live: return Err(Fat32CapsuleMountErrorV1.StaleOperation)
+    Ok(Fat32CapsuleOperationDeviceV1(_operation: operation))
 
 pub struct Fat32CapsuleMountSnapshotV1:
     mounted: bool
