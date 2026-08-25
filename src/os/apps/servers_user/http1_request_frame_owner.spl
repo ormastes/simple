@@ -76,9 +76,18 @@ fn _http_connection_token_kind(bytes: [u8], start: u64, end: u64) -> i32:
         _http_ascii_lower(bytes[start + 8u64]) == 118u8 and
         _http_ascii_lower(bytes[start + 9u64]) == 101u8):
         return 2
+    if (length == 7u64 and
+        _http_ascii_lower(bytes[start]) == 117u8 and
+        _http_ascii_lower(bytes[start + 1u64]) == 112u8 and
+        _http_ascii_lower(bytes[start + 2u64]) == 103u8 and
+        _http_ascii_lower(bytes[start + 3u64]) == 114u8 and
+        _http_ascii_lower(bytes[start + 4u64]) == 97u8 and
+        _http_ascii_lower(bytes[start + 5u64]) == 100u8 and
+        _http_ascii_lower(bytes[start + 6u64]) == 101u8):
+        return 3
     0
 
-fn _http_connection_options(value: text) -> (bool, bool, bool):
+fn _http_connection_options(value: text) -> (bool, bool, bool, bool):
     # RFC 9110 Connection is a comma list of field-name tokens. Parse it once
     # as ASCII bytes so lifecycle decisions never depend on split/lower
     # allocations or accept whitespace inside a token. Empty list members are
@@ -90,12 +99,13 @@ fn _http_connection_options(value: text) -> (bool, bool, bool):
     var after_token = false
     var close = false
     var keep_alive = false
+    var upgrade = false
     var index: u64 = 0u64
     while index < bytes.len():
         val byte = bytes[index]
         if _http_field_token_byte(byte):
             if after_token:
-                return (false, false, false)
+                return (false, false, false, false)
             if token_start < 0:
                 token_start = index.to_i64()
         elif byte == 32u8 or byte == 9u8:
@@ -104,6 +114,7 @@ fn _http_connection_options(value: text) -> (bool, bool, bool):
                     bytes, token_start.to_u64(), index)
                 close = close or kind == 1
                 keep_alive = keep_alive or kind == 2
+                upgrade = upgrade or kind == 3
                 token_start = -1
                 after_token = true
         elif byte == 44u8:
@@ -112,17 +123,87 @@ fn _http_connection_options(value: text) -> (bool, bool, bool):
                     bytes, token_start.to_u64(), index)
                 close = close or kind == 1
                 keep_alive = keep_alive or kind == 2
+                upgrade = upgrade or kind == 3
             token_start = -1
             after_token = false
         else:
-            return (false, false, false)
+            return (false, false, false, false)
         index = index + 1u64
     if token_start >= 0:
         val kind = _http_connection_token_kind(
             bytes, token_start.to_u64(), bytes.len())
         close = close or kind == 1
         keep_alive = keep_alive or kind == 2
-    (true, close, keep_alive)
+        upgrade = upgrade or kind == 3
+    (true, close, keep_alive, upgrade)
+
+fn _http_upgrade_name_is_websocket(
+    bytes: [u8], start: u64, end: u64
+) -> bool:
+    end - start == 9u64 and
+        _http_ascii_lower(bytes[start]) == 119u8 and
+        _http_ascii_lower(bytes[start + 1u64]) == 101u8 and
+        _http_ascii_lower(bytes[start + 2u64]) == 98u8 and
+        _http_ascii_lower(bytes[start + 3u64]) == 115u8 and
+        _http_ascii_lower(bytes[start + 4u64]) == 111u8 and
+        _http_ascii_lower(bytes[start + 5u64]) == 99u8 and
+        _http_ascii_lower(bytes[start + 6u64]) == 107u8 and
+        _http_ascii_lower(bytes[start + 7u64]) == 101u8 and
+        _http_ascii_lower(bytes[start + 8u64]) == 116u8
+
+fn _http_upgrade_options(value: text) -> (bool, bool):
+    # RFC 9110 Upgrade is `#protocol`, where each protocol is a token with an
+    # optional immediately-adjacent `/token` version. Validate the complete
+    # field before it can influence the framing handoff. Empty comma members
+    # are tolerated; the `#protocol` form also permits an empty list.
+    val bytes = text_to_bytes_pure(value)
+    var phase: i32 = 0  # 0=between, 1=name, 2=need-version, 3=version, 4=OWS
+    var name_start: u64 = 0u64
+    var name_end: u64 = 0u64
+    var websocket = false
+    var index: u64 = 0u64
+    while index < bytes.len():
+        val byte = bytes[index]
+        if _http_field_token_byte(byte):
+            if phase == 0:
+                name_start = index
+                phase = 1
+            elif phase == 2:
+                phase = 3
+            elif phase == 4:
+                return (false, false)
+        elif byte == 47u8:
+            if phase != 1:
+                return (false, false)
+            name_end = index
+            phase = 2
+        elif byte == 32u8 or byte == 9u8:
+            if phase == 1:
+                name_end = index
+                websocket = websocket or
+                    _http_upgrade_name_is_websocket(bytes, name_start, name_end)
+                phase = 4
+            elif phase == 3:
+                phase = 4
+            elif phase == 2:
+                return (false, false)
+        elif byte == 44u8:
+            if phase == 1:
+                name_end = index
+                websocket = websocket or
+                    _http_upgrade_name_is_websocket(bytes, name_start, name_end)
+            elif phase == 2:
+                return (false, false)
+            phase = 0
+        else:
+            return (false, false)
+        index = index + 1u64
+    if phase == 1:
+        websocket = websocket or
+            _http_upgrade_name_is_websocket(bytes, name_start, bytes.len())
+    elif phase == 2:
+        return (false, false)
+    (true, websocket)
 
 fn _http_hex_byte(byte: u8) -> i64:
     if byte >= 48u8 and byte <= 57u8: return (byte - 48u8) as i64
@@ -327,6 +408,7 @@ class Http1RequestFrameOwner:
     retained: [u8]
     line_start: i64
     request_line_seen: bool
+    request_method: text
     request_version: text
     host_seen: bool
     host_nonempty: bool
@@ -347,6 +429,7 @@ class Http1RequestFrameOwner:
     expect_continue: bool
     connection_close: bool
     connection_keep_alive: bool
+    connection_upgrade: bool
     chunk_phase: i32
     chunk_cursor: i64
     chunk_line_start: i64
@@ -365,6 +448,7 @@ class Http1RequestFrameOwner:
             retained: [],
             line_start: 0,
             request_line_seen: false,
+            request_method: "",
             request_version: "",
             host_seen: false,
             host_nonempty: false,
@@ -391,6 +475,7 @@ class Http1RequestFrameOwner:
             expect_continue: false,
             connection_close: false,
             connection_keep_alive: false,
+            connection_upgrade: false,
             chunk_phase: CHUNK_SIZE,
             chunk_cursor: -1,
             chunk_line_start: -1,
@@ -430,11 +515,20 @@ class Http1RequestFrameOwner:
             if parsed.2 != "HTTP/1.1" and parsed.2 != "HTTP/1.0":
                 self._fail("400 Unsupported HTTP version")
                 return
+            self.request_method = parsed.0
             self.request_version = parsed.2
             self.request_line_seen = true
             return
 
         if line == "":
+            # Upgrade alone is not a WebSocket handoff. RFC 6455 requires GET
+            # over HTTP/1.1 and RFC 9110 requires the matching Connection
+            # option so intermediaries know both fields are hop-by-hop.
+            self.websocket_upgrade_candidate =
+                self.websocket_upgrade_candidate and
+                self.connection_upgrade and
+                self.request_method == "GET" and
+                self.request_version == "HTTP/1.1"
             val decision = body_decision(self.headers, self.policy.max_body, true)
             if decision.0 != "":
                 self._fail(decision.0)
@@ -512,9 +606,12 @@ class Http1RequestFrameOwner:
             self.host_seen = true
             self.host_nonempty = value != ""
         if name.lower() == "upgrade":
-            for token in value.split(","):
-                if token.trim().lower() == "websocket":
-                    self.websocket_upgrade_candidate = true
+            val upgrades = _http_upgrade_options(value)
+            if not upgrades.0:
+                self._fail("400 Invalid Upgrade protocol list")
+                return
+            self.websocket_upgrade_candidate =
+                self.websocket_upgrade_candidate or upgrades.1
         if name.lower() == "transfer-encoding":
             # This transport implements exactly the RFC 9112 chunked coding.
             # Reject stacked/unknown codings instead of letting different
@@ -530,6 +627,7 @@ class Http1RequestFrameOwner:
                 return
             self.connection_close = self.connection_close or options.1
             self.connection_keep_alive = self.connection_keep_alive or options.2
+            self.connection_upgrade = self.connection_upgrade or options.3
         self.headers.push((name, value))
 
     me _validate_chunk_trailer(line_start: i64, line_end: i64) -> bool:

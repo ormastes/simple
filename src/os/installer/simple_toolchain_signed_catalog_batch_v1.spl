@@ -1,0 +1,161 @@
+"""Fail-closed preparation of one signed Simple toolchain catalog triplet.
+
+This module does not publish files and grants no boot authority. It prepares a
+single immutable value for the hosted safe-artifact transaction once that owner
+supports bounded multi-record staging beneath one retained root authority.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, SimpleArtifactManifest}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    decode_simple_artifact_manifest_v1_signing_bytes,
+    encode_simple_artifact_manifest_v1_signing_bytes}
+use os.installer.hosted_safe_artifact_io_v1.{
+    HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1,
+    SimpleboxSignedCatalogExternalCandidateV1,
+    simplebox_signed_catalog_record_decode_v1}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1}
+use os.kernel.loader.artifact_manifest.{
+    manifest_format_version, manifest_kind_elf}
+
+val SIMPLE_TOOLCHAIN_SIGNED_CATALOG_RECORD_COUNT_V1: i64 = 3
+
+pub(package) struct SimpleToolchainSignedCatalogBatchV1:
+    artifact_bytes: [u8]
+    scr1_bytes: [[u8]]
+    manifests: [SimpleArtifactManifest]
+    target: ManifestTarget
+    signer: ExecutableManifestTrustedSignerV1
+    artifact_sha256: text
+    trust_root_sha256: text
+
+fn _paths_v1() -> [text]:
+    ["/sys/apps/simple_interpreter.smf",
+     "/sys/apps/simple_compiler.smf",
+     "/sys/apps/simple_loader.smf"]
+
+fn _target_equal_v1(left: ManifestTarget, right: ManifestTarget) -> bool:
+    left.os == right.os and left.arch == right.arch and left.abi == right.abi
+
+fn _hex_nibble_v1(value: text) -> i64:
+    if value >= "0" and value <= "9": return value.char_code_at(0) - 48
+    if value >= "a" and value <= "f": return value.char_code_at(0) - 87
+    if value >= "A" and value <= "F": return value.char_code_at(0) - 55
+    -1
+
+fn _signature_bytes_v1(value: text) -> [u8]:
+    if value.len() != 128: return []
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < value.len():
+        val high = _hex_nibble_v1(value.substring(index, index + 1))
+        val low = _hex_nibble_v1(value.substring(index + 1, index + 2))
+        if high < 0 or low < 0: return []
+        out.push((high * 16 + low).to_u8())
+        index = index + 2
+    out
+
+fn _copy_bytes_v1(value: [u8]) -> [u8]:
+    var out: [u8] = []
+    for byte in value: out.push(byte)
+    out
+
+fn _key_id_valid_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if code < 33 or code > 126 or code == 58: return false
+        index = index + 1
+    true
+
+fn _candidate_authenticated_v1(
+    candidate: SimpleboxSignedCatalogExternalCandidateV1,
+    expected_path: text,
+    expected_target: ManifestTarget,
+    artifact_sha256: text,
+    signer: ExecutableManifestTrustedSignerV1,
+    trust_root_sha256: text,
+) -> SimpleArtifactManifest?:
+    val record = candidate.record
+    if record.canonical_path != expected_path or record.aliases.len() != 0 or
+        record.content_sha256 != artifact_sha256 or
+        record.expected_trust_root_sha256 != trust_root_sha256 or
+        record.manifest.format_version != manifest_format_version() or
+        record.manifest.artifact_kind != manifest_kind_elf() or
+        not record.manifest.content_hashes.contains(artifact_sha256) or
+        not _target_equal_v1(record.manifest.target, expected_target) or
+        record.manifest.entrypoint != expected_path:
+        return nil
+    val envelope = record.detached_signature.split(":")
+    if envelope.len() != 3 or envelope[0] != "ed25519" or
+        envelope[1] != signer.key_id or
+        record.manifest.signature != record.detached_signature:
+        return nil
+    val signature = _signature_bytes_v1(envelope[2])
+    val signing = encode_simple_artifact_manifest_v1_signing_bytes(
+        record.manifest, artifact_sha256)
+    if signature.len() != 64 or not signing.ok or
+        not pure_ed25519_verify(signer.public_key, signing.bytes, signature):
+        return nil
+    # Re-decode the canonical signed projection so the returned batch does not
+    # retain any caller-owned nested manifest arrays after authentication.
+    val pinned = decode_simple_artifact_manifest_v1_signing_bytes(
+        signing.bytes, record.detached_signature)
+    if not pinned.? or pinned.unwrap().image_hash != artifact_sha256:
+        return nil
+    Some(pinned.unwrap().manifest)
+
+pub(package) fn simple_toolchain_signed_catalog_batch_prepare_v1(
+    artifact_bytes: [u8],
+    scr1_bytes: [[u8]],
+    manifests: [SimpleArtifactManifest],
+    target: ManifestTarget,
+    signer: ExecutableManifestTrustedSignerV1,
+) -> Result<SimpleToolchainSignedCatalogBatchV1, text>:
+    """Authenticate all three rows before any future atomic publication."""
+    if artifact_bytes.len() == 0 or
+        artifact_bytes.len() > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        not _key_id_valid_v1(signer.key_id) or
+        signer.public_key.len() != 32 or target.os != "simpleos" or
+        target.abi != "simpleos" or
+        (target.arch != "x86_64" and target.arch != "aarch64" and
+         target.arch != "riscv64") or
+        scr1_bytes.len() != SIMPLE_TOOLCHAIN_SIGNED_CATALOG_RECORD_COUNT_V1 or
+        manifests.len() != SIMPLE_TOOLCHAIN_SIGNED_CATALOG_RECORD_COUNT_V1:
+        return Err("signed-toolchain-batch-shape-rejected")
+    val pinned_artifact = _copy_bytes_v1(artifact_bytes)
+    val pinned_signer = ExecutableManifestTrustedSignerV1(
+        key_id: signer.key_id, public_key: _copy_bytes_v1(signer.public_key))
+    val artifact_sha256 = sha256_u8_hex(pinned_artifact)
+    val trust_root_sha256 = sha256_u8_hex(pinned_signer.public_key)
+    val paths = _paths_v1()
+    var pinned_scr1: [[u8]] = []
+    var pinned_manifests: [SimpleArtifactManifest] = []
+    var index: i64 = 0
+    while index < SIMPLE_TOOLCHAIN_SIGNED_CATALOG_RECORD_COUNT_V1:
+        if scr1_bytes[index].len() == 0 or
+            scr1_bytes[index].len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1:
+            return Err("signed-toolchain-scr1-bounds-rejected")
+        val decoded = simplebox_signed_catalog_record_decode_v1(
+            scr1_bytes[index], manifests[index])
+        if not decoded.?:
+            return Err("signed-toolchain-record-authentication-rejected")
+        val pinned_manifest = _candidate_authenticated_v1(
+            decoded.unwrap(), paths[index], target, artifact_sha256,
+            pinned_signer, trust_root_sha256)
+        if not pinned_manifest.?:
+            return Err("signed-toolchain-record-authentication-rejected")
+        pinned_scr1.push(_copy_bytes_v1(scr1_bytes[index]))
+        pinned_manifests.push(pinned_manifest.unwrap())
+        index = index + 1
+    Ok(SimpleToolchainSignedCatalogBatchV1(
+        artifact_bytes: pinned_artifact, scr1_bytes: pinned_scr1,
+        manifests: pinned_manifests, target: target, signer: pinned_signer,
+        artifact_sha256: artifact_sha256,
+        trust_root_sha256: trust_root_sha256))

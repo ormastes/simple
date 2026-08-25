@@ -29,7 +29,7 @@ so this module deliberately supplies no unsigned or synthetic invocation.
 use std.common.string_core.{bytes_to_text}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign, pure_ed25519_verify}
 use std.common.crypto.secure_memory.{secure_zero_u8_slots}
-use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
 use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
     SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES,
     decode_simple_artifact_manifest_v1_signing_bytes,
@@ -38,7 +38,10 @@ use os.installer.hosted_safe_artifact_io_v1.{
     HostedSafeArtifactRootAuthorityV1,
     hosted_safe_artifact_root_acquire_v1, hosted_safe_artifact_root_close_v1,
     hosted_safe_artifact_read_once_v1, hosted_safe_artifact_publish_prepare_v1,
-    hosted_safe_artifact_publish_redeem_v1}
+    hosted_safe_artifact_publish_redeem_v1,
+    hosted_safe_artifact_bundle_begin_v1, hosted_safe_artifact_bundle_read_stage_v1,
+    hosted_safe_artifact_bundle_identity_v1, hosted_safe_artifact_bundle_stage_scr1_v1,
+    hosted_safe_artifact_bundle_finish_v1}
 use os.installer.simplebox_signed_catalog_provisioner_v1.{
     SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1,
     SimpleboxSignedCatalogExternalCandidateV1,
@@ -60,12 +63,25 @@ pub struct SignedCatalogRecordProduceRequestV1:
     output_scr1_relative_path: text
     expected_canonical_path: text
     expected_target_arch: text
+pub(package) struct SignedCatalogBundleProduceRequestV1:
+    trusted_absolute_root: text
+    source_relative_path: text
+    bundle_relative_path: text
+    payload_leaf: text
+    scr1_leaf: text
+    manifest_relative_path: text
+    signer_seed_relative_path: text
+    trust_config_relative_path: text
+    aliases_relative_path: text
+    canonical_path: text
+    target_arch: text
+    max_artifact_bytes: i64
 
 pub struct SignedCatalogRecordProduceResultV1:
     ok: bool
     reason: text
     receipt_line: text
-struct _EncodedCatalogV1:
+pub(package) struct SignedCatalogEncodedRecordV1:
     bytes: [u8]
     receipt_line: text
 
@@ -153,6 +169,13 @@ fn _same_bytes(left: [u8], right: [u8]) -> bool:
         if left[index] != right[index]: return false
         index = index + 1
     true
+fn _same_i64(left: [i64], right: [i64]) -> bool:
+    if left.len() != right.len(): return false
+    var index: i64 = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
 
 fn _wipe_seed(seed: [u8]):
     val _ = secure_zero_u8_slots(seed)
@@ -172,18 +195,18 @@ fn _produce(authority: HostedSafeArtifactRootAuthorityV1,
             expected_target_arch: text) -> Result<text, text>:
     val receipt_bytes = hosted_safe_artifact_read_once_v1(
         authority, receipt_relative, _CONTROL_TEXT_MAX_V1)?
-    val encoded = _encode_v1(authority, manifest_relative, bytes_to_text(receipt_bytes), seed_relative, trust_relative, aliases_relative, output_relative, expected_canonical_path, expected_target_arch)?
+    val encoded = signed_catalog_encode_authenticated_receipt_v1(authority, manifest_relative, bytes_to_text(receipt_bytes), seed_relative, trust_relative, aliases_relative, output_relative, expected_canonical_path, expected_target_arch)?
     val grant = hosted_safe_artifact_publish_prepare_v1(authority, output_relative, encoded.bytes, SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1)?
     val published = hosted_safe_artifact_publish_redeem_v1(grant)?
     if not published.durable or published.byte_count != encoded.bytes.len(): return Err("scr1-publish-not-durable")
     Ok(encoded.receipt_line)
 
-fn _encode_v1(authority: HostedSafeArtifactRootAuthorityV1,
+pub(package) fn signed_catalog_encode_authenticated_receipt_v1(authority: HostedSafeArtifactRootAuthorityV1,
     manifest_relative: text, receipt: text, seed_relative: text,
     trust_relative: text, aliases_relative: text, output_relative: text,
     expected_canonical_path: text = "",
     expected_target_arch: text = "",
-) -> Result<_EncodedCatalogV1, text>:
+) -> Result<SignedCatalogEncodedRecordV1, text>:
     val sam1 = hosted_safe_artifact_read_once_v1(authority, manifest_relative, SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES)?
     val seed = hosted_safe_artifact_read_once_v1(authority, seed_relative, 32)?
     # Keep the raw signing seed owned by this frame and wipe its backing bytes
@@ -263,7 +286,7 @@ fn _encode_v1(authority: HostedSafeArtifactRootAuthorityV1,
     val encoded = simplebox_signed_catalog_record_encode_v1(candidate)
     if not encoded.?: return Err("canonical-scr1-encode-rejected")
     val record_bytes = encoded.unwrap()
-    Ok(_EncodedCatalogV1(bytes: record_bytes,
+    Ok(SignedCatalogEncodedRecordV1(bytes: record_bytes,
         receipt_line: "simpleos_catalog_scr1=" + output_relative + " artifact_sha256=" + artifact_hash + " artifact_size=" + artifact_size.to_text() + " artifact_identity=" + artifact_identity))
 
 pub fn signed_catalog_record_produce_v1(
@@ -304,3 +327,52 @@ pub fn signed_catalog_record_produce_v1(
                         case Ok(line):
                             SignedCatalogRecordProduceResultV1(
                                 ok: true, reason: "", receipt_line: line)
+
+pub(package) fn signed_catalog_bundle_produce_v1(request: SignedCatalogBundleProduceRequestV1) -> SignedCatalogRecordProduceResultV1:
+    val root = hosted_safe_artifact_root_acquire_v1(request.trusted_absolute_root)
+    if val Err(reason) = root: return SignedCatalogRecordProduceResultV1(ok: false, reason: reason, receipt_line: "")
+    val authority = root.unwrap()
+    val begun = hosted_safe_artifact_bundle_begin_v1(authority, request.source_relative_path, request.bundle_relative_path, request.payload_leaf, request.scr1_leaf, request.max_artifact_bytes)
+    if val Err(reason) = begun:
+        _ = hosted_safe_artifact_root_close_v1(authority)
+        return SignedCatalogRecordProduceResultV1(ok: false, reason: reason, receipt_line: "")
+    val bundle = begun.unwrap()
+    val before = hosted_safe_artifact_bundle_identity_v1(bundle)
+    val stream = sha256_stream_v1_new()
+    var count = 0i64
+    var failure = ""
+    while failure == "":
+        val read = hosted_safe_artifact_bundle_read_stage_v1(bundle)
+        if val Err(reason) = read: failure = reason
+        else:
+            val chunk = read.unwrap()
+            if chunk.len() == 0: break
+            if count > request.max_artifact_bytes - chunk.len() or not sha256_stream_v1_update(stream, chunk): failure = "bundle-hash-bound"
+            else: count = count + chunk.len()
+    val after = hosted_safe_artifact_bundle_identity_v1(bundle)
+    if failure == "" and (before.is_err() or after.is_err() or not _same_i64(before.unwrap(), after.unwrap())): failure = "bundle-source-identity-changed"
+    val digest = if failure == "": sha256_stream_v1_finish_hex(stream) else: nil
+    var receipt_line = ""
+    if failure == "" and digest != nil and count > 0:
+        val identity = before.unwrap()
+        val sam1 = hosted_safe_artifact_read_once_v1(authority, request.manifest_relative_path, SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES)
+        if val Err(reason) = sam1: failure = reason
+        else:
+            val digest_text = digest ?? ""
+            val scr1_path = request.bundle_relative_path + "/" + request.scr1_leaf
+            val receipt = "schema=simpleos-artifact-identity-v1\nartifact_sha256={digest_text}\nartifact_size={count}\nartifact_identity=dev={identity[0]}:ino={identity[1]}:size={identity[2]}:mtime={identity[3]}.{identity[4]}\ncanonical_path={request.canonical_path}\ntarget_os=simpleos\ntarget_arch={request.target_arch}\ntarget_abi=simpleos\nmanifest_sam1_sha256={sha256_u8_hex(sam1.unwrap())}\n"
+            val encoded = signed_catalog_encode_authenticated_receipt_v1(authority, request.manifest_relative_path, receipt, request.signer_seed_relative_path, request.trust_config_relative_path, request.aliases_relative_path, scr1_path, request.canonical_path, request.target_arch)
+            if val Err(reason) = encoded: failure = reason
+            else:
+                val staged = hosted_safe_artifact_bundle_stage_scr1_v1(bundle, encoded.unwrap().bytes, SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1)
+                if val Err(reason) = staged: failure = reason
+                else: receipt_line = encoded.unwrap().receipt_line
+    else if failure == "": failure = "bundle-digest-invalid"
+    val finished = hosted_safe_artifact_bundle_finish_v1(bundle, failure == "")
+    val closed = hosted_safe_artifact_root_close_v1(authority)
+    if val Err(reason) = finished: failure = reason
+    if val Err(reason) = closed: failure = reason
+    if failure != "": return SignedCatalogRecordProduceResultV1(ok: false, reason: failure, receipt_line: "")
+    val commit = finished.unwrap()
+    if not commit.bundle_published or not commit.durable: return SignedCatalogRecordProduceResultV1(ok: false, reason: "bundle-not-durable", receipt_line: "")
+    SignedCatalogRecordProduceResultV1(ok: true, reason: "", receipt_line: receipt_line)

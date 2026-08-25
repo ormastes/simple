@@ -225,6 +225,8 @@ fn rt_browser_http_job_take_error_stub(_args: &[Value]) -> Result<Value, Compile
 fn rt_browser_http_job_bool_stub(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(false))
 }
+fn rt_hosted_safe_artifact_bundle_unavailable(_args: &[Value]) -> Result<Value, CompileError> { Ok(Value::Int(0)) }
+fn rt_hosted_safe_artifact_bundle_identity_unavailable(_args: &[Value]) -> Result<Value, CompileError> { Ok(Value::Int(-1)) }
 
 fn rt_cli_command_v1_call_interpreter(args: &[Value]) -> Result<Value, CompileError> {
     let [Value::Int(fn_ptr), Value::Int(interface_handle), Value::Int(provider_context), Value::Int(request_ptr), Value::Int(request_len), Value::Int(result_ptr), Value::Int(result_capacity)] =
@@ -1438,6 +1440,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_extract_smf_dynlib", file_io::rt_file_extract_smf_dynlib);
     insert_simple!("rt_file_write_text_at", file_io::rt_file_write_text_at);
     insert_simple!("rt_file_write_text", file_io::rt_file_write_text);
+    insert_simple!("rt_hosted_safe_artifact_bundle_begin_v1", rt_hosted_safe_artifact_bundle_unavailable);
+    insert_simple!("rt_hosted_safe_artifact_bundle_read_stage_v1", rt_hosted_safe_artifact_bundle_unavailable);
+    insert_simple!("rt_hosted_safe_artifact_bundle_identity_v1", rt_hosted_safe_artifact_bundle_identity_unavailable);
+    insert_simple!("rt_hosted_safe_artifact_bundle_stage_scr1_v1", rt_hosted_safe_artifact_bundle_unavailable);
+    insert_simple!("rt_hosted_safe_artifact_bundle_finish_v1", rt_hosted_safe_artifact_bundle_unavailable);
     // rt_io_file_* backs std.nogc_sync_mut.io.file (FileHandle/File) -- a
     // separate family from rt_file_* above with its own fd-based, real-OS-fd
     // semantics (see io_file.rs module doc). Previously unregistered here,

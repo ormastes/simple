@@ -90,6 +90,7 @@ val DBD_MAX_LINE_BYTES: i64 = DBD_MAX_JOURNAL_LINE_BYTES
 val DBD_RECV_BOUND_BYTES: i64 = 4096  # bound on one socket read
 val DBD_STARTUP_BLOCKED_RC: i64 = -95
 val DBD_MAX_SEND_ATTEMPTS: i64 = 256
+val DBD_SEND_RETRY_WINDOW_BYTES: u64 = 4096u64
 val DBD_MAX_SESSION_ID: i64 = 9223372036854775807
 
 # Decode helper mirroring sshd's decode_net_runtime_i32/fd (see sshd.spl):
@@ -109,10 +110,13 @@ fn _dbd_bytes_equal(a: [u8], b: [u8]) -> bool:
         i = i + 1
     true
 
-fn _dbd_byte_suffix(bytes: [u8], start: u64) -> [u8]:
+fn _dbd_byte_window(bytes: [u8], start: u64, maximum: u64) -> [u8]:
     var out: [u8] = []
     var i = start
-    while i < bytes.len():
+    var end = bytes.len()
+    if maximum < end - start:
+        end = start + maximum
+    while i < end:
         out.push(bytes[i])
         i = i + 1u64
     out
@@ -127,7 +131,14 @@ fn _dbd_send_all(sock_fd: i64, bytes: [u8]) -> bool:
         if attempts >= DBD_MAX_SEND_ATTEMPTS:
             return false
         attempts = attempts + 1
-        val remaining = _dbd_byte_suffix(bytes, sent)
+        # Give the transport the original record on the common first attempt.
+        # After a short write, materialize at most one fixed retry window;
+        # repeatedly copying the complete remaining record amplifies partial
+        # writes into attempt_count * response_size transient bytes.
+        val remaining = if sent == 0u64:
+            bytes
+        else:
+            _dbd_byte_window(bytes, sent, DBD_SEND_RETRY_WINDOW_BYTES)
         val wrote_i = rt_net_send_bytes(sock_fd, remaining)
         if wrote_i < 0:
             return false

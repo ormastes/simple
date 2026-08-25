@@ -26,7 +26,8 @@ use os.port.clang_sysroot_include_manifest_v1.{
 }
 use os.tools.simplebox.simplebox_artifact_contract.{SIMPLEBOX_CANONICAL_PATH_V1, simplebox_canonical_aliases_v1}
 use os.installer.signed_catalog_record_producer_v1.{
-    SignedCatalogRecordProduceRequestV1, signed_catalog_record_produce_v1}
+    SignedCatalogRecordProduceRequestV1, signed_catalog_record_produce_v1,
+    SignedCatalogBundleProduceRequestV1, signed_catalog_bundle_produce_v1}
 use os.installer.hosted_safe_artifact_io_v1.{
     HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1,
     hosted_safe_artifact_root_acquire_v1, hosted_safe_artifact_root_close_v1,
@@ -108,6 +109,21 @@ fn _empty_signed_catalog_media_v1() -> ImageSignedCatalogMediaV1:
         enabled: false, scr1_bytes: [], trust_config_bytes: [],
         toolchain_enabled: false, toolchain_artifact_bytes: [],
         toolchain_scr1_bytes: [], toolchain_trust_config_bytes: [])
+
+pub fn image_builder_stage_clang_signed_bundle_v1(trusted_root: text,
+    source_relative: text, bundle_relative: text, manifest_relative: text,
+    seed_relative: text, trust_relative: text, aliases_relative: text,
+    target_arch: text) -> Result<text, text>:
+    val result = signed_catalog_bundle_produce_v1(SignedCatalogBundleProduceRequestV1(
+        trusted_absolute_root: trusted_root, source_relative_path: source_relative,
+        bundle_relative_path: bundle_relative, payload_leaf: "clang",
+        scr1_leaf: "clang.scr1", manifest_relative_path: manifest_relative,
+        signer_seed_relative_path: seed_relative,
+        trust_config_relative_path: trust_relative,
+        aliases_relative_path: aliases_relative, canonical_path: "/usr/bin/clang",
+        target_arch: target_arch, max_artifact_bytes: 1073741824))
+    if not result.ok: return Err(result.reason)
+    Ok(result.receipt_line)
 
 pub struct ImageSimpleboxArtifactV1:
     bytes: [u8]
@@ -1165,7 +1181,7 @@ fn build_install_image_with_rootfs(
     _build_image_v1(config)
 
 fn _print_image_usage():
-    print "Usage: image-builder create [--arch=ARCH] [--output=PATH] [--size=MB] [--kernel=PATH] [--packages=DIR] [--simple-binary=PATH] [--simplebox-artifact=PATH --simplebox-receipt=PATH] [--signed-catalog-root=DIR --signed-catalog-artifact=REL --simplebox-receipt=REL --signed-catalog-sam1=REL --signed-catalog-identity-receipt=REL --signed-catalog-seed=REL --signed-catalog-trust=REL --signed-catalog-output=REL [--signed-catalog-aliases=REL]] [--signed-toolchain-root=DIR --signed-toolchain-artifact=REL --signed-toolchain-sam1=I,C,L --signed-toolchain-identity-receipts=I,C,L --signed-toolchain-seed=REL --signed-toolchain-trust=REL --signed-toolchain-outputs=I,C,L] [--rootfs=fat32|dbfs|nvfs] [--screen-type=T] [--screen-res=WxH] [--screen-simd=S] [--installer]"
+    print "Usage: image-builder create [options] [--clang-bundle-root=DIR --clang-bundle-source=REL --clang-bundle-output=REL --clang-bundle-sam1=REL --clang-bundle-seed=REL --clang-bundle-trust=REL [--clang-bundle-aliases=REL]]"
 
 fn run_image_builder(args: [text]) -> i32:
     for arg in args:
@@ -1195,6 +1211,13 @@ fn run_image_builder(args: [text]) -> i32:
         manifest_relative_paths: [], identity_receipt_relative_paths: [],
         signer_seed_relative_path: "", trust_config_relative_path: "",
         output_scr1_relative_paths: [])
+    var clang_bundle_root = ""
+    var clang_bundle_source = ""
+    var clang_bundle_output = ""
+    var clang_bundle_sam1 = ""
+    var clang_bundle_seed = ""
+    var clang_bundle_trust = ""
+    var clang_bundle_aliases = ""
     var installer = false
     var rootfs_backend = "fat32"
     var screen_type = ""
@@ -1253,6 +1276,20 @@ fn run_image_builder(args: [text]) -> i32:
         else if arg.starts_with("--signed-toolchain-outputs="):
             signed_toolchain.output_scr1_relative_paths =
                 arg.slice(27, arg.len()).split(",")
+        else if arg.starts_with("--clang-bundle-root="):
+            clang_bundle_root = arg.slice(20, arg.len())
+        else if arg.starts_with("--clang-bundle-source="):
+            clang_bundle_source = arg.slice(22, arg.len())
+        else if arg.starts_with("--clang-bundle-output="):
+            clang_bundle_output = arg.slice(22, arg.len())
+        else if arg.starts_with("--clang-bundle-sam1="):
+            clang_bundle_sam1 = arg.slice(20, arg.len())
+        else if arg.starts_with("--clang-bundle-seed="):
+            clang_bundle_seed = arg.slice(20, arg.len())
+        else if arg.starts_with("--clang-bundle-trust="):
+            clang_bundle_trust = arg.slice(21, arg.len())
+        else if arg.starts_with("--clang-bundle-aliases="):
+            clang_bundle_aliases = arg.slice(23, arg.len())
         else if arg.starts_with("--rootfs="):
             rootfs_backend = arg.slice(9, arg.len())
         else if arg.starts_with("--screen-type="):
@@ -1270,6 +1307,39 @@ fn run_image_builder(args: [text]) -> i32:
         print "Error: {e}"
         return 1
     val arch = arch_result.unwrap()
+
+    val clang_bundle_present = clang_bundle_root != "" or clang_bundle_source != "" or
+        clang_bundle_output != "" or clang_bundle_sam1 != "" or
+        clang_bundle_seed != "" or clang_bundle_trust != "" or
+        clang_bundle_aliases != ""
+    if clang_bundle_present:
+        if clang_bundle_root == "" or clang_bundle_source == "" or
+            clang_bundle_output == "" or clang_bundle_sam1 == "" or
+            clang_bundle_seed == "" or clang_bundle_trust == "":
+            print "Error: Clang bundle options are incomplete"
+            return 1
+        val clang_target_arch = match arch:
+            PkgArch.X86_64: "x86_64"
+            PkgArch.Arm64: "aarch64"
+            PkgArch.Riscv64: "riscv64"
+            PkgArch.Riscv32: "riscv32"
+            PkgArch.Any: ""
+        if clang_target_arch == "":
+            print "Error: Clang bundle requires a concrete target architecture"
+            return 1
+        val bundled = image_builder_stage_clang_signed_bundle_v1(
+            clang_bundle_root, clang_bundle_source, clang_bundle_output,
+            clang_bundle_sam1, clang_bundle_seed, clang_bundle_trust,
+            clang_bundle_aliases, clang_target_arch)
+        if val Err(e) = bundled:
+            print "Error: {e}"
+            return 1
+        print bundled.unwrap()
+        # This command prepares an atomic host-side payload+SCR1 directory.
+        # The current disk writer does not ingest that directory; callers must
+        # explicitly add a later media-ingestion step rather than infer that
+        # successful bundle preparation changed the output disk image.
+        print "Clang signed bundle prepared outside the disk image; disk embedding is not yet supported"
 
     val screen_result = image_builder_set_screen(screen_type, screen_res, screen_simd)
     if val Err(e) = screen_result:

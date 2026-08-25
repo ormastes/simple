@@ -2679,6 +2679,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_hosted_safe_artifact_read_v1"
         | "rt_hosted_safe_artifact_publish_v1" => Some(&[1]),
         "rt_file_write_bytes" => Some(&[0]),
+        "rt_hosted_safe_artifact_bundle_begin_v1" => Some(&[1, 2, 3, 4]),
         // rt_file_open is (path_ptr, path_len, mode: i32) — descriptor.rs:19.
         "rt_file_open" => Some(&[0]),
         // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.

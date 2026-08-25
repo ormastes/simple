@@ -63,3 +63,20 @@ Boot invocation intentionally stays dormant until the catalog composer can
 populate all three records atomically and boot supplies both a preconfigured
 authority registry and a real nonzero parent task. Missing media remains
 optional for ordinary boot; authenticated execution has no resident fallback.
+
+## Wave 18 atomic publication boundary
+
+The current hosted transaction registry intentionally supports exactly one
+payload and one SCR1 staged into a private directory followed by one atomic
+rename. It cannot safely publish the three toolchain records as one unit, and
+the image builder therefore continues to reject signed-toolchain production
+instead of performing sequential durable writes.
+
+`simple_toolchain_signed_catalog_batch_v1.spl` now provides the package-private
+consumer for the future bounded registry extension. Before any publication it
+requires exactly three canonical SAM1 projections and SCR1 envelopes, hashes
+the actual shared artifact bytes once, binds every record to the selected
+64-bit target and exact interpreter/compiler/loader path, requires one signer
+and trust-root digest, and verifies every Ed25519 signature over the canonical
+manifest signing domain. The resulting batch carries no publication or boot
+authority, so it creates no false reachability while the atomic owner is absent.
