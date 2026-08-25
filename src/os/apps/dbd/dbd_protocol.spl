@@ -477,7 +477,19 @@ pub fn dbd_journal_args_valid(args: [text]) -> bool:
     if cmd == "SET":
         args.len() == 3 and args[1].len() > 0
     elif cmd == "DEL":
-        args.len() == 2 and args[1].len() > 0
+        # Match the canonical Redis owner: DEL accepts one or more keys and
+        # returns the number removed.  Retaining the complete argument vector
+        # in one integrity-bound record makes replay atomic at the command
+        # boundary instead of forcing callers to split one wire command into
+        # several independently recoverable mutations.
+        if args.len() < 2:
+            return false
+        var key_index: u64 = 1
+        while key_index < args.len():
+            if args[key_index].len() == 0:
+                return false
+            key_index = key_index + 1u64
+        true
     else:
         false
 
@@ -491,12 +503,19 @@ pub fn dbd_encode_journal_line(args: [text]) -> text:
     """
     if not dbd_journal_args_valid(args):
         return ""
-    var body = ""
+    var body_parts: [text] = []
+    var body_bytes: i64 = 0
     for arg in args:
-        body = body + " B" + base64_encode(arg)
+        val field = " B" + base64_encode(arg)
         # Reserve the fixed ``J1 `` prefix, 64-byte SHA-256, and separator.
-        if body.len() + 68 > DBD_MAX_JOURNAL_LINE_BYTES:
+        if field.len() > DBD_MAX_JOURNAL_LINE_BYTES - 68 - body_bytes:
             return ""
+        body_parts.push(field)
+        body_bytes = body_bytes + field.len()
+    # Join once.  Multi-key DEL is bounded to DBD_MAX_JOURNAL_ARGS, but
+    # repeated immutable-text concatenation would still copy earlier fields
+    # for every key on this persistence hot path.
+    val body = body_parts.join("")
     "J1 " + sha256_text(body) + body
 
 fn _dbd_decode_j1_journal_line(line: text) -> [text]:
@@ -504,7 +523,7 @@ fn _dbd_decode_j1_journal_line(line: text) -> [text]:
     val fields = line.split(" ")
     if fields.len() < 4 or fields[0] != "J1" or fields[1].len() != 64:
         return rejected
-    var body = ""
+    var body_parts: [text] = []
     var args: [text] = []
     var i: u64 = 2
     while i < fields.len():
@@ -517,9 +536,10 @@ fn _dbd_decode_j1_journal_line(line: text) -> [text]:
         # base64 must never be normalized into a different durable command.
         if base64_encode(decoded) != encoded:
             return rejected
-        body = body + " " + field
+        body_parts.push(" " + field)
         args.push(decoded)
         i = i + 1
+    val body = body_parts.join("")
     if sha256_text(body) != fields[1] or not dbd_journal_args_valid(args):
         return rejected
     args

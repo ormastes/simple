@@ -17,7 +17,7 @@ use std.fs_driver.extension.{Extension, PosixCompatExt}
 use std.fs_driver.ops.{FsDriver}
 use os.services.nvfs.core.arena.{arena_create_impl, arena_append_impl, arena_readv_impl, arena_total_bytes_impl, arena_discard_impl, arena_clone_range_impl}
 use os.services.nvfs.core.ns_tree.{Namespace, NsInodeKind}
-use os.services.nvfs.core.reflink.{reflink_bump, reflink_drop}
+use os.services.nvfs.core.reflink.{reflink_bump, reflink_drop, reflink_replace_arena}
 use os.services.nvfs.posix.fd_table.{FdEntry, FdTable}
 use os.services.nvfs.posix.cow_engine.{CowShadow}
 use os.services.nvfs.posix.capabilities.{nvfs_posix_capabilities}
@@ -407,28 +407,51 @@ impl FsDriver for NvfsPosixDriver:
 impl NvfsPosixDriver:
 
     fn _publish_flip(fd: u32, old_arena: i64, new_arena: i64):
-        """Atomically swap fd's arena to new_arena; discard old_arena."""
+        """Publish one CoW replacement to every reference to the same file.
+
+        Separate opens and hard links share a file, not a frozen arena.  A
+        publish that updates only the writer leaves the other live descriptors
+        pointing at an arena that is about to be discarded.  Move all live fd
+        and pathname references together, and move the namespace reference
+        count before retiring the old arena.
+        """
         val idx = fd as i64
         if idx >= self.fd_table.entries.len() as i64:
             return
-        val e = self.fd_table.entries[idx]
-        val updated = FdEntry(
-            arena_id: new_arena,
-            refcount: e.refcount,
-            dead:     e.dead,
-            offset:   e.offset,
-            mode:     e.mode
-        )
-        self.fd_table.entries[idx] = updated
+        val writer = self.fd_table.entries[idx]
+        if writer.refcount == 0 or writer.arena_id != old_arena:
+            return
+
+        # Publish to all independently opened descriptors for this file.  A
+        # duplicated descriptor already shares one slot through refcount.
+        var fd_idx: i64 = 1
+        while fd_idx < self.fd_table.entries.len() as i64:
+            val e = self.fd_table.entries[fd_idx]
+            if e.refcount > 0 and e.arena_id == old_arena:
+                self.fd_table.entries[fd_idx] = FdEntry(
+                    arena_id: new_arena,
+                    refcount: e.refcount,
+                    dead:     e.dead,
+                    offset:   e.offset,
+                    mode:     e.mode
+                )
+            fd_idx = fd_idx + 1
+
         # Update name-table entries that pointed to old_arena.
         var i = 0
+        var name_refs: u32 = 0u32
         while i < self.names.len() as i64:
             if self.names[i].arena_id == old_arena:
                 self.names[i] = NameEntry(
                     path:     self.names[i].path,
                     arena_id: new_arena
                 )
+                name_refs = name_refs + 1u32
             i = i + 1
+
+        # Transfer hard-link accounting in one sidecar operation rather than
+        # rescanning it once per link.
+        reflink_replace_arena(old_arena, new_arena, name_refs)
         val _ = arena_discard_impl(old_arena)
 
     fn _truncate_arena(arena_id: i64, length: i64) -> Result<i64, FsError>:

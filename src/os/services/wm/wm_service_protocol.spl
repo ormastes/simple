@@ -10,7 +10,7 @@ use os.userlib.syscall_raw.{syscall}
 use common.window_protocol.geometry.{WindowId}
 use common.window_protocol.window_protocol.{WmCreateRequest, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_INPUT_TEXT_MAX_BYTES, wm_focus_event, wm_focus_event_encode}
 use os.services.launcher.launcher.{launcher_get_process_app_id_for_pid}
-use os.services.wm.wm_world.{WmAction, wm_action_none, Geometry, WindowState, WIN_STATE_NORMAL, WIN_STATE_MINIMIZED, WIN_STATE_MAXIMIZED}
+use os.services.wm.wm_world.{WmAction, wm_action_none, Geometry, WIN_STATE_NORMAL, WIN_STATE_MINIMIZED, WIN_STATE_MAXIMIZED}
 use os.services.wm.wm_codec.{wm_send_create_reply, wm_send_create_response, wm_send_status_reply, wm_send_error_reply, _read_u8, _read_u32, _read_u64, _read_i32, _read_text, _push_u32, _push_i32, _push_u64, _ipc_send}
 
 impl WmService:
@@ -514,13 +514,10 @@ impl WmService:
         if not self.admit_window_damage(window_id, 0u64, "minimize"):
             return wm_action_none()
 
-        val e = self.world.find_entity_for_window(window_id)
-        if not e.is_null():
-            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
-            val ecs_tick = self.world.base.now()
-            var states_s = self.world.states
-            states_s.insert(e, WindowState(value: WIN_STATE_MINIMIZED), ecs_tick)
-            self.world.states = states_s
+        if not self.set_window_state(window_id, WIN_STATE_MINIMIZED):
+            return wm_action_none()
+        if self.focused_window_id == window_id:
+            self.focused_window_id = self.focus_fallback_window()
 
         WmAction(kind: "minimize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
@@ -543,13 +540,13 @@ impl WmService:
         if not self.admit_window_damage(window_id, 0u64, "maximize"):
             return wm_action_none()
 
-        val e = self.world.find_entity_for_window(window_id)
-        if not e.is_null():
-            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
-            val ecs_tick = self.world.base.now()
-            var states_s = self.world.states
-            states_s.insert(e, WindowState(value: WIN_STATE_MAXIMIZED), ecs_tick)
-            self.world.states = states_s
+        # Compositor maximize is also an activation. Mirror its focus raise in
+        # the service before accepting future input for the new top surface.
+        if not self.raise_focus_stack(window_id):
+            return wm_action_none()
+
+        if not self.set_window_state(window_id, WIN_STATE_MAXIMIZED):
+            return wm_action_none()
 
         WmAction(kind: "maximize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
@@ -572,13 +569,13 @@ impl WmService:
         if not self.admit_window_damage(window_id, 0u64, "restore"):
             return wm_action_none()
 
-        val e = self.world.find_entity_for_window(window_id)
-        if not e.is_null():
-            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
-            val ecs_tick = self.world.base.now()
-            var states_s = self.world.states
-            states_s.insert(e, WindowState(value: WIN_STATE_NORMAL), ecs_tick)
-            self.world.states = states_s
+        # Restore raises the surface in the compositor; keep service focus and
+        # input routing identical to that canonical lifecycle transition.
+        if not self.raise_focus_stack(window_id):
+            return wm_action_none()
+
+        if not self.set_window_state(window_id, WIN_STATE_NORMAL):
+            return wm_action_none()
 
         WmAction(kind: "restore", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 

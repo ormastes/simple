@@ -20,6 +20,25 @@ struct FsFat32Driver:
     mounted: bool
     direct_io: Option<DirectIoExt>
 
+fn _fat32_file_size(size: i64) -> u64:
+    # On-disk FAT32 sizes are unsigned.  Keep corrupt negative values from
+    # wrapping into enormous allocations in VFS read-whole-file consumers.
+    if size <= 0:
+        return 0u64
+    size.to_u64()
+
+fn _fat32_file_blocks(size: u64, block_size: u32) -> u64:
+    if size == 0u64 or block_size == 0u32:
+        return 0u64
+    (size + block_size.to_u64() - 1u64) / block_size.to_u64()
+
+fn _fat32_file_mode(is_dir: bool) -> u32:
+    # FAT32 has no POSIX mode field.  Publish the same synthetic defaults used
+    # by the shared filesystem layer, including a directory type bit.
+    if is_dir:
+        return 0o040755
+    0o644
+
 impl FsFat32Driver:
     static fn new(name: text, device: BlockDevice) -> FsFat32Driver:
         FsFat32Driver(
@@ -220,12 +239,13 @@ impl FsDriver for FsFat32Driver:
         val of = match of_rc:
             Ok(value): value
             Err(_): return Err(FsError.InvalidArg)
+        val size = _fat32_file_size(of.size)
         Ok(FileStat(
             inode: of.start_cluster.to_u64(),
-            size: of.size.to_u64(),
-            blocks: 0,
+            size: size,
+            blocks: _fat32_file_blocks(size, self.inner.bytes_per_sector),
             block_size: self.inner.bytes_per_sector,
-            mode: 0,
+            mode: _fat32_file_mode(of.is_dir),
             uid: 0,
             gid: 0,
             nlinks: 1,
@@ -244,12 +264,13 @@ impl FsDriver for FsFat32Driver:
         val entry = match entry_rc:
             Ok(value): value
             Err(_): return Err(FsError.NotFound)
+        val size = _fat32_file_size(entry.size)
         Ok(FileStat(
             inode: entry.inode.id,
-            size: 0,
-            blocks: 0,
+            size: size,
+            blocks: _fat32_file_blocks(size, self.inner.bytes_per_sector),
             block_size: self.inner.bytes_per_sector,
-            mode: 0,
+            mode: _fat32_file_mode(entry.is_dir),
             uid: 0,
             gid: 0,
             nlinks: 1,

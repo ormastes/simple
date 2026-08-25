@@ -22,7 +22,7 @@ use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.kernel.log.klog_api.{log_info}
 use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_send_ssh_banner, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_ssh_encrypted_packet, rt_net_ssh_encrypted_read_plan, rt_net_recv_version_text, rt_net_recv_version_bytes, rt_net_close}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
-use os.apps.sshd.ssh_identification.{ssh_identification_text_to_bytes_stable, ssh_identification_bytes_start_ssh2, ssh_identification_bytes_trim_crlf}
+use os.apps.sshd.ssh_identification.{ssh_identification_text_to_bytes_stable, ssh_identification_bytes_valid_ssh2, ssh_identification_bytes_trim_crlf}
 use os.apps.sshd.arm64_ssh_request_context_owner.{Arm64SshRequestContextOwnerV1, ssh_session_arm64_request_context_owner_v1}
 
 pub fn ssh_recv_ring_u32_be(ring: SshRecvRing, offset: u64) -> u32:
@@ -501,19 +501,33 @@ impl SshSession:
         val client_version_from_bytes = ssh_identification_bytes_trim_crlf(client_version_raw)
         serial_println("[sshd-session] version raw bytes len={client_version_from_bytes.len()} hex={_bytes_to_hex(client_version_from_bytes)}")
         serial_println("[sshd-session] version bytes assign start")
-        if client_version_from_bytes.len() > 0 and ssh_identification_bytes_start_ssh2(client_version_from_bytes):
-            self.client_version_bytes = _copy_bytes_stable(client_version_from_bytes)
-            self.client_version = rt_string_from_byte_array(self.client_version_bytes)
+        if client_version_from_bytes.len() > 0u64:
+            # A non-empty byte result has consumed the peer's first line.  It
+            # must be accepted or rejected authoritatively; falling back to a
+            # second line would let an attacker smuggle an invalid banner in
+            # front of the exchange-hash identity.
+            if not ssh_identification_bytes_valid_ssh2(
+                client_version_from_bytes):
+                serial_println("[sshd-session] invalid client version bytes")
+                self.transition_closed()
+                return false
+            self.client_version_bytes =
+                _copy_bytes_stable(client_version_from_bytes)
+            self.client_version =
+                rt_string_from_byte_array(self.client_version_bytes)
             serial_println("[sshd-session] version recv text={self.client_version}")
         else:
             val client_version_text = rt_net_recv_version_text(self.socket_fd as i64)
             serial_println("[sshd-session] version recv text={client_version_text}")
-            if not client_version_text.starts_with("SSH-2.0-"):
+            val client_version_text_bytes =
+                ssh_identification_text_to_bytes_stable(client_version_text)
+            if not ssh_identification_bytes_valid_ssh2(
+                client_version_text_bytes):
                 serial_println("[sshd-session] invalid client version text={client_version_text}")
                 self.transition_closed()
                 return false
             self.client_version = client_version_text
-            self.client_version_bytes = ssh_identification_text_to_bytes_stable(client_version_text)
+            self.client_version_bytes = client_version_text_bytes
         serial_println("[sshd-session] version bytes stored len={self.client_version_bytes.len()}")
         serial_println("[sshd-session] version bytes stored hex={_bytes_to_hex(self.client_version_bytes)}")
         self.state = SshSessionState.KexInit
