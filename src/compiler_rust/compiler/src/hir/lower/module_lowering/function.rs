@@ -496,6 +496,12 @@ impl Lowerer {
         f: &ast::FunctionDef,
         owner_type: Option<&str>,
     ) -> LowerResult<HirFunction> {
+        // Local IDs restart for every function. Capabilities retained from the
+        // previous function would therefore alias unrelated locals that happen
+        // to reuse the same numeric ID. Reuse the table allocation but begin a
+        // fresh function-local aliasing domain.
+        self.capability_env.clear();
+
         // Set current class type for Self resolution
         let previous_class_type = self.current_class_type;
         if let Some(type_name) = owner_type {
