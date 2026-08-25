@@ -420,3 +420,21 @@ removed and no rows added. Applied to the preceding ledger, the source-only
 count is 12,019 `rt_*` declaration rows / 3,172 symbols: 1,190 tagged, 638
 `unsafe_contract_declared`, 10,563 untouched, and zero exact-artifact
 verified-and-signed.
+
+## Common P-256 canonical-owner checkpoint
+
+`std.common.crypto.ecdsa_p256` now imports the canonical checked signature
+facade instead of redeclaring the P-256 sign and verify providers. Its existing
+SPKI-to-raw-point validation and exact 64-byte signature contract remain local.
+The shared verification lift now also rejects provider statuses above `1`, so
+unknown statuses cannot be converted to `Ok(false)`.
+
+The sign and verify hot paths still make one provider call. The migration adds
+no lookup, copy, allocation, hashing beyond ECDSA itself, or generic dispatch;
+it removes duplicate unsafe declarations and their local descriptor decoder.
+The focused static ratchet passed. Production source checking remains blocked
+by the policy-rejected bootstrap executable recorded above, so this is not
+artifact admission. The exact declaration delta is two tagged rows removed and
+none added: 12,017 rows / 3,172 symbols, 1,188 tagged, 636
+`unsafe_contract_declared`, 10,563 untouched, and zero exact-artifact
+verified-and-signed.

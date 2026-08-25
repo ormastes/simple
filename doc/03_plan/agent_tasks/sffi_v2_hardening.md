@@ -363,3 +363,7 @@ passing placeholder.
     symbols, with zero exact-artifact signed/admitted. Re-run source checks only
     after a policy-accepted self-hosted runtime is available; do not bypass the
     production-runtime guard or restore empty-signature/boolean sentinels.
+69. Retain the canonical P-256 signature owner. The common crypto facade keeps
+    SPKI and fixed-width validation but must not redeclare the providers; the
+    shared verifier must reject statuses outside `-1/0/1`. Ledger: 12,017
+    declarations, 1,188 tagged, 10,563 untouched, and zero signed/admitted.

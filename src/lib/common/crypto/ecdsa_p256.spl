@@ -1,5 +1,5 @@
 # ECDSA P-256 SHA-256 sign and verify — common crypto layer.
-# Wraps rt_ecdsa_p256_sign / rt_ecdsa_p256_verify runtime externs.
+# Uses the canonical checked signature facade for the foreign calls.
 #
 # Key format: PKCS#8 v1 DER-encoded private key / SPKI DER-encoded public key.
 # Signature format: 64-byte fixed-width r||s (32 bytes each, big-endian).
@@ -7,55 +7,7 @@
 # The raw boundary uses checked status descriptors.  Safe callers never receive
 # an empty signature or `false` manufactured from a malformed bridge value.
 
-# ============================================================================
-# Tier 1: Raw SFFI externs
-# ============================================================================
-
-# Verify an ECDSA P-256 SHA-256 fixed-width (64-byte r||s) signature.
-# pubkey:    Raw uncompressed EC point (04 || Qx || Qy, 65 bytes) — ring 0.17
-#            requires this format; use ecdsa_p256_verify for SPKI input.
-# message:   Raw message bytes (hashed internally with SHA-256).
-# signature: 64-byte r||s (NOT the SSH-wire mpint pair).
-# Returns 1 if valid, 0 if cryptographically invalid, and -1 for malformed
-# bridge input.
-@unsafe(reason: "checked ECDSA P-256 verification ABI", capabilities: [ffi])
-extern fn rt_ecdsa_p256_verify_checked(pubkey: [u8], message: [u8], signature: [u8]) -> i64
-
-# Sign `message` with ECDSA P-256 SHA-256 using a PKCS#8-v1 DER private key.
-# Returns [status, signature], where status 0 is success and the signature is
-# exactly 64 bytes.  Nonzero statuses carry no usable signature.
-@unsafe(reason: "checked ECDSA P-256 signing ABI", capabilities: [ffi])
-extern fn rt_ecdsa_p256_sign_checked(pkcs8: [u8], message: [u8]) -> [Any]
-
-# ============================================================================
-# Tier 2: Simple-friendly wrappers
-# ============================================================================
-
-fn _ecdsa_p256_sign_raw_checked(pkcs8: [u8], message: [u8]) -> [Any]:
-    val raw = unsafe(capabilities: [ffi]):
-        rt_ecdsa_p256_sign_checked(pkcs8, message)
-    raw ?? []
-
-fn _ecdsa_p256_verify_raw_checked(pubkey: [u8], message: [u8], signature: [u8]) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_ecdsa_p256_verify_checked(pubkey, message, signature)
-
-fn _checked_signature(raw: [Any]) -> Result<[u8], text>:
-    if raw.len() != 2:
-        return Err("E-SFFI-017: corrupt ECDSA P-256 signing result descriptor")
-    val status = raw[0] as i64
-    if status == 1:
-        return Err("E-SFFI-010: malformed ECDSA P-256 signing bridge input")
-    if status == 2:
-        return Err("E-SFFI-010: invalid ECDSA P-256 private key")
-    if status == 3:
-        return Err("E-SFFI-017: ECDSA P-256 provider signing failure")
-    if status != 0:
-        return Err("E-SFFI-017: unknown ECDSA P-256 signing status {status}")
-    val signature = raw[1] as [u8]
-    if signature.len() != 64:
-        return Err("E-SFFI-017: ECDSA P-256 success returned a non-64-byte signature")
-    Ok(signature)
+use std.nogc_sync_mut.io.signature_sffi.{ecdsa_p256_sign_checked, ecdsa_p256_verify_checked}
 
 # Sign `message` with ECDSA P-256 SHA-256.
 #
@@ -67,7 +19,10 @@ fn _checked_signature(raw: [Any]) -> Result<[u8], text>:
 #
 # Hosted-only: requires a system CSPRNG in the runtime.
 fn ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
-    _checked_signature(_ecdsa_p256_sign_raw_checked(pkcs8, message))
+    val signature = ecdsa_p256_sign_checked(pkcs8, message)?
+    if signature.len() != 64:
+        return Err("E-SFFI-017: ECDSA P-256 success returned a non-64-byte signature")
+    Ok(signature)
 
 # Extract raw EC point (04 || Qx || Qy, 65 bytes) from a P-256 SPKI (91 bytes).
 # P-256 SPKI layout: 26 bytes of DER headers, then the 65-byte uncompressed point.
@@ -93,9 +48,4 @@ fn ecdsa_p256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> Result<boo
     if signature.len() != 64:
         return Err("E-SFFI-010: invalid ECDSA P-256 signature length")
     val ec_point = _spki_to_ec_point(pubkey)?
-    val status = _ecdsa_p256_verify_raw_checked(ec_point, message, signature)
-    if status < 0:
-        return Err("E-SFFI-010: malformed ECDSA P-256 verification bridge input")
-    if status > 1:
-        return Err("E-SFFI-017: unknown ECDSA P-256 verification status {status}")
-    Ok(status == 1)
+    ecdsa_p256_verify_checked(ec_point, message, signature)
