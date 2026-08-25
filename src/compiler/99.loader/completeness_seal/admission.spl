@@ -101,12 +101,12 @@ pub class AdmittedModule:
 fn _identity_key(id: PersistentExtensionId) -> text:
     id.canonical_text()
 
-fn _sealed_holder(seal: CompletenessSeal, id: PersistentExtensionId) -> text?:
-    for entry in seal.tags.entries:
-        if entry.owner_enum == id.owner_enum
-                and entry.constructor_name == id.constructor_name:
-            return Some(entry.provider_module)
-    None
+fn _collision_key(owner_enum: text, constructor_name: text) -> text:
+    # Length-prefix the first component so distinct pairs cannot alias even if
+    # future identifier grammars admit punctuation used by ordinary delimiters.
+    val owner_len = owner_enum.length()
+    val owner_len_text = owner_len.to_text()
+    owner_len_text + ":" + owner_enum + constructor_name
 
 fn _check_seal_hash(seal: CompletenessSeal, cand: AdmissionCandidate,
         mut reasons: [AdmissionReason]):
@@ -127,23 +127,30 @@ fn _check_operations(cand: AdmissionCandidate, mut reasons: [AdmissionReason]):
 
 fn _check_collisions(seal: CompletenessSeal, cand: AdmissionCandidate,
         mut reasons: [AdmissionReason]):
-    var seen: [text] = []
+    if cand.extensions.len() == 0:
+        return
+    # Dense-tag order is authoritative.  Retaining the first entry per key
+    # preserves the former first-match diagnostic while avoiding repeated full
+    # seal scans across candidate extensions.
+    var sealed_holders: Dict<text, text> = {}
+    for entry in seal.tags.entries:
+        val key = _collision_key(entry.owner_enum, entry.constructor_name)
+        if not sealed_holders.contains_key(key):
+            sealed_holders[key] = entry.provider_module
+
+    var seen: Dict<text, bool> = {}
     for ext in cand.extensions:
         val id = identity_of(ext)
-        match _sealed_holder(seal, id):
-            case Some(holder):
+        val collision_key = _collision_key(id.owner_enum, id.constructor_name)
+        if sealed_holders.contains_key(collision_key):
+            reasons.push(AdmissionReason.IdCollision(
+                ext.constructor, ext.provider_module, sealed_holders[collision_key]))
+        else:
+            val identity_key = _identity_key(id)
+            if seen.contains_key(identity_key):
                 reasons.push(AdmissionReason.IdCollision(
-                    ext.constructor, ext.provider_module, holder))
-            case None:
-                val key = _identity_key(id)
-                var dup = false
-                for k in seen:
-                    if k == key:
-                        dup = true
-                if dup:
-                    reasons.push(AdmissionReason.IdCollision(
-                        ext.constructor, ext.provider_module, cand.module_id))
-                seen = seen + [key]
+                    ext.constructor, ext.provider_module, cand.module_id))
+            seen[identity_key] = true
 
 fn _check_closure(cand: AdmissionCandidate, profile: AdmissionProfile,
         mut reasons: [AdmissionReason]):
