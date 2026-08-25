@@ -1,14 +1,15 @@
-# Stage 3 surface-freeze SIGSEGV blocks MC/DC/RT-HAL verification
+# Stage 3 HIR lowering errors block MC/DC/RT-HAL verification
 
 Date: 2026-08-25
 Status: open / release-blocking
-Owner: compiler bootstrap and HIR surface retention
+Owner: compiler HIR import/materialization and nested-pattern lowering
 
 ## Impact
 
-The MC/DC/RT-HAL hardening feature cannot run its self-hosted `check`, `test`,
-SPipe, optimizer, or matched performance/RSS gates. AC-13, AC-15, AC-16, and
-AC-18 therefore remain unproven; the feature must not be marked complete.
+The MC/DC/RT-HAL hardening feature cannot yet run its self-hosted `check`,
+`test`, SPipe, optimizer, or matched performance/RSS gates. AC-13, AC-15,
+AC-16, and AC-18 therefore remain unproven; the feature must not be marked
+complete.
 
 ## Evidence
 
@@ -28,10 +29,22 @@ Measured immediately before failure:
 - log: `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`;
 - command receipt: `build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage3-command.transcript`.
 
-The log also contains many unresolved callable/payload-origin notices before the
-crash. No terminal compiler diagnostic was emitted, so it is not yet proven
-whether the immediate cause is malformed retained-surface state, origin-table
-growth, or a native receiver/ownership fault inside surface freezing.
+GDB subsequently proved that `surface_freeze` was only the last progress marker,
+not the crash owner. The fault occurred on entry to `HirLowering.error`, while
+copying a malformed nested `Span` passed by `flatten_enum_match_arm` during HIR
+lowering of `src/compiler/driver/driver.spl`. The transform now reports against
+the stable enclosing match span instead of projecting `pat.span` through the
+nested aggregate. This is a cold O(1) diagnostic-path change with no added
+allocation or hot-path dispatch.
+
+A fresh Stage 2 containing that fix passed native build, positional-entry
+sanity, the struct receiver/runtime proof, and admission. The single admitted
+Stage-3 continuation no longer segfaulted: it exited normally with structured
+HIR diagnostics. The remaining blocker is now explicit: ambiguous callable
+dependencies and unresolved types across the full compiler closure, plus six
+unsupported nested enum-payload patterns in
+`src/compiler/driver/driver_compile_vhdl_lowering.spl`. Evidence remains in
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`.
 
 ## Cleared blockers in the same audit
 
@@ -45,8 +58,7 @@ growth, or a native receiver/ownership fault inside surface freezing.
 
 ## Unblock condition
 
-Capture a symbolized Stage-3 failure at `surface_freeze`, repair the owner or
-receiver fault without weakening the surface integrity gates, then start a new
-scoped session and run the canonical admitted Stage-3 continuation once. Do not
-retry in this session: the feature reached the mandatory three-cycle cap.
-
+Repair the reported import/materialization ambiguity and nested-pattern
+lowering errors without weakening either gate, rebuild and admit Stage 2, then
+run one canonical admitted Stage-3 continuation. The former SIGSEGV is cleared;
+do not re-investigate surface freezing unless new evidence points there.
