@@ -255,6 +255,40 @@ identity, trusted signatures, and proof receipts remain unresolved. This frame
 executor and the wider estate are not globally verified or signed;
 verified-and-signed admission remains 0.
 
+## SimpleOS GPU tensor authority checkpoint
+
+`src/os/ml/gpu_tensor.spl` now declares all ten CUDA and scalar/array bridge
+ABI families with explicit authority. Six `GpuTensor` methods and thirteen
+top-level tensor operations that allocate, copy, duplicate, launch, mutate, or
+free raw device authority require `ffi, raw_ptr`; the pure `ceil_div` helper
+remains safe.
+
+This checkpoint intentionally does not label the API safe. `GpuTensor` remains
+a copyable integer device pointer, `reshape` aliases ownership, shape products
+can overflow, allocation/transfer/launch status is not consistently checked,
+and the reduction comment admits inputs larger than its single-block kernel can
+handle. Fabricating a zero tensor or converting boolean status to integers
+would hide those defects, so the existing behavior is retained and exposed as
+unsafe pending a typed `Result`/resource redesign.
+
+The focused authority/provider/performance ratchet passed. Of ten declarations
+(nine currently called), two appear in both typed registries, one in only one,
+and seven in neither. Semantic transfer/launch results remain `bool`. The
+annotation-only change adds no branch, allocation, copy, synchronization,
+kernel launch, lookup, hash, signature operation, wrapper dispatch, or forced
+inlining. The census changed exactly by the 37 formerly unbounded calls:
+
+- raw call sites: unchanged at 18,810
+- missing authority: 14,139 -> 14,102
+- lexical unsafe: unchanged at 3,403
+- function unsafe: 1,268 -> 1,305
+
+Typed ownership, overflow-safe shape validation, total status propagation,
+reduction bounds, provider closure, exact artifact identity, trusted
+signatures, and proof receipts remain unresolved. This tensor API and the
+wider estate are not globally verified or signed; verified-and-signed
+admission remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
