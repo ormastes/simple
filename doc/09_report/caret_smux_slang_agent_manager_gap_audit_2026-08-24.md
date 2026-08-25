@@ -18,7 +18,7 @@ unstarted and is the single largest open item in the lane.
 | lane | recorded | measured | verdict |
 |---|---|---|---|
 | llm-caret-claude-cli-full-parity | design-done | 646/1902 target files exist; 504/1902 meet the 80% LOC bar | **not implemented** |
-| llm-caret-claude-cli-harden | dev-done | trace checker FAIL: 501/586 symbols traced, 12 stale rows | **regressed** |
+| llm-caret-claude-cli-harden | dev-done | trace checker FAIL: 501/586 symbols traced, 12 stale rows | **regressed — repaired 2026-08-25, now STATUS: PASS at 586/586 and 34/34 files mapped** |
 | smux-caret-sspec-quality | all 7 ACs DONE | 3 specs had been re-clobbered to legacy shape | **regressed — repaired here** |
 | llm-caret-messaging | implementation | native carriers release-blocked; live Codex stdio blocked | **blocked, correctly recorded** |
 | slang-a1-bootstrap | A1 DONE | artifacts exist under post-reorg paths; A2–A8 untouched | **stale paths, not lost work** |
@@ -34,6 +34,25 @@ target_files_missing=1256
 target_loc_ge_80pct_source=504  (26%)
 class_rows=124  class_target_files_missing=15
 ```
+
+**Correction (2026-08-25): those numbers are an UNDERCOUNT, and the "15 missing
+classes" below are not missing at all.** The matrices derive each Simple target
+path from the TypeScript basename verbatim, keeping hyphens — the matrix asks
+for `ink/events/click-event.spl` while the real, already-written port is
+`ink/events/click_event.spl`. All 15 "missing" classes exist as faithful ports
+(the matrix's own recorded source line numbers match them exactly, e.g.
+`log_update.spl:43 LogUpdate`, `:752 VirtualScreen`), and **101 of the 1256
+"missing file" rows are the same naming artifact**. The remaining ~1155 are
+genuinely unimplemented, so the lane is still overwhelmingly open — but the
+checker cannot be driven green by writing code, and no hyphenated shim files
+should be created to satisfy it. Fix: snake_case the derived target when
+regenerating the matrices. Filed as
+`doc/08_tracking/bug/llm_caret_parity_matrix_target_paths_use_hyphens_2026-08-24.md`.
+
+The Ink cluster had zero test coverage; 8 behavioral specs (73 examples, all
+green) were added against the existing ports, covering ESC-strip / CSI-u /
+application-keypad / SGR-mouse suppression, first-match resolution and DA1
+sentinel draining, resize/offscreen full-reset, and cursor-delta bookkeeping.
 
 The plan is exhaustive by design and forbids skipping rows, so this is a
 multi-week lane, not a session task. It was deliberately not opened here. The
@@ -208,7 +227,12 @@ No repair was attempted here.
    resolved" above. Remaining in that area: `spipe_docgen_scenario_body_spec`
    carries 16 pre-existing failures in the capture/evidence-metadata family,
    untouched.
-3. Retire the trace-report debt: 85 untraced symbols, 12 stale rows, by hand.
+3. ~~Retire the trace-report debt~~ — **done 2026-08-25**: 85 rows added, 12
+   stale removed, 9 unmapped files described; `check-llm-caret-claude-cli-trace.shs`
+   now reports `STATUS: PASS`.
 4. Pick the Ink terminal-UI sub-lane if full parity is to be started.
-5. Add a CI job that runs the lane's system specs, so a state file can never
-   again record DONE over a RED tree — that is what let all three clobbers sit.
+5. ~~Add a CI gate~~ — **done 2026-08-25**: `scripts/check/check-sspec-lane-shape.shs`,
+   a fail-closed static guard wired into the repo-hygiene ratchet job. Verified
+   against the real incident: all three clobbered blobs FAIL with the correct
+   reason. The deep executable check stays authoritative; this is the cheap
+   always-on half, because the deep one existed all along and nobody ran it.
