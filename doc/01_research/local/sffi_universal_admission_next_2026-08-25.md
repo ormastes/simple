@@ -2358,6 +2358,32 @@ loops.  It removes foreign dispatch and adds no allocation, copy, hash,
 signature operation, lookup, lock, or generic dispatch.  This is static source
 evidence only; verified-and-signed artifact admission remains 0.
 
+## SSH host-key loader contract checkpoint
+
+The loader's local `rt_file_read_bytes` declaration now matches the
+authoritative nullable `[u8]?` provider contract.  A missing or failed read is
+lifted to `Result.Err` instead of being coalesced to an empty array and then
+misreported as an empty file.  The remaining raw byte-to-text conversion is
+centralized in one minimal `unsafe(ffi)` wrapper that rejects nil and rejects
+an empty text fabricated from non-empty input.  The focused
+`ssh-host-key-sffi-contract.shs` ratchet passed.
+
+The authoritative census reflects two duplicate raw conversion calls removed
+and the two retained wrapper calls bounded:
+
+- raw call sites: 20,655 -> 20,653
+- missing authority: 16,752 -> 16,748
+- lexical unsafe: 2,984 -> 2,986
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Valid reads and conversions preserve their existing O(file bytes) work and
+allocation shape.  Error checks are O(1); no per-call hash, signature check,
+lookup, lock, generic dispatch, or additional full-buffer copy was added.
+Provider lanes still disagree on malformed byte-to-text behavior and no exact
+artifact proof/signature receipt exists, so this module remains unsafe rather
+than verified-and-signed; repository admission remains 0.
+
 ## SSH KEX call-authority and hot-path checkpoint
 
 The SSH session KEX owner no longer dispatches its 113 constant packet-byte
