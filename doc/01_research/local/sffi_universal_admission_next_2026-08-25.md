@@ -2335,6 +2335,29 @@ This checkpoint is a source/static contract result, not production compiler
 verification or signed artifact admission.  Repository-wide verified-and-
 signed admission remains 0.
 
+## Pure Simple SSH byte-utility checkpoint
+
+`ssh_transport.spl`, `ssh_packet.spl`, and `ssh_kex_primitives.spl` now use
+bounds-preserving Pure Simple indexing instead of `rt_bytes_u8_at`.
+`ssh_identification.spl` now appends its already-masked byte directly instead
+of calling `rt_push_byte`.  These modules consequently have no raw byte-
+access/push declarations or calls; the focused
+`ssh-pure-byte-boundary.shs` ratchet passed.
+
+The authoritative census changed exactly by the four removed calls:
+
+- raw call sites: 20,659 -> 20,655
+- distinct called symbols: 3,261 -> 3,260
+- caller files: 3,092 -> 3,088
+- missing authority: 16,756 -> 16,752
+- lexical unsafe: unchanged at 2,984
+- function unsafe: unchanged at 919
+
+Each replacement retains O(1) byte access and the existing O(n) surrounding
+loops.  It removes foreign dispatch and adds no allocation, copy, hash,
+signature operation, lookup, lock, or generic dispatch.  This is static source
+evidence only; verified-and-signed artifact admission remains 0.
+
 ## SSH KEX call-authority and hot-path checkpoint
 
 The SSH session KEX owner no longer dispatches its 113 constant packet-byte
