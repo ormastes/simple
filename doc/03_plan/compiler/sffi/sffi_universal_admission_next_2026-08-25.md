@@ -46,6 +46,19 @@ untouched declaration rows, and zero signed/admitted symbols. The call-authority
 ratchet fails with 19,494 missing-authority sites. These measurements prioritize
 the migration but do not satisfy this step's resolved-HIR exit criterion.
 
+Checkpoint: resolved-HIR identity now also follows `MethodResolution` for
+instance, trait, UFCS/free-function, and static call forms. The same symbol-ID
+rule feeds lexical safety enforcement, while unresolved `rt_`/`spl_` method
+candidates make inventory completeness fail closed. This adds compiler/audit
+work only; generated runtime calls gain no lookup, branch, allocation, or copy.
+Behavioral coverage is present but remains unexecuted until an admitted
+self-hosted runtime is available.
+
+Checkpoint: resolved fields and indirect callable values now retain the raw
+callable type marker through both inventory and lexical enforcement. Indirect
+sites have a dedicated count rather than being mislabeled as a distinct
+provider symbol.
+
 - Extend compiler-owned extern identity through aliases, re-exports, methods,
   generated declarations, and indirect callable values.
 - Require `hir_complete == true` before workspace totals are authoritative.

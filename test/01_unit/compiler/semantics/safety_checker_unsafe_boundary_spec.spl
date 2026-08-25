@@ -39,6 +39,7 @@ fn empty_sffi_inventory() -> SffiHirInventoryStats:
     SffiHirInventoryStats(
         resolved_extern_symbols: 0, raw_call_sites: 0,
         resolved_raw_call_sites: 0, aliased_raw_call_sites: 0,
+        indirect_raw_call_sites: 0,
         unresolved_prefixed_candidates: 0, lexically_scoped_call_sites: 0,
         missing_authority_call_sites: 0, distinct_called_symbols: 0,
         unavailable_method_bodies: 0, hir_complete: false,
@@ -194,6 +195,31 @@ describe "safety checker unsafe boundary":
         expect(inventory.missing_authority_call_sites).to_equal(0)
         expect(inventory.lexically_scoped_call_sites).to_equal(1)
         expect(inventory.hir_complete).to_equal(true)
+
+    it "tracks a resolved extern reached through UFCS":
+        step("Verify: resolved UFCS identity retains the FFI boundary")
+        val provider = "pub extern fn device_poke(x: i64) -> i64\n"
+        val consumer = r"use ffi_provider.{device_poke}" + "\n" +
+            "fn use_ffi() -> i64:\n" +
+            "    1.device_poke()\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(count_kind(errors, "ffi")).to_equal(1)
+        expect(inventory.raw_call_sites).to_equal(1)
+        expect(inventory.resolved_raw_call_sites).to_equal(1)
+        expect(inventory.missing_authority_call_sites).to_equal(1)
+
+    it "accepts the same resolved UFCS extern inside minimal unsafe":
+        step("Verify: resolved UFCS identity respects lexical FFI authority")
+        val provider = "pub extern fn device_poke(x: i64) -> i64\n"
+        val consumer = r"use ffi_provider.{device_poke}" + "\n" +
+            "fn use_ffi() -> i64:\n" +
+            "    unsafe(capabilities: [ffi]):\n" +
+            "        1.device_poke()\n"
+        val (errors, inventory) = check_imported_source(provider, consumer)
+        expect(count_kind(errors, "ffi")).to_equal(0)
+        expect(inventory.raw_call_sites).to_equal(1)
+        expect(inventory.missing_authority_call_sites).to_equal(0)
+        expect(inventory.lexically_scoped_call_sites).to_equal(1)
 
     it "does not classify an imported safe wrapper as raw ffi":
         step("Verify: foreign identity does not leak through safe wrappers")
