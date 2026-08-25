@@ -1397,6 +1397,26 @@ Estimated declaration totals remain 11,652 / 3,137 symbols. Unsafe-tagged rows
 increase from 1,920 to 2,001, untouched rows decrease from 9,534 to 9,453, and
 exact-artifact verified-and-signed admission remains zero.
 
+## FTP/FTPS unbacked-boundary checkpoint
+
+The canonical FTP owner has 25 raw declarations and no C or Rust provider or
+interpreter registration in the current tree. Application and GC variants are
+already compile-time re-export facades. The LLM Caret storage selector detects
+this state and rejects FTP before invoking the boundary instead of accepting a
+fabricated handle.
+
+All 25 declarations now carry adjacent operation-specific `unsafe(ffi)`
+metadata covering connection ownership, credentials, TLS policy, remote/local
+paths, transfers, ambiguous empty text, negative size failure, transfer modes,
+and keep-alive state. A static ratchet requires those tags, rejects appearance
+of an unreviewed runtime/interpreter provider, and preserves the storage
+fail-closed guard. This metadata adds no network/file operation, allocation,
+copy, lookup, lock, branch, or dispatch.
+
+Estimated declaration totals remain 11,652 / 3,137 symbols. Unsafe-tagged rows
+increase from 2,079 to 2,104, untouched rows decrease from 9,375 to 9,350, and
+exact-artifact verified-and-signed admission remains zero.
+
 The native C provider now rejects non-heap scalar values before pointer
 untagging on every connection/statement operation, and `close(nil)` no longer
 fabricates success. This is an O(1) bit-tag branch with no registry or

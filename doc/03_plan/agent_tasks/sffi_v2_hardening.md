@@ -604,3 +604,8 @@ passing placeholder.
      boolean results. Generate one authoritative owner and typed transport/
      protocol errors without extra DNS queries, connections, requests, reads,
      copies, allocations, locks, handle lookups, or dispatch.
+119. Keep all 25 unbacked FTP declarations explicitly tagged `unsafe(ffi)` and
+     keep storage selection fail-closed. Do not add weak/fabricated providers.
+     Any future FTP/FTPS provider requires typed ownership/status contracts,
+     TLS policy, exact signed admission, and no extra network/file operations,
+     copies, allocations, lookups, locks, or generic dispatch on the hot path.
