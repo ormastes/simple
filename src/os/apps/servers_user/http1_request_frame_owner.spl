@@ -52,6 +52,78 @@ fn _http_field_name_is_expect(line_bytes: [u8], colon: i64) -> bool:
         (line_bytes[4u64] == 67u8 or line_bytes[4u64] == 99u8) and
         (line_bytes[5u64] == 84u8 or line_bytes[5u64] == 116u8))
 
+fn _http_ascii_lower(byte: u8) -> u8:
+    if byte >= 65u8 and byte <= 90u8: byte + 32u8 else: byte
+
+fn _http_connection_token_kind(bytes: [u8], start: u64, end: u64) -> i32:
+    val length = end - start
+    if (length == 5u64 and
+        _http_ascii_lower(bytes[start]) == 99u8 and
+        _http_ascii_lower(bytes[start + 1u64]) == 108u8 and
+        _http_ascii_lower(bytes[start + 2u64]) == 111u8 and
+        _http_ascii_lower(bytes[start + 3u64]) == 115u8 and
+        _http_ascii_lower(bytes[start + 4u64]) == 101u8):
+        return 1
+    if (length == 10u64 and
+        _http_ascii_lower(bytes[start]) == 107u8 and
+        _http_ascii_lower(bytes[start + 1u64]) == 101u8 and
+        _http_ascii_lower(bytes[start + 2u64]) == 101u8 and
+        _http_ascii_lower(bytes[start + 3u64]) == 112u8 and
+        bytes[start + 4u64] == 45u8 and
+        _http_ascii_lower(bytes[start + 5u64]) == 97u8 and
+        _http_ascii_lower(bytes[start + 6u64]) == 108u8 and
+        _http_ascii_lower(bytes[start + 7u64]) == 105u8 and
+        _http_ascii_lower(bytes[start + 8u64]) == 118u8 and
+        _http_ascii_lower(bytes[start + 9u64]) == 101u8):
+        return 2
+    0
+
+fn _http_connection_options(value: text) -> (bool, bool, bool):
+    # RFC 9110 Connection is a comma list of field-name tokens. Parse it once
+    # as ASCII bytes so lifecycle decisions never depend on split/lower
+    # allocations or accept whitespace inside a token. Empty list members are
+    # tolerated as required by the HTTP list extension. Since the `#element`
+    # form permits an empty list, an OWS/comma-only value is valid and carries
+    # no persistence option.
+    val bytes = text_to_bytes_pure(value)
+    var token_start: i64 = -1
+    var after_token = false
+    var close = false
+    var keep_alive = false
+    var index: u64 = 0u64
+    while index < bytes.len():
+        val byte = bytes[index]
+        if _http_field_token_byte(byte):
+            if after_token:
+                return (false, false, false)
+            if token_start < 0:
+                token_start = index.to_i64()
+        elif byte == 32u8 or byte == 9u8:
+            if token_start >= 0:
+                val kind = _http_connection_token_kind(
+                    bytes, token_start.to_u64(), index)
+                close = close or kind == 1
+                keep_alive = keep_alive or kind == 2
+                token_start = -1
+                after_token = true
+        elif byte == 44u8:
+            if token_start >= 0:
+                val kind = _http_connection_token_kind(
+                    bytes, token_start.to_u64(), index)
+                close = close or kind == 1
+                keep_alive = keep_alive or kind == 2
+            token_start = -1
+            after_token = false
+        else:
+            return (false, false, false)
+        index = index + 1u64
+    if token_start >= 0:
+        val kind = _http_connection_token_kind(
+            bytes, token_start.to_u64(), bytes.len())
+        close = close or kind == 1
+        keep_alive = keep_alive or kind == 2
+    (true, close, keep_alive)
+
 fn _http_hex_byte(byte: u8) -> i64:
     if byte >= 48u8 and byte <= 57u8: return (byte - 48u8) as i64
     if byte >= 65u8 and byte <= 70u8: return (byte - 55u8) as i64
@@ -452,12 +524,12 @@ class Http1RequestFrameOwner:
                 return
             self.transfer_encoding_seen = true
         if name.lower() == "connection":
-            for token in value.split(","):
-                val normalized = token.trim().lower()
-                if normalized == "close":
-                    self.connection_close = true
-                elif normalized == "keep-alive":
-                    self.connection_keep_alive = true
+            val options = _http_connection_options(value)
+            if not options.0:
+                self._fail("400 Invalid Connection token list")
+                return
+            self.connection_close = self.connection_close or options.1
+            self.connection_keep_alive = self.connection_keep_alive or options.2
         self.headers.push((name, value))
 
     me _validate_chunk_trailer(line_start: i64, line_end: i64) -> bool:

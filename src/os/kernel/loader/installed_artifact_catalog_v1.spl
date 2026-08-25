@@ -78,6 +78,11 @@ pub(package) struct InstalledArtifactBootstrapSessionV1:
     generation: u64
     nonce: u64
 
+pub(package) struct InstalledArtifactCatalogSealLeaseV1:
+    """Opaque one-shot proof that offline-root verification reached seal."""
+    generation: u64
+    nonce: u64
+
 struct InstalledArtifactSlotV1:
     generation: u64
     canonical_path: text
@@ -111,6 +116,9 @@ struct InstalledArtifactCatalogOwnerV1:
     bootstrap_generation: u64
     bootstrap_nonce: u64
     nonce_counter: u64
+    seal_lease_generation: u64
+    seal_lease_nonce: u64
+    seal_lease_state: i64
     records: [InstalledArtifactSlotV1]
     keys: [InstalledArtifactKeySlotV1]
 
@@ -138,6 +146,9 @@ var _installed_artifact_catalog_v1 = InstalledArtifactCatalogOwnerV1(
     bootstrap_generation: 0u64,
     bootstrap_nonce: 0u64,
     nonce_counter: 0x494e5354414c4c31u64,
+    seal_lease_generation: 0u64,
+    seal_lease_nonce: 0u64,
+    seal_lease_state: 0,
     records: [],
     keys: [])
 
@@ -434,6 +445,9 @@ pub(package) fn installed_artifact_catalog_bootstrap_begin_v1(
         return nil
     _installed_artifact_catalog_v1.bootstrap_generation =
         _installed_artifact_catalog_v1.bootstrap_generation + 1u64
+    _installed_artifact_catalog_v1.seal_lease_generation = 0u64
+    _installed_artifact_catalog_v1.seal_lease_nonce = 0u64
+    _installed_artifact_catalog_v1.seal_lease_state = 0
     _installed_artifact_catalog_v1.bootstrap_nonce = nonce
     _installed_artifact_catalog_v1.lifecycle =
         InstalledArtifactCatalogLifecycleV1.Populating
@@ -538,6 +552,81 @@ pub(package) fn installed_artifact_catalog_bootstrap_seal_v1(
         return false
     _installed_artifact_catalog_v1.bootstrap_nonce = 0u64
     _installed_artifact_catalog_v1.lifecycle = InstalledArtifactCatalogLifecycleV1.Sealed
+    _installed_artifact_unlock_v1()
+
+pub(package) fn installed_artifact_catalog_bootstrap_seal_for_lease_v1(
+    session: InstalledArtifactBootstrapSessionV1
+) -> bool:
+    """Seal and retain one lease for later sole-owner issuance.
+
+    The generic seal surface remains for catalog-only fixtures, but it emits no
+    trust-transition lease. Production boot calls this surface only after its
+    complete record set has passed the pinned offline-root verification loop.
+    """
+    if not _installed_artifact_lock_v1(): return false
+    if not _installed_artifact_session_valid_locked_v1(session) or
+        _installed_artifact_catalog_v1.records.len() == 0 or
+        _installed_artifact_catalog_v1.seal_lease_state != 0:
+        _ = _installed_artifact_unlock_v1()
+        return false
+    val lease_nonce = _installed_artifact_next_nonce_locked_v1()
+    if lease_nonce == 0u64:
+        _installed_artifact_catalog_v1.lifecycle =
+            InstalledArtifactCatalogLifecycleV1.Quarantined
+        _ = _installed_artifact_unlock_v1()
+        return false
+    _installed_artifact_catalog_v1.bootstrap_nonce = 0u64
+    _installed_artifact_catalog_v1.lifecycle = InstalledArtifactCatalogLifecycleV1.Sealed
+    _installed_artifact_catalog_v1.seal_lease_generation = session.generation
+    _installed_artifact_catalog_v1.seal_lease_nonce = lease_nonce
+    # 1 = emitted/available, 2 = issued, 3 = consumed.
+    _installed_artifact_catalog_v1.seal_lease_state = 1
+    _installed_artifact_unlock_v1()
+
+pub(package) fn installed_artifact_catalog_seal_lease_take_v1(
+) -> InstalledArtifactCatalogSealLeaseV1?:
+    """Move the sole emitted lease from catalog owner to boot composition."""
+    if not _installed_artifact_lock_v1(): return nil
+    if _installed_artifact_catalog_v1.lifecycle !=
+            InstalledArtifactCatalogLifecycleV1.Sealed or
+        _installed_artifact_catalog_v1.seal_lease_state != 1 or
+        _installed_artifact_catalog_v1.seal_lease_generation == 0u64 or
+        _installed_artifact_catalog_v1.seal_lease_nonce == 0u64:
+        _ = _installed_artifact_unlock_v1()
+        return nil
+    val lease = InstalledArtifactCatalogSealLeaseV1(
+        generation: _installed_artifact_catalog_v1.seal_lease_generation,
+        nonce: _installed_artifact_catalog_v1.seal_lease_nonce)
+    _installed_artifact_catalog_v1.seal_lease_state = 2
+    if not _installed_artifact_unlock_v1(): return nil
+    Some(lease)
+
+pub(package) fn installed_artifact_catalog_seal_lease_consume_for_root_v1(
+    lease: InstalledArtifactCatalogSealLeaseV1,
+    signer_identity: text,
+    trust_root_sha256: text
+) -> bool:
+    """Consume only when every sealed row names the candidate root."""
+    if signer_identity == "" or signer_identity.len() > 128 or
+        not hash256_hex_valid(trust_root_sha256) or
+        hash256_is_zero(trust_root_sha256):
+        return false
+    if not _installed_artifact_lock_v1(): return false
+    if _installed_artifact_catalog_v1.lifecycle !=
+            InstalledArtifactCatalogLifecycleV1.Sealed or
+        _installed_artifact_catalog_v1.seal_lease_state != 2 or
+        lease.generation == 0u64 or lease.nonce == 0u64 or
+        lease.generation != _installed_artifact_catalog_v1.seal_lease_generation or
+        lease.nonce != _installed_artifact_catalog_v1.seal_lease_nonce:
+        _ = _installed_artifact_unlock_v1()
+        return false
+    for record in _installed_artifact_catalog_v1.records:
+        if record.signer_identity != signer_identity or
+            record.expected_trust_root_sha256 != trust_root_sha256:
+            _ = _installed_artifact_unlock_v1()
+            return false
+    _installed_artifact_catalog_v1.seal_lease_state = 3
+    _installed_artifact_catalog_v1.seal_lease_nonce = 0u64
     _installed_artifact_unlock_v1()
 
 pub(package) fn installed_artifact_catalog_bootstrap_quarantine_v1(

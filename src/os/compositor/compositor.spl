@@ -518,26 +518,28 @@ class Compositor:
 
     me destroy_window(id: i32):
         val removed_index = self.surface_index(id as u64)
+        if removed_index < 0:
+            # A delayed close may race a prior owner-side destruction. Clear
+            # any stale interaction that still names the retired identity,
+            # but do not allocate/copy the live z-order or disturb focus.
+            self._cancel_drag_for_window(id)
+            return
         var prior_focused_id = 0
         if self.focused_idx >= 0 and self.focused_idx < self.surfaces.len():
             prior_focused_id = self.surfaces[self.focused_idx].id
-        if removed_index >= 0:
-            var removed = self.surfaces[removed_index]
-            removed.state = wm_window_state_begin_close(removed.state)
-            self.surfaces[removed_index] = removed
-            self._release_gui_content(removed.content_handle)
-            self._release_pixel_content(removed.content_handle)
-            if removed.process_id > 0 and self.owned_surface_scalar_count > 0:
-                self.owned_surface_scalar_count = self.owned_surface_scalar_count - 1
-            removed.state = wm_window_state_finish_close(removed.state)
+        var removed = self.surfaces[removed_index]
+        removed.state = wm_window_state_begin_close(removed.state)
+        self.surfaces[removed_index] = removed
+        self._release_gui_content(removed.content_handle)
+        self._release_pixel_content(removed.content_handle)
+        if removed.process_id > 0 and self.owned_surface_scalar_count > 0:
+            self.owned_surface_scalar_count = self.owned_surface_scalar_count - 1
+        removed.state = wm_window_state_finish_close(removed.state)
         self._cancel_drag_for_window(id)
-        var out: [WindowSurface] = []
-        var i = 0
-        while i < self.surfaces.len():
-            if self.surfaces[i].id != id:
-                out.push(self.surfaces[i])
-            i = i + 1
-        self.surfaces = out
+        # The owner already resolved the exact identity index. Remove it in
+        # place so close does not allocate and copy a second full surface
+        # vector; Array.remove retains the relative z-order of survivors.
+        self.surfaces.remove(removed_index)
         self.focused_idx = -1
         if prior_focused_id != id:
             val prior_index = self.surface_index(prior_focused_id as u64)

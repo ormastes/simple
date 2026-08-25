@@ -606,15 +606,37 @@ pub class DbdEngine:
             return -1
         # Validate the complete bounded journal before applying any mutation.
         # A corrupt later record must not leave a partially reconstructed DB.
+        # Scan record boundaries in place rather than split the complete log
+        # into a second retained array of line texts.  Only the current line
+        # and the decoded commands needed for the atomic validate-then-apply
+        # contract remain live.
         var commands: [[text]] = []
-        for line in log_text.split("\n"):
-            if line.len() > 0:
-                if commands.len() >= DBD_MAX_JOURNAL_RECORDS:
-                    return -1
-                val args = dbd_decode_journal_line(line)
-                if not dbd_journal_args_valid(args):
-                    return -1
-                commands.push(args)
+        var line_start: i64 = 0
+        var cursor: i64 = 0
+        while cursor < log_text.len():
+            if log_text.char_code_at(cursor) == 10:
+                val line = log_text.substring(line_start, cursor)
+                line_start = cursor + 1
+                # Empty records, including the terminal split artifact, have
+                # always been ignored by the replay format.
+                if line.len() > 0:
+                    if commands.len() >= DBD_MAX_JOURNAL_RECORDS:
+                        return -1
+                    val args = dbd_decode_journal_line(line)
+                    if not dbd_journal_args_valid(args):
+                        return -1
+                    commands.push(args)
+            cursor = cursor + 1
+        # split("\n") also exposed a non-empty unterminated final record.
+        # Preserve that format behavior without materializing every line.
+        if line_start < log_text.len():
+            val line = log_text.substring(line_start, log_text.len())
+            if commands.len() >= DBD_MAX_JOURNAL_RECORDS:
+                return -1
+            val args = dbd_decode_journal_line(line)
+            if not dbd_journal_args_valid(args):
+                return -1
+            commands.push(args)
         for args in commands:
             self.engine.dispatch(args)
         commands.len().to_i64()

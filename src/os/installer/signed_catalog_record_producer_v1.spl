@@ -58,10 +58,15 @@ pub struct SignedCatalogRecordProduceRequestV1:
     trust_config_relative_path: text
     aliases_relative_path: text
     output_scr1_relative_path: text
+    expected_canonical_path: text
+    expected_target_arch: text
 
 pub struct SignedCatalogRecordProduceResultV1:
     ok: bool
     reason: text
+    receipt_line: text
+struct _EncodedCatalogV1:
+    bytes: [u8]
     receipt_line: text
 
 fn _field(document: text, name: text) -> text:
@@ -163,11 +168,23 @@ fn _aliases(bytes: [u8]) -> [text]:
 fn _produce(authority: HostedSafeArtifactRootAuthorityV1,
             manifest_relative: text, receipt_relative: text,
             seed_relative: text, trust_relative: text, aliases_relative: text,
-            output_relative: text) -> Result<text, text>:
-    val sam1 = hosted_safe_artifact_read_once_v1(authority, manifest_relative,
-        SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES)?
+            output_relative: text, expected_canonical_path: text,
+            expected_target_arch: text) -> Result<text, text>:
     val receipt_bytes = hosted_safe_artifact_read_once_v1(
         authority, receipt_relative, _CONTROL_TEXT_MAX_V1)?
+    val encoded = _encode_v1(authority, manifest_relative, bytes_to_text(receipt_bytes), seed_relative, trust_relative, aliases_relative, output_relative, expected_canonical_path, expected_target_arch)?
+    val grant = hosted_safe_artifact_publish_prepare_v1(authority, output_relative, encoded.bytes, SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1)?
+    val published = hosted_safe_artifact_publish_redeem_v1(grant)?
+    if not published.durable or published.byte_count != encoded.bytes.len(): return Err("scr1-publish-not-durable")
+    Ok(encoded.receipt_line)
+
+fn _encode_v1(authority: HostedSafeArtifactRootAuthorityV1,
+    manifest_relative: text, receipt: text, seed_relative: text,
+    trust_relative: text, aliases_relative: text, output_relative: text,
+    expected_canonical_path: text = "",
+    expected_target_arch: text = "",
+) -> Result<_EncodedCatalogV1, text>:
+    val sam1 = hosted_safe_artifact_read_once_v1(authority, manifest_relative, SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES)?
     val seed = hosted_safe_artifact_read_once_v1(authority, seed_relative, 32)?
     # Keep the raw signing seed owned by this frame and wipe its backing bytes
     # on every success or error return after acquisition.
@@ -177,10 +194,8 @@ fn _produce(authority: HostedSafeArtifactRootAuthorityV1,
     if aliases_relative != "":
         alias_bytes = hosted_safe_artifact_read_once_v1(
             authority, aliases_relative, _CONTROL_TEXT_MAX_V1)?
-    if sam1.len() == 0 or receipt_bytes.len() == 0 or seed.len() != 32 or trust_bytes.len() == 0:
+    if sam1.len() == 0 or receipt == "" or seed.len() != 32 or trust_bytes.len() == 0:
         return Err("empty-or-invalid-control-input")
-
-    val receipt = bytes_to_text(receipt_bytes)
     val trust = bytes_to_text(trust_bytes)
     if not _receipt_shape_valid(receipt) or
         _field(receipt, "schema") != "simpleos-artifact-identity-v1":
@@ -189,8 +204,12 @@ fn _produce(authority: HostedSafeArtifactRootAuthorityV1,
     val artifact_size = _positive_decimal(_field(receipt, "artifact_size"))
     val artifact_identity = _field(receipt, "artifact_identity")
     val canonical_path = _field(receipt, "canonical_path")
+    if expected_canonical_path != "" and canonical_path != expected_canonical_path:
+        return Err("canonical-path-mismatch")
     val target_os = _field(receipt, "target_os")
     val target_arch = _field(receipt, "target_arch")
+    if expected_target_arch != "" and target_arch != expected_target_arch:
+        return Err("target-arch-mismatch")
     val target_abi = _field(receipt, "target_abi")
     val sam1_hash = _field(receipt, "manifest_sam1_sha256")
     if not _lower_sha256(artifact_hash) or artifact_size <= 0 or
@@ -244,13 +263,8 @@ fn _produce(authority: HostedSafeArtifactRootAuthorityV1,
     val encoded = simplebox_signed_catalog_record_encode_v1(candidate)
     if not encoded.?: return Err("canonical-scr1-encode-rejected")
     val record_bytes = encoded.unwrap()
-    val grant = hosted_safe_artifact_publish_prepare_v1(
-        authority, output_relative, record_bytes, SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1)?
-    val published = hosted_safe_artifact_publish_redeem_v1(grant)?
-    if not published.durable or published.byte_count != record_bytes.len():
-        return Err("scr1-publish-not-durable")
-    Ok("simpleos_catalog_scr1=" + output_relative + " artifact_sha256=" + artifact_hash +
-        " artifact_size=" + artifact_size.to_text() + " artifact_identity=" + artifact_identity)
+    Ok(_EncodedCatalogV1(bytes: record_bytes,
+        receipt_line: "simpleos_catalog_scr1=" + output_relative + " artifact_sha256=" + artifact_hash + " artifact_size=" + artifact_size.to_text() + " artifact_identity=" + artifact_identity))
 
 pub fn signed_catalog_record_produce_v1(
     request: SignedCatalogRecordProduceRequestV1,
@@ -274,7 +288,9 @@ pub fn signed_catalog_record_produce_v1(
                 request.signer_seed_relative_path,
                 request.trust_config_relative_path,
                 request.aliases_relative_path,
-                request.output_scr1_relative_path)
+                request.output_scr1_relative_path,
+                request.expected_canonical_path,
+                request.expected_target_arch)
             val closed = hosted_safe_artifact_root_close_v1(authority)
             match closed:
                 case Err(reason):

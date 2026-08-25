@@ -98,10 +98,16 @@ struct ImageSignedCatalogMediaV1:
     enabled: bool
     scr1_bytes: [u8]
     trust_config_bytes: [u8]
+    toolchain_enabled: bool
+    toolchain_artifact_bytes: [u8]
+    toolchain_scr1_bytes: [[u8]]
+    toolchain_trust_config_bytes: [u8]
 
 fn _empty_signed_catalog_media_v1() -> ImageSignedCatalogMediaV1:
     ImageSignedCatalogMediaV1(
-        enabled: false, scr1_bytes: [], trust_config_bytes: [])
+        enabled: false, scr1_bytes: [], trust_config_bytes: [],
+        toolchain_enabled: false, toolchain_artifact_bytes: [],
+        toolchain_scr1_bytes: [], toolchain_trust_config_bytes: [])
 
 pub struct ImageSimpleboxArtifactV1:
     bytes: [u8]
@@ -308,6 +314,72 @@ struct ImageSignedCatalogLoadV1:
     artifact_bytes: [u8]
     receipt: ImageSimpleboxArtifactReceiptV1
 
+struct ImageSignedToolchainCatalogRequestV1:
+    trusted_root: text
+    artifact_relative_path: text
+    manifest_relative_paths: [text]
+    identity_receipt_relative_paths: [text]
+    signer_seed_relative_path: text
+    trust_config_relative_path: text
+    output_scr1_relative_paths: [text]
+
+fn _signed_toolchain_request_present_v1(
+    request: ImageSignedToolchainCatalogRequestV1,
+) -> bool:
+    request.trusted_root != "" or request.artifact_relative_path != "" or
+        request.manifest_relative_paths.len() > 0 or
+        request.identity_receipt_relative_paths.len() > 0 or
+        request.signer_seed_relative_path != "" or
+        request.trust_config_relative_path != "" or
+        request.output_scr1_relative_paths.len() > 0
+
+fn _signed_toolchain_request_complete_v1(
+    request: ImageSignedToolchainCatalogRequestV1,
+) -> bool:
+    if not (request.trusted_root != "" and request.artifact_relative_path != "" and
+        request.signer_seed_relative_path != "" and
+        request.trust_config_relative_path != "" and
+        request.manifest_relative_paths.len() == 3 and
+        request.identity_receipt_relative_paths.len() == 3 and
+        request.output_scr1_relative_paths.len() == 3):
+        return false
+    var index: i64 = 0
+    while index < 3:
+        if request.manifest_relative_paths[index] == "" or
+            request.identity_receipt_relative_paths[index] == "" or
+            request.output_scr1_relative_paths[index] == "":
+            return false
+        var prior: i64 = 0
+        while prior < index:
+            if request.manifest_relative_paths[prior] ==
+                    request.manifest_relative_paths[index] or
+                request.identity_receipt_relative_paths[prior] ==
+                    request.identity_receipt_relative_paths[index] or
+                request.output_scr1_relative_paths[prior] ==
+                    request.output_scr1_relative_paths[index]:
+                return false
+            prior = prior + 1
+        index = index + 1
+    true
+
+fn _produce_and_load_signed_toolchain_catalog_v1(
+    request: ImageSignedToolchainCatalogRequestV1,
+    arch: PkgArch,
+) -> Result<ImageSignedCatalogMediaV1, text>:
+    if not _signed_toolchain_request_complete_v1(request):
+        return Err("signed toolchain catalog requested but triplet inputs are incomplete")
+    val target_arch = match arch:
+        PkgArch.X86_64: "x86_64"
+        PkgArch.Arm64: "aarch64"
+        PkgArch.Riscv64: "riscv64"
+        else: ""
+    if target_arch == "": return Err("signed toolchain catalog target unsupported")
+    # The hosted-safe publisher durably creates one file during prepare.  It has
+    # no batch transaction or rollback, so three sequential calls can expose a
+    # partial catalog.  Fail closed until one retained-root owner can validate
+    # the artifact/receipt/trust triplet and commit all three records atomically.
+    Err("signed toolchain catalog production requires atomic triplet publication")
+
 fn _signed_catalog_request_present_v1(request: ImageSignedCatalogRequestV1) -> bool:
     request.trusted_root != "" or request.artifact_relative_path != "" or
         request.manifest_relative_path != "" or
@@ -377,7 +449,9 @@ fn _produce_and_load_signed_catalog_media_v1(
             signer_seed_relative_path: request.signer_seed_relative_path,
             trust_config_relative_path: request.trust_config_relative_path,
             aliases_relative_path: request.aliases_relative_path,
-            output_scr1_relative_path: request.output_scr1_relative_path))
+            output_scr1_relative_path: request.output_scr1_relative_path,
+            expected_canonical_path: SIMPLEBOX_CANONICAL_PATH_V1,
+            expected_target_arch: ""))
     if not produced.ok:
         return Err("signed catalog production rejected: " + produced.reason)
 
@@ -410,7 +484,9 @@ fn _produce_and_load_signed_catalog_media_v1(
     Ok(ImageSignedCatalogLoadV1(
         media: ImageSignedCatalogMediaV1(
             enabled: true, scr1_bytes: scr1.unwrap(),
-            trust_config_bytes: trust.unwrap()),
+            trust_config_bytes: trust.unwrap(), toolchain_enabled: false,
+            toolchain_artifact_bytes: [], toolchain_scr1_bytes: [],
+            toolchain_trust_config_bytes: []),
         artifact_bytes: artifact_bytes, receipt: parsed_receipt))
 struct PartitionLayout:
     efi_start_sector: u64
@@ -672,6 +748,26 @@ impl ImageBuilder:
         val simple_bytes = image_load_validated_simple_binary(
             simple_binary, self.config.arch)?
 
+        val signed_media = self.config.signed_catalog_media
+        if signed_media.toolchain_enabled:
+            if signed_media.toolchain_scr1_bytes.len() != 3 or
+                signed_media.toolchain_trust_config_bytes.len() == 0 or
+                signed_media.toolchain_artifact_bytes != simple_bytes:
+                return Err("signed toolchain catalog does not bind the staged Simple payload")
+            val record_names = ["simple_interpreter.scr1", "simple_compiler.scr1",
+                "simple_loader.scr1"]
+            var record_index: i64 = 0
+            while record_index < record_names.len():
+                if not rt_file_write_bytes(
+                    "{rootfs_root}/boot/catalog/{record_names[record_index]}",
+                    signed_media.toolchain_scr1_bytes[record_index]):
+                    return Err("signed toolchain SCR1 staging failed")
+                record_index = record_index + 1
+            if not rt_file_write_bytes(
+                "{rootfs_root}/boot/catalog/simple_toolchain.trust",
+                signed_media.toolchain_trust_config_bytes):
+                return Err("signed toolchain trust config staging failed")
+
         var manifest = ""
         for guest_path in IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS:
             val decision = image_package_payload_decision_v1(
@@ -685,6 +781,16 @@ impl ImageBuilder:
             if not ok:
                 return Err("SimpleOS essential toolchain staging failed: {guest_path}")
             manifest = manifest + _manifest_file(guest_path, "simple-toolchain-role", "simpleos-tools")
+
+        if signed_media.toolchain_enabled:
+            manifest = manifest + _manifest_file(
+                "/boot/catalog/simple_interpreter.scr1", "boot-catalog-scr1", "simpleos-loader")
+            manifest = manifest + _manifest_file(
+                "/boot/catalog/simple_compiler.scr1", "boot-catalog-scr1", "simpleos-loader")
+            manifest = manifest + _manifest_file(
+                "/boot/catalog/simple_loader.scr1", "boot-catalog-scr1", "simpleos-loader")
+            manifest = manifest + _manifest_file(
+                "/boot/catalog/simple_toolchain.trust", "boot-catalog-trust", "simpleos-loader")
 
         _ensure_dir("{rootfs_root}/SYS")
         write_text("{rootfs_root}/SYS/SIMPLETOOL.SDN", image_simple_toolchain_manifest(simple_binary))
@@ -1059,7 +1165,7 @@ fn build_install_image_with_rootfs(
     _build_image_v1(config)
 
 fn _print_image_usage():
-    print "Usage: image-builder create [--arch=ARCH] [--output=PATH] [--size=MB] [--kernel=PATH] [--packages=DIR] [--simple-binary=PATH] [--simplebox-artifact=PATH --simplebox-receipt=PATH] [--signed-catalog-root=DIR --signed-catalog-artifact=REL --simplebox-receipt=REL --signed-catalog-sam1=REL --signed-catalog-identity-receipt=REL --signed-catalog-seed=REL --signed-catalog-trust=REL --signed-catalog-output=REL [--signed-catalog-aliases=REL]] [--rootfs=fat32|dbfs|nvfs] [--screen-type=T] [--screen-res=WxH] [--screen-simd=S] [--installer]"
+    print "Usage: image-builder create [--arch=ARCH] [--output=PATH] [--size=MB] [--kernel=PATH] [--packages=DIR] [--simple-binary=PATH] [--simplebox-artifact=PATH --simplebox-receipt=PATH] [--signed-catalog-root=DIR --signed-catalog-artifact=REL --simplebox-receipt=REL --signed-catalog-sam1=REL --signed-catalog-identity-receipt=REL --signed-catalog-seed=REL --signed-catalog-trust=REL --signed-catalog-output=REL [--signed-catalog-aliases=REL]] [--signed-toolchain-root=DIR --signed-toolchain-artifact=REL --signed-toolchain-sam1=I,C,L --signed-toolchain-identity-receipts=I,C,L --signed-toolchain-seed=REL --signed-toolchain-trust=REL --signed-toolchain-outputs=I,C,L] [--rootfs=fat32|dbfs|nvfs] [--screen-type=T] [--screen-res=WxH] [--screen-simd=S] [--installer]"
 
 fn run_image_builder(args: [text]) -> i32:
     for arg in args:
@@ -1084,6 +1190,11 @@ fn run_image_builder(args: [text]) -> i32:
         identity_receipt_relative_path: "", signer_seed_relative_path: "",
         trust_config_relative_path: "", aliases_relative_path: "",
         output_scr1_relative_path: "")
+    var signed_toolchain = ImageSignedToolchainCatalogRequestV1(
+        trusted_root: "", artifact_relative_path: "",
+        manifest_relative_paths: [], identity_receipt_relative_paths: [],
+        signer_seed_relative_path: "", trust_config_relative_path: "",
+        output_scr1_relative_paths: [])
     var installer = false
     var rootfs_backend = "fat32"
     var screen_type = ""
@@ -1125,6 +1236,23 @@ fn run_image_builder(args: [text]) -> i32:
             signed_catalog.aliases_relative_path = arg.slice(25, arg.len())
         else if arg.starts_with("--signed-catalog-output="):
             signed_catalog.output_scr1_relative_path = arg.slice(24, arg.len())
+        else if arg.starts_with("--signed-toolchain-root="):
+            signed_toolchain.trusted_root = arg.slice(24, arg.len())
+        else if arg.starts_with("--signed-toolchain-artifact="):
+            signed_toolchain.artifact_relative_path = arg.slice(28, arg.len())
+        else if arg.starts_with("--signed-toolchain-sam1="):
+            signed_toolchain.manifest_relative_paths =
+                arg.slice(24, arg.len()).split(",")
+        else if arg.starts_with("--signed-toolchain-identity-receipts="):
+            signed_toolchain.identity_receipt_relative_paths =
+                arg.slice(37, arg.len()).split(",")
+        else if arg.starts_with("--signed-toolchain-seed="):
+            signed_toolchain.signer_seed_relative_path = arg.slice(24, arg.len())
+        else if arg.starts_with("--signed-toolchain-trust="):
+            signed_toolchain.trust_config_relative_path = arg.slice(25, arg.len())
+        else if arg.starts_with("--signed-toolchain-outputs="):
+            signed_toolchain.output_scr1_relative_paths =
+                arg.slice(27, arg.len()).split(",")
         else if arg.starts_with("--rootfs="):
             rootfs_backend = arg.slice(9, arg.len())
         else if arg.starts_with("--screen-type="):
@@ -1170,6 +1298,23 @@ fn run_image_builder(args: [text]) -> i32:
             print "Error: {e}"
             return 1
         simplebox_artifact = loaded.unwrap()
+
+    if _signed_toolchain_request_present_v1(signed_toolchain):
+        if arch == PkgArch.Riscv32 or arch == PkgArch.Any:
+            print "Error: signed toolchain catalog media supports x86_64, arm64, and riscv64"
+            return 1
+        val loaded_toolchain = _produce_and_load_signed_toolchain_catalog_v1(
+            signed_toolchain, arch)
+        if val Err(e) = loaded_toolchain:
+            print "Error: {e}"
+            return 1
+        val toolchain = loaded_toolchain.unwrap()
+        signed_catalog_media.toolchain_enabled = toolchain.toolchain_enabled
+        signed_catalog_media.toolchain_artifact_bytes =
+            toolchain.toolchain_artifact_bytes
+        signed_catalog_media.toolchain_scr1_bytes = toolchain.toolchain_scr1_bytes
+        signed_catalog_media.toolchain_trust_config_bytes =
+            toolchain.toolchain_trust_config_bytes
 
     val result = if installer:
         val config = ImageConfig(
