@@ -276,9 +276,10 @@ impl RedisClient:
         """Send raw RESP text to the server."""
         if not self.is_connected:
             return Err(IoError(kind: IoErrorKind.Other, message: "not connected", source: nil))
-        val written = rt_io_tcp_write_text(self.fd, data)
-        if written <= 0:
-            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "send failed", source: nil))
+        val written = unsafe(capabilities: [ffi]):
+            rt_io_tcp_write_text(self.fd, data)
+        if written != data.len():
+            return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "send incomplete", source: nil))
         Ok(())
 
     fn read_reply() -> Result<RedisReply, IoError>:
@@ -473,6 +474,7 @@ extern fn rt_io_tcp_connect(addr: text) -> i64
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
 @unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_close(fd: i64) -> bool
 use std.common.string_core.{bytes_to_text}

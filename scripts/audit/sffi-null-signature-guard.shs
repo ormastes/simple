@@ -35,6 +35,33 @@ reject_text() {
     fi
 }
 
+require_raw_symbol_scoped() {
+    symbol=$1
+    files=$(rg -l --glob '*.spl' --glob '!**/vendor/**' \
+        "^[[:space:]]*extern fn $symbol\\(" \
+        "$root/src" "$root/test" || true)
+    for file in $files; do
+        if ! awk -v symbol="$symbol" '
+            index($0, symbol "(") > 0 && $0 !~ /extern fn/ {
+                if (previous !~ /unsafe\(capabilities: \[ffi\]\):/) exit 1
+            }
+            { previous = $0 }
+        ' "$file"; then
+            echo "SFFI lint: $symbol call escaped its minimal ffi scope in $file" >&2
+            failed=1
+        fi
+        if ! awk -v symbol="$symbol" '
+            index($0, "extern fn " symbol "(") > 0 {
+                if (previous !~ /@unsafe\(/) exit 1
+            }
+            { previous = $0 }
+        ' "$file"; then
+            echo "SFFI lint: $symbol declaration is not tagged unsafe in $file" >&2
+            failed=1
+        fi
+    done
+}
+
 # The legacy rt_mkdir_p declarations used a lane-dependent ABI. All Simple
 # callers must go through std.io_runtime.mkdir_p, whose one canonical raw owner
 # is rt_dir_create_all with an explicit ffi scope.
@@ -112,6 +139,11 @@ require_text 'tcp_read_failure_is_nil_not_empty_bytes' \
     src/compiler_rust/runtime/src/value/net_tcp.rs
 require_text 'tcp_read_failure_is_nil_not_empty_bytes' \
     src/compiler_rust/compiler/src/interpreter_native_net.rs
+require_raw_symbol_scoped rt_io_tcp_read
+require_raw_symbol_scoped rt_io_tcp_write_text
+require_text 'rt_io_tcp_write_text\(self.fd, s\) == s.len\(\)' \
+    src/lib/nogc_sync_mut/io/tcp.spl
+require_text 'message: "write_text incomplete"' src/lib/nogc_sync_mut/io/tcp.spl
 
 for owner in \
     src/compiler_rust/runtime/src/value/wsffi_native.rs \
