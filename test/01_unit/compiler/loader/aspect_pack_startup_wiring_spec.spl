@@ -47,9 +47,10 @@ use std.spec.{describe, it}
 use std.common.aspect_pack.{ApkModuleSourceV1, apk_build_pack_v1,
     apk_open_pack_v1, apk_load_module_v1}
 use std.common.string_core.{text_to_bytes, bytes_to_text}
-use std.io_runtime.{file_write_bytes, file_read, mkdir_p}
+use std.io_runtime.{file_write_bytes, file_read, mkdir_p, platform_name}
 use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size}
 use app.cli.startup_aspect_packs.{startup_aspect_pack_paths,
+    startup_aspect_pack_paths_for_platform,
     startup_register_aspect_pack, startup_load_aspect_packs,
     STARTUP_ASPECT_PACK_ENV}
 
@@ -60,6 +61,10 @@ fn _pack_dir() -> text:
 
 fn _pack_path(tag: text) -> text:
     "{_pack_dir()}/aspect_pack_startup_{tag}.apk"
+
+fn _host_pack_list(a: text, b: text) -> text:
+    val separator = if platform_name() == "windows": ";" else: ":"
+    a + separator + b
 
 fn _payload(tag: text) -> [u8]:
     var s = ""
@@ -83,11 +88,19 @@ fn _write_pack(tag: text, module_id: text) -> text:
 describe "Startup aspect-pack list parsing":
 
     it "splits a PATH-style list and drops empty entries":
-        step("Verify: `:`-separated pack list parsing")
+        step("Verify: host PATH-list parsing")
         # @req: REQ-APKS-01
         expect(startup_aspect_pack_paths("")).to_equal([])
         expect(startup_aspect_pack_paths("a.apk")).to_equal(["a.apk"])
-        expect(startup_aspect_pack_paths("a.apk::b.apk:")).to_equal(["a.apk", "b.apk"])
+
+    it "uses the platform delimiter and preserves Windows drive prefixes":
+        step("Verify: Unix and Windows PATH delimiters are distinct")
+        # @req: REQ-APKS-01
+        expect(startup_aspect_pack_paths_for_platform(
+            "a.apk:: b.apk :", false)).to_equal(["a.apk", "b.apk"])
+        expect(startup_aspect_pack_paths_for_platform(
+            "C:/packs/a.apk;; D:/packs/b.apk ;", true)).to_equal(
+                ["C:/packs/a.apk", "D:/packs/b.apk"])
 
     it "an empty spec loads nothing and is not an error":
         step("Verify: unset environment is a no-op, exit 0")
@@ -116,7 +129,7 @@ describe "Startup loads a custom dynamic library from disk":
         # @req: REQ-APKS-01
         val p1 = _write_pack("multi_a", "custom.lib.a")
         val p2 = _write_pack("multi_b", "custom.lib.b")
-        val r = startup_load_aspect_packs("{p1}:{p2}")
+        val r = startup_load_aspect_packs(_host_pack_list(p1, p2))
         expect(r.exit_code).to_equal(0)
         expect(r.packs_loaded).to_equal(2)
 
@@ -161,7 +174,7 @@ describe "Startup fails closed on a bad pack":
         # @req: REQ-APKS-01
         val first = _write_pack("rollback_missing", "custom.lib.rollback.missing")
         val missing = "{_pack_dir()}/aspect_pack_startup_missing_second.apk"
-        val r = startup_load_aspect_packs("{first}:{missing}")
+        val r = startup_load_aspect_packs(_host_pack_list(first, missing))
         expect(r.exit_code).to_equal(1)
         expect(r.requested).to_equal(2)
         expect(r.packs_loaded).to_equal(0)
@@ -174,7 +187,7 @@ describe "Startup fails closed on a bad pack":
         step("Verify: duplicate-path refusal also rolls back the accepted prefix")
         # @req: REQ-APKS-01
         val first = _write_pack("rollback_duplicate", "custom.lib.rollback.duplicate")
-        val r = startup_load_aspect_packs("{first}:{first}")
+        val r = startup_load_aspect_packs(_host_pack_list(first, first))
         expect(r.exit_code).to_equal(1)
         expect(r.requested).to_equal(2)
         expect(r.packs_loaded).to_equal(0)
