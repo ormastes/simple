@@ -53,13 +53,55 @@ use std.io.{file_exists, file_write}
 # the canonical owner ("File mutation stays owned by file_ops", io/__init__.spl).
 use std.io.file_ops.{file_lock, file_unlock}
 
+@unsafe(reason: "raw process termination ABI", capabilities: [ffi])
 extern fn rt_exit(code: i64)
+@unsafe(reason: "raw stdout flush ABI", capabilities: [ffi])
 extern fn rt_stdout_flush()
-extern fn rt_env_get(key: text) -> text
-extern fn rt_env_set(key: text, value: text)
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw environment mutation ABI", capabilities: [ffi])
+extern fn rt_env_set(key: text, value: text) -> bool
+@unsafe(reason: "raw transient-array scope begin ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_pause() -> bool
+@unsafe(reason: "raw transient-array scope end ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_end() -> bool
+
+@always_inline
+fn _sffi_exit(code: i64):
+    unsafe(capabilities: [ffi]):
+        rt_exit(code)
+
+@always_inline
+fn _sffi_stdout_flush():
+    unsafe(capabilities: [ffi]):
+        rt_stdout_flush()
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_env_set(key: text, value: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_env_set(key, value)
+
+@always_inline
+fn _sffi_transient_array_scope_begin() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_begin()
+
+@always_inline
+fn _sffi_transient_array_scope_pause() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_pause()
+
+@always_inline
+fn _sffi_transient_array_scope_end() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_end()
 
 
 # The front-end cache lives in 10.frontend and must not import 80.driver, so
@@ -112,7 +154,7 @@ var _driver_parse_shard_memo: text = "@@unset@@"
 fn _driver_parse_shard_spec() -> text:
     if _driver_parse_shard_memo != "@@unset@@":
         return _driver_parse_shard_memo
-    _driver_parse_shard_memo = rt_env_get("SIMPLE_PARSE_SHARD") ?? ""
+    _driver_parse_shard_memo = _sffi_env_get("SIMPLE_PARSE_SHARD") ?? ""
     _driver_parse_shard_memo
 
 pub fn driver_parse_shard_active() -> bool:
@@ -167,7 +209,7 @@ var _driver_parse_shard_claimed: i64 = 0
 fn _driver_parse_shard_queue_dir() -> text:
     if _driver_parse_shard_queue_memo != "@@unset@@":
         return _driver_parse_shard_queue_memo
-    _driver_parse_shard_queue_memo = rt_env_get("SIMPLE_PARSE_SHARD_QUEUE") ?? ""
+    _driver_parse_shard_queue_memo = _sffi_env_get("SIMPLE_PARSE_SHARD_QUEUE") ?? ""
     _driver_parse_shard_queue_memo
 
 pub fn driver_parse_shard_claimed() -> i64:
@@ -206,11 +248,11 @@ fn _driver_parse_shard_owns(path: text) -> bool:
         return _driver_parse_shard_owns_static(path)
     _driver_parse_shard_claim(queue_dir, path)
 
-fn _driver_publish_frontend_cache_scope():
-    if (rt_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
-        return
+fn _driver_publish_frontend_cache_scope() -> bool:
+    if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
+        return true
     val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_compiler_identity())
-    rt_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope)
+    _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope)
 
 pub fn driver_promote_frontend_registry_owners() -> bool:
     val aspect_ok = aspect_registry_promote_transient_owner()
@@ -232,7 +274,7 @@ class ParsedEntryModuleBox:
 # Env-gated driver trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
 # [DRV]/[BOOTSTRAP-PHASE] loading/lowering probe trail.
 pub fn dtrace(msg: text) -> ():
-    if (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
+    if (_sffi_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
         eprint(msg)
 
 pub fn driver_end_transient_parse_scope() -> bool:
@@ -247,7 +289,7 @@ pub fn driver_end_transient_parse_scope() -> bool:
     # ensure fires here in native binaries, which zero-initialise module arrays.
     # rt_core_register_scoped_immortal() stamps EVERY array born while a
     # transient array scope is active with that scope's id, and
-    # rt_transient_array_scope_end() then free()s those objects and erases them
+    # _sffi_transient_array_scope_end() then free()s those objects and erases them
     # from the immortal pointer registry. Resetting first therefore handed the
     # NEXT file a dead arena -- rt_array_len returns 0/-1, rt_array_push is
     # silently dropped, rt_array_clear is a silent no-op -- for the rest of the
@@ -257,7 +299,7 @@ pub fn driver_end_transient_parse_scope() -> bool:
     # scope and stay process-immortal, while the per-file parse garbage that the
     # scope actually owns is still reclaimed exactly as before.
     # See doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
-    val ended = rt_transient_array_scope_end()
+    val ended = _sffi_transient_array_scope_end()
     lexer_release_parse_source_globals()
     # The token interner retains short strings born in the just-ended parser
     # scope. Replace the whole owner only after that scope is closed so the new
@@ -282,7 +324,7 @@ impl CompilerDriver:
             return Err("module surface builder is frozen")
         if builder.index_by_path.contains_key(canonical_path):
             return Err("module surface already exists for physical source: {canonical_path}")
-        if not rt_transient_array_scope_begin():
+        if not _sffi_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source_path}")
         val source = SourceFile(
             path: source_path,
@@ -293,7 +335,7 @@ impl CompilerDriver:
         val module = parse_full_frontend(
             source_content, source_path, source_module_name, self.ctx.logger)
         if par_had_error_get():
-            if not rt_transient_array_scope_pause():
+            if not _sffi_transient_array_scope_pause():
                 val _ended = driver_end_transient_parse_scope()
                 return Err("transient parser scope pause failed after parse error for {source_path}")
             if not driver_promote_frontend_registry_owners():
@@ -312,7 +354,7 @@ impl CompilerDriver:
         val surface_result = module_surface_from_owner(
             module_owner, source, source_index)
         if surface_result.is_err():
-            if not rt_transient_array_scope_pause():
+            if not _sffi_transient_array_scope_pause():
                 val _ended = driver_end_transient_parse_scope()
                 return Err("transient parser scope pause failed after surface error for {source_path}")
             if not driver_promote_frontend_registry_owners():
@@ -322,7 +364,7 @@ impl CompilerDriver:
             return Err(surface_result.unwrap_err())
         val surface = surface_result.unwrap()
         log_module_surface_stage(source_path, "surface-done")
-        if not rt_transient_array_scope_pause():
+        if not _sffi_transient_array_scope_pause():
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source_path}")
         if not driver_promote_frontend_registry_owners():
@@ -360,7 +402,7 @@ impl CompilerDriver:
         self.streaming_entry_source_index_owner = bootstrap_entry_source_index(self.ctx)
         # Same compiler-identity scope the non-streaming parse publishes: the
         # HIR cache keys off it, and without it the streaming path had no cache.
-        _driver_publish_frontend_cache_scope()
+        val _cache_scope_published = _driver_publish_frontend_cache_scope()
         self.ctx.modules = {}
         self.ctx.module_surfaces = nil
         # Phase 1 owns independent scalar text arrays; phase 2 never re-reads a
@@ -459,7 +501,7 @@ impl CompilerDriver:
         # deep-promote the whole registry graph before committing it. Promoting
         # individual surfaces is insufficient: the registry's Dict and aligned
         # name/index arrays are allocated only during finalization.
-        if not rt_transient_array_scope_begin():
+        if not _sffi_transient_array_scope_begin():
             self.ctx.add_error(
                 "Module surface retention scope unavailable after phase 2")
             return false
@@ -468,22 +510,22 @@ impl CompilerDriver:
             ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
         val finish_error = builder.finish_into(retained_surfaces)
         if finish_error != "":
-            val _paused = rt_transient_array_scope_pause()
-            val _ended = rt_transient_array_scope_end()
+            val _paused = _sffi_transient_array_scope_pause()
+            val _ended = _sffi_transient_array_scope_end()
             self.ctx.add_error(
                 "Module surface alignment error: {finish_error}")
             return false
-        if not rt_transient_array_scope_pause():
-            val _ended = rt_transient_array_scope_end()
+        if not _sffi_transient_array_scope_pause():
+            val _ended = _sffi_transient_array_scope_end()
             self.ctx.add_error(
                 "Module surface retention scope pause failed after phase 2")
             return false
         if not module_surfaces_promote(retained_surfaces):
-            val _ended = rt_transient_array_scope_end()
+            val _ended = _sffi_transient_array_scope_end()
             self.ctx.add_error(
                 "Module surface registry graph promotion failed after phase 2")
             return false
-        if not rt_transient_array_scope_end():
+        if not _sffi_transient_array_scope_end():
             self.ctx.add_error(
                 "Module surface retention scope end failed after phase 2")
             return false
@@ -518,9 +560,9 @@ impl CompilerDriver:
             # The streaming parse has no front-end parse cache to warm, and a
             # shard child must never carry on into HIR/MIR/codegen (it did:
             # each child lowered the whole closure in process, N times over).
-            print "[parse-shard] done shard={rt_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
-            rt_stdout_flush()
-            rt_exit(0)
+            print "[parse-shard] done shard={_sffi_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
+            _sffi_stdout_flush()
+            _sffi_exit(0)
         # Read the authoritative scalar field directly.  Avoid both a receiver
         # method call and a phase-local boolean: the current native backend has
         # independently mis-lowered each form in this large mutable method.
@@ -547,8 +589,8 @@ impl CompilerDriver:
         val sources = self.ctx.sources
         log_debug("parsing sources")
         val native_entry_closure = (
-            rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+            _sffi_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val native_entry = _sffi_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         if native_entry_closure or native_entry != "":
             var entry_modules: Dict<text, ParserModule> = self.ctx.modules
             var entry_sources: [SourceFile] = []
@@ -591,13 +633,13 @@ impl CompilerDriver:
             # already use for the index table, so it can't alias.
             var poisoned_physical_keys: [text] = []
             var progress_parse_done = 0
-            _driver_publish_frontend_cache_scope()
+            val _cache_scope_published = _driver_publish_frontend_cache_scope()
             log_build_progress("parse", "files", 0,
                 unique_entry_sources.len(), "pending", 1, 6, 0, 0, "running")
             for source in unique_entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
-                if ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
-                    (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
+                if ((_sffi_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
+                    (_sffi_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
                     dtrace(
                         "[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
                 log_phase(
@@ -672,8 +714,8 @@ impl CompilerDriver:
                         return (self.ctx, false)
                     progress_parse_done = progress_parse_done + 1
                     continue
-                if ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
-                    (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
+                if ((_sffi_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
+                    (_sffi_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
                     dtrace(
                         "[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
                 var parsed_slot = _driver_text_bucket_index(
@@ -733,9 +775,9 @@ impl CompilerDriver:
                 # Shard children exist only to warm the cache. Everything after
                 # this point (surfaces, HIR, MIR, codegen, link) is the real
                 # build's job and must not be duplicated N times.
-                print "[parse-shard] done shard={rt_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
-                rt_stdout_flush()
-                rt_exit(0)
+                print "[parse-shard] done shard={_sffi_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
+                _sffi_stdout_flush()
+                _sffi_exit(0)
             var entry_surface_builder = ModuleSurfaceBuilder.new()
             var entry_surface_source_index: i64 = 0
             log_build_progress("surface_build", "files", 0,
@@ -857,11 +899,11 @@ impl CompilerDriver:
             if entry_sources.len() == 0:
                 self.ctx.add_error(
                     "native entry source not found: {native_entry}")
-            if (rt_env_get("SIMPLE_TRACE_PHASE2") ?? "") != "":
+            if (_sffi_env_get("SIMPLE_TRACE_PHASE2") ?? "") != "":
                 print "[phase2] entry-closure verdict error_count={self.ctx.error_count_value} errors_len={self.ctx.errors.len()}"
             return (self.ctx, self.ctx.error_count_value == 0)
-        if ((rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
-            (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"):
+        if ((_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+            (_sffi_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"):
             var bootstrap_modules: Dict<text, ParserModule> = self.ctx.modules
             var boot_idx = 0
             while boot_idx < sources.len():

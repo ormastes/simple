@@ -39,6 +39,37 @@ authority.  This fixes the false-pass harness but does not cryptographically
 verify the invoked tools or runtime artifact; verified-and-signed admission
 remains 0.
 
+## Driver source-parsing authority checkpoint
+
+The phase-2 parsing driver now confines its seven raw process, environment,
+stdout, and transient-array-scope ABIs to mandatory-inline lexical
+`unsafe(ffi)` owners.  Environment lookup is truthfully nullable and
+`rt_env_set` now preserves its provider boolean instead of declaring the
+operation void.  Frontend-cache scope publication returns that status; its two
+callers explicitly retain the result, while a failed publication safely leaves
+the frontend cache disabled rather than fabricating cache admission.
+
+All transient-scope success-path statuses remain checked.  Cleanup calls on an
+already failing parse still preserve the primary error, and no successful
+parse can ignore begin, pause, promotion, or end failure.  Mandatory inlining
+keeps the existing call topology: no parser/source loop gains a foreign call,
+allocation, copy, lookup, hash, lock, branch, or scan.
+
+The focused static authority/performance ratchet passed.  The authoritative
+census changed:
+
+- raw call sites: 19,019 -> 18,996
+- missing authority: 14,778 -> 14,748
+- lexical unsafe: 3,284 -> 3,291
+- function unsafe: unchanged at 957
+
+Six symbols have typed-native plus interpreter registration.  `rt_stdout_flush`
+is interpreter-registered but still absent from the typed-native registry, so
+the audit deliberately records the lane gap rather than promoting the module.
+No production self-hosted optimizer or benchmark was available.  Exact
+artifact identity, signatures, and evidence admission remain absent;
+verified-and-signed admission remains 0.
+
 ## RISC-V boot-services authority checkpoint
 
 `riscv_services.spl` had twelve PCI/network/storage/log interfaces and 63
