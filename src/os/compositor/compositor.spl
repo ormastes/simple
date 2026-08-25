@@ -377,6 +377,15 @@ class Compositor:
         )
 
     me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> i32:
+        # Creating a window transfers keyboard ownership to it.  Backend
+        # events already waiting in the ring were observed under the previous
+        # focus epoch and have no target identity of their own, so they cannot
+        # safely be retargeted to the new surface.  Invalidate both the old
+        # owner's materialized interaction and the queued pre-transition
+        # events before publishing the new focus.
+        if self.focused_idx >= 0 and self.focused_idx < self.surfaces.len():
+            self._cancel_drag_for_window(self.surfaces[self.focused_idx].id)
+        self.input_queue.clear()
         val id = self.next_id
         self.next_id = self.next_id + 1
         self.surfaces.push(WindowSurface(
@@ -482,6 +491,11 @@ class Compositor:
             self.pending_wm_text_shift = false
 
     me _focus_top_visible():
+        # Raw HostInputEvent values in input_queue deliberately carry no
+        # window handle.  A fallback focus therefore starts a new ownership
+        # epoch by discarding the bounded pre-transition backlog in O(1),
+        # rather than delivering its keys/releases to the replacement owner.
+        self.input_queue.clear()
         self.focused_idx = -1
         var i = self.surfaces.len() - 1
         # cpu-lane-loop-ok: reverse scan for the topmost visible window surface; bound is the open-window count, not a pixel or glyph count
@@ -565,8 +579,14 @@ class Compositor:
         # pointer capture, or queued key/text delivery.  Cancel that ownership
         # before publishing the new focus; otherwise the next pointer step can
         # still mutate or dispatch into an unfocused surface.
-        if prior_focused_id > 0 and prior_focused_id != id:
-            self._cancel_drag_for_window(prior_focused_id)
+        if prior_focused_id != id:
+            if prior_focused_id > 0:
+                self._cancel_drag_for_window(prior_focused_id)
+            # Events still in the ingress ring were produced while the prior
+            # surface owned input.  Since queue entries are intentionally
+            # target-free, clearing is the only fail-closed epoch boundary;
+            # retaining them would silently retarget stale key/pointer input.
+            self.input_queue.clear()
         var out: [WindowSurface] = []
         var i = 0
         while i < self.surfaces.len():
@@ -579,6 +599,7 @@ class Compositor:
 
     me cycle_focus():
         if self.surfaces.len() == 0:
+            self.input_queue.clear()
             self.focused_idx = -1
             return
         var step = 1
@@ -591,9 +612,11 @@ class Compositor:
                 return
             step = step + 1
         self.focused_idx = -1
+        self.input_queue.clear()
 
     me cycle_focus_reverse():
         if self.surfaces.len() == 0:
+            self.input_queue.clear()
             self.focused_idx = -1
             return
         var step = 1
@@ -608,6 +631,7 @@ class Compositor:
                 return
             step = step + 1
         self.focused_idx = -1
+        self.input_queue.clear()
 
     me move_window(id: i32, x: i32, y: i32):
         val i = self.surface_index(id as u64)

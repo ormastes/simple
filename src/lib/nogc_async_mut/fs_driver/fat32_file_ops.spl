@@ -107,6 +107,24 @@ impl Fat32Core:
             content_generation: content_generation,
             size: of.size.to_u64()))
 
+    me fn prepare_direct_write_v1(handle: FileHandle) -> Result<(), text>:
+        """Invalidate retained execute observations before DirectIo mutates file data.
+
+        DirectIo writes bypass fat32_write and the 4 KiB overwrite helpers, so
+        the submission owner must call this after validating the mapped extent
+        and before handing it to the block device.  Advancing before submission
+        is deliberately conservative: an uncertain device outcome must never
+        leave an older executable observation looking current.
+        """
+        val idx = _fat32_handle_index(self.open_files, handle)
+        if idx < 0 or idx >= self.open_files.len():
+            return Err("invalid file handle")
+        val of = self.open_files[idx]
+        if not of.is_open or of.is_dir or of.start_cluster < 2u32 or
+           of.file_generation_slot < 0:
+            return Err("FAT32 direct-write generation unavailable")
+        self._prepare_file_content_mutation_slot(of.file_generation_slot)
+
     fn _file_unlink_is_deferred(start_cluster: u32) -> bool:
         for entry in self.file_generations:
             if entry.start_cluster == start_cluster:

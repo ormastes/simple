@@ -555,8 +555,15 @@ pub class Rfc6455ServerConnectionOwner:
                 break
             val remaining = input.len() - input_index
             val take = if remaining < capacity: remaining else: capacity
-            self.wire.extend(input.slice(input_index, input_index + take))
-            input_index = input_index + take
+            # Append directly from the caller-owned chunk.  Building a slice
+            # here allocated and copied every accepted byte into a temporary
+            # array before `extend` copied it again into the retained wire
+            # buffer.  The indexed loop keeps the same bounded ordering and
+            # cursor semantics with one copy and no per-chunk temporary.
+            val input_end = input_index + take
+            while input_index < input_end:
+                self.wire.push(input[input_index])
+                input_index = input_index + 1u64
             events.extend(self._drain_wire())
             if events.len() > RFC6455_MAX_EVENTS_PER_APPEND:
                 events = [self._fail(1009, "event count exceeds per-call bound")]

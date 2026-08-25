@@ -462,13 +462,21 @@ impl MountTable:
             return Some(binding)
         nil
 
-    me fn _retire_stable_snapshot(lease: StableFileSnapshotLeaseV1):
+    me fn _retire_stable_snapshot(lease: StableFileSnapshotLeaseV1) -> bool:
+        """Consume exactly one live generational snapshot authority.
+
+        Returning success is part of execute promotion's authority transfer:
+        callers must not publish the retained file handle unless the exact
+        lease slot was retired.  This also makes stale cleanup observable
+        instead of silently pretending that a mismatched slot was consumed.
+        """
         val slot = mount_handle_slot(lease.id)
         if slot < 0 or slot >= self.stable_snapshots.len() as i32:
-            return
+            return false
         val binding = self.stable_snapshots[slot]
-        if not binding.active or binding.lease_id != lease.id:
-            return
+        if not binding.active or binding.lease_id != lease.id or
+           binding.generation != mount_handle_generation(lease.id):
+            return false
         val terminal = binding.generation == MOUNT_HANDLE_GENERATION_MAX
         self.stable_snapshots[slot] = StableFileSnapshotBindingV1(
             active: false, retired: terminal,
@@ -485,6 +493,7 @@ impl MountTable:
             hash_stream: binding.hash_stream, hash_tracking: binding.hash_tracking,
             hash_next_offset: binding.hash_next_offset,
             hash_complete: binding.hash_complete, hash_invalid: binding.hash_invalid)
+        true
 
     me fn _file_binding(handle: FileHandle) -> OpenFileBinding?:
         val slot = mount_handle_slot(handle.id)
@@ -972,7 +981,8 @@ impl MountTable:
             return Err(FsError.Permission)
         if snapshot.size < 1u64 or snapshot.size > MOUNT_TABLE_MAX_EXECUTABLE_BYTES:
             return Err(FsError.TooLarge)
-        self._retire_stable_snapshot(lease)
+        if not self._retire_stable_snapshot(lease):
+            return Err(FsError.StaleHandle)
         return Ok(ExecuteOpenBinding(
             mount_id: entry.id,
             backend_name: backend_name,
@@ -999,7 +1009,8 @@ impl MountTable:
                     case Some(entry): _driver_close_handle(entry.driver, file.inner_handle)
                 self._unbind_file_handle(snapshot.file_handle)
                 close_result
-        self._retire_stable_snapshot(lease)
+        if not self._retire_stable_snapshot(lease):
+            return Err(FsError.StaleHandle)
         result
 
     me fn lookup(path: Path) -> MountEntry?:

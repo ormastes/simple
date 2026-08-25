@@ -13,7 +13,7 @@ use std.common.contracts.os.server_data_namespace_v1.{
 }
 use os.userlib.fs.{
     file_open_direct, file_read_direct, file_write_direct, file_close_direct,
-    file_sync_direct, file_rename_direct
+    file_sync_direct, file_rename_direct, file_fstat_bounded
 }
 use os.services.vfs.dbfs_mount_capability.{
     dbfs_vfs_mount_capability_snapshot_v1,
@@ -110,12 +110,37 @@ pub class DbdDbfsAdapter:
             val opened = file_open_direct(path, 0u32)
             if opened.is_err(): return Err("dbfs-recovery-journal-not-found")
             val fd = opened.unwrap()
-            val read = file_read_direct(fd, max_bytes.to_u64())
+            # Bind recovery to the opened inode's exact length.  Reading only
+            # `max_bytes` could accept a valid checksummed prefix of an
+            # oversized journal, while accepting a short descriptor read
+            # could silently discard durable tail records.  Transactional
+            # replacement keeps this opened inode stable across publication.
+            val stat = file_fstat_bounded(fd as u64)
+            if stat.is_err():
+                val _ = file_close_direct(fd)
+                return Err("dbfs-recovery-stat-failed")
+            val size = stat.unwrap().size
+            if size > max_bytes.to_u64():
+                val _ = file_close_direct(fd)
+                return Err("dbfs-recovery-journal-too-large")
+            if size == 0u64:
+                if not file_close_direct(fd):
+                    self.state = DbdDbfsAdapterState.Quarantined
+                    self.last_error = "dbfs-recovery-close-failed"
+                    return Err(self.last_error)
+                if not self.filesystem_vfs_mount_current():
+                    return Err("dbfs-vfs-mount-changed-during-recovery")
+                return Ok([])
+            val read = file_read_direct(fd, size)
             if not file_close_direct(fd):
                 self.state = DbdDbfsAdapterState.Quarantined
                 self.last_error = "dbfs-recovery-close-failed"
                 return Err(self.last_error)
             if read.is_err(): return Err("dbfs-recovery-read-failed")
+            if read.unwrap().len() != size:
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-recovery-short-read"
+                return Err(self.last_error)
             if not self.filesystem_vfs_mount_current():
                 return Err("dbfs-vfs-mount-changed-during-recovery")
             return read
