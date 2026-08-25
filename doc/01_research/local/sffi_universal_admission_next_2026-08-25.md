@@ -12,6 +12,35 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Simple-core atomic-fallback authority checkpoint
+
+The pure-Simple bootstrap atomic fallback retains six explicitly tagged raw
+interfaces and routes all ten former ambient calls through mandatory-inline
+`ffi, raw_ptr` owners.  Its eight public address/handle operations now also
+declare `raw_ptr` authority: arbitrary numeric addresses and unregistered
+handles cannot honestly be exposed as safe.  The allocation constructor itself
+remains safe and preserves its explicit zero-on-allocation-failure contract.
+The focused `simple-core-atomic-authority.shs` ratchet passed and pins the ABI
+registry plus both compilers' mandatory-inline recognition.
+
+These functions remain deliberately single-threaded bootstrap fallbacks.  The
+fetch-add and compare-exchange implementations are ordinary load/conditional
+store sequences and are explicitly documented as not concurrent atomic RMW
+operations.  Each valid operation keeps the same number of loads, stores,
+branches, and allocations; no copy, lookup, lock, hash, signature operation,
+or generic dispatch was added.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,639 -> 19,635
+- lexical unsafe: 3,207 -> 3,213
+- function unsafe: unchanged at 919 (`raw_ptr`-only owners are a separate axis)
+- missing authority: 15,513 -> 15,503
+
+Production execution and exact artifact evidence remain unavailable, so this
+fallback is explicitly unsafe rather than verified; verified-and-signed
+admission remains 0.
+
 ## Simple-core closure authority checkpoint
 
 The pure-Simple closure provider retains five explicitly tagged raw
