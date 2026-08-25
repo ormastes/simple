@@ -1,8 +1,8 @@
 # TUI input widget: multibyte insert advances cursor by BYTES and corrupts the value — 2026-08-25
 
-Status: OPEN (P2) — defect in `src/lib/nogc_sync_mut/tui/widgets/input.spl`
-(std), surfaced by the llm_caret decoder spec. Not fixed here (outside
-`src/app/llm_caret/**`); spec stays RED.
+Status: FIXED 2026-08-25 (uncommitted at time of writing) — defect in
+`src/lib/nogc_sync_mut/tui/widgets/input.spl` (std), surfaced by the
+llm_caret decoder spec. See "Fix" and "Evidence" below.
 
 ## Symptom
 
@@ -53,3 +53,79 @@ Minimal repro on the fresh seed: `char_from_code(0xA2)` equals `"¢"` but
 must advance/measure in code points (`+ 1` per inserted code point, or a
 codepoint-length helper), keeping `substring` semantics. Re-verify with
 `bin/simple test test/01_unit/app/llm_caret/chat_tui_input_spec.spl`.
+
+## Root-cause correction (2026-08-25)
+
+The "substring is codepoint-indexed" premise above is wrong on the test
+engine: probed on both the shared seed (2026-08-23) and a fresh origin seed
+(2026-08-25), `"¢".substring(0, 1)` is `�` and `"¢".substring(0, 2)` is `¢`,
+i.e. `substring` and `len` are BOTH byte-based, while `chars()` /
+`char_at` are codepoint-based (the stdlib says so itself:
+`src/lib/common/text.spl:26-28`). The real defect is that `cursor_pos` was a
+byte offset while the widget's public contract (and its consumers,
+`chat_tui_input_spec`) treat it as a codepoint index — and a first attempt
+that merely counted codepoints for the cursor but kept `substring(0,
+cursor_pos)` split `¢` mid-sequence (`expected (�😀, 3) to equal (¢한😀, 3)`).
+
+## Fix
+
+`src/lib/nogc_sync_mut/tui/widgets/input.spl`:
+- `input_text_len(s)` — codepoint length (`s.chars().len()`), used for the
+  cursor bound in `make_input_widget_with_value`, `input_delete_forward`,
+  `input_move_right`, `input_move_end`, and `+ input_text_len(ch)` on insert.
+- `input_byte_offset(s, cp_index)` — converts the codepoint cursor to the
+  byte offset `substring` needs; used by `input_insert_char`,
+  `input_delete_back`, `input_delete_forward`, and the `input_render` scroll
+  start. `cursor_pos` is now a codepoint index everywhere.
+- `input_render`: `result = result + [x]` in loops -> `result.push(x)`
+  (COLL001 lint error on the changed file; semantics identical).
+
+Reproduce + generalization specs (both mirrors kept identical):
+`test/01_unit/lib/nogc_async_mut/tui/widgets/tui_widgets_facade_spec.spl`
+and `test/unit/lib/nogc_async_mut/tui/widgets/tui_widgets_facade_spec.spl`,
+describe `input widget cursor arithmetic is codepoint based`: insert
+2/3/4-byte code points, backspace over a 4-byte emoji, cursor-left across a
+3-byte hangul, insert/delete-forward in the middle of multibyte text, ASCII
+regression.
+
+## Evidence
+
+Widget spec, BEFORE (both trees): `Results: 6 total, 2 passed, 4 failed` —
+`expected (¢한😀, 9) to equal (¢한😀, 3)`, `expected (a�b, 4) to equal (ab, 1)`,
+`expected 3 to equal 0`, `expected 16 to equal 2`.
+Widget spec, AFTER (shared tree AND clean origin worktree
+`/mnt/data/tmp/claude-1000/caret-clean` @ `684fadabcae`):
+`Results: 6 total, 6 passed, 0 failed`.
+
+`chat_tui_input_spec.spl`: BEFORE `Results: 22 total, 18 passed, 4 failed`
+(the four listed above) -> AFTER `Results: 22 total, 22 passed, 0 failed` on
+the shared tree at 04:0x; later runs on BOTH trees give `Results: 22 total,
+19 passed, 3 failed` — the residual below, which is not the widget.
+`chat_tui_runtime_spec.spl`: `Results: 20 total, 20 passed, 0 failed` (both
+trees).
+`chat_tui_spec.spl` (clean tree): `Results: 62 total, 62 passed, 0 failed`
+before and after.
+`bin/simple lint src/lib/nogc_sync_mut/tui/widgets/input.spl`: `Found 0
+error(s), 4 warning(s)` (warnings pre-existing, `unnamed_duplicate_typed_args`
+in the docstring example).
+
+### Residual, separate defect: `char_from_code` is shadowed by `encoding/utf8.spl`
+
+The 3 examples that stay RED after the widget fix have the CURSOR right and
+only the VALUE corrupt: `expected (���, 3) to equal (¢한😀, 3)`, `(A�B, 2)`,
+`(>��!, 4)`. Each `�` is U+FFFD (3 bytes). Probe under `bin/simple test` with
+`app.llm_caret.chat_tui` imported: `char_from_code(162)` returns `�` (len 3,
+1 codepoint) — the SAME call in a spec that imports only `std.string_core`
+returns `¢` (len 2), and `bin/simple run` of the exact
+`decode_raw_key_byte` -> `apply_raw_key_decode` sequence prints
+`step|¢한😀|3|`. `src/lib/common/encoding/utf8.spl:366` defines a second
+`fn char_from_code(code: i64) -> text` that returns `"�"` for every
+`code >= 128`; `app.llm_caret.chat.spl` pulls `encoding.utf8` in, and under
+the interpreter's flat function namespace that definition wins over
+`std.string_core.char_from_code` (`tui_input.spl:13`), so the widget is
+handed U+FFFD before it ever runs. Which definition wins depends on module
+load order — a parallel session's edits to `src/lib/common/json/*` and
+`src/app/llm_caret/json_helpers.spl` flipped the shared tree from 22/22 to
+19/3 with the widget file byte-identical. Widget spec (literal `¢한😀`) is
+6/6 on both trees. Needs its own record: rename/remove the utf8.spl
+duplicate or make `tui_input.spl` call a non-colliding name.
