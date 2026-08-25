@@ -24,6 +24,11 @@ fn _frame(wire: text):
     frame_http1_fragments_owned_for_test(
         _one_byte_fragments(wire), SecureServerPolicy.production())
 
+fn _small_body_policy(max_body: i32) -> SecureServerPolicy:
+    var policy = SecureServerPolicy.production()
+    policy.max_body = max_body
+    policy
+
 describe "SimpleOS filesystem HTTP/1 incremental framing owner":
     it "accepts request headers and bodies fragmented at every byte boundary":
         val wire = "POST /health HTTP/1.1\r\nHost: simpleos\r\nContent-Length: 5\r\n\r\nhello"
@@ -47,15 +52,19 @@ describe "SimpleOS filesystem HTTP/1 incremental framing owner":
         expect(result.request).to_equal(header)
         expect(result.upgrade_tail).to_equal(tail)
 
-    it "accepts the exact ten MiB body policy boundary without a header rescan":
+    it "pins the production body cap and accepts an exact configured boundary without a rescan":
+        expect(SecureServerPolicy.production().max_body).to_equal(10485760)
+        val fixture_body_length: i32 = 64
         val header = text_to_bytes_pure(
-            "POST /health HTTP/1.1\r\nHost: simpleos\r\nContent-Length: 10485760\r\n\r\n")
-        val body: [u8] = [97u8; 10485760]
+            "POST /health HTTP/1.1\r\nHost: simpleos\r\nContent-Length: 64\r\n\r\n")
+        val body: [u8] = [97u8; fixture_body_length]
         val result = frame_http1_fragments_owned_for_test(
-            [header, body], SecureServerPolicy.production())
+            [header, body], _small_body_policy(fixture_body_length))
         expect(result.complete).to_equal(true)
-        expect(result.scanned_bytes).to_equal(header.len() as i64 + 10485760)
-        expect(result.request.len()).to_equal(header.len() as i64 + 10485760)
+        expect(result.scanned_bytes).to_equal(
+            header.len() as i64 + fixture_body_length as i64)
+        expect(result.request.len()).to_equal(
+            header.len() as i64 + fixture_body_length as i64)
         expect(result.request).to_start_with("POST /health HTTP/1.1\r\n")
         expect(result.request).to_end_with("a")
 
@@ -136,6 +145,39 @@ describe "SimpleOS filesystem HTTP/1 incremental framing owner":
             text_to_bytes_pure("b\r\n\r\n")
         ], SecureServerPolicy.production())
         expect(control.error).to_contain("Control byte")
+
+    it "accepts only RFC token bytes in the HTTP method":
+        expect(_frame("M-SEARCH / HTTP/1.1\r\nHost: simpleos\r\n\r\n").complete
+        ).to_equal(true)
+        expect(_frame(" / HTTP/1.1\r\nHost: simpleos\r\n\r\n").error
+        ).to_contain("Invalid HTTP method token")
+        expect(_frame("GE(T / HTTP/1.1\r\nHost: simpleos\r\n\r\n").error
+        ).to_contain("Invalid HTTP method token")
+        val control_method = frame_http1_fragments_owned_for_test([
+            [71u8, 69u8, 1u8, 84u8] +
+                text_to_bytes_pure(" / HTTP/1.1\r\nHost: simpleos\r\n\r\n")
+        ], SecureServerPolicy.production())
+        expect(control_method.error).to_contain("Invalid HTTP method token")
+
+    it "admits field-content bytes and rejects forbidden controls before parsing":
+        val tab_value = _frame(
+            "GET / HTTP/1.1\r\nHost: simpleos\r\nX-Mode:\tfast\r\n\r\n")
+        expect(tab_value.complete).to_equal(true)
+        val obs_text = frame_http1_fragments_owned_for_test([
+            text_to_bytes_pure("GET / HTTP/1.1\r\nHost: simpleos\r\nX-Byte: ") +
+                [0x80u8, 0xFFu8] + text_to_bytes_pure("\r\n\r\n")
+        ], SecureServerPolicy.production())
+        expect(obs_text.complete).to_equal(true)
+        val nul_value = frame_http1_fragments_owned_for_test([
+            text_to_bytes_pure("GET / HTTP/1.1\r\nHost: simpleos\r\nX-Byte: a") +
+                [0u8] + text_to_bytes_pure("b\r\n\r\n")
+        ], SecureServerPolicy.production())
+        expect(nul_value.error).to_contain("Invalid header field value")
+        val delete_value = frame_http1_fragments_owned_for_test([
+            text_to_bytes_pure("GET / HTTP/1.1\r\nHost: simpleos\r\nX-Byte: a") +
+                [0x7Fu8] + text_to_bytes_pure("b\r\n\r\n")
+        ], SecureServerPolicy.production())
+        expect(delete_value.error).to_contain("Invalid header field value")
 
     it "enforces fragmented line count body and version boundaries":
         expect(_frame("POST / HTTP/1.1\r\nContent-Length: 10485761\r\n\r\n").error).to_contain("413")

@@ -143,6 +143,24 @@ fn _arm_vfs_read_mounted_regular_file_bounded_v1(
             is_dir: false, is_file: true, size: file_stat.size.to_i64()),
         bytes: bytes))
 
+pub fn arm_fs_exec_read_mounted_regular_file_bounded_v1(
+    path: text, max_bytes: u64
+) -> Result<ArmFsExecRegularFileReadV1, FsError>:
+    """Read through the authoritative mounted namespace without boot fallback.
+
+    This is the backend-neutral ARM filesystem boundary used after boot has
+    published a MountTable.  Keeping it explicit also lets hosted conformance
+    specs exercise empty files, typed lookup failures, and object-type/size
+    admission without emulating the ARM VirtIO device.
+    """
+    # Preserve the public ARM reader's argument-error precedence: malformed
+    # namespace input is InvalidArg even when the supplied bound is also bad.
+    if not mount_path_canonical(path) or path == "/":
+        return Err(FsError.InvalidArg)
+    if max_bytes > ARM_FS_EXEC_MAX_REGULAR_FILE_BYTES:
+        return Err(FsError.TooLarge)
+    _arm_vfs_read_mounted_regular_file_bounded_v1(path, max_bytes)
+
 pub fn arm_fs_exec_vfs_boot_init() -> bool:
     arm_fs_exec_trace(211)
     g_arm_mount_table_ready = false
@@ -268,7 +286,7 @@ pub fn arm_fs_exec_read_regular_file_bounded_v1(
     # routing.  Probe/legacy media use the direct walker only when no MountTable
     # publication occurred.
     if g_arm_mount_table_ready:
-        val mounted = _arm_vfs_read_mounted_regular_file_bounded_v1(
+        val mounted = arm_fs_exec_read_mounted_regular_file_bounded_v1(
             mapped, max_bytes)
         if mounted.is_ok():
             _arm_vfs_log("[vfs-read] mounted-hit len={rt_arm_array_len_u32(mounted.unwrap().bytes)}")

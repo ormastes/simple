@@ -15,7 +15,8 @@ use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_string}
 use os.apps.sshd.ssh_session.{
     ssh_channel_pty_request_payload_valid,
     ssh_channel_window_change_payload_valid,
-    ssh_channel_exec_request_payload_valid
+    ssh_channel_exec_request_payload_valid,
+    ssh_scp_source_path_from_exec_payload_v1
 }
 
 describe "SSH channel request authority is fail-closed":
@@ -42,6 +43,27 @@ describe "SSH channel request authority is fail-closed":
             channel, ChannelTerminalRequestV1.Shell)).to_be(false)
         expect(table.begin_terminal_request(
             channel, ChannelTerminalRequestV1.Subsystem)).to_be(false)
+
+    it "binds shell input to one exact live channel and transfers only after close":
+        step("Keep sibling channel input outside the sole mutable shell owner")
+        var table = ChannelTable.new()
+        val owner = table.open(
+            ChannelType.Session, 21u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        val sibling = table.open(
+            ChannelType.Session, 22u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(table.begin_terminal_request(
+            owner, ChannelTerminalRequestV1.Shell)).to_be(true)
+        expect(table.shell_input_allowed(owner)).to_be(true)
+        expect(table.shell_input_allowed(sibling)).to_be(false)
+        expect(table.begin_terminal_request(
+            sibling, ChannelTerminalRequestV1.Shell)).to_be(false)
+
+        expect(table.close(owner)).to_be(true)
+        expect(table.shell_input_allowed(owner)).to_be(false)
+        expect(table.shell_input_allowed(sibling)).to_be(false)
+        expect(table.begin_terminal_request(
+            sibling, ChannelTerminalRequestV1.Shell)).to_be(true)
+        expect(table.shell_input_allowed(sibling)).to_be(true)
 
     it "permits window changes only after a PTY-backed shell":
         step("Bind geometry updates to the same PTY and shell owner")
@@ -83,3 +105,34 @@ describe "SSH channel request authority is fail-closed":
         expect(ssh_channel_exec_request_payload_valid(
             ssh_put_text([], ""), 0u64)).to_be(false)
 
+    it "admits only one exact SCP source command and safe absolute path":
+        step("Parse the bounded SSH exec string without shell interpretation")
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -f /boot/hello.o"), 0u64)
+        ).to_equal("/boot/hello.o".bytes())
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -t /boot/hello.o"), 0u64).len()
+        ).to_equal(0u64)
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -pf /boot/hello.o"), 0u64).len()
+        ).to_equal(0u64)
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -f /boot/hello.o extra"), 0u64).len()
+        ).to_equal(0u64)
+
+    it "rejects SCP traversal control bytes and trailing exec payload bytes":
+        step("Keep unsafe path bytes and ambiguous framing outside filesystem access")
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -f /boot/../secret"), 0u64).len()
+        ).to_equal(0u64)
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -f /boot//hello.o"), 0u64).len()
+        ).to_equal(0u64)
+        var control_path = ssh_put_text([], "scp -f /boot/hello")
+        control_path[control_path.len() - 1u64] = 10u8
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            control_path, 0u64).len()).to_equal(0u64)
+        var trailing = ssh_put_text([], "scp -f /boot/hello.o")
+        trailing.push(0u8)
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            trailing, 0u64).len()).to_equal(0u64)
