@@ -57,6 +57,12 @@ var _g_closure_ms_collect: i64 = 0
 var _g_closure_n_imports: i64 = 0
 var _g_closure_n_resolve: i64 = 0
 var _g_closure_n_collect: i64 = 0
+var _g_entry_scan_content_by_path: Dict<text, text> = {}
+var _g_entry_scan_imports_by_path: Dict<text, [text]> = {}
+var _g_entry_scan_siblings_by_path: Dict<text, [text]> = {}
+var _g_entry_scan_read_count: i64 = 0
+var _g_entry_scan_scan_count: i64 = 0
+var _g_entry_scan_hit_count: i64 = 0
 
 @unsafe(reason: "raw monotonic clock; negative values are the provider-failure sentinel", capabilities: [ffi])
 extern fn rt_time_now_monotonic_ms() -> i64
@@ -75,6 +81,28 @@ pub fn driver_closure_timing_report() -> text:
     if _g_closure_n_collect == 0 and _g_closure_n_imports == 0:
         return ""
     "[closure-timing] imports={_g_closure_ms_imports}ms/{_g_closure_n_imports} resolve={_g_closure_ms_resolve}ms/{_g_closure_n_resolve} collect={_g_closure_ms_collect}ms/{_g_closure_n_collect}"
+
+pub fn driver_entry_scan_cache_release():
+    """Release build-local scan payloads while retaining diagnostic counters."""
+    _g_entry_scan_content_by_path = {}
+    _g_entry_scan_imports_by_path = {}
+    _g_entry_scan_siblings_by_path = {}
+
+pub fn driver_entry_scan_cache_reset():
+    """Start a build with no source payload or counters from a prior build."""
+    driver_entry_scan_cache_release()
+    _g_entry_scan_read_count = 0
+    _g_entry_scan_scan_count = 0
+    _g_entry_scan_hit_count = 0
+
+pub fn driver_entry_scan_cache_read_count() -> i64:
+    _g_entry_scan_read_count
+
+pub fn driver_entry_scan_cache_scan_count() -> i64:
+    _g_entry_scan_scan_count
+
+pub fn driver_entry_scan_cache_hit_count() -> i64:
+    _g_entry_scan_hit_count
 
 fn _driver_text_index_of(value: text, needle: text) -> i64:
     if needle == "":
@@ -583,6 +611,28 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
         _g_closure_ms_imports = _g_closure_ms_imports + (t1 - t0)
     _g_closure_n_imports = _g_closure_n_imports + 1
     out
+
+pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bool):
+    """Read and scan one physical source at most once during build phase 1."""
+    val key = _driver_physical_source_key(path)
+    if _g_entry_scan_content_by_path.contains_key(key):
+        _g_entry_scan_hit_count = _g_entry_scan_hit_count + 1
+        return (
+            _g_entry_scan_content_by_path[key],
+            _g_entry_scan_imports_by_path[key],
+            _g_entry_scan_siblings_by_path[key],
+            true)
+    var content = ""
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_text(path) ?? ""
+    _g_entry_scan_read_count = _g_entry_scan_read_count + 1
+    val imports = _driver_entry_import_module_paths(content)
+    val siblings = _driver_entry_sibling_module_paths(content)
+    _g_entry_scan_scan_count = _g_entry_scan_scan_count + 1
+    _g_entry_scan_content_by_path[key] = content
+    _g_entry_scan_imports_by_path[key] = imports
+    _g_entry_scan_siblings_by_path[key] = siblings
+    (content, imports, siblings, false)
 
 fn _driver_entry_sibling_path(line: text) -> text:
     if line.starts_with("mod "):
@@ -1102,9 +1152,7 @@ fn _driver_collect_entry_import_source_untimed(p: text) -> [SourceFile]:
         normalized.starts_with("doc/") or normalized.contains("/doc/"))
     if normalized.contains("/test/") or normalized.contains("/tests/") or normalized.contains("/testdata/") or is_repository_doc or normalized.contains("/verification/"):
         return result
-    var content = ""
-    unsafe(capabilities: [ffi]):
-        content = rt_file_read_text(p) ?? ""
+    val (content, _, _, _) = _driver_cached_entry_source_scan(p)
     if content == "":
         return result
     _driver_module_aliases(p, content, _driver_module_name_from_path(p))
@@ -1139,8 +1187,15 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
             if not core_allowed3:
                 return result
         var content = ""
+        var native_entry = ""
         unsafe(capabilities: [ffi]):
-            content = rt_file_read_text(p) ?? ""
+            native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        if native_entry != "":
+            val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)
+            content = cached_content
+        else:
+            unsafe(capabilities: [ffi]):
+                content = rt_file_read_text(p) ?? ""
         if _driver_source_trace_enabled():
             print "[collect_sources] content_len {content.len()}"
         if content != "":

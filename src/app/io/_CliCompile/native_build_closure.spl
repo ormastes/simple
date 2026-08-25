@@ -9,10 +9,9 @@ use app.io.env_ops (env_get)
 use app.io.time_ops (time_now_unix_micros)
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_source_loading.{
-    _driver_entry_import_module_paths, _driver_entry_sibling_module_paths,
-    _driver_resolve_entry_import, _driver_text_bucket_set_new
+    _driver_resolve_entry_import, _driver_text_bucket_set_new,
+    _driver_cached_entry_source_scan
 }
-use std.io_runtime.{read_file_text}
 @unsafe(reason: "raw file probe; false is the absent-or-I/O-failure sentinel", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw path expansion; empty text is the invalid-or-expansion-failure sentinel", capabilities: [ffi])
@@ -196,7 +195,7 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure entry missing {f}")
             continue
-        val content = read_file_text(f)
+        val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)
         if trace_closure and f == entry:
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:
@@ -205,8 +204,8 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
         # without materializing every ordinary source line. Sibling `mod` and
         # `export member.*` declarations use a separate guarded compatibility
         # scan because they resolve relative to the declaring file.
-        var module_paths = _driver_entry_import_module_paths(content)
-        for sibling in _driver_entry_sibling_module_paths(content):
+        var module_paths = imports
+        for sibling in siblings:
             module_paths = module_paths.push(sibling)
         for mp in module_paths:
             if mp.starts_with("."):

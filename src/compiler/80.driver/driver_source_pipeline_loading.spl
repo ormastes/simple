@@ -11,10 +11,11 @@ use compiler.driver.driver_source_loading.{
     _driver_collect_sources,
     _driver_collect_sources_via_find,
     _driver_entry_import_dirname,
-    _driver_entry_import_module_paths,
     _driver_resolve_entry_import,
     _driver_collect_entry_import_source,
     _driver_physical_source_key,
+    _driver_cached_entry_source_scan,
+    driver_entry_scan_cache_release,
     _driver_module_name_collision,
     _driver_text_bucket_set_new,
     _driver_unique_physical_sources
@@ -128,6 +129,7 @@ impl CompilerDriver:
             has_project_source = false
             if source_trace:
                 print "[load_sources] direct modules loaded"
+            driver_entry_scan_cache_release()
             return (self.ctx, not self.ctx.has_errors())
         while i < input_len:
             val input_path = driver_inputs[i]
@@ -172,6 +174,7 @@ impl CompilerDriver:
         # taken from --source roots) keeps its old behaviour.
         if native_entry_input != "" and not native_entry_closure_pre and all_sources.len() == 0:
             self.ctx.add_error("native-build entry '{native_entry_input}' collected zero source files: --entry takes a path to a .spl file (e.g. 'dir/main.spl'), not a module path (e.g. 'dir.main'), and the path is resolved relative to the current working directory")
+            driver_entry_scan_cache_release()
             return (self.ctx, false)
 
         # ROOT FIX (#138 Wall #1): a native-build seeded with one entry used to
@@ -218,7 +221,7 @@ impl CompilerDriver:
                         closure_scan_sources.len(), closure_src.path,
                         0, 6, 0, 0, "running")
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
-                val closure_imports = _driver_entry_import_module_paths(closure_src.content)
+                val (_, closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
@@ -313,6 +316,7 @@ impl CompilerDriver:
         val module_collision = _driver_module_name_collision(all_sources)
         if module_collision != "":
             self.ctx.add_error(module_collision)
+            driver_entry_scan_cache_release()
             return (self.ctx, false)
 
         # Single assignment avoids chained push issue
@@ -351,6 +355,9 @@ impl CompilerDriver:
         self.ctx.source_contents_owner = owned_contents
         self.ctx.source_content_hashes_owner = owned_content_hashes
         self.ctx.source_module_names_owner = owned_module_names
+        # Canonical phase-1 owners now retain the source bodies. Drop the
+        # duplicate scan payloads before parsing/lowering grows compiler RSS.
+        driver_entry_scan_cache_release()
         if source_trace:
             print "[load_sources] total {all_sources.len()}"
 
