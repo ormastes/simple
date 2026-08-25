@@ -3346,16 +3346,19 @@ impl MirLowering:
                         if val last_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, true, nil):
                             return last_result
 
-                    # `.get(i)` is the same builtin-Array gap as
+                    # `.get(i)` / `.at(i)` are the same builtin-Array gap as
                     # `first`/`last`/`push`/`map` above (no MethodResolver
                     # entry), so it also reaches this Unresolved arm and used
-                    # to hit the loud "unresolved method call: get" below --
-                    # measured on the native lane while BOTH seed lanes
-                    # (interpret and jit) answered it correctly via
-                    # `handle_array_methods`' `"get"` arm in the Rust seed's
-                    # interpreter_method/collections.rs. That one-lane gap is
-                    # exactly what test/fixtures/engine_differential/
-                    # list_index_and_get.spl exists to catch.
+                    # to hit the loud "unresolved method call" below. `get`
+                    # was measured by test/fixtures/engine_differential/
+                    # list_index_and_get.spl; `at` is the remaining
+                    # pure-Simple native lane in
+                    # array_at_returns_nil_for_every_index_2026-08-01.md.
+                    # The Rust interpreter/JIT already define Array.at as a
+                    # signed, bounds-checked Option accessor. Keep this arm
+                    # receiver- and arity-gated so text `.at(i)`, custom
+                    # same-named methods, and malformed calls retain their
+                    # existing dispatch/error contracts.
                     #
                     # Shares `lower_array_first_or_last`'s body rather than
                     # duplicating its ~90 lines of Option-handle construction:
@@ -3363,21 +3366,23 @@ impl MirLowering:
                     # the only differences being which index is computed and
                     # that an explicit index also needs a LOWER bound test.
                     #
-                    # Deliberate, documented engine difference (NOT a
-                    # divergence this fixture can see): the seed returns the
-                    # RAW element and a bare `Value::Nil` out of bounds, while
-                    # this lowering returns a real `Option<T>`, matching the
-                    # pure-Simple compiler's own `first`/`last` convention.
-                    # Both spellings agree through `??` and on any in-bounds
-                    # index, which is all the fixture exercises; an
+                    # Deliberate, documented `.get` engine difference (NOT a
+                    # divergence this fixture can see): seed `.get` returns
+                    # the RAW element and a bare `Value::Nil` out of bounds,
+                    # while this lowering returns a real `Option<T>`, matching
+                    # the pure-Simple compiler's own `first`/`last` convention.
+                    # Seed `.at`, by contrast, already returns a boxed Option;
+                    # this shared lowering therefore brings `.at` into parity.
+                    # Both `.get` spellings agree through `??` and on any
+                    # in-bounds index, which is all the fixture exercises; an
                     # out-of-bounds `get` printed WITHOUT `??` would still
                     # differ (`nil` vs `None`). Left alone deliberately --
-                    # changing `first`/`last` to match the seed is a separate,
-                    # wider change than clearing this lane error.
-                    if method == "get" and args.len() == 1:
-                        val get_index_local = self.lower_expr(args[0].value)
-                        if val get_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, Some(get_index_local)):
-                            return get_result
+                    # changing `first`/`last`/`get` to match the seed is a
+                    # separate, wider change than clearing this lane error.
+                    if (method == "get" or method == "at") and args.len() == 1:
+                        val access_index_local = self.lower_expr(args[0].value)
+                        if val access_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, Some(access_index_local)):
+                            return access_result
 
                     # `.find(\x: pred)` -- same Unresolved-arm gap, same
                     # native-lane-only symptom, measured against
@@ -4370,7 +4375,7 @@ impl MirLowering:
         acc
 
     me lower_array_first_or_last(receiver: HirExpr, arr: LocalId, want_last: bool, explicit_index: LocalId?) -> LocalId?:
-        """Real MIR lowering for `Array.first()`/`.last()`/`.get(i)` on a runtime
+        """Real MIR lowering for `Array.first()`/`.last()`/`.get(i)`/`.at(i)` on a runtime
         array, returning a genuine `Option<T>` handle -- mirrors
         `Option.map`'s some/none/merge shape immediately above (the
         `option_method_receiver` `"map"` arm), which is the established
