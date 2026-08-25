@@ -247,12 +247,12 @@ pub fn vfs_state_close_dbfs_root_mount_seal_v1(
 # Owner APIs for mutable root and MountTable state. Ordinary operations receive
 # a mutex-scoped loan and commit only through this declaring module; the sole
 # blocking exception is the exact nonce-bound lease above.
-fn vfs_state_reset_rootfs():
+fn vfs_state_reset_rootfs() -> bool:
     val ticket = vfs_include_mutation_begin_v1("/usr/include")
-    if ticket.is_err(): return
+    if ticket.is_err(): return false
     if not vfs_state_mount_table_lock_v1():
         _ = vfs_include_mutation_finish_v1(ticket.unwrap())
-        return
+        return false
     g_root_fat32 = nil
     g_root_nvfs_hosted = nil
     g_mount_table_lease_active_v1 = false
@@ -261,12 +261,14 @@ fn vfs_state_reset_rootfs():
     if not _vfs_state_advance_mount_table_owner_epoch_v1():
         _ = vfs_state_mount_table_unlock_v1()
         _ = vfs_include_mutation_finish_v1(ticket.unwrap())
-        return
+        return false
     g_vfs_initialized = false
     g_vfs_boot_storage_provider = "not-mounted"
     g_vfs_boot_storage_pure_simple = false
-    _ = vfs_state_mount_table_unlock_v1()
-    _ = vfs_include_mutation_finish_v1(ticket.unwrap())
+    if not vfs_state_mount_table_unlock_v1():
+        _ = vfs_include_mutation_finish_v1(ticket.unwrap())
+        return false
+    vfs_include_mutation_finish_v1(ticket.unwrap())
 
 fn vfs_state_mark_rootfs_ready():
     g_vfs_initialized = true
