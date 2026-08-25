@@ -2311,6 +2311,30 @@ worktree has no production self-hosted binary.  The static shape evidence is
 therefore useful but not performance verification.  Verified-and-signed SFFI
 admission remains 0.
 
+## Pure Simple SSH cipher boundary checkpoint
+
+The general SSH cipher no longer declares or calls `serial_println` or
+`rt_bytes_u8_at`; it remains a Pure Simple implementation.  Direct bounds-
+checked indexing replaces the foreign byte accessor, and the packet hot path
+no longer constructs an incrementally concatenated hexadecimal diagnostic or
+prints secret-adjacent frame material.
+
+AES-256-GCM now rejects non-32-byte keys, non-12-byte IVs, oversized or
+inconsistent SSH frames, unexpected encryption output lengths, and unexpected
+decryption plaintext lengths.  Nonces no longer silently zero-pad a short IV.
+The focused `ssh-cipher-pure-boundary.shs` static ratchet passed.
+
+The source change removes exactly two missing-authority raw call sites from
+this caller, so the census baseline moves from 20,661 to 20,659 raw calls and
+from 16,758 to 16,756 missing-authority calls; lexical and function unsafe
+counts remain 2,984 and 919.  The valid path retains O(packet bytes) work and
+existing packet buffers.  New checks are O(1), occur before allocation/copy
+where possible, and add no hashing, signing, lookup, lock, dispatch, or copy.
+
+This checkpoint is a source/static contract result, not production compiler
+verification or signed artifact admission.  Repository-wide verified-and-
+signed admission remains 0.
+
 ## SSH KEX call-authority and hot-path checkpoint
 
 The SSH session KEX owner no longer dispatches its 113 constant packet-byte
