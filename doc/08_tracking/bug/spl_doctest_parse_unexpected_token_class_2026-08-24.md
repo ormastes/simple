@@ -1,7 +1,7 @@
 # SPL-doctest `parse: Unexpected token` class — 13 real doc defects, 1 harness artifact
 
 - **Filed:** 2026-08-24
-- **Status:** FIXED 2026-08-25 — all 13 real defects repaired (see "Resolution 2026-08-25")
+- **Status:** FIXED 2026-08-25 — all 13 real defects repaired and the entire `Unexpected token` class is gone from the 8 touched files. 3 blocks go fully GREEN; the other 10 now fail on two SEPARATE, independently-filed defects (see "Measured result").
 - **Engine for every measurement below:** the Rust seed, `bin/simple`
   (`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
   60650360 bytes, 2026-08-23 04:47), run from a worktree at base `d2d0bec2e40`.
@@ -183,6 +183,141 @@ The two unresolved questions the triage stopped on both resolved as
 
 ### A. Glued fence x4 — `builder.spl` 264, 287, 306, 345
 
+Fence line and receiver both restored (triple-backtick `simple` fence +
+`BlockBuilder("...")`).
+
+**The triage's contradiction did not exist, and the first explanation offered
+for it was wrong.** An earlier revision of this section claimed the
+contradiction was a scope artifact — that `.simple_parser()` is sugar over the
+file-scope free functions `blockbuilder_simple_parser(...)`, invisible to a
+standalone probe but in scope in the composite. That was a HYPOTHESIS recorded
+before it was measured, and measurement refutes it. Retracted.
+
+What the harness actually reports, measured on a rebuilt seed that produces real
+verdict lines (see "Harness" below):
+
+```
+  FAIL  src/compiler/15.blocks/blocks/builder.spl (0 passed, 5 failed, 638ms)
+        Line 21:  --> .../15.blocks/blocks/modes.spl:6:1
+        Line 264: --> .../15.blocks/blocks/modes.spl:6:1
+        Line 288: --> .../15.blocks/blocks/modes.spl:6:1
+        Line 308: --> .../15.blocks/blocks/modes.spl:6:1
+        Line 348: --> .../15.blocks/blocks/modes.spl:6:1
+```
+
+Line 21 **is extracted** and **does not pass** — it fails with the same reason as
+every other block in the file, and it failed identically BEFORE any edit in this
+change (measured at `HEAD~1` with the same binary: `0 passed, 5 failed`). So the
+triage's premise ("line 21 chains identically and passes") was simply false, and
+neither of the two rival explanations it proposed was needed.
+
+The four glued fences were still real, independent defects: the fence text was
+objectively corrupted and each block reproduced its parse error standalone.
+Repairing them removed every `Unexpected token` from the file. They do not turn
+green, because all five blocks — the four repaired and the one untouched — are
+blocked by a separate composite-only defect at `modes.spl:6:1`, filed separately.
+
+### B. Trait-implementation syntax — 3 blocks
+
+- `src/compiler/15.blocks/blocks/definition.spl:22`
+- `src/compiler/15.blocks/blocks/mod.spl:43`
+- `src/compiler/15.blocks/blocks/mod.spl:138`
+
+All use `struct MyBlockDef: BlockDefinition:` and fail with
+`Unexpected token: expected Newline, found Identifier { name: "BlockDefinition", pattern: TypeName }`.
+`BlockDefinition` is declared `trait BlockDefinition:` at `definition.spl:15`, so
+the examples intend a trait impl, but the parser rejects this form. Whether the
+documented syntax was never valid or the parser regressed is a language question
+that is not settled here.
+
+### C. Block-literal requiring a registered block — 2 blocks
+
+`blocks/mod.spl:18` and `blocks/easy.spl:30` end with `heredoc{ text here }` /
+equivalent and fail `expected expression, found RBrace`. A custom block literal
+is only lexable once its block is registered at compile time, which a doctest
+composite cannot arrange. These examples are illustrative, not executable.
+
+### D. Unterminated string literal — 2 blocks
+
+- `src/compiler/10.frontend/core/interpreter/mod.spl:78` — `Error("Unterminated f-string")`
+- `src/compiler/15.blocks/blocks/text_transforms.spl:54` — `Error("Unterminated raw string")`
+
+Both reproduce standalone. The doc block genuinely contains an unbalanced
+string delimiter.
+
+### E. Truncated block — 1 block
+
+`src/compiler/15.blocks/blocks/unified_registry.spl:30` —
+`expected Indent, found Eof`: the example opens a suite and ends before its body.
+
+### F. Dangling `else` — 1 block
+
+`src/lib/nogc_async_mut/http_server/static_file.spl:63` —
+`expected Indent, found Else`.
+
+### G. HARNESS ARTIFACT — 1 block
+
+`src/lib/nogc_async_mut/async_host/__init__.spl:92`.
+
+- Standalone: **parses**, fails later with `error: semantic: variable 'JoinSet' not found`.
+- In the composite: `Unexpected token: expected expression, found Dedent`.
+
+Same binary, same block text. Since parsing is context-free, the break is in
+`build_spl_doctest_code`'s join of `source_content` + `use std.spec.*` + block —
+this block is the last thing in the file and ends on a dedent chain
+(`match` / `case nil:` / `break`). This is the only one of the 14 that is not a
+defect in the documented example.
+
+Follow-up is blocked: re-verification currently cannot run at all, see below.
+
+## Why no example was edited
+
+Per the repo rule, a failing test is not made to pass by weakening it, and an
+example is not edited to dodge an error that may reveal a real compiler or
+runtime bug. Categories A and B both sit on unresolved language questions; C is
+a genuine limitation of running block literals in a composite. Thirteen example
+edits that would still not go green would satisfy nothing. They are recorded
+here instead.
+
+## Blocker: the doctest runner currently aborts on `main`
+
+Measured 2026-08-24 at clean `origin/main` (`16383395b5a`), with no local
+changes applied:
+
+```
+=== Running SPL Doctests ===
+SPL Doctest: Running doctests from 1 source file(s)...
+error[E1002]: function `unsafe` not found
+  = help: check the function name or import the module that defines it
+```
+
+Exit 1, and **no `SPL Doctest: N passed, N failed` verdict line at all** — the
+runner dies before executing any block, so any run over this tip is UNKNOWN, not
+a pass. This reproduces without the `rt_test_it` fix applied, so it is not from
+that change; it appeared with a landing in the same window as the value-bound
+`unsafe` parser work. Every measurement in this record was therefore taken at
+base `d2d0bec2e40`, before that tip. The taxonomy above cannot be re-measured
+until this abort is fixed.
+
+## Related
+
+- `doc/08_tracking/bug/seed_stdlib_resolves_build_time_repo_root_before_cwd_2026-08-24.md`
+  — the cross-worktree stdlib resolution defect found in the same investigation.
+  Every doctest reason recorded before that was fixed had to be re-measured,
+  because reasons could come from a foreign worktree's stdlib.
+
+## Resolution 2026-08-25
+
+All 13 real defects are repaired. Every fix was gated on the same discipline the
+triage used: the block was hand-built standalone and confirmed to fail with the
+recorded error BEFORE any edit, and the replacement form was confirmed to parse
+standalone before it was applied. Engine: the Rust seed.
+
+The two unresolved questions the triage stopped on both resolved as
+**documentation defects, not compiler defects**, on direct measurement:
+
+### A. Glued fence x4 — `builder.spl` 264, 287, 306, 345
+
 Fence line and receiver both restored (triple-backtick `simple` fence + `BlockBuilder("...")`),
 matching the file's own working line-21 example.
 
@@ -235,3 +370,79 @@ ignore/no_run tag, and using one would have been a skip.
 ### Not touched
 
 `async_host/__init__.spl:92` — the harness artifact. Unchanged, as recorded.
+
+## Harness
+
+The triage could not re-measure because the runner aborted with
+``error[E1002]: function `unsafe` not found`` and emitted no verdict line. That
+abort was root-caused (not worked around) as a **binary/source skew**: the
+deployed seed was built 2026-08-23, before the parser learned the value-bound
+`unsafe(capabilities: [...])` form, while `io_runtime.spl` had since adopted it
+(`7ef30bafe0e`). Rebuilding the seed from the tree's own `src/compiler_rust`
+fixes it at root. See
+`doc/08_tracking/bug/deployed_seed_cannot_parse_value_bound_unsafe_2026-08-25.md`.
+
+**Engine for every "Resolution" measurement:** a seed rebuilt from this tree,
+**60634072 bytes, 2026-08-25 05:17**, deployed into the measuring lane only.
+Smoke-verified before use: `std.io_runtime.time_now_unix_micros` (the value-bound
+`unsafe` path) exits 0, and a single-file doctest emits a real verdict line.
+
+## Measured result
+
+Per-file, **same binary on both sides**, before = `HEAD~1`, after = `HEAD`:
+
+| file | before | after |
+|---|---|---|
+| `10.frontend/core/interpreter/mod.spl` | 1 passed, 3 failed | 1 passed, 2 failed |
+| `15.blocks/blocks/builder.spl` | 0 passed, 5 failed | 0 passed, 5 failed |
+| `15.blocks/blocks/definition.spl` | 1 passed, 1 failed | **2 passed, 0 failed** |
+| `15.blocks/blocks/easy.spl` | 2 passed, 1 failed | 2 passed, 1 failed |
+| `15.blocks/blocks/mod.spl` | 0 passed, 6 failed | 0 passed, 6 failed |
+| `15.blocks/blocks/text_transforms.spl` | 0 passed, 2 failed | 1 passed, 1 failed |
+| `15.blocks/blocks/unified_registry.spl` | 0 passed, 1 failed | 0 passed, 1 failed |
+| `nogc_async_mut/http_server/static_file.spl` | 0 passed, 2 failed | 1 passed, 1 failed |
+| **total** | **4 passed, 21 failed** | **7 passed, 17 failed** |
+
+The headline number understates the change, because the `Unexpected token` class
+is fully eliminated even where the block does not go green. `blocks/mod.spl` is
+the clearest evidence — same 6 blocks before and after, and every parse error is
+gone:
+
+```
+BEFORE  Line 18:  ... Unexpected token: expected expression, found RBrace
+        Line 43:  ... Unexpected token: expected Newline, found Identifier { name: "BlockDefinition" }
+        Line 138: ... Unexpected token: expected Newline, found Identifier { name: "BlockDefinition" }
+        Line 33/120/128: --> modes.spl:6:1
+AFTER   Line 18/35/45/125/133/143: --> modes.spl:6:1   (all six, no parse errors)
+```
+
+**Why 10 blocks still fail — two separate defects, neither a doc defect:**
+
+1. **`modes.spl:6:1` composite-only failure** — blocks all of `builder.spl` (5),
+   `blocks/mod.spl` (6), `unified_registry.spl` (1) and `easy.spl` (1). The line
+   is `export use compiler.frontend.block_types.*`, a wildcard re-export.
+   Importing that module standalone succeeds (`use compiler.blocks.modes.{LexerMode}`
+   -> exit 0), so the failure exists only inside the doctest composite built by
+   `build_spl_doctest_code` (`doctest_runner.spl:440-441`). This is the same
+   family as the category-G harness artifact, and it affects blocks nobody
+   edited. Filed separately.
+2. **Placeholder identifiers** — some repaired examples reference helpers that
+   were never defined (`my_parser`, `parse_json`, `parse_sql`). Those land in the
+   `variable X not found` class (33 occurrences suite-wide), which is a different
+   class from this one and is not re-litigated here.
+
+## Whole-suite verdict: UNKNOWN, not a pass
+
+A whole-suite `--spl-doctest` run on the rebuilt seed **aborts** and emits no
+verdict line, so per `.claude/rules/testing.md` its counts are UNKNOWN:
+
+```
+error: compile failed: parse: in ".../src/lib/nogc_sync_mut/tooling/easy_fix/accessor_rewrite.spl": Unexpected token: expected Colon, found If
+```
+
+This is a THIRD, unrelated abort in a stdlib file nobody in this change touched;
+the simple value-bound `if` form is not the cause (a fixture of it exits 0 on
+both the old and the rebuilt seed). The `267 passed, 215 failed` figure quoted as
+a baseline for this work was taken on the old binary that now aborts, so it is
+not comparable to anything measured here and is not used. The per-file table
+above is the honest measurement of this change's delta.
