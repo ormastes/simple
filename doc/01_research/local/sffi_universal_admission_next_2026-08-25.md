@@ -2341,6 +2341,37 @@ allocations.  The added NUL comparison is within that loop; no extra scan,
 copy, allocation, lookup, lock, hash, signature check, or dispatch is added.
 Exact-artifact proof remains absent; verified-and-signed admission remains 0.
 
+## simple-core SHA-256 authority/status checkpoint
+
+`core_sha256.spl` had eleven untagged declarations and 21 missing-authority
+calls.  All declarations now state their pointer or scalar/handle capability,
+and all used calls are confined to mandatory-inline owners.  Eight
+pointer-bearing operations require `ffi, raw_ptr`; close/seek and tagged-array
+release use `ffi`.
+
+The file-hash path previously ignored failure when rewinding the descriptor and
+ignored final close failure before publishing a digest.  Rewind failure now
+closes and returns tagged nil.  Final close failure releases the input buffer
+and returns tagged nil.  Signed provider statuses remain signed rather than
+being reduced to booleans.
+
+`simple-core-sha256-authority.shs` passed, pinning declarations, owners,
+archive providers, pointer-intrinsic lowering, inline policy, and rewind/close
+admission checks.  Census results:
+
+- raw call sites: 19,698 -> 19,688
+- missing authority: 15,619 -> 15,598
+- lexical unsafe: 3,160 -> 3,171
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Valid hashing retains the exact SHA rounds, reads, buffers, and O(file bytes)
+work.  Error paths add only cleanup/status branches.  The pre-existing
+whole-file input allocation remains explicitly documented in source as a
+streaming ponytail; this change adds no allocation, copy, scan, lookup, lock,
+hash pass, signature check, or dispatch.  Exact-artifact proof is still absent,
+so verified-and-signed admission remains 0.
+
 ## simple-core network authority and status checkpoint
 
 `core_net.spl` had eight untagged declarations and 51 missing-authority calls.
