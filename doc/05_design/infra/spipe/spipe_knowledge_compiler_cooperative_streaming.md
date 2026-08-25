@@ -379,7 +379,8 @@ deterministic randomized chunk partitions, the frozen domain-separated
 receipt/candidate/payload vectors, and the frozen domain-input vectors.
 `update` also proves
 fail-closed range validation for negative offset, negative count, and
-`offset > bytes.len`; no rejected range may read, hash, or advance state.
+`offset > bytes.len`; no rejected range may read, hash, or advance
+buffered/compressed digest content.
 Charge failure occurs before its compression. Checkpoint failure after a
 compression terminalizes the stream and prevents digest publication; it does
 not promise rollback of already-compressed internal state. The digest and canonical emitted bytes must match together
@@ -792,7 +793,11 @@ These subwaves refine parent Wave 4 and precede any accepted `cancel:true`.
 - Exercise UTF-8 with every single split and deterministic mixed/random
   partition sequences through two-, three-, and four-byte scalars and
   combining sequences. Reject negative offset, negative count, and
-  `offset > bytes.len` at every byte-slice boundary without state advance.
+  `offset > bytes.len` at every byte-slice boundary before reading or charging
+  bytes, producing output, or mutating UTF-8 carry/SHA buffered or compressed
+  content. Rejection terminally latches the exact range-error reason; every
+  subsequent update/finalize call fails with that recorded reason. No semantic
+  bytes are consumed and no digest is published by the rejected call.
 - Exercise SHA at 0, 1, 55, 56, 63, 64, 65, 4,095, 4,096, 4,097, and
   1,048,576 bytes with single-split and randomized partitions, frozen
   domain-separated receipt/candidate/payload vectors, frozen domain-input
@@ -801,9 +806,10 @@ These subwaves refine parent Wave 4 and precede any accepted `cancel:true`.
   vector; bounded depth/tokens/bytes prove before allocation; the post-fix
   focused tests execute and PASS. Static correction or review alone cannot
   close the gate.
-- **Current status:** work-control is accepted and pushed. UTF-8 source review
-  is complete but execution evidence is incomplete. SHA source static review
-  is complete, while its last focused execution was 4/5. Wave 4S-C is open.
+- **Current status:** work-control is accepted and pushed; request-control has
+  a fresh focused PASS 9/9; and UTF-8 has a fresh focused PASS 7/7. SHA source
+  static review is complete, while its last focused execution was 4/5. These
+  focused results do not prove the integrated pipeline; Wave 4S-C is open.
 
 ### Wave 4S-D — Streaming analyzer and lexical cache
 
@@ -874,8 +880,8 @@ Required evidence includes:
 | raw framing | every header/payload split, coalesced frames, short/zero/would-block read/write, timeout/EOF/error; exactly one header event precedes contiguous nonempty bounded owned payload chunks; concatenated chunk bytes equal the declared payload once with no gap/overlap/replay; completion returns metadata only |
 | prebinding safety | oversize, malformed header, invalid UTF-8, noncanonical JSON silently close with no reflected content |
 | iterative JSON | depth/token/member/string limits, duplicate/out-of-order keys, integer/escape canonicality, no recursion |
-| incremental SHA | lengths 0/1/55/56/63/64/65/4095/4096/4097/1 MiB, frozen domain-separated receipt/candidate/payload vectors, frozen domain-input vectors, and all single-split/random chunk partitions equal one-shot; negative offset/count and `offset > len` reject without state change; charge failure prevents its compression, while checkpoint failure terminalizes the stream without digest publication and need not roll back prior compressed state; acceptance records an executed post-fix PASS rather than a static correction |
-| incremental UTF-8 | every single split plus deterministic mixed/random partition sequences preserve valid decoded bytes; negative offset/count and `offset > len` reject without state change; malformed/truncated input fails identically in an executed post-fix PASS |
+| incremental SHA | lengths 0/1/55/56/63/64/65/4095/4096/4097/1 MiB, frozen domain-separated receipt/candidate/payload vectors, frozen domain-input vectors, and all single-split/random chunk partitions equal one-shot; negative offset/count and `offset > len` reject before reading/charging bytes, output, or buffered/compressed-content mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed or digest published by rejection; charge failure prevents its compression, while checkpoint failure terminalizes the stream without digest publication and need not roll back prior compressed state; acceptance records an executed post-fix PASS rather than a static correction |
+| incremental UTF-8 | every single split plus deterministic mixed/random partition sequences preserve valid decoded bytes; negative offset/count and `offset > len` reject before reading/charging bytes, output, or carry mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed; malformed/truncated input fails identically in an executed post-fix PASS |
 | Unicode | NFC split sequences, Hangul, combining reorder/compose, U+0130 expansion, Final_Sigma lookahead across chunks, long carry failure |
 | analyzer/search | token/position/length/TF/corpus-stat/score/order/explanation parity and targeted invalidation |
 | deadline | exact 1 ms minimum, header-relative expiry during ingress/parse/work/emission, measured checkpoint overshoot |

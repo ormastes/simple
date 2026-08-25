@@ -204,15 +204,20 @@ cap.
 
 Wave 4S-C acceptance is evidence-specific. UTF-8 lanes must return every
 single split plus deterministic mixed/random partition sequences and negative
-offset/count/`offset > len` results. SHA lanes must return boundary and
-randomized partitions at 0/1/55/56/63/64/65/4095/4096/4097/1 MiB, frozen
+offset/count/`offset > len` results. An invalid UTF-8 or SHA slice range must
+be rejected before reading or charging bytes, producing output, or mutating
+UTF-8 carry/SHA buffered or compressed content; rejection terminally latches
+the exact recorded reason, and every later update/finalize call fails with
+that reason. SHA lanes must return boundary and randomized partitions at
+0/1/55/56/63/64/65/4095/4096/4097/1 MiB, frozen
 domain-separated receipt/candidate/payload vectors, frozen domain-input
 vectors, and injected charge/checkpoint failure with no digest publication.
 Both must show an executed post-fix PASS; static correction or source review
-is insufficient. Current status is: work-control accepted and pushed; UTF-8
-source reviewed with execution evidence incomplete; SHA source static-reviewed
-with the last focused run at 4/5. The merge owner therefore keeps Wave 4S-C
-open.
+is insufficient. Current status is: work-control accepted and pushed;
+request-control has a fresh focused PASS 9/9; UTF-8 has a fresh focused PASS
+7/7; and SHA is static-reviewed with the last focused run at 4/5. The merge
+owner therefore keeps Wave 4S-C open pending SHA and integrated production
+evidence.
 
 Budget admission in this wave uses the exact
 `ProviderBudgetPort.charge_all(charges: [ProviderBudgetChargeV1])` owner

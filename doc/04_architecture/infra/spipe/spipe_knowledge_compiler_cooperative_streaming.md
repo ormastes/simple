@@ -481,11 +481,12 @@ retains the preceding implementation and its honest capability response; it
 does not create a compatibility fallback inside a new hot path.
 
 Current Wave 4S-C evidence status is deliberately non-transitive: the
-work-control prerequisite is accepted and pushed; the UTF-8 source has been
-reviewed, but its required partition/range execution evidence is incomplete;
-the SHA source has passed static review, but the last executed focused run was
-4/5. Consequently Wave 4S-C remains open, and neither review result may be
-reported as an executed post-fix PASS.
+work-control prerequisite is accepted and pushed; the request-control focused
+spec has a fresh executed PASS 9/9; and the UTF-8 focused spec has a fresh
+executed PASS 7/7. The SHA source has passed static review, but its last
+executed focused run was 4/5. Consequently Wave 4S-C remains open: focused
+request-control and UTF-8 evidence does not close the SHA cell or prove the
+integrated production pipeline.
 
 The `cancel:true` gate requires an actual protocol 1.0 session test: transmit a
 bounded long-running request, then a real framed canonical `cancel` operation
