@@ -42,6 +42,34 @@ use super::{
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 
+fn should_bind_module_namespace(
+    binding_name: &str,
+    target: &ImportTarget,
+    selected_binding_claims_module_name: bool,
+) -> bool {
+    let path_derived_name = matches!(target, ImportTarget::Glob | ImportTarget::Group(_));
+    if binding_name == "main" && path_derived_name {
+        return false;
+    }
+
+    !selected_binding_claims_module_name
+}
+
+fn bind_module_namespace_after_import(
+    env: &mut Env,
+    binding_name: &str,
+    target: &ImportTarget,
+    module_value: &Value,
+    selected_binding_claims_module_name: bool,
+) -> bool {
+    if !should_bind_module_namespace(binding_name, target, selected_binding_claims_module_name) {
+        return false;
+    }
+
+    env.insert(binding_name.to_string(), module_value.clone());
+    true
+}
+
 fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value) {
     MODULE_GLOBALS.with(|cell| {
         cell.borrow_mut().insert(name.clone(), value.clone());
@@ -1653,6 +1681,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     &mut enums,
                 ) {
                     Ok(value) => {
+                        let mut selected_binding_claims_module_name = false;
                         // Unpack module exports into current namespace
                         // For Group imports, only import specified items
                         // For Glob imports, import everything
@@ -1675,6 +1704,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                                     MODULE_GLOBALS.with(|cell| {
                                                         cell.borrow_mut().insert(alias.clone(), export_value.clone());
                                                     });
+                                                    selected_binding_claims_module_name |= alias == &binding_name;
                                                 }
                                                 continue;
                                             }
@@ -1688,6 +1718,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                             MODULE_GLOBALS.with(|cell| {
                                                 cell.borrow_mut().insert(item_name.clone(), export_value.clone());
                                             });
+                                            selected_binding_claims_module_name |= item_name == binding_name;
                                         }
                                     }
                                 }
@@ -1729,8 +1760,10 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 // Single/Aliased: bind module dict only, do NOT unpack
                             }
                         }
-                        // Also keep the module dict under its name for qualified access.
-                        // Skip this for Glob/Group imports whose `binding_name` is only
+                        // Also keep the module dict under its name for qualified access,
+                        // unless a Group import explicitly selected that same local name.
+                        // The explicit symbol wins; callers that need both can alias the
+                        // module namespace. Also skip Glob/Group imports whose `binding_name` is only
                         // "main" because the imported module's *file* happens to be named
                         // `main.spl` (binding_name is derived from the last path segment
                         // for those two targets, not chosen by the importer) -- binding a
@@ -1740,10 +1773,13 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // though the entry file never declared its own main (e.g. any spec
                         // doing `use compiler.tools.lint.main.{Linter, ...}`). A Single or
                         // Aliased import is explicit user intent and is left untouched.
-                        let is_path_derived_main = binding_name == "main"
-                            && matches!(&use_stmt.target, ImportTarget::Glob | ImportTarget::Group(_));
-                        if !is_path_derived_main {
-                            env.insert(binding_name.clone(), value.clone());
+                        if bind_module_namespace_after_import(
+                            env,
+                            &binding_name,
+                            &use_stmt.target,
+                            &value,
+                            selected_binding_claims_module_name,
+                        ) {
                             // Sync module binding to MODULE_GLOBALS so functions can access it
                             MODULE_GLOBALS.with(|cell| {
                                 cell.borrow_mut().insert(binding_name.clone(), value);
