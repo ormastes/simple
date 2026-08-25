@@ -254,6 +254,42 @@ signature, or loader admission was run. The SMF mmap loader and wider SFFI
 estate remain neither globally verified nor signed; verified-and-signed
 admission remains 0.
 
+## Top-level SMF mmap compatibility authority checkpoint
+
+The distinct top-level SMF mmap implementation now declares all twenty used
+runtime ABI families unsafe and confines every raw call to lexical
+`unsafe(ffi)`. Eight repeated file/mapping operations use mandatory-inline
+owners; twelve existing one-site byte, relocation, locking, and function-call
+operations retain direct lexical blocks. The unused page-size declaration was
+removed.
+
+Seventeen address-consuming APIs retain explicit `raw_ptr` caller authority.
+The existing function-call facades continue returning `Result<i64, text>` for
+invalid addresses rather than manufacturing zero. The implementation's stronger
+W^X policy is pinned: allocation remains RW and the existing transition makes
+pages RX; no RWX allocation was introduced.
+
+The hot path remains one raw call per operation. Mandatory inlining adds no
+dispatch, and the packed code-copy path remains a single bulk call with only
+the existing interpreter fallback loop. No admission hash, signature check,
+lookup, lock, allocation, copy, or extra traversal was added. Static registry
+inventory found eleven symbols in both typed-native and interpreter registries,
+three in one registry, and six in neither.
+
+The focused static authority/W^X/performance ratchet passed. The authoritative
+census changed:
+
+- raw call sites: 18,850 -> 18,846
+- missing authority: 14,538 -> 14,526
+- lexical unsafe: 3,334 -> 3,342
+- function unsafe: unchanged at 978 (`raw_ptr`-only caller obligations are not
+  classified as `ffi` function authority by the census)
+
+No production self-hosted build, optimizer, benchmark, proof receipt, artifact
+signature, or loader admission was run. This compatibility loader and the wider
+SFFI estate remain neither globally verified nor signed; verified-and-signed
+admission remains 0.
+
 ## MIR function-lowering authority checkpoint
 
 MIR function lowering now confines its tagged-value discriminant ABI and five
