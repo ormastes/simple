@@ -260,7 +260,8 @@ pub fn sched_create_user_task_pid_impl(
         assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
         arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
         riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1()
+        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        exec_generation: 1u64
     )
     var new_tasks = tasks
     new_tasks[slot] = tcb
@@ -355,7 +356,8 @@ pub fn sched_create_user_task_from_bytes_pid_impl(
         assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
         arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
         riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1()
+        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        exec_generation: 1u64
     )
     var new_tasks = tasks
     new_tasks[slot] = tcb
@@ -415,7 +417,8 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
         assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
         arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
         riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1()
+        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        exec_generation: 1u64
     )
     var new_tasks = tasks
     new_tasks[0] = tcb
@@ -475,7 +478,8 @@ pub fn sched_clone_task_impl(
         # A future 32-bit fork transaction must attach a distinct mapping.
         arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
         riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1()
+        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        exec_generation: 1u64
     )
     var new_tasks = tasks
     new_tasks[child_slot] = child
@@ -506,6 +510,11 @@ pub fn sched_exec_image_impl(
         case _: false
     if is_zombie:
         return (-22, tasks)
+    if old_task.exec_generation == 0u64 or
+        old_task.exec_generation == 0xFFFFFFFFFFFFFFFFu64 or
+        old_task.isolation.capability_generation == 0u64 or
+        old_task.isolation.capability_generation == 0xFFFFFFFFFFFFFFFFu64:
+        return (-75, tasks)
     # Replacing an owned ARM32 image requires a two-mapping commit.  Reject
     # before grant, vmspace, or address-space side effects until that owner
     # transaction exists.
@@ -544,8 +553,10 @@ pub fn sched_exec_image_impl(
             destroy_user_address_space(new_as)
             return (-12, tasks)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    _ = server_data_launch_grant_revoke_task_lifecycle_v1(
-        old_task.id.id, old_task.lifecycle_generation)
+    if not server_data_launch_grant_revoke_task_lifecycle_v1(
+        old_task.id.id, old_task.lifecycle_generation):
+        destroy_user_address_space(new_as)
+        return (-5, tasks)
     sched_release_task_address_space(old_task)
     var new_isolation = old_task.isolation
     new_isolation.address_space_id = new_as.id
@@ -562,6 +573,7 @@ pub fn sched_exec_image_impl(
     task.isolation = new_isolation
     task.exit_code = 0
     task.ticks_remaining = TIME_SLICE_TICKS
+    task.exec_generation = task.exec_generation + 1u64
     var new_tasks = tasks
     new_tasks[slot] = task
     register_task_vmspace(task.id.id.to_u32(), ProcessVmSpace(pml4: new_as.phys_root, id: new_as.id, vma_count: 0, areas: []))

@@ -376,9 +376,15 @@ impl SshSession:
                         SSH_DISCONNECT_PROTOCOL_ERROR,
                         "invalid channel window adjustment")
                     return
-                if self.scp_pending:
+                # Credit belongs only to the wire recipient. Do not let a
+                # multiplexed sibling's valid adjustment wake retained SCP or
+                # SFTP producers on another channel; that creates cross-channel
+                # dispatch amplification without granting them send credit.
+                val adjusted_recipient = _read_u32_stable(payload, 1u64)
+                if self.scp_pending and self.scp_local_id == adjusted_recipient:
                     self._drain_scp_source()
-                self._pump_sftp_output([])
+                if self.sftp_enabled and self.sftp_local_channel_id == adjusted_recipient:
+                    self._pump_sftp_output([])
                 continue
             elif msg_type == 96:
                 # Peer EOF is half-close notification; retain the channel

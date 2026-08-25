@@ -62,17 +62,30 @@ fn _field_name_valid(name: text) -> bool:
             return false
     true
 
-fn _strict_crlf(request: text) -> bool:
-    val bytes = request.bytes()
+fn _strict_crlf(bytes: [u8]) -> bool:
     var index: u64 = 0u64
+    var line_bytes: u64 = 0u64
+    var separators: i32 = 0
     while index < bytes.len():
         if bytes[index] == 13:
             if index + 1u64 >= bytes.len() or bytes[index + 1u64] != 10:
                 return false
+            if line_bytes > RFC6455_MAX_HANDSHAKE_LINE_BYTES:
+                return false
+            separators = separators + 1
+            # Request line + at most 100 header lines + terminal empty line.
+            # Bound this before split("\r\n") can allocate an element for
+            # every attacker-controlled separator in the 65 KiB envelope.
+            if separators > RFC6455_MAX_HANDSHAKE_HEADERS + 2:
+                return false
+            line_bytes = 0u64
             index = index + 2u64
         elif bytes[index] == 10:
             return false
         else:
+            line_bytes = line_bytes + 1u64
+            if line_bytes > RFC6455_MAX_HANDSHAKE_LINE_BYTES:
+                return false
             index = index + 1u64
     true
 
@@ -161,9 +174,10 @@ fn _websocket_key_is_canonical_16_bytes(key: text) -> bool:
     last == 65 or last == 81 or last == 103 or last == 119
 
 pub fn validate_rfc6455_server_handshake(request: text) -> Rfc6455HandshakeDecision:
-    if request.len().to_u64() > RFC6455_MAX_HANDSHAKE_BYTES:
+    val wire = request.bytes()
+    if wire.len() > RFC6455_MAX_HANDSHAKE_BYTES:
         return _handshake_reject("handshake exceeds 65550 bytes")
-    if not _strict_crlf(request) or not request.ends_with("\r\n\r\n"):
+    if not _strict_crlf(wire) or not request.ends_with("\r\n\r\n"):
         return _handshake_reject("handshake requires strict CRLF framing")
     val lines = request.split("\r\n")
     if lines.len() < 3:

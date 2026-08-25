@@ -434,7 +434,14 @@ impl DbdServer:
             self.quarantine_present = _dbd_quarantine_exact(verify)
             return false
         self.log_text = updated
-        self.persistence.commit_verified(appended_bytes)
+        if not self.persistence.commit_verified(appended_bytes):
+            # The exact record is already durable.  Quarantine later work but
+            # report this publication as committed so the caller applies the
+            # same mutation in memory; otherwise restart would reveal a write
+            # that the live engine skipped.
+            self.persistence.mark_unhealthy()
+            _dbd_log("[dbd] durable accounting diverged after publication")
+        true
 
     # ------------------------------------------------------------------
     # Command handling — durability wraps the REAL dispatch(); it never
@@ -473,8 +480,10 @@ impl DbdServer:
                 return "-ERR persist failed\r\n"
             self.log_text = updated
             if not self.persistence.commit_verified(appended_bytes):
+                # Publication is authoritative after commit_and_sync(). Keep
+                # the live engine aligned with recovery and quarantine only
+                # subsequent work.
                 self.persistence.mark_unhealthy()
-                return "-ERR persist failed\r\n"
             return self.engine.dispatch(args)
         val journal_line = dbd_encode_journal_line(args)
         if journal_line == "" or journal_line.len() > DBD_MAX_LINE_BYTES:
@@ -531,10 +540,10 @@ impl DbdServer:
             self.log_text = updated
             if not self.persistence.commit_verified_batch(
                 mutation_count, journal_bytes):
-                # Admission was checked before publication; reaching this edge
-                # means owner accounting diverged and the service must stop.
+                # The complete transaction journal is already published.
+                # Dispatch it below so live state matches restart state, then
+                # leave the owner unhealthy to reject subsequent mutations.
                 self.persistence.mark_unhealthy()
-                return "-EXECABORT durable accounting failed\r\n"
         var response_parts: [text] = [
             "*" + commands.len().to_text() + "\r\n"]
         for args in commands:

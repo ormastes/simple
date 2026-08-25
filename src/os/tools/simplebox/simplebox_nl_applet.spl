@@ -1,0 +1,250 @@
+# Bounded line numbering for filesystem-launched SimpleOS Simplebox.
+
+use os.userlib.fs.{file_open_direct, file_read_direct, file_close_direct}
+use os.tools.simplebox.simplebox_fs_applets.{
+    SIMPLEBOX_FILE_BYTES_LIMIT, SIMPLEBOX_READ_CHUNK_BYTES,
+    SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT
+}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+
+extern fn stdout_write(data: text)
+
+pub const SIMPLEBOX_NL_LINE_LIMIT: u64 = 1000000u64
+pub const SIMPLEBOX_NL_LINE_BYTES_LIMIT: u64 = 1048576u64
+pub const SIMPLEBOX_NL_NUMBER_LIMIT: i64 = 1000000000
+pub const SIMPLEBOX_NL_OUTPUT_BYTES_LIMIT: u64 = 67108864u64
+pub const SIMPLEBOX_NL_ROWS_PER_BLOCK: u64 = 1024u64
+
+struct SimpleboxNlNumber:
+    value: i64
+    accepted: bool
+
+struct SimpleboxNlPlan:
+    number_all: bool
+    start: i64
+    increment: i64
+    path: text
+    accepted: bool
+    error: text
+
+class SimpleboxNlReadState:
+    lines: [text]
+    pending: [u8]
+    consumed: u64
+    failure: text
+
+    me finish_line(path: text):
+        if self.lines.len() >= SIMPLEBOX_NL_LINE_LIMIT:
+            self.failure = path + ": input exceeds simplebox line limit"
+            return
+        self.lines.push(bytes_to_string(self.pending))
+        self.pending = []
+
+    me append_byte(byte: u8, path: text):
+        if self.pending.len() >= SIMPLEBOX_NL_LINE_BYTES_LIMIT:
+            self.failure = path + ": line exceeds simplebox byte limit"
+            return
+        self.pending.push(byte)
+
+class SimpleboxNlOutputState:
+    blocks: [text]
+    buffered_rows: [text]
+    output_bytes: u64
+    failure: text
+
+    me push_row(row: text):
+        if (self.output_bytes > SIMPLEBOX_NL_OUTPUT_BYTES_LIMIT or
+            row.len() > SIMPLEBOX_NL_OUTPUT_BYTES_LIMIT - self.output_bytes):
+            self.failure = "output exceeds simplebox byte limit"
+            return
+        self.buffered_rows.push(row)
+        if self.buffered_rows.len() == SIMPLEBOX_NL_ROWS_PER_BLOCK:
+            self.blocks.push(self.buffered_rows.join(""))
+            self.buffered_rows = []
+        self.output_bytes = self.output_bytes + row.len()
+
+    me finish():
+        if self.buffered_rows.len() > 0u64:
+            self.blocks.push(self.buffered_rows.join(""))
+            self.buffered_rows = []
+
+fn _nl_parse_number(spec: text) -> SimpleboxNlNumber:
+    val bytes = spec.bytes()
+    if bytes.len() == 0u64 or bytes.len() > 11u64:
+        return SimpleboxNlNumber(value: 0, accepted: false)
+    var negative = false
+    var index: u64 = 0u64
+    if bytes[0] == 43u8 or bytes[0] == 45u8:
+        negative = bytes[0] == 45u8
+        index = 1u64
+    if index == bytes.len():
+        return SimpleboxNlNumber(value: 0, accepted: false)
+    var magnitude: i64 = 0
+    while index < bytes.len():
+        val byte = bytes[index]
+        if byte < 48u8 or byte > 57u8:
+            return SimpleboxNlNumber(value: 0, accepted: false)
+        val digit = (byte - 48u8).to_i64()
+        if magnitude > (SIMPLEBOX_NL_NUMBER_LIMIT - digit) / 10:
+            return SimpleboxNlNumber(value: 0, accepted: false)
+        magnitude = magnitude * 10 + digit
+        index = index + 1u64
+    SimpleboxNlNumber(
+        value: if negative: 0 - magnitude else: magnitude, accepted: true)
+
+fn _nl_plan(args: [text]) -> SimpleboxNlPlan:
+    var number_all = false
+    var start: i64 = 1
+    var increment: i64 = 1
+    var start_set = false
+    var increment_set = false
+    var path = ""
+    var options = true
+    var index: u64 = 0u64
+    while index < args.len():
+        val arg = args[index]
+        if options and arg == "--":
+            options = false
+        elif options and arg == "-ba":
+            number_all = true
+        elif options and arg == "-bt":
+            number_all = false
+        elif options and (arg == "-v" or arg == "-i"):
+            if index + 1u64 >= args.len():
+                return SimpleboxNlPlan(number_all: false, start: 0,
+                    increment: 0, path: "", accepted: false,
+                    error: arg + " requires one number")
+            val parsed = _nl_parse_number(args[index + 1u64])
+            if not parsed.accepted:
+                return SimpleboxNlPlan(number_all: false, start: 0,
+                    increment: 0, path: "", accepted: false,
+                    error: arg + " number must be within -1000000000..1000000000")
+            if arg == "-v":
+                if start_set:
+                    return SimpleboxNlPlan(number_all: false, start: 0,
+                        increment: 0, path: "", accepted: false,
+                        error: "starting number specified more than once")
+                start = parsed.value
+                start_set = true
+            else:
+                if increment_set:
+                    return SimpleboxNlPlan(number_all: false, start: 0,
+                        increment: 0, path: "", accepted: false,
+                        error: "increment specified more than once")
+                increment = parsed.value
+                increment_set = true
+            index = index + 1u64
+        elif options and arg.starts_with("-"):
+            return SimpleboxNlPlan(number_all: false, start: 0,
+                increment: 0, path: "", accepted: false,
+                error: "unsupported option: " + arg)
+        elif path != "":
+            return SimpleboxNlPlan(number_all: false, start: 0,
+                increment: 0, path: "", accepted: false,
+                error: "expected exactly one FILE operand")
+        else:
+            path = arg
+            options = false
+        index = index + 1u64
+    if path == "":
+        return SimpleboxNlPlan(number_all: false, start: 0,
+            increment: 0, path: "", accepted: false,
+            error: "missing FILE operand")
+    if path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+        return SimpleboxNlPlan(number_all: false, start: 0,
+            increment: 0, path: "", accepted: false,
+            error: "invalid path length")
+    # The independent bounds prove magnitude below 1.001e15, within i64.
+    SimpleboxNlPlan(number_all: number_all, start: start, increment: increment,
+        path: path, accepted: true, error: "")
+
+fn _nl_read(path: text) -> SimpleboxNlReadState:
+    val state = SimpleboxNlReadState(lines: [], pending: [], consumed: 0u64,
+        failure: "")
+    val opened = file_open_direct(path, 0u32)
+    match opened:
+        case Err(reason):
+            state.failure = path + ": " + reason
+            state
+        case Ok(fd):
+            var complete = false
+            while not complete and state.failure == "":
+                match file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES):
+                    case Err(reason): state.failure = path + ": " + reason
+                    case Ok(chunk):
+                        if chunk.len() == 0u64:
+                            complete = true
+                        elif (state.consumed > SIMPLEBOX_FILE_BYTES_LIMIT or
+                            chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT - state.consumed):
+                            state.failure = path + ": file exceeds simplebox byte limit"
+                        else:
+                            state.consumed = state.consumed + chunk.len()
+                            var index: u64 = 0u64
+                            while index < chunk.len() and state.failure == "":
+                                if chunk[index] == 10u8:
+                                    state.finish_line(path)
+                                else:
+                                    state.append_byte(chunk[index], path)
+                                index = index + 1u64
+            if state.failure == "" and state.pending.len() > 0u64:
+                state.finish_line(path)
+            if not file_close_direct(fd) and state.failure == "":
+                state.failure = path + ": close failed"
+            state
+
+fn _nl_number_prefix(number: i64) -> text:
+    val digits = number.to_string()
+    var parts: [text] = []
+    var padding = 0
+    if digits.len() < 6u64:
+        padding = (6u64 - digits.len()).to_i64()
+    while padding > 0:
+        parts.push(" ")
+        padding = padding - 1
+    parts.push(digits)
+    parts.push("\t")
+    parts.join("")
+
+fn _nl_render(lines: [text], plan: SimpleboxNlPlan) -> SimpleboxNlOutputState:
+    val output = SimpleboxNlOutputState(blocks: [], buffered_rows: [],
+        output_bytes: 0u64, failure: "")
+    var number = plan.start
+    for line in lines:
+        val numbered = plan.number_all or line.len() > 0u64
+        if numbered:
+            output.push_row(_nl_number_prefix(number) + line + "\n")
+            number = number + plan.increment
+        else:
+            output.push_row(line + "\n")
+        if output.failure != "":
+            return output
+    output.finish()
+    output
+
+pub fn simplebox_nl(args: [text]) -> i32:
+    """Number lines from one bounded file for source and log diagnostics.
+
+    Supported form: `nl [-ba|-bt] [-v START] [-i INCREMENT] [--] FILE`.
+    `-bt` is the default and numbers nonempty lines; `-ba` numbers every line.
+    START and INCREMENT are signed values in -1,000,000,000..1,000,000,000.
+    Numbers are
+    right-aligned to at least six columns and followed by tab; unnumbered empty
+    lines remain empty. Unterminated final lines remain logical lines.
+    Input, line length/count, numeric growth, and output are bounded. The file
+    read and close complete before linear rendering or stdout.
+    """
+    val plan = _nl_plan(args)
+    if not plan.accepted:
+        stdout_write("nl: " + plan.error + "\n")
+        return 2
+    val input = _nl_read(plan.path)
+    if input.failure != "":
+        stdout_write("nl: " + input.failure + "\n")
+        return 2
+    val output = _nl_render(input.lines, plan)
+    if output.failure != "":
+        stdout_write("nl: " + output.failure + "\n")
+        return 2
+    for block in output.blocks:
+        stdout_write(block)
+    0

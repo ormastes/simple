@@ -31,6 +31,10 @@ use os.kernel.types.x86_32_mapping_handle_v1.{
     SchedulerX8632MappingHandleV1
 }
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.scheduler.scheduler_capability_snapshot_lease_v1.{
+    SchedulerCapabilitySnapshotLeaseV1,
+    scheduler_capability_snapshot_issue_v1
+}
 export use os.kernel.scheduler.scheduler_executable_adoption_state.{
     SchedulerExecutableAdoptionOwnerStateV1
 }
@@ -51,8 +55,9 @@ pub val SCHED_RT_BASE_PRIORITY_UNSET: i64 = 9223372036854775807
 # Revision 2 appended lifecycle_generation and the opaque ARM32 mapping locator.
 # Revision 3 appends the opaque RV32 mapping locator.
 # Revision 4 appends the opaque x86-32 mapping locator.
+# Revision 5 appends the scheduler-owned executable-image generation.
 # Earlier field offsets remain stable; consumers must not assume revision-1 size.
-pub val TASK_CONTROL_BLOCK_ABI_REVISION_V1: u32 = 4u32
+pub val TASK_CONTROL_BLOCK_ABI_REVISION_V1: u32 = 5u32
 
 # Stable external state codes. PreparingExit is appended rather than inserted
 # into the legacy 0..3 range consumed by ps/top and syscall TaskInfoBuf.
@@ -176,6 +181,9 @@ pub struct TaskControlBlock:
     # Copyable, non-authorizing locator only. The authenticated x86-32 mapper
     # retains its page-directory lease and terminal destruction receipt.
     x86_32_mapping_handle: SchedulerX8632MappingHandleV1
+    # Exact image lifetime within this TCB lifetime. Starts at one and rotates
+    # only when the scheduler atomically publishes a successful in-place exec.
+    exec_generation: u64
 
 pub struct WaitCollectResult:
     """Result of collecting child exit state for waitpid-compatible syscalls."""
@@ -754,6 +762,37 @@ pub class Scheduler:
     green_parallelism_state: GreenCarrierParallelismState
 
 impl Scheduler:
+    pub(package) fn current_capability_snapshot_lease_v1(
+        task_id: u64,
+        lifecycle_generation: u64,
+        exec_generation: u64
+    ) -> SchedulerCapabilitySnapshotLeaseV1?:
+        """Snapshot the exact current execution while the Scheduler owns its TCB.
+
+        Lock order: caller holds the exclusive Scheduler/TCB owner first; this
+        method then enters the snapshot registry. Registry consumers never
+        enter Scheduler, so the reverse order is forbidden by construction.
+        """
+        val slot = self.current_slot
+        if slot < 0 or slot >= self.tasks.len(): return nil
+        val maybe_task = self.tasks[slot]
+        if maybe_task == nil: return nil
+        val task = maybe_task.unwrap()
+        if (task.id.id != self.current.id or task.id.id != task_id or
+            task.lifecycle_generation != lifecycle_generation or
+            task.exec_generation != exec_generation):
+            return nil
+        val admitted = match task.state:
+            case TaskState.Ready: true
+            case TaskState.Running: true
+            case TaskState.Blocked(reason): true
+            case TaskState.PreparingExit: false
+            case TaskState.Zombie: false
+        if not admitted: return nil
+        scheduler_capability_snapshot_issue_v1(
+            task.id.id, task.lifecycle_generation, task.exec_generation,
+            task.capabilities)
+
     pub(package) fn current_task_admission_v1() -> SchedulerCurrentTaskAdmissionV1?:
         val slot = self.current_slot
         if slot < 0 or slot >= self.tasks.len(): return nil

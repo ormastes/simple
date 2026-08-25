@@ -1089,12 +1089,52 @@ class Compositor:
         val i = self.surface_index(id)
         if i >= 0:
             var surface = self.surfaces[i]
-            if surface.content_html != content_html:
-                self._release_gui_content(surface.content_handle)
-                self._release_pixel_content(surface.content_handle)
+            if (surface.content_kind != WM_CONTENT_KIND_WEB_DOCUMENT or
+                surface.content_html != content_html):
+                # Content handles are uniquely owned by one surface. Do not
+                # retire a shared/corrupt handle and orphan another window.
+                if surface.content_handle > 0:
+                    var owner_scan = 0
+                    while owner_scan < self.surfaces.len():
+                        if (owner_scan != i and
+                            self.surfaces[owner_scan].content_handle ==
+                                surface.content_handle):
+                            return
+                        owner_scan = owner_scan + 1
+                # Retire only the resource kind this surface owns, and make
+                # successful retirement a prerequisite for publishing Web
+                # identity. A failed registry release leaves the old surface
+                # fully intact instead of leaking an unreachable resource.
+                if surface.content_kind == WM_CONTENT_KIND_GUI_SESSION:
+                    if (surface.content_handle <= 0 or
+                        self.gui_content_index(surface.content_handle) < 0):
+                        return
+                    self._release_gui_content(surface.content_handle)
+                    if self.gui_content_index(surface.content_handle) >= 0:
+                        return
+                elif surface.content_kind == WM_CONTENT_KIND_PIXEL_SURFACE:
+                    if (surface.content_handle <= 0 or
+                        self.pixel_content_index(surface.content_handle) < 0):
+                        return
+                    self._release_pixel_content(surface.content_handle)
+                    if self.pixel_content_index(surface.content_handle) >= 0:
+                        return
+                elif (surface.content_kind != WM_CONTENT_KIND_EMPTY and
+                    surface.content_kind != WM_CONTENT_KIND_WEB_DOCUMENT):
+                    return
+                elif surface.content_handle != 0:
+                    return
+                # Queued and materialized input belongs to the replaced
+                # document/tree epoch even though window focus is unchanged.
+                self._cancel_drag_for_window(surface.id)
+                self.input_queue.clear()
                 surface.content_kind = WM_CONTENT_KIND_WEB_DOCUMENT
                 surface.content_handle = 0
                 surface.content_html = content_html
+                # Scroll belongs to the replaced document, not the window
+                # identity. Retaining it makes navigation render a fresh page
+                # from an unrelated prior viewport offset.
+                surface.scroll_y = 0
                 surface.content_revision = surface.content_revision + 1
                 surface.dirty = true
                 self.surfaces[i] = surface
