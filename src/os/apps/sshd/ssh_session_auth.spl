@@ -5,10 +5,10 @@
 
 use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_hex.{format_hex, format_hex_width}
-use os.apps.sshd.ssh_transport.{SSH_MSG_KEXINIT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_service_accept, ssh_build_disconnect}
+use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_KEXINIT, SSH_MSG_IGNORE, SSH_MSG_UNIMPLEMENTED, SSH_MSG_DEBUG, SSH_MSG_EXT_INFO, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_service_accept, ssh_build_disconnect}
 use os.apps.sshd.ssh_auth.{SshUserDb, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_check_public_key_auth, ssh_build_auth_success, ssh_build_userauth_pk_ok}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
-use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _bytes_to_hex, _read_text_field_fast, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _payload_field_is_publickey, _publickey_only_auth_failure_payload, _is_ssh_userauth_service_request}
+use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, ssh_pre_auth_control_budget_allows, _bytes_to_hex, _read_text_field_fast, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _payload_field_is_publickey, _publickey_only_auth_failure_payload, _is_ssh_userauth_service_request}
 use os.kernel.log.klog_api.{log_info}
 
 extern fn serial_println(msg: text)
@@ -72,6 +72,8 @@ impl SshSession:
         """Handle authentication requests. Loops until success or max attempts."""
         log_info("[app.sshd] " + "[sshd-session] auth")
         var attempts: u32 = 0
+        var control_packets: u32 = 0
+        var rekeys: u32 = 0
 
         while attempts < MAX_AUTH_ATTEMPTS:
             val payload = self.recv_packet_payload()
@@ -82,12 +84,27 @@ impl SshSession:
                 return false
 
             val auth_msg_type = ssh_session_u8_at(payload, 0)
+            if auth_msg_type == SSH_MSG_DISCONNECT:
+                # The peer has already terminated the transport.  Do not
+                # charge a terminal packet as an authentication attempt or
+                # answer it with a second disconnect.
+                self.transition_closed()
+                return false
             if auth_msg_type == SSH_MSG_KEXINIT:
+                control_packets = control_packets + 1u32
+                rekeys = rekeys + 1u32
+                if not ssh_pre_auth_control_budget_allows(control_packets, rekeys):
+                    self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "authentication transport budget exceeded")
+                    return false
                 if not self.do_rekey(payload):
                     self.transition_closed()
                     return false
                 continue
-            if auth_msg_type == 7 or auth_msg_type == 2 or auth_msg_type == 4:
+            if auth_msg_type == SSH_MSG_EXT_INFO or auth_msg_type == SSH_MSG_IGNORE or auth_msg_type == SSH_MSG_UNIMPLEMENTED or auth_msg_type == SSH_MSG_DEBUG:
+                control_packets = control_packets + 1u32
+                if not ssh_pre_auth_control_budget_allows(control_packets, rekeys):
+                    self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "authentication transport budget exceeded")
+                    return false
                 serial_println("[sshd-session] auth skip type=0x{format_hex_width(auth_msg_type.to_u64(), 2)}")
                 continue
 
