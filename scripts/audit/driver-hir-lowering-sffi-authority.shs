@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+raws="env_get hash_text transient_array_scope_begin transient_array_scope_pause transient_heap_promote heap_ref_wellformed transient_last_promoted_nodes transient_last_promoted_bytes transient_scope_promoted_nodes transient_scope_promoted_bytes exit stdout_flush"
+for suffix in $raws; do
+    raw="rt_$suffix"
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+(return )?${raw}\\(" "$module")" -eq 1 ]
+done
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 12 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 11 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 12 ]
+grep -q '^extern fn rt_env_get(key: text) -> text?$' "$module"
+
+for expected in env_get:11 hash_text:3 transient_array_scope_begin:2 \
+    transient_array_scope_pause:2 transient_heap_promote:2 \
+    transient_last_promoted_nodes:2 transient_last_promoted_bytes:2 \
+    transient_scope_promoted_nodes:2 transient_scope_promoted_bytes:2 \
+    exit:3 stdout_flush:3; do
+    suffix=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "_sffi_${suffix}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+# This owner MUST remain a plain non-inlined scalar-return function. Inlining
+# it can recreate the native tuple-return-across-unsafe miscompile documented
+# immediately above the function.
+[ "$(grep -c '^fn driver_heap_ref_wellformed(value: Any) -> bool:' "$module")" -eq 1 ]
+! sed -n '/^fn driver_heap_ref_wellformed/,/^struct StreamingHirPromotion/p' "$module" | grep -q '@always_inline'
+
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+# Provider coverage is intentionally recorded as incomplete.
+for raw in rt_env_get rt_hash_text rt_transient_array_scope_begin \
+    rt_transient_array_scope_pause rt_transient_heap_promote rt_exit; do
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+    grep -q "insert_simple!(\"$raw\"" "$interpreter"
+done
+for raw in rt_transient_last_promoted_nodes rt_transient_last_promoted_bytes \
+    rt_transient_scope_promoted_nodes rt_transient_scope_promoted_bytes; do
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+    ! grep -q "insert_simple!(\"$raw\"" "$interpreter"
+done
+for raw in rt_heap_ref_wellformed rt_stdout_flush; do
+    ! grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+    grep -q "insert_simple!(\"$raw\"" "$interpreter"
+done
+
+echo "driver HIR-lowering SFFI authority audit: PASS (12 raw ABIs confined; 11 direct-inline owners; heap probe preserves non-inline scalar-return workaround; provider lane gaps recorded)"

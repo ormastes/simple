@@ -46,18 +46,85 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_status_line, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw deterministic text-hash ABI", capabilities: [ffi])
 extern fn rt_hash_text(content: text) -> i64
+@unsafe(reason: "raw transient-array scope begin ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_pause() -> bool
+@unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
+@unsafe(reason: "raw heap-reference formation probe ABI", capabilities: [ffi])
 extern fn rt_heap_ref_wellformed(value: Any) -> bool
+@unsafe(reason: "raw last-promotion node-count ABI", capabilities: [ffi])
 extern fn rt_transient_last_promoted_nodes() -> i64
+@unsafe(reason: "raw last-promotion byte-count ABI", capabilities: [ffi])
 extern fn rt_transient_last_promoted_bytes() -> i64
+@unsafe(reason: "raw transient-scope promoted-node-count ABI", capabilities: [ffi])
 extern fn rt_transient_scope_promoted_nodes() -> i64
+@unsafe(reason: "raw transient-scope promoted-byte-count ABI", capabilities: [ffi])
 extern fn rt_transient_scope_promoted_bytes() -> i64
+@unsafe(reason: "raw process termination ABI", capabilities: [ffi])
 extern fn rt_exit(code: i64)
+@unsafe(reason: "raw stdout flush ABI", capabilities: [ffi])
 extern fn rt_stdout_flush()
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_hash_text(content: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_hash_text(content)
+
+@always_inline
+fn _sffi_transient_array_scope_begin() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_begin()
+
+@always_inline
+fn _sffi_transient_array_scope_pause() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_pause()
+
+@always_inline
+fn _sffi_transient_heap_promote(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
+
+@always_inline
+fn _sffi_transient_last_promoted_nodes() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_transient_last_promoted_nodes()
+
+@always_inline
+fn _sffi_transient_last_promoted_bytes() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_transient_last_promoted_bytes()
+
+@always_inline
+fn _sffi_transient_scope_promoted_nodes() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_transient_scope_promoted_nodes()
+
+@always_inline
+fn _sffi_transient_scope_promoted_bytes() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_transient_scope_promoted_bytes()
+
+@always_inline
+fn _sffi_exit(code: i64):
+    unsafe(capabilities: [ffi]):
+        rt_exit(code)
+
+@always_inline
+fn _sffi_stdout_flush():
+    unsafe(capabilities: [ffi]):
+        rt_stdout_flush()
 
 # Formation probe wrapper, deliberately shaped as a plain `fn` that returns a
 # SCALAR out of the unsafe block. Mirrors `hir_heap_ref_wellformed`
@@ -96,7 +163,7 @@ fn driver_streaming_surfaces_payload(owner: ModuleSurfacesByName?) -> ModuleSurf
 
 impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<StreamingHirPromotion, text>:
-        if not rt_transient_array_scope_begin():
+        if not _sffi_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
         val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
         if par_had_error_get():
@@ -106,16 +173,16 @@ impl CompilerDriver:
         # Keep the scope active through the complete lowering. The reparsed AST
         # and all lowering scratch graphs are transient; only the canonical HIR,
         # its diagnostics, and frontend registries escape this file boundary.
-        if not rt_transient_array_scope_pause():
+        if not _sffi_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source.path}")
-        if not rt_transient_heap_promote(hir_module):
+        if not _sffi_transient_heap_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("HIR ownership promotion failed for {source.path}")
-        val hir_promoted_nodes = rt_transient_last_promoted_nodes()
-        val hir_promoted_bytes = rt_transient_last_promoted_bytes()
+        val hir_promoted_nodes = _sffi_transient_last_promoted_nodes()
+        val hir_promoted_bytes = _sffi_transient_last_promoted_bytes()
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
@@ -135,8 +202,8 @@ impl CompilerDriver:
         # Read the scope counters only after every escaping owner has promoted
         # so diagnostics, the optional flat row, and frontend registries are
         # included in the complete per-source attribution.
-        val total_promoted_nodes = rt_transient_scope_promoted_nodes()
-        val total_promoted_bytes = rt_transient_scope_promoted_bytes()
+        val total_promoted_nodes = _sffi_transient_scope_promoted_nodes()
+        val total_promoted_bytes = _sffi_transient_scope_promoted_bytes()
         if not driver_end_transient_parse_scope():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             return Err("transient parser scope end failed for {source.path}")
@@ -260,7 +327,7 @@ impl CompilerDriver:
                 "error[E-DRV-PHASE3-EMPTY-VISIT]: phase 3 (HIR typecheck, streaming) computed an EMPTY visit order from {surfaces.surfaces.len()} module surface(s) -- ctx.source_module_names_owner is empty ({self.ctx.source_module_names_owner.len()} names, {self.ctx.source_paths_owner.len()} paths), so every module would be skipped and an empty program would flow into MIR lowering. Refusing to continue.")
             return (self.ctx, false)
         var hir_loop_pos: i64 = 0
-        val hir_bootstrap_mode_gate = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val hir_bootstrap_mode_gate = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
             "pending", 2, 6, 0, 0, "running")
         if mem_snapshot_begin() < 0:
@@ -305,7 +372,7 @@ impl CompilerDriver:
             # stale field under the Stage-3 native backend. The non-streaming
             # validation path below already uses this scalar boundary.
             val source_content_length: i64 = source.content.len()
-            val source_content_hash: i64 = rt_hash_text(source.content)
+            val source_content_hash: i64 = _sffi_hash_text(source.content)
             val is_physical_owner = (
                 surfaces.surfaces[surface_index].source_index == source_index and
                 surfaces.surfaces[surface_index].module_name == source.module_name)
@@ -417,7 +484,7 @@ impl CompilerDriver:
                 # Stage-3 native closure. Read only bounded scalar/text projections
                 # and make the poison decision from this module's fatal count.
                 val module_error_count: i64 = lowering.lowering_error_count()
-                val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+                val bootstrap_mode = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
                 var module_error_index: i64 = 0
                 var module_fatal_error_count: i64 = 0
                 var hir_module_warnings: [text] = []
@@ -452,7 +519,7 @@ impl CompilerDriver:
                         return (self.ctx, false)
                     hir_loop_pos = hir_loop_pos + 1
                     continue
-                if (rt_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
+                if (_sffi_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
                     val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
                     print hir_codec_roundtrip_line(hir_round_trip, source.path)
                     hir_module = hir_round_trip.module
@@ -500,8 +567,8 @@ impl CompilerDriver:
         print hir_cache_status_line()
         if hir_shard_mode:
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
-            rt_stdout_flush()
-            rt_exit(0)
+            _sffi_stdout_flush()
+            _sffi_exit(0)
         # Collect-all summary (streaming surfaces path). Same provenance marker
         # as the non-streaming loop -- see the comment there.
         val poisoned_count = self.ctx.poisoned_module_count_value
@@ -792,7 +859,7 @@ impl CompilerDriver:
             # Real single-file HIR lowering is the default; SIMPLE_STUB_HIR=1 is the
             # escape hatch forcing the empty-HIR stub (pre-2026-07-03 behavior) if a
             # stage4 lowering regression ever needs to be bypassed in the field.
-            val unstub_hir = (rt_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
+            val unstub_hir = (_sffi_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
             val is_requested_bootstrap_entry = source_idx == entry_source_index
             val is_bootstrap_entry = is_requested_bootstrap_entry
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
@@ -817,7 +884,7 @@ impl CompilerDriver:
                 # Replay the stored warning-level diagnostics under the same
                 # gate the in-process path applies (warnings are advisory and
                 # dropped in bootstrap mode there too).
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+                if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
                     for hir_cached_warning in hir_cache_last_warnings():
                         self.ctx.add_warning(hir_cached_warning)
             var hir_module: HirModule = if hir_cache_hit:
@@ -901,8 +968,8 @@ impl CompilerDriver:
             # owner methods return only scalar/text projections, avoiding the
             # stage4 array-of-struct transport failure under closure pressure.
             val module_error_count: i64 = lowering.lowering_error_count()
-            val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-            val bootstrap_diag = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+            val bootstrap_mode = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+            val bootstrap_diag = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
             if bootstrap_diag and module_error_count > 0 and source_idx < 20:
                 eprint("[bootstrap-hir-module-errors] source_idx={source_idx} path={src.path} count={module_error_count}")
             var module_error_idx = 0
@@ -969,7 +1036,7 @@ impl CompilerDriver:
             # receipt per module, and the build CONTINUES FROM THE DECODED
             # module so a lossy codec cannot pass quietly. Gate:
             # scripts/check/check-hir-codec-roundtrip.shs
-            if (rt_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
+            if (_sffi_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
                 val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
                 print hir_codec_roundtrip_line(hir_round_trip, src.path)
                 hir_module = hir_round_trip.module
@@ -1003,7 +1070,7 @@ impl CompilerDriver:
             # parameter duplicates the no-GC Stage-3 ownership graph.
             var validation_surface_index: i64 = -1
             val validation_content_length: i64 = src.content.len()
-            val validation_content_hash: i64 = rt_hash_text(src.content)
+            val validation_content_hash: i64 = _sffi_hash_text(src.content)
             var validation_alias_index: i64 = 0
             while validation_alias_index < retained_module_surfaces.ordered_names.len() and
                   validation_alias_index < retained_module_surfaces.ordered_indices.len():
@@ -1091,8 +1158,8 @@ impl CompilerDriver:
             # Shard children exist only to fill the HIR cache. Everything after
             # this point is the real build's job and must not run N times.
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
-            rt_stdout_flush()
-            rt_exit(0)
+            _sffi_stdout_flush()
+            _sffi_exit(0)
         log_debug("HIR lowering complete")
 
         # Step-3 receipts -- see the streaming path above for why.
@@ -1151,7 +1218,7 @@ impl CompilerDriver:
         val typecheck_enforcing = match typecheck_pass_severity():
             case TypecheckPassSeverity.Advisory: false
             case _: true
-        if ((rt_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1") or typecheck_enforcing:
+        if ((_sffi_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1") or typecheck_enforcing:
             log_build_progress("typecheck", "modules", 0,
                 phase_hir_modules.len(), "hm-infer+visibility",
                 2, 6, 0, 0, "running")
@@ -1170,7 +1237,7 @@ impl CompilerDriver:
         val safety_enforcing = match safety_pass_severity():
             case SafetyPassSeverity.Advisory: false
             case _: true
-        if ((rt_env_get("SIMPLE_SAFETY_WARN") ?? "") == "1") or safety_enforcing:
+        if ((_sffi_env_get("SIMPLE_SAFETY_WARN") ?? "") == "1") or safety_enforcing:
             log_build_progress("safety", "modules", 0,
                 phase_hir_modules.len(), "unsafe-context",
                 2, 6, 0, 0, "running")

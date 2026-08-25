@@ -70,6 +70,38 @@ No production self-hosted optimizer or benchmark was available.  Exact
 artifact identity, signatures, and evidence admission remain absent;
 verified-and-signed admission remains 0.
 
+## Driver HIR-lowering authority checkpoint
+
+The phase-3 HIR driver now confines all twelve raw ABI families.  Eleven use
+mandatory-inline lexical `unsafe(ffi)` owners.  The existing
+`driver_heap_ref_wellformed` owner deliberately remains a plain non-inlined
+scalar-return function: inlining it can recreate the documented native
+tuple-return-across-unsafe miscompile that caused malformed owners to be read
+as success.  The focused ratchet pins this exception.
+
+Environment lookup is truthfully nullable.  Source hashing, transient scope
+begin/pause/promotion, promotion counters, process exit, and stdout flush keep
+their existing invocation points.  No per-module hash, counter read, promotion,
+allocation, copy, lookup, lock, branch, loop, or foreign call was added.
+
+Provider coverage is explicitly incomplete:
+
+- typed native and interpreter: 6 symbols
+- typed native only: 4 promotion-counter symbols
+- interpreter only: heap-reference formation and stdout flush
+
+The authoritative census changed:
+
+- raw call sites: 18,924 -> 18,912
+- missing authority: 14,665 -> 14,642
+- lexical unsafe: 3,302 -> 3,313
+- function unsafe: unchanged at 957
+
+No production self-hosted optimizer or benchmark was available.  Lane parity,
+exact artifact identity, signatures, and evidence admission remain absent, so
+HIR lowering and the wider SFFI estate are not globally verified or signed;
+verified-and-signed admission remains 0.
+
 ## MIR function-lowering authority checkpoint
 
 MIR function lowering now confines its tagged-value discriminant ABI and five
