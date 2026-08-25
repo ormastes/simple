@@ -1745,6 +1745,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Static bound: O(1) policy bypass, O(N) active scans, and O(N) allocation only
   for changed output; no manual execution or timing/RSS measurement was run.
 
+# Completed tranche: compiler-output line cursor (2026-08-25)
+
+- Removed whole-output newline split arrays from diagnostic count and collection.
+- Added one byte-based LF boundary owner with monotonic progress and terminal
+  empty-line compatibility.
+- Preserved CRLF trimming, Unicode, duplicates, unrelated lines, ordering, and
+  exact count/collection admission.
+- Added paired exact-JSON and bounded structural evidence plus a canonical manual.
+- Static bounds beyond cleaned input: O(S) work, O(M + P) count peak, and
+  O(M + P + D + K) collection peak; no execution/timing/RSS measurement was run.
+
 # Completed tranche: structured-error streaming (2026-08-25)
 
 - Moved RELATED/HELP metadata semantics into one shared parser.

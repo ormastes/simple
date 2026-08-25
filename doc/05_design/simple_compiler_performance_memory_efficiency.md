@@ -1290,3 +1290,12 @@ The requested severity is formatted once and byte-compared against the complete
 run, so equal multi-digit values also return the original while leading-zero
 normalization remains a rewrite. A changed value publishes prefix, severity,
 and suffix through one fragment join; chained immutable concatenation is banned.
+
+# Compiler-output line cursor design
+
+Each owner starts at byte zero, obtains `line_end` from the shared LF finder,
+consumes `[line_start,line_end)`, breaks when the end equals source length, and
+otherwise advances to `line_end + 1`. This deliberately visits the synthetic
+empty terminal segment after a trailing LF, matching split semantics; downstream
+admission ignores it. Count retains only trim/prefix state. Collection invokes
+the canonical line-to-JSON parser once and appends only nonempty results.

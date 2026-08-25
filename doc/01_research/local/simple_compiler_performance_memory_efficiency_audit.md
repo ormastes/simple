@@ -3595,6 +3595,22 @@ fragments and one final join. Zero-policy routing performs no field scan; active
 routing is O(N) with O(1) scan state, while only a real change constructs O(N)
 output. No execution, allocation, timing, or RSS measurement was run.
 
+# 2026-08-25 follow-up: compiler-output line cursor
+
+Both clean compiler-diagnostic owners called `clean_output.split("\n")`. Counting
+retained every line slice/handle merely to increment a scalar; JSON collection
+retained the same line projection beside its growing diagnostic result. Each
+then consumed lines sequentially, so whole-output line retention was unnecessary.
+
+`_check_output_line_end` now finds LF bytes with one monotonic cursor. Count and
+collection slice, consume, and release one physical line before advancing, while
+preserving trim, CRLF, empty/trailing line, duplicate, malformed-prefix, and
+Unicode behavior. For S output bytes traversal is O(S). Beyond the already-owned
+clean output, count peaks at O(M + P) for maximum line M and prefix P; collection
+peaks at O(M + P + D + K) for retained diagnostic bytes D and handles K. Count and
+collection remain separate passes. No execution, timing, allocation, or RSS
+measurement was run.
+
 # 2026-08-25 follow-up: streaming structured-error metadata
 
 `query_check` and `query_diagnostics` independently parsed `|||RELATED:` and

@@ -960,3 +960,11 @@ override count bypasses code/severity parsing. Mapped negative values suppress
 before output; mapped nonnegative values delegate to one byte-based severity
 rewriter. Missing or malformed severity fields preserve the original diagnostic,
 and an already-equal digit run must not allocate rewritten JSON.
+
+# Compiler-output line projection ownership
+
+`query_diagnostics._check_output_line_end` owns physical LF boundaries for
+clean compiler output. Counting and JSON collection keep independent semantic
+owners but must share this boundary function, consume only one transient line at
+a time, preserve source order, and never retain a whole-output split array.
+Existing trim and diagnostic parsing remain downstream authorities.
