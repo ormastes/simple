@@ -1777,14 +1777,6 @@ spl_u64 rt_riscv_qemu_reserved_end(void) {
     return 0x80400000ULL;
 }
 
-spl_u64 rt_riscv_qemu_heap_start(void) {
-    return 0x87000000ULL;
-}
-
-spl_u64 rt_riscv_qemu_heap_size(void) {
-    return 16ULL * 1024ULL * 1024ULL;
-}
-
 spl_i64 rt_time_now_unix_micros(void) {
     spl_u64 cycles;
     __asm__ volatile("rdtime %0" : "=r"(cycles));
