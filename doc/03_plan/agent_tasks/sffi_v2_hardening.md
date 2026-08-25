@@ -408,3 +408,8 @@ passing placeholder.
     canonical library owner; never restore its 35 duplicate declarations or
     wrappers. Next type the canonical TLS handle/read/write/status contracts
     and migrate application modules that still import raw TLS symbols directly.
+78. Keep TLS-disabled Rust runtime builds free of exported TLS stubs. Gate both
+    runtime re-export layers with `runtime-tls`; a consumer requiring TLS must
+    fail linkage/admission when the real provider is absent. Preserve the real
+    provider hot path byte-for-byte and keep both feature configurations under
+    compile checks. Next migrate raw application TLS imports to checked owners.

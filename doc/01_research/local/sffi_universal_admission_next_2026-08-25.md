@@ -584,3 +584,22 @@ admission remain unavailable. Thirty-five duplicate declaration rows are
 removed: 11,942 rows / 3,156 symbols, 1,189 tagged, 637
 `unsafe_contract_declared`, 10,487 untouched, and zero exact-artifact
 verified-and-signed.
+
+## TLS-disabled native provider removal checkpoint
+
+The Rust runtime previously included `net_tls_stub.rs` whenever `runtime-tls`
+was disabled. That file exported the full TLS symbol family while returning
+`-1`, empty text, or `false`; in particular, a missing provider read was
+indistinguishable from clean EOF. The stub module is deleted, its include is
+removed, and TLS re-exports from both runtime layers are gated by the real
+`runtime-tls` feature. A TLS-disabled runtime can still build, but an artifact
+requiring TLS now fails linkage/admission instead of receiving fabricated
+values.
+
+The TLS-enabled implementation is unchanged, so there is no added branch,
+lookup, allocation, copy, or call overhead. `cargo check` passed once for both
+`--no-default-features` and `--no-default-features --features runtime-tls`.
+The TLS static fail-closed ratchet also passed. This changes provider behavior,
+not Simple declaration inventory, so the ledger remains 11,942 rows / 3,156
+symbols, 1,189 tagged, 637 `unsafe_contract_declared`, 10,487 untouched, and
+zero exact-artifact verified-and-signed.

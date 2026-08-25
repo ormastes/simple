@@ -985,6 +985,10 @@ pub use value::{
     rt_io_udp_bind, rt_io_udp_close, rt_io_udp_connect, rt_io_udp_local_addr, rt_io_udp_recv,
     rt_io_udp_recv_from, rt_io_udp_send, rt_io_udp_send_to, rt_io_udp_set_broadcast,
     rt_io_udp_set_nonblocking, rt_io_udp_set_read_timeout,
+};
+
+#[cfg(feature = "runtime-tls")]
+pub use value::{
     rt_tls_client_close, rt_tls_client_config_add_root_cert, rt_tls_client_config_enable_sni,
     rt_tls_client_config_free, rt_tls_client_config_new, rt_tls_client_config_set_alpn,
     rt_tls_client_config_set_verify_mode, rt_tls_client_connect, rt_tls_client_connect_with_sni,
