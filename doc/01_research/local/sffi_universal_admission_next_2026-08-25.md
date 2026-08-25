@@ -1894,6 +1894,26 @@ declarations / 3,141 symbols. Unsafe-tagged rows increase from 2,421 to 2,443,
 untouched rows decrease from 9,027 to 9,005, and exact-artifact
 verified-and-signed admission remains zero.
 
+## Shared GPU foreign-text null checkpoint
+
+The Rust interpreter GPU adapter used one shared `c_ptr_to_string` lift for
+Metal device/error text and feature-enabled CUDA device/error text. A null
+provider pointer was converted to `String::new()`, fabricating valid empty text
+where the foreign contract had failed. The lift now returns a typed runtime
+error naming the symbol; all four callers propagate it.
+
+The success path retains the same single C-string scan and owned-string
+allocation. The only added work is the required null comparison, with no extra
+provider call, copy, lookup, lock, hash, signing operation, or dispatch.
+`metal-sffi-symbol-identity.shs` passes and pins the non-fabrication rule. The
+focused Rust test passed (1 test, zero failures; 3,928 unrelated compiler tests
+filtered out).
+
+This fixes one shared lifting defect but does not yet scope the 67 raw Metal
+calls in the Simple facade or authenticate the provider. Census and declaration
+counts are unchanged; exact-artifact verified-and-signed admission remains
+zero.
+
 ## SDL2 event-consumer authority checkpoint
 
 The canonical SDL2 facade already tagged its 65 raw declarations, but two

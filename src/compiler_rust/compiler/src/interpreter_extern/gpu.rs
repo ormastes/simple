@@ -577,11 +577,13 @@ pub(super) fn c_string_or_error(text: String, name: &str) -> Result<CString, Com
     CString::new(text).map_err(|_| CompileError::semantic(format!("{name} does not accept embedded NUL bytes")))
 }
 
-fn c_ptr_to_string(ptr: *const std::os::raw::c_char) -> String {
+fn c_ptr_to_string(ptr: *const std::os::raw::c_char, name: &str) -> Result<String, CompileError> {
     if ptr.is_null() {
-        String::new()
+        Err(CompileError::runtime(format!(
+            "{name}: foreign text contract returned null"
+        )))
     } else {
-        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+        Ok(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
     }
 }
 
@@ -862,7 +864,7 @@ pub fn rt_metal_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
         0,
         "rt_metal_device_name",
         1,
-    )?))))
+    )?), "rt_metal_device_name")?))
 }
 
 pub fn rt_metal_device_memory_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1146,7 +1148,10 @@ pub fn rt_metal_wait_completed_fn(args: &[Value]) -> Result<Value, CompileError>
 }
 
 pub fn rt_metal_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(c_ptr_to_string(rt_metal_get_last_error())))
+    Ok(Value::text(c_ptr_to_string(
+        rt_metal_get_last_error(),
+        "rt_metal_get_last_error",
+    )?))
 }
 
 pub fn rt_metal_create_sampler_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1323,7 +1328,9 @@ pub fn rt_cuda_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     let device = arg_i64(args, 0, "rt_cuda_device_name", 1)?;
     #[cfg(feature = "cuda")]
     {
-        return Ok(Value::Str(c_ptr_to_string(rt_cuda_device_name(device)).into()));
+        return Ok(Value::Str(
+            c_ptr_to_string(rt_cuda_device_name(device), "rt_cuda_device_name")?.into(),
+        ));
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -2361,7 +2368,9 @@ pub fn rt_cuda_get_error_string_fn(args: &[Value]) -> Result<Value, CompileError
     let error_code = arg_i64(args, 0, "rt_cuda_get_error_string", 1)?;
     #[cfg(feature = "cuda")]
     {
-        return Ok(Value::Str(c_ptr_to_string(rt_cuda_get_error_string(error_code)).into()));
+        return Ok(Value::Str(
+            c_ptr_to_string(rt_cuda_get_error_string(error_code), "rt_cuda_get_error_string")?.into(),
+        ));
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -5781,5 +5790,16 @@ mod cuda_status_tests {
         assert_eq!(cuda_driver_status(0), 0);
         assert_eq!(cuda_driver_status(1), -1);
         assert_eq!(cuda_driver_status(100), -100);
+    }
+}
+
+#[cfg(test)]
+mod foreign_text_tests {
+    use super::c_ptr_to_string;
+
+    #[test]
+    fn null_foreign_text_is_a_contract_error() {
+        let error = c_ptr_to_string(std::ptr::null(), "rt_metal_device_name").unwrap_err();
+        assert!(format!("{error:?}").contains("foreign text contract returned null"));
     }
 }
