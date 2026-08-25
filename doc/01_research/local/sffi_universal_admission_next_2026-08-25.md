@@ -381,6 +381,35 @@ No production optimizer/runtime test was run for this Pure Simple annotation
 change. Missing providers, raw handle validity, ownership, artifact identity,
 and signatures remain open; verified-and-signed admission remains 0.
 
+## System facade authority checkpoint
+
+`src/lib/nogc_sync_mut/sffi/system.spl` now confines all 41 raw calls without
+blanket authority. Twenty-nine total scalar, optional, status, process, and
+time operations use minimal lexical `unsafe(ffi)` owners. Thirteen public
+facades whose types still conflate failure with empty runtime-owned text,
+untyped discriminants, parser sentinels, or snapshot ownership remain
+explicitly unsafe. Optional environment absence remains `text?`, and semantic
+mutation/kill results remain `bool` rather than numeric workarounds.
+
+All direct raw owners are mandatory-inline. This adds no call frame, allocation,
+copy, lookup, lock, branch, or generic dispatch; existing PID validation and
+process execution behavior are unchanged. Provider inventory remains
+incomplete: of 39 declared symbols, twelve appear in both typed-native and
+interpreter registries, six in one registry, and twenty-one in neither.
+
+The focused static authority/provider/performance ratchet passed. The census
+changed:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,493 -> 14,460
+- lexical unsafe: 3,344 -> 3,365
+- function unsafe: 1,009 -> 1,021
+
+No production optimizer/runtime test was run for this Pure Simple annotation
+change. The thirteen ambiguous facades require typed `Option`/`Result` redesign,
+and provider/artifact/signature evidence remains absent; verified-and-signed
+admission remains 0.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
