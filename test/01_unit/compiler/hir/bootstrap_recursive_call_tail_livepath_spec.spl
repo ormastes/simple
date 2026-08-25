@@ -1,0 +1,71 @@
+"""Live module-build regression for a recursive expression-statement tail."""
+
+use std.spec.{describe, expect, it, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.{HirExprKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+describe "bootstrap recursive-call tail live path":
+    it "keeps native_build_policy_action_from_args value-producing through module_build and MIR":
+        step("Parse and lower the exact Stage3 blocker shape in bootstrap mode")
+        val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val source =
+            "fn native_build_runtime_bundle_is_removed(bundle: text) -> i64:\n" +
+            "    if bundle == \"hosted\":\n        return 1\n" +
+            "    0\n\n" +
+            "fn native_build_policy_action_from_args(args: [text], i: i64) -> text:\n" +
+            "    if i >= args.len():\n        return \"\"\n" +
+            "    val arg = args[i]\n" +
+            "    if arg == \"--help\" or arg == \"-h\" or arg == \"--list-optimizations\":\n        return arg\n" +
+            "    if arg == \"--runtime-bundle\" and i + 1 < args.len():\n" +
+            "        val bundle = args[i + 1]\n" +
+            "        if native_build_runtime_bundle_is_removed(bundle) == 1:\n            return bundle\n" +
+            "        return native_build_policy_action_from_args(args, i + 2)\n" +
+            "    if arg.starts_with(\"--runtime-bundle=\"):\n" +
+            "        val bundle = arg.substring(17)\n" +
+            "        if native_build_runtime_bundle_is_removed(bundle) == 1:\n            return bundle\n" +
+            "    native_build_policy_action_from_args(args, i + 1)\n"
+        val parsed = parse_full_frontend(source, "src/app/cli/bootstrap_main.spl", "app.cli.bootstrap_main", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("src/app/cli/bootstrap_main.spl")
+        val hir = hir_lowering.lower_module(parsed)
+
+        var found = false
+        var hir_clean = hir_lowering.errors.len() == 0
+        var tail_is_recursive_call = false
+        var mir_missing_return = false
+        var mir_clean = false
+        for function_ in hir.functions.values():
+            if function_.name == "native_build_policy_action_from_args":
+                found = true
+                if function_.body.has:
+                    match function_.body.value.kind:
+                        case HirExprKind.Call(_, args, _):
+                            tail_is_recursive_call = args.len() == 2
+                        case _:
+                            tail_is_recursive_call = false
+                var mir_lowering = MirLowering.new(hir.symbols)
+                val _mir = mir_lowering.lower_function(function_)
+                mir_clean = mir_lowering.errors.len() == 0
+                for diagnostic in mir_lowering.errors:
+                    if diagnostic.message.contains("E-SFFI-016"):
+                        mir_missing_return = true
+
+        if val prior_value = prior_bootstrap:
+            rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+        else:
+            rt_env_remove("SIMPLE_BOOTSTRAP")
+
+        step("Require the live function and reject fabricated missing-return diagnostics")
+        expect(found).to_equal(true)
+        expect(hir_clean).to_equal(true)
+        expect(tail_is_recursive_call).to_equal(true)
+        expect(mir_clean).to_equal(true)
+        expect(mir_missing_return).to_equal(false)

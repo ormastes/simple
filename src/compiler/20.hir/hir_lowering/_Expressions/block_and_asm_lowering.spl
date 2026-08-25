@@ -64,6 +64,8 @@ impl HirLowering:
         val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(block_value_expr))
         val return_expr_disc = rt_enum_discriminant(HirExprKind.Return(nil))
         val stmt_count = b.stmts.len()
+        val source_expr_disc = rt_enum_discriminant(StmtKind.Expr(
+            Expr(kind: ExprKind.NilLit, span: b.span)))
         var stmt_idx = 0
         while stmt_idx < stmt_count:
             # A single source statement may desugar into several HIR statements
@@ -75,6 +77,53 @@ impl HirLowering:
                 self.strip_discarded_string_interps(b.stmts[stmt_idx])
             else:
                 b.stmts[stmt_idx]
+            # Preserve the typed, fresh return for the common value-tail path.
+            # lower_hir_stmt_multi returns [HirStmt]; re-indexing its sole
+            # element erases the enum payload to ANY in the Stage-3 compiler,
+            # so the Expr payload match below can fail even though its
+            # discriminator is Expr.  Tuple destructuring still needs the
+            # multi-result path, but an expression statement never expands.
+            # Keeping it scalar also removes one hot-path array allocation.
+            if stmt_idx == stmt_count - 1:
+                # Read/copy the source enum only for the possible tail. Doing
+                # this for every statement would add a redundant aggregate
+                # copy before lower_hir_stmt_multi performs its own dispatch.
+                val source_kind: StmtKind = src_stmt.kind
+                if rt_enum_discriminant(source_kind) == source_expr_disc:
+                    val lowered_tail = self.lower_hir_stmt(src_stmt)
+                    if rt_enum_discriminant(lowered_tail.kind) == expr_stmt_disc:
+                        match lowered_tail.kind:
+                            case HirStmtKind.Expr(expr):
+                                if rt_enum_discriminant(expr.kind) == return_expr_disc:
+                                    stmts = stmts.push(lowered_tail)
+                                else:
+                                    block_has_value = true
+                                    val type_ok = expr.has_type_ and hir_heap_ref_wellformed(expr.type_)
+                                    if expr.has_type_ and not type_ok:
+                                        eprint("E-HIR-BLOCK-VALUE-TYPE-MALFORMED: block tail expression claims has_type_ but its type_ word is not a well-formed heap reference")
+                                    val span_ok = hir_heap_ref_wellformed(expr.span)
+                                    if not span_ok:
+                                        eprint("E-HIR-BLOCK-VALUE-SPAN-MALFORMED: block tail expression span word is not a well-formed heap reference; falling back to the block span")
+                                    if span_ok:
+                                        block_value_expr = HirExpr(kind: expr.kind, has_type_: false, type_: nil, span: expr.span)
+                                    else:
+                                        block_value_expr = HirExpr(kind: expr.kind, has_type_: false, type_: nil, span: b.span)
+                            case _:
+                                # Discriminator/payload disagreement is malformed.
+                                # lower_hir_stmt already reports the source-side
+                                # equivalent; retain an Error statement here so a
+                                # future HIR representation regression also fails
+                                # closed rather than fabricating a missing return.
+                                self.error("HIR expression statement payload is malformed", src_stmt.span)
+                                stmts = stmts.push(HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: src_stmt.span)), span: src_stmt.span))
+                    else:
+                        # Assignment expressions intentionally lower to Assign and
+                        # remain statements; any other future non-Expr lowering is
+                        # likewise preserved rather than promoted as a value.
+                        stmts = stmts.push(lowered_tail)
+                    stmt_idx = stmt_idx + 1
+                    continue
+
             val lowered_list = self.lower_hir_stmt_multi(src_stmt)
             val lowered_count = lowered_list.len()
             var li = 0

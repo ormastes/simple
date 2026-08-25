@@ -598,11 +598,22 @@ impl HirLowering:
             # their own Expr-typed fields (rt_enum_payload -- Return's
             # idiom -- comes back nil for Expr's payload specifically; see
             # bug doc hir_stmt_expr_payload_extraction_nil_2026-07-17.md).
-            val expr_t: Expr = match stmt_kind_value:
+            var expr_payload_ok = false
+            var expr_t: Expr = sk_dummy
+            match stmt_kind_value:
                 case StmtKind.Expr(einner):
-                    einner
+                    expr_t = einner
+                    expr_payload_ok = true
                 case _:
-                    sk_dummy
+                    pass
+            if not expr_payload_ok:
+                # A matching discriminator with an unreadable payload is a
+                # malformed AST boundary, not a source-level nil literal.
+                # Fail closed instead of silently substituting `sk_dummy`,
+                # which can turn a declared value return into NilLit and let
+                # native code fabricate an ABI default.
+                self.error("expression statement payload is malformed", s.span)
+                return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: s.span)), span: s.span)
             # The flat parser emits `target = value` as an EXPRESSION
             # statement (expr_assign), never StmtKind.Assign. Route it
             # into HirStmtKind.Assign so MIR's assignment lowering
