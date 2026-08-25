@@ -70,6 +70,35 @@ No production self-hosted optimizer or benchmark was available.  Exact
 artifact identity, signatures, and evidence admission remain absent;
 verified-and-signed admission remains 0.
 
+## HIR item-lowering helper authority checkpoint
+
+HIR item-lowering helpers now confine nullable environment lookup, process
+termination, and transient graph promotion to three mandatory-inline lexical
+`unsafe(ffi)` owners.  All three symbols have typed-native and interpreter
+registration.
+
+The bootstrap HIR publication path retains exactly fourteen graph-promotion
+calls and combines every status into the existing total verdict.  Two fatal
+paths previously continued if a defective `rt_exit` provider returned—one
+could resume partial publication and the other indexed out of bounds.  Both
+now panic after a returning exit provider.  This changes only a violated
+noreturn contract and adds no work to valid execution.
+
+The focused static authority/performance ratchet passed.  No graph walk,
+allocation, copy, lookup, hash, lock, loop, or foreign call was added.  The
+authoritative census changed:
+
+- raw call sites: 18,893 -> 18,875
+- missing authority: 14,619 -> 14,598
+- lexical unsafe: 3,317 -> 3,320
+- function unsafe: unchanged at 957
+
+Registration does not prove promotion semantics, noreturn behavior, exact
+artifact identity, signatures, or provenance.  No production self-hosted
+optimizer or benchmark was available.  HIR helpers and the wider SFFI estate
+remain neither globally verified nor signed; verified-and-signed admission
+remains 0.
+
 ## AST declaration-node environment authority checkpoint
 
 The flat declaration arena now confines its four environment ABIs to
