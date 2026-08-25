@@ -635,7 +635,6 @@ int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
 int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
 int64_t  rt_hash_text(int64_t value);
-int64_t  rt_text_eq_fast(int64_t left, int64_t right);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
 int64_t  rt_string_eq(int64_t left, int64_t right);

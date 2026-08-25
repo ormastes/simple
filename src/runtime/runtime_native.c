@@ -4570,10 +4570,6 @@ int64_t rt_string_eq(int64_t left, int64_t right) {
     return a->len == 0 || memcmp(a->data, b->data, (size_t)a->len) == 0;
 }
 
-int64_t rt_text_eq_fast(int64_t left, int64_t right) {
-    return rt_string_eq(left, right);
-}
-
 /* #148: native-path `text == text` / `text != text` equality.
  *
  * On the normal native (non-bootstrap) MIR->LLVM path a "str"-typed MIR local
