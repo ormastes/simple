@@ -243,6 +243,18 @@ evidence passed. The source-only ledger is now 12,038 `rt_*` rows / 3,179
 symbols: 1,200 unsafe-tagged, 568 contract-documented and unsafe-minimized,
 10,572 untouched, and zero exact-artifact verified-and-signed.
 
+Checkpoint: the common ECDSA P-256 wrapper now consumes only checked signing
+and verification contracts and exposes `Result`, preserving `Ok(false)` solely
+for a real cryptographic mismatch. Malformed bridge values, keys, SPKI, and
+signature lengths are errors; empty signatures are never safe values. Raw calls
+are lexically scoped to one `unsafe(ffi)` statement. The static guard and source
+check passed without adding hot-path lookup, hashing, copying, or allocation.
+The executable spec is blocked upstream by the unrelated
+`env_access_host.spl` parser failure and the available tool reports itself as a
+Rust bootstrap seed. The source-only ledger is 12,038 `rt_*` rows / 3,179
+symbols: 1,202 tagged, 650 contract-declared, 10,570 untouched, and zero
+exact-artifact verified-and-signed.
+
 ### 7. Verify once, then stop
 
 - Run sabotage and parity across interpreter, JIT, native, sealed dynload, and

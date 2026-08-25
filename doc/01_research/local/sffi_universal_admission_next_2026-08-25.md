@@ -282,3 +282,28 @@ parity, and the cross-lane SFFI ratchet. The refreshed source-only ledger is
 12,038 `rt_*` declaration rows / 3,179 symbols: 1,200 unsafe-tagged, 568
 contract-documented and unsafe-minimized, 10,572 untouched, and zero
 exact-artifact verified-and-signed.
+
+## Common ECDSA P-256 checked-result checkpoint
+
+`std.common.crypto.ecdsa_p256` no longer calls the legacy signing and
+verification ABIs that collapse bridge failures into an empty signature or
+`false`. Signing now returns `Result<[u8], text>` and accepts only a two-field
+checked descriptor with status zero and an exactly 64-byte signature.
+Verification returns `Result<bool, text>`: a genuine mismatch is `Ok(false)`,
+while malformed SPKI/signature shapes, corrupt statuses, and bridge failures
+are `Err`. The typed wrapper propagates the result instead of constructing
+`Signature.new([])`.
+
+Both common and canonical signature wrappers put each checked raw call in a
+one-statement lexical `unsafe(capabilities: [ffi])` scope. No hashing, symbol or
+map lookup, input conversion, payload copy, or provider allocation was added.
+The focused static guard and two-file source check passed. The executable crypto
+spec is blocked before this module by an unrelated parser error in
+`src/app/io/env_access_host.spl` (`expected Comma, found Pub`). The available
+binary also identifies itself as the Rust bootstrap seed, so it is not accepted
+as self-hosted verification.
+
+The refreshed source-only ledger remains 12,038 `rt_*` declaration rows and
+3,179 symbols: 1,202 rows are unsafe-tagged, 650 are in
+`unsafe_contract_declared`, 10,570 are untouched, and zero are exact-artifact
+verified-and-signed.

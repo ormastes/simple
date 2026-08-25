@@ -4,9 +4,8 @@
 # Key format: PKCS#8 v1 DER-encoded private key / SPKI DER-encoded public key.
 # Signature format: 64-byte fixed-width r||s (32 bytes each, big-endian).
 #
-# NOTE: The interpreter may wrap [u8] extern returns in Option::Some(...)
-# (tracked in doc/09_report/crypto_spec_remains_2026-04-16.md).
-# _unwrap_sig() coerces the return before callers see it.
+# The raw boundary uses checked status descriptors.  Safe callers never receive
+# an empty signature or `false` manufactured from a malformed bridge value.
 
 # ============================================================================
 # Tier 1: Raw SFFI externs
@@ -17,23 +16,46 @@
 #            requires this format; use ecdsa_p256_verify for SPKI input.
 # message:   Raw message bytes (hashed internally with SHA-256).
 # signature: 64-byte r||s (NOT the SSH-wire mpint pair).
-# Returns 1 if valid, 0 otherwise.
-extern fn rt_ecdsa_p256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+# Returns 1 if valid, 0 if cryptographically invalid, and -1 for malformed
+# bridge input.
+@unsafe(reason: "checked ECDSA P-256 verification ABI", capabilities: [ffi])
+extern fn rt_ecdsa_p256_verify_checked(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 
 # Sign `message` with ECDSA P-256 SHA-256 using a PKCS#8-v1 DER private key.
-# Returns 64-byte fixed-width r||s, or an empty array on error.
-extern fn rt_ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> [u8]
+# Returns [status, signature], where status 0 is success and the signature is
+# exactly 64 bytes.  Nonzero statuses carry no usable signature.
+@unsafe(reason: "checked ECDSA P-256 signing ABI", capabilities: [ffi])
+extern fn rt_ecdsa_p256_sign_checked(pkcs8: [u8], message: [u8]) -> [Any]
 
 # ============================================================================
 # Tier 2: Simple-friendly wrappers
 # ============================================================================
 
-# Coerce Option<[u8]> -> [u8] in case the interpreter wraps the extern return.
-fn _unwrap_sig(maybe: [u8]) -> [u8]:
-    if val bytes = maybe:
-        bytes
-    else:
-        []
+fn _ecdsa_p256_sign_raw_checked(pkcs8: [u8], message: [u8]) -> [Any]:
+    val raw = unsafe(capabilities: [ffi]):
+        rt_ecdsa_p256_sign_checked(pkcs8, message)
+    raw ?? []
+
+fn _ecdsa_p256_verify_raw_checked(pubkey: [u8], message: [u8], signature: [u8]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_ecdsa_p256_verify_checked(pubkey, message, signature)
+
+fn _checked_signature(raw: [Any]) -> Result<[u8], text>:
+    if raw.len() != 2:
+        return Err("E-SFFI-017: corrupt ECDSA P-256 signing result descriptor")
+    val status = raw[0] as i64
+    if status == 1:
+        return Err("E-SFFI-010: malformed ECDSA P-256 signing bridge input")
+    if status == 2:
+        return Err("E-SFFI-010: invalid ECDSA P-256 private key")
+    if status == 3:
+        return Err("E-SFFI-017: ECDSA P-256 provider signing failure")
+    if status != 0:
+        return Err("E-SFFI-017: unknown ECDSA P-256 signing status {status}")
+    val signature = raw[1] as [u8]
+    if signature.len() != 64:
+        return Err("E-SFFI-017: ECDSA P-256 success returned a non-64-byte signature")
+    Ok(signature)
 
 # Sign `message` with ECDSA P-256 SHA-256.
 #
@@ -41,23 +63,22 @@ fn _unwrap_sig(maybe: [u8]) -> [u8]:
 #   pkcs8:   PKCS#8 v1 DER-encoded P-256 private key.
 #   message: Bytes to sign (hashed with SHA-256 inside the runtime).
 #
-# Returns: 64-byte fixed-width r||s signature.
-#          Returns an empty array on any error — caller must check len > 0.
+# Returns: a 64-byte fixed-width r||s signature or a typed error.
 #
 # Hosted-only: requires a system CSPRNG in the runtime.
-fn ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> [u8]:
-    _unwrap_sig(rt_ecdsa_p256_sign(pkcs8, message))
+fn ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
+    _checked_signature(_ecdsa_p256_sign_raw_checked(pkcs8, message))
 
 # Extract raw EC point (04 || Qx || Qy, 65 bytes) from a P-256 SPKI (91 bytes).
 # P-256 SPKI layout: 26 bytes of DER headers, then the 65-byte uncompressed point.
 # Returns [] for any non-conforming input.
-fn _spki_to_ec_point(spki: [u8]) -> [u8]:
+fn _spki_to_ec_point(spki: [u8]) -> Result<[u8], text>:
     if spki.len() != 91:
-        []
+        Err("E-SFFI-010: invalid ECDSA P-256 SPKI length")
     else if (spki[26] as i64) != 4:
-        []
+        Err("E-SFFI-010: invalid ECDSA P-256 SPKI point encoding")
     else:
-        spki.slice(26, 91)
+        Ok(spki.slice(26, 91))
 
 # Verify an ECDSA P-256 SHA-256 signature.
 #
@@ -66,8 +87,15 @@ fn _spki_to_ec_point(spki: [u8]) -> [u8]:
 #   message:   Message bytes that were signed.
 #   signature: 64-byte fixed-width r||s (32 + 32, big-endian).
 #
-# Returns: true if the signature is valid, false otherwise.
-fn ecdsa_p256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool:
-    val ec_point = _spki_to_ec_point(pubkey)
-    val result = rt_ecdsa_p256_verify(ec_point, message, signature)
-    result == 1
+# Returns: Ok(true) for valid, Ok(false) for a cryptographic mismatch, and Err
+# for malformed input or a bridge contract violation.
+fn ecdsa_p256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> Result<bool, text>:
+    if signature.len() != 64:
+        return Err("E-SFFI-010: invalid ECDSA P-256 signature length")
+    val ec_point = _spki_to_ec_point(pubkey)?
+    val status = _ecdsa_p256_verify_raw_checked(ec_point, message, signature)
+    if status < 0:
+        return Err("E-SFFI-010: malformed ECDSA P-256 verification bridge input")
+    if status > 1:
+        return Err("E-SFFI-017: unknown ECDSA P-256 verification status {status}")
+    Ok(status == 1)
