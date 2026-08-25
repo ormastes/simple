@@ -52,10 +52,26 @@ proj_markers() {
         "parser_type_kind_weak_inner|Weak"
 }
 
-# Body of parser_type_named_dependencies, from its `fn` line to the next
-# top-level `fn `/`# ===` boundary.
+# Body of the accumulator helper that owns the constructor dispatch, from its
+# `fn` line to the next top-level `fn `/`# ===` boundary.
 mat_body() {
-    awk '/^fn parser_type_named_dependencies\(/{on=1; print; next} on && (/^fn /||/^# =/) {exit} on{print}' "$1"
+    awk '/^fn parser_type_named_dependencies_into\(/{on=1; print; next} on && (/^fn /||/^# =/) {exit} on{print}' "$1"
+}
+
+# Keep the extractor coupled to the public entrypoint. If the helper is renamed
+# or the wrapper stops delegating to it, constructor counts from dead code must
+# not be accepted as coverage.
+mat_wiring_ok() {
+    awk '
+        /^fn parser_type_named_dependencies\(/ {on=1; found_fn=1; stage=0; next}
+        on && (/^fn /||/^# =/) {exit}
+        on && (/^[[:space:]]*$/||/^[[:space:]]*#/||/^[[:space:]]*""".*"""[[:space:]]*$/) {next}
+        on && stage == 0 && /^    var names: \[text\] = \[\]$/ {stage=1; next}
+        on && stage == 1 && /^    parser_type_named_dependencies_into\(type_, names\)$/ {stage=2; next}
+        on && stage == 2 && /^    names$/ {stage=3; next}
+        on {bad=1}
+        END {exit !(found_fn && stage == 3 && !bad)}
+    ' "$1"
 }
 
 # Body of `me imported_surface_type(` up to the next `me ` at the same indent.
@@ -87,6 +103,10 @@ allow_kinds() {
 run_scan() {
     if [ ! -f "$MAT_FILE" ] || [ ! -f "$PROJ_FILE" ] || [ ! -f "$ALLOWLIST" ]; then
         echo "ERROR — nothing was checked (a required file is missing)"
+        return 2
+    fi
+    if ! mat_wiring_ok "$MAT_FILE"; then
+        echo "ERROR — nothing was checked (materialization wrapper no longer delegates to the extracted helper)"
         return 2
     fi
     MAT=$(mat_kinds)
@@ -124,14 +144,17 @@ selftest() {
     # Fixture 1: a constructor materialized, not projected, not allowlisted -> FAIL
     mkdir -p "$TD/f1/src/compiler/10.frontend" "$TD/f1/src/compiler/20.hir/hir_lowering/_Items" "$TD/f1/scripts/check"
     cat > "$TD/f1/src/compiler/10.frontend/parser_types_expr.spl" <<'EOT'
-fn parser_type_named_dependencies(type_: Type) -> [text]:
+fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
     if disc == rt_enum_discriminant(TypeKind.Named("", [])): return []
     if disc == rt_enum_discriminant(TypeKind.Tuple([])): return []
     if disc == rt_enum_discriminant(TypeKind.Array(p, nil)): return []
     if disc == rt_enum_discriminant(TypeKind.Union([])): return []
     if disc == rt_enum_discriminant(TypeKind.Pointer(p, false)): return []
     if disc == rt_enum_discriminant(TypeKind.Brandnew(p)): return []
-    []
+fn parser_type_named_dependencies(type_: Type) -> [text]:
+    var names: [text] = []
+    parser_type_named_dependencies_into(type_, names)
+    names
 EOT
     cat > "$TD/f1/src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl" <<'EOT'
     me imported_surface_type(type_: Type, m: text) -> HirType:
@@ -167,11 +190,48 @@ EOT
     esac
     # Fixture 4: extractor matches nothing -> ERROR, never a pass
     cp -r "$TD/f1" "$TD/f4"
-    echo "" > "$TD/f4/src/compiler/10.frontend/parser_types_expr.spl"
+    cat > "$TD/f4/src/compiler/10.frontend/parser_types_expr.spl" <<'EOT'
+fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
+    return
+fn parser_type_named_dependencies(type_: Type) -> [text]:
+    var names: [text] = []
+    parser_type_named_dependencies_into(type_, names)
+    names
+EOT
     out=$(ROOT="$TD/f4" sh "$0" --scan-only 2>&1); rc=$?
     case "$out" in
         ERROR*) [ "$rc" = 2 ] || { echo "selftest: fixture 4 exit $rc, want 2"; fails=$((fails+1)); } ;;
         *) echo "selftest: fixture 4 (empty walk) did not ERROR: $out"; fails=$((fails+1)) ;;
+    esac
+    # Fixture 5: dispatch helper remains, but wrapper wiring drifts -> ERROR.
+    cp -r "$TD/f1" "$TD/f5"
+    cat > "$TD/f5/src/compiler/10.frontend/parser_types_expr.spl" <<'EOT'
+fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
+    if disc == rt_enum_discriminant(TypeKind.Named("", [])): return []
+    if disc == rt_enum_discriminant(TypeKind.Tuple([])): return []
+    if disc == rt_enum_discriminant(TypeKind.Array(p, nil)): return []
+    if disc == rt_enum_discriminant(TypeKind.Union([])): return []
+    if disc == rt_enum_discriminant(TypeKind.Pointer(p, false)): return []
+fn parser_type_named_dependencies(type_: Type) -> [text]:
+    var names: [text] = []
+    # parser_type_named_dependencies_into(type_, names)
+    parser_type_named_dependencies_elsewhere(type_, names)
+    names
+EOT
+    out=$(ROOT="$TD/f5" sh "$0" --scan-only 2>&1); rc=$?
+    case "$out" in
+        *"wrapper no longer delegates"*) [ "$rc" = 2 ] || { echo "selftest: fixture 5 exit $rc, want 2"; fails=$((fails+1)); } ;;
+        *) echo "selftest: fixture 5 (wrapper drift) did not ERROR: $out"; fails=$((fails+1)) ;;
+    esac
+    # Fixture 6: canonical call text after an early return is unreachable -> ERROR.
+    cp -r "$TD/f1" "$TD/f6"
+    awk '{print} /^fn parser_type_named_dependencies\(/{print "    return []"}' \
+        "$TD/f6/src/compiler/10.frontend/parser_types_expr.spl" > "$TD/f6/parser_types_expr.tmp"
+    mv "$TD/f6/parser_types_expr.tmp" "$TD/f6/src/compiler/10.frontend/parser_types_expr.spl"
+    out=$(ROOT="$TD/f6" sh "$0" --scan-only 2>&1); rc=$?
+    case "$out" in
+        *"wrapper no longer delegates"*) [ "$rc" = 2 ] || { echo "selftest: fixture 6 exit $rc, want 2"; fails=$((fails+1)); } ;;
+        *) echo "selftest: fixture 6 (early return) did not ERROR: $out"; fails=$((fails+1)) ;;
     esac
     rm -rf "$TD"
     [ "$fails" = 0 ] && return 0
