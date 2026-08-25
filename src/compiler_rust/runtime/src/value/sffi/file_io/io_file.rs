@@ -114,11 +114,16 @@ pub unsafe extern "C" fn rt_io_file_open(path_ptr: *const u8, path_len: u64, mod
 /// Read up to `size` bytes from `fd`. Returns a `[u8]`, empty at EOF.
 #[no_mangle]
 pub unsafe extern "C" fn rt_io_file_read(fd: i64, size: i64) -> RuntimeValue {
-    if size < 0 {
-        return RuntimeValue::NIL;
-    }
+    let size = match usize::try_from(size) {
+        Ok(size) => size,
+        Err(_) => return RuntimeValue::NIL,
+    };
     with_fd(fd, RuntimeValue::NIL, |file| {
-        let mut buf = vec![0u8; size as usize];
+        let mut buf = Vec::new();
+        if buf.try_reserve_exact(size).is_err() {
+            return RuntimeValue::NIL;
+        }
+        buf.resize(size, 0);
         match file.read(&mut buf) {
             Ok(n) => {
                 buf.truncate(n);
@@ -173,10 +178,14 @@ pub unsafe extern "C" fn rt_io_file_read_line(fd: i64) -> RuntimeValue {
 /// Write `data` to `fd`. Returns the byte count written, or `-1` on error.
 #[no_mangle]
 pub unsafe extern "C" fn rt_io_file_write(fd: i64, data_ptr: *const u8, data_len: u64) -> i64 {
-    if data_ptr.is_null() && data_len > 0 {
-        return -1;
-    }
-    let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        if data_ptr.is_null() || data_len > usize::MAX as u64 {
+            return -1;
+        }
+        std::slice::from_raw_parts(data_ptr, data_len as usize)
+    };
     with_fd(fd, -1i64, |file| match file.write(data) {
         Ok(n) => n as i64,
         Err(_) => -1,
@@ -186,10 +195,14 @@ pub unsafe extern "C" fn rt_io_file_write(fd: i64, data_ptr: *const u8, data_len
 /// Write all of `data` to `fd`. Returns false on a short write or error.
 #[no_mangle]
 pub unsafe extern "C" fn rt_io_file_write_all(fd: i64, data_ptr: *const u8, data_len: u64) -> bool {
-    if data_ptr.is_null() && data_len > 0 {
-        return false;
-    }
-    let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        if data_ptr.is_null() || data_len > usize::MAX as u64 {
+            return false;
+        }
+        std::slice::from_raw_parts(data_ptr, data_len as usize)
+    };
     with_fd(fd, false, |file| file.write_all(data).is_ok())
 }
 

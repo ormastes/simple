@@ -1913,3 +1913,34 @@ zero missing. Repository-wide missing authority fell from 18,339 to 18,310;
 production missing authority fell from 10,169 to 10,140. Declaration totals
 remain 11,627, with 2,443 unsafe-tagged and 9,005 untouched declaration rows.
 Exact-artifact verified-and-signed admission remains zero.
+
+## Synchronous file I/O raw-contract checkpoint
+
+The canonical `FileHandle`/`File` facade has 16 explicitly unsafe declarations
+backed by both typed interpreter registrations and a native Rust C ABI. Its 20
+production raw calls were outside lexical authority; each is now scoped to the
+exact provider operation. Negative read extents are rejected before crossing
+the boundary.
+
+Provider review found that both write functions passed `(null, 0)` to Rust's
+`slice::from_raw_parts`, which is undefined behavior even for an empty slice.
+Zero-length writes now use `&[]`; nonempty writes validate both pointer and
+target `usize` extent. Bounded reads replace infallible `vec![0; size]` with
+checked conversion and fallible exact reservation, returning the existing nil
+failure sentinel rather than aborting on capacity failure.
+
+Valid reads retain one buffer allocation and one read; valid writes retain one
+write call and no new allocation or copy. No lookup, lock, hash, signing work,
+or generic dispatch was added. The Rust provider still accepts generationless
+raw file descriptors, `read_all` remains caller-unbounded, and boolean
+exists/delete results cannot distinguish false from provider failure, so this
+family remains unsafe and unsigned.
+
+The source census measured repository-wide missing authority decreasing from
+18,310 to 18,290 and production missing authority from 10,140 to 10,120. The
+broader `rt_io` family now has 306 explicit and 34 missing call sites.
+Declaration totals remain 11,627, with 2,443 unsafe-tagged and 9,005 untouched
+rows; exact-artifact verified-and-signed admission remains zero.
+
+Focused Rust provider verification passed: 81 `file_io`-filtered tests, zero
+failures (1.01 seconds; 1,146 unrelated tests filtered out).
