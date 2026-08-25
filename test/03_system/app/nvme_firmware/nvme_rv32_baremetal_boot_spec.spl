@@ -24,10 +24,10 @@ of asserting a boot it could not perform — it never fakes a pass and never ski
 silently. Run:
 `bin/simple test test/03_system/app/nvme_firmware/nvme_rv32_baremetal_boot_spec.spl`.
 
-NOTE (2026-07-05): this asserts the prebuilt NVMe firmware rv32 ELF boots and
+NOTE (2026-08-25): this asserts the prebuilt NVMe firmware rv32 ELF boots and
 prints the firmware PASS marker. The P9 wrapper has a separate scenario below
-proving the boot hook is wired and the firmware entry owns the strong exported
-hook.
+proving the stable HAL selects either the stock Pure-Simple default or the
+generated firmware-specific Pure-Simple provider.
 """
 
 use std.spec.*
@@ -92,8 +92,8 @@ describe "NVMe firmware rv32 baremetal-remote boot on QEMU":
 describe "NVMe firmware rv32 P9 build evidence":
     """
     The P9 firmware-specific rv32 wrapper must not build a stock OS image and call it NVMe
-    evidence. The rv32 boot path now has an optional weak hook, and the NVMe firmware entry
-    provides the strong exported hook that prints the firmware PASS marker.
+    evidence. The rv32 boot path uses a Pure-Simple default provider, and the NVMe firmware
+    build composes a generated Pure-Simple provider that calls the public firmware self-test.
     """
 
     it "runs the rv32 no-alloc logic reference and proves the boot hook is wired":
@@ -124,18 +124,23 @@ describe "NVMe firmware rv32 P9 build evidence":
         expect(direct_out).to_contain("rt_pool_safepoint")
         expect(direct_out).to_contain("rt_riscv_uart_put")
 
-        step("The stock rv32 boot path reaches the sole raw NVMe hook through its HAL provider")
+        step("The stock rv32 boot path keeps a constant Pure-Simple default and the firmware build composes its provider override")
         val (boot_out, boot_err, boot_code) = _run("rg -n 'hal_rv32_boot_optional_nvme_fw_selftest\\(\\)' src/os/kernel/arch/riscv32/boot.spl")
-        val (provider_out, provider_err, provider_code) = _run("rg -n '^extern fn rt_rv32_boot_optional_nvme_fw_selftest|^    rt_rv32_boot_optional_nvme_fw_selftest\\(\\)$' src/os/kernel/arch/riscv32/optional_firmware_provider.spl")
-        val (weak_out, weak_err, weak_code) = _run("rg -n 'rt_rv32_boot_optional_nvme_fw_selftest\\(void\\).*weak' src/os/kernel/arch/riscv32/boot/baremetal_stubs.c")
+        val (provider_out, provider_err, provider_code) = _run("rg -n '^pub fn hal_rv32_boot_optional_nvme_fw_selftest\\(\\) -> i64:|^    0$' src/os/kernel/arch/riscv32/optional_firmware_provider.spl")
+        val (override_out, override_err, override_code) = _run("rg -n 'OPTIONAL_FIRMWARE_OVERRIDE=.*optional_firmware_provider\\.spl|use entry\\.\\{nvme_fw_rv32_selftest\\}|pub fn hal_rv32_boot_optional_nvme_fw_selftest\\(\\) -> i64:|nvme_fw_rv32_selftest\\(\\)' examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs")
+        val (legacy_out, legacy_err, legacy_code) = _run("if rg -n '^extern fn |selftest\\(void\\)' src/os/kernel/arch/riscv32/optional_firmware_provider.spl src/os/kernel/arch/riscv32/boot/baremetal_stubs.c; then echo LEGACY_RAW_HOOK_PRESENT; else echo PURE_SIMPLE_PROVIDER_ONLY; fi")
         expect(boot_code).to_equal(0)
         expect(provider_code).to_equal(0)
-        expect(weak_code).to_equal(0)
-        expect(provider_out).to_contain("extern fn rt_rv32_boot_optional_nvme_fw_selftest")
-        expect(provider_out).to_contain("    rt_rv32_boot_optional_nvme_fw_selftest()")
+        expect(override_code).to_equal(0)
+        expect(provider_out).to_contain("pub fn hal_rv32_boot_optional_nvme_fw_selftest() -> i64:")
+        expect(provider_out).to_contain("    0")
+        expect(override_out).to_contain("use entry.{nvme_fw_rv32_selftest}")
+        expect(legacy_out).to_contain("PURE_SIMPLE_PROVIDER_ONLY")
 
-        step("The firmware rv32 entry exports the strong hook that prints the PASS marker")
-        val (hook_out, hook_err, hook_code) = _run("rg -n '@export\\(\"C\", name: \"rt_rv32_boot_optional_nvme_fw_selftest\"\\)|ALL RV32 NVME FW CHECKS PASS' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
+        step("The firmware rv32 entry exposes an ordinary public Simple hook that prints the PASS marker")
+        val (hook_out, hook_err, hook_code) = _run("rg -n '^pub fn nvme_fw_rv32_selftest\\(\\) -> i64:|ALL RV32 NVME FW CHECKS PASS' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
+        val (export_out, export_err, export_code) = _run("if rg -n '@export.*nvme_fw_rv32_selftest' examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl; then echo LEGACY_C_EXPORT_PRESENT; else echo ORDINARY_SIMPLE_HOOK; fi")
         expect(hook_code).to_equal(0)
-        expect(hook_out).to_contain("rt_rv32_boot_optional_nvme_fw_selftest")
+        expect(hook_out).to_contain("pub fn nvme_fw_rv32_selftest() -> i64:")
         expect(hook_out).to_contain("ALL RV32 NVME FW CHECKS PASS")
+        expect(export_out).to_contain("ORDINARY_SIMPLE_HOOK")

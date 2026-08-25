@@ -19,20 +19,23 @@ The scalar logic is `bin/simple check`-clean and host-verified:
 
 ## Integration
 
-`entry.spl` exposes `nvme_fw_rv32_selftest()`, delegates to `logic.spl`, and exports the strong
-`rt_rv32_boot_optional_nvme_fw_selftest` hook consumed through the rv32 HAL provider:
+`entry.spl` exposes the ordinary public Pure-Simple `nvme_fw_rv32_selftest()`, delegates to
+`logic.spl`, and is selected through the stable rv32 HAL provider:
 
 1. `src/os/kernel/arch/riscv32/boot.spl` calls
    `hal_rv32_boot_optional_nvme_fw_selftest()` after `riscv_noalloc_log_init()`.
-   `optional_firmware_provider.spl` alone owns the raw extern; the C boot shim
-   supplies the weak default and this firmware entry supplies the strong override.
-2. Build the rv32 OS ELF: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
+   The source `optional_firmware_provider.spl` returns `0` for stock boots. OS firmware builds
+   generate `build/os/generated/os/kernel/arch/riscv32/optional_firmware_provider.spl`, whose
+   same HAL function calls `entry.nvme_fw_rv32_selftest()`.
+2. Build the rv32 OS ELF and generated provider override:
+   `NVME_RV32_BUILD_OS_BOOT=1 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
 3. Boot + check the marker: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs <elf>`.
 4. Check the boot wrapper fail-closed contract without QEMU:
    `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test`.
 
-`build.shs` fails closed with `NVME_RV32_BOOT_NOT_WIRED` if the boot hook is removed, so a stock
-rv32 OS image cannot be mistaken for P9 firmware evidence. `boot.shs --self-test`
+`build.shs` fails closed with `NVME_RV32_BOOT_NOT_WIRED` if the stable HAL, default provider, or
+public firmware self-test is removed, so a stock rv32 OS image cannot be mistaken for P9 firmware
+evidence. `boot.shs --self-test`
 uses a fake QEMU in a temp `PATH` and proves the wrapper accepts only the PASS
 marker without any serial `FAIL` line.
 

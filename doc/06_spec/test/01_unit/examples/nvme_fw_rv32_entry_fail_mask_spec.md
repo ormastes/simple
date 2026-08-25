@@ -79,26 +79,29 @@ expect(source).to_not_contain("fail = fail + rv32_")
 
 </details>
 
-#### keeps the build wrapper on the stock rv32 boot-hook path
+#### keeps the build wrapper on the direct compiled firmware path
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = rt_file_read_text("examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs") ?? ""
 
+expect(source).to_contain("Default mode is intentionally small")
+expect(source).to_contain("if [ \"$OS_BOOT_BUILD\" = \"1\" ]; then")
 expect(source).to_contain("$SIMPLE_BIN\" native-build --backend llvm")
-expect(source).to_contain("SIMPLE_COMPILER_PHASE_PROFILE=1")
 expect(source).to_contain("timeout -k 10s")
-expect(source).to_contain("use os.kernel.arch.riscv32.boot")
-expect(source).to_contain("use entry.")
-expect(source).to_contain("rt_rv32_boot_optional_nvme_fw_selftest")
-expect(source).to_contain("--source build/os/generated --source src --source examples/09_embedded/simpleos_nvme_fw/fw_rv32")
-expect(source).to_not_contain("fn _start():")
-expect(source).to_not_contain("fn _qemu_exit_fail():")
+expect(source).to_contain("OPTIONAL_FIRMWARE_OVERRIDE=\"$ENTRY_DIR/os/kernel/arch/riscv32/optional_firmware_provider.spl\"")
+expect(source).to_contain("use entry.{nvme_fw_rv32_selftest}")
+expect(source).to_contain("ld.lld -m elf32lriscv")
+expect(source).to_contain("SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1")
+expect(source).to_contain("--emit-object -o \"$OBJ\"")
+expect(source).to_contain("call    nvme_fw_direct_entry__nvme_fw_rv32_selftest")
+expect(source).to_contain("nvme_fw_rv32_logic_selftest()")
+expect(source).to_contain("NVME_RV32_BUILD_OS_BOOT=1")
 expect(source).to_not_contain("SIMPLE_BOOTSTRAP=1")
 expect(source).to_not_contain("--timeout \"$TIMEOUT_SECS\"")
 ```
