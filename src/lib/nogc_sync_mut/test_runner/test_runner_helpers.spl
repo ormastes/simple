@@ -7,11 +7,15 @@
 # - Test database update
 # - Feature status update from tests
 
-use std.test_runner.test_runner_types.{TestRunResult}
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
 use std.test_runner.test_runner_files.{strip_ansi}
 use std.test_runner.test_db_compat.{RunnerTestDb, load_test_db_compat, micros_to_rfc3339}
 use std.test_runner.test_db_types.{IndividualTestResult, TestStatus}
 use std.database.feature.{FeatureDatabase, FeatureStatus, Feature}
+use std.common.perf.execution_metrics.{
+    ApprovedBaseline, AnomalyPolicy, BaselineState, DecisionStatus,
+    compare_approved_baseline, decision_status_name
+}
 use compiler.core.closure_analysis.{closure_warnings_get, closure_warnings_has}
 use compiler.core.call_graph.{call_graph_warnings_get, call_graph_warnings_has}
 
@@ -255,8 +259,18 @@ fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64) -> 
             suite_name: "spec",
             category: "",
             status: status,
-            duration_ms: file_result.duration_ms.to_f64()
+            duration_ms: file_result.duration_ms.to_f64(),
+            cohort_id: file_result.cohort_id
         )
+        match file_result.resource_usage:
+            case Some(usage):
+                db.record_resource_run(
+                    run_id, file_result.path, file_result.resource_class,
+                    file_result.cohort_id, file_result.compile_ms,
+                    file_result.execution_ms, usage,
+                    file_result.budget_status, file_result.anomaly_status
+                )
+            case nil: pass
 
     db.complete_run(run_id, result.files.len(), result.total_passed, result.total_failed, result.total_timed_out)
     db.cleanup_stale_runs(48)
@@ -266,6 +280,93 @@ fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64) -> 
         case Err(reason):
             print "Warning: Could not save test database: {reason}"
             Err(reason)
+
+fn _parse_baseline_samples(encoded: text) -> [f64]:
+    var samples: [f64] = []
+    val body = encoded.trim().replace("[", "").replace("]", "")
+    if body == "":
+        return samples
+    for field in body.split(","):
+        val clean = field.trim()
+        if clean != "":
+            samples.push(clean.to_float())
+    samples
+
+fn apply_historical_anomaly_policy(result: TestRunResult) -> TestRunResult:
+    """Compare completed files with frozen cohort baselines before rendering.
+
+    Recording remains a later transaction, so the candidate can never approve
+    or move the baseline it is being compared against.
+    """
+    val loaded = load_test_db_compat()
+    var db = match loaded:
+        case Ok(value): value
+        case Err(_): return result
+    var files: [TestFileResult] = []
+    var added_failures = 0
+    val policy = AnomalyPolicy(
+        warning_relative_percent: 10,
+        warning_mad_multiplier: 3.0,
+        failure_relative_percent: 15,
+        failure_mad_multiplier: 4.0,
+        absolute_floor: 5.0
+    )
+    for file_result in result.files:
+        var anomaly_status = file_result.anomaly_status
+        var policy_error = ""
+        match db.timing_summary_for_test(file_result.path):
+            case Some(summary):
+                val samples = _parse_baseline_samples(summary.baseline_samples)
+                val cohort_matches = summary.baseline_cohort_id != "" and summary.baseline_cohort_id == file_result.cohort_id
+                if summary.has_baseline and summary.baseline_state == "approved" and cohort_matches and samples.len() > 0:
+                    val baseline = ApprovedBaseline(
+                        cohort_id: summary.baseline_cohort_id,
+                        state: BaselineState.Approved,
+                        samples: samples,
+                        generation: summary.baseline_generation
+                    )
+                    val confirmed = db.prior_anomaly_warning(file_result.path, file_result.cohort_id)
+                    val decision = compare_approved_baseline(
+                        baseline, [file_result.duration_ms.to_f64()],
+                        file_result.cohort_id, confirmed, policy
+                    )
+                    anomaly_status = decision_status_name(decision.status)
+                    if decision.status == DecisionStatus.Failure:
+                        policy_error = "PERFORMANCE REGRESSION: {decision.reason}; baseline={decision.baseline_median}ms candidate={decision.candidate_median}ms delta={decision.relative_percent}%"
+            case nil: pass
+        val policy_failed = policy_error != ""
+        if policy_failed:
+            added_failures = added_failures + 1
+        files.push(TestFileResult(
+            path: file_result.path,
+            passed: file_result.passed,
+            failed: file_result.failed + (if policy_failed: 1 else: 0),
+            skipped: file_result.skipped,
+            pending: file_result.pending,
+            duration_ms: file_result.duration_ms,
+            setup_ms: file_result.setup_ms,
+            error: if policy_failed and file_result.error == "": policy_error else: file_result.error,
+            timed_out: file_result.timed_out,
+            cached: file_result.cached,
+            compile_ms: file_result.compile_ms,
+            execution_ms: file_result.execution_ms,
+            resource_usage: file_result.resource_usage,
+            resource_class: file_result.resource_class,
+            cohort_id: file_result.cohort_id,
+            budget_status: file_result.budget_status,
+            anomaly_status: anomaly_status
+        ))
+    TestRunResult(
+        files: files,
+        total_passed: result.total_passed,
+        total_failed: result.total_failed + added_failures,
+        total_skipped: result.total_skipped,
+        total_pending: result.total_pending,
+        total_timed_out: result.total_timed_out,
+        total_duration_ms: result.total_duration_ms,
+        total_setup_ms: result.total_setup_ms,
+        total_cached: result.total_cached
+    )
 
 # =========================================================================
 # M3/H6: Update feature status from test results

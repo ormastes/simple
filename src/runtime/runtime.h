@@ -883,6 +883,30 @@ typedef struct RtOwnedProcessResultV2 {
     int32_t runtime_error;
 } RtOwnedProcessResultV2;
 
+/* Additive observation receipt. Unlike the lifecycle result above, these
+ * quantities are optional provider evidence and retain their exact meaning.
+ * peak_direct_child_rss_bytes is wait4(2) ru_maxrss converted to bytes; it is
+ * never aggregate tree RSS. Tree charge/job commit fields remain zero until a
+ * provider marks them available in evidence_flags. */
+#define RT_OWNED_PROCESS_OBSERVATION_VERSION 2
+#define RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE (1ULL << 0)
+#define RT_PROCESS_EVIDENCE_TREE_CHARGE         (1ULL << 1)
+#define RT_PROCESS_EVIDENCE_TREE_PIDS           (1ULL << 2)
+#define RT_PROCESS_EVIDENCE_SAMPLED_TREE        (1ULL << 3)
+typedef struct RtOwnedProcessObservationV1 {
+    uint64_t version;
+    uint64_t evidence_flags;
+    int64_t user_cpu_ms;
+    int64_t system_cpu_ms;
+    int64_t peak_direct_child_rss_bytes;
+    int64_t peak_tree_charge_bytes;
+    int64_t io_read_bytes;
+    int64_t io_write_bytes;
+    int64_t pids_peak;
+    int64_t termination_signal;
+    int32_t runtime_error;
+} RtOwnedProcessObservationV1;
+
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1419. NOT a bare SplArray*. */
@@ -898,9 +922,17 @@ bool      rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
                                        int64_t timeout_ms, uint64_t max_output_bytes,
                                        char* out, uint64_t out_cap, char* err,
                                        uint64_t err_cap, RtOwnedProcessReceipt* receipt);
+bool      rt_process_run_owned_observed_bounded(const char* cmd, const char* const* argv,
+                                                int64_t timeout_ms, uint64_t max_output_bytes,
+                                                char* out, uint64_t out_cap, char* err,
+                                                uint64_t err_cap, RtOwnedProcessReceipt* receipt,
+                                                RtOwnedProcessObservationV1* observation);
 int64_t*  rt_process_run_owned_bounded_value(const char* cmd, uint64_t cmd_len,
                                              SplArray* args, int64_t timeout_ms,
                                              int64_t max_output_bytes);
+int64_t*  rt_process_run_owned_observed_bounded_value(const char* cmd, uint64_t cmd_len,
+                                                      SplArray* args, int64_t timeout_ms,
+                                                      int64_t max_output_bytes);
 #ifdef _WIN32
 char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t arg_count);
 #endif
@@ -932,6 +964,8 @@ bool     rt_process_owned_cancel_v2(RtOwnedProcessTokenV2 token,
                                     RtOwnedProcessCancelReceipt* receipt);
 bool     rt_process_owned_result_v2(RtOwnedProcessTokenV2 token,
                                     RtOwnedProcessResultV2* result);
+bool     rt_process_owned_observation_v1(RtOwnedProcessTokenV2 token,
+                                         RtOwnedProcessObservationV1* observation);
 bool     rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
                                      RtOwnedProcessResultV2* result);
 

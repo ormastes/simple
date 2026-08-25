@@ -300,13 +300,13 @@ fn compile_c_runtime_sources() {
         // also declares extern "C" live in runtime_packed_span.c, also never
         // registered here.
         "runtime_packed_span.c",
-        // rt_process_run_owned_bounded_value + rt_process_owned_* (Vulkan
+        // rt_process_run_owned_bounded_value / observed sibling + rt_process_owned_* (Vulkan
         // Engine2D native-JIT blocker, doc/08_tracking/bug/
         // vulkan_engine2d_native_jit_missing_rt_struct_receiver_valid_2026-08-12.md
         // follow-up): the names are in the runtime_symbols.rs manifest and
         // declared by JIT codegen, but this list never included the source
         // file, so the JIT hit "unresolved external symbol
-        // 'rt_process_run_owned_bounded_value'" and dropped whole modules to
+        // 'rt_process_run_owned_bounded_value' (or observed sibling)" and dropped whole modules to
         // the interpreter. Its only cross-file C dependency, rt_free_deep
         // (runtime_native.c, not compiled here), is swapped for the Rust
         // rt_string_free via SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE below --

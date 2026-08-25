@@ -6,9 +6,11 @@
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output, parse_test_output}
+use std.test_runner.test_runner_metrics.{test_execution_cohort_id}
 use std.io.{file_exists, file_read}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, ExecutionScopeResult, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope}
+use std.common.perf.execution_metrics.{ResourceBudget, decision_status_name}
 use std.io_runtime.{shell}
 use std.nogc_sync_mut.jit.jit_types.{JitBinary}
 use std.nogc_sync_mut.jit.jit_util.{hex_i64}
@@ -28,6 +30,28 @@ use std.sffi.io.{file_read_bytes}
 # =========================================================================
 # Composite Platform Execution
 # =========================================================================
+
+fn run_composite_scoped(resource_class: ExecutionResourceClass, cmd: text, args: [text], timeout_ms: i64) -> ExecutionScopeResult:
+    val defaults = standard_resource_budget(resource_class)
+    val budget = ResourceBudget(
+        max_wall_ms: timeout_ms, max_cpu_ms: defaults.max_cpu_ms,
+        max_tree_charge_bytes: defaults.max_tree_charge_bytes,
+        max_direct_child_rss_bytes: defaults.max_direct_child_rss_bytes,
+        max_io_read_bytes: defaults.max_io_read_bytes,
+        max_io_write_bytes: defaults.max_io_write_bytes,
+        max_pids: defaults.max_pids, max_fds: defaults.max_fds)
+    run_in_execution_resource_scope(
+        execution_resource_scope_with_budget(resource_class, budget, TEST_OUTPUT_CAPTURE_BYTES),
+        cmd, args)
+
+fn attach_composite_scope(result: TestFileResult, scoped: ExecutionScopeResult, resource_class: text, duration_ms: i64, file_path: text, options: TestOptions) -> TestFileResult:
+    result.execution_ms = duration_ms
+    result.resource_usage = scoped.process.usage
+    result.resource_class = resource_class
+    result.cohort_id = test_execution_cohort_id(file_path, options)
+    result.budget_status = decision_status_name(scoped.budget_decision.status)
+    result.anomaly_status = "provisional"
+    result
 
 fn run_test_file_composite(file_path: text, options: TestOptions, spec: text) -> TestFileResult:
     """Execute test in composite platform mode."""
@@ -206,12 +230,12 @@ fn run_test_file_baremetal_via_interpreter(file_path: text, options: TestOptions
     val setup_ms = (setup_end - setup_start) / 1000
 
     val test_start = time_now_unix_micros()
-    val (stdout, stderr, exit_code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    val scoped = run_composite_scoped(ExecutionResourceClass.System, binary, child_args, timeout_ms)
     val test_end = time_now_unix_micros()
     val duration_ms = (test_end - test_start) / 1000
-    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    var result = make_result_from_output(file_path, scoped.process.stdout, scoped.process.stderr, scoped.process.usage.exit_code, duration_ms, options.timeout)
     result.setup_ms = setup_ms
-    result
+    attach_composite_scope(result, scoped, "system", duration_ms, file_path, options)
 
 fn find_baremetal_elf(spec_file: text, arch: text) -> text:
     """Find prebuilt ELF for a baremetal spec file."""
@@ -262,18 +286,18 @@ fn run_test_file_baremetal_ghdl(file_path: text, options: TestOptions, elf_path:
 
     val timeout_ms = timeout_secs * 1000
     val test_start = time_now_unix_micros()
-    val (stdout, stderr, exit_code) = process_run_bounded(
+    val scoped = run_composite_scoped(
+        ExecutionResourceClass.System,
         "bash",
         ["src/lib/nogc_async_mut_noalloc/baremetal/ghdl_runner.shs", elf_path, "--timeout={timeout_secs}"],
-        timeout_ms,
-        TEST_OUTPUT_CAPTURE_BYTES
+        timeout_ms
     )
     val test_end = time_now_unix_micros()
     val duration_ms = (test_end - test_start) / 1000
 
-    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
+    var result = make_result_from_output(file_path, scoped.process.stdout, scoped.process.stderr, scoped.process.usage.exit_code, duration_ms, timeout_secs)
     result.setup_ms = setup_ms
-    result
+    attach_composite_scope(result, scoped, "system", duration_ms, file_path, options)
 
 fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: text, elf_path: text) -> TestFileResult:
     """Execute a prebuilt ELF on QEMU with semihosting and parse results."""
@@ -301,14 +325,14 @@ fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: tex
 
     val timeout_ms = options.timeout * 1000
     val test_start = time_now_unix_micros()
-    val (stdout, stderr, exit_code) = process_run_bounded(qemu_bin, qemu_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    val scoped = run_composite_scoped(ExecutionResourceClass.Qemu, qemu_bin, qemu_args, timeout_ms)
     val test_end = time_now_unix_micros()
     val duration_ms = (test_end - test_start) / 1000
 
     # Parse SPipe-format output from QEMU semihosting
-    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    var result = make_result_from_output(file_path, scoped.process.stdout, scoped.process.stderr, scoped.process.usage.exit_code, duration_ms, options.timeout)
     result.setup_ms = setup_ms
-    result
+    attach_composite_scope(result, scoped, "qemu", duration_ms, file_path, options)
 
 # =========================================================================
 # GPU lane dispatch — wires remote(cuda(...))/remote(vulkan(...)) to the

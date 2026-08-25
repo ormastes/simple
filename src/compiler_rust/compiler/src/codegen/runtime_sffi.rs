@@ -1504,6 +1504,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Lost together with that C file in the tree-wipe restore ae55a746719; without
     // this spec resolve_runtime_func drops whole modules to the interpreter.
     RuntimeFuncSpec::new("rt_process_run_owned_bounded_value", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_process_run_owned_observed_bounded_value",
+        &[I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     // rt_process_is_running(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
     // rt_process_wait(pid, timeout_ms) -> exit_code
@@ -2375,6 +2380,11 @@ mod tests {
         let spec = spec_for("rt_process_run_owned_bounded_value").expect("owned process runtime spec");
         assert_eq!(spec.params, [I64, I64, I64, I64, I64]);
         assert_eq!(spec.returns, [I64]);
+
+        let observed = spec_for("rt_process_run_owned_observed_bounded_value")
+            .expect("observed process runtime spec");
+        assert_eq!(observed.params, [I64, I64, I64, I64, I64]);
+        assert_eq!(observed.returns, [I64]);
     }
 
     #[test]

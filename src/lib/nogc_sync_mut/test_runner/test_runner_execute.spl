@@ -1,3 +1,4 @@
+#![allow(large_file)]  # Intentional: cohesive core interpreter/SMF/native/safe execution owner; splitting changes bootstrap symbol wiring.
 # Test Runner Execution
 #
 # Core test execution modes: interpreter, SMF, native, and safe mode.
@@ -16,13 +17,16 @@ use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_decision_manifest_sdn}
+use std.test_runner.test_runner_metrics.{test_resource_class, test_execution_cohort_id}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{env_set, env_get}
 use std.io.{random_hex}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_size_raw, file_modified_time}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_with_limits_bounded, ProcessResult}
+use std.nogc_sync_mut.io.process_ops.{ProcessResult}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope}
+use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, ResourceBudget, DecisionStatus, TerminationCause, evaluate_resource_budget, decision_status_name}
 
 # Import from split-out files (same directory, but need use for re-export)
 use std.test_runner.test_executor_parsing.{
@@ -46,6 +50,92 @@ use std.test_runner.test_executor_parsing.{
 export use nogc_sync_mut.test_runner.test_executor_parsing.{
     extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks
 }
+
+struct ScopedChildRun:
+    result: ProcessResult
+    usage: ResourceUsage?
+    budget_status: text
+
+fn _run_scoped_child(resource_class: ExecutionResourceClass, cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_ms: i64, max_fds: i64, max_pids: i64, enforce_class_defaults: bool) -> ScopedChildRun:
+    val defaults = standard_resource_budget(resource_class)
+    val effective_memory = if memory_bytes > 0: memory_bytes elif enforce_class_defaults: defaults.max_tree_charge_bytes else: 0
+    val effective_cpu = if cpu_ms > 0: cpu_ms elif enforce_class_defaults: defaults.max_cpu_ms else: 0
+    val effective_fds = if max_fds > 0: max_fds elif enforce_class_defaults: defaults.max_fds else: 0
+    val effective_pids = if max_pids > 0: max_pids elif enforce_class_defaults: defaults.max_pids else: 0
+    val budget = ResourceBudget(
+        max_wall_ms: timeout_ms, max_cpu_ms: effective_cpu,
+        max_tree_charge_bytes: effective_memory, max_direct_child_rss_bytes: effective_memory,
+        max_io_read_bytes: if enforce_class_defaults: defaults.max_io_read_bytes else: 0,
+        max_io_write_bytes: if enforce_class_defaults: defaults.max_io_write_bytes else: 0,
+        max_pids: effective_pids,
+        max_fds: effective_fds)
+    val scope = execution_resource_scope_with_budget(resource_class, budget, TEST_OUTPUT_CAPTURE_BYTES)
+    val scoped = run_in_execution_resource_scope(scope, cmd, args)
+    val termination = scoped.process.usage.termination
+    val limit_type = if (termination == TerminationCause.MemoryMax or
+            (scoped.budget_decision.status == DecisionStatus.Failure and scoped.budget_decision.reason.contains("memory"))):
+        "memory"
+    elif (termination == TerminationCause.ProcessLimit or
+            (scoped.budget_decision.status == DecisionStatus.Failure and scoped.budget_decision.reason.contains("process"))):
+        "procs"
+    elif termination == TerminationCause.CpuLimit:
+        "cpu"
+    elif termination == TerminationCause.WallTimeout:
+        "timeout"
+    elif effective_fds > 0 and scoped.process.stderr.lower().contains("too many open files"):
+        "fds"
+    elif scoped.budget_decision.status == DecisionStatus.Failure:
+        "budget"
+    else:
+        ""
+    ScopedChildRun(
+        result: ProcessResult(stdout: scoped.process.stdout, stderr: scoped.process.stderr,
+            exit_code: scoped.process.usage.exit_code, limit_exceeded: limit_type != "", limit_type: limit_type),
+        usage: scoped.process.usage,
+        budget_status: decision_status_name(scoped.budget_decision.status))
+
+fn _attach_scope_evidence(result: TestFileResult, usage: ResourceUsage?, budget_status: text, file_path: text, options: TestOptions, compile_ms: i64 = 0, execution_ms: i64 = 0) -> TestFileResult:
+    TestFileResult(
+        path: result.path, passed: result.passed, failed: result.failed,
+        skipped: result.skipped, pending: result.pending,
+        duration_ms: result.duration_ms, setup_ms: result.setup_ms,
+        error: result.error, timed_out: result.timed_out, cached: result.cached,
+        compile_ms: compile_ms, execution_ms: execution_ms,
+        resource_usage: usage,
+        resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
+        cohort_id: test_execution_cohort_id(file_path, options),
+        budget_status: budget_status, anomaly_status: "provisional")
+
+fn _combine_usage(first: ResourceUsage?, second: ResourceUsage?) -> ResourceUsage?:
+    val left = match first:
+        case Some(value): value
+        case nil: return second
+    val right = match second:
+        case Some(value): value
+        case nil: return first
+    val quality = if left.evidence_quality == ResourceEvidenceQuality.Unavailable or right.evidence_quality == ResourceEvidenceQuality.Unavailable:
+        ResourceEvidenceQuality.Unavailable
+    elif left.evidence_quality == ResourceEvidenceQuality.ExactTree and right.evidence_quality == ResourceEvidenceQuality.ExactTree:
+        ResourceEvidenceQuality.ExactTree
+    elif left.evidence_quality == ResourceEvidenceQuality.SampledTree or right.evidence_quality == ResourceEvidenceQuality.SampledTree:
+        ResourceEvidenceQuality.SampledTree
+    else:
+        ResourceEvidenceQuality.ExactDirectChild
+    ResourceUsage(
+        wall_ms: left.wall_ms + right.wall_ms,
+        user_cpu_ms: left.user_cpu_ms + right.user_cpu_ms,
+        system_cpu_ms: left.system_cpu_ms + right.system_cpu_ms,
+        peak_tree_charge_bytes: if left.peak_tree_charge_bytes > right.peak_tree_charge_bytes: left.peak_tree_charge_bytes else: right.peak_tree_charge_bytes,
+        peak_direct_child_rss_bytes: if left.peak_direct_child_rss_bytes > right.peak_direct_child_rss_bytes: left.peak_direct_child_rss_bytes else: right.peak_direct_child_rss_bytes,
+        heap_live_end_bytes: right.heap_live_end_bytes,
+        heap_peak_bytes: if left.heap_peak_bytes > right.heap_peak_bytes: left.heap_peak_bytes else: right.heap_peak_bytes,
+        io_read_bytes: left.io_read_bytes + right.io_read_bytes,
+        io_write_bytes: left.io_write_bytes + right.io_write_bytes,
+        pids_peak: if left.pids_peak > right.pids_peak: left.pids_peak else: right.pids_peak,
+        evidence_quality: quality,
+        termination: if left.termination != TerminationCause.Exited: left.termination else: right.termination,
+        signal: if left.signal != 0: left.signal else: right.signal,
+        exit_code: if left.exit_code != 0: left.exit_code else: right.exit_code)
 
 use std.io_runtime.{getpid}
 extern fn rt_file_create_excl(path: text, content: text) -> bool
@@ -75,6 +165,7 @@ fn limit_exceeded_message(result: ProcessResult, options: TestOptions) -> text:
         case "cpu": "TERMINATED: CPU time limit exceeded (unverified)"
         case "fds": "File descriptor limit exceeded"
         case "timeout": "TIMEOUT: Timed out under resource limits (unverified)"
+        case "budget": "Declared resource budget exceeded"
         case _: "Resource limit exceeded ({result.limit_type})"
 
 # =========================================================================
@@ -83,7 +174,7 @@ fn limit_exceeded_message(result: ProcessResult, options: TestOptions) -> text:
 #
 # PER-SPEC PROCESS ISOLATION IS UNCONDITIONAL AND IS NOT A MODE FEATURE.
 # Every run_test_file_* variant below spawns the spec in its OWN child process
-# (process_run_bounded / process_run_with_limits_bounded) regardless of
+# (run_in_execution_resource_scope) regardless of
 # `options.unstable_mode`. This file reads `unstable_mode` NOWHERE, by design:
 # isolation is a PRECONDITION of the outcome contract, not a toggle. The
 # classes CRASHED / TERMINATED / TIMEOUT are derived from a child's exit code
@@ -105,7 +196,10 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     # Fork mode: use fork() + COW instead of subprocess spawn (Linux only)
     # Fork output does not yet carry child coverage payloads back to the parent.
     if options.fork_mode and not options.coverage:
-        return run_test_file_fork(file_path, options)
+        val fork_result = run_test_file_fork(file_path, options)
+        return _attach_scope_evidence(fork_result, fork_result.resource_usage,
+            fork_result.budget_status, file_path, options,
+            execution_ms: fork_result.execution_ms)
 
     # Session setup phase — not counted toward test duration
     val setup_start = time_now_unix_micros()
@@ -178,33 +272,36 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     var stdout = ""
     var stderr = ""
     var exit_code = 0
-    if (options.max_mem_gb > 0 or options.max_procs > 0) and not options.no_limits:
-        val memory_bytes = if options.max_mem_gb > 0: options.max_mem_gb * 1024 * 1024 * 1024 else: 0
-        val result = process_run_with_limits_bounded(binary, child_args, timeout_ms, memory_bytes, 0, 0, options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
-        stdout = result.stdout
-        stderr = result.stderr
-        exit_code = result.exit_code
-        if result.limit_exceeded:
-            val end2 = time_now_unix_micros()
-            val dur = (end2 - start) / 1000
-            if cleanup_path != "" and not options.keep_artifacts:
-                if file_exists(cleanup_path):
-                    file_delete(cleanup_path)
-            if infix_path != file_path and not options.keep_artifacts:
-                if file_exists(infix_path):
-                    file_delete(infix_path)
-            if evidence_path != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
-                return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                    duration_ms: dur, setup_ms: setup_ms, error: "test-runner: cannot restore structured result environment", timed_out: false, cached: false)
-            if evidence_path != "" and file_exists(evidence_path):
-                file_delete(evidence_path)
-            return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
-                duration_ms: dur, setup_ms: setup_ms, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false)
-    else:
-        val (out, err, code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
-        stdout = out
-        stderr = err
-        exit_code = code
+    var observed_usage: ResourceUsage? = nil
+    var budget_status = "incomplete"
+    val memory_bytes = if (options.max_mem_gb > 0 and not options.no_limits): options.max_mem_gb * 1024 * 1024 * 1024 else: 0
+    val max_pids = if options.no_limits: 0 else: options.max_procs
+    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, child_args, timeout_ms, memory_bytes, 0, 0, max_pids, not options.no_limits)
+    stdout = scoped_child.result.stdout
+    stderr = scoped_child.result.stderr
+    exit_code = scoped_child.result.exit_code
+    observed_usage = scoped_child.usage
+    budget_status = scoped_child.budget_status
+    if scoped_child.result.limit_exceeded:
+        val result = scoped_child.result
+        val end2 = time_now_unix_micros()
+        val dur = (end2 - start) / 1000
+        if cleanup_path != "" and not options.keep_artifacts:
+            if file_exists(cleanup_path):
+                file_delete(cleanup_path)
+        if infix_path != file_path and not options.keep_artifacts:
+            if file_exists(infix_path):
+                file_delete(infix_path)
+        if evidence_path != "" and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: dur, setup_ms: setup_ms, error: "test-runner: cannot restore structured result environment", timed_out: false, cached: false)
+        if evidence_path != "" and file_exists(evidence_path):
+            file_delete(evidence_path)
+        return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
+            duration_ms: dur, setup_ms: setup_ms, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false,
+            execution_ms: dur, resource_usage: observed_usage,
+            resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
+            cohort_id: test_execution_cohort_id(file_path, options), budget_status: budget_status, anomaly_status: "incomplete")
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
     var compiler_manifest_error = ""
@@ -253,7 +350,13 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         error: result.error, timed_out: result.timed_out, cached: result.cached,
         mcdc_evidence_v1: result.mcdc_evidence_v1,
         blocked: result.blocked, unsupported: result.unsupported,
-        omission_evidence: result.omission_evidence
+        omission_evidence: result.omission_evidence,
+        execution_ms: duration_ms,
+        resource_usage: observed_usage,
+        resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
+        cohort_id: test_execution_cohort_id(file_path, options),
+        budget_status: budget_status,
+        anomaly_status: "provisional"
     )
 
 # A completed .smf artifact (SMF header + trailer + at least some code) is
@@ -294,22 +397,19 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
         var stdout = ""
         var stderr = ""
         var exit_code = 0
-        if (options.max_mem_gb > 0 or options.max_procs > 0) and not options.no_limits:
-            val memory_bytes = if options.max_mem_gb > 0: options.max_mem_gb * 1024 * 1024 * 1024 else: 0
-            val result = process_run_with_limits_bounded(binary, run_args, timeout_ms, memory_bytes, 0, 0, options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
-            stdout = result.stdout
-            stderr = result.stderr
-            exit_code = result.exit_code
-            if result.limit_exceeded:
-                val end2 = time_now_unix_micros()
-                val dur = (end2 - start) / 1000
-                return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
-                    duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false)
-        else:
-            val (out, err, code) = process_run_bounded(binary, run_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
-            stdout = out
-            stderr = err
-            exit_code = code
+        val memory_bytes = if (options.max_mem_gb > 0 and not options.no_limits): options.max_mem_gb * 1024 * 1024 * 1024 else: 0
+        val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, run_args, timeout_ms, memory_bytes, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+        stdout = scoped_child.result.stdout
+        stderr = scoped_child.result.stderr
+        exit_code = scoped_child.result.exit_code
+        if scoped_child.result.limit_exceeded:
+            val end2 = time_now_unix_micros()
+            val dur = (end2 - start) / 1000
+            return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(scoped_child.result.limit_type): 0 else: 1, skipped: 0, pending: 0,
+                duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(scoped_child.result, options), timed_out: scoped_child.result.limit_type.contains("timeout"), cached: false,
+                execution_ms: dur, resource_usage: scoped_child.usage,
+                resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
+                cohort_id: test_execution_cohort_id(file_path, options), budget_status: scoped_child.budget_status, anomaly_status: "incomplete")
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         if options.coverage:
@@ -318,7 +418,8 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
             record_coverage_sdn(sdn)
             stdout = strip_coverage_blocks(stdout)
             stderr = strip_coverage_blocks(stderr)
-        return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+        val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+        return _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
 
     # No precompiled artifact exists. Compile to SMF instead of silently
     # falling back to source execution.
@@ -335,14 +436,15 @@ fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileRe
         run_args.push("--gc-log")
     if options.gc_off:
         run_args.push("--gc=off")
-    val result = process_run_with_limits_bounded(binary, run_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
-    val stdout = result.stdout
-    val stderr = result.stderr
-    val exit_code = result.exit_code
+    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, run_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    val stdout = scoped_child.result.stdout
+    val stderr = scoped_child.result.stderr
+    val exit_code = scoped_child.result.exit_code
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
-    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
 
 fn spipe_inline_helpers() -> text:
     "# === spipe inline helpers (compile-mode only) ===\n" +
@@ -766,7 +868,10 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         compile_args.push("--verbose")
         print "[native] Compiling {file_path} to {smf_path}"
 
-    val compile_result = process_run_with_limits_bounded(binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
+    val compile_started = time_now_unix_micros()
+    val compile_scoped = _run_scoped_child(test_resource_class(file_path), binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    val compile_ms = (time_now_unix_micros() - compile_started) / 1000
+    val compile_result = compile_scoped.result
     val compile_stdout = compile_result.stdout
     val compile_stderr = compile_result.stderr
     val compile_exit = compile_result.exit_code
@@ -787,7 +892,10 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             setup_ms: 0,
             error: error_msg,
             timed_out: false,
-            cached: false
+            cached: false,
+            compile_ms: compile_ms, resource_usage: compile_scoped.usage,
+            resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
+            cohort_id: test_execution_cohort_id(file_path, options), budget_status: compile_scoped.budget_status, anomaly_status: "incomplete"
         )
 
     if options.coverage:
@@ -857,25 +965,23 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     var stdout = ""
     var stderr = ""
     var exit_code = 0
-    if (options.max_mem_gb > 0 or options.max_procs > 0) and not options.no_limits:
-        val memory_bytes = if options.max_mem_gb > 0: options.max_mem_gb * 1024 * 1024 * 1024 else: 0
-        val result = process_run_with_limits_bounded(run_binary, run_args, timeout_ms, memory_bytes, 0, 0, options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
-        stdout = result.stdout
-        stderr = result.stderr
-        exit_code = result.exit_code
-        if result.limit_exceeded:
-            val end2 = time_now_unix_micros()
-            val dur = (end2 - start) / 1000
-            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
-            if mcdc_manifest_path != "":
-                if not options.keep_artifacts and file_exists(mcdc_manifest_path): file_delete(mcdc_manifest_path)
-            return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
-                duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false)
-    else:
-        val (out, err, code) = process_run_bounded(run_binary, run_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
-        stdout = out
-        stderr = err
-        exit_code = code
+    val memory_bytes = if (options.max_mem_gb > 0 and not options.no_limits): options.max_mem_gb * 1024 * 1024 * 1024 else: 0
+    val run_started = time_now_unix_micros()
+    val run_scoped = _run_scoped_child(test_resource_class(file_path), run_binary, run_args, timeout_ms, memory_bytes, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    val execution_ms = (time_now_unix_micros() - run_started) / 1000
+    stdout = run_scoped.result.stdout
+    stderr = run_scoped.result.stderr
+    exit_code = run_scoped.result.exit_code
+    if run_scoped.result.limit_exceeded:
+        val end2 = time_now_unix_micros()
+        val dur = (end2 - start) / 1000
+        cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+        return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(run_scoped.result.limit_type): 0 else: 1, skipped: 0, pending: 0,
+            duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(run_scoped.result, options), timed_out: run_scoped.result.limit_type.contains("timeout"), cached: false,
+            compile_ms: compile_ms, execution_ms: execution_ms,
+            resource_usage: _combine_usage(compile_scoped.usage, run_scoped.usage),
+            resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
+            cohort_id: test_execution_cohort_id(file_path, options), budget_status: run_scoped.budget_status, anomaly_status: "incomplete")
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
@@ -892,7 +998,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         stdout = strip_coverage_blocks(stdout)
         stderr = strip_coverage_blocks(stderr)
 
-    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    _attach_scope_evidence(base_result, _combine_usage(compile_scoped.usage, run_scoped.usage), run_scoped.budget_status, file_path, options, compile_ms, execution_ms)
 
 fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResult:
     """Compile mode: compile test file to .smf and run it.
@@ -918,9 +1025,8 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
     if options.gc_off:
         run_args.push("--gc=off")
 
-    val result = process_run_with_limits_bounded(
-        binary, run_args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs, TEST_OUTPUT_CAPTURE_BYTES
-    )
+    val scoped_child = _run_scoped_child(ExecutionResourceClass.System, binary, run_args, timeout_ms, memory_bytes, cpu_seconds * 1000, max_fds, max_procs, true)
+    val result = scoped_child.result
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
@@ -935,10 +1041,14 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
             setup_ms: 0,
             error: "Resource limit exceeded: {result.limit_type}",
             timed_out: result.limit_type.contains("timeout"),
-            cached: false
+            cached: false,
+            execution_ms: duration_ms, resource_usage: scoped_child.usage,
+            resource_class: "safe", cohort_id: test_execution_cohort_id(file_path, options),
+            budget_status: scoped_child.budget_status, anomaly_status: "incomplete"
         )
 
-    make_result_from_output(file_path, result.stdout, result.stderr, result.exit_code, duration_ms, options.timeout)
+    val base_result = make_result_from_output(file_path, result.stdout, result.stderr, result.exit_code, duration_ms, options.timeout)
+    _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
 
 # =========================================================================
 # Exports - includes re-exports from split-out files for backward compat

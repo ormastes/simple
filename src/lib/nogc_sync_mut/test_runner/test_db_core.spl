@@ -11,7 +11,7 @@ use std.test_runner.test_db_types.{TestStatus, FileRecord, SuiteRecord, TestReco
 use std.test_runner.test_db_io.{DB_PATH, RUNS_PATH, read_db_file, write_db_file_locked}
 use std.test_runner.test_db_parser.{parse_stable_db, parse_volatile_db, ParsedStableDb, ParsedVolatileDb}
 use std.test_runner.test_db_serializer.{serialize_stable_db, serialize_volatile_db}
-use std.test_runner.test_stats.{compute_statistics, compute_percentiles, detect_outliers_iqr, sort_f64, percentile_at, abs_f64, detect_flaky_test}
+use std.test_runner.test_stats.{compute_statistics, compute_percentiles, detect_outliers_iqr, sort_f64, percentile_at, detect_flaky_test}
 
 # Excess timing-run entries tolerated before one full prune pass runs.
 # Bounds the amortized cost of cap_timing_runs to O(1) per update.
@@ -400,7 +400,6 @@ impl RunnerTestDbCore:
         if self._timing_index.has(name_str):
             val i = self._timing_index[name_str]
             var ts = self.timing[i]
-            val old_baseline = ts.baseline_median
             ts.last_ms = duration_ms
             ts.p50 = stats.p50
             ts.p90 = stats.p90
@@ -412,25 +411,7 @@ impl RunnerTestDbCore:
             ts.mean = stats.mean
             ts.std_dev = stats.std_dev
             ts.cv_pct = stats.cv_pct
-            # C6: Baseline recomputation with change detection
-            if old_baseline == 0.0 or old_baseline < 0.001:
-                ts.baseline_median = stats.p50
-                ts.baseline_mean = stats.mean
-                ts.baseline_std_dev = stats.std_dev
-                ts.baseline_cv_pct = stats.cv_pct
-                ts.baseline_last_updated = now_str
-                ts.baseline_run_count = stats.count
-                ts.baseline_update_reason = "initial"
-            else:
-                val change_ratio = abs_f64(stats.p50 - old_baseline) / old_baseline
-                if change_ratio > config.baseline_change_threshold:
-                    ts.baseline_median = stats.p50
-                    ts.baseline_mean = stats.mean
-                    ts.baseline_std_dev = stats.std_dev
-                    ts.baseline_cv_pct = stats.cv_pct
-                    ts.baseline_last_updated = now_str
-                    ts.baseline_run_count = stats.count
-                    ts.baseline_update_reason = "threshold_exceeded"
+            # Observation updates deliberately preserve approved baseline fields.
             self.timing[i] = ts
         else:
             val idx = self.timing.len()
@@ -440,7 +421,7 @@ impl RunnerTestDbCore:
                 p50: stats.p50,
                 p90: stats.p90,
                 p95: stats.p95,
-                baseline_median: stats.p50,
+                baseline_median: 0.0,
                 p99: stats.p99,
                 min_time: stats.min,
                 max_time: stats.max,
@@ -448,14 +429,30 @@ impl RunnerTestDbCore:
                 mean: stats.mean,
                 std_dev: stats.std_dev,
                 cv_pct: stats.cv_pct,
-                baseline_mean: stats.mean,
-                baseline_std_dev: stats.std_dev,
-                baseline_cv_pct: stats.cv_pct,
-                baseline_last_updated: now_str,
-                baseline_run_count: stats.count,
-                baseline_update_reason: "initial"
+                baseline_mean: 0.0,
+                baseline_std_dev: 0.0,
+                baseline_cv_pct: 0.0,
+                baseline_last_updated: "",
+                baseline_run_count: 0,
+                baseline_update_reason: "provisional"
             ))
             self._timing_index[name_str] = idx
+
+    me promote_timing_baseline(name_str: i64) -> bool:
+        if not self._timing_index.has(name_str):
+            return false
+        val i = self._timing_index[name_str]
+        var ts = self.timing[i]
+        ts.baseline_median = ts.p50
+        ts.baseline_mean = ts.mean
+        ts.baseline_std_dev = ts.std_dev
+        ts.baseline_cv_pct = ts.cv_pct
+        ts.baseline_last_updated = micros_to_rfc3339(time_now_unix_micros())
+        ts.baseline_run_count = self.collect_timing_runs(name_str).len()
+        ts.baseline_update_reason = "explicit_promotion"
+        self.timing[i] = ts
+        self.dirty = true
+        true
 
     # Amortized cap: counts come from the index, and the O(all runs) rebuild
     # happens once per PRUNE_BATCH excess entries instead of once per update.

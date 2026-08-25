@@ -31,10 +31,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef __linux__
+#include <dirent.h>
+#include <ctype.h>
 #include <sys/syscall.h>
 #endif
 
@@ -44,6 +47,59 @@
 #define RT_OWNED_DRAIN_QUANTUM (64U * 1024U)
 #define RT_OWNED_ABI_MAX_TIMEOUT_MS 3600000
 #define RT_OWNED_ABI_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
+
+#ifdef __linux__
+typedef struct RtOwnedTreeSample {
+    int64_t charge_bytes;
+    int64_t io_read_bytes;
+    int64_t io_write_bytes;
+    int64_t pids;
+} RtOwnedTreeSample;
+
+static int64_t owned_proc_counter(pid_t member, const char* file, const char* key,
+                                  uint64_t multiplier) {
+    char path[96];
+    int path_len = snprintf(path, sizeof(path), "/proc/%ld/%s", (long)member, file);
+    if (path_len <= 0 || (size_t)path_len >= sizeof(path)) return 0;
+    FILE* stream = fopen(path, "r");
+    if (!stream) return 0;
+    char line[256];
+    int64_t value = 0;
+    size_t key_len = strlen(key);
+    while (fgets(line, sizeof(line), stream)) {
+        if (strncmp(line, key, key_len) == 0) {
+            unsigned long long parsed = 0;
+            if (sscanf(line + key_len, "%llu", &parsed) == 1 &&
+                multiplier > 0 && parsed <= (unsigned long long)INT64_MAX / multiplier)
+                value = (int64_t)(parsed * multiplier);
+            break;
+        }
+    }
+    fclose(stream);
+    return value;
+}
+
+static RtOwnedTreeSample owned_sample_process_group(pid_t pgid) {
+    RtOwnedTreeSample sample = {0, 0, 0, 0};
+    DIR* proc = opendir("/proc");
+    if (!proc) return sample;
+    struct dirent* entry;
+    while ((entry = readdir(proc)) != NULL) {
+        if (!isdigit((unsigned char)entry->d_name[0])) continue;
+        char* end = NULL;
+        long raw_pid = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || raw_pid <= 0 || raw_pid > INT_MAX) continue;
+        pid_t member = (pid_t)raw_pid;
+        if (getpgid(member) != pgid) continue;
+        sample.pids++;
+        sample.charge_bytes += owned_proc_counter(member, "status", "VmRSS:", 1024);
+        sample.io_read_bytes += owned_proc_counter(member, "io", "read_bytes:", 1);
+        sample.io_write_bytes += owned_proc_counter(member, "io", "write_bytes:", 1);
+    }
+    closedir(proc);
+    return sample;
+}
+#endif
 
 /* Output is owned by the lease, never by a transient poll caller.  A single
  * bounded record array preserves the interleaving source while separate read
@@ -104,6 +160,8 @@ typedef struct RtOwnedSlot {
     int identity_revalidated;
     int reaped;
     int runtime_error;
+    struct rusage child_usage;
+    int child_usage_available;
     int retired;
     int op_refs;
     int collecting;
@@ -152,6 +210,21 @@ static int64_t owned_now_ms(void) {
 
 static uint64_t owned_add_sat(uint64_t a, uint64_t b) {
     return UINT64_MAX - a < b ? UINT64_MAX : a + b;
+}
+
+static int64_t owned_timeval_ms(struct timeval value) {
+    if (value.tv_sec > INT64_MAX / 1000) return INT64_MAX;
+    return (int64_t)value.tv_sec * 1000 + value.tv_usec / 1000;
+}
+
+static int64_t owned_direct_child_rss_bytes(const struct rusage* usage) {
+#if defined(__APPLE__)
+    return usage->ru_maxrss < 0 ? 0 : (int64_t)usage->ru_maxrss;
+#else
+    if (usage->ru_maxrss <= 0) return 0;
+    if ((uint64_t)usage->ru_maxrss > (uint64_t)INT64_MAX / 1024U) return INT64_MAX;
+    return (int64_t)usage->ru_maxrss * 1024;
+#endif
 }
 
 static uint64_t owned_start_identity(pid_t pid) {
@@ -590,9 +663,11 @@ static enum OwnedSignalOutcome owned_async_signal_or_reap(RtOwnedSlot* slot, int
     while (rc < 0 && errno == EINTR);
     if (rc == 0 && info.si_pid == slot->pid) {
         (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, SIGKILL);
-        pid_t waited; do waited = waitpid(slot->pid, &slot->status, 0);
+        memset(&slot->child_usage, 0, sizeof(slot->child_usage));
+        pid_t waited; do waited = wait4(slot->pid, &slot->status, 0, &slot->child_usage);
         while (waited < 0 && errno == EINTR);
         if (waited == slot->pid) {
+            slot->child_usage_available = 1;
             slot->reaped = 1;
             slot->drain_deadline_ms = now + RT_OWNED_POST_REAP_DRAIN_MS;
             return OWNED_SIGNAL_REAPED;
@@ -742,8 +817,10 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
     int64_t now = owned_now_ms();
     if (wr == 0 && info.si_pid == slot->pid && !slot->reaped) {
         (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, SIGKILL);
-        pid_t waited; do waited = waitpid(slot->pid, &slot->status, 0); while (waited < 0 && errno == EINTR);
+        memset(&slot->child_usage, 0, sizeof(slot->child_usage));
+        pid_t waited; do waited = wait4(slot->pid, &slot->status, 0, &slot->child_usage); while (waited < 0 && errno == EINTR);
         if (waited == slot->pid) {
+            slot->child_usage_available = 1;
             slot->reaped = 1;
             slot->drain_deadline_ms = now + RT_OWNED_POST_REAP_DRAIN_MS;
             if (slot->runtime_error == ESTALE) slot->runtime_error = 0;
@@ -850,6 +927,37 @@ bool rt_process_owned_result_v2(RtOwnedProcessTokenV2 token,
 #endif
 }
 
+bool rt_process_owned_observation_v1(RtOwnedProcessTokenV2 token,
+                                     RtOwnedProcessObservationV1* observation) {
+    if (!observation) return false;
+    memset(observation, 0, sizeof(*observation));
+    observation->version = RT_OWNED_PROCESS_OBSERVATION_VERSION;
+#ifndef __linux__
+    (void)token; observation->runtime_error = ENOTSUP; return false;
+#else
+    RtOwnedSlot* slot = owned_token_acquire(token, NULL);
+    if (!slot) { observation->runtime_error = ESTALE; return false; }
+    pthread_mutex_lock(slot->state_lock);
+    if (slot->state != 2) {
+        pthread_mutex_unlock(slot->state_lock); owned_token_release(slot);
+        observation->runtime_error = EAGAIN; return false;
+    }
+    if (slot->child_usage_available) {
+        observation->evidence_flags |= RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE;
+        observation->user_cpu_ms = owned_timeval_ms(slot->child_usage.ru_utime);
+        observation->system_cpu_ms = owned_timeval_ms(slot->child_usage.ru_stime);
+        observation->peak_direct_child_rss_bytes = owned_direct_child_rss_bytes(&slot->child_usage);
+        /* ru_inblock/ru_oublock count operations, not bytes. Keep byte fields
+         * unavailable instead of relabeling unlike evidence. */
+    }
+    if (slot->reaped && WIFSIGNALED(slot->status)) {
+        observation->termination_signal = WTERMSIG(slot->status);
+    }
+    pthread_mutex_unlock(slot->state_lock); owned_token_release(slot);
+    return true;
+#endif
+}
+
 bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
                                  RtOwnedProcessResultV2* result) {
     if (!result) return false;
@@ -902,27 +1010,37 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
 #endif
 }
 
-bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
-                                  int64_t timeout_ms, uint64_t max_output_bytes,
-                                  char* out, uint64_t out_cap,
-                                  char* err, uint64_t err_cap,
-                                  RtOwnedProcessReceipt* receipt) {
+static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
+                                   int64_t timeout_ms, uint64_t max_output_bytes,
+                                   char* out, uint64_t out_cap,
+                                   char* err, uint64_t err_cap,
+                                   RtOwnedProcessReceipt* receipt,
+                                   RtOwnedProcessObservationV1* observation) {
     if (!receipt) return false;
     memset(receipt, 0, sizeof(*receipt));
+    if (observation) {
+        memset(observation, 0, sizeof(*observation));
+        observation->version = RT_OWNED_PROCESS_OBSERVATION_VERSION;
+    }
     receipt->version = RT_OWNED_PROCESS_RECEIPT_VERSION;
     receipt->exit_code = -1;
     if (!cmd || !argv || timeout_ms <= 0 ||
         (out_cap && !out) || (err_cap && !err)) {
         receipt->runtime_error = EINVAL;
+        if (observation) observation->runtime_error = EINVAL;
         return false;
     }
     if (out_cap) out[0] = '\0';
     if (err_cap) err[0] = '\0';
 #ifndef __linux__
     receipt->runtime_error = ENOTSUP;
+    if (observation) observation->runtime_error = ENOTSUP;
     return false;
 #else
     RtOwnedCleanup cleanup = {0, 0, 0, 0, -1, -1, -1, 0, 0};
+    struct rusage child_usage;
+    memset(&child_usage, 0, sizeof(child_usage));
+    volatile int child_usage_available = 0;
     int old_cancel_state = 0;
     (void)pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
     if (!owned_reserve(&cleanup.slot, &cleanup.generation)) {
@@ -982,10 +1100,26 @@ bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
 
     int out_open = 1, err_open = 1, child_done = 0, status = 0;
     int64_t started = owned_now_ms(), term_at = -1, drain_deadline = -1;
+    int64_t next_tree_sample_ms = started;
     if (started < 0) { receipt->runtime_error = errno ? errno : EIO; goto done; }
     while (!child_done || out_open || err_open) {
         int64_t now = owned_now_ms();
         if (now < 0) { receipt->runtime_error = errno ? errno : EIO; break; }
+        if (observation && !child_done && now >= next_tree_sample_ms) {
+            RtOwnedTreeSample sample = owned_sample_process_group(pid);
+            if (sample.pids > 0) {
+                observation->evidence_flags |= RT_PROCESS_EVIDENCE_SAMPLED_TREE;
+                if (sample.charge_bytes > observation->peak_tree_charge_bytes)
+                    observation->peak_tree_charge_bytes = sample.charge_bytes;
+                if (sample.io_read_bytes > observation->io_read_bytes)
+                    observation->io_read_bytes = sample.io_read_bytes;
+                if (sample.io_write_bytes > observation->io_write_bytes)
+                    observation->io_write_bytes = sample.io_write_bytes;
+                if (sample.pids > observation->pids_peak)
+                    observation->pids_peak = sample.pids;
+            }
+            next_tree_sample_ms = now + 50;
+        }
         if (child_done && drain_deadline >= 0 && now >= drain_deadline) {
             if (out_open) { close(cleanup.out_fd); cleanup.out_fd = -1; out_open = 0; }
             if (err_open) { close(cleanup.err_fd); cleanup.err_fd = -1; err_open = 0; }
@@ -1025,8 +1159,9 @@ bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
                     break;
                 }
                 pid_t waited;
-                do waited = waitpid(pid, &status, 0); while (waited < 0 && errno == EINTR);
+                do waited = wait4(pid, &status, 0, &child_usage); while (waited < 0 && errno == EINTR);
                 if (waited != pid) { receipt->runtime_error = errno ? errno : ECHILD; break; }
+                child_usage_available = 1;
                 child_done = 1; cleanup.reaped = 1; receipt->reaped = 1;
                 drain_deadline = owned_add_sat((uint64_t)owned_now_ms(), RT_OWNED_POST_REAP_DRAIN_MS);
             } else if (wait_rc < 0) {
@@ -1057,13 +1192,22 @@ bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
     if (!cleanup.reaped) {
         (void)owned_signal_group(pid, pid, cleanup.pidfd, SIGKILL);
         pid_t waited;
-        do waited = waitpid(pid, &status, 0); while (waited < 0 && errno == EINTR);
-        if (waited == pid) { cleanup.reaped = 1; receipt->reaped = 1; }
+        do waited = wait4(pid, &status, 0, &child_usage); while (waited < 0 && errno == EINTR);
+        if (waited == pid) { cleanup.reaped = 1; receipt->reaped = 1; child_usage_available = 1; }
         else if (receipt->runtime_error == 0) receipt->runtime_error = errno ? errno : ECHILD;
     }
     if (receipt->reaped) {
         if (WIFEXITED(status)) receipt->exit_code = WEXITSTATUS(status);
         else if (WIFSIGNALED(status)) receipt->exit_code = 128 + WTERMSIG(status);
+    }
+    if (observation && child_usage_available) {
+        observation->evidence_flags |= RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE;
+        observation->user_cpu_ms = owned_timeval_ms(child_usage.ru_utime);
+        observation->system_cpu_ms = owned_timeval_ms(child_usage.ru_stime);
+        observation->peak_direct_child_rss_bytes = owned_direct_child_rss_bytes(&child_usage);
+    }
+    if (observation && receipt->reaped && WIFSIGNALED(status)) {
+        observation->termination_signal = WTERMSIG(status);
     }
 
 done:
@@ -1072,6 +1216,7 @@ done:
     if (out_cap) out[receipt->stdout_bytes_kept < out_cap ? receipt->stdout_bytes_kept : out_cap - 1] = '\0';
     if (err_cap) err[receipt->stderr_bytes_kept < err_cap ? receipt->stderr_bytes_kept : err_cap - 1] = '\0';
     owned_cleanup(&cleanup);
+    if (observation) observation->runtime_error = receipt->runtime_error;
     pthread_cleanup_pop(0);
     (void)pthread_setcancelstate(old_cancel_state, NULL);
     if (old_cancel_state == PTHREAD_CANCEL_ENABLE) pthread_testcancel();
@@ -1079,12 +1224,33 @@ done:
 #endif
 }
 
+bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
+                                  int64_t timeout_ms, uint64_t max_output_bytes,
+                                  char* out, uint64_t out_cap,
+                                  char* err, uint64_t err_cap,
+                                  RtOwnedProcessReceipt* receipt) {
+    return owned_run_bounded_impl(cmd, argv, timeout_ms, max_output_bytes,
+                                  out, out_cap, err, err_cap, receipt, NULL);
+}
+
+bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* argv,
+                                           int64_t timeout_ms, uint64_t max_output_bytes,
+                                           char* out, uint64_t out_cap,
+                                           char* err, uint64_t err_cap,
+                                           RtOwnedProcessReceipt* receipt,
+                                           RtOwnedProcessObservationV1* observation) {
+    if (!observation) return false;
+    return owned_run_bounded_impl(cmd, argv, timeout_ms, max_output_bytes,
+                                  out, out_cap, err, err_cap, receipt, observation);
+}
+
 /* Stable language ABI. Keep the policy receipt numeric and versioned so the
  * Simple facade can reject layouts it does not understand. */
 #ifndef RT_PROCESS_OWNED_CORE_ONLY
-int64_t* rt_process_run_owned_bounded_value(const char* cmd_data, uint64_t cmd_len, SplArray* args,
-                                            int64_t timeout_ms,
-                                            int64_t max_output_bytes) {
+static int64_t* owned_run_bounded_value_impl(const char* cmd_data, uint64_t cmd_len, SplArray* args,
+                                             int64_t timeout_ms,
+                                             int64_t max_output_bytes,
+                                             int include_observation) {
     if (!cmd_data || cmd_len > SIZE_MAX - 1 || timeout_ms < 0 || max_output_bytes < 0) return NULL;
     if (!args || memchr(cmd_data, '\0', (size_t)cmd_len) != NULL) return NULL;
     if (timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS) timeout_ms = RT_OWNED_ABI_MAX_TIMEOUT_MS;
@@ -1125,9 +1291,13 @@ int64_t* rt_process_run_owned_bounded_value(const char* cmd_data, uint64_t cmd_l
     if (!out || !err) goto fail;
 
     RtOwnedProcessReceipt receipt;
-    bool ok = rt_process_run_owned_bounded(cmd, (const char* const*)argv, timeout_ms, limit,
-                                            out, capacity, err, capacity, &receipt);
-    fields = rt_array_new(19);
+    RtOwnedProcessObservationV1 observation;
+    bool ok = include_observation
+        ? rt_process_run_owned_observed_bounded(cmd, (const char* const*)argv, timeout_ms, limit,
+                                                out, capacity, err, capacity, &receipt, &observation)
+        : rt_process_run_owned_bounded(cmd, (const char* const*)argv, timeout_ms, limit,
+                                       out, capacity, err, capacity, &receipt);
+    fields = rt_array_new(include_observation ? 30 : 19);
     if (!fields) goto fail;
 #define OWNED_PUSH(value) do { if (!rt_array_push(fields, rt_value_int((int64_t)(value)))) goto fail; } while (0)
     OWNED_PUSH(receipt.version); OWNED_PUSH(receipt.slot); OWNED_PUSH(receipt.generation);
@@ -1138,6 +1308,15 @@ int64_t* rt_process_run_owned_bounded_value(const char* cmd_data, uint64_t cmd_l
     OWNED_PUSH(receipt.kill_sent); OWNED_PUSH(receipt.identity_revalidated); OWNED_PUSH(receipt.reaped);
     OWNED_PUSH(receipt.stdout_truncated); OWNED_PUSH(receipt.stderr_truncated);
     OWNED_PUSH(receipt.runtime_error);
+    if (include_observation) {
+        OWNED_PUSH(observation.version); OWNED_PUSH(observation.evidence_flags);
+        OWNED_PUSH(observation.user_cpu_ms); OWNED_PUSH(observation.system_cpu_ms);
+        OWNED_PUSH(observation.peak_direct_child_rss_bytes);
+        OWNED_PUSH(observation.peak_tree_charge_bytes); OWNED_PUSH(observation.io_read_bytes);
+        OWNED_PUSH(observation.io_write_bytes); OWNED_PUSH(observation.pids_peak);
+        OWNED_PUSH(observation.termination_signal);
+        OWNED_PUSH(observation.runtime_error);
+    }
 #undef OWNED_PUSH
     (void)ok; /* runtime_error carries provider failure without hiding output. */
 
@@ -1166,6 +1345,17 @@ fail:
     if (tuple) rt_free(tuple);
     return NULL;
 }
+
+int64_t* rt_process_run_owned_bounded_value(const char* cmd_data, uint64_t cmd_len, SplArray* args,
+                                            int64_t timeout_ms, int64_t max_output_bytes) {
+    return owned_run_bounded_value_impl(cmd_data, cmd_len, args, timeout_ms, max_output_bytes, 0);
+}
+
+int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint64_t cmd_len,
+                                                     SplArray* args, int64_t timeout_ms,
+                                                     int64_t max_output_bytes) {
+    return owned_run_bounded_value_impl(cmd_data, cmd_len, args, timeout_ms, max_output_bytes, 1);
+}
 #endif
 
 #else
@@ -1183,6 +1373,19 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
     memset(token, 0, sizeof(*token)); memset(receipt, 0, sizeof(*receipt));
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION; receipt->runtime_error = ENOTSUP;
     return false;
+}
+
+bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* argv,
+                                           int64_t timeout_ms, uint64_t max_output_bytes,
+                                           char* out, uint64_t out_cap, char* err,
+                                           uint64_t err_cap, RtOwnedProcessReceipt* receipt,
+                                           RtOwnedProcessObservationV1* observation) {
+    if (!observation) return false;
+    memset(observation, 0, sizeof(*observation));
+    observation->version = RT_OWNED_PROCESS_OBSERVATION_VERSION;
+    observation->runtime_error = ENOTSUP;
+    return rt_process_run_owned_bounded(cmd, argv, timeout_ms, max_output_bytes,
+                                        out, out_cap, err, err_cap, receipt);
 }
 
 bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
@@ -1211,6 +1414,16 @@ bool rt_process_owned_result_v2(RtOwnedProcessTokenV2 token,
     if (!result) return false;
     memset(result, 0, sizeof(*result));
     result->version = RT_OWNED_PROCESS_ASYNC_VERSION; result->exit_code = -1; result->runtime_error = ENOTSUP;
+    return false;
+}
+
+bool rt_process_owned_observation_v1(RtOwnedProcessTokenV2 token,
+                                     RtOwnedProcessObservationV1* observation) {
+    if (!observation) return false;
+    memset(observation, 0, sizeof(*observation));
+    observation->version = RT_OWNED_PROCESS_OBSERVATION_VERSION;
+    observation->runtime_error = ENOTSUP;
+    (void)token;
     return false;
 }
 
@@ -1269,6 +1482,37 @@ int64_t* rt_process_run_owned_bounded_value(const char* cmd, uint64_t cmd_len, S
         -1, 0, 0, 0, 0, 0, 0, 0, ENOTSUP,
     };
     for (int i = 0; i < 19; i++) {
+        if (!rt_array_push(fields, rt_value_int(values[i]))) {
+            rt_array_free(fields);
+            return NULL;
+        }
+    }
+    int64_t* tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
+    if (!tuple) { rt_array_free(fields); return NULL; }
+    tuple[0] = rt_string_new((const uint8_t*)"", 0);
+    tuple[1] = rt_string_new((const uint8_t*)"", 0);
+    if (!tuple[0] || !tuple[1]) {
+        if (tuple[0]) (void)RT_OWNED_FREE_VALUE(tuple[0]);
+        if (tuple[1]) (void)RT_OWNED_FREE_VALUE(tuple[1]);
+        rt_array_free(fields); rt_free(tuple);
+        return NULL;
+    }
+    tuple[2] = (int64_t)(uintptr_t)fields;
+    return tuple;
+}
+
+int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd, uint64_t cmd_len,
+                                                     SplArray* args, int64_t timeout_ms,
+                                                     int64_t max_output_bytes) {
+    (void)cmd; (void)cmd_len; (void)args; (void)timeout_ms; (void)max_output_bytes;
+    SplArray* fields = rt_array_new(30);
+    if (!fields) return NULL;
+    const int64_t values[30] = {
+        RT_OWNED_PROCESS_RECEIPT_VERSION, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        -1, 0, 0, 0, 0, 0, 0, 0, ENOTSUP,
+        RT_OWNED_PROCESS_OBSERVATION_VERSION, 0, 0, 0, 0, 0, 0, 0, 0, 0, ENOTSUP,
+    };
+    for (int i = 0; i < 30; i++) {
         if (!rt_array_push(fields, rt_value_int(values[i]))) {
             rt_array_free(fields);
             return NULL;

@@ -31,7 +31,10 @@
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 use std.test_runner.test_executor_parsing.{make_result_from_output}
+use std.test_runner.test_runner_metrics.{test_resource_class, test_resource_class_name, test_execution_cohort_id}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io.resource_scope.{standard_resource_budget}
+use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause, evaluate_resource_budget, decision_status_name}
 
 # SFFI declarations for fork bridge
 extern fn rt_fork_child_setup() -> i64
@@ -41,6 +44,9 @@ extern fn rt_fork_parent_stderr() -> text
 extern fn rt_fork_child_exit(code: i64)
 extern fn rt_fork_parent_signaled() -> bool
 extern fn rt_fork_parent_timed_out() -> bool
+extern fn rt_fork_parent_user_cpu_micros() -> i64
+extern fn rt_fork_parent_system_cpu_micros() -> i64
+extern fn rt_fork_parent_peak_rss_bytes() -> i64
 
 # SFFI declaration for running interpreter on a file (Rust-side, already in binary)
 extern fn rt_cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64
@@ -82,6 +88,38 @@ fn is_outside_kill(signo: i64) -> bool:
     unverified -- the deliberate direction, since over-reporting a crash is
     recoverable and under-reporting one is the silent-green defect.)"""
     signo == 1 or signo == 2 or signo == 15
+
+fn attach_fork_resource(result: TestFileResult, file_path: text, options: TestOptions, duration_ms: i64, exit_code: i64) -> TestFileResult:
+    val signal = if rt_fork_parent_signaled() and exit_code > 128: exit_code - 128 else: 0
+    val termination = if rt_fork_parent_timed_out():
+        TerminationCause.WallTimeout
+    elif signal > 0:
+        TerminationCause.Signal
+    elif exit_code < 0:
+        TerminationCause.InfrastructureFailure
+    else:
+        TerminationCause.Exited
+    val usage = ResourceUsage(
+        wall_ms: duration_ms,
+        user_cpu_ms: rt_fork_parent_user_cpu_micros() / 1000,
+        system_cpu_ms: rt_fork_parent_system_cpu_micros() / 1000,
+        peak_tree_charge_bytes: 0,
+        peak_direct_child_rss_bytes: rt_fork_parent_peak_rss_bytes(),
+        heap_live_end_bytes: 0, heap_peak_bytes: 0,
+        io_read_bytes: 0, io_write_bytes: 0, pids_peak: 1,
+        evidence_quality: ResourceEvidenceQuality.ExactDirectChild,
+        termination: termination, signal: signal, exit_code: exit_code)
+    val resource_class = test_resource_class(file_path)
+    val budget = evaluate_resource_budget(usage, standard_resource_budget(resource_class))
+    TestFileResult(
+        path: result.path, passed: result.passed, failed: result.failed,
+        skipped: result.skipped, pending: result.pending,
+        duration_ms: result.duration_ms, setup_ms: result.setup_ms,
+        error: result.error, timed_out: result.timed_out, cached: result.cached,
+        execution_ms: duration_ms, resource_usage: usage,
+        resource_class: test_resource_class_name(resource_class),
+        cohort_id: test_execution_cohort_id(file_path, options),
+        budget_status: decision_status_name(budget.status), anomaly_status: "provisional")
 
 fn classify_fork_exit(file_path: text, exit_code: i64, timeout_secs: i64, duration_ms: i64, setup_ms: i64) -> TestFileResult:
     """Classify a fork child's death without the -1 sentinel guesswork.
@@ -173,11 +211,11 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
     # SIGSEGV (139) from an earlyoom SIGTERM (143) — fork mode can, and must
     # not throw that information away by deferring to the weaker classifier.
     if rt_fork_parent_timed_out() or rt_fork_parent_signaled() or exit_code < 0:
-        return classify_fork_exit(file_path, exit_code, options.timeout, duration_ms, setup_ms)
+        return attach_fork_resource(classify_fork_exit(file_path, exit_code, options.timeout, duration_ms, setup_ms), file_path, options, duration_ms, exit_code)
 
     val result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
     # Attach setup_ms to the result
-    TestFileResult(
+    attach_fork_resource(TestFileResult(
         path: result.path,
         passed: result.passed,
         failed: result.failed,
@@ -191,7 +229,7 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
         mcdc_evidence_v1: result.mcdc_evidence_v1,
         blocked: result.blocked, unsupported: result.unsupported,
         omission_evidence: result.omission_evidence
-    )
+    ), file_path, options, duration_ms, exit_code)
 
 # =========================================================================
 # Exports

@@ -62,6 +62,11 @@ bool rt_fork_parent_timed_out(void);
 /* True only when the most recent child terminated by signal. */
 bool rt_fork_parent_signaled(void);
 
+/* Direct-child wait4 observations from the most recent parent wait. */
+int64_t rt_fork_parent_user_cpu_micros(void);
+int64_t rt_fork_parent_system_cpu_micros(void);
+int64_t rt_fork_parent_peak_rss_bytes(void);
+
 /*
  * Get captured stdout from the last rt_fork_parent_wait() call.
  * Returns empty string if no data or if called before wait.

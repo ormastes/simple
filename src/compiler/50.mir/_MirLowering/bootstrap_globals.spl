@@ -310,6 +310,18 @@ fn bootstrap_set_entry_hir_module(m: HirModule):
 fn bootstrap_clear_entry_hir_module():
     _bootstrap_entry_hir_module = nil
 
+fn bootstrap_entry_hir_module_value() -> HirModule:
+    # Do not call `.unwrap()` here. Older admitted self-host compilers can bind
+    # that method call to `Poll.unwrap`, whose Poll-specific discriminant check
+    # returns nil for `Option.Some`. Pattern binding lowers through the enum
+    # payload operation and preserves the actual module.
+    match _bootstrap_entry_hir_module:
+        case Some(hir_module): return hir_module
+        case _:
+            eprint("error: bootstrap entry HIR module was not set before MIR lowering\n")
+            rt_exit(1)
+    HirModule(name: "", functions: {}, statics: {}, constants: {}, types: {})
+
 fn bootstrap_flat_symbol_table(module_index: i64) -> SymbolTable:
     var table = SymbolTable.new()
     var symbol_index = 0
@@ -584,9 +596,9 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
     bootstrap_mir_functions_reset()
     var real_instr_total = 0
     # Seed-compiled `if val` can enter the Some arm while binding a nil payload.
-    # Check the option explicitly before extracting the module used below.
+    # Check explicitly, then extract through the pattern-based owner helper.
     if _bootstrap_entry_hir_module.?:
-        val hir_module: HirModule = _bootstrap_entry_hir_module.unwrap()
+        val hir_module: HirModule = bootstrap_entry_hir_module_value()
         # `.?` above is not a liveness proof: it has been measured entering the
         # Some arm while binding a nil payload in Stage-2-compiled code (the
         # same predicate-misread class as `is_empty()` returning false on an

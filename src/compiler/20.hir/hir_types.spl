@@ -122,6 +122,20 @@ struct HirSymbol:
     is_mutable: bool
     defining_module: text?   # Which module defined this symbol (for visibility checking)
 
+fn hir_symbol_visibility_or_private(visibility: Visibility) -> Visibility:
+    # Streaming transfer in older self-host compilers can zero a non-optional
+    # enum field. Preserve every valid scoped visibility; an invalid payload
+    # must fail closed to file-private rather than reaching the HIR cache codec
+    # as a non-enum value or accidentally widening access.
+    match visibility:
+        case Visibility.Public: Visibility.Public
+        case Visibility.Peer: Visibility.Peer
+        case Visibility.Up: Visibility.Up
+        case Visibility.Internal: Visibility.Internal
+        case Visibility.Package: Visibility.Package
+        case Visibility.Private: Visibility.Private
+        case _: Visibility.Private
+
 """Kind of symbol."""
 enum SymbolKind:
     Function
@@ -376,6 +390,7 @@ impl SymbolTable:
         val id = SymbolId(id: raw_id)
         self.next_symbol_id = raw_id + 1
 
+        val retained_visibility = hir_symbol_visibility_or_private(visibility)
         val symbol = HirSymbol(
             id: id,
             name: name,
@@ -383,8 +398,8 @@ impl SymbolTable:
             type_: type_,
             scope: self.current_scope,
             span: span,
-            visibility: visibility,
-            is_public: visibility == Visibility.Public,
+            visibility: retained_visibility,
+            is_public: retained_visibility == Visibility.Public,
             is_mutable: is_mutable,
             defining_module: defining_module
         )
