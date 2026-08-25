@@ -102,6 +102,32 @@ No production self-hosted optimizer or benchmark was available.  Exact
 artifact identity, signatures, and evidence admission remain absent;
 verified-and-signed admission remains 0.
 
+## MIR switch/operator lowering authority checkpoint
+
+MIR switch, operator, and call lowering now confines its two used raw ABI
+families—nullable environment lookup and tagged-value discriminant—to
+mandatory-inline lexical `unsafe(ffi)` owners.  The unused raw string-data and
+string-length declarations were removed rather than granted authority.  Both
+used symbols have typed-native and interpreter registration.
+
+The sixteen source discriminant probes remain one-for-one at their existing
+call/operator lowering sites.  Environment probes remain at their existing
+debug/profile gates.  No second classification pass, allocation, copy, lookup,
+hash, lock, branch, loop, or generic dispatch was added.
+
+The focused static authority/performance ratchet passed.  The authoritative
+census changed:
+
+- raw call sites: 18,875 -> 18,857
+- missing authority: 14,577 -> 14,557
+- lexical unsafe: 3,320 -> 3,322
+- function unsafe: unchanged at 978
+
+Registration does not prove tagged-value layout, artifact identity,
+signatures, or provenance.  No production self-hosted optimizer or benchmark
+was available.  MIR expression lowering and the wider SFFI estate remain
+neither globally verified nor signed; verified-and-signed admission remains 0.
+
 ## HIR item-lowering helper authority checkpoint
 
 HIR item-lowering helpers now confine nullable environment lookup, process

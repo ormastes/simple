@@ -31,12 +31,20 @@ use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin
 use compiler.semantics.rt_hal_tag.{rt_hal_compilation_requires_finalize}
 use compiler.mir.mir_rt_hal_boundary.{inject_rt_hal_worker_complete}
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw tagged-value discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
-# Two-word (ptr, len) text-extern-ABI split -- see text_extern_abi.spl and
-# doc/05_design/compiler/codegen/pure_simple_text_extern_abi_fix_plan.md.
-extern fn rt_string_data(s: text) -> i64
-extern fn rt_string_len(value: text) -> i64
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_enum_discriminant(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
 
 # Monotonic counter for lambda-lift synthesized top-level function names. A
 # non-capturing `Lambda` used as a first-class VALUE (passed to a HOF) is lifted
@@ -750,7 +758,7 @@ impl MirLowering:
             val default_local = self.lower_expr(default_expr)
             result = result.push(mir_operand_copy(default_local))
             i = i + 1
-        if (rt_env_get("SIMPLE_MIR_DEFAULT_PAD_TRACE") ?? "") == "1":
+        if (_sffi_env_get("SIMPLE_MIR_DEFAULT_PAD_TRACE") ?? "") == "1":
             eprint("[mir-default-pad] callee={callee_name} given={args_in.len()} arity={params.len()}\n")
         result
 
@@ -1112,8 +1120,8 @@ impl MirLowering:
         if args.len() != 1:
             return nil
         val fallback_symbol = SymbolId(id: -1)
-        val callee_disc = rt_enum_discriminant(callee.kind)
-        if callee_disc == rt_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
+        val callee_disc = _sffi_enum_discriminant(callee.kind)
+        if callee_disc == _sffi_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
             match callee.kind:
                 case HirExprKind.NamedVar(symbol, _):
                     # Use the symbol already resolved onto this HIR node --
@@ -1132,7 +1140,7 @@ impl MirLowering:
                     return self.try_lower_bitfield_construct_for_symbol(symbol, args)
                 case _:
                     return nil
-        if callee_disc == rt_enum_discriminant(HirExprKind.Var(fallback_symbol)):
+        if callee_disc == _sffi_enum_discriminant(HirExprKind.Var(fallback_symbol)):
             match callee.kind:
                 case HirExprKind.Var(symbol):
                     return self.try_lower_bitfield_construct_for_symbol(symbol, args)
@@ -1305,10 +1313,10 @@ impl MirLowering:
 
     me lower_unaryop(op: HirUnaryOp) -> MirUnaryOp:
         """Convert HIR unary op to MIR unary op."""
-        val disc = rt_enum_discriminant(op)
-        if disc == rt_enum_discriminant(HirUnaryOp.Not): return MirUnaryOp.Not
-        if disc == rt_enum_discriminant(HirUnaryOp.BitNot): return MirUnaryOp.BitNot
-        if disc == rt_enum_discriminant(HirUnaryOp.Transpose): return MirUnaryOp.Transpose
+        val disc = _sffi_enum_discriminant(op)
+        if disc == _sffi_enum_discriminant(HirUnaryOp.Not): return MirUnaryOp.Not
+        if disc == _sffi_enum_discriminant(HirUnaryOp.BitNot): return MirUnaryOp.BitNot
+        if disc == _sffi_enum_discriminant(HirUnaryOp.Transpose): return MirUnaryOp.Transpose
         MirUnaryOp.Neg
 
     me infer_binop_type(op: HirBinOp) -> MirType:
@@ -1350,7 +1358,7 @@ impl MirLowering:
             return MirType.i64()
         if name == "rt_simd_engine2d_neon_hits" or name == "rt_simd_engine2d_neon_reset" or name == "rt_engine2d_simd_row_probe":
             return MirType.i64()
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             # Name-keyed prescan registry: covers callees whose symbol id is
             # invalid at this call site (wildcard imports), where
             # resolved_call_return_type would default to i64 and rv32 callers
@@ -1405,7 +1413,7 @@ impl MirLowering:
         self.resolved_call_return_type(symbol)
 
     me try_lower_bootstrap_cli_arg_index(base: HirExpr, index_local: LocalId) -> LocalId?:
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             return nil
         match base.kind:
             case Call(callee, args, _):
@@ -2125,7 +2133,7 @@ impl MirLowering:
 
     me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
         """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
-        rt_enum_discriminant(e) compared to each variant's index; binds a single
+        _sffi_enum_discriminant(e) compared to each variant's index; binds a single
         i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
         val scrut_local = self.lower_expr(scrutinee)
         var bd = self.builder
@@ -2841,7 +2849,7 @@ impl MirLowering:
                     enum_symbol_id, enum_symbol_id, enum_name,
                     all_ids, all_names, covered_ids, has_default,
                 )
-                if match_coverage_requires_hard_error(coverage, rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""):
+                if match_coverage_requires_hard_error(coverage, _sffi_env_get("SIMPLE_SAFETY_PROFILE") ?? ""):
                     val missing_names = coverage.missing_variant_names()
                     var cmsg = "critical-profile match coverage: non-exhaustive match on '" + enum_name
                     cmsg = cmsg + "' (no default/wildcard arm). Missing: " + missing_names.join(", ") + "."
@@ -4561,12 +4569,12 @@ impl MirLowering:
         if val bf_local = bitfield_construct:
             return bf_local
 
-        val callee_disc = rt_enum_discriminant(callee.kind)
+        val callee_disc = _sffi_enum_discriminant(callee.kind)
         val fallback_symbol = SymbolId(id: -1)
         var direct_symbol = fallback_symbol
         var direct_name = ""
         var is_direct = false
-        if callee_disc == rt_enum_discriminant(HirExprKind.Var(fallback_symbol)):
+        if callee_disc == _sffi_enum_discriminant(HirExprKind.Var(fallback_symbol)):
             match callee.kind:
                 case HirExprKind.Var(symbol):
                     direct_symbol = symbol
@@ -4575,7 +4583,7 @@ impl MirLowering:
                     is_direct = true
                 case _:
                     self.payload_decode_failed("HirExprKind.Var", callee.span)
-        elif callee_disc == rt_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
+        elif callee_disc == _sffi_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
             match callee.kind:
                 case HirExprKind.NamedVar(symbol, name):
                     # `name` already carries a --entry-closure cross-module
@@ -4598,7 +4606,7 @@ impl MirLowering:
                     is_direct = true
                 case _:
                     self.payload_decode_failed("HirExprKind.NamedVar", callee.span)
-        elif callee_disc == rt_enum_discriminant(HirExprKind.Lambda([], callee, [])):
+        elif callee_disc == _sffi_enum_discriminant(HirExprKind.Lambda([], callee, [])):
             # IIFE: a raw lambda literal used directly as the call callee,
             # `(\x: x + 1)(5)`. try_inline_lambda_call below only fires for a
             # `Var`/`NamedVar` callee resolved through `lambda_bindings` (a
@@ -4781,9 +4789,9 @@ impl MirLowering:
             val arg_value: HirExpr = arg.value
             val arg_kind: HirExprKind = arg_value.kind
             val fallback_arg_symbol = SymbolId(id: -1)
-            val named_var_disc = rt_enum_discriminant(HirExprKind.NamedVar(fallback_arg_symbol, ""))
+            val named_var_disc = _sffi_enum_discriminant(HirExprKind.NamedVar(fallback_arg_symbol, ""))
             var emitted_function = false
-            if rt_enum_discriminant(arg_kind) == named_var_disc:
+            if _sffi_enum_discriminant(arg_kind) == named_var_disc:
                 match arg_kind:
                     case HirExprKind.NamedVar(symbol, name):
                         if not self.local_map.has(mir_expr_symbol_id_value(symbol)):
@@ -4797,8 +4805,8 @@ impl MirLowering:
                 continue
             # A lambda passed as a first-class VALUE (`apply(\x: x+1, 5)`):
             # materialize a raw lifted fnptr or a closure handle.
-            val lambda_disc = rt_enum_discriminant(HirExprKind.Lambda([], arg_value, []))
-            if rt_enum_discriminant(arg_kind) == lambda_disc:
+            val lambda_disc = _sffi_enum_discriminant(HirExprKind.Lambda([], arg_value, []))
+            if _sffi_enum_discriminant(arg_kind) == lambda_disc:
                 val lambda_operand = self.lower_lambda_value(arg_value)
                 if lambda_operand != nil:
                     arg_operands = arg_operands.push(lambda_operand.unwrap())
@@ -4903,7 +4911,7 @@ impl MirLowering:
                 # existing valid aliasing (the same object passed twice) as
                 # a borrow conflict. Opt-in until the checker models
                 # shared-mutation semantics.
-                if (rt_env_get("SIMPLE_BORROW_REF_CALL_ARGS") ?? "") == "1":
+                if (_sffi_env_get("SIMPLE_BORROW_REF_CALL_ARGS") ?? "") == "1":
                     match declared_param_type.kind:
                         case HirTypeKind.Named(cls_sym, _):
                             val cls_rec = self.symbols.get_symbol_raw(cls_sym.id)
