@@ -2031,3 +2031,25 @@ broader `rt_io` family now has 313 explicit and 27 missing call sites.
 Declaration totals remain 11,627; unsafe-tagged declarations increase from
 2,443 to 2,447 and untouched declarations decrease from 9,005 to 9,001.
 Exact-artifact verified-and-signed admission remains zero.
+
+## Engine2D Vulkan raw-facade authority checkpoint
+
+The Engine2D Vulkan owner has 59 already-tagged declarations and 90 production
+calls that were previously treated as safe. Its ABI selectors, dual-dispatch
+class methods, generationless handle/resource façades, quarantine ownership,
+presentation operations, and headless device selection are now explicitly
+unsafe at their narrow function boundaries. The checked compute orchestrator
+also remains unsafe because scalar validation cannot prove foreign handle
+generation, aliasing, or provider identity.
+
+No generic Vulkan driver calls were introduced. Dynamic mode retains exactly
+one `vkEnumerateInstanceVersion` loader probe and rejects operational dispatch;
+static mode keeps direct typed thunks. Existing region and strided-copy bounds
+remain capped and overflow-safe. Authority metadata adds no provider call,
+allocation, copy, lookup, lock, hash, signature work, branch, or dispatch.
+
+The source census measured missing authority decreasing by exactly 90: 18,207
+to 18,117 repository-wide and 10,037 to 9,947 in production. All 90 became
+function-scoped authorities. Declaration totals remain 11,627, with 2,449
+tagged and 8,999 untouched; exact-artifact verified-and-signed admission
+remains zero.
