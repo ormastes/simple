@@ -435,6 +435,29 @@ bin/simple query sem-query 'FIND fn WHERE return_type = "i64"'
 bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_count > 2'
 ```
 
+### LLM Caret Infrastructure (9 tools)
+
+Mail / wiki / file-server tools bridged from LLM Caret
+(`src/app/llm_caret/tools.spl`) via `src/app/mcp/main_lazy_caret_tools.spl`.
+Each call runs the one-shot child `src/app/llm_caret/tool_cli.spl` (the server
+startup path never imports the caret module graph). Config comes from
+`$LLM_CARET_CONFIG` (an `llm_caret.sdn`); **mutating tools are denied unless
+the call passes `confirm: true`**. See
+`doc/07_guide/app/llm_caret_usage.md` § "Using caret tools from Claude Code /
+Codex via MCP".
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `caret_mail_list` | List mailbox messages (IMAP, read-only) | |
+| `caret_mail_read` | Read one mail by uid (read-only) | uid |
+| `caret_mail_send` | Send a mail (SMTP). MUTATING | to, subject, body, confirm |
+| `caret_wiki_search` | Search wiki (Confluence or local markdown) | query |
+| `caret_wiki_read` | Read one wiki page (read-only) | page_id |
+| `caret_wiki_write` | Create/update a wiki page. MUTATING | body, confirm |
+| `caret_storage_ls` | List objects (MinIO, read-only) | |
+| `caret_storage_get` | Fetch one object as text (read-only) | key |
+| `caret_storage_put` | Upload text as an object. MUTATING | key, content, confirm |
+
 ---
 
 ## Resources (URIs)

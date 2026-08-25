@@ -13,11 +13,12 @@
 #   glob        - simple `*` glob within the workspace
 #   mail_list / mail_read / mail_send      - IMAP/SMTP (infra_mail.spl)
 #   storage_ls / storage_get / storage_put - MinIO/FTP (infra_storage.spl)
+#   wiki_search / wiki_read / wiki_write    - Confluence/local markdown (infra_wiki.spl)
 #
 # Permission model:
 #   read-only tools (read_file / list_dir / glob / mail_list / mail_read /
-#   storage_ls / storage_get) are auto-allowed
-#   mutating tools (bash / write_file / mail_send / storage_put) require
+#   storage_ls / storage_get / wiki_search / wiki_read) are auto-allowed
+#   mutating tools (bash / write_file / mail_send / storage_put / wiki_write) require
 #   explicit allow (allow_list or allow_all). With no grant the policy default is "ask"; in non-interactive
 #   mode "ask" resolves to DENY and the model gets a permission-error tool_result
 #   instead of any execution.
@@ -37,6 +38,7 @@ use std.io_runtime.{dir_exists}
 use std.io_runtime.{dir_list}
 use app.llm_caret.infra_mail.{mail_tool_schemas, mail_list, mail_read, mail_send}
 use app.llm_caret.infra_storage.{storage_tool_schemas, storage_ls, storage_get, storage_put}
+use app.llm_caret.infra_wiki.{wiki_tool_schemas, wiki_search, wiki_read, wiki_write}
 
 # ============================================================================
 # JSON helpers (inlined - self contained)
@@ -229,10 +231,12 @@ fn _list_contains(items: [text], target: text) -> bool:
 fn is_read_only_tool(name: text) -> bool:
     name == "read_file" or name == "list_dir" or name == "glob" or
         name == "mail_list" or name == "mail_read" or
-        name == "storage_ls" or name == "storage_get"
+        name == "storage_ls" or name == "storage_get" or
+        name == "wiki_search" or name == "wiki_read"
 
 fn is_mutating_tool(name: text) -> bool:
-    name == "bash" or name == "write_file" or name == "mail_send" or name == "storage_put"
+    name == "bash" or name == "write_file" or name == "mail_send" or name == "storage_put" or
+        name == "wiki_write"
 
 fn is_known_tool(name: text) -> bool:
     is_read_only_tool(name) or is_mutating_tool(name)
@@ -246,7 +250,7 @@ fn tool_schemas() -> [text]:
     var base: [text] = []
     for name in ["bash", "read_file", "write_file", "list_dir", "glob"]:
         base.push(_LB() + q + "name" + q + ": " + q + name + q + ", " + q + "description" + q + ": " + q + "workspace tool " + name + q + ", " + q + "input_schema" + q + ": " + obj_schema + _RB())
-    base + mail_tool_schemas() + storage_tool_schemas()
+    base + mail_tool_schemas() + storage_tool_schemas() + wiki_tool_schemas()
 
 # Returns "allow" | "deny" | "ask".
 fn permission_decision(policy: PermissionPolicy, name: text) -> text:
@@ -471,6 +475,12 @@ fn run_tool(policy: PermissionPolicy, call: ToolCall) -> ToolResult:
         res = _infra_result(storage_get(_json_get_str(call.input, "bucket"), _json_get_str(call.input, "key"), _json_get_int(call.input, "max_bytes", 0)))
     elif call.name == "storage_put":
         res = _infra_result(storage_put(_json_get_str(call.input, "bucket"), _json_get_str(call.input, "key"), _json_get_str(call.input, "content")))
+    elif call.name == "wiki_search":
+        res = _infra_result(wiki_search(policy.workspace_root, _json_get_str(call.input, "query")))
+    elif call.name == "wiki_read":
+        res = _infra_result(wiki_read(policy.workspace_root, _json_get_str(call.input, "page_id")))
+    elif call.name == "wiki_write":
+        res = _infra_result(wiki_write(policy.workspace_root, _json_get_str(call.input, "page_id"), _json_get_str(call.input, "parent"), _json_get_str(call.input, "title"), _json_get_str(call.input, "body")))
     ToolResult(tool_use_id: call.id, content: res.content, is_error: res.is_error)
 
 # ============================================================================
