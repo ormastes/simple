@@ -416,6 +416,16 @@ impl Lowerer {
                                 type_bindings: std::collections::HashMap::new(),
                             },
                         );
+                        // Enum BODY methods: mirror the `Node::Impl` branch
+                        // below for return types only. Without this an
+                        // imported `SdnValue.get(k) -> SdnValue?` answered ANY
+                        // to `lookup_method_return_type`, so `case Some(x)`
+                        // over it bound `x: ANY` and the next `x.get(k2)` was
+                        // routed by codegen to `rt_index_get` (nil on a user
+                        // enum) instead of the user method. Additive: never
+                        // fails the import (ANY on an unresolvable type).
+                        // doc/08_tracking/bug/jit_option_of_enum_payload_double_unwrap_2026-08-24.md
+                        self.register_enum_method_return_types(enum_def);
                         imported_count += 1;
                     }
                 }
@@ -640,6 +650,10 @@ impl Lowerer {
                                     type_bindings: std::collections::HashMap::new(),
                                 },
                             );
+                            // Same as the direct-import branch above: a
+                            // transitively registered enum keeps its body
+                            // methods' return types too.
+                            self.register_enum_method_return_types(enum_def);
                             registered_any = true;
                         }
                         _ => {}
@@ -1071,6 +1085,20 @@ impl Lowerer {
                 targets.iter().any(|t| self.should_import_symbol(name, t))
             }
             ImportTarget::Aliased { name: n, .. } => n == name, // Import if matches (will be aliased later)
+        }
+    }
+
+    /// Record `Enum.method -> declared return type` for every method declared
+    /// in an imported enum's BODY. `Node::Impl` blocks already do this (see
+    /// the `Node::Impl` branch in `load_imported_types`); enum-body methods
+    /// had no equivalent, so `lookup_method_return_type` answered ANY for
+    /// them. Additive and never fails the import: an unresolvable return type
+    /// records ANY, which is exactly what the lookup returned before.
+    fn register_enum_method_return_types(&mut self, enum_def: &simple_parser::ast::EnumDef) {
+        for method in &enum_def.methods {
+            let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+            let qualified = format!("{}.{}", enum_def.name, method.name);
+            self.method_return_types.insert(qualified, ret_ty);
         }
     }
 }

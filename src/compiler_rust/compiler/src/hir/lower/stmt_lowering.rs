@@ -1431,6 +1431,17 @@ impl Lowerer {
                         // Use the binding's resolved type (from enum variant definition)
                         // instead of ANY, so MIR lowering can insert proper unboxing
                         let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
+                        if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                            eprintln!(
+                                "[HIR-PAT-BIND] {}({}) subject_ty={:?} ({:?}) binding_ty={:?} ({:?})",
+                                enum_variant,
+                                name,
+                                subject_ty,
+                                self.module.types.get(subject_ty),
+                                binding_ty,
+                                self.module.types.get(binding_ty)
+                            );
+                        }
 
                         // Enum variant payload extraction. The positional
                         // class/struct spelling never reaches here: it is claimed

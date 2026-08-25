@@ -1467,6 +1467,25 @@ impl Lowerer {
                         self.method_return_types.insert(qualified, ret_ty);
                     }
                 }
+                // Enum BODY methods (`enum SdnValue: ... fn get(self, k) -> SdnValue?`)
+                // were the one method-carrying declaration missing from this
+                // table. Their bodies are lowered (second pass below, and
+                // `globals` gets `Enum.method` in pass 0.5), but with no
+                // `method_return_types` entry `lookup_method_return_type` on
+                // a KNOWN enum receiver answered ANY, so `case Some(x)` over
+                // `v.get(k)` bound `x: ANY` and the next `x.get(k2)` became a
+                // bare erased-receiver call that codegen routes to
+                // `rt_index_get` (nil on a user enum) instead of the user
+                // method. Same file, no imports, no parser needed.
+                // doc/08_tracking/bug/jit_option_of_enum_payload_double_unwrap_2026-08-24.md
+                // (## Second defect)
+                Node::Enum(e) => {
+                    for method in &e.methods {
+                        let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                        let qualified = format!("{}.{}", e.name, method.name);
+                        self.method_return_types.insert(qualified, ret_ty);
+                    }
+                }
                 Node::Actor(a) => {
                     for method in &a.methods {
                         let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);

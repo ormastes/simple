@@ -824,6 +824,21 @@ impl Lowerer {
 
     /// Look up the return type of a method from pre-registered signatures.
     fn lookup_method_return_type(&self, recv_ty: TypeId, method: &str) -> TypeId {
+        let ret = self.lookup_method_return_type_inner(recv_ty, method);
+        if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+            eprintln!(
+                "[HIR-METHOD-RET] .{} recv_ty={:?} recv_hir={:?} -> {:?} ({:?})",
+                method,
+                recv_ty,
+                self.module.types.get(recv_ty),
+                ret,
+                self.module.types.get(ret)
+            );
+        }
+        ret
+    }
+
+    fn lookup_method_return_type_inner(&self, recv_ty: TypeId, method: &str) -> TypeId {
         // Optional unwrap: `T?` is represented as `Pointer { inner: T }`
         // (type_resolver.rs). `.unwrap()`/`.expect(...)` on such a value yields
         // the inner `T`. Genuine `Option<T>`/`Result<T,E>` enum cases are already

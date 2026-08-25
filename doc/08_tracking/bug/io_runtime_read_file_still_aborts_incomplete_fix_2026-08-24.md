@@ -92,7 +92,7 @@ For this binary and this probe it does not.
 Binary under test (unchanged throughout):
 `bin/simple -> /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
 60650360 bytes, mtime 2026-08-23 04:47:05 +0000. `strings` shows its build
-tree is `/mnt/data/worktrees/seed-deploy-1` (775 baked path literals).
+tree is `/mnt/data/worktrees/seed-deploy-1`. (Correction: `strings` on the ELF finds **0** such path literals, so the path is discovered at runtime, not compiled in. The evidence is the strace opens — independently reproduced: 20 opens under `seed-deploy-1/src/lib` alongside 316 under the current tree in one run.)
 
 1. **`strace -e openat` of the three-line repro** (probe file in a scratch
    dir): the first `.spl` opens after the entry file are
