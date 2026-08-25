@@ -7,6 +7,7 @@ tail=$root/examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_ne
 media=$root/examples/09_embedded/simple_os/arch/riscv64/boot/rv64_fs_exec_media.inc.c
 loader=$root/examples/09_embedded/simple_os/arch/riscv64/boot/rv64_fs_exec_loader.inc.c
 entry=$root/examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl
+policy=$root/src/os/kernel/loader/riscv64_authenticated_media_policy.spl
 builder=$root/scripts/os/build_simpleos_fs_exec_probe.shs
 work=$(mktemp -d "${TMPDIR:-/tmp}/rv64-streamed-elf.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
@@ -34,8 +35,12 @@ need "$loader" 'return (RuntimeValue)-13;' 'legacy executor fail-closed result'
 for unit in "$stubs" "$root"/examples/09_embedded/simple_os/arch/riscv64/boot/*.inc.c; do
     [ "$(wc -l < "$unit")" -le 800 ] || fail "changed C unit exceeds 800 lines: $unit"
 done
-need "$entry" 'rt_riscv_fs_legacy_exec_disabled()' 'production legacy-exec rejection'
+need "$policy" 'pub fn rv64_legacy_fs_exec_disabled_v1() -> bool: true' 'Pure Simple legacy-exec policy owner'
+need "$entry" 'rv64_legacy_fs_exec_disabled_v1()' 'production legacy-exec rejection decision'
+need "$entry" 'if not rv64_legacy_fs_exec_disabled_v1():' 'fail-closed decision branch'
 need "$entry" 'RV64_LEGACY_FSEXEC_DISABLED reason=missing-loader-authority-token' 'production rejection receipt'
+reject "$entry" 'rt_riscv_fs_legacy_exec_disabled' 'foreign legacy-exec policy query'
+reject "$loader" 'rt_riscv_fs_legacy_exec_disabled' 'foreign legacy-exec policy provider'
 reject "$entry" 'val fs_exec_rc = rt_riscv_fs_exec_run()' 'unauthenticated production execution'
 
 cc=${RISCV64_ELF_CC:-riscv64-unknown-elf-gcc}
@@ -47,8 +52,8 @@ command -v "$nm_tool" >/dev/null 2>&1 || fail "missing cross nm: $nm_tool"
 symbols=$($nm_tool --defined-only "$work/rv64-stubs.o")
 [ "$(printf '%s\n' "$symbols" | awk '$3 == "rt_riscv_fs_exec_run" { n++ } END { print n + 0 }')" -eq 1 ] ||
     fail 'rt_riscv_fs_exec_run must have exactly one linked owner'
-[ "$(printf '%s\n' "$symbols" | awk '$3 == "rt_riscv_fs_legacy_exec_disabled" { n++ } END { print n + 0 }')" -eq 1 ] ||
-    fail 'rt_riscv_fs_legacy_exec_disabled must have exactly one linked owner'
+[ "$(printf '%s\n' "$symbols" | awk '$3 == "rt_riscv_fs_legacy_exec_disabled" { n++ } END { print n + 0 }')" -eq 0 ] ||
+    fail 'obsolete rt_riscv_fs_legacy_exec_disabled provider remains'
 
 SIMPLEOS_FS_EXEC_PROBE_PADDING_BYTES=4194304 \
     sh "$builder" riscv64 "$work/large.elf" "$work/large.manifest" >/dev/null

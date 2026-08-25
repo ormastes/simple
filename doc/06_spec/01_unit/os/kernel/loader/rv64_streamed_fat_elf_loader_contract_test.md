@@ -10,3 +10,6 @@ also builds and inspects a RISC-V ELF larger than 4 MiB to prove the host
 fixture is not limited by the removed fixed buffers. It does not boot QEMU or
 prove the guest loader executed that ELF.
 
+The source-contract portion also pins the branchless Pure Simple
+`rv64_legacy_fs_exec_disabled_v1` policy, the smoke entry's fail-closed
+decision and rejection receipt, and absence of the former C runtime provider.
