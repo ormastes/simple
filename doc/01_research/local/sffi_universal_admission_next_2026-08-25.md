@@ -395,3 +395,28 @@ No declaration was added or removed in this propagation tranche, so the
 source-only ledger remains 12,023 `rt_*` rows / 3,172 symbols: 1,190 tagged,
 638 `unsafe_contract_declared`, 10,567 untouched, and zero exact-artifact
 verified-and-signed.
+
+## OS RSA typed-result checkpoint
+
+`os.crypto.rsa` no longer redeclares or directly calls the four legacy
+RSA SHA-256/SHA-512 sign/verify runtime symbols. It consumes the canonical
+checked signature facade, exposes `Result` from signing and verification, and
+JWT now propagates provider/malformed-input errors instead of interpreting an
+empty signature or verification bridge failure as a cryptographic result.
+The mirrored RSA specs assert `Ok(true)`, `Ok(false)`, and typed failures.
+
+The normal automatic signing path still makes exactly one hosted provider call
+on success and invokes the Pure Simple fallback only after a typed hosted
+failure. Comparison modes retain their intentional two-engine behavior. There
+is no new lookup, hash beyond RSA itself, payload copy, generic dispatch, or
+success-path error allocation; failure text is allocated only on failure.
+
+The focused static checked-caller ratchet passed. The production source-check
+gate refused the only available executable because it identifies as a
+non-production bootstrap runtime, so this tranche is not executable-verified
+or artifact-admitted. The full census run was stopped after it emitted its
+large inventory without converging; the exact declaration delta is four rows
+removed and no rows added. Applied to the preceding ledger, the source-only
+count is 12,019 `rt_*` declaration rows / 3,172 symbols: 1,190 tagged, 638
+`unsafe_contract_declared`, 10,563 untouched, and zero exact-artifact
+verified-and-signed.

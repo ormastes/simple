@@ -356,3 +356,10 @@ passing placeholder.
     explicit / 19,388 missing calls. Next scope or type the same owner's
     env/dir/time/PID/CLI/hash families, then address its three public primitive
     APIs. Do not claim signing from source authority.
+68. Retain the OS RSA typed-result boundary: the facade must call only the
+    canonical checked signature APIs, JWT must propagate `Result`, and normal
+    automatic signing must perform one hosted call with Pure Simple fallback
+    only after failure. Current declaration ledger is 12,019 rows / 3,172
+    symbols, with zero exact-artifact signed/admitted. Re-run source checks only
+    after a policy-accepted self-hosted runtime is available; do not bypass the
+    production-runtime guard or restore empty-signature/boolean sentinels.

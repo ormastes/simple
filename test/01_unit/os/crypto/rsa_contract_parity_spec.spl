@@ -90,6 +90,16 @@ fn _test_message() -> [u8]:
 fn _malformed_pkcs8() -> [u8]:
     [0x30, 0x03, 0x02, 0x01, 0x00]
 
+fn _signature_len(result: Result<[u8], text>) -> u64:
+    match result:
+        case Ok(sig): sig.len()
+        case Err(_): 0
+
+fn _signing_failed(result: Result<[u8], text>) -> bool:
+    match result:
+        case Ok(_): false
+        case Err(_): true
+
 describe "RSA signing contract backend selection":
     it "Auto matches HostedReference for a valid SHA-512 RSA fixture":
         if not _ensure_crypto_fixtures():
@@ -98,7 +108,7 @@ describe "RSA signing contract backend selection":
         val msg = _test_message()
         val auto_sig = rsa_sha512_sign_with_backend(pkcs8, msg, RsaSignBackend.Auto)
         val hosted_sig = rsa_sha512_sign_with_backend(pkcs8, msg, RsaSignBackend.HostedReference)
-        expect(auto_sig.len()).to_be_greater_than(0)
+        expect(_signature_len(auto_sig)).to_be_greater_than(0)
         expect(auto_sig).to_equal(hosted_sig)
 
     it "HostedReference SHA-512 signing is deterministic":
@@ -108,7 +118,7 @@ describe "RSA signing contract backend selection":
         val msg = _test_message()
         val sig_a = rsa_sha512_sign_with_backend(pkcs8, msg, RsaSignBackend.HostedReference)
         val sig_b = rsa_sha512_sign_with_backend(pkcs8, msg, RsaSignBackend.HostedReference)
-        expect(sig_a.len()).to_be_greater_than(0)
+        expect(_signature_len(sig_a)).to_be_greater_than(0)
         expect(sig_a).to_equal(sig_b)
 
     it "PureSimple SHA-512 signing is deterministic":
@@ -121,18 +131,18 @@ describe "RSA signing contract backend selection":
         # wall-clock budget.  Skip until compiled-mode test runner lands.
         return "skip: pure-Simple 2048-bit modexp too slow for interpreter"
 
-    it "malformed PKCS#8 returns empty signatures for SHA-256 and SHA-512 across backends":
+    it "malformed PKCS#8 returns typed errors for SHA-256 and SHA-512 across backends":
         val malformed = _malformed_pkcs8()
         val msg = _test_message()
-        expect(rsa_sha256_sign_with_backend(malformed, msg, RsaSignBackend.HostedReference)).to_equal([])
-        expect(rsa_sha256_sign_with_backend(malformed, msg, RsaSignBackend.PureSimple)).to_equal([])
-        expect(rsa_sha512_sign_with_backend(malformed, msg, RsaSignBackend.HostedReference)).to_equal([])
-        expect(rsa_sha512_sign_with_backend(malformed, msg, RsaSignBackend.PureSimple)).to_equal([])
+        expect(_signing_failed(rsa_sha256_sign_with_backend(malformed, msg, RsaSignBackend.HostedReference))).to_equal(true)
+        expect(_signing_failed(rsa_sha256_sign_with_backend(malformed, msg, RsaSignBackend.PureSimple))).to_equal(true)
+        expect(_signing_failed(rsa_sha512_sign_with_backend(malformed, msg, RsaSignBackend.HostedReference))).to_equal(true)
+        expect(_signing_failed(rsa_sha512_sign_with_backend(malformed, msg, RsaSignBackend.PureSimple))).to_equal(true)
 
-    it "wrong key type returns empty SHA-512 signatures across backends":
+    it "wrong key type returns typed SHA-512 signing errors across backends":
         if not _ensure_crypto_fixtures():
             return "skip: openssl fixture generation unavailable"
         val ec_pkcs8 = _load_bytes(EC_PK8)
         val msg = _test_message()
-        expect(rsa_sha512_sign_with_backend(ec_pkcs8, msg, RsaSignBackend.HostedReference)).to_equal([])
-        expect(rsa_sha512_sign_with_backend(ec_pkcs8, msg, RsaSignBackend.PureSimple)).to_equal([])
+        expect(_signing_failed(rsa_sha512_sign_with_backend(ec_pkcs8, msg, RsaSignBackend.HostedReference))).to_equal(true)
+        expect(_signing_failed(rsa_sha512_sign_with_backend(ec_pkcs8, msg, RsaSignBackend.PureSimple))).to_equal(true)

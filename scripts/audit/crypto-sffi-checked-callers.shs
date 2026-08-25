@@ -9,6 +9,8 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 builder="$root/src/os/tls13/server_builders.spl"
 handshake="$root/src/os/tls13/server_handshake.spl"
 declarations="$root/src/lib/nogc_sync_mut/io/signature_sffi.spl"
+rsa_facade="$root/src/os/crypto/rsa.spl"
+jwt="$root/src/lib/common/jwt/sign.spl"
 tls_verify_dir="$root/src/os/tls13/_CertVerify"
 failed=0
 
@@ -45,6 +47,22 @@ if grep -q 'build_certificate_verify(' "$handshake"; then
 fi
 if grep -R -n -E 'rsa_pss_sha(256|384|512)_verify_native' "$tls_verify_dir"; then
     echo "TLS verification paths still use legacy sentinel RSA-PSS wrappers" >&2
+    failed=1
+fi
+
+if grep -n -E 'extern fn rt_rsa_|rt_rsa_sha(256|512)_(sign|verify)\(' "$rsa_facade"; then
+    echo "OS RSA facade must use the checked canonical signature facade" >&2
+    failed=1
+fi
+if ! grep -q 'fn rsa_sha256_sign.*Result<\[u8\], text>' "$rsa_facade" ||
+   ! grep -q 'fn rsa_sha512_sign.*Result<\[u8\], text>' "$rsa_facade" ||
+   ! grep -q 'fn rsa_sha256_verify.*Result<bool, text>' "$rsa_facade" ||
+   ! grep -q 'fn rsa_sha512_verify.*Result<bool, text>' "$rsa_facade"; then
+    echo "OS RSA facade must preserve typed signing and verification failures" >&2
+    failed=1
+fi
+if grep -n -E 'rsa_sig_valid\(rsa_sha256_sign|val sig = rsa_sha256_sign\([^?]*$|val valid = rsa_sha256_verify\([^?]*$' "$jwt"; then
+    echo "JWT RSA paths must propagate typed signing and verification failures" >&2
     failed=1
 fi
 if ! grep -R -q 'rsa_pss_sha256_verify_checked' "$tls_verify_dir" ||
