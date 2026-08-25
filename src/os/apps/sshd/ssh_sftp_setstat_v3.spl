@@ -1,18 +1,16 @@
 # Strict, bounded SFTP v3 SETSTAT/FSETSTAT request codec.
 #
-# This module does not execute filesystem operations.  Path permissions are
-# the only currently actionable subset: the session owner may pass the
-# decoded path and mode to `vfs_chmod_checked`.  Size is rejected because the
-# user-facing VFS mutation facade has no canonical truncate operation, and a
-# handle target is retained as an opaque bounded token because this leaf must
-# not know session handle state.  In particular, decoding FSETSTAT is not an
-# assertion that the requested mutation can be executed.
+# This module does not execute filesystem operations.  It decodes the SIZE and
+# PERMISSIONS subset for the session owner, which retains filesystem authority
+# and handle state.  In particular, decoding FSETSTAT is not an assertion that
+# every requested mutation can be executed by the available handle facades.
 
 use os.apps.sshd.ssh_packet.{ssh_get_u32}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 
 pub val SSH_FXP_SETSTAT_V3: u8 = 9u8
 pub val SSH_FXP_FSETSTAT_V3: u8 = 10u8
+pub val SSH_FILEXFER_ATTR_SIZE_V3: u32 = 0x00000001u32
 pub val SSH_FILEXFER_ATTR_PERMISSIONS_V3: u32 = 0x00000004u32
 
 val SFTP_SETSTAT_MAX_PACKET_V3: u64 = 35000u64
@@ -28,6 +26,9 @@ pub struct SftpSetstatRequestV3:
     request_id: u32
     path: text
     handle: [u8]
+    has_size: bool
+    size: u64
+    has_permissions: bool
     mode: u16
 
 fn _setstat_copy_v3(data: [u8], start: u64, length: u64) -> [u8]:
@@ -84,11 +85,11 @@ pub fn sftp_setstat_request_id_v3(frame: [u8]) -> u32:
     ssh_get_u32(frame, 5u64)
 
 pub fn sftp_setstat_decode_v3(frame: [u8]) -> Result<SftpSetstatRequestV3, text>:
-    """Decode the permission-only subset of one complete v3 SETSTAT request.
+    """Decode the SIZE/PERMISSIONS subset of one complete v3 SETSTAT request.
 
     FSETSTAT is decoded to an opaque handle target for session-owner validation.
-    All other attribute flags, including SIZE, UID/GID, times, and extensions,
-    are rejected rather than silently ignored.
+    UID/GID, times, extensions, empty attributes, and unknown flags are rejected
+    rather than silently ignored.
     """
     if frame.len() < 17u64 or frame.len() > SFTP_SETSTAT_MAX_PACKET_V3 + 4u64:
         return Err("invalid SETSTAT request length")
@@ -104,17 +105,37 @@ pub fn sftp_setstat_decode_v3(frame: [u8]) -> Result<SftpSetstatRequestV3, text>
         SFTP_SETSTAT_MAX_HANDLE_V3
     val target = _setstat_string_v3(frame, 9u64, maximum)?
     val after_target = target.1
-    if after_target > frame.len() or frame.len() - after_target != 8u64:
+    if after_target > frame.len() or frame.len() - after_target < 4u64:
         return Err("invalid SETSTAT attributes length")
     val flags = ssh_get_u32(frame, after_target)
-    if flags != SSH_FILEXFER_ATTR_PERMISSIONS_V3:
+    val supported = SSH_FILEXFER_ATTR_SIZE_V3 |
+        SSH_FILEXFER_ATTR_PERMISSIONS_V3
+    if flags == 0u32 or (flags & supported) != flags:
         return Err("unsupported SETSTAT attributes")
-    val mode = (ssh_get_u32(frame, after_target + 4u64) & 0xFFFu32).to_u16()
+    val has_size = (flags & SSH_FILEXFER_ATTR_SIZE_V3) != 0u32
+    val has_permissions =
+        (flags & SSH_FILEXFER_ATTR_PERMISSIONS_V3) != 0u32
+    val expected_attributes = 4u64 + (if has_size: 8u64 else: 0u64) +
+        (if has_permissions: 4u64 else: 0u64)
+    if frame.len() - after_target != expected_attributes:
+        return Err("invalid SETSTAT attributes length")
+    var attribute_offset = after_target + 4u64
+    var size: u64 = 0u64
+    if has_size:
+        size = (ssh_get_u32(frame, attribute_offset).to_u64() << 32u64) |
+            ssh_get_u32(frame, attribute_offset + 4u64).to_u64()
+        attribute_offset = attribute_offset + 8u64
+        if size > 0x7FFFFFFFFFFFFFFFu64:
+            return Err("SETSTAT size exceeds supported range")
+    var mode: u16 = 0u16
+    if has_permissions:
+        mode = (ssh_get_u32(frame, attribute_offset) & 0xFFFu32).to_u16()
     if kind == SSH_FXP_FSETSTAT_V3:
         return Ok(SftpSetstatRequestV3(
             target_kind: SftpSetstatTargetKindV3.Handle,
             request_id: ssh_get_u32(frame, 5u64), path: "",
-            handle: target.0, mode: mode))
+            handle: target.0, has_size: has_size, size: size,
+            has_permissions: has_permissions, mode: mode))
     if not _setstat_path_admitted_v3(target.0):
         return Err("SETSTAT path denied")
     match validated_utf8_bytes_to_text_linear(target.0):
@@ -122,7 +143,8 @@ pub fn sftp_setstat_decode_v3(frame: [u8]) -> Result<SftpSetstatRequestV3, text>
         Ok(decoded_path): Ok(SftpSetstatRequestV3(
             target_kind: SftpSetstatTargetKindV3.Path,
             request_id: ssh_get_u32(frame, 5u64), path: decoded_path,
-            handle: [], mode: mode))
+            handle: [], has_size: has_size, size: size,
+            has_permissions: has_permissions, mode: mode))
 
 pub fn sftp_setstat_is_path_v3(request: SftpSetstatRequestV3) -> bool:
     match request.target_kind:

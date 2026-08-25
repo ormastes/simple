@@ -102,6 +102,9 @@ class SimplePortalServer:
             return self._error(normalized.1, 400)
         val clean_path = normalized.0
 
+        if method == "OPTIONS" and clean_path.starts_with("/static/"):
+            return self._serve_static_options(clean_path)
+
         if method != "GET" and method != "HEAD" and method != "POST":
             return self._method_not_allowed(clean_path)
 
@@ -185,6 +188,25 @@ class SimplePortalServer:
             build_text(content)
         self._finalize_static(resp, content, head_only, headers)
 
+    fn _serve_static_options(clean_path: text) -> text:
+        val rel = clean_path["/static/".length():]
+        if rel == "" or rel.contains("..") or rel.contains("\\") or rel.starts_with("/"):
+            return self._error("Static path traversal rejected", 404)
+        if not file_exists("{self.app_root}/public/{rel}"):
+            return self._finalize(_build_error(404, "Not Found"), false, false)
+        var resp = HttpResponseData(
+            status: 204,
+            reason: "No Content",
+            headers: [],
+            body: "",
+            body_file: "",
+            body_offset: 0,
+            body_length: 0,
+            chunked: false
+        )
+        resp = _add_response_header(resp, "Allow", "GET, HEAD, OPTIONS")
+        self._finalize(resp, false, false)
+
     fn _finalize_static(resp: HttpResponseData, content: text, head_only: bool, request_headers: text) -> text:
         val etag = "\"" + sha256_text(content) + "\""
         if _if_none_match_matches(_header_value(request_headers, "If-None-Match"), etag):
@@ -242,6 +264,8 @@ class SimplePortalServer:
         var resp = _build_error(405, "Method Not Allowed")
         val allow_header = if clean_path == "/api/playground/run":
             "POST"
+        elif clean_path.starts_with("/static/"):
+            "GET, HEAD, OPTIONS"
         else:
             "GET, HEAD"
         resp = _add_response_header(resp, "Allow", allow_header)
@@ -307,6 +331,7 @@ fn _status_reason(status: i64) -> text:
     match status:
         200: "OK"
         202: "Accepted"
+        204: "No Content"
         400: "Bad Request"
         403: "Forbidden"
         404: "Not Found"

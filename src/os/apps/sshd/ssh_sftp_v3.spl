@@ -18,8 +18,8 @@ use os.userlib.fs_mutation.{
     vfs_rename_checked, vfs_chmod_checked, vfs_symlink_checked,
     vfs_readlink_checked
 }
-use os.userlib.fs.{VfsFileStat, file_stat_bounded, file_fstat_bounded}
-use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_open, g_vfs_positioned_close, g_vfs_positioned_read_at, g_vfs_positioned_write_at}
+use os.userlib.fs.{VfsFileStat, file_stat_bounded, file_lstat_bounded, file_fstat_bounded}
+use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_open, g_vfs_positioned_close, g_vfs_positioned_ftruncate, g_vfs_positioned_read_at, g_vfs_positioned_write_at}
 use os.services.vfs.vfs_write_ops.{g_vfs_readdir}
 use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind}
 use std.fs_driver.error.{FsError}
@@ -663,9 +663,10 @@ impl SftpSessionV3:
                 "path is not valid UTF-8")
             Ok(path):
                 if not follow_links:
-                    # Canonical VFS_STAT does not promise no-follow semantics.
-                    return _status(request_id, SSH_FX_OP_UNSUPPORTED,
-                        "lstat unsupported")
+                    match file_lstat_bounded(path):
+                        Err(error): return _status(request_id,
+                            _stat_error_status(error), "lstat failed")
+                        Ok(stat): return _attrs(request_id, stat)
                 match file_stat_bounded(path):
                     Err(error): _status(request_id, _stat_error_status(error),
                         "stat failed")
@@ -753,9 +754,6 @@ impl SftpSessionV3:
             Ok(request):
                 match request.target_kind:
                     case SftpSetstatTargetKindV3.Handle:
-                        # The strict decoder has validated the complete request,
-                        # but positioned SFTP handles have no canonical fchmod
-                        # facade.  Never substitute path lookup or fake success.
                         if request.handle.len() != 12u64 or
                             ssh_get_u32(request.handle, 0u64) != SFTP_HANDLE_MAGIC:
                             return _status(request.request_id, SSH_FX_FAILURE,
@@ -767,14 +765,67 @@ impl SftpSessionV3:
                                 self.handle_generations[slot]:
                             return _status(request.request_id, SSH_FX_FAILURE,
                                 "invalid handle")
-                        _status(request.request_id, SSH_FX_OP_UNSUPPORTED,
-                            "fsetstat unsupported")
-                    case SftpSetstatTargetKindV3.Path:
-                        match vfs_chmod_checked(request.path, request.mode):
+                        if self.handle_directory[slot]:
+                            return _status(request.request_id,
+                                SSH_FX_OP_UNSUPPORTED,
+                                "directory fsetstat unsupported")
+                        # No canonical positioned fchmod exists.  Reject the
+                        # entire combined operation before changing size.
+                        if request.has_permissions:
+                            return _status(request.request_id,
+                                SSH_FX_OP_UNSUPPORTED,
+                                "fsetstat permissions unsupported")
+                        if not request.has_size:
+                            return _status(request.request_id,
+                                SSH_FX_OP_UNSUPPORTED, "fsetstat unsupported")
+                        if not self.handle_writable[slot]:
+                            return _status(request.request_id,
+                                SSH_FX_PERMISSION_DENIED,
+                                "fsetstat requires writable handle")
+                        match g_vfs_positioned_ftruncate(
+                            self.file_objects[slot], request.size.to_i64()):
                             Err(error): _status(request.request_id,
-                                _namespace_error_status(error),
-                                "setstat permissions failed")
+                                _fs_status(error), "fsetstat size failed")
                             Ok(_): _status(request.request_id, SSH_FX_OK, "ok")
+                    case SftpSetstatTargetKindV3.Path:
+                        # No canonical transaction combines truncate and chmod.
+                        # Reject the pair before either mutation so a later
+                        # failure cannot leave an unacknowledged partial update.
+                        if request.has_size and request.has_permissions:
+                            return _status(request.request_id,
+                                SSH_FX_OP_UNSUPPORTED,
+                                "combined setstat unsupported")
+                        if request.has_size:
+                            # Open without CREATE so SETSTAT never fabricates a
+                            # missing path, then resize through the positioned
+                            # owner and close the temporary object on all paths.
+                            match g_vfs_positioned_open(
+                                request.path, OpenFlags.write_only()):
+                                Err(error): return _status(request.request_id,
+                                    _fs_status(error), "setstat open failed")
+                                Ok(file_object):
+                                    val resized = g_vfs_positioned_ftruncate(
+                                        file_object, request.size.to_i64())
+                                    val closed = g_vfs_positioned_close(file_object)
+                                    match resized:
+                                        Err(error): return _status(
+                                            request.request_id,
+                                            _fs_status(error),
+                                            "setstat size failed")
+                                        Ok(_):
+                                            match closed:
+                                                Err(error): return _status(
+                                                    request.request_id,
+                                                    _fs_status(error),
+                                                    "setstat close failed")
+                                                Ok(_): pass
+                        if request.has_permissions:
+                            match vfs_chmod_checked(request.path, request.mode):
+                                Err(error): return _status(request.request_id,
+                                    _namespace_error_status(error),
+                                    "setstat permissions failed")
+                                Ok(_): pass
+                        _status(request.request_id, SSH_FX_OK, "ok")
 
     fn _ring_byte(offset: u64) -> u8:
         self.rx_ring[(self.rx_head + offset) % SFTP_ACCUMULATOR_CAP]

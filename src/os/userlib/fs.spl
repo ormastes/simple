@@ -3,7 +3,7 @@
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.userlib.syscall_raw
-use os.userlib.ipc_protocol(VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE, VFS_STAT, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST, VFS_READLINK, VFS_OPEN_O_RDONLY, VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC)
+use os.userlib.ipc_protocol(VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE, VFS_STAT, VFS_STAT_NO_FOLLOW, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST, VFS_READLINK, VFS_OPEN_O_RDONLY, VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC)
 use os.kernel.types.fs_types(DirEntry, FsNode, FsNodeKind)
 use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_fstat}
 use std.fs_driver.error.{FsError}
@@ -349,6 +349,36 @@ fn stat(path: text) -> Result<FsNode, text>:
         modified_ns: 0u64
     ))
 
+fn stat_no_follow(path: text) -> Result<FsNode, text>:
+    val response = vfs_ipc_request_bytes(VFS_STAT_NO_FOLLOW, _vfs_text_bytes(path))?
+    if response.len() != 11u64:
+        return Err("malformed no-follow stat response")
+    Ok(FsNode(
+        id: 0u64,
+        kind: _fs_node_kind_from_u8(response[0u64]),
+        size: _vfs_read_u64(response, 1u64),
+        permissions: _vfs_read_u16(response, 9u64),
+        owner: 0u32, group: 0u32, created_ns: 0u64, modified_ns: 0u64
+    ))
+
+pub fn file_lstat_bounded(path: text) -> Result<VfsFileStat, text>:
+    """Stat one bounded path without following its final symlink."""
+    if path.len() == 0u64 or path.len() > 4096u64 or path.contains("\0"):
+        return Err("invalid no-follow stat path length")
+    val node = stat_no_follow(path)?
+    val type_bits = match node.kind:
+        case FsNodeKind.Directory: 0o040000u32
+        case FsNodeKind.Symlink: 0o120000u32
+        case FsNodeKind.Device: 0o060000u32
+        case FsNodeKind.Pipe: 0o010000u32
+        case _: 0o100000u32
+    Ok(VfsFileStat(
+        kind: node.kind, size: node.size,
+        mode: type_bits | node.permissions.to_u32(),
+        uid: 0u32, gid: 0u32, atime_ns: 0u64, mtime_ns: 0u64,
+        kind_available: true, mode_available: true,
+        uid_gid_available: false, times_available: false))
+
 pub fn file_stat_bounded(path: text) -> Result<VfsFileStat, text>:
     """Stat one bounded path through canonical VFS_STAT.
 
@@ -505,6 +535,6 @@ fn mount_list() -> Result<[text], text>:
 
 # Minimal process-side byte I/O surface used by filesystem-launched tools.
 export file_open_direct, file_read_direct, file_close_direct, stat, list_directory_bounded,
-    VfsDirectoryListing, VfsFileStat, file_stat_bounded, file_fstat_bounded,
+    VfsDirectoryListing, VfsFileStat, file_stat_bounded, file_lstat_bounded, file_fstat_bounded,
     VFS_DIRECTORY_ENTRY_LIMIT,
     VFS_DIRECTORY_NAME_BYTES_LIMIT, VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT

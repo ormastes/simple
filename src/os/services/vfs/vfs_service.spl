@@ -15,6 +15,7 @@
 #   WRITE:  fd (u64) | data (bytes)
 #   CLOSE:  fd (u64)
 #   STAT:   path (text)
+#   STAT_NO_FOLLOW: path (text)
 #   READDIR: path (text)
 #   MKDIR:  path (text)
 #   UNLINK: path (text)
@@ -50,6 +51,7 @@ val VFS_CHMOD: u32 = 12
 val VFS_SYMLINK: u32 = 13
 val VFS_RMDIR: u32 = 14
 val VFS_READLINK: u32 = 17
+val VFS_STAT_NO_FOLLOW: u32 = 18
 
 # VFS_OPEN carries the kernel's POSIX O_* bit layout, never a service-private
 # flag encoding.  Keep this decoding boundary aligned with os.kernel.fd_table.
@@ -211,6 +213,7 @@ impl VfsService:
             VFS_SYMLINK: self.dispatch_symlink(src_port, payload_addr, payload_len)
             VFS_RMDIR: self.dispatch_rmdir(src_port, payload_addr, payload_len)
             VFS_READLINK: self.dispatch_readlink(src_port, payload_addr, payload_len)
+            VFS_STAT_NO_FOLLOW: self.dispatch_stat_no_follow(src_port, payload_addr, payload_len)
             _: self.send_error_reply(src_port, STATUS_INVALID, "unknown VFS method")
 
     # ========================================================================
@@ -309,6 +312,25 @@ impl VfsService:
                 self.send_bytes_reply(src_port, STATUS_OK, reply)
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
+
+    me dispatch_stat_no_follow(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Parse STAT_NO_FOLLOW request: path(text)."""
+        val path = _read_text(payload_addr, payload_len)
+        match self.vfs.stat_no_follow(path):
+            Result.Ok(node):
+                var reply: [u8] = []
+                val kind_val: u8 = match node.kind:
+                    FsNodeKind.File: 0
+                    FsNodeKind.Directory: 1
+                    FsNodeKind.Symlink: 2
+                    FsNodeKind.Device: 3
+                    FsNodeKind.Pipe: 4
+                reply.push(kind_val)
+                _push_u64(reply, node.size)
+                _push_u16(reply, node.permissions)
+                self.send_bytes_reply(src_port, STATUS_OK, reply)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_ERR, e)
 
     me dispatch_readdir(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse READDIR request: path(text)."""
@@ -597,6 +619,7 @@ fn _vfs_request_payload_is_valid(method: u32, addr: u64, payload_len: u32) -> bo
         VFS_SYMLINK: _vfs_has_exact_two_nonempty_nul_paths(addr, payload_len)
         VFS_RMDIR: _vfs_has_nonempty_plain_path(addr, payload_len)
         VFS_READLINK: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_STAT_NO_FOLLOW: _vfs_has_nonempty_plain_path(addr, payload_len)
         _: true
 
 fn _read_text(addr: u64, len: u32) -> text:

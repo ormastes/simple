@@ -33,13 +33,22 @@ pub(package) struct SchedulerExecutableSourceCleanupReceiptV1:
 val SCHEDULER_EXECUTABLE_SOURCE_CLEANUP_LIMIT_V1: i64 = 512
 val _executable_source_cleanup_mutex_v1: i64 = mutex_raw_create()
 var _executable_source_cleanup_slots_v1: [SchedulerExecutableSourceCleanupSlotV1] = []
+var _executable_source_cleanup_quarantined_v1: bool = false
 
 fn _source_cleanup_lock_v1() -> bool:
     _executable_source_cleanup_mutex_v1 > 0 and
+        not _executable_source_cleanup_quarantined_v1 and
         mutex_raw_lock(_executable_source_cleanup_mutex_v1)
 
 fn _source_cleanup_unlock_v1() -> bool:
-    mutex_raw_unlock(_executable_source_cleanup_mutex_v1)
+    if mutex_raw_unlock(_executable_source_cleanup_mutex_v1): return true
+    # The caller cannot distinguish an unlock that left the mutex held from
+    # one that released it but failed to report success.  Slot state may also
+    # already contain a newly retained authority or an in-flight claim.  Make
+    # that ambiguity terminal for this owner instead of later replaying close
+    # through state whose lock history is no longer trustworthy.
+    _executable_source_cleanup_quarantined_v1 = true
+    false
 
 fn _source_cleanup_receipt_v1(
     complete: bool, indeterminate: bool
