@@ -39,6 +39,27 @@ explicit authority. Its ratchet failed (`19,494 > 19,412`). This scanner is a
 bounded source heuristic and explicitly does not resolve aliases, re-exports,
 or generated declarations; resolved HIR remains the required final authority.
 
+### 2026-08-25 post-admission refresh
+
+After the exact-artifact signature and typed-boolean work landed, the full
+repository-owned inventory was rerun once. The distinct `rt_*` symbol total and
+provider-language split were unchanged, while declaration tagging advanced:
+
+| Unit | Total | Unsafe tagged | Signed/admitted | Untouched |
+| --- | ---: | ---: | ---: | ---: |
+| `rt_*` declaration rows | 12,131 | 958 | 0 | 10,901 |
+| distinct `rt_*` symbols | 3,173 | 696 | 0 | 2,246 |
+
+Distinct provider-language provenance remains 1,321 linked-native/unknown,
+1,012 with no provider observed, 591 Rust, and 249 C/C++. This proves that the
+tree is still not universally admitted. It also exposed 26 duplicate Simple
+`rt_mkdir_p` declarations whose legacy C and canonical pointer/length provider
+shapes were not one authoritative ABI. The follow-up consolidation removed all
+Simple declarations and routes callers through `std.io_runtime.mkdir_p` and
+its already-scoped `rt_dir_create_all` owner. The focused lint now rejects any
+reintroduction. This changes neither asymptotic work nor allocation count; it
+removes a duplicate boundary and an unconditional LLVM declaration.
+
 ## Current enforcement boundary
 
 - Normal and bootstrap MIR lowering now reject non-unit fallthrough with

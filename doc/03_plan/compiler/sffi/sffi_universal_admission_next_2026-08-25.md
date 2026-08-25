@@ -159,6 +159,16 @@ handle contracts.
 
 ### 6. Migrate or isolate every remaining row
 
+Checkpoint: the first source-ledger consolidation removed all 26 duplicate
+Simple `rt_mkdir_p` declaration rows, including mirrored specs, and removed the
+obsolete unconditional LLVM declaration. Callers now use the canonical
+`std.io_runtime.mkdir_p` wrapper, whose only raw operation is the existing
+scoped `rt_dir_create_all` call. The focused SFFI lint was repaired to define
+its previously missing negative-pattern helper and now rejects any future raw
+Simple `rt_mkdir_p` declaration. The lint passed once. No per-call hashing,
+lookup, allocation, copy, or new loop was introduced; runtime performance
+measurement remains blocked on the admitted self-hosted compiler.
+
 For each row, prefer a pure-Simple owner. Otherwise require either:
 
 1. admitted exact evidence plus a typed safe wrapper; or
