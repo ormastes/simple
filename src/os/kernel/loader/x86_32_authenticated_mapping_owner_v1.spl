@@ -12,6 +12,10 @@ use os.kernel.loader.executable_x86_32_mapping_owner_v1.{
     executable_x86_32_mapping_readiness_v1,
     executable_x86_32_mapping_max_pages_v1
 }
+use os.kernel.loader.executable_launch_arguments_v1.{ExecutableLaunchArgumentsV1}
+use os.kernel.loader.stack_builder.{
+    AuxEntry, build_initial_stack_checked
+}
 use os.kernel.arch.x86_32.user_page_root_owner_v1.{
     X8632UserRootLeaseV1, X8632LeafDispositionV1,
     x86_32_user_root_create_v1, x86_32_user_allocate_and_map_v1,
@@ -194,26 +198,30 @@ fn _x86_32_copy_segment_page_v1(
         zeroed = zeroed + 1u64
     true
 
-fn _x86_32_write_u32_le_v1(phys: u64, offset: u64, value: u32) -> bool:
+fn _x86_32_build_launch_stack_v1(
+    stack_phys: u64,
+    entry_point: u64,
+    launch: ExecutableLaunchArgumentsV1
+) -> u64:
+    val frame_result = build_initial_stack_checked(
+        _X86_32_STACK_TOP_V1, _X86_32_MAPPING_PAGE_BYTES_V1, 4u64, [],
+        launch.argv, launch.envp,
+        [AuxEntry(aux_type: 9u64, value: entry_point)])
+    if frame_result.is_err(): return 0u64
+    val frame = frame_result.unwrap()
+    if (frame.sp < _X86_32_STACK_PAGE_V1 or
+        frame.bytes.len() as u64 > _X86_32_MAPPING_PAGE_BYTES_V1 or
+        frame.sp + frame.bytes.len() as u64 != _X86_32_STACK_TOP_V1):
+        return 0u64
+    val destination_offset = frame.sp - _X86_32_STACK_PAGE_V1
     var index = 0u64
-    while index < 4u64:
-        val byte = ((value >> (index * 8u64) as u32) & 0xFFu32) as u8
-        mmio_write8(phys + offset + index, byte)
-        if mmio_read8(phys + offset + index) != byte: return false
-        index = index + 1u64
-    true
-
-fn _x86_32_build_empty_stack_v1(stack_phys: u64) -> u64:
-    # argc, argv terminator, envp terminator and AT_NULL pair are five u32
-    # words.  Round downward to the i386 16-byte process-entry alignment.
-    val stack_pointer = (_X86_32_STACK_TOP_V1 - 20u64) & 0xFFFFFFFFFFFFFFF0u64
-    val offset = stack_pointer - _X86_32_STACK_PAGE_V1
-    var word = 0u64
-    while word < 5u64:
-        if not _x86_32_write_u32_le_v1(stack_phys, offset + word * 4u64, 0u32):
+    while index < frame.bytes.len() as u64:
+        val value = frame.bytes[index as i64]
+        mmio_write8(stack_phys + destination_offset + index, value)
+        if mmio_read8(stack_phys + destination_offset + index) != value:
             return 0u64
-        word = word + 1u64
-    stack_pointer
+        index = index + 1u64
+    frame.sp
 
 fn _x86_32_mapping_slot_matches_v1(
     receipt: X8632AuthenticatedMappingReceiptV1,
@@ -251,7 +259,8 @@ fn _x86_32_mapping_release_v1(
 
 pub(package) fn x86_32_authenticated_mapping_prepare_v1(
     handle: ExecutableImageHandleV1,
-    authenticated_source: [u8]
+    authenticated_source: [u8],
+    launch: ExecutableLaunchArgumentsV1
 ) -> X8632AuthenticatedMappingReceiptV1:
     val readiness = executable_x86_32_mapping_readiness_v1(handle, authenticated_source)
     if not readiness.ready or readiness.error != ExecutableX8632MappingReadinessErrorV1.None:
@@ -329,7 +338,8 @@ pub(package) fn x86_32_authenticated_mapping_prepare_v1(
             if not stack.ok:
                 error = X8632AuthenticatedMappingErrorV1.RollbackFailed
             else:
-                initial_sp = _x86_32_build_empty_stack_v1(stack.phys)
+                initial_sp = _x86_32_build_launch_stack_v1(
+                    stack.phys, readiness.entry_point, launch)
                 if initial_sp == 0u64:
                     error = X8632AuthenticatedMappingErrorV1.StackSerializationFailed
     val generation = _x86_32_mapping_generation_v1

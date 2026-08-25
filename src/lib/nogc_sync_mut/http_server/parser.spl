@@ -133,6 +133,9 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
             val decision = headers_decision(headers, max_body)
             if decision.0 != "":
                 return Err(decision.0)
+            val host_error = request_host_error(headers, version)
+            if host_error != "":
+                return Err(host_error)
             val content_length = decision.1
 
             var body = ""
@@ -171,6 +174,27 @@ fn headers_decision(headers: [(text, text)], max_body: i32) -> (text, i32):
     val d = body_decision(headers, max_body, false)
     (d.0, d.1)
 
+# HTTP/1.1 requires exactly one non-empty Host field (RFC 9112 §3.2).  Treat
+# duplicates as invalid even when their values agree: accepting them leaves
+# authority selection dependent on which copy a downstream component uses.
+# HTTP/1.0 keeps its historical optional-Host behavior.
+fn request_host_error(headers: [(text, text)], version: text) -> text:
+    if version != "HTTP/1.1":
+        return ""
+    var host_count: i32 = 0
+    var host_value = ""
+    for header in headers:
+        if header.0.to_lower() == "host":
+            host_count = host_count + 1
+            host_value = header.1.trim()
+    if host_count == 0:
+        return "400 Missing Host header"
+    if host_count > 1:
+        return "400 Multiple Host headers"
+    if host_value == "":
+        return "400 Empty Host header"
+    return ""
+
 fn parse_request_line(line: text) -> (text, text, text):
     # HTTP/1 request-line is exactly method SP request-target SP version.
     # Empty components, tabs, leading/trailing SP, and extra tokens reject.
@@ -207,4 +231,5 @@ fn to_i32_safe(s: text) -> i32:
 export parse_request, parse_request_with_limits, parse_request_with_policy_limits, parse_request_line
 export request_line_without_terminator
 export to_i32_safe, headers_decision
+export request_host_error
 export RUNTIME_READ_LINE_CAP
