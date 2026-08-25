@@ -2197,3 +2197,29 @@ exactly 62: 17,916 to 17,854 repository-wide and 9,747 to 9,685 in production.
 All 72 calls in the two provider entries are function-scoped. The broader
 `rt_vulkan` family now has 206 explicit and 262 missing call sites.
 Exact-artifact verified-and-signed admission remains zero.
+
+## VulkanBackend3D lexical-boundary checkpoint
+
+`VulkanRenderBackend3D` implements the ordinary `RenderBackend3D` trait, so
+marking whole methods or the trait unsafe would expand authority and could be
+bypassed through trait dispatch. Instead, the 18 methods that actually reach
+the canonical Vulkan ABI now contain leading lexical `unsafe(ffi)` blocks. All
+64 foreign calls are covered while pure command-recording methods and the
+public trait shape remain unchanged.
+
+Boundary review added O(1) preflight guards: frame and texture dimensions must
+be positive and at most 8192 per axis, each buffer allocation is capped at
+256 MiB, buffer uploads reject invalid handles and negative offsets, and
+texture uploads reject invalid handles. These checks occur before provider
+calls and prevent unchecked geometry, allocation requests, and raw-handle use.
+
+The command array, batching loops, handle-table layout, framebuffer cache, and
+provider call count are unchanged. No allocation, copy, lookup, lock, hash,
+signing operation, generic dispatch, or loop was added. The guards add one
+constant-time branch only at resource creation/upload boundaries, not inside
+the recorded-command drain loop.
+
+The source census measured missing authority decreasing by exactly 64: 17,854
+to 17,790 repository-wide and 9,685 to 9,621 in production. All 64 became
+lexically scoped. The broader `rt_vulkan` family now has 270 explicit and 198
+missing call sites. Exact-artifact verified-and-signed admission remains zero.
