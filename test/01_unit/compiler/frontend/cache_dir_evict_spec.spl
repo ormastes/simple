@@ -38,6 +38,7 @@ use std.nogc_sync_mut.io_runtime.{
 }
 use compiler.frontend.cache_dir_evict.{
     CACHE_DEFAULT_MAX_BYTES, CACHE_EVICT_SWEEP_INTERVAL,
+    _CacheDirEvictPlan,
     cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap
 }
 use compiler.frontend.frontend_parse_cache.{
@@ -118,5 +119,59 @@ describe("cache dir default + eviction", fn():
     it("reports a missing directory as nothing evicted", fn():
         assert_equal(cache_dir_evict_to_cap(SCRATCH + "/absent", ".fpc", 1), 0,
                      "a missing cache dir is not an error")
+    )
+
+    it("orders heap candidates by mtime then discovery order", fn():
+        val plan = _CacheDirEvictPlan.empty()
+        plan.account_entry("first-equal", 10, 100, 1000)
+        plan.account_entry("oldest", 10, 50, 1000)
+        plan.account_entry("second-equal", 10, 100, 1000)
+        plan.prepare()
+
+        assert_equal(plan.oldest_path(), "oldest", "lower mtime is evicted first")
+        plan.pop_oldest()
+        assert_equal(plan.oldest_path(), "first-equal",
+                     "the first discovered equal-mtime entry wins the tie")
+        plan.pop_oldest()
+        assert_equal(plan.oldest_path(), "second-equal",
+                     "the later equal-mtime entry remains second")
+    )
+
+    it("accounts protected bytes and admits the exact grace boundary", fn():
+        val plan = _CacheDirEvictPlan.empty()
+        plan.account_entry("future", 7, 1001, 1000)
+        plan.account_entry("inside-grace", 11, 701, 1000)
+        plan.account_entry("at-boundary", 13, 700, 1000)
+
+        assert_equal(plan.total_bytes(), 31,
+                     "fresh and future entries still count toward the directory cap")
+        assert_equal(plan.candidate_count(), 1,
+                     "only an entry at least 300 seconds old is eligible")
+        plan.prepare()
+        assert_equal(plan.oldest_path(), "at-boundary",
+                     "the exact grace boundary is eligible, matching the original condition")
+    )
+
+    it("does not credit failed deletes and stops exactly at the cap", fn():
+        val plan = _CacheDirEvictPlan.empty()
+        plan.account_entry("delete-fails", 10, 10, 1000)
+        plan.account_entry("delete-succeeds", 10, 20, 1000)
+        plan.account_entry("protected", 10, 999, 1000)
+        plan.prepare()
+
+        assert_true(plan.over_cap(20), "30 accounted bytes exceed the 20-byte cap")
+        val failed_size = plan.oldest_size()
+        plan.pop_oldest()
+        plan.record_delete(failed_size, false)
+        assert_equal(plan.total_bytes(), 30, "a failed unlink frees no accounted bytes")
+        assert_equal(plan.removed_count(), 0, "a failed unlink is not reported as removed")
+        assert_true(plan.over_cap(20), "eviction continues after a failed unlink")
+
+        val deleted_size = plan.oldest_size()
+        plan.pop_oldest()
+        plan.record_delete(deleted_size, true)
+        assert_equal(plan.total_bytes(), 20, "a confirmed unlink subtracts its exact size")
+        assert_equal(plan.removed_count(), 1, "only confirmed unlinks are counted")
+        assert_false(plan.over_cap(20), "equality with the cap terminates eviction")
     )
 )

@@ -17,13 +17,11 @@
 #     write-then-rename, so ties are broken arbitrarily; that only affects
 #     WHICH cold entry goes, never correctness.
 #
-# ponytail: deliberately an O(n) directory scan with an O(n^2) selection sort
-# over the entry list, run at most once per process and only when the store
-# count crosses the sweep interval. At the measured scale (a bootstrap closure
-# is ~700 entries per cache dir) that is milliseconds. If an entry dir ever
-# exceeds ~10k files this needs a real sort, and past ~100k it needs an index
-# file instead of a scan — at that point adopt 80.driver/cache/gc/ rather than
-# growing this.
+# Selection uses a stable min-heap keyed by (mtime, discovery index): one O(n)
+# directory scan, O(e) heap construction for e grace-eligible entries, then
+# O(log e) per deletion attempt. If an entry dir ever exceeds ~100k files it
+# needs an index file instead of a scan — at that point adopt
+# 80.driver/cache/gc/ rather than growing this.
 
 @unsafe(reason: "raw environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
@@ -67,6 +65,118 @@ pub fn cache_dir_evict_due(store_count: i64) -> bool:
         return false
     store_count % CACHE_EVICT_SWEEP_INTERVAL == 0
 
+# Internal eviction state, public only so the ordering/accounting contract can
+# be covered without sleeping for the filesystem grace period. Candidate
+# indexes are their discovery order, which makes equal-mtime eviction stable.
+pub class _CacheDirEvictPlan:
+    paths: [text]
+    sizes: [i64]
+    mtimes: [i64]
+    heap: [i64]
+    total: i64
+    removed: i64
+
+    static fn empty() -> _CacheDirEvictPlan:
+        _CacheDirEvictPlan(
+            paths: [], sizes: [], mtimes: [], heap: [], total: 0, removed: 0
+        )
+
+    fn _precedes(left: i64, right: i64) -> bool:
+        if self.mtimes[left] != self.mtimes[right]:
+            return self.mtimes[left] < self.mtimes[right]
+        left < right
+
+    me _heap_swap(left: i64, right: i64):
+        val candidate = self.heap[left]
+        self.heap[left] = self.heap[right]
+        self.heap[right] = candidate
+
+    me _sift_down(start: i64):
+        var index = start
+        while true:
+            val left = index * 2 + 1
+            if left >= self.heap.len():
+                return
+            val right = left + 1
+            var first = left
+            if (
+                right < self.heap.len() and
+                self._precedes(self.heap[right], self.heap[left])
+            ):
+                first = right
+            if not self._precedes(self.heap[first], self.heap[index]):
+                return
+            self._heap_swap(index, first)
+            index = first
+
+    # Account all matching bytes, including grace-protected entries. Only
+    # eligible entries enter the eviction heap.
+    me account_entry(path: text, size: i64, mtime: i64, now_secs: i64):
+        self.total = self.total + size
+        if now_secs - mtime < CACHE_EVICT_GRACE_SECS:
+            return
+        val candidate = self.paths.len()
+        self.paths.push(path)
+        self.sizes.push(size)
+        self.mtimes.push(mtime)
+        self.heap.push(candidate)
+
+    # Bottom-up construction is linear and is delayed until the cap is
+    # exceeded, so the common under-cap path performs no heap comparisons.
+    me prepare():
+        if self.heap.len() < 2:
+            return
+        var start = (self.heap.len() - 2) / 2
+        while true:
+            self._sift_down(start)
+            if start == 0:
+                return
+            start = start - 1
+
+    fn total_bytes() -> i64:
+        self.total
+
+    fn removed_count() -> i64:
+        self.removed
+
+    fn candidate_count() -> i64:
+        self.heap.len()
+
+    fn over_cap(max_bytes: i64) -> bool:
+        self.total > max_bytes
+
+    fn has_candidate() -> bool:
+        self.heap.len() > 0
+
+    fn oldest_path() -> text:
+        if self.heap.len() == 0:
+            return ""
+        self.paths[self.heap[0]]
+
+    fn oldest_size() -> i64:
+        if self.heap.len() == 0:
+            return 0
+        self.sizes[self.heap[0]]
+
+    # A candidate is attempted at most once even when deletion fails, matching
+    # the previous selection loop's path-emptying behavior.
+    me pop_oldest():
+        if self.heap.len() == 0:
+            return
+        val last = self.heap.len() - 1
+        if last > 0:
+            self.heap[0] = self.heap[last]
+        val _ = self.heap.pop()
+        if self.heap.len() > 0:
+            self._sift_down(0)
+
+    # Failed deletion preserves both byte accounting and the removed count.
+    me record_delete(size: i64, deleted: bool):
+        if not deleted:
+            return
+        self.total = self.total - size
+        self.removed = self.removed + 1
+
 # Evicts least-recently-modified entries with the given suffix until the
 # directory's total entry bytes are at or below `max_bytes`. Returns the number
 # of entries deleted. A `max_bytes` of 0 disables eviction entirely.
@@ -82,10 +192,7 @@ pub fn cache_dir_evict_to_cap(dir: text, suffix: text, max_bytes: i64) -> i64:
     unsafe(capabilities: [ffi]):
         now_micros = rt_time_now_unix_micros()
     val now_secs = now_micros / 1000000
-    var paths: [text] = []
-    var sizes: [i64] = []
-    var mtimes: [i64] = []
-    var total: i64 = 0
+    val plan = _CacheDirEvictPlan.empty()
     var entries: [text] = []
     unsafe(capabilities: [ffi]):
         entries = rt_dir_list(dir)
@@ -98,40 +205,22 @@ pub fn cache_dir_evict_to_cap(dir: text, suffix: text, max_bytes: i64) -> i64:
             size = rt_file_size(path)
         if size <= 0:
             continue
-        total = total + size
         var mtime: i64 = 0
         unsafe(capabilities: [ffi]):
             mtime = rt_file_stat(path)
-        if now_secs - mtime < CACHE_EVICT_GRACE_SECS:
-            continue
-        paths.push(path)
-        sizes.push(size)
-        mtimes.push(mtime)
-    if total <= max_bytes:
+        plan.account_entry(path, size, mtime, now_secs)
+    if not plan.over_cap(max_bytes):
         return 0
-    var removed: i64 = 0
-    var remaining = paths.len()
-    while total > max_bytes and remaining > 0:
-        var oldest = -1
-        var oldest_mtime: i64 = 0
-        var i = 0
-        while i < paths.len():
-            if paths[i] != "" and (oldest < 0 or mtimes[i] < oldest_mtime):
-                oldest = i
-                oldest_mtime = mtimes[i]
-            i = i + 1
-        if oldest < 0:
-            break
-        val victim = paths[oldest]
-        paths[oldest] = ""
-        remaining = remaining - 1
+    plan.prepare()
+    while plan.over_cap(max_bytes) and plan.has_candidate():
+        val victim = plan.oldest_path()
+        val victim_size = plan.oldest_size()
+        plan.pop_oldest()
         var deleted = false
         unsafe(capabilities: [ffi]):
             deleted = rt_file_delete(victim)
-        if deleted:
-            total = total - sizes[oldest]
-            removed = removed + 1
-    removed
+        plan.record_delete(victim_size, deleted)
+    plan.removed_count()
 
 export CACHE_DEFAULT_MAX_BYTES, CACHE_EVICT_GRACE_SECS, CACHE_EVICT_SWEEP_INTERVAL
 export cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap
