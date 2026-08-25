@@ -74,6 +74,7 @@ export use std.common.contracts.execution.simpleos_executable_v1.{
 # on a dynamically-produced `[u8]` is not proven safe on the x64 freestanding
 # path (see this file's own header + those modules' identical `extern fn
 # rt_bytes_u8_at` declarations).
+@unsafe(reason: "freestanding raw byte-array accessor; caller validates digest extent and returned byte domain", capabilities: [ffi])
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 # ============================================================================
@@ -380,11 +381,16 @@ pub fn manifest_sha256_hex(bytes: [u8]) -> text:
     (matches `std.common.crypto.sha256.sha256_text`'s encoding so a hash
     computed host-side and one computed here are directly comparable)."""
     val digest = sha256(bytes)
+    if digest.len() != 32:
+        panic("manifest SHA-256 provider returned an invalid digest length")
     var pairs: [text] = []
     var i: i64 = 0
     val n = digest.len() as i64
     while i < n:
-        val v = rt_bytes_u8_at(digest, i)
+        val v = unsafe(capabilities: [ffi]):
+            rt_bytes_u8_at(digest, i)
+        if v < 0 or v > 255:
+            panic("manifest SHA-256 byte accessor returned an invalid value")
         pairs.push(_manifest_hex_digit((v >> 4) & 15) + _manifest_hex_digit(v & 15))
         i = i + 1
     pairs.join("")

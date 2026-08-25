@@ -2456,6 +2456,38 @@ generic dispatch, or long-lived allocation.  Ptrace/DWARF and 15 debugger
 operations are still unavailable, so the module is not verified or signed;
 verified-and-signed admission remains 0.
 
+## Artifact-manifest signed-admission boundary checkpoint
+
+The generic artifact manifest has one freestanding raw call: byte access while
+hex-encoding its Pure Simple SHA-256 digest.  Its declaration and call now have
+minimal `unsafe(ffi)` authority.  The wrapper requires an exact 32-byte digest
+and a returned byte in 0..255 before encoding; invalid runtime behavior traps
+instead of manufacturing an empty or malformed identity.
+
+The loader-owned Ed25519 verifier now also rejects non-canonical image and
+trust-root identities before signing-body construction.  Both must be exactly
+64 lowercase hexadecimal characters.  Existing admission still requires a
+three-field Ed25519 envelope, a 64-byte decoded signature, a private trusted
+signer capsule, an exact trust-root hash, canonical signing bytes, and a Pure
+Simple Ed25519 verification result.  The package-private receipt remains the
+authority carrier; caller-supplied booleans cannot construct an executable
+handle, and the verifier call precedes handle construction.
+
+The focused `artifact-manifest-admission-contract.shs` ratchet passed.  The
+authoritative call census changed by the one newly bounded accessor:
+
+- missing authority: 17,259 -> 17,258
+- lexical unsafe: 2,953 -> 2,954
+- function unsafe: unchanged at 919
+
+Hashing, trust-root lookup, locking, and signature verification remain
+load-time admission work, not per-executable-call work.  The new identity
+checks are two bounded 64-character scans before much more expensive Ed25519
+verification and allocate no arrays.  No production self-hosted executable was
+available for the signature fixtures.  This proves a local fail-closed source
+shape, not that any exact provider artifact has a verified receipt; repository
+verified-and-signed admission remains 0.
+
 ## SimpleOS Ed25519 Pure-Simple boundary checkpoint
 
 `src/os/crypto/ed25519.spl` previously claimed to be Pure Simple while still

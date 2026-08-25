@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+manifest="$root/src/os/kernel/loader/artifact_manifest.spl"
+verifier="$root/src/os/kernel/loader/executable_manifest_signature_verifier.spl"
+pipeline="$root/src/os/kernel/loader/executable_admission_pipeline.spl"
+
+if [ "$(grep -c '^extern fn ' "$manifest")" -ne 1 ] ||
+   [ "$(grep -c '^@unsafe(.*capabilities: \[ffi\]' "$manifest")" -ne 1 ] ||
+   [ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$manifest")" -ne 1 ]; then
+    echo "artifact manifest raw-access authority inventory changed" >&2
+    exit 1
+fi
+grep -q 'if digest.len() != 32:' "$manifest"
+grep -q 'if v < 0 or v > 255:' "$manifest"
+
+grep -q 'fn _manifest_sha256_hex_valid(value: text) -> bool:' "$verifier"
+grep -q 'if not _manifest_sha256_hex_valid(image_hash):' "$verifier"
+grep -q 'if not _manifest_sha256_hex_valid(expected_trust_root_hash):' "$verifier"
+grep -q 'if signature.len() != 64:' "$verifier"
+grep -q 'if not pure_ed25519_verify(public_key, signing.bytes, signature):' "$verifier"
+grep -q 'pub(package) struct ExecutableManifestVerificationReceiptV1:' "$verifier"
+
+# Caller-supplied booleans do not grant authority: the loader must invoke the
+# private cryptographic verifier before constructing the executable handle.
+verify_line=$(grep -n 'match executable_manifest_signature_verify(' "$pipeline" | head -1 | cut -d: -f1)
+handle_line=$(grep -n 'val candidate = _loader_handle_from_binding' "$pipeline" | head -1 | cut -d: -f1)
+if [ -z "$verify_line" ] || [ -z "$handle_line" ] || [ "$verify_line" -ge "$handle_line" ]; then
+    echo "executable handle can be constructed before signature verification" >&2
+    exit 1
+fi
+
+if grep -E '(dlsym|dlopen|registry_lookup)' "$manifest" "$verifier" >/dev/null; then
+    echo "artifact admission gained dynamic provider lookup" >&2
+    exit 1
+fi
+
+echo "Artifact manifest admission audit: PASS (one bounded raw byte accessor; canonical SHA-256 identities; 64-byte Ed25519 signature; private receipt; cryptographic verify precedes handle construction)"
