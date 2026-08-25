@@ -1,8 +1,7 @@
 # SPL-doctest `parse: Unexpected token` class — 13 real doc defects, 1 harness artifact
 
 - **Filed:** 2026-08-24
-- **Status:** OPEN (recorded, deliberately NOT "fixed" by editing examples — see
-  "Why no example was edited")
+- **Status:** FIXED 2026-08-25 — all 13 real defects repaired (see "Resolution 2026-08-25")
 - **Engine for every measurement below:** the Rust seed, `bin/simple`
   (`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
   60650360 bytes, 2026-08-23 04:47), run from a worktree at base `d2d0bec2e40`.
@@ -171,3 +170,68 @@ until this abort is fixed.
   — the cross-worktree stdlib resolution defect found in the same investigation.
   Every doctest reason recorded before that was fixed had to be re-measured,
   because reasons could come from a foreign worktree's stdlib.
+
+## Resolution 2026-08-25
+
+All 13 real defects are repaired. Every fix was gated on the same discipline the
+triage used: the block was hand-built standalone and confirmed to fail with the
+recorded error BEFORE any edit, and the replacement form was confirmed to parse
+standalone before it was applied. Engine: the Rust seed.
+
+The two unresolved questions the triage stopped on both resolved as
+**documentation defects, not compiler defects**, on direct measurement:
+
+### A. Glued fence x4 — `builder.spl` 264, 287, 306, 345
+
+Fence line and receiver both restored (triple-backtick `simple` fence + `BlockBuilder("...")`),
+matching the file's own working line-21 example.
+
+The triage's contradiction — repairing the fence yields `method simple_parser
+not found on type BlockBuilder` while line 21 chains identically and passes —
+is explained by **harness context, not a compiler bug**. `.simple_parser()` is
+method sugar over the free functions `blockbuilder_simple_parser(self:
+BlockBuilder, ...)` declared at file scope in `builder.spl`. The triage's probe
+was a hand-built STANDALONE file, where those free functions are not in scope,
+so the sugar cannot resolve. The doctest composite prepends `source_content`,
+which puts them in scope — which is exactly why line 21 passes there. The two
+facts never actually contradicted each other; they were measured in two
+different scopes.
+
+### B. Trait-implementation syntax x3 — `definition.spl:22`, `mod.spl:43`, `mod.spl:138`
+
+`struct X: Trait:` has **zero** occurrences in the entire tree
+(`grep -rn "^struct [A-Za-z_]*: [A-Z]" src/ --include=*.spl` -> 0). The live,
+working convention is `struct X:` plus a separate `impl Trait for X:`, used at
+`tls/transport.spl:38`, `web_ui/plugin.spl:87` and elsewhere. A minimal fixture
+confirms it: `impl Greeter for Hi:` runs exit 0, while `struct Hi: Greeter:`
+fails with the recorded error verbatim
+(`expected Newline, found Identifier { name: "Greeter", pattern: TypeName }`).
+The examples documented a form that never existed — not a parser regression.
+Rewritten to the working form.
+
+### C. Block literal x2 — `mod.spl:18`, `easy.spl:30`
+
+A custom block literal is only lexable in a compilation unit where the block is
+already registered at COMPILE time, so it cannot appear in the same example that
+registers it at RUNTIME. This is a language property, not a defect. The usage is
+now expressed as a comment — which is the convention the same file's Tier-3
+example (`mod.spl:138`) already used for exactly this reason. Nothing was
+retagged or removed from the doctest population; the extractor has no
+ignore/no_run tag, and using one would have been a skip.
+
+### D/E/F — 4 blocks, unambiguous
+
+- `interpreter/mod.spl:78` and `text_transforms.spl:54` used **Python** string
+  syntax. Measured: `"""..."""` is valid Simple multiline (exit 0), a bare
+  multi-line `"` is not, and `'''...'''` is not Simple at all. `interpreter`
+  took `"""`; `text_transforms` could not (its example sits inside a `"""`
+  docstring, which `"""` would terminate early) so it took the escaped
+  single-line form, verified exit 0.
+- `unified_registry.spl:30` and `static_file.spl:63` had an indented block whose
+  only body was a comment. A comment is not a statement in Simple, exactly as in
+  Python; minimal fixtures reproduce `expected Indent, found Eof` and
+  `expected Indent, found Else` verbatim. Each branch was given a real statement.
+
+### Not touched
+
+`async_host/__init__.spl:92` — the harness artifact. Unchanged, as recorded.
