@@ -7,6 +7,10 @@
 # Reading bytes does not authorize execution. Callers must still enter the
 # authenticated executable admission pipeline and consume its one-shot token.
 
+use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
+use std.fs_driver.types.{ExecuteTrust}
+use std.fs_driver.error.{FsError}
+
 @cfg(arm64)
 use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
 
@@ -57,3 +61,23 @@ pub fn vfs_read_executable_bytes_v1(path: text) -> [u8]:
     authority; this function adds no fallback and grants no execution right.
     """
     _vfs_read_executable_backend_bytes_v1(path)
+
+pub fn vfs_open_authenticated_executable_v1(
+    mut table: MountTable, path: text, trust: ExecuteTrust
+) -> Result<ExecuteOpenBinding, FsError>:
+    """Open one executable through the shared mounted-filesystem owner.
+
+    This is the production read boundary for authenticated launch.  It keeps
+    FAT32, DBFS, NVFS, and future filesystem backends behind MountTable's
+    longest-prefix dispatch instead of selecting a backend here.  MountTable
+    enforces execute capability, noexec/untrusted policy, file type and size,
+    and binds the open handle to mount/namespace/content generations.
+
+    The returned binding is still not execution authority.  A loader must
+    verify the image and sidecars against this exact binding, admit it through
+    executable_admission_pipeline, and consume the resulting one-shot token at
+    scheduler adoption.
+    """
+    if path == "" or not path.starts_with("/"):
+        return Err(FsError.InvalidArg)
+    table.open_for_execute(path, trust)
