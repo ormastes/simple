@@ -184,12 +184,60 @@ Duplicate UIDs are always fatal.
 
 ### 3.3 Graph records
 
+Wave 3 canonical records are closed schemas; unknown fields fail validation:
+
+```text
+GraphNode = {uid:Uid, node_kind:NodeKind, project_uid:ProjectUid|null,
+             revision_id:NonEmptyString, record_type:RecordType,
+             record_hash:Sha256, visibility:Visibility,
+             trust_scope:TrustScope, status:NodeStatus}
+RequirementRecord = {type, uid, kind, key, display_id, project_uid,
+                     revision_id, artifact_uid, section_uid, title, status,
+                     content_hash, aliases}
+SSpecScenarioRecord = {type, uid, key, project_uid, revision_id, artifact_uid,
+                       title, ordinal, source_span, content_hash,
+                       requirement_uids, status}
+SourceSymbolRecord = {type, uid, project_uid, revision_id, canonical_path,
+                      symbol_kind, name, qualified_name, signature_hash,
+                      source_span, content_hash, annotation_uids, status}
+IdentityMigrationRecord = {old_uid, old_record_type, new_uid,
+                           migrated_at_revision}
+```
+
+All fields are required unless `|null` is shown; arrays default to `[]` and no
+other defaults exist. Strings are UTF-8 NFC; hashes are lowercase `sha256:`
+hex. `Visibility={public,project,private}`, `TrustScope={trusted,reviewed,
+untrusted}`, and `NodeStatus={candidate,proposed,accepted,deprecated}`.
+`NodeKind` is exactly the Wave 3 architecture list. Existing registry kinds use
+their accepted Wave 2 closed schemas; the records above add trace kinds.
+
+Requirement keys are normalized lowercase semantic keys; `display_id` is the
+readable uppercase label. Markdown uses this exact grammar:
+
+```markdown
+## REQ-SPKC-003 — Typed graph snapshots
+<!-- spipe:section uid=S-... key=req-spkc-003 -->
+<!-- spipe:requirement uid=RQ-... key=req-spkc-003 display_id=REQ-SPKC-003 status=accepted -->
+
+## NFR-SPKC-002 — Deterministic rebuilds
+<!-- spipe:section uid=S-... key=nfr-spkc-002 -->
+<!-- spipe:nfr uid=NFR-... key=nfr-spkc-002 display_id=NFR-SPKC-002 status=accepted -->
+```
+
+An SSpec marker is `# spipe:scenario uid=SS-... key=<lowercase-key>
+requires=RQ-...,NFR-...` immediately before its declaration. A source marker is
+`# spipe:symbol uid=SY-... implements=RQ-...,SS-...` immediately before its
+declaration. Parsers bind exactly the next declaration, reject unknown or
+duplicate attributes and UIDs, and resolve aliases before storing targets.
+Markerless or ambiguous records remain candidates, never strict evidence.
+
 ```sdn
 edge:
   uid: E-...
-  type: verifies
+  type: edge
+  edge_type: verifies
   from_uid: T-...
-  to_uid: R-...
+  to_uid: RQ-...
   origin: explicit
   status: accepted
   confidence_milli: 1000
@@ -197,6 +245,11 @@ edge:
   created_at_revision: 3b676a1...
   evidence_uids: [A-...]
   generator: nil
+  provenance: {project_uid: P-..., worktree_uid: WT-..., revision_id: 3b676a1...,
+               input_snapshot_uid: spks1-..., source_uid: A-...,
+               source_span: {start: 10, end: 20}, decision_uid: D-...}
+  authority: {kind: explicit_review, receipt_uid: D-...,
+              policy_hash: sha256:..., policy_version: 1}
 ```
 
 Stored direction follows the active-verb table in the architecture. An inverse
@@ -206,9 +259,19 @@ same endpoints are preserved. Only the lifecycle progression subgraph is
 required to be acyclic; general `links_to`, `depends_on`, `extends`, and
 classification relationships may contain cycles. Lifecycle-cycle detection
 returns a diagnostic and blocks strict publication. `generated` edges
-also store generator ID/version/rule/input snapshot. Inferred edges start as
-`proposed`; accepting one records an explicit review event without rewriting
-its origin.
+also store generator ID/version/rule/input snapshot. Inferred edges remain
+`proposed`; review may annotate or reject them but cannot make them compliance
+evidence without creating a separate explicit edge.
+
+An authorization receipt is a signed `D-` record verified through
+`AuthorizationPort`. Its payload binds receipt UID, exact edge UID and canonical
+acceptance-subject hash, endpoints, origin, accepted status, project/worktree, input snapshot,
+policy hash/version, issuer key ID, capability (`trace.accept.explicit` or
+`trace.accept.generated`), issued-at, expiry, and revocation epoch. Strict
+evaluation verifies every binding; it never trusts stored authority prose.
+The subject is `spipe-edge-accept-v1\0` plus canonical JSON of the edge with
+`status`, `provenance.decision_uid`, and `authority` removed. The completed
+stored-edge hash is computed only after attaching the receipt UID.
 
 ### 3.4 Snapshot and delta
 
@@ -229,11 +292,45 @@ snapshot_manifest:
 ```
 
 `KnowledgeDelta` contains sorted `ArtifactDelta` artifact/section changes,
-`GraphDelta` edge changes, and `IndexDelta` lexical changes, plus alias changes,
+`GraphDelta` node and edge changes, and `IndexDelta` lexical changes, plus alias changes,
 projection invalidation keys, and `DiagnosticRecord` changes. It names its base
 snapshot and all input hashes. Parent
 publication rejects a delta whose base, schema, or project revision differs
 from the pinned generation.
+
+Wave 3 freezes `GraphDelta.nodes` and `GraphDelta.edges` as separate,
+UID-disjoint operation sets. Added values contain canonical records. Updated
+values contain `before_hash` plus the complete replacement record; removed
+values contain UID plus `before_hash`. The enclosing and nested base snapshot
+UIDs must agree. A repeat is idempotent only when its recorded delta hash maps
+to the same output root; otherwise post-publication replay is stale. A
+`before_hash` hashes canonical JSON of the complete stored wrapper. The graph
+root hashes exact canonical JSON `{schema:1,nodes:[...],edges:[...]}`, nodes by
+UID and edges by `(from_uid,type,to_uid,uid)`, with no omitted fields.
+Endpoint/type/origin/provenance changes
+are remove-plus-add with a new EdgeUid, not updates.
+
+`delta_hash` is SHA-256 over `spipe-graph-delta-v1\0` plus canonical JSON of
+the complete delta. Successful publication retains immutable
+`{delta_hash,base_snapshot_uid,base_graph_root,output_snapshot_uid,
+output_graph_root}` beside the output snapshot. Exact lookup returns
+`already_applied`; same-base different hash or absent retained replay evidence
+returns stale base.
+
+Canonical graph record prefixes are `RQ`, `NFR`, `SS`, `SY`, `WS`, and `WT` as
+defined by the architecture. Requirement headings use their stable SectionUid
+as the owning document location and an `RQ-`/`NFR-` record as trace identity;
+`REQ-*`/`NFR-*` prose identifiers are keys and aliases. Parsers emit candidates
+until both identities are canonical. `R-` is never a requirement UID.
+
+`GraphStorePort` defaults/hard limits are: depth `8/32`, visited nodes
+`2,000/20,000`, returned edges `10,000/50,000`, work units
+`50,000/500,000`, edge pages `100/1,000`, and trace rows `100/1,000`.
+Exhaustion returns deterministic partial data, reason, counters, and an
+authenticated snapshot-bound cursor. `SnapshotPin` is a store-issued branded
+handle (authenticated opaque token across processes) binding store generation,
+snapshot UID, graph root, authorization-scope digest, policy version,
+issued/expiry time, and liveness generation. Invalid pins fail before lookup.
 
 ### 3.5 Diagnostics and results
 
@@ -288,6 +385,14 @@ prepare/publish in a worktree. Readers pin a manifest and need no global lock.
 The writer lock contains process identity, boot/session nonce, start time, and
 transaction ID; stale-lock takeover requires proof that the owner is absent and
 records an audit event.
+
+`SnapshotStore.stage(manifest, objects)` durably writes immutable objects and a
+non-current manifest. `publish(expected_current_uid, next_manifest)` acquires
+the per-worktree writer lock and atomically replaces `current.sdn` only when the
+expected UID matches. `pin_current(scope)` returns an immutable pin containing
+manifest UID, graph root, authorization-scope digest, and release handle;
+`release(pin)` decrements retention. Graph queries accept only a live pin and
+cannot reread `current.sdn` mid-request.
 
 Committed receipts are retained for 90 days or the latest 100 transactions,
 whichever retains more. Rolled-back and recovery-required journals are retained

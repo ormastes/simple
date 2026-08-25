@@ -74,7 +74,7 @@ Expose the same projection model through MCP resources, model-callable MCP
 tools, and bounded materialized `.spipe/view/` files. Every entry maps to one
 canonical UID and one snapshot-bound projection identity consisting of
 `workspace + snapshot + view + logical path + page + visibility scope`.
-The exact `ProjectionUid` is `spkp1-` plus lowercase SHA-256 of canonical SDN
+The exact `ProjectionUid` is `spkp1-<lowercase sha256>` over canonical SDN
 `projection_v1(workspace_uid, snapshot_id, view_kind,
 normalized_logical_path, normalized_parameters_hash,
 effective_auth_scope_hash, page_start_key)`, using SnapshotId's UTF-8 NFC and
@@ -119,6 +119,8 @@ publication boundary.
 - Neutral: raw external edits remain possible but are diagnosed and reconciled.
 
 ## ADR-SPKC-005: Make `std.common.search` the BM25 Contract Owner
+
+**Trace:** REQ-SPKC-014
 
 ### Status
 
@@ -344,9 +346,13 @@ Hand-maintained Claude, Codex, Gemini, and agent copies drift semantically.
 Store one canonical skill/rule source plus harness adapters. Deterministically
 generate supported surfaces with source UID, generator version, and content
 hash; stale output fails verification and generated files are not hand-edited.
-Only reviewed canonical skill/rule scope becomes policy. Retrieved documents and
-summaries stay untrusted until an authorized promotion records provenance,
-license/secret gates, review, and validation.
+Every artifact has exactly one instruction-trust value: `untrusted_data`,
+`reviewed_reference`, or `executable_policy`. Only an artifact explicitly
+registered by the policy registry as `executable_policy` may activate
+instructions. `reviewed_reference` remains data/reference despite human review
+and cannot route tools, grant capabilities, or alter policy. Promotion,
+generation, path placement, signature, or provenance alone cannot change the
+trust value; registry authorization is mandatory and auditable.
 
 ### Consequences
 
@@ -426,13 +432,35 @@ Internal injection uses `LexicalSearchPort`, `SemanticSearchPort`,
 `SymbolIndexPort`, and `ProjectionPort` for the shared provider boundary.
 They map respectively to `SearchProvider` (both search ports),
 `SourceSymbolProvider`, and `ProjectionProvider`. SPipe retains projection truth
-and authorization. Identity, graph, storage, authorization, transaction, and
-snapshot-publication authority cannot be externalized; no `StorageProvider` is
+and authorization. Identity, graph, storage, authorization, transaction,
+safe-filesystem, and snapshot-publication authority cannot be externalized; no `StorageProvider` is
 declared by this shared contract. `RefactorPlan` is the only mutation-plan name;
 `TransactionPlan` is forbidden. `DiagnosticRecord` is the only public diagnostic
 record name. `KnowledgeDelta` is the atomic child-to-parent envelope binding one
 base snapshot and coherent `ArtifactDelta`, `GraphDelta`, `IndexDelta`, and
 `DiagnosticRecord` collections; constituents cannot publish independently.
+
+`RefactorSafeFilesystemPort` is internal and callable only by `RefactorService`
+with non-copyable `SafeFilesystem.Refactor` issued by `AuthorizationPort` for one
+transaction/project/worktree/snapshot/path-operation set. Its frozen API is
+`open_project_root`, `read_regular`, `capture_metadata`, `stage_regular`,
+`create_directory`, `atomic_replace`, `atomic_move`, `restore_metadata`,
+`remove_empty_directory`, `sync_file`, and `sync_directory`. All paths are
+descriptor-relative and no-follow. Removal moves content to the transaction
+rollback area; no arbitrary path, raw write, recursive delete, or symlink-
+following mutation exists.
+
+`SafeFilesystem.Materializer` is issued only to the authorized
+`ProjectionService` adapter and is never exposed to a provider. The adapter
+derives non-authorizing `MaterializerRootGrant`, containing only opaque root,
+normalized path/operation bounds, projection/snapshot, budget, and expiry—no
+principal, policy, token, credential, or authorization. The provider-facing
+`MaterializerSafeFilesystemPort` frozen API is
+`open_view_root(MaterializerRootGrant)`, `stage_generated`, `create_generated_directory`,
+`atomic_replace_generated`, `remove_generated`, `sync_generated_file`, and
+`sync_generated_directory`. `SafeFilesystem.Refactor` and
+`SafeFilesystem.Materializer` are least-authority/non-implying;
+`MaterializerRootGrant` is not a capability and cannot authorize another root.
 
 ## Cross-Cutting Performance Measurement
 
@@ -474,3 +502,26 @@ Transport and mutation implementation cannot precede the executable threat
 model and negative tests for path escape, cache-scope leakage, confused deputy,
 cross-worktree disclosure, stale snapshot authorization, journal tampering,
 provider response poisoning, and untrusted prompt content.
+
+## ADR-SPKC-016 — Graph identity, delta, and publication contract
+
+**Decision:** The graph is a snapshot projection of canonical typed records.
+Wave 3 uses `RQ-`, `NFR-`, `SS-`, `SY-`, `WS-`, and `WT-`; `R-` remains a
+project relation. Existing schema-v1 `W-` workspace/worktree identities are
+decoded by record type and migrated through tracked old-type-to-new-UID records;
+new publications use only `WS-`/`WT-`. Alias and mount records remain
+registry-owned and receive graph projections. `GraphDelta` owns disjoint,
+before-hash-guarded node and edge changes. Graph roots hash canonical nodes and
+edges. Publication stages immutable objects and performs writer-locked
+`current.sdn` compare-and-swap; all reads use one store-issued, scope-bound,
+revocable immutable pin. Strict accepted edges require a verified `D-`
+authorization receipt binding the exact edge and policy.
+
+**Rationale:** This removes UID collisions, gives requirement/scenario/symbol
+trace endpoints canonical identity, makes clean and incremental graph roots
+falsifiably equivalent, and prevents mixed-generation reads.
+
+**Consequences:** Wave 3 must add canonical trace-node models and snapshot
+publication lifecycle before graph extraction. Markerless candidates and
+inferred edges remain non-authoritative. Endpoint/type/origin/provenance changes
+create a new EdgeUid. `Behavior`, test-run, and result nodes remain Wave 7.

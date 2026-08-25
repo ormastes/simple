@@ -47,7 +47,7 @@ Implement the selected SPipe Knowledge Compiler direction end to end as a portab
 - Generated-manual review owner: primary Codex, after an independent sidecar checks operator readability and trace coverage.
 
 ## Phase
-implementation-wave2-done
+design-wave3-contract-review
 
 ## Log
 - dev: Created state file with 18 acceptance criteria (type: feature); recorded parallel ownership, shared interfaces, manual steps, checker helpers, and highest-capability review.
@@ -77,3 +77,6 @@ implementation-wave2-done
 - implementation-wave2-resumed-cycle-3: Made linked-project resolution require authorization and moved it before project, revision, trust, mount, and filesystem checks. `STATUS: FAIL`; stopped at the mandatory three-cycle cap because relation lookup still precedes authorization, allowing unauthorized callers to distinguish `relation_missing` from `authorization_denied`. Resume by authorizing the requested relation UID before `_relations.get`, then expose missing/existing state only to authorized callers. Wave 2 remains unaccepted and unpushed.
 - implementation-wave2-final-cycle-1: Moved authorization ahead of relation lookup and added indistinguishability evidence for missing versus existing denied IDs. Correctness/security review passed; the sole failure was a noisy legacy doctor P95 result.
 - implementation-wave2-final-cycle-2: Aligned the retained performance gate with its original 80-sample qualification and discarded three cold-cache warmups. Evidence: version 54.683 ms, help 56.102 ms, doctor 71.865 ms, all within qualified limits. Independent highest-capability review returned `STATUS: PASS`; Wave 2 accepted for scoped sync.
+- sync-wave2: Accepted Wave 2 was integrated from fresh `origin/main` with a non-shrinking tracked-file guard and pushed as `deccbce964ec0b2bad4ba500c8865395b383a6a3`.
+- design-wave3-contract: Parallel graph, extraction/diagnostics, and executable-test audits found unresolved node taxonomy, UID namespace, canonical trace-node, node-delta, and snapshot CAS/pin contracts. Merge owner froze ADR-SPKC-016 plus architecture/detail/test/ownership updates before implementation fan-out.
+- design-wave3-review-stop: Stopped after the mandatory third high-model review cycle with STATUS FAIL. Remaining blockers are Wave 2 enum-to-graph projection mappings, fully typed trace schemas and canonical span shape, canonical base32 encoding, and deterministic schema-v1 W-to-WS/WT migration derivation. Wave 3 implementation has not started.
