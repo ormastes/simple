@@ -42,7 +42,7 @@
 # serve_connection()'s buffering logic (drain all complete commands per read,
 # retain a trailing partial fragment) on top of the freestanding primitives.
 
-use os.apps.dbd.dbd_protocol.{DbdEngine, DbdSessionBudget, DbdPersistenceBudget, DbdCredentialProvider, dbd_command_is_mutating, dbd_command_has_durable_journal_semantics, dbd_encode_journal_line, dbd_parse_next_authenticated_command, dbd_redact_diagnostic, DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_LINE_BYTES}
+use os.apps.dbd.dbd_protocol.{DbdEngine, DbdSessionBudget, DbdPersistenceBudget, DbdCredentialProvider, dbd_command_is_mutating, dbd_command_has_durable_journal_semantics, dbd_command_terminates_session, dbd_encode_journal_line, dbd_parse_next_authenticated_command, dbd_redact_diagnostic, DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_LINE_BYTES}
 use os.apps.dbd.dbd_auth_ingress.{
     DbdMutableAuthRequestOwnerV1, DbdAuthIngressStatusV1
 }
@@ -721,6 +721,8 @@ impl DbdServer:
                                     live.close()
                                     self.finish_client(client_fd, live.budget)
                                     return true
+                                val terminal_command =
+                                    dbd_command_terminates_session(parsed.0)
                                 val reply = self.handle_command(parsed.0)
                                 val send_status = live.send_text(client_fd, reply)
                                 if send_status == DbdTlsSendStatusV1.BudgetRejected:
@@ -732,6 +734,16 @@ impl DbdServer:
                                     self.finish_client(client_fd, live.budget)
                                     return true
                                 if send_status == DbdTlsSendStatusV1.TransportFailed:
+                                    val _ = ingress.zeroize_plaintext_frames()
+                                    live.close()
+                                    self.finish_client(client_fd, live.budget)
+                                    return true
+                                if terminal_command:
+                                    # QUIT is terminal only after its canonical
+                                    # reply is fully sealed and written. close()
+                                    # wipes incomplete and already-framed
+                                    # pipelined bytes so no post-QUIT command can
+                                    # escape through a later drain iteration.
                                     val _ = ingress.zeroize_plaintext_frames()
                                     live.close()
                                     self.finish_client(client_fd, live.budget)

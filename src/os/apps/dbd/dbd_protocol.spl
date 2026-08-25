@@ -48,7 +48,7 @@ val DBD_DBFS_OWNER_VERIFIED: bool = false
 
 # Advertised capabilities are intentionally conservative: features without a
 # verified implementation must remain visibly blocked.
-pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;journal=ChecksummedBase64V1;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;auth=DigestVerifierImplementedUnprovisionedV1;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=Blocked;dbfs_adapter=DiagnosticReadOnly;live_dbfs_durability=Blocked"
+pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;journal=ChecksummedBase64V1;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;quit=TerminalAfterReplyV1;auth=DigestVerifierImplementedUnprovisionedV1;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=Blocked;dbfs_adapter=DiagnosticReadOnly;live_dbfs_durability=Blocked"
 
 pub fn dbd_production_startup_ready() -> bool:
     """True only after real auth, TLS, and DBFS owners verify admission."""
@@ -344,6 +344,17 @@ pub fn dbd_command_has_durable_journal_semantics(cmd: text) -> bool:
     """True only for mutations whose exact restart semantics are implemented."""
     val u = cmd.upper()
     u == "SET" or u == "DEL"
+
+pub fn dbd_command_terminates_session(args: [text]) -> bool:
+    """Match the canonical Redis engine's terminal QUIT command.
+
+    The hosted server closes after any parsed QUIT command, including one
+    carrying extra arguments.  The SimpleOS transport must make the same
+    lifecycle decision after sending the canonical dispatch reply; otherwise
+    commands pipelined behind QUIT execute on a connection the peer was told
+    had terminated.
+    """
+    args.len() > 0 and args[0].upper() == "QUIT"
 
 fn _dbd_journal_scalar_safe(value: text) -> bool:
     if value.len() > DBD_MAX_JOURNAL_LINE_BYTES:
