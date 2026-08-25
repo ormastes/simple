@@ -972,7 +972,15 @@ site yields `FAIL — 1190 unsafe block(s) checked, 1 tuple return(s)` naming
 
 ### Honest limits — what this does NOT establish
 
-- **Not verified by a native rebuild.** Every Stage-2 binary on this host SEGVs
+- **A native rebuild WAS attempted in this lane and did not finish in time.**
+  `bootstrap-from-scratch.sh --strategy=adhoc --full-bootstrap --stop-after-stage2
+  --backend=cranelift --mode=dynload --jobs=full --output=build/bootstrap/errprop1`
+  was started from the fixed tree and ran ~30 minutes, still inside the stage-1
+  self-host step (13 live processes, no stage-2 artifact emitted) when this lane
+  closed. It was NOT observed to fail — it was simply not finished, so it yields
+  no verdict either way and is recorded as an attempt, not as evidence. The
+  re-run below is therefore still owed.
+- **Not verified by a native rebuild.** Every PRE-EXISTING Stage-2 binary on this host SEGVs
   on a two-line hello world (`zp2`, `zp3`, `zpfix`, `zpfix2` all
   `NATIVE_BUILD_RC=139`; the older `starfive` stage2 fails to build one at all),
   so no working native compiler existed in which to rebuild the driver and
