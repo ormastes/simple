@@ -54,11 +54,16 @@ fn detect_cycles(metadata: NoteSdnMetadata) -> CycleDetectionResult:
     # Find all cycles using DFS
     val cycles = find_all_cycles(graph)
 
+    # Classification used to scan every dependency for every edge in every
+    # cycle. Build the qualifying indirection edges once so classification is
+    # linear in the reported cycle paths rather than O(total_cycle_length * E).
+    val soft_edges = build_soft_edge_index(metadata.dependencies)
+
     # Classify each cycle as hard error or soft warning
     for cycle in cycles:
         val cycle_path = cycle.join("->")
 
-        if is_hard_cycle(cycle, metadata.dependencies):
+        if is_hard_cycle(cycle, soft_edges):
             result.errors.push(CircularError(
                 cycle_path: cycle_path.clone(),
                 error_code: "E0420"
@@ -175,7 +180,36 @@ fn find_cycles_dfs(
 # Cycle Classification
 # ============================================================================
 
-fn is_hard_cycle(cycle: [text], dependencies: [DependencyEdge]) -> bool:
+class SoftEdgeIndex:
+    entries: {text: bool}
+
+    static fn create() -> SoftEdgeIndex:
+        SoftEdgeIndex(entries: {})
+
+    me add(from: text, to: text):
+        self.entries[soft_edge_key(from, to)] = true
+
+    fn contains(from: text, to: text) -> bool:
+        self.entries.contains_key(soft_edge_key(from, to))
+
+fn soft_edge_key(from: text, to: text) -> text:
+    # The source byte length makes the concatenation injective even when type
+    # names contain punctuation or one another.
+    "{from.len()}:{from}{to}"
+
+fn build_soft_edge_index(dependencies: [DependencyEdge]) -> SoftEdgeIndex:
+    """Index edges whose indirection makes a dependency cycle soft."""
+    val soft_edges = SoftEdgeIndex.create()
+
+    for dep in dependencies:
+        if dep.dep_kind == DependencyKind.InnerType:
+            val from = dep.from_inst
+            if from.contains("Option") or from.contains("Result") or from.contains("Nullable"):
+                soft_edges.add(from, dep.to_inst)
+
+    soft_edges
+
+fn is_hard_cycle(cycle: [text], soft_edges: SoftEdgeIndex) -> bool:
     """Determine if a cycle is a "hard" cycle (error) or "soft" cycle (warning).
 
     A cycle is "soft" if it's broken by an indirection type like Option<T>,
@@ -188,14 +222,8 @@ fn is_hard_cycle(cycle: [text], dependencies: [DependencyEdge]) -> bool:
         val from = cycle[i]
         val to = cycle[i + 1]
 
-        # Find the dependency edge
-        for dep in dependencies:
-            if dep.from_inst == from and dep.to_inst == to:
-                # InnerType dependency through Option/Result breaks the cycle
-                if dep.dep_kind == DependencyKind.InnerType:
-                    # Check if it's through an Option or similar nullable type
-                    if from.contains("Option") or from.contains("Result") or from.contains("Nullable"):
-                        return false  # Soft cycle
+        if soft_edges.contains(from, to):
+            return false  # Soft cycle
 
     # No indirection found - hard cycle
     true
@@ -399,7 +427,7 @@ fn topological_sort(metadata: NoteSdnMetadata) -> [text]?:
 #
 # - build_graph: O(E) where E = number of edges
 # - find_all_cycles: O(V + E) DFS traversal, V = nodes, E = edges
-# - is_hard_cycle: O(cycle_length * E) - can be optimized with edge map
+# - cycle classification: O(E + total cycle path length) via soft-edge index
 # - would_create_cycle: O(V + E) DFS path search
 # - topological_sort: O(V + E) Kahn's algorithm
 #
