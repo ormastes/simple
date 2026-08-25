@@ -1,0 +1,74 @@
+# Bounded namespace-mutation applets for filesystem-launched Simplebox.
+
+use os.userlib.fs_mutation.{
+    VFS_MUTATION_PATH_MAX_BYTES, vfs_mkdir_checked, vfs_unlink_checked,
+    vfs_rmdir_checked
+}
+
+extern fn stdout_write(data: text)
+
+pub const SIMPLEBOX_MUTATION_OPERAND_LIMIT: u64 = 128u64
+pub const SIMPLEBOX_MUTATION_TOTAL_PATH_BYTES_LIMIT: u64 = 65536u64
+
+enum SimpleboxMutationKind:
+    Mkdir
+    Unlink
+    Rmdir
+
+fn _mutation_operands(command: text, args: [text]) -> Result<[text], text>:
+    var start: u64 = 0u64
+    if args.len() > 0u64 and args[0] == "--":
+        start = 1u64
+    if start == args.len():
+        return Err("{command}: missing operand")
+    val count = args.len() - start
+    if count > SIMPLEBOX_MUTATION_OPERAND_LIMIT:
+        return Err("{command}: too many operands")
+    var paths: [text] = []
+    var total_bytes: u64 = 0u64
+    var index = start
+    while index < args.len():
+        val path = args[index]
+        if path.starts_with("-"):
+            return Err("{command}: unsupported option: {path}")
+        if path.len() == 0u64 or path.len() > VFS_MUTATION_PATH_MAX_BYTES:
+            return Err("{command}: invalid path length")
+        if path.len() > SIMPLEBOX_MUTATION_TOTAL_PATH_BYTES_LIMIT - total_bytes:
+            return Err("{command}: operand bytes exceed 65536-byte limit")
+        total_bytes = total_bytes + path.len()
+        paths.push(path)
+        index = index + 1u64
+    Ok(paths)
+
+fn _run_mutations(
+    command: text, args: [text], kind: SimpleboxMutationKind
+) -> i32:
+    val parsed = _mutation_operands(command, args)
+    match parsed:
+        case Err(reason):
+            stdout_write(reason + "\n")
+            1
+        case Ok(paths):
+            for path in paths:
+                val result = match kind:
+                    case SimpleboxMutationKind.Mkdir: vfs_mkdir_checked(path)
+                    case SimpleboxMutationKind.Unlink: vfs_unlink_checked(path)
+                    case SimpleboxMutationKind.Rmdir: vfs_rmdir_checked(path)
+                match result:
+                    case Err(reason):
+                        stdout_write("{command}: {path}: {reason}\n")
+                        return 1
+                    case Ok(_): pass
+            0
+
+pub fn simplebox_mkdir(args: [text]) -> i32:
+    """Create each named directory; parent synthesis (-p) is not claimed."""
+    _run_mutations("mkdir", args, SimpleboxMutationKind.Mkdir)
+
+pub fn simplebox_rm(args: [text]) -> i32:
+    """Unlink files only; recursive and force semantics are intentionally absent."""
+    _run_mutations("rm", args, SimpleboxMutationKind.Unlink)
+
+pub fn simplebox_rmdir(args: [text]) -> i32:
+    """Remove empty directories only through the VFS rmdir operation."""
+    _run_mutations("rmdir", args, SimpleboxMutationKind.Rmdir)

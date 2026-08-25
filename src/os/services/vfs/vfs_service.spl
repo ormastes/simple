@@ -73,6 +73,9 @@ val VFS_SERVICE_NAME: text = "vfs"
 val VFS_IPC_REQUEST_PAYLOAD_MAX: u32 = 4096u32
 val VFS_IPC_REPLY_PAYLOAD_MAX: u64 = 4092u64
 val VFS_IPC_BYTE_ARRAY_HEADER_BYTES: u64 = 16u64
+val VFS_READDIR_ENTRY_MAX: u64 = 128u64
+val VFS_READDIR_NAME_BYTES_MAX: u64 = 255u64
+val VFS_READDIR_TOTAL_NAME_BYTES_MAX: u64 = 3072u64
 val IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
 
 # Response status codes
@@ -309,11 +312,28 @@ impl VfsService:
         val path = _read_text(payload_addr, payload_len)
         match self.vfs.readdir(path):
             Result.Ok(entries):
-                # Encode as newline-separated "kind:name" entries
-                var reply_text = ""
-                var i = 0
+                # Encode as newline-separated ``kind:name`` entries into one
+                # bounded byte buffer. Avoid quadratic text concatenation and
+                # reject names the wire envelope cannot represent.
+                if entries.len().to_u64() > VFS_READDIR_ENTRY_MAX:
+                    self.send_error_reply(src_port, STATUS_INVALID, "directory exceeds entry limit")
+                    return
+                var reply: [u8] = []
+                var total_name_bytes: u64 = 0u64
+                var i: u64 = 0u64
                 while i < entries.len():
                     val entry = entries[i]
+                    val name_bytes = entry.name.len().to_u64()
+                    if name_bytes == 0u64 or name_bytes > VFS_READDIR_NAME_BYTES_MAX or
+                        entry.name.contains("\0") or entry.name.contains("\n") or
+                        entry.name.contains("\r"):
+                        self.send_error_reply(src_port, STATUS_INVALID, "directory contains unencodable entry")
+                        return
+                    if total_name_bytes > VFS_READDIR_TOTAL_NAME_BYTES_MAX or
+                        name_bytes > VFS_READDIR_TOTAL_NAME_BYTES_MAX - total_name_bytes:
+                        self.send_error_reply(src_port, STATUS_INVALID, "directory exceeds name byte limit")
+                        return
+                    total_name_bytes = total_name_bytes + name_bytes
                     val kind_val: u8 = match entry.node.kind:
                         FsNodeKind.File: 0
                         FsNodeKind.Directory: 1
@@ -321,10 +341,15 @@ impl VfsService:
                         FsNodeKind.Device: 3
                         FsNodeKind.Pipe: 4
                     if i > 0:
-                        reply_text = reply_text + "\n"
-                    reply_text = reply_text + "{kind_val}:{entry.name}"
+                        reply.push(10u8)
+                    reply.push(48u8 + kind_val)
+                    reply.push(58u8)
+                    var name_index: u64 = 0u64
+                    while name_index < entry.name.len():
+                        reply.push(entry.name.byte_at(name_index))
+                        name_index = name_index + 1u64
                     i = i + 1
-                self.send_text_reply(src_port, STATUS_OK, reply_text)
+                self.send_bytes_reply(src_port, STATUS_OK, reply)
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
 

@@ -1,0 +1,54 @@
+# Capability-enforced filesystem namespace mutations through the canonical VFS
+# service. The kernel IPC connect gate and VFS lookup-grant policy remain the
+# mutation authorities; this client additionally owns bounded wire validation.
+
+use os.userlib.fs.{vfs_ipc_request_bytes}
+use os.userlib.ipc_protocol.{VFS_MKDIR, VFS_REMOVE, VFS_RMDIR}
+
+pub const VFS_MUTATION_PATH_MAX_BYTES: u64 = 4096u64
+
+fn _mutation_path_bytes(path: text) -> Result<[u8], text>:
+    if path.len() == 0u64:
+        return Err("empty mutation path")
+    if path.len() > VFS_MUTATION_PATH_MAX_BYTES:
+        return Err("mutation path exceeds 4096-byte limit")
+    if path == "/":
+        return Err("refusing to mutate filesystem root")
+    var bytes: [u8] = []
+    var index: u64 = 0u64
+    while index < path.len():
+        val byte = path.byte_at(index)
+        if byte == 0u8:
+            return Err("mutation path contains NUL")
+        bytes.push(byte)
+        index = index + 1u64
+    Ok(bytes)
+
+fn _read_u64_le(bytes: [u8]) -> u64:
+    var value: u64 = 0u64
+    var index: u64 = 0u64
+    while index < 8u64:
+        value = value | (bytes[index].to_u64() << (index * 8u64))
+        index = index + 1u64
+    value
+
+fn _vfs_mutate_checked(method: u32, path: text) -> Result<bool, text>:
+    val payload = _mutation_path_bytes(path)?
+    val response = vfs_ipc_request_bytes(method, payload)?
+    if response.len() != 8u64:
+        return Err("malformed VFS mutation reply")
+    if _read_u64_le(response) != 1u64:
+        return Err("VFS mutation was not acknowledged")
+    Ok(true)
+
+pub fn vfs_mkdir_checked(path: text) -> Result<bool, text>:
+    """Create one directory after canonical VFS capability/grant checks."""
+    _vfs_mutate_checked(VFS_MKDIR, path)
+
+pub fn vfs_unlink_checked(path: text) -> Result<bool, text>:
+    """Remove one non-directory after canonical VFS capability/grant checks."""
+    _vfs_mutate_checked(VFS_REMOVE, path)
+
+pub fn vfs_rmdir_checked(path: text) -> Result<bool, text>:
+    """Remove one empty directory after canonical VFS capability/grant checks."""
+    _vfs_mutate_checked(VFS_RMDIR, path)

@@ -3,9 +3,11 @@
 
 use os.userlib.fs.{
     file_open_direct, file_read_direct, file_write_direct, file_close_direct,
-    file_sync_direct, file_rename_direct
+    file_sync_direct, file_rename_direct, list_directory_bounded
 }
 use nogc_async_mut_noalloc.path.{bm_path_normalize}
+use os.kernel.types.fs_types.{DirEntry}
+use os.libc.simpleos_string.{libc_strcmp}
 
 extern fn stdout_write(data: text)
 
@@ -298,3 +300,58 @@ pub fn simplebox_mv(args: [text]) -> i32:
                     stdout_write("mv: " + source + " -> " + destination + ": " + reason + "\n")
                     1
                 case Ok(_): 0
+
+fn _simplebox_dir_entry_after(left: DirEntry, right: DirEntry) -> bool:
+    libc_strcmp(left.name.bytes(), right.name.bytes()) > 0
+
+fn _simplebox_dir_sift_down(entries: [DirEntry], root: u64, end: u64):
+    if end == 0u64:
+        return
+    var parent = root
+    while parent <= (end - 1u64) / 2u64:
+        var child = parent * 2u64 + 1u64
+        if child < end and _simplebox_dir_entry_after(entries[child + 1u64], entries[child]):
+            child = child + 1u64
+        if not _simplebox_dir_entry_after(entries[child], entries[parent]):
+            return
+        val temporary = entries[parent]
+        entries[parent] = entries[child]
+        entries[child] = temporary
+        parent = child
+
+fn _simplebox_sort_directory_entries(entries: [DirEntry]):
+    """In-place bytewise heapsort: O(n log n), O(1) auxiliary storage."""
+    if entries.len() < 2u64:
+        return
+    var root = entries.len() / 2u64
+    while root > 0u64:
+        root = root - 1u64
+        _simplebox_dir_sift_down(entries, root, entries.len() - 1u64)
+    var end = entries.len() - 1u64
+    while end > 0u64:
+        val temporary = entries[0u64]
+        entries[0u64] = entries[end]
+        entries[end] = temporary
+        end = end - 1u64
+        _simplebox_dir_sift_down(entries, 0u64, end)
+
+pub fn simplebox_ls(args: [text]) -> i32:
+    """List one capability-authorized canonical-VFS directory."""
+    if args.len() > 1u64:
+        stdout_write("ls: too many operands\n")
+        return 1
+    val path = if args.len() == 0u64 then "/" else: args[0]
+    match list_directory_bounded(path):
+        case Err(reason):
+            stdout_write("ls: " + path + ": " + reason + "\n")
+            1
+        case Ok(listing):
+            val entries = listing.entries
+            _simplebox_sort_directory_entries(entries)
+            var output_parts: [text] = []
+            for entry in entries:
+                output_parts.push(entry.name)
+                output_parts.push("\n")
+            if output_parts.len() > 0u64:
+                stdout_write(output_parts.join(""))
+            0

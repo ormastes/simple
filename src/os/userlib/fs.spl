@@ -12,6 +12,13 @@ pub use std.common.contracts.os.dbfs_vfs_mount_capability_v1.{DbfsVfsMountCapabi
 extern fn unsafe_addr_of(ref: any) -> u64
 
 val _DIRECT_FILE_MAX_BYTES: u64 = 1048576
+pub const VFS_DIRECTORY_ENTRY_LIMIT: u64 = 128u64
+pub const VFS_DIRECTORY_NAME_BYTES_LIMIT: u64 = 255u64
+pub const VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT: u64 = 3072u64
+
+pub struct VfsDirectoryListing:
+    entries: [DirEntry]
+    total_name_bytes: u64
 
 pub fn dbfs_vfs_mount_capability_v1() -> DbfsVfsMountCapabilityV1:
     match syscall(79, 0, 0, 0, 0, 0):
@@ -313,7 +320,17 @@ fn mkdir(path: text) -> Result<bool, text>:
     val resp = _vfs_request(VFS_MKDIR, path)?
     Ok(true)
 
-fn readdir(path: text) -> Result<[DirEntry], text>:
+pub fn list_directory_bounded(path: text) -> Result<VfsDirectoryListing, text>:
+    """List one directory through the capability-enforcing canonical VFS.
+
+    The VFS manager applies the caller's file grant and container namespace
+    before dispatch.  This client additionally rejects oversized or malformed
+    replies, so a filesystem driver cannot turn ``ls`` into unbounded work.
+    Entry order is preserved here; presentation owners may sort the bounded
+    result without changing filesystem identity.
+    """
+    if path.len() == 0u64 or path.len() > 4096u64:
+        return Err("invalid directory path length")
     val response = vfs_ipc_request_bytes(VFS_READDIR, _vfs_text_bytes(path))?
     # The current VFS service serializes each directory entry as
     # `kind:u8-as-decimal:name`, separated by newlines.  The enclosing IPC
@@ -321,35 +338,51 @@ fn readdir(path: text) -> Result<[DirEntry], text>:
     # textual until the service owner publishes a different READDIR format.
     val resp = bytes_to_string(response)
     var entries: [DirEntry] = []
+    var total_name_bytes: u64 = 0u64
     if resp.len() == 0:
-        return Ok(entries)
+        return Ok(VfsDirectoryListing(entries: entries, total_name_bytes: 0u64))
     val lines = resp.split("\n")
     var i: u64 = 0
     while i < lines.len() as u64:
         val line = lines[i as i64]
-        if line.len() > 0:
-            # The service emits `kind:name`.  A Unix filename may itself
-            # contain `:`, so only the first delimiter belongs to the wire
-            # envelope; everything after it is the exact entry name.
-            val separator = line.index_of(":")
-            if separator > 0:
-                val kind_val = line.slice(0, separator).parse_u8()
-                val name_val = line.slice(separator + 1, line.len())
-                entries.push(DirEntry(
-                    name: name_val,
-                    node: FsNode(
-                        id: 0u64,
-                        kind: _fs_node_kind_from_u8(kind_val),
-                        size: 0u64,
-                        permissions: 0u16,
-                        owner: 0u32,
-                        group: 0u32,
-                        created_ns: 0u64,
-                        modified_ns: 0u64
-                    )
-                ))
+        if line.len() == 0u64:
+            return Err("malformed empty VFS directory entry")
+        if entries.len() >= VFS_DIRECTORY_ENTRY_LIMIT:
+            return Err("directory exceeds entry limit")
+        # The service emits `kind:name`. A Unix filename may itself contain
+        # `:`, so only the first delimiter belongs to the wire envelope.
+        val separator = line.index_of(":")
+        if separator <= 0:
+            return Err("malformed VFS directory entry")
+        val kind_text = line.slice(0, separator)
+        if kind_text.len() != 1u64 or kind_text.byte_at(0u64) < 48u8 or
+            kind_text.byte_at(0u64) > 52u8:
+            return Err("malformed VFS directory kind")
+        val kind_val = kind_text.parse_u8()
+        val name_val = line.slice(separator + 1, line.len())
+        val name_bytes = name_val.len().to_u64()
+        if name_bytes == 0u64 or name_bytes > VFS_DIRECTORY_NAME_BYTES_LIMIT or
+            name_val.contains("\0"):
+            return Err("invalid VFS directory entry name")
+        if total_name_bytes > VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT or
+            name_bytes > VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT - total_name_bytes:
+            return Err("directory exceeds name byte limit")
+        total_name_bytes = total_name_bytes + name_bytes
+        entries.push(DirEntry(
+            name: name_val,
+            node: FsNode(
+                id: 0u64,
+                kind: _fs_node_kind_from_u8(kind_val),
+                size: 0u64,
+                permissions: 0u16,
+                owner: 0u32,
+                group: 0u32,
+                created_ns: 0u64,
+                modified_ns: 0u64
+            )
+        ))
         i = i + 1
-    Ok(entries)
+    Ok(VfsDirectoryListing(entries: entries, total_name_bytes: total_name_bytes))
 
 fn remove(path: text) -> Result<bool, text>:
     val resp = _vfs_request(VFS_REMOVE, path)?
@@ -388,4 +421,6 @@ fn mount_list() -> Result<[text], text>:
     Ok(result)
 
 # Minimal process-side byte I/O surface used by filesystem-launched tools.
-export file_open_direct, file_read_direct, file_close_direct, stat
+export file_open_direct, file_read_direct, file_close_direct, stat, list_directory_bounded,
+    VfsDirectoryListing, VFS_DIRECTORY_ENTRY_LIMIT,
+    VFS_DIRECTORY_NAME_BYTES_LIMIT, VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT
