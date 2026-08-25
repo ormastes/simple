@@ -337,11 +337,6 @@ pub extern "C" fn rt_tls_client_write_timeout(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rt_tls_client_read(conn: i64, max_bytes: i64) -> crate::value::RuntimeValue {
-    rt_tls_client_read_timeout(conn, max_bytes, TLS_CLIENT_IO_TIMEOUT.as_millis() as i64)
-}
-
 /// Checked client read: NIL is an I/O/contract failure, empty text is clean EOF.
 #[no_mangle]
 pub extern "C" fn rt_tls_client_read_checked(
@@ -354,15 +349,6 @@ pub extern "C" fn rt_tls_client_read_checked(
         TLS_CLIENT_IO_TIMEOUT.as_millis() as i64,
         true,
     )
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_read_timeout(
-    conn: i64,
-    max_bytes: i64,
-    timeout_ms: i64,
-) -> crate::value::RuntimeValue {
-    tls_client_read_timeout_impl(conn, max_bytes, timeout_ms, false)
 }
 
 /// Checked timeout read: NIL is failure, empty text is clean EOF.
@@ -685,11 +671,6 @@ fn tls_server_write_bytes_impl(conn: i64, bytes: &[u8]) -> i64 {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rt_tls_server_read(conn: i64, max_bytes: i64) -> crate::value::RuntimeValue {
-    tls_server_read_impl(conn, max_bytes, false)
-}
-
 /// Checked server read: NIL is an I/O/contract failure, empty text is clean EOF.
 #[no_mangle]
 pub extern "C" fn rt_tls_server_read_checked(
@@ -845,8 +826,7 @@ fn tls_cipher_suite_name(suite: rustls::CipherSuite) -> Option<&'static str> {
 #[cfg(test)]
 mod platform_trust_tests {
     use super::{
-        rt_tls_client_read, rt_tls_client_read_checked, rt_tls_server_read,
-        rt_tls_client_read_timeout_checked,
+        rt_tls_client_read_checked, rt_tls_client_read_timeout_checked,
         rt_tls_server_read_checked, rt_tls_get_cipher_suite,
         rt_tls_get_negotiated_alpn, rt_tls_get_protocol_version,
         rt_tls_is_handshake_complete, TLS_CLIENT_CONFIG,
@@ -858,12 +838,10 @@ mod platform_trust_tests {
     }
 
     #[test]
-    fn checked_client_and_server_reads_distinguish_failure_from_legacy_empty_text() {
+    fn checked_client_and_server_reads_fail_closed_for_invalid_handles() {
         assert!(rt_tls_client_read_checked(-1, 1024).is_nil());
         assert!(rt_tls_client_read_timeout_checked(-1, 1024, 100).is_nil());
-        assert!(!rt_tls_client_read(-1, 1024).is_nil());
         assert!(rt_tls_server_read_checked(-1, 1024).is_nil());
-        assert!(!rt_tls_server_read(-1, 1024).is_nil());
     }
 
     #[test]

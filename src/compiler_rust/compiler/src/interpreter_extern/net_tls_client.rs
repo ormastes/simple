@@ -148,17 +148,6 @@ pub fn rt_tls_client_write_timeout(args: &[Value]) -> Result<Value, CompileError
     )))
 }
 
-/// `rt_tls_client_read(conn, max_bytes) -> text`
-pub fn rt_tls_client_read(args: &[Value]) -> Result<Value, CompileError> {
-    runtime_text_out(
-        net::rt_tls_client_read(
-            int_arg(args, 0, "rt_tls_client_read")?,
-            int_arg(args, 1, "rt_tls_client_read")?,
-        ),
-        "rt_tls_client_read",
-    )
-}
-
 /// `rt_tls_client_read_checked(conn, max_bytes) -> text?`
 pub fn rt_tls_client_read_checked(args: &[Value]) -> Result<Value, CompileError> {
     runtime_optional_text_out(
@@ -167,18 +156,6 @@ pub fn rt_tls_client_read_checked(args: &[Value]) -> Result<Value, CompileError>
             int_arg(args, 1, "rt_tls_client_read_checked")?,
         ),
         "rt_tls_client_read_checked",
-    )
-}
-
-/// `rt_tls_client_read_timeout(conn, max_bytes, timeout_ms) -> text`
-pub fn rt_tls_client_read_timeout(args: &[Value]) -> Result<Value, CompileError> {
-    runtime_text_out(
-        net::rt_tls_client_read_timeout(
-            int_arg(args, 0, "rt_tls_client_read_timeout")?,
-            int_arg(args, 1, "rt_tls_client_read_timeout")?,
-            int_arg(args, 2, "rt_tls_client_read_timeout")?,
-        ),
-        "rt_tls_client_read_timeout",
     )
 }
 
@@ -239,7 +216,6 @@ mod tests {
         assert!(rt_tls_client_connect(&[Value::Nil, Value::Int(443)]).is_err());
         assert!(rt_tls_client_connect(&[Value::text("example.com"), Value::Bool(false)]).is_err());
         assert!(rt_tls_client_write(&[Value::Int(1), Value::Int(2)]).is_err());
-        assert!(rt_tls_client_read(&[Value::Int(1)]).is_err());
         assert!(rt_tls_client_read_checked(&[Value::Int(1)]).is_err());
         assert!(rt_tls_client_read_timeout_checked(&[Value::Int(1), Value::Int(2)]).is_err());
         assert!(rt_tls_client_close(&[Value::text("1")]).is_err());

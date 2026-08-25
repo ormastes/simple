@@ -463,3 +463,9 @@ passing placeholder.
     ignored-timeout duplicate branches or ambiguous legacy reads. Next remove
     remaining legacy client read exports once all callers migrate; exact signed
     artifact admission remains zero.
+87. Do not restore ambiguous `rt_tls_client_read`,
+    `rt_tls_client_read_timeout`, or `rt_tls_server_read`. All lanes must expose
+    checked nullable reads only; nil is failure and empty text is EOF. SimpleOS
+    must retain fail-closed checked/timeout symbols for sealed linkage. Next
+    audit the remaining 19 canonical TLS declarations and eliminate duplicate
+    noncanonical callers; signed artifact admission remains zero.

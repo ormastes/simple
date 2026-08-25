@@ -775,3 +775,22 @@ declarations, and adding two non-TLS raw authority tags yields an estimated
 11,922 declaration rows / 3,139 symbols, 1,212 tagged declarations, 660
 `unsafe_contract_declared`, 10,446 untouched, and zero exact-artifact
 verified-and-signed.
+
+## Ambiguous TLS read provider removal checkpoint
+
+After browser migration, no Simple caller remained for legacy client read,
+client timeout-read, or server read. Those three providers are removed from
+hosted exports, interpreter registration, native symbol tables, canonical
+declarations, and SimpleOS. Only nullable checked reads remain. SimpleOS now
+also exports fail-closed checked client read/timeout and the real timeout symbol
+family required by sealed consumers.
+
+This deletion reduces code and dispatch surface. It adds no compatibility
+branch, lookup, allocation, copy, or provider call. The static checked-only
+ratchet, compiler integration check, and focused invalid-handle read test
+passed; only pre-existing compiler warnings remain.
+
+Removing two canonical declarations and three unique symbols yields an
+estimated 11,920 declaration rows / 3,136 symbols, 1,210 tagged declarations,
+658 `unsafe_contract_declared`, 10,446 untouched, and zero exact-artifact
+verified-and-signed.
