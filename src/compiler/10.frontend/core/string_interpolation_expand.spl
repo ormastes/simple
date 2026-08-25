@@ -129,29 +129,34 @@ fn parse_interpolation_fragment(inner: text) -> i64:
 fn decode_interpolation_brace_escapes(value: text) -> text:
     # Fast path (perf, exact): this function only ever rewrites `{{` -> `{` and
     # `}}` -> `}`. A value carrying neither doubled brace decodes to itself, so
-    # the char-by-char rebuild below (one `value[i:i+1]` substring allocation
-    # AND one `result + ch` string reallocation per character -- quadratic in
-    # the literal's length) is pure waste for the overwhelming majority of
-    # string literals. Measured 2026-08-21: this loop ran over every plain
-    # string literal in the module. See
+    # entering the scanner is pure waste for the overwhelming majority of
+    # string literals. Measured 2026-08-21: the old loop ran over every plain
+    # literal and grew `result + ch` once per character. The slow path below
+    # keeps untouched source spans and joins once, so brace-bearing inputs no
+    # longer retain that quadratic accumulator-copy term. See
     # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
     if not (value.contains("{{") or value.contains("}}")):
         return value
-    var result = ""
+    var chunks: [text] = []
+    var copied_until = 0
     var i = 0
     while i < value.len():
         val ch = value[i:i + 1]
         val next = if i + 1 < value.len(): value[i + 1:i + 2] else: ""
         if ch == "{" and next == "{":
-            result = result + "{"
+            chunks.push(value.substring(copied_until, i))
+            chunks.push("{")
             i = i + 2
+            copied_until = i
         elif ch == "}" and next == "}":
-            result = result + "}"
+            chunks.push(value.substring(copied_until, i))
+            chunks.push("}")
             i = i + 2
+            copied_until = i
         else:
-            result = result + ch
             i = i + 1
-    result
+    chunks.push(value.substring(copied_until, value.len()))
+    chunks.join("")
 
 fn parse_string_interpolation_parts(value: text) -> [i64]:
     # Fast path (perf, exact): every branch of the scanner below is gated on
