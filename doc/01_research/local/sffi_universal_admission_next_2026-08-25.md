@@ -390,6 +390,36 @@ trusted signatures, constant-time proof receipts, and semantic verification
 remain unresolved. OCB3 and the wider estate are not globally verified or
 signed; verified-and-signed admission remains 0.
 
+## TLS 1.3 HKDF authority and UTF-8 extent checkpoint
+
+`src/os/tls13/hkdf.spl` now declares all sixteen local text, byte, serial, and
+specialized HKDF ABI families with explicit authority. Four foreign-fast-path
+owners remain unsafe because their status/out or returned-array conventions
+are not semantically verified. Owned text conversion and bounded byte reads use
+two lexical `unsafe(ffi)` owners; the hot byte owner is mandatory-inline.
+
+Review also found a correctness defect for unknown/non-ASCII labels: the code
+encoded the label to UTF-8 bytes but bounded later indexing with `text.len()`.
+Both SHA-256 and SHA-384 label encoders now use the actual already-produced
+byte-array length, and the obsolete character-count helper was removed. This
+is O(1) and introduces no encoding, scan, allocation, copy, branch, or loop.
+
+The focused authority/provider/performance ratchet passed. Fourteen repeated
+byte-access sites now route through one inline boundary, reducing duplicated
+raw dispatch without changing the HKDF/HMAC loops. Of sixteen declarations,
+one appears in both typed registries, eight in one, and seven in neither. The
+census changed as follows:
+
+- raw call sites: 18,783 -> 18,770
+- missing authority: 14,004 -> 13,975
+- lexical unsafe: 3,404 -> 3,406
+- function unsafe: 1,375 -> 1,389
+
+HKDF length limits, unambiguous status/result contracts, specialized-provider
+closure, exact artifact identity, trusted signatures, and cryptographic proof
+receipts remain unresolved. This TLS boundary and the wider estate are not
+globally verified or signed; verified-and-signed admission remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
