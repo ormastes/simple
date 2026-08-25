@@ -5546,3 +5546,32 @@ Annotations add no runtime branch, allocation, copy, lookup, lock, hash,
 signature operation, dispatch, or data-layout change. This adapter remains
 unusable in safe or critical code until a real provider and typed contract are
 implemented and admitted. Verified-and-signed admission remains 0.
+
+## Legacy SSH/SFTP wrapper authority checkpoint
+
+The 23 SSH/SFTP declarations were already documented as unbacked and absent
+from the runtime, typed-native registry, and interpreter registry, but their 23
+direct wrappers still appeared safe. Those exact wrappers now carry explicit
+`unsafe(ffi)` authority. This makes the absent provider, unknown host-key and
+credential policy, unbounded/ambiguous output, handle ownership, partial-write,
+path, timeout, and metadata obligations caller-visible.
+
+The focused `ssh-sffi-authority.shs` audit passed. It pins all 23 declarations,
+23 call sites, 23 wrapper authorities, zero registered providers, and the
+absence of new wrapper layers or forced inlining. Existing semantic booleans,
+text and tuple results, invalid handles, zero-write sentinel, and fabricated
+legacy metadata remain unchanged because a safe `Result` mapping cannot be
+defined until a real provider supplies an authoritative error ABI.
+
+The authoritative census changed as follows:
+
+- raw call sites: unchanged at 18,519
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,087
+- missing authority: 13,468 -> 13,445
+- lexical unsafe: unchanged at 3,428
+- function unsafe: 1,623 -> 1,646
+
+Annotations add no runtime branch, allocation, copy, lookup, lock, hash,
+signature operation, dispatch, or data-layout change. This dead legacy adapter
+is not safe or critical-admissible; verified-and-signed admission remains 0.
