@@ -52,8 +52,9 @@ export use os.apps.sshd.ssh_session_auth.*
 export use os.apps.sshd.ssh_session_channel.*
 export use os.apps.sshd.ssh_session_lifecycle.*
 
-extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
+@unsafe(reason: "raw runtime byte-array to text lift; caller validates SSH identification bytes first", capabilities: [ffi])
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
+@unsafe(reason: "raw scheduler sleep provider; callers use bounded retry loops", capabilities: [ffi])
 extern fn rt_thread_sleep(ms: i64) -> i64
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
@@ -406,7 +407,8 @@ impl SshSession:
                 empty_reads = empty_reads + 1
                 if empty_reads <= 200:
                     serial_println("[sshd-session] auth empty read retry={empty_reads}")
-                    rt_thread_sleep(20)
+                    unsafe(capabilities: [ffi]):
+                        rt_thread_sleep(20)
                     pass_dn
                 else:
                     serial_println("[sshd-session] auth empty read limit")
@@ -539,7 +541,8 @@ impl SshSession:
         val ov_len = our_version.len()
         val sv_len_i: i64 = ov_len.to_i64() - 2
         self.server_version_bytes = _copy_bytes_stable(rt_bytes_slice(our_version, 0, sv_len_i))
-        self.server_version = rt_string_from_byte_array(self.server_version_bytes)
+        self.server_version = unsafe(capabilities: [ffi]):
+            rt_string_from_byte_array(self.server_version_bytes)
         serial_println("[sshd-session] version send start")
         serial_println("[sshd-session] version banner send start")
         val write_rc = rt_net_send_ssh_banner(self.socket_fd as i64)
@@ -570,7 +573,8 @@ impl SshSession:
             self.client_version_bytes =
                 _copy_bytes_stable(client_version_from_bytes)
             self.client_version =
-                rt_string_from_byte_array(self.client_version_bytes)
+                unsafe(capabilities: [ffi]):
+                    rt_string_from_byte_array(self.client_version_bytes)
             serial_println("[sshd-session] version recv text={self.client_version}")
         else:
             val client_version_text = rt_net_recv_version_text(self.socket_fd as i64)
@@ -727,7 +731,8 @@ impl SshSession:
                         serial_println("[sshd-session] recv encrypted timeout head seq={self.cipher.seq_c2s}")
                         self.transition_transport_failed()
                         return []
-                    rt_thread_sleep(1)
+                    unsafe(capabilities: [ffi]):
+                        rt_thread_sleep(1)
                     pass_dn
                 else:
                     serial_println("[sshd-session] recv encrypted head bytes={new_data.len()} seq={self.cipher.seq_c2s}")
@@ -750,7 +755,8 @@ impl SshSession:
                             serial_println("[sshd-session] recv encrypted timeout min-header seq={self.cipher.seq_c2s} recv_buf_len={self.recv_ring.len()}")
                             self.transition_transport_failed()
                             return []
-                        rt_thread_sleep(1)
+                        unsafe(capabilities: [ffi]):
+                            rt_thread_sleep(1)
                         pass_dn
                     else:
                         empty_spins = 0
@@ -778,7 +784,8 @@ impl SshSession:
                         serial_println("[sshd-session] recv encrypted timeout body seq={self.cipher.seq_c2s} need={total_needed} have={self.recv_ring.len()}")
                         self.transition_transport_failed()
                         return []
-                    rt_thread_sleep(1)
+                    unsafe(capabilities: [ffi]):
+                        rt_thread_sleep(1)
                     pass_dn
                 else:
                     empty_spins = 0

@@ -2342,6 +2342,40 @@ ownership, compiler/artifact identity, and proof receipts remain unresolved,
 so SSH KEX and the wider SFFI surface are not globally safe, verified, or
 signed; exact-artifact verified-and-signed admission remains 0.
 
+## SSH session transport and sleep-ABI checkpoint
+
+The parent SSH session owner replaced 41 fixed identification-byte calls to
+the raw `rt_push_byte` provider with the same inline Pure Simple `_append_byte`
+compatibility helper used by the KEX owner.  It also removed 81 raw serial
+diagnostic calls, including ciphertext, packet, authentication, and version
+formatting, and replaced the one runtime byte-slice call with the existing
+bounded Pure Simple prefix copier.  This removes 123 raw call sites and avoids
+diagnostic formatting/hex allocations on send, receive, and authentication
+paths.
+
+Provider inspection found that `rt_thread_sleep` is `void` in both
+`runtime_thread.c` and the Rust executor.  The SSH declaration incorrectly
+claimed an `i64` result; it now matches the provider and the KEX caller no
+longer reads a fabricated return register.  Four bounded sleep calls and two
+validated byte-to-text lifts use six minimal lexical `unsafe(ffi)` scopes.
+Empty text lifts fail closed, send requires the provider to report the full
+byte count, and receive sizes are checked against the facade's existing
+16 MiB maximum before the `u64` to `i64` conversion.
+
+The focused static boundary ratchet passed.  The authoritative census changed:
+
+- raw call sites: 20,948 -> 20,825
+- missing authority: 17,070 -> 16,941
+- lexical unsafe: 2,959 -> 2,965
+- function unsafe: unchanged at 919
+
+The valid path removes foreign calls and diagnostic work.  Its added checks
+are constant-time scalar comparisons; it adds no allocation, copy, hashing,
+signature operation, discovery, lookup, lock, or generic dispatch.  The
+network facade and providers still lack exact-artifact ABI/proof/signature
+admission, so SSH and the broader SFFI surface remain not globally safe,
+verified, or signed; exact-artifact verified-and-signed admission remains 0.
+
 ## Synchronous SIMD SFFI facade checkpoint
 
 `src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
