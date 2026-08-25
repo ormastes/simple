@@ -109,7 +109,7 @@ before and after.
 error(s), 4 warning(s)` (warnings pre-existing, `unnamed_duplicate_typed_args`
 in the docstring example).
 
-### Residual, separate defect: `char_from_code` is shadowed by `encoding/utf8.spl`
+### Second defect (FIXED 2026-08-25): `char_from_code` shadowed by `encoding/utf8.spl`
 
 The 3 examples that stay RED after the widget fix have the CURSOR right and
 only the VALUE corrupt: `expected (���, 3) to equal (¢한😀, 3)`, `(A�B, 2)`,
@@ -127,5 +127,24 @@ handed U+FFFD before it ever runs. Which definition wins depends on module
 load order — a parallel session's edits to `src/lib/common/json/*` and
 `src/app/llm_caret/json_helpers.spl` flipped the shared tree from 22/22 to
 19/3 with the widget file byte-identical. Widget spec (literal `¢한😀`) is
-6/6 on both trees. Needs its own record: rename/remove the utf8.spl
-duplicate or make `tui_input.spl` call a non-colliding name.
+6/6 on both trees.
+
+**Fix** (`src/lib/common/encoding/utf8.spl`): `char_from_code` now delegates
+every code >= 128 to `char_from_codepoint` (-> `utf8_encode_one` ->
+`rt_bytes_to_text`), so both definitions produce byte-identical UTF-8 for
+every valid scalar 0..0x10FFFF; neither definition was deleted and no app
+import changed. `char_from_codepoint` gained a `cp >= 0` guard on its ASCII
+fast path (it delegates back to `char_from_code`, which recursed forever on
+negative input — caught by the new spec: `stack overflow: recursion depth
+1000 exceeded`). Policy difference kept and asserted: invalid input
+(surrogates, > U+10FFFF, negative) is U+FFFD here (utf8_encode_one policy)
+but `""` in string_core (its documented policy); the llm_caret decoder never
+emits those. Spec: `test/01_unit/lib/common/encoding/utf8_spec.spl`,
+describe `char_from_code encodes scalars above 127` (test/unit mirror already
+diverged and baselined, left alone). BEFORE: `Results: 52 total, 49 passed,
+3 failed` (`expected 3 to equal 2` — len of `char_from_code(0xA2)`). AFTER:
+`Results: 52 total, 52 passed, 0 failed` on both trees;
+`chat_tui_input_spec.spl` `Results: 22 total, 22 passed, 0 failed` on both
+trees; `chat_tui_runtime_spec.spl` 20/20; `chat_tui_spec.spl` 62/62 (clean);
+`bin/simple lint src/lib/common/encoding/utf8.spl`: 0 errors (17 pre-existing
+warnings).

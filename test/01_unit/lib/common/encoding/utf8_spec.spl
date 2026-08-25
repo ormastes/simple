@@ -370,3 +370,57 @@ describe "text_from_codepoints":
         step("Verify: creates text from ASCII codepoints")
         val result = text_from_codepoints([0x48, 0x69])
         expect(result).to_equal("Hi")
+
+# ============================================================================
+# char_from_code parity with std.string_core.char_from_code
+# ============================================================================
+# Reproduce for
+# doc/08_tracking/bug/llm_caret_tui_input_utf8_cursor_counts_bytes_2026-08-25.md:
+# this module's `char_from_code` returned U+FFFD for every code >= 128 and,
+# under the flat function namespace, shadowed `std.string_core.char_from_code`
+# once encoding.utf8 was loaded. Observed before the fix:
+# `expected 3 to equal 2` (len of char_from_code(0xA2): 3 bytes of U+FFFD, not
+# 2 bytes of ¢); Results: 52 total, 49 passed, 3 failed.
+
+use std.common.encoding.utf8.{char_from_code}
+use std.string_core.{char_from_code_inline}
+
+describe "char_from_code encodes scalars above 127":
+    it "encodes U+00A2 as the cent sign, not U+FFFD":
+        step("Verify: encodes U+00A2 as the cent sign, not U+FFFD")
+        expect(char_from_code(0xA2)).to_equal("¢")
+        expect(char_from_code(0xA2).len()).to_equal(2)
+
+    it "encodes the 2, 3 and 4 byte boundaries":
+        step("Verify: encodes the 2, 3 and 4 byte boundaries")
+        expect(char_from_code(128).len()).to_equal(2)
+        expect(char_from_code(0x7FF).len()).to_equal(2)
+        expect(char_from_code(0x800).len()).to_equal(3)
+        expect(char_from_code(0xD55C)).to_equal("한")
+        expect(char_from_code(0xFFFF).len()).to_equal(3)
+        expect(char_from_code(0x10000).len()).to_equal(4)
+        expect(char_from_code(0x1F600)).to_equal("😀")
+        expect(char_from_code(0x10FFFF).len()).to_equal(4)
+
+    it "keeps ASCII unchanged":
+        step("Verify: keeps ASCII unchanged")
+        expect(char_from_code(65)).to_equal("A")
+        expect(char_from_code(0x7F).len()).to_equal(1)
+
+    it "yields U+FFFD for surrogates and out-of-range values":
+        step("Verify: yields U+FFFD for surrogates and out-of-range values")
+        expect(char_from_code(0xD800)).to_equal("\uFFFD")
+        expect(char_from_code(0xDFFF)).to_equal("\uFFFD")
+        expect(char_from_code(0x110000)).to_equal("\uFFFD")
+        expect(char_from_code(-1)).to_equal("\uFFFD")
+
+    it "agrees byte-for-byte with std.string_core for every valid scalar":
+        step("Verify: agrees byte-for-byte with std.string_core for every valid scalar")
+        for cp in [0, 9, 10, 32, 65, 0x7F, 128, 0xA2, 0x7FF, 0x800, 0xD55C, 0xD7FF, 0xE000, 0xFFFF, 0x10000, 0x1F600, 0x10FFFF]:
+            expect(char_from_code(cp)).to_equal(char_from_code_inline(cp))
+            expect(char_from_code(cp).len()).to_equal(char_from_code_inline(cp).len())
+
+    it "documents the one policy difference: string_core returns empty text for invalid input":
+        step("Verify: string_core returns empty text for invalid input")
+        expect(char_from_code_inline(0xD800)).to_equal("")
+        expect(char_from_code_inline(0x110000)).to_equal("")

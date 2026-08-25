@@ -342,7 +342,9 @@ fn char_from_codepoint(cp: i64) -> text:
     """Convert a Unicode codepoint to a single-character text string.
     Invalid codepoints (surrogates, or above U+10FFFF) yield U+FFFD, matching
     utf8_encode_one's replacement-character policy elsewhere in this file."""
-    if cp < 128:
+    # `cp >= 0` guard: char_from_code(negative) delegates back here, so a bare
+    # `cp < 128` would recurse forever on negative input.
+    if cp >= 0 and cp < 128:
         return char_from_code(cp)
     # Bug: this used to assemble the codepoint's UTF-8 bytes and route each
     # individual byte back through char_from_code(byte), but every
@@ -364,13 +366,18 @@ fn char_from_codepoint(cp: i64) -> text:
     rt_bytes_to_text(byte_arr)
 
 fn char_from_code(code: i64) -> text:
-    """Convert a byte value (0-255) to a single-byte text character.
-    Uses runtime built-in."""
-    # Delegates to the built-in method
+    """Convert a Unicode scalar value to a single-character text string.
+
+    Same contract as `std.string_core.char_from_code` for every valid scalar
+    0..0x10FFFF (byte-for-byte identical UTF-8). Under the flat function
+    namespace whichever definition loads last wins, so this one must NOT
+    disagree: it used to return U+FFFD for every code >= 128, which turned
+    `char_from_code(0xA2)` into `\uFFFD` whenever this module was loaded
+    (doc/08_tracking/bug/llm_caret_tui_input_utf8_cursor_counts_bytes_2026-08-25.md).
+    Invalid input (negative, surrogates, > U+10FFFF) yields U+FFFD, matching
+    utf8_encode_one; string_core returns "" for those."""
     if code >= 0 and code <= 127:
         # ASCII range — use string literal table for common chars
         val table = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\x7f"
         return table[code:code+1]
-    # For 128-255, these are raw bytes (not valid UTF-8 by themselves)
-    # Return replacement character
-    "\uFFFD"
+    char_from_codepoint(code)
