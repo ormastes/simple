@@ -354,6 +354,33 @@ mixed-width admission for the legacy path, but an exact integer signature is
 still not artifact identity, ownership proof, signature verification, or a
 general typed thunk. Verified-and-signed admission remains 0.
 
+## Runtime-value facade authority checkpoint
+
+`src/lib/nogc_sync_mut/sffi/runtime.spl` now preserves authority instead of
+turning raw runtime-value integer handles into apparently safe values. GC init
+and collection are the only safe facades and use minimal lexical `unsafe(ffi)`;
+the other 31 handle-producing/consuming facades explicitly retain `ffi` and
+`raw_ptr` caller obligations. All 33 wrappers are mandatory-inline, so the
+change adds no call frame, allocation, copy, branch, lookup, or dispatch.
+
+Semantic predicates and comparisons remain `bool`; they were not converted to
+numeric status workarounds. Provider inventory is incomplete: of 32 declared
+symbols, six appear in both typed-native and interpreter registries, eight in
+one registry, and eighteen in neither. Consequently this module is not safe or
+verified merely because its authority is now honest.
+
+The focused static authority/provider/performance ratchet passed. The current
+census changed:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,526 -> 14,493
+- lexical unsafe: 3,342 -> 3,344
+- function unsafe: 978 -> 1,009
+
+No production optimizer/runtime test was run for this Pure Simple annotation
+change. Missing providers, raw handle validity, ownership, artifact identity,
+and signatures remain open; verified-and-signed admission remains 0.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
