@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-25
 **Severity:** CRITICAL (not one gate — every tool that runs on the deployed `bin/simple` and touches `std.io_runtime` fails at parse time)
-**Status:** OPEN — blocked on a seed redeploy owned by the bootstrap lane
+**Status:** FIXED 2026-08-25 05:16 UTC — seed-sibling refresh deployed (see "Resolution" below). Self-hosted redeploy remains a separate, still-open item.
 **Found by:** re-measuring `check-engine-differential.shs` with a pinned binary and a clean bracket
 
 ## The skew
@@ -71,3 +71,21 @@ harness is correct; the compiler running it is stale.
 - **Done when:** the 5-line probe above prints `V=/home/…`, and
   `check-engine-differential.shs` prints a `PASS —`/`FAIL —` line (either is
   progress; `ERROR — nothing was checked` is the current blind state).
+
+## Resolution (2026-08-25 05:16 UTC — seed-sibling refresh, NOT a self-hosted redeploy)
+
+- Deployed `bin/release/x86_64-unknown-linux-gnu/simple`:
+  pre `f6521b60b67d38944016b82451ac60c522375410c60dec7178d5c06bd063bde7`
+  (60650360 B, 2026-08-23 04:47) -> post
+  `706fa63677e053add9e09b8a2238dbece43019ce43cdaca5e95bc30be53689d6`
+  (60641352 B, 2026-08-25 05:16). Deployed via `cp -> simple.new && mv`.
+- Provenance: Rust seed, `cargo build --release --bin simple` from a CLEAN
+  worktree at origin/main `e8db788629b` (`>= d2d0bec2e40`, so the parser
+  carries "retain value-bound unsafe blocks"). Banner still says seed — that is
+  the honest state; this does not close the self-hosted (Stage 4) redeploy.
+- Done-when evidence: the 5-line probe now prints `V=/home/ormastes` on
+  `bin/simple run` (was `error[E1002]: function `unsafe` not found`);
+  arithmetic smoke prints `5`.
+- Rollback receipt (pre/post copies, hashes, smoke, exact restore command):
+  `/mnt/data/tmp/claude-1000/seed-rollback/RECEIPT.md`.
+- `DIFF_FILTER=utf8 sh scripts/check/check-engine-differential.shs` on the refreshed seed: `PASS — 17 fixture(s) checked, unbaselined divergence(s)=0` (exit 0) — the gate has a verdict again, no longer blind.
