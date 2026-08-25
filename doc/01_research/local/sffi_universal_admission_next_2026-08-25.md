@@ -289,6 +289,42 @@ signatures, and proof receipts remain unresolved. This tensor API and the
 wider estate are not globally verified or signed; verified-and-signed
 admission remains 0.
 
+## AES-256-GCM foreign fast-path authority checkpoint
+
+`src/os/crypto/aes256_gcm.spl` incorrectly described itself as having no SFFI
+while calling two undeclared `rt_tls13_aes256_gcm_*` fast paths. Those
+declarations are now explicit alongside `rt_bytes_u8_at`, and all three carry
+`ffi` authority. The direct byte-lane loaders and public encrypt/decrypt fast
+path owners are explicitly unsafe.
+
+This is not a claim that the API is safe. The foreign fast paths encode
+unsupported input, invalid input, and provider failure as an empty array that
+falls through to Pure Simple. The byte accessor also relies on caller-proven
+bounds, while public key/nonce/tag extent validation is incomplete. These
+contracts require typed `Result`/status APIs before safe lifting.
+
+No crypto data path changed. The focused ratchet preserves the constant-time
+tag-difference accumulator, once-per-message AES-256 key expansion in GCTR,
+semantic array results, and existing fallback. It adds no round, branch,
+allocation, copy, lookup, lock, hash pass, signature operation, dispatch layer,
+or forced inlining. The first ratchet run correctly exposed a tooling error
+that counted three docstring references; the audit was fixed to strip
+docstrings/comments/declarations before its passing executable-call count.
+
+All three symbols appear in both typed registries. Making the two implicit
+foreign calls explicit increased the authoritative raw-site inventory while
+covering all 35 calls in this file:
+
+- raw call sites: 18,810 -> 18,812
+- missing authority: 14,102 -> 14,069
+- lexical unsafe: unchanged at 3,403
+- function unsafe: 1,305 -> 1,340
+
+Input extents, unambiguous status, exact artifact identity, trusted signatures,
+constant-time proof receipts, and provider semantic verification remain
+unresolved. This cryptographic boundary and the wider estate are not globally
+verified or signed; verified-and-signed admission remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
