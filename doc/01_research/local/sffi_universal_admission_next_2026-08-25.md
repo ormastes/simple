@@ -465,6 +465,35 @@ No production optimizer/runtime test was run for this Pure Simple annotation
 change. Typed resources, cross-lane providers, artifact identity, and signatures
 remain absent; verified-and-signed admission remains 0.
 
+## Audio facade authority checkpoint
+
+`src/lib/nogc_sync_mut/io/audio_sffi.spl` now keeps 21 device, source,
+playback, SDL-backend, spatial-source, and raw PCM buffer facades explicitly
+unsafe. Its `AudioEngine`/`AudioSource`/`AudioPlayback` values are copyable
+integer handles without exactly-once ownership or backend branding, so an
+`is_valid` flag cannot make shutdown, close, or cross-backend use safe.
+
+Fourteen global volume/count/backend/listener/capture operations join the
+existing pitch adapter behind minimal lexical `unsafe(ffi)`. Semantic state and
+status results remain `bool`; no numeric workaround was introduced. All 36
+Simple wrappers that call raw audio operations are mandatory-inline, adding no
+call frame, audio-buffer copy, allocation, lookup, lock, branch, or dispatch.
+
+The focused static authority/provider/performance ratchet passed. None of the
+39 declarations appears in either the typed-native registry or interpreter
+dispatch, so the module currently has zero cross-lane registered providers.
+The census changed:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,399 -> 14,364
+- lexical unsafe: 3,383 -> 3,397
+- function unsafe: 1,064 -> 1,085
+
+No production optimizer/audio runtime test was run for this Pure Simple
+annotation change. Typed resources, backend-branded handles, registrations,
+artifact identity, and signatures remain absent; verified-and-signed admission
+remains 0.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
