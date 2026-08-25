@@ -134,6 +134,25 @@ impl PatternAnalysis:
         var missing: [text] = []
         var unreachable: [i64] = []
         var duplicates: [(i64, i64)] = []
+        var has_wildcard = false
+        var covered_enum_variants: {text: bool} = {}
+        var has_true = false
+        var has_false = false
+
+        # Classify arms once.  The former exhaustiveness checks filtered the
+        # full arm list once per enum variant (and twice more for bool), making
+        # large enum matches O(variants * arms) and allocating filter results.
+        for arm in arms:
+            match arm:
+                case Wildcard: has_wildcard = true
+                case Identifier(_): has_wildcard = true
+                case Enum(name, _): covered_enum_variants[name] = true
+                case LitBool(value):
+                    if value:
+                        has_true = true
+                    else:
+                        has_false = true
+                case _: pass
 
         # Check for unreachable/duplicate patterns
         for i in 0..arms.len():
@@ -144,25 +163,16 @@ impl PatternAnalysis:
                         duplicates = duplicates.push((j, i))
 
         # Check exhaustiveness
-        val has_wildcard = arms.filter(is_wildcard(_)).?
-
         if not has_wildcard:
             # Check enum variants
             if self.enum_variants.has(scrutinee_type):
                 val variants = self.enum_variants[scrutinee_type]
                 for v in variants:
-                    val covered = arms.filter(
-                        match _:
-                            case Enum(n, _): n == v
-                            case _: false
-                    ).?
-                    if not covered:
+                    if not covered_enum_variants.contains_key(v):
                         missing = missing.push(v)
 
             # Check bool exhaustiveness
             if scrutinee_type == "bool":
-                val has_true = arms.filter(match _: case LitBool(v): v; case _: false).?
-                val has_false = arms.filter(match _: case LitBool(v): not v; case _: false).?
                 if not has_true: missing = missing.push("true")
                 if not has_false: missing = missing.push("false")
 
