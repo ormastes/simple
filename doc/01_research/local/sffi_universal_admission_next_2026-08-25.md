@@ -794,3 +794,21 @@ Removing two canonical declarations and three unique symbols yields an
 estimated 11,920 declaration rows / 3,136 symbols, 1,210 tagged declarations,
 658 `unsafe_contract_declared`, 10,446 untouched, and zero exact-artifact
 verified-and-signed.
+
+## Graphics2D canonical-owner consolidation checkpoint
+
+`app.io.graphics2d_sffi` duplicated the full 510-line canonical module and its
+49 `rt_lyon_*` declarations. Its only semantic difference was weaker handle
+validation: it accepted every negative handle as valid via `handle != 0`, while
+the canonical owner requires `handle > 0`. The application module is now a
+two-line compatibility re-export of `std.nogc_sync_mut.io.graphics2d_sffi`.
+
+This removes duplicate declarations and the negative-handle divergence with no
+runtime call, branch, allocation, copy, lookup, or layout change. A dedicated
+owner ratchet requires exactly 49 declarations in the canonical file and
+forbids providers, wrappers, or `handle != 0` semantics in the application
+facade; it passed.
+
+Based on the authoritative inventory immediately before this consolidation,
+the estimate is 11,870 `rt_*` declaration rows / 3,135 symbols, 1,210 tagged,
+10,402 untouched, and zero exact-artifact verified-and-signed.

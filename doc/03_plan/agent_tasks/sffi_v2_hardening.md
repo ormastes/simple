@@ -469,3 +469,8 @@ passing placeholder.
     must retain fail-closed checked/timeout symbols for sealed linkage. Next
     audit the remaining 19 canonical TLS declarations and eliminate duplicate
     noncanonical callers; signed artifact admission remains zero.
+88. Keep `app.io.graphics2d_sffi` a zero-cost re-export of the canonical
+    library owner. Never restore its 49 declarations or negative-handle
+    `handle != 0` semantics. Next type/tag the canonical Lyon contracts and
+    replace dummy resource/zero/empty wrapper failures with Results where the
+    API is fallible; exact signed artifact admission remains zero.
