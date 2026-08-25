@@ -2075,3 +2075,29 @@ function-scoped authorities. The broader `rt_vulkan` family now has 134
 explicit and 324 missing call sites. Declaration totals remain 11,627, with
 2,449 tagged and 8,999 untouched; exact-artifact verified-and-signed admission
 remains zero.
+
+## Lyon graphics capability-gap checkpoint
+
+The Lyon graphics module declares 49 raw `rt_lyon_*` functions, but repository
+search and the interpreter's capability-gap registry confirm that no native C
+or Rust provider exists in tree. Consequently none of its resource handles,
+tuples, arrays, text, or boolean results can be promoted to a verified safe
+contract. All 49 production wrappers that cross this boundary are now
+explicitly function-unsafe, and the negative capability-gap fixture uses a
+narrow lexical FFI scope. Invalid resource cleanup now returns `false` instead
+of fabricating successful release.
+
+This is authority metadata plus seven fail-closed constant changes on invalid
+inputs. Valid paths retain the same direct call, branches, data layout, and
+allocations; no provider call, copy, lookup, lock, hash, signing operation, or
+dispatch was added. The existing polygon flattening and stroke-options text
+construction are unchanged. The identity-only path-transform workaround is
+not made safe by this change and remains behind the unsafe boundary.
+
+The source census measured production missing authority decreasing by exactly
+49, from 9,899 to 9,850. Including the negative fixture, repository-wide
+missing authority decreases by exactly 50, from 18,069 to 18,019: 49 calls
+became function-scoped and one became lexically scoped. The `rt_lyon` family
+therefore has 50 explicit and zero missing call sites. The fixture adds one
+unsafe-tagged declaration; production declaration counts are unchanged.
+Exact-artifact verified-and-signed admission remains zero.
