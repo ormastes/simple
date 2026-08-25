@@ -5677,6 +5677,16 @@ The generic bridge's existing cached symbol lookup remains unchanged; no new
 lookup, lock, hash, signature check, or dispatch is introduced. Each corrected
 C-string adds one scoped allocation/copy only on cold target lookup, emission,
 or pass-pipeline setup—not per IR instruction. The four extra raw calls occur
-only during allocation failure cleanup. Typed thunks, signed LLVM admission,
-and the older combined `ffi/llvm_instructions.spl` surface remain unresolved;
+only during allocation failure cleanup.
+
+The older combined `ffi/llvm_instructions.spl` compatibility surface was then
+reviewed separately. Its duplicated 20 target APIs now carry the same unsafe
+authority, C-string termination, and partial-allocation cleanup. No current
+source consumer was found, but dead compatibility code is not treated as safe.
+The focused audit now covers all four target surfaces. This follow-up does not
+change the call census because the combined module imports through the legacy
+`ffi` namespace, which the intentionally bounded source census does not classify
+as an SFFI import; resolved HIR remains required to close that inventory gap.
+
+Typed thunks and signed LLVM admission remain unresolved;
 verified-and-signed admission remains 0.
