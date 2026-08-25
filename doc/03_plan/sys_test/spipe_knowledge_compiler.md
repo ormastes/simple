@@ -443,7 +443,8 @@ or package smoke gates activated by the actual changed paths.
 
 - **Given** one published graph delta
 - **When** the identical delta and a different same-base delta are replayed
-- **Then** only the first returns `already_applied`; the second is stale.
+- **Then** the identical replay returns its original byte-identical successful
+  response, while the different delta is stale.
 
 ### Scenario: Snapshot pins cannot cross lifetime or store
 
@@ -491,3 +492,324 @@ Implementation completion remains unproven until fail-fast helpers are replaced
 with production oracles, mirrors are regenerated and independently reviewed,
 receipts are retained, Wave 0 qualifies absolute latency budgets, and every
 applicable command records one verified PASS.
+
+## 13. Wave 4 search-provider acceptance freeze
+
+<!-- codex-design -->
+
+This section refines Sections 5.3, 6, 7, and 8 with the completed Wave 4
+audits. It freezes executable vocabulary rather than adding a second
+requirements namespace. Coverage remains on `REQ-SPKC-011` through
+`REQ-SPKC-016` and the applicable NFR IDs already allocated
+above. Tests and receipts must name these exact contracts:
+`spipe-search-provider/1.0`, `spipe-unicode-lex-v1`, `bm25-fixed-v1`,
+`bm25-explain-v1`, `spipe-lexical-snapshot-v1`, and `rrf-fixed-v1`.
+
+### 13.1 Frozen helpers and fixtures
+
+Provider-conformance code uses only these shared helper names:
+
+- `loadSearchGoldenCorpus`
+- `runProviderConformance`
+- `assertCanonicalSearchPage`
+- `buildIndexFromCorpus`
+- `applyGoldenDeltaSequence`
+- `assertCleanIncrementalParity`
+- `assertExplanationBoundedAndCanonical`
+- `measureQualifiedSearch`
+- `createJsProviderFixture`
+- `createSimpleProviderFixture`
+
+Their signatures are frozen as
+`loadSearchGoldenCorpus()`,
+`runProviderConformance(suiteContext)` with the closed context in Section 13.7,
+`assertCanonicalSearchPage(actual, expected)`,
+`buildIndexFromCorpus(port, corpus)`,
+`applyGoldenDeltaSequence(port, deltas)`,
+`assertCleanIncrementalParity(factory, corpus, deltas)`,
+`assertExplanationBoundedAndCanonical(hit)`,
+`measureQualifiedSearch(provider, fixture, repetitions)`,
+`createJsProviderFixture()`, and `createSimpleProviderFixture()`.
+
+The checked-in golden corpus must carry a canonical fixture hash and cover all
+five ordered fields—`identifier`, `title`, `heading`, `classification`, and
+`body`—with weights `4000/4000/2500/2000/1000` milli. It includes empty and
+missing fields, zero/one/many-document corpora, repeated terms, ties, unsigned
+UTF-8 document-ID ordering, stop-word position gaps, valid non-BMP Unicode,
+combining sequences, NFC equivalents, invalid UTF-8 rejection, overflow
+boundaries, facets, private documents, deletes, and stale replace preconditions.
+
+The exact fixture locations are:
+
+- `examples/05_stdlib/spipe/test/fixture/wave4_search/golden_corpus.json`
+- `examples/05_stdlib/spipe/test/fixture/wave4_search/golden_results.json`
+- `examples/05_stdlib/spipe/test/fixture/wave4_search/fusion_results.json`
+
+JavaScript unit ownership is
+`examples/05_stdlib/spipe/test/unit/{search_analyzer_test.js,search_bm25_test.js,search_index_test.js,search_fusion_test.js,search_provider_protocol_test.js}`;
+integration ownership is
+`examples/05_stdlib/spipe/test/integration/knowledge_wave4_search_test.js`.
+Simple unit ownership is
+`test/01_unit/lib/common/search/{ranking_spec.spl,analyzer_spec.spl,document_spec.spl,query_spec.spl,top_k_spec.spl,provider_spec.spl,explain_spec.spl,snapshot_spec.spl`.
+DBFS parity extends
+`test/02_integration/storage/dbfs/fts_engine_spec.spl`; the system owner remains
+`test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl`.
+
+### 13.2 Exact Wave 4 matrix
+
+| Matrix ID | Required oracle | Required implementations |
+|---|---|---|
+| `W4-SRCH-01` Analyzer parity | exact normalized tokens, positions, exact identifier token, and rejection agree for the pinned Unicode table | JavaScript and Simple |
+| `W4-SRCH-02` Checked BM25 | exact integer scores, per-field statistics/contributions, one public-milli conversion, and score/unsigned-UTF-8-ID ordering agree | exhaustive JS, common Simple, DBFS facade |
+| `W4-SRCH-03` Explanation | `bm25-explain-v1` is bounded, canonical, recomputes the hit score, and contains no unauthorized field/value | every lexical adapter |
+| `W4-SRCH-04` Logical root | clean builds across providers produce the same `spipe-lexical-snapshot-v1` root | JavaScript, Simple process, DBFS facade |
+| `W4-SRCH-05` Delta parity | sorted UID-disjoint add/replace/delete; exact-present and paired-null expected-absence delete preconditions; mixed-null rejection; unchanged-root no-op; byte-identical original result/envelope/receipt replay; conflict, CAS, and mixed-history result equal clean rebuild | JavaScript and Simple; DBFS compatibility path |
+| `W4-SRCH-06` Protocol bounds | eight lowercase-hex framing, canonical UTF-8 JSON, 1 MiB limit, correlation, deadlines, cancellation, and response validation fail closed | process adapter and adversarial provider fixture |
+| `W4-SRCH-07` Health/fallback | closed health transitions, poisoned-generation quarantine, crash fallback with same-root rebuild, at-most-one retry, and no mixed page/cursor | process adapter plus JavaScript fallback |
+| `W4-SRCH-08` Query v1 | distinct bag terms and equality facets are deterministic; phrase handshake is `false` and phrase syntax returns `unsupported_capability` | every v1 provider/adapter |
+| `W4-SRCH-09` Qualified performance | persistent provider, no hot full-tree reads/spawns, raw latency/RSS receipt, and functional parity under benchmark load | each implementation claimed production-ready |
+
+`runProviderConformance` executes `W4-SRCH-01` through `W4-SRCH-08` against
+the same corpus and returns structured per-matrix evidence. It must not convert
+an unavailable implementation into PASS. `assertCanonicalSearchPage` checks
+score order, unsigned UTF-8 ID ties, snapshot/query bindings, visibility, and
+canonical explanation. `assertCleanIncrementalParity` compares logical root,
+ordered pages, exact scores, corpus statistics, and explanations—not merely hit
+sets.
+
+### 13.3 System scenarios and manual allocation
+
+The provider-parity SSpec contains these exact scenario titles:
+
+1. `should return identical golden ordering and scores across fallback and Simple providers`
+2. `should keep exact identity dominant and break lexical ties by public document ID`
+3. `should reject phrase queries and apply metadata equality filters identically in version 1`
+4. `should return bounded canonical explanations for every ranked hit`
+5. `should make mixed incremental deltas equal a clean rebuilt snapshot`
+6. `should degrade process and semantic provider failures without a false semantic pass`
+7. `should reject every query and response resource boundary at limit plus one`
+8. `should meet qualified warm-query and incremental-update latency gates`
+
+The third title deliberately replaces the pre-freeze draft wording “apply
+phrase queries”: `phrase=false` is normative in v1, so executing phrases as if
+supported would be a contract failure.
+
+Detailed scalar, arithmetic, corruption, and limit rows remain folded in the
+manual. The visible workflow remains `Search and trace artifacts`, invokes
+`check_spipe_provider_parity`, and captures compact score/explanation evidence
+as `text`, protocol transitions as `protocol`, degradation/quarantine as `log`,
+and the logical-root/delta/performance receipts as `artifact`.
+
+### 13.4 Performance qualification rule
+
+`measureQualifiedSearch` must record machine/CPU and memory, OS, toolchain,
+build identity/mode, provider and contract versions, fixture hash and document/
+token/byte sizes, warm-up count, measured sample count, percentile algorithm,
+raw samples, P95, maximum RSS, command, exit status, and timestamp. The receipt
+must separately prove zero per-query process spawns and zero warm-query
+full-tree scans/repeated source reads. Functional parity and enforced limits
+remain prerequisite gates.
+
+The qualified fixture contains exactly 50,000 artifacts and freezes its
+content hash, analyzer identity, and score identity. It also records CPU model
+and core policy, RAM, OS/kernel, runtime and provider binary hashes, cold/warm
+state, repetitions, percentile method, peak RSS, index bytes, and cache bytes.
+After a checked-in Wave 0 profile qualifies those inputs, its release gates are
+warm lexical P95 below 100 ms, one-document publication P95 below 100 ms, and
+full-rebuild median divided by incremental median at least `20.0`. The provider
+must start exactly once with no per-query spawn, warm full-tree scan, or
+repeated source read. Degradation runs are measured separately and excluded
+from steady-state samples. Missing qualification metadata is `NOT EVIDENCE`,
+never PASS.
+
+Until a checked-in profile freezes hardware class, fixture, warmups, samples,
+variance rule, and absolute budget, the research values such as 50,000
+documents and warm P95 below 100 ms are qualification targets only. A timing
+run may report observations but must not claim an absolute performance PASS.
+
+### 13.5 High-review closure matrix
+
+The following cases are additions to the exact Wave 4 matrix and must be red
+before their implementation exists:
+
+| Matrix ID | Exact evidence |
+|---|---|
+| `W4-SRCH-10` UCD provenance | UCD 17.0.0 generator manifest has real source/generated hashes; clean regeneration is byte-identical; complete normalization and default-lowercase vectors match JS/Simple; host locale/engine variation changes nothing |
+| `W4-SRCH-11` Scope isolation | two principals and policy versions receive distinct scope-bound roots/cursors/caches; private/redacted documents cannot affect public `N`, `df`, lengths, averages, scores, counts, explanations, or error shape |
+| `W4-SRCH-12` Canonical JSON | exact golden bytes/hashes match across JS/Simple for NFC/key ordering/integer/escape boundaries; duplicate normalized keys, `-0`, exponent/fraction, invalid UTF-8, NaN/infinity, trailing bytes/newline, and frame length including header are rejected |
+| `W4-SRCH-13` Arithmetic order | every normative BM25 and fixed-ln intermediate matches golden integers, averages floor once, public milli converts once, and all invalid-stat/overflow/range-reduction boundaries return the exact typed error |
+| `W4-SRCH-14` Negotiation schema | protocol object is required; all five provider-side contract IDs and negative capabilities negotiate; closed init/request/success/error records reject missing/extra/wrong fields and mismatched bindings; provider-supplied fusion authority is rejected |
+
+Additional checked-in fixtures are
+`unicode_17_0_0_manifest.json`, `canonical_json_vectors.json`,
+`authorization_scope_vectors.json`, `bm25_intermediates.json`, and
+`provider_protocol_vectors.json` under
+`examples/05_stdlib/spipe/test/fixture/wave4_search/`. The UCD generated-table
+artifacts and non-placeholder manifest hashes are a Wave 4 pre-implementation
+gate, not documentation-only intent.
+
+`runProviderConformance` must execute `W4-SRCH-01` through `W4-SRCH-14`.
+`assertCanonicalSearchPage` additionally verifies `scope_digest` and proves the
+explanation can mechanically reconstruct the public score. Protocol tests feed
+fragmented and coalesced frames and assert that the eight lowercase hex bytes
+count only canonical JSON payload bytes. Fallback tests verify a new generation
+and identical authorized logical root; they reject mixed pages, cursors,
+statistics, caches, or scope partitions. Performance tests cannot begin until
+all correctness matrices pass.
+
+### 13.6 Wire-operation closure cases
+
+Extend `W4-SRCH-14` with a table-driven case for every operation:
+`index_open`, `index_apply`, `index_publish`, `search`, `explain`,
+`duplicate_candidates`, `symbols_snapshot`, `stats`, `cancel`, and `shutdown`.
+For each, assert its exact request and result schema, null policy, type and
+limit boundaries, missing/extra/duplicate-normalized fields, and bound error.
+Wave 4 must prove `duplicate_candidates`, `symbols_snapshot`, phrase, regex,
+wildcard, and semantic capabilities are false and return a fully bound
+`unsupported_capability`, never a success or unbound generic error.
+
+Error fixtures separately cover:
+
+- initialize rejection plus every syntactically valid pre-initialization
+  operation returning the closed `PreBindingErrorResponseV1`
+  `handshake_required`, echoing only request ID, operation, and protocol;
+- malformed length, UTF-8, JSON, canonicality, unknown operation, or an
+  undecodable correlation triple closing the connection/process with no
+  fabricated response;
+- every post-initialization failure echoing request ID, operation, protocol,
+  provider generation, workspace, snapshot, scope digest, and the exact query
+  receipt/null and operation receipt/null policy;
+- one-field mismatches in each bound success/error quarantining the complete
+  generation.
+
+Search matrices prove equality filters are conjunctive, term candidates use
+at-least-one-term scoring semantics, empty analyzed text requires a filter,
+explain-null parity, and authenticated pagination yields every authorized hit
+once across multiple pages. Delta matrices prove complete documents are sent
+from the published compiler projection, never reread from the repository;
+before-revision/hash, operation payload hash, replay receipt, candidate root,
+and publish CAS are all bound. Delete fixtures freeze both choices: a non-null
+revision/hash pair must match one present base document exactly; a null/null
+pair must find the base document absent. Expected absence returns a
+zero-`deleted`, unchanged-root `no_op` candidate, whereas a present document is
+`precondition_conflict`; either mixed-null pair is `invalid_request` before any
+candidate or receipt exists. The canonical payload retains both nulls.
+
+Add canonical JSON vectors for `9007199254740991`,
+`-9007199254740991`, rejected `±9007199254740992`, signed i64 extrema,
+fraction/exponent/`-0`, and the exact signed-i128 decimal-string extrema plus
+one beyond each bound. Golden explanations assert every conceptual wide field
+has one fixed representation and cannot switch between JSON number and string.
+
+### 13.7 Stateful provider and explanation closure
+
+Replace the old two-argument conformance abstraction with the frozen suite
+context:
+
+```text
+runProviderConformance({
+  corpus, expected, jsFactory, simpleFactory, dbfsFactory,
+  adversarialFactory, authorizationFixtures, fallbackFixture,
+  applicability
+}) -> [ConformanceResult]
+```
+
+`ConformanceResult` is exactly `{matrix_id, implementation, applicability,
+status, evidence_path, reason}`. Applicability is `required` or
+`not_applicable`; status is `pass`, `fail`, or `not_evidence`. A required
+implementation/fixture missing, unavailable, unsupported, or skipped is
+`fail`. `not_applicable` needs a contract-cited reason and yields
+`not_evidence`, never PASS. DBFS scope isolation is required only when its
+advertised capability accepts that scope; otherwise the required result is a
+pre-statistics `unsupported_scope` test.
+
+Extend the matrix:
+
+| Matrix ID | Exact evidence |
+|---|---|
+| `W4-SRCH-15` Explanation closure | closed nested explanation arrays obey authorization/order/bounds/type rules and mechanically recompute every score/tie |
+| `W4-SRCH-16` Scoped projection | full five-field documents derive canonical authorized subsets; absent/redacted fields disappear from root/stats/explanation; DBFS fails unsupported scopes before reads |
+| `W4-SRCH-17` Signed receipts | query, operation, and separate candidate-expiry receipt IDs/signatures bind distinct domains, non-circular omitted fields, authority ID/generation, request or candidate/apply identity, scope/root/policy, time/revocation; restart replay returns identical durable bytes |
+| `W4-SRCH-18` Candidate lifecycle | concurrent candidates coexist; a still-staged candidate losing the current-root CAS returns typed success `stale_base` with its own signed receipt; publish/abort/authority-expiry candidate-state races have one winner, and losing requests receive their own journaled bound terminal error with null receipt, never the winner receipt; corruption and restart/replay are deterministic and nonpublishing |
+| `W4-SRCH-19` Error taxonomy | each invalid N/df/average/denominator/array/log input/overflow/canonical/binding case returns its exact code and no generic substitute |
+| `W4-SRCH-20` Cancellation lifecycle | cancel/deadline races order immediately before versus after the combined terminal transaction; before prevents root/candidate/receipt/metadata commit, after returns/replays the signed terminal result; an unknown target is exactly bound `cancel_target_not_found` with `retryable:false` and null receipts; shutdown rejects, cancels, drains, and restarts deterministically |
+
+This increment extends `runProviderConformance` through `W4-SRCH-20`; the final
+required range is frozen in Section 13.8. Add fixtures for explanation nesting/recomputation,
+authorized field subsets, Ed25519 valid/forged/wrong-key/revoked/expired
+receipts, durable restart replay, candidate races/abort/expiry/CAS loss, every
+error code, and deterministic cancel/deadline/shutdown schedules. Each receipt
+test retains canonical unsigned bytes, signature, public-key fingerprint,
+policy/revocation generation, and durable replay evidence without private keys.
+
+### 13.8 Cycle-2 closure evidence
+
+| Matrix ID | Exact evidence |
+|---|---|
+| `W4-SRCH-21` Scoped provider bytes | only closed `ScopedSearchDocumentV1` crosses provider/delta/root boundaries; scoped content hash excludes unauthorized fields; stats exactly match authorized field count/order and reject mismatch |
+| `W4-SRCH-22` Contribution union | absent terms carry exact zero/null fields without denominator work; scored terms carry every fixed-type intermediate; exact qtf and mechanical total reconstruction agree |
+| `W4-SRCH-23` Receipt wire objects | envelopes carry full signed query/operation objects or null, never IDs; candidate expiry uses only `CandidateExpiryReceiptV1` in authority/audit storage; all three domains, length framing, omitted-field sets, authority bindings, revocation/time, byte echo, and restart replay are exact |
+| `W4-SRCH-24` Complete errors | every closed error code is triggered by its named operation; snapshot, semantic, protocol, cancellation, internal, and fatal cases cannot collapse or publish |
+| `W4-SRCH-25` Candidate terminality | each terminal winner pre-signs its receipt; published atomically commits root pointer + terminal candidate + receipt + publication metadata, while stale/abort atomically commit candidate + receipt without root; candidate-state losers atomically fsync `DurableTerminalErrorV1`; restart preserves every result byte-for-byte |
+| `W4-SRCH-27` Replay identity and absence delete | apply/publish replay has no replay-only status or outcome and returns the original canonical envelope plus signed receipt byte-for-byte across restart; paired-null delete hashes both nulls, yields an unchanged-root signed `no_op` only when absent at base, conflicts when present, and rejects mixed pairs before mutation |
+| `W4-SRCH-26` Initialize closure | exact nested contracts, capabilities, limits, ID arrays, optional fields, minor-version rules, maxima, and negotiated-minimum identity reject every mutation |
+
+`runProviderConformance` executes `W4-SRCH-01` through `W4-SRCH-27` after this
+freeze. Add scoped-document/hash/stat mismatch fixtures; absent/scored
+contribution vectors; receipt objects with altered domain, length, omitted
+field, key, revocation generation, and signature; every error-code operation;
+deterministic three-way candidate races across restart; and initialization
+limit/ID/unknown-key/optional-field matrices. Missing any required fixture is
+FAIL under the suite-context policy, not a skipped PASS.
+
+`provider_protocol_vectors.json` must also carry the exact normative bytes from
+detail-design Section 14.17.1. Tests assert: the 176-byte
+`handshake_required` payload, `000000b0` frame header, and published SHA-256;
+the 456-byte unknown-cancel bound error, `000001c8` header, published SHA-256,
+`retryable:false`, and both null receipts; and the 880-byte unsigned
+`CandidateExpiryReceiptV1` with required policy fields and domain plus u64be
+length yielding receipt ID suffix
+`5bf2e3a55ccfba6130ed059cb4c063c0db39b0f4fbf4845953cabbdf06c268cc`.
+The former 771-byte no-policy record is rejected and its independently checked
+NUL-domain hash is
+`f13c7cce500d3d29b81c75880195f8ffcba4006ad16313a69ac1a43294731d40`.
+Each operation is sent once before initialize: all syntactically valid closed
+requests produce the same closed pre-binding error shape, while each malformed
+framing/canonicality mutation produces EOF with zero response bytes. The
+candidate race fixture fault-injects before and after the one atomic terminal
+transaction, persists, restarts, and byte-compares (a) the
+winner's receipt, (b) the authority expiry receipt when expiry wins, (c) a
+stale-current-root success and its own receipt, and (d) every candidate-CAS
+loser's separately atomic `DurableTerminalErrorV1` and bound null-receipt
+response. Substitution of any winner receipt into a loser response is an
+explicit failure.
+
+The terminal-transaction fixture injects failure at three named points:
+`before_terminal_transaction`, `inside_terminal_transaction`, and
+`after_terminal_transaction_before_response`. After restart, the first exposes
+the old root and staged candidate with no terminal receipt/metadata; the second
+must expose either that complete old tuple or the complete new tuple, never a
+split; the third exposes and replays the complete signed terminal result. For a
+published tuple, root pointer, terminal candidate, operation receipt, and
+publication metadata appear together. For stale-base/abort, candidate and
+receipt appear together and root/metadata remain unchanged/absent. Cancel and
+deadline schedules at the same boundaries prove the pre-transaction winner
+prevents the commit and the post-transaction loser returns `already_complete`
+or the signed terminal response.
+
+Exact payload/identity vectors assert: 136-byte apply payload without its hash
+maps to `53eac50845e9d3c9014580d3136062cb03e36c7863f947124e63bb674e38308f`;
+the 245-byte paired-null absence-delete payload maps to
+`9f3366f906834cadde2ea4b02494f47f8dc80f37418729785841e7209d1d9f08`;
+the 277-byte publish payload maps to
+`cf61ac4db6bd270c671a5dd63e47bcc990714d2390cfe14acbfe6131e9042eee`;
+and the closed 424-byte candidate record maps to
+`cand-4adcb8c9713f37d79044d0130b7117f7a4c8d1b3e57a255a9a34be40ffbdb191`,
+using the three distinct NUL-terminated domains and
+u64be lengths in detail-design Sections 14.12 and 14.17. Tests reject inclusion
+of `payload_hash` in its own preimage, omission of any other field/empty array,
+omission of either absence null, either mixed-null delete variant, hashing the
+`cand-` prefix, wrong domains/terminators, noncanonical JSON, and raw
+concatenation. Apply and publish are each executed, persisted, restarted, and
+replayed; the second response must equal the first complete frame byte-for-byte
+and retain the original status and receipt outcome.
