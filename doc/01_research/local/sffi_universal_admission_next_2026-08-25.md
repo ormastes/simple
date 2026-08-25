@@ -12,6 +12,43 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## ARM filesystem-exec VFS authority checkpoint
+
+The ARM filesystem-exec VFS declared eleven foreign interfaces; the unused
+`rt_arm_virtio_blk_read_hello_smf` boundary is removed, and all 94 ambient
+calls to the ten active array/VirtIO/log/trace interfaces are routed through
+mandatory-inline `ffi` owners.  The focused
+`arm-fs-exec-vfs-sffi-authority.shs` ratchet passed and pins the six entries
+that exist in the compiler ABI registry.
+
+Review corrected two fail-open behaviors.  A late device initialization no
+longer continues into filesystem reads after its FAT32 BPB probe fails.  The
+multi-sector cluster and file-chain loops no longer discard short-append
+status; they stop with the bytes actually established instead of continuing as
+if the requested extent was appended.  Valid append iterations gain one
+status comparison.  Sector and boot-probe paths hoist stable length projections,
+removing two redundant calls.  Allocation count, byte copies, I/O request
+count, data layout, and asymptotic work are otherwise unchanged; failed paths
+perform less work.
+
+Provider admission remains incomplete.  `arm_fs_exec_trace`,
+`rt_arm_array_append_bytes`, `rt_arm_fat32_probe_bpb_from_virtio`, and
+`rt_arm_virtio_blk_read_prefix` remain in the repository's authoritative
+unbacked-extern baseline.  Example-tree C implementations are migration
+evidence, not proof that the loaded production artifact owns those symbols.
+The `[u8]` read API also still conflates empty files and some read failures.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,478 -> 19,394
+- lexical unsafe: 3,221 -> 3,231
+- function unsafe: unchanged at 919
+- missing authority: 15,338 -> 15,244
+
+The file now reports ten raw rows, all lexically authorized, and zero missing
+authority.  It remains explicitly unsafe and unverified; verified-and-signed
+admission remains 0.
+
 ## HIR module-surface authority checkpoint
 
 `module_surface_registry.spl` had two genuine runtime interfaces and 63
