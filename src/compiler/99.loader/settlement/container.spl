@@ -79,15 +79,33 @@ impl ContainerError:
             case LoadFailed(id, reason): "Failed to load module {id}: {reason}"
 
 fn _insert_sorted_unique(values: [text], value: text) -> [text]:
-    if values.contains(value):
-        return values
     var out: [text] = []
     var inserted = false
     for existing in values:
+        if existing == value:
+            return values
         if not inserted and value < existing:
             out.push(value)
             inserted = true
         out.push(existing)
+    if not inserted:
+        out.push(value)
+    out
+
+fn _insert_sorted_unique_after(values: [text], value: text, processed: i64) -> [text]:
+    """Insert into the sorted, unprocessed suffix of a ready queue."""
+    var out: [text] = []
+    var index = 0i64
+    var inserted = false
+    for existing in values:
+        if index >= processed:
+            if existing == value:
+                return values
+            if not inserted and value < existing:
+                out.push(value)
+                inserted = true
+        out.push(existing)
+        index = index + 1
     if not inserted:
         out.push(value)
     out
@@ -324,9 +342,10 @@ impl SettlementContainer:
                 queue = _insert_sorted_unique(queue, id)
 
         var sorted: [text] = []
-        while queue.len() > 0:
-            val current = queue[0]
-            queue = queue[1..]
+        var queue_cursor = 0i64
+        while queue_cursor < queue.len():
+            val current = queue[queue_cursor]
+            queue_cursor = queue_cursor + 1
             sorted.push(current)
 
             val entry = self.modules[current]
@@ -334,7 +353,7 @@ impl SettlementContainer:
                 if in_degree.contains(dependent_id):
                     in_degree[dependent_id] = in_degree[dependent_id] - 1
                     if in_degree[dependent_id] == 0:
-                        queue = _insert_sorted_unique(queue, dependent_id)
+                        queue = _insert_sorted_unique_after(queue, dependent_id, queue_cursor)
 
         if sorted.len() != self.modules.keys().len():
             # Circular dependency — find the cycle
