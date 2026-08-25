@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_async_mut/gpu/engine2d/host_gpu_event_queue.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn rt_host_gpu_queue_' "$module")" -eq 14 ]
+[ "$(grep -c '^@unsafe(reason:' "$module")" -eq 22 ]
+[ "$(grep -Eo 'rt_host_gpu_queue_[a-z_]+' "$module" | wc -l)" -eq 57 ]
+[ "$(grep -c '^@always_inline$' "$module" || true)" -eq 0 ]
+
+symbols='rt_host_gpu_queue_emit rt_host_gpu_queue_emit_payload_text rt_host_gpu_queue_reset rt_host_gpu_queue_drain rt_host_gpu_queue_submit rt_host_gpu_queue_complete rt_host_gpu_queue_submitted_count rt_host_gpu_queue_completed_count rt_host_gpu_queue_in_flight_count rt_host_gpu_queue_last_status rt_host_gpu_queue_last_backend_handle rt_host_gpu_queue_last_payload_size rt_host_gpu_queue_last_payload_hash rt_host_gpu_queue_last_payload_text'
+both=0
+one=0
+none=0
+for symbol in $symbols; do
+    providers=0
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry" && providers=$((providers + 1))
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" && providers=$((providers + 1))
+    case "$providers" in
+        2) both=$((both + 1)) ;;
+        1) one=$((one + 1)) ;;
+        0) none=$((none + 1)) ;;
+    esac
+done
+[ "$both" -eq 5 ]
+[ "$one" -eq 8 ]
+[ "$none" -eq 1 ]
+
+grep -q '^    submitted: bool$' "$module"
+grep -q '^    dispatched: bool$' "$module"
+
+echo "Host/GPU queue SFFI authority audit: PASS (43 calls/14 symbols; 14 unsafe declarations + 8 narrow/transitive unsafe owners; 5 both/8 one/1 no-provider; semantic bool preserved; no forced inlining)"

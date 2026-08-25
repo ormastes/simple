@@ -134,6 +134,35 @@ provider-global layout lifetime, typed resource ownership, exact artifact
 identity, trusted signature admission, and proof receipts remain unresolved;
 verified-and-signed admission remains 0.
 
+## Host/GPU event-queue authority checkpoint
+
+`src/lib/nogc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` now declares all
+fourteen process-global queue ABI families with explicit `ffi, raw_ptr`
+authority. Eight narrowly selected direct and transitive owners cover reset,
+emit, payload submit, submit/complete phases, and drain. Pure-Simple queue
+state transitions and dispatch validation remain safe and unchanged.
+
+This is a hot event lane, so the change is annotation-only. It preserves the
+existing O(1) queue calls, payload copy behavior, data layout, semantic
+`submitted`/`dispatched` booleans, and debug accounting. It introduces no new
+loop, branch, allocation, copy, lookup, lock, hash, signature operation, or
+dispatch layer, and deliberately adds no forced-inlining annotation.
+
+The focused static authority/provider/performance ratchet passed. Five symbols
+appear in both typed-native and interpreter registries, eight in one, and the
+payload-text emitter in neither. The census changed exactly by the 43 formerly
+unbounded calls:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,300 -> 14,257
+- lexical unsafe: unchanged at 3,401
+- function unsafe: 1,145 -> 1,188
+
+Provider-global synchronization, queue/backend handle branding, payload
+lifetime, the missing provider, exact artifact identity, trusted signatures,
+and proof receipts remain unresolved. This lane and the wider estate are not
+globally verified or signed; verified-and-signed admission remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
