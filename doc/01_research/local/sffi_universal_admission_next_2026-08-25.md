@@ -218,6 +218,42 @@ exact artifact identity, signatures, and evidence admission remain absent, so
 HIR lowering and the wider SFFI estate are not globally verified or signed;
 verified-and-signed admission remains 0.
 
+## SMF mmap loader authority checkpoint
+
+The native SMF mmap loader now declares all sixteen used runtime ABI families
+as unsafe and confines every raw call to a lexical `unsafe(ffi)` owner. Twelve
+reused operations have mandatory-inline owners; the four existing one-site
+memory-lock and bulk-array operations retain their direct lexical blocks. The
+unused page-size declaration was removed instead of receiving authority.
+
+Twenty-one APIs that consume raw mapped addresses, relocation targets, or arbitrary
+function pointers remain explicitly unsafe. Null/negative checks are retained,
+but they are not mislabeled as proof of mapped extent, lifetime, relocation
+bounds, or function signature. Status-returning operations keep their boolean
+facades; pointer/sentinel ABIs keep their established numeric representation.
+
+The hot-path shape is unchanged: mandatory inlining preserves direct runtime
+calls, the packed-array executable-memory write still uses its single bulk
+copy, and the boxed interpreter fallback remains the only byte loop. No lookup,
+hash, signature check, lock, allocation, copy, generic dispatch, or second pass
+was added. Static provider inventory across the typed-native and interpreter
+registries found seven symbols in both registries, three in one registry, and
+six in neither; registration remains an implementation gap, not proof.
+
+The focused static authority/performance ratchet passed. The authoritative
+census changed:
+
+- raw call sites: 18,857 -> 18,850
+- missing authority: 14,557 -> 14,538
+- lexical unsafe: 3,322 -> 3,334
+- function unsafe: unchanged at 978 (the census counts `ffi` authority; these
+  twenty-one caller obligations are deliberately `raw_ptr` authority)
+
+No production self-hosted build, optimizer, benchmark, proof receipt, artifact
+signature, or loader admission was run. The SMF mmap loader and wider SFFI
+estate remain neither globally verified nor signed; verified-and-signed
+admission remains 0.
+
 ## MIR function-lowering authority checkpoint
 
 MIR function lowering now confines its tagged-value discriminant ABI and five
