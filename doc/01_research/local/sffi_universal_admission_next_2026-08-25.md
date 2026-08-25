@@ -163,6 +163,38 @@ complete provider closure, trusted signatures, and proof receipts remain
 unresolved. This renderer and the wider estate are not globally verified or
 signed; verified-and-signed admission remains 0.
 
+## Cross-platform event-handle authority checkpoint
+
+`src/lib/nogc_async_mut/io/platform_event.spl` now declares all twenty epoll,
+kqueue, IOCP, and event-port ABI families with explicit `ffi, raw_ptr`
+authority. The seven create/register/deregister/poll/close owners carry the
+same authority because they accept or return copyable native loop, descriptor,
+and token integers and unverified flat event arrays.
+
+Positivity checks are not ownership, backend branding, or exactly-once close.
+IOCP completion semantics and event-port one-shot reassociation also cannot be
+proved equivalent to the readiness facade from this wrapper alone. Therefore
+these operations remain unsafe while backend detection, enum conversion, and
+name queries stay safe.
+
+The focused authority/provider/performance ratchet passed. Semantic register,
+deregister, and close statuses remain `bool`; maximum-event validation and the
+single O(1) enum dispatch remain unchanged. No poll, allocation, array copy,
+loop, branch, lookup, lock, hash, signature operation, wrapper layer, or forced
+inlining was added. Only one of twenty symbols appears in both typed
+registries, eleven appear in one, and eight in neither. The census changed:
+
+- raw call sites: unchanged at 18,671
+- missing authority: 13,829 -> 13,801
+- lexical unsafe: unchanged at 3,411
+- function unsafe: 1,431 -> 1,459
+
+Typed backend-branded ownership, exactly-once close, poll-array validation,
+cross-backend semantic equivalence, provider closure, exact artifact identity,
+trusted signatures, and proof receipts remain unresolved. This event facade
+and the wider estate are not globally verified or signed; verified-and-signed
+admission remains 0.
+
 ## QEMU runner environment/file/process authority checkpoint
 
 `src/os/qemu_runner_part2.spl` now declares all seven local process, file,
