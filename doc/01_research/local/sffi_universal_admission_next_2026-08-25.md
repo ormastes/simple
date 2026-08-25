@@ -288,6 +288,23 @@ protection transitions and two validated entry-point calls to four minimal
 cache, and symbol-table algorithms are unchanged, and no authority was widened
 to the loader function or module level.
 
+## Compatibility loader caller-authority checkpoint
+
+The compatibility loader now confines its eleven executable-memory operations
+to minimal `raw_ptr` blocks while preserving its existing single-pass load and
+relocation flow. Relocation bounds cover the complete four/eight-byte write and
+reject address-addition overflow before entering authority. The two native-main
+calls continue propagating typed `Result` values.
+
+Review also found that failures after one or more executable allocations can
+leak candidate mappings and provisional global-symbol entries. That broader
+transactional defect is recorded at
+`doc/08_tracking/bug/compat_loader_partial_exec_mapping_rollback_2026-08-25.md`
+with fail-path and performance acceptance criteria. It was not hidden by a
+local cleanup that would leave earlier mappings leaked. The focused static
+authority/bounds/single-pass ratchet passed; production RSS and allocation
+evidence remain unavailable.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used

@@ -430,10 +430,13 @@ impl ModuleLoader:
                     val addr = native_alloc_exec_memory(code.len() as i64)
                     if addr == 0:
                         return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
-                    val written = native_write_exec_memory(addr, code, 0)
+                    val written = unsafe(capabilities: [raw_ptr]):
+                        native_write_exec_memory(addr, code, 0)
                     if written != code.len() as i64:
                         return LoadResult.Error(message: "Failed to copy executable bytes for {smf_sym.name}")
-                    if not native_make_executable(addr, code.len() as i64):
+                    val executable = unsafe(capabilities: [raw_ptr]):
+                        native_make_executable(addr, code.len() as i64)
+                    if not executable:
                         return LoadResult.Error(message: "Failed to mark executable memory for {smf_sym.name}")
                     native_flush_icache(addr, code.len() as i64)
                     val symbol_size: i64 = smf_sym.size as i64
@@ -465,11 +468,16 @@ impl ModuleLoader:
                 if relocs.len() > 0:
                     for sym_name in symbols.keys():
                         val loaded_sym = symbols[sym_name]
-                        if not native_make_rw(loaded_sym.address, loaded_sym.size):
+                        val writable = unsafe(capabilities: [raw_ptr]):
+                            native_make_rw(loaded_sym.address, loaded_sym.size)
+                        if not writable:
                             return LoadResult.Error(message: "Failed to make memory writable for relocation at {sym_name}")
                         for reloc in relocs:
-                            if reloc.offset < 0 or reloc.offset >= loaded_sym.size:
-                                return LoadResult.Error(message: "Relocation offset {reloc.offset} out of bounds")
+                            val write_width = if reloc.reloc_type == 1: 8 else: 4
+                            if loaded_sym.address <= 0 or loaded_sym.size < write_width or reloc.offset < 0 or reloc.offset > loaded_sym.size - write_width:
+                                return LoadResult.Error(message: "Relocation offset {reloc.offset} with width {write_width} out of bounds")
+                            if loaded_sym.address > 0x7FFFFFFFFFFFFFFF - reloc.offset:
+                                return LoadResult.Error(message: "Relocation address overflow at offset {reloc.offset}")
                             var target_addr = 0i64
                             if reloc.symbol_index >= 0 and reloc.symbol_index < ordered_symbols.len():
                                 val target_name = ordered_symbols[reloc.symbol_index].name
@@ -482,18 +490,25 @@ impl ModuleLoader:
                                 return LoadResult.Error(message: "Unresolved symbol at index {reloc.symbol_index}")
                             match reloc.reloc_type:
                                 1:
-                                    native_reloc_write_i64(loaded_sym.address, reloc.offset, target_addr + reloc.addend)
+                                    unsafe(capabilities: [raw_ptr]):
+                                        native_reloc_write_i64(loaded_sym.address, reloc.offset, target_addr + reloc.addend)
                                 2:
-                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+                                    unsafe(capabilities: [raw_ptr]):
+                                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
                                 3:
-                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+                                    unsafe(capabilities: [raw_ptr]):
+                                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
                                 4:
-                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+                                    unsafe(capabilities: [raw_ptr]):
+                                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
                                 5:
-                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr + reloc.addend) as i32)
+                                    unsafe(capabilities: [raw_ptr]):
+                                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr + reloc.addend) as i32)
                                 _:
                                     return LoadResult.Error(message: "Unknown relocation type: {reloc.reloc_type}")
-                        if not native_make_executable(loaded_sym.address, loaded_sym.size):
+                        val executable = unsafe(capabilities: [raw_ptr]):
+                            native_make_executable(loaded_sym.address, loaded_sym.size)
+                        if not executable:
                             return LoadResult.Error(message: "Failed to restore executable memory for {sym_name}")
                         native_flush_icache(loaded_sym.address, loaded_sym.size)
 
