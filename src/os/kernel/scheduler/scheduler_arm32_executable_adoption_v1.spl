@@ -60,6 +60,16 @@ use os.kernel.types.arm32_mapping_handle_v1.{SchedulerArm32MappingHandleV1}
 pub(package) struct SchedulerArm32AdoptionResultV1:
     scheduler: Scheduler
     pid: i64
+    cleanup_indeterminate: bool
+
+fn _arm32_adoption_result_v1(
+    scheduler: Scheduler,
+    pid: i64,
+    cleanup_indeterminate: bool
+) -> SchedulerArm32AdoptionResultV1:
+    SchedulerArm32AdoptionResultV1(
+        scheduler: scheduler, pid: pid,
+        cleanup_indeterminate: cleanup_indeterminate)
 
 fn _arm32_range_same_v1(a: ExecutableLoadRangeV1, b: ExecutableLoadRangeV1) -> bool:
     a.file_offset == b.file_offset and a.file_size == b.file_size and
@@ -129,7 +139,7 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
         reserved.execution_authorized or reserved.root_phys == 0u64 or
         reserved.entry_point == 0u64 or reserved.initial_sp == 0u64):
         _ = _arm32_destroy_reserved_v1(reserved)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+        return _arm32_adoption_result_v1(owner, -13, false)
 
     var slot = _find_empty_slot_in(owner.tasks)
     if slot < 0 and owner.current.id == 0u64: slot = 0
@@ -139,27 +149,27 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
         nil
     if slot < 0 or maybe_identity == nil:
         _ = _arm32_destroy_reserved_v1(reserved)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -11)
+        return _arm32_adoption_result_v1(owner, -11, false)
     val identity = maybe_identity.unwrap()
     if identity.task_id == 0u64 or identity.task_id > 0xFFFFFFFFu64 or
         identity.lifecycle_generation == 0u64 or
         identity.lifecycle_generation > 0xFFFFFFFFu64:
         _ = _arm32_destroy_reserved_v1(reserved)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -75)
+        return _arm32_adoption_result_v1(owner, -75, false)
 
     val committed = executable_loader_commit(authorities, token)
     if committed.is_err():
         _ = _arm32_destroy_reserved_v1(reserved)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+        return _arm32_adoption_result_v1(owner, -13, false)
     val retrieved_result = executable_loader_retrieve_once(authorities, token)
     if retrieved_result.is_err():
         _ = _arm32_destroy_reserved_v1(reserved)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+        return _arm32_adoption_result_v1(owner, -13, false)
     val retrieved = retrieved_result.unwrap().image_handle
     if not _arm32_handle_same_v1(retrieved, preparation.image_handle):
         _ = _arm32_destroy_reserved_v1(reserved)
         _ = executable_loader_release_retrieved(table, authorities, token)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+        return _arm32_adoption_result_v1(owner, -13, false)
 
     val child = TaskId(id: identity.task_id)
     var exec_token = (token.nonce ^ child.id ^ identity.lifecycle_generation ^
@@ -171,7 +181,7 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
     if mapping == nil:
         _ = _arm32_destroy_reserved_v1(reserved)
         _ = executable_loader_release_retrieved(table, authorities, token)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+        return _arm32_adoption_result_v1(owner, -13, false)
     val mapping_handle = mapping.unwrap()
 
     val grant_install = server_data_launch_grant_install_before_publication_v1(
@@ -181,7 +191,7 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
         _ = _arm32_rollback_moved_v1(
             mapping_handle, child.id, identity.lifecycle_generation, reserved)
         _ = executable_loader_release_retrieved(table, authorities, token)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+        return _arm32_adoption_result_v1(owner, -13, false)
 
     val observation = scheduler_execution_observe_adoption_handle_with_launch_v1(
         child.id, owner.current.id, retrieved, launch)
@@ -193,7 +203,7 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
         _ = _arm32_rollback_moved_v1(
             mapping_handle, child.id, identity.lifecycle_generation, reserved)
         _ = executable_loader_release_retrieved(table, authorities, token)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -11)
+        return _arm32_adoption_result_v1(owner, -11, false)
     val observation_handle: SchedulerExecutionObservationHandleV1 = observation.unwrap()
 
     # The retry coordinate must be retained before mapping publication. If the
@@ -212,7 +222,7 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
         _ = _arm32_rollback_moved_v1(
             mapping_handle, child.id, identity.lifecycle_generation, reserved)
         _ = executable_loader_release_retrieved(table, authorities, token)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -5)
+        return _arm32_adoption_result_v1(owner, -5, true)
 
     val user_context = _initial_user_task_context(
         reserved.entry_point, reserved.initial_sp)
@@ -234,7 +244,6 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
     owner.tasks[slot] = tcb
     if not scheduler_arm32_mapping_handle_publish_v1(
         mapping_handle, child.id, identity.lifecycle_generation):
-        owner.tasks[slot] = nil
         # The cleanup owner retains an indeterminate cancellation and retries
         # it by exact lifecycle.  Mapping publication failed, so the reserved
         # mapping may still be rolled back after the observation is detached.
@@ -244,10 +253,17 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
             val grant_handle = grant_install.handle.unwrap()
             if not server_data_launch_grant_rollback_before_publication_v1(grant_handle):
                 _ = server_data_launch_grant_quarantine_before_publication_v1(grant_handle)
-        _ = _arm32_rollback_moved_v1(
+        val mapping_rolled_back = _arm32_rollback_moved_v1(
             mapping_handle, child.id, identity.lifecycle_generation, reserved)
         _ = executable_loader_release_retrieved(table, authorities, token)
-        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -5)
+        if mapping_rolled_back:
+            owner.tasks[slot] = nil
+            return _arm32_adoption_result_v1(owner, -5, false)
+        # Publication may have committed before its acknowledgement became
+        # unavailable. Keep the exact moved handle in the non-runnable TCB so
+        # the lifecycle remains recoverable; dropping it would orphan a
+        # possibly published mapping and permit unsafe slot reuse.
+        return _arm32_adoption_result_v1(owner, -5, true)
 
     register_task_vmspace(
         child.id.to_u32(),
@@ -261,7 +277,7 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
     # and reap; it never revokes or rolls back the now-runnable mapping.
     _ = scheduler_arm32_adoption_cleanup_retry_v1(
         child.id, identity.lifecycle_generation)
-    SchedulerArm32AdoptionResultV1(scheduler: owner, pid: child.id as i64)
+    _arm32_adoption_result_v1(owner, child.id as i64, false)
 
 export SchedulerArm32AdoptionResultV1
 export scheduler_arm32_adopt_reserved_authenticated_v1

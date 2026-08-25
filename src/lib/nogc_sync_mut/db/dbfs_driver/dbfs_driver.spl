@@ -71,6 +71,31 @@ struct DbFsFd:
     is_dir:     bool
     closed:     bool
 
+fn _dbfs_file_stat_for_inode(inode: DbFsInode) -> FileStat:
+    """Build honest metadata for one canonical DBFS inode.
+
+    Mutable ownership, permission, and timestamp metadata is not persisted by
+    DBFS yet, so those fields retain explicit backend defaults.  Identity,
+    type, size, and allocation always describe the supplied live inode.
+    """
+    val is_dir = inode.kind == DbFsKind.Dir
+    val type_mode: u32 = if is_dir: 0o040000 else: 0o100000
+    val permission_mode: u32 = if is_dir: 0o755 else: 0o644
+    FileStat(
+        inode: inode.id,
+        size: inode.size as u64,
+        blocks: ((inode.size as u64) + 4095u64) / 4096u64,
+        block_size: 4096,
+        mode: type_mode | permission_mode,
+        uid: 0,
+        gid: 0,
+        nlinks: 1,
+        atime_ns: 0u64,
+        mtime_ns: 0u64,
+        ctime_ns: 0u64,
+        birth_time_ns: 0u64
+    )
+
 # --- Canonical namespace state ---
 # Keyed by inst_id so multiple driver instances are isolated. These arrays are
 # private state of device_commit_owner's transaction domain; helpers carrying
@@ -309,21 +334,7 @@ impl DbFsDriver:
         if inode_idx < 0:
             return Err(FsError.StaleHandle)
         val inode = _dbfs_inodes[inode_idx]
-        Ok(FileStat(
-            inode: inode.id,
-            size: inode.size as u64,
-            blocks: ((inode.size as u64) + 4095u64) / 4096u64,
-            block_size: 4096,
-            mode: (if inode.kind == DbFsKind.Dir: 0o755 else 0o644) |
-                (if inode.kind == DbFsKind.Dir: 0o040000 else 0),
-            uid: 0,
-            gid: 0,
-            nlinks: 1,
-            atime_ns: 0u64,
-            mtime_ns: 0u64,
-            ctime_ns: 0u64,
-            birth_time_ns: 0u64
-        ))
+        Ok(_dbfs_file_stat_for_inode(inode))
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)

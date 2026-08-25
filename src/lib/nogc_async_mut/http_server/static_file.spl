@@ -41,9 +41,10 @@ val STATIC_CACHE_DEFAULT_CAPACITY: i64 = 128
 val STATIC_CACHE_DEFAULT_MAX_BYTES: i64 = 16777216  # 16 MiB
 
 class CacheEntry:
-    """One cached compressed payload keyed by (path, encoding)."""
+    """One cached compressed payload keyed by (path, encoding, validator)."""
     path: text
     encoding: text
+    validator: text
     compressed: [u8]
     size: i64
 
@@ -94,11 +95,15 @@ class StaticCompressionCache:
         On a hit, promotes the entry to most-recently-used (end of list).
         Returns nil on a miss.
         """
+        self.get_variant(path, encoding, "")
+
+    me get_variant(path: text, encoding: text, validator: text) -> Option<[u8]>:
+        """Look up bytes for one exact on-disk representation version."""
         var idx: i64 = 0
         var found_idx: i64 = -1
         while idx < self.entries.len():
             val e = self.entries[idx]
-            if e.path == path and e.encoding == encoding:
+            if e.path == path and e.encoding == encoding and e.validator == validator:
                 found_idx = idx
             idx = idx + 1
         if found_idx == -1:
@@ -122,6 +127,10 @@ class StaticCompressionCache:
         fit and is silently rejected. Otherwise, evicts LRU entries until
         there is room, then appends.
         """
+        self.put_variant(path, encoding, "", compressed)
+
+    me put_variant(path: text, encoding: text, validator: text, compressed: [u8]):
+        """Store bytes for one exact on-disk representation version."""
         val sz = compressed.len()
         # Reject entries that can never fit.
         if sz > self.max_bytes:
@@ -131,7 +140,13 @@ class StaticCompressionCache:
             if self.entries.len() == 0:
                 return
             self.evict_oldest()
-        val entry = CacheEntry(path: path, encoding: encoding, compressed: compressed, size: sz)
+        val entry = CacheEntry(
+            path: path,
+            encoding: encoding,
+            validator: validator,
+            compressed: compressed,
+            size: sz
+        )
         self.entries = self.entries.push(entry)
         self.current_size = self.current_size + sz
 
@@ -155,6 +170,10 @@ class StaticCompressionCache:
 
     me serve_compressed_or_plain(content: text, mime: text, actual_path: text, accept_header: text) -> HttpResponseData:
         """Serve plain or compressed bytes while preserving cache mutations."""
+        self.serve_compressed_or_plain_variant(content, mime, actual_path, accept_header, "")
+
+    me serve_compressed_or_plain_variant(content: text, mime: text, actual_path: text, accept_header: text, validator: text) -> HttpResponseData:
+        """Serve bytes cached for the current ETag, never an older file version."""
         if accept_header.len() == 0:
             return build_html_or_typed(content, mime)
         if not is_mime_compressible(mime):
@@ -162,7 +181,7 @@ class StaticCompressionCache:
         val chosen = negotiate_encoding(accept_header, supported_encodings())
         if chosen.len() == 0:
             return build_html_or_typed(content, mime)
-        val hit = self.get(actual_path, chosen)
+        val hit = self.get_variant(actual_path, chosen, validator)
         if hit != nil:
             val cached = hit ?? []
             return build_compressed_response(cached, mime, chosen)
@@ -172,7 +191,7 @@ class StaticCompressionCache:
                 bytes
             Err(_):
                 return build_html_or_typed(content, mime)
-        self.put(actual_path, chosen, compressed)
+        self.put_variant(actual_path, chosen, validator, compressed)
         build_compressed_response(compressed, mime, chosen)
 
 # ============================================================================
@@ -447,7 +466,9 @@ class StaticFileHandler:
         if size <= 65536:
             val content = file_read_text(actual_path)
             val accept = _get_header_ci(request.headers, "accept-encoding")
-            base_resp = self.cache.serve_compressed_or_plain(content, mime, actual_path, accept)
+            base_resp = self.cache.serve_compressed_or_plain_variant(
+                content, mime, actual_path, accept, etag
+            )
         else:
             base_resp = build_file_response(actual_path, mime, size)
 

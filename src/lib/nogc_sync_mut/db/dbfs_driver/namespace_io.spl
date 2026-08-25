@@ -9,14 +9,15 @@ use nogc_sync_mut.db.dbfs_driver.dbfs_driver.{
     DbFsDriver, DbFsInode, DbFsFd, DbFsKind,
     _dbfs_inodes, _dbfs_fds,
     _find_inode_idx_locked, _find_fd_idx_locked, _fd_inode_idx_locked,
-    _alloc_inode_id_locked, _alloc_fd_id_locked, _dbfs_persist_namespace_locked
+    _alloc_inode_id_locked, _alloc_fd_id_locked, _dbfs_persist_namespace_locked,
+    _dbfs_file_stat_for_inode
 }
 use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
     dbfs_text_to_bytes, dbfs_bytes_to_text, dbfs_slice_bytes,
     dbfs_owner_transaction_begin, dbfs_owner_transaction_end
 }
 use std.fs_driver.error.{FsError}
-use std.fs_driver.types.{FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo}
+use std.fs_driver.types.{FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo, FileStat}
 
 val DBFS_MAX_BOUNDED_PREAD_BYTES: i64 = 65536
 
@@ -40,6 +41,13 @@ fn _namespace_finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:
 
 impl DbFsDriver:
     # --- stat ---
+
+    fn _file_stat_path_locked(path: Path) -> Result<FileStat, FsError>:
+        val raw = if path.raw == "": "/" else: path.raw
+        val inode_idx = _find_inode_idx_locked(self.inst_id, raw)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        Ok(_dbfs_file_stat_for_inode(_dbfs_inodes[inode_idx]))
 
     fn _file_generation_v1_locked(handle: FileHandle) -> Result<u64, FsError>:
         """Return the exact live inode version under DBFS's transaction owner."""
@@ -642,6 +650,10 @@ impl DbFsDriver:
     fn stat(path: text) -> Result<StatInfo, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._stat_locked(path))
+
+    fn file_stat_path(path: Path) -> Result<FileStat, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._file_stat_path_locked(path))
 
     fn file_generation_v1(handle: FileHandle) -> Result<u64, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)

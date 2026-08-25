@@ -249,6 +249,36 @@ fn wm_lifecycle_bounded_window_height(height: i32, desktop_height: i32) -> i32:
         bounded = desktop_height
     bounded
 
+fn wm_lifecycle_clamp_to_work_area(window: WmLifecycleWindowState, desktop_width: i32, desktop_height: i32) -> WmLifecycleWindowState:
+    """Clamp lifecycle geometry to the current display work area.
+
+    Restore rectangles are intentionally stored in normal-window coordinates,
+    so a display-size change can make them stale.  Resize also preserves the
+    old origin.  Keeping both transitions here prevents either path from
+    reviving an unreachable or larger-than-display window.
+    """
+    var out = window
+    val work_width = if desktop_width > 0: desktop_width else: 1
+    var work_top = WM_WORK_AREA_TOP
+    if work_top >= desktop_height:
+        work_top = 0
+    var work_height = desktop_height - work_top - WM_WORK_AREA_BOTTOM
+    if work_height < 1:
+        work_height = if desktop_height > work_top: desktop_height - work_top else: 1
+    out.w = wm_lifecycle_bounded_window_width(out.w, work_width)
+    out.h = wm_lifecycle_bounded_window_height(out.h, work_height)
+    val max_x = work_width - out.w
+    val max_y = work_top + work_height - out.h
+    if out.x < 0:
+        out.x = 0
+    elif out.x > max_x:
+        out.x = max_x
+    if out.y < work_top:
+        out.y = work_top
+    elif out.y > max_y:
+        out.y = max_y
+    out
+
 fn wm_lifecycle_resize_grip_hit(window_x: i32, window_y: i32, window_width: i32, window_height: i32, x: i32, y: i32) -> bool:
     (x >= window_x + window_width - WM_WINDOW_RESIZE_GRIP_PX and
         x <= window_x + window_width and
@@ -349,6 +379,7 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
     elif action.kind == "resize":
         win.w = action.width
         win.h = action.height
+        win = wm_lifecycle_clamp_to_work_area(win, desktop_width, desktop_height)
     elif action.kind == "move":
         win.x = action.x
         win.y = action.y
@@ -372,6 +403,7 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
         win.y = WM_WORK_AREA_TOP
         win.w = desktop_width
         win.h = desktop_height - WM_WORK_AREA_TOP - WM_WORK_AREA_BOTTOM
+        win = wm_lifecycle_clamp_to_work_area(win, desktop_width, desktop_height)
         out_windows[i] = win
         return WmLifecycleApplyResult(windows: wm_lifecycle_focus_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     elif action.kind == "restore":
@@ -380,6 +412,7 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
             win.y = win.restore_y
             win.w = win.restore_w
             win.h = win.restore_h
+        win = wm_lifecycle_clamp_to_work_area(win, desktop_width, desktop_height)
         win.minimized = false
         win.focused = true
         win.maximized = false
