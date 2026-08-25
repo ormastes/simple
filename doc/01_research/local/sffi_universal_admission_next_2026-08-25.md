@@ -2310,6 +2310,38 @@ No production Simple optimizer/runtime measurement was possible because this
 worktree has no production self-hosted binary.  The static shape evidence is
 therefore useful but not performance verification.  Verified-and-signed SFFI
 admission remains 0.
+
+## SSH KEX call-authority and hot-path checkpoint
+
+The SSH session KEX owner no longer dispatches its 113 constant packet-byte
+appends through `rt_push_byte`; the retained local spelling is an inline Pure
+Simple wrapper over `_append_byte`, so byte sequences and array-growth
+semantics are unchanged.  Sixty-nine raw serial diagnostic calls were removed,
+including transcript, public-key, signature, and exchange-hash hex formatting.
+This removes foreign dispatch and avoids diagnostic text/hex allocations from
+the handshake path.
+
+The six remaining actual foreign calls in this owner are now inside minimal
+lexical `unsafe(ffi)` scopes: X25519 public/shared operations, two SHA-256 KDF
+calls, the exchange hash, and bounded retry sleep.  X25519 and SHA-256 results
+must be exactly 32 bytes, the exchange hash must be exactly 32 bytes, derived
+key lengths are checked before publication, and the KDF request is capped at
+64 bytes.  A short/empty SHA-256 result now fails instead of leaving the KDF
+expansion loop unable to make progress.
+
+The focused static boundary ratchet passed.  The authoritative census changed:
+
+- missing authority: 17,145 -> 17,070
+- lexical unsafe: 2,954 -> 2,959
+- function unsafe: unchanged at 919
+
+The valid path adds fixed-width comparisons only and removes per-byte foreign
+dispatch and diagnostic allocation work.  No hashing, signing, discovery,
+lookup, lock, generic dispatch, or additional copy was added.  Provider ABI,
+ownership, compiler/artifact identity, and proof receipts remain unresolved,
+so SSH KEX and the wider SFFI surface are not globally safe, verified, or
+signed; exact-artifact verified-and-signed admission remains 0.
+
 ## Synchronous SIMD SFFI facade checkpoint
 
 `src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
