@@ -16,6 +16,7 @@ use app.cli.query_lint.{_emit_source_lint_diagnostics, _diag_emit_or_collect, _D
 use app.cli.query_lint_checks.{_query_indent_successor_index}
 use app.cli.query_lint_checks.{_check_ignored_return_text_indexed}
 use app.cli.query_lint_scan.{deprecated_new_columns}
+use app.cli.query_source_mask.{deprecated_dunder_facts}
 use compiler.driver.driver.{check_file}
 use compiler.driver.driver_types.{CompileResult}
 use std.report.emitter.lsp.{LspEmitter}
@@ -397,12 +398,22 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
     var parts: [text] = []
     val indent_successors = _query_indent_successor_index(lines)
     val deprecated_columns = deprecated_new_columns(lines)
+    val deprecated_dunders = deprecated_dunder_facts(lines)
+    var deprecated_dunder_i = 0
 
     var li = 0
     while li < lines.len():
         val line = lines[li]
         val trimmed = line.trim()
         val line_num = li + 1
+
+        # DEPR001: deprecated Type__method() calls from shared lexical facts.
+        while (deprecated_dunder_i < deprecated_dunders.len() and
+            deprecated_dunders[deprecated_dunder_i].line == line_num):
+            val fact = deprecated_dunders[deprecated_dunder_i]
+            parts.push("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{fact.name}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{fact.start_column},\"end_line\":{line_num},\"end_col\":{fact.end_column},\"tags\":[2],\"source\":\"simple-lint\"}")
+            count = count + 1
+            deprecated_dunder_i = deprecated_dunder_i + 1
 
         # DEPR002: .new() calls
         val col = deprecated_columns[li]

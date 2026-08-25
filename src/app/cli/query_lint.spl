@@ -7,6 +7,7 @@ use app.cli.query_helpers.{_count_indent}
 use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name, query_file_read_rich, query_file_exists, query_json_escape, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE, _DIAG_SEVERITY_OVERRIDE_COUNT}
 use app.cli.query_lint_checks.{_check_match_exhaustiveness_text, _check_closure_capture_text, _check_ignored_return_text_indexed, _check_multiline_bool_text, _check_safety_text, _check_visibility_text, _check_print_to_log_text, QueryIndentSuccessorIndex, _query_indent_successor_index}
 use app.cli.query_lint_scan.{lint_scan_line, deprecated_new_columns}
+use app.cli.query_source_mask.{deprecated_dunder_facts}
 # Strictness-tier severity routing: resolve the LintConfig (sdn profile= + @lint_profile)
 # and translate per-code Allow/Deny into the diagnostic severity override map, so the
 # LSP/build lint path honors the strictness tier — matching `simple lint`.
@@ -269,13 +270,23 @@ fn _emit_basic_line_lints(
 ) -> i64:
     var count = 0
     val deprecated_columns = deprecated_new_columns(lines)
+    val deprecated_dunders = deprecated_dunder_facts(lines)
+    var deprecated_dunder_i = 0
     var lint_i = 0
     while lint_i < lines.len():
         val scan = lint_scan_line(lines, lint_i)
         val trimmed = scan.trimmed
         val line_num = scan.line_num
 
-        count = count + _check_deprecated_double_underscore(trimmed, line_num, file, format)
+        while (deprecated_dunder_i < deprecated_dunders.len() and
+            deprecated_dunders[deprecated_dunder_i].line == line_num):
+            val fact = deprecated_dunders[deprecated_dunder_i]
+            if format == "json":
+                _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{fact.name}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{fact.start_column},\"end_line\":{line_num},\"end_col\":{fact.end_column},\"tags\":[2],\"source\":\"simple-lint\"}")
+            else:
+                print "{file}:{line_num}: warning[DEPR001]: '{fact.name}()' uses deprecated Type__method() syntax"
+            count = count + 1
+            deprecated_dunder_i = deprecated_dunder_i + 1
         count = count + _check_hash_bracket_attribute(trimmed, line_num, file, format)
 
         val deprecated_new_col = deprecated_columns[lint_i]
@@ -406,38 +417,6 @@ fn _truncate_import_suffix(value: text, marker: text) -> text:
     if idx < 0:
         return value
     value.substring(0, idx)
-
-fn _check_deprecated_double_underscore(trimmed: text, line_num: i64, file: text, format: text) -> i64:
-    """Check for Type__method() deprecated call pattern in a line."""
-    # Look for identifier__identifier( pattern
-    var ci = 0
-    var found = 0
-    while ci < trimmed.len() - 3:
-        val ch = trimmed.substring(ci, ci + 1)
-        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
-        if is_alpha:
-            var end_ci = ci + 1
-            while end_ci < trimmed.len():
-                val wc = trimmed.substring(end_ci, end_ci + 1)
-                val ww = (wc >= "a" and wc <= "z") or (wc >= "A" and wc <= "Z") or (wc >= "0" and wc <= "9") or wc == "_"
-                if not ww:
-                    break
-                end_ci = end_ci + 1
-            val word = trimmed.substring(ci, end_ci)
-            # Check for __ in the middle (not at start/end, not dunder)
-            if (word.len() > 4 and not word.starts_with("__") and
-                not word.ends_with("__") and word.contains("__")):
-                # Check if followed by (
-                if end_ci < trimmed.len() and trimmed.substring(end_ci, end_ci + 1) == "(":
-                    if format == "json":
-                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{word}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{ci + 1},\"end_line\":{line_num},\"end_col\":{end_ci + 1},\"tags\":[2],\"source\":\"simple-lint\"}")
-                    else:
-                        print "{file}:{line_num}: warning[DEPR001]: '{word}()' uses deprecated Type__method() syntax"
-                    found = found + 1
-            ci = end_ci
-        else:
-            ci = ci + 1
-    found
 
 fn _check_hash_bracket_attribute(trimmed: text, line_num: i64, file: text, format: text) -> i64:
     """Check for legacy #[name] attribute syntax — should be @name instead.

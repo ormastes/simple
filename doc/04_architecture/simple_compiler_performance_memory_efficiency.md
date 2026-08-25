@@ -917,3 +917,12 @@ executable line. Its sole lexical input is `code_pattern_line_facts`; consumers
 must not reinterpret trimmed raw text. Live lint and collected query-check JSON
 share the immutable index. RET001 may consume last-statement facts, while
 UNREACH001 additionally consumes return, successor, and span facts.
+
+# DEPR001 lexical-fact ownership
+
+`query_source_mask` owns the stateful lexical boundary for deprecated dunder
+calls. It publishes ordered immutable `DeprecatedDunderFact` values containing
+only source line, identifier byte span, and accepted name. The query lint owner
+constructs that list once per source and owns severity/message rendering.
+Neither comments nor string payload may cross the fact boundary, and renderers
+must not recompute names or columns from trimmed text.

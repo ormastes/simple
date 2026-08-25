@@ -1241,3 +1241,14 @@ stack. Executable lines record the first
 ASCII identifier/number token's exclusive end column; punctuation receives a
 one-byte span. Both diagnostic routes report the selected successor's original
 line and token columns.
+
+# DEPR001 lexical matcher design
+
+`deprecated_dunder_facts` keeps one cross-line triple-string bit and one
+monotonic byte cursor per physical line. Outside strings/comments it recognizes
+a token only at a true ASCII identifier boundary, advances across the maximal
+identifier, and records internal double underscores while scanning. It rejects
+leading/trailing dunders and requires `(` at the exact token end. Only then does
+it allocate the diagnostic name slice. Facts append in physical-line and token
+order. `_emit_basic_line_lints` advances one fact cursor alongside its canonical
+line loop, preserving rule and same-line diagnostic order.

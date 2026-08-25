@@ -3616,6 +3616,27 @@ use the same successor index and exact first-token span. Work remains O(N+L)
 with O(L) scalar arrays/stack and no masked source copy or suffix rescans. No
 execution or runtime/RSS measurement was run.
 
+# 2026-08-25 follow-up: DEPR001 lexical facts
+
+The query fallback scanned every trimmed physical line for deprecated
+`Type__method(` names. It created one-byte substrings throughout identifier
+discovery plus a whole-token substring for every identifier, warned on comments
+and ordinary/triple-string payload, and reported indentation-relative JSON
+columns. It also accepted a deprecated-looking suffix embedded in a larger
+digit-prefixed token.
+
+`deprecated_dunder_facts` now performs one stateful byte scan over original
+lines, tracking comments, escaped ordinary strings, and multiline triple
+strings. It recognizes maximal boundary-delimited ASCII identifiers, tracks the
+internal/leading/trailing dunder shape with scalar flags, requires the immediate
+call parenthesis, and slices only accepted names. `_emit_basic_line_lints`
+constructs the ordered fact list once and emits every same-line match in the
+former DEPR001 position. Work is O(B) plus output with O(D) fact objects and
+O(D+M) retained scanner bytes for D findings and M total matched-name bytes,
+instead of O(B+T) tiny substring objects and shifted locations. This is one
+DEPR001 construction scan; other lint rules retain their own linear passes. No
+execution or runtime/RSS measurement was run.
+
 # 2026-08-24 follow-up: doc-coverage repeated traversal removal
 
 The live self-hosted doc-coverage path ran three recursive grep pipelines for

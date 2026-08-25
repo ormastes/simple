@@ -1758,6 +1758,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   plus a canonical manual.
 - No manual execution or timing/RSS measurement was run under the user override.
 
+# Completed tranche: DEPR001 lexical facts (2026-08-25)
+
+- Replaced trimmed raw-text DEPR001 matching with stateful original-byte facts.
+- Excluded comments and ordinary/triple-string payload while resuming after
+  closures.
+- Preserved every real same-line match and exact message/severity ordering.
+- Added true identifier boundaries and original one-based exclusive spans.
+- Reduced allocation from per-byte/per-token substrings to accepted names only.
+- Added paired ordered-fact, decoy, exact-JSON, and structural evidence plus a
+  canonical manual.
+- No manual execution or timing/RSS measurement was run under the user override.
+
 # Completed tranche: MIR local binding index (2026-08-24)
 
 - Retained the staged-native-safe parallel binding arrays as authority.
