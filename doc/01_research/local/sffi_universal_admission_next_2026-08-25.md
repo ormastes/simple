@@ -331,6 +331,29 @@ This establishes provider presence and compile correctness, not artifact
 identity, proof, sanitizer coverage, or signatures. The nine providers remain
 unsafe boundary code and verified-and-signed admission remains 0.
 
+## Generic dynamic-dispatch typed-admission checkpoint
+
+The legacy dynamic resolver may now publish a generic function pointer only
+when the compiler-owned runtime registry declares an exact all-`i64` parameter
+list and exactly one `i64` result matching the call arity. Unknown symbols,
+mixed-width parameters/results, void returns, and arity mismatches fail with
+typed SFFI conversion errors before `dlsym` publication or invocation. The
+specialized scoped byte/font adapters remain independent typed owners.
+
+Admission is deliberately cold-path. Each main-runtime, satellite, or manifest
+symbol cache stores the admitted address and arity. The existing cache miss
+does the registry scan once; cached calls retain the existing hash lookup and
+add only one integer arity comparison. `call_fptr` performs no registry scan,
+allocation, new lookup, or new lock. Its fixed stack argument array and arity
+cap remain unchanged.
+
+The focused static admission/performance ratchet passed. All 15 focused
+dynamic-SFFI unit tests passed (0 failures); the optimized test build/link took
+3m32s and the tests themselves completed in 0.00s. This closes name-only and
+mixed-width admission for the legacy path, but an exact integer signature is
+still not artifact identity, ownership proof, signature verification, or a
+general typed thunk. Verified-and-signed admission remains 0.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
