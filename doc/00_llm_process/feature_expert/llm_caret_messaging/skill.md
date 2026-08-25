@@ -64,3 +64,20 @@ and absence of embedded secrets.
   @req REQ-LLM-CARET-BACKEND-001) exercising spawn/poll/kill for both the
   claude (`-p ... --output-format json`)
   and codex (`exec <prompt>`) argv contracts with a stub binary.
+
+## Agent sessions and worktrees (2026-08-25)
+
+`src/app/llm_caret/agent_workspace.spl` is the side-effecting counterpart of
+the model-only `agent_tmux.spl` embed: one detached git worktree
+(`<root>/<agent_id>`, never a branch) plus one tmux window per agent, on a
+PRIVATE tmux socket (`tmux -L caret_ws_<id>`) so the operator's own tmux server
+is never touched. `send_to_each_pane` broadcasts one command to every pane;
+`launch_caret_suite` runs `bin/simple test <spec> --no-session-daemon` in a
+`caret_suite` window and `wait_for_pane_text` polls `capture-pane` for the
+authoritative `Results:` line. Worktree paths must be absolute (`git -C repo`
+resolves relative paths against the repo). Evidence:
+`test/01_unit/app/llm_caret/agent_workspace_spec.spl` (throwaway `git init`
+fixture, two-pane broadcast with a per-pane marker oracle) and
+`test/03_system/app/llm_caret/caret_suite_tmux_window_system_spec.spl`
+(real suite run inside a tmux window). tmux absent => `pending("BLOCKED: ...")`,
+never a silent pass.
