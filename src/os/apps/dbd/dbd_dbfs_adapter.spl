@@ -15,6 +15,10 @@ use os.userlib.fs.{
     file_open_direct, file_read_direct, file_write_direct, file_close_direct,
     file_sync_direct, file_rename_direct
 }
+use os.services.vfs.dbfs_mount_capability.{
+    dbfs_vfs_mount_capability_snapshot_v1,
+    dbfs_vfs_mount_capability_snapshot_current_v1
+}
 
 pub val DBD_DBFS_MAX_RECOVERY_BYTES: i64 = 1024 * 1024
 pub val DBD_DBFS_STORAGE_ROOT_V1: text = SERVER_DATA_DATABASE_ROOT_PATH_V1
@@ -44,6 +48,7 @@ pub class DbdDbfsAdapter:
     last_error: text
     filesystem_vfs: bool
     filesystem_vfs_transactional_replace: bool
+    filesystem_vfs_generation: u64
 
     pub static fn detached(reason: text) -> DbdDbfsAdapter:
         DbdDbfsAdapter(
@@ -54,8 +59,16 @@ pub class DbdDbfsAdapter:
             open_handles: 0,
             last_error: reason,
             filesystem_vfs: false,
-            filesystem_vfs_transactional_replace: false
+            filesystem_vfs_transactional_replace: false,
+            filesystem_vfs_generation: 0u64
         )
+
+    fn filesystem_vfs_mount_current() -> bool:
+        if not self.filesystem_vfs or self.filesystem_vfs_generation == 0u64:
+            return false
+        val snapshot = dbfs_vfs_mount_capability_snapshot_v1()
+        snapshot.code == 1 and
+            snapshot.generation == self.filesystem_vfs_generation
 
     pub fn ready() -> bool:
         # No caller-controlled flag can promote this adapter.  Readiness needs
@@ -63,7 +76,8 @@ pub class DbdDbfsAdapter:
         match self.state:
             case DbdDbfsAdapterState.Detached: false
             case DbdDbfsAdapterState.MountedSyncUnsupported: false
-            case DbdDbfsAdapterState.MountedDurable: true
+            case DbdDbfsAdapterState.MountedDurable:
+                not self.filesystem_vfs or self.filesystem_vfs_mount_current()
             case DbdDbfsAdapterState.Quarantined: false
             case DbdDbfsAdapterState.Closed: false
 
@@ -73,7 +87,11 @@ pub class DbdDbfsAdapter:
                 if self.last_error != "": self.last_error else: "dbfs-root-driver-unavailable"
             case DbdDbfsAdapterState.MountedSyncUnsupported:
                 if self.last_error != "": self.last_error else: "dbfs-durable-sync-unavailable"
-            case DbdDbfsAdapterState.MountedDurable: ""
+            case DbdDbfsAdapterState.MountedDurable:
+                if self.filesystem_vfs and not self.filesystem_vfs_mount_current():
+                    "dbfs-vfs-mount-generation-stale"
+                else:
+                    ""
             case DbdDbfsAdapterState.Quarantined:
                 if self.last_error != "": self.last_error else: "dbfs-adapter-quarantined"
             case DbdDbfsAdapterState.Closed:
@@ -83,6 +101,8 @@ pub class DbdDbfsAdapter:
         if self.state != DbdDbfsAdapterState.MountedSyncUnsupported and
             self.state != DbdDbfsAdapterState.MountedDurable:
             return Err(self.blocker())
+        if self.filesystem_vfs and not self.filesystem_vfs_mount_current():
+            return Err("dbfs-vfs-mount-generation-stale")
         if path != DBD_DBFS_JOURNAL_PATH_V1 or max_bytes <= 0 or
             max_bytes > DBD_DBFS_MAX_RECOVERY_BYTES:
             return Err("dbfs-recovery-read-invalid-boundary")
@@ -96,6 +116,8 @@ pub class DbdDbfsAdapter:
                 self.last_error = "dbfs-recovery-close-failed"
                 return Err(self.last_error)
             if read.is_err(): return Err("dbfs-recovery-read-failed")
+            if not self.filesystem_vfs_mount_current():
+                return Err("dbfs-vfs-mount-changed-during-recovery")
             return read
         val driver = match self.driver:
             Some(value): value
@@ -132,6 +154,8 @@ pub class DbdDbfsAdapter:
     pub me commit_and_sync(path: text, bytes: [u8]) -> Result<(), text>:
         if self.state != DbdDbfsAdapterState.MountedDurable:
             return Err(self.blocker())
+        if self.filesystem_vfs and not self.filesystem_vfs_mount_current():
+            return Err("dbfs-vfs-mount-generation-stale")
         if path != DBD_DBFS_JOURNAL_PATH_V1 or bytes.len().to_i64() <= 0 or
             bytes.len().to_i64() > DBD_DBFS_MAX_RECOVERY_BYTES:
             return Err("dbfs-commit-invalid-boundary")
@@ -174,6 +198,10 @@ pub class DbdDbfsAdapter:
                 self.state = DbdDbfsAdapterState.Quarantined
                 self.last_error = "dbfs-commit-namespace-close-failed"
                 return Err(self.last_error)
+            if not self.filesystem_vfs_mount_current():
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-vfs-mount-changed-during-commit"
+                return Err(self.last_error)
             self.generation = self.generation + 1
             return Ok(())
         val driver = match self.driver:
@@ -212,6 +240,9 @@ pub class DbdDbfsAdapter:
             return false
         self.driver = nil
         self.driver_instance_id = 0
+        self.filesystem_vfs = false
+        self.filesystem_vfs_transactional_replace = false
+        self.filesystem_vfs_generation = 0u64
         self.state = DbdDbfsAdapterState.Closed
         true
 
@@ -221,6 +252,9 @@ pub class DbdDbfsAdapter:
         val preserve_quarantine = self.state == DbdDbfsAdapterState.Quarantined
         self.driver = nil
         self.driver_instance_id = 0
+        self.filesystem_vfs = false
+        self.filesystem_vfs_transactional_replace = false
+        self.filesystem_vfs_generation = 0u64
         self.generation = self.generation + 1
         if preserve_quarantine:
             # Restart may release the old driver owner, but it must not erase
@@ -252,7 +286,8 @@ pub fn dbd_dbfs_adapter_from_driver(driver: DriverInstance) -> DbdDbfsAdapter:
                 open_handles: 0,
                 last_error: mounted_error,
                 filesystem_vfs: false,
-                filesystem_vfs_transactional_replace: false
+                filesystem_vfs_transactional_replace: false,
+                filesystem_vfs_generation: 0u64
             )
         case _:
             DbdDbfsAdapter.detached("mounted-root-is-not-dbfs")
@@ -272,8 +307,17 @@ pub fn dbd_dbfs_adapter_from_filesystem_vfs(
         return DbdDbfsAdapter.detached("filesystem-vfs-durable-sync-unavailable")
     if not transactional_replace:
         return DbdDbfsAdapter.detached("filesystem-vfs-transactional-replace-unavailable")
+    # The booleans are compatibility claims from the launch coordinator, not
+    # authority.  Admit only a stable snapshot published by the mounted DBFS
+    # owner; a caller cannot manufacture readiness, and a concurrent remount
+    # cannot be mistaken for the observed generation.
+    val before = dbfs_vfs_mount_capability_snapshot_v1()
+    val after = dbfs_vfs_mount_capability_snapshot_v1()
+    if not dbfs_vfs_mount_capability_snapshot_current_v1(before, after):
+        return DbdDbfsAdapter.detached("filesystem-vfs-mount-capability-unavailable")
     DbdDbfsAdapter(
         state: DbdDbfsAdapterState.MountedDurable,
         driver: nil, driver_instance_id: 0, generation: 1, open_handles: 0,
         last_error: "", filesystem_vfs: true,
-        filesystem_vfs_transactional_replace: true)
+        filesystem_vfs_transactional_replace: true,
+        filesystem_vfs_generation: after.generation)
