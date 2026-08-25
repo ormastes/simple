@@ -2281,3 +2281,32 @@ bytes outside its loop. Both constant-time helpers carry `@inline`; successful
 operations retain the same allocation count, copy count, and loop complexity.
 The unavailable production Simple binary prevents executable optimizer/runtime
 evidence in this worktree, so the facade remains unsafe and unverified.
+## Synchronous CLI SFFI facade checkpoint
+
+`src/lib/nogc_sync_mut/sffi/cli.spl` contains 50 direct raw calls across
+40 symbols.  Every call now has a minimal lexical `unsafe(ffi)` scope; the
+public signatures and the existing boolean/status semantics are unchanged.
+The facade remains O(1) direct delegation and gained no allocation, copy,
+lookup, lock, hash, signature operation, or generic dispatch.  The focused
+`nogc-sync-cli-sffi-authority.shs` audit passed and guards both the exact call
+inventory and the absence of admission work on the call path.
+
+The authoritative call census changed exactly as expected:
+
+- missing authority: 17,739 -> 17,689
+- lexical unsafe: 2,519 -> 2,569
+- function unsafe: unchanged at 918
+
+Static provider inspection found that `rt_compile_to_native` and
+`rt_compile_to_native_with_opt` are not cross-lane ABI-safe: the Simple and
+interpreter contracts return `(bool, text)`, but the standalone Rust runtime
+exports `i64` functions that currently return a fabricated zero.  This
+checkpoint does not coerce that integer into a tuple or claim the provider is
+safe.  The ABI must be regenerated from one authoritative contract and the
+zero stubs removed before these functions can be admitted outside their unsafe
+boundary.
+
+No production Simple optimizer/runtime measurement was possible because this
+worktree has no production self-hosted binary.  The static shape evidence is
+therefore useful but not performance verification.  Verified-and-signed SFFI
+admission remains 0.
