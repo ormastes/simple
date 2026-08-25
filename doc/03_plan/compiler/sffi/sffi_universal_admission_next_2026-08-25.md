@@ -58,6 +58,12 @@ those failures to integer zero. Success performs the same single OS call and
 value lift; the added checks are boundary failure checks, not hot foreign-call
 dispatch work.
 
+Checkpoint: the interpreter `i64` bridge no longer coerces `bool` to `1/0`.
+It now matches the native checked bridge and rejects every non-integer value;
+typed boolean ABI support must use a boolean thunk instead of changing the
+source value's type. This removes conversion work rather than adding hot-path
+overhead.
+
 ### 3. Complete resolved-HIR inventory
 
 Checkpoint: the bounded source ledgers now report 12,128 `rt_*` declaration

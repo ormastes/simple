@@ -323,7 +323,6 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
             .iter()
             .map(|v| match v {
                 Value::Int(n) => Ok(*n),
-                Value::Bool(b) => Ok(if *b { 1i64 } else { 0i64 }),
                 _ => Err(CompileError::runtime("spl_wffi_call_i64: args must be integers")),
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -729,6 +728,17 @@ mod tests {
     #[test]
     fn close_rejects_null_handle_instead_of_reporting_success() {
         let result = spl_dlclose(&[Value::Int(0)]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn integer_bridge_rejects_boolean_coercion() {
+        let args = Value::Array(Arc::new(vec![Value::Bool(true)]));
+        let result = spl_wffi_call_i64(&[
+            Value::Int(add_scaled as usize as i64),
+            args,
+            Value::Int(1),
+        ]);
         assert!(result.is_err());
     }
 
