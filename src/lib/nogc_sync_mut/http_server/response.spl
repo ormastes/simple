@@ -91,13 +91,16 @@ fn _application_header_is_safe(name: text, value: text) -> bool:
     val normalized = name.to_lower()
     normalized != "content-length" and normalized != "transfer-encoding" and normalized != "connection"
 
-fn _serialize_response_head_with_body_length(resp: HttpResponse, body_len: i64) -> text:
+fn _serialize_response_head_with_body_length_and_connection(
+    resp: HttpResponse, body_len: i64, close_connection: bool
+) -> text:
     val status_code = http_status_code(resp.status)
     val reason = http_status_reason(resp.status)
 
     var wire = "HTTP/1.1 {status_code} {reason}\r\n"
     wire = "{wire}Content-Length: {body_len}\r\n"
-    wire = "{wire}Connection: close\r\n"
+    val connection_value = if close_connection: "close" else: "keep-alive"
+    wire = "{wire}Connection: {connection_value}\r\n"
 
     var has_content_type = false
     for pair in resp.headers:
@@ -112,6 +115,9 @@ fn _serialize_response_head_with_body_length(resp: HttpResponse, body_len: i64) 
     wire = "{wire}\r\n"
     return wire
 
+fn _serialize_response_head_with_body_length(resp: HttpResponse, body_len: i64) -> text:
+    _serialize_response_head_with_body_length_and_connection(resp, body_len, true)
+
 fn serialize_response_head_for_body_length(resp: HttpResponse, body_len: i64) -> text:
     """Serialize canonical HTTP/1.1 headers for an externally-owned byte body.
 
@@ -122,11 +128,24 @@ fn serialize_response_head_for_body_length(resp: HttpResponse, body_len: i64) ->
         return ""
     _serialize_response_head_with_body_length(resp, body_len)
 
+fn serialize_response_head_for_body_length_connection(
+    resp: HttpResponse, body_len: i64, close_connection: bool
+) -> text:
+    """Serialize a canonical response head with an explicit connection
+    lifecycle decision owned by the HTTP/1 connection loop."""
+    if body_len < 0:
+        return ""
+    _serialize_response_head_with_body_length_and_connection(
+        resp, body_len, close_connection)
+
 fn _serialize_response_head(resp: HttpResponse) -> text:
     _serialize_response_head_with_body_length(resp, resp.body.len())
 
 fn serialize_response(resp: HttpResponse) -> text:
     "{_serialize_response_head(resp)}{resp.body}"
+
+fn serialize_response_connection(resp: HttpResponse, close_connection: bool) -> text:
+    "{_serialize_response_head_with_body_length_and_connection(resp, resp.body.len(), close_connection)}{resp.body}"
 
 fn response_wire_size(resp: HttpResponse) -> i64:
     _serialize_response_head(resp).len() + resp.body.len()
@@ -202,8 +221,10 @@ fn html_error_page(status: HttpStatus, message: text) -> HttpResponse:
     )
 
 export write_response, write_response_limited, write_error, write_error_limited
-export serialize_response, response_wire_size, response_wire_fits, bounded_response_wire
-export serialize_response_head_for_body_length, response_wire_parts_fit
+export serialize_response, serialize_response_connection
+export response_wire_size, response_wire_fits, bounded_response_wire
+export serialize_response_head_for_body_length
+export serialize_response_head_for_body_length_connection, response_wire_parts_fit
 export with_default_security_headers
 export response_header_name_is_token, response_header_value_is_safe
 export generate_error_page, html_not_found_page, html_error_page

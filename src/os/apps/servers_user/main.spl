@@ -11,7 +11,8 @@ use os.userlib.syscall_raw.{syscall}
 use os.kernel.net.http_route.{http_classify_request, HttpRouteKind}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.http_server.response.{
-    serialize_response, serialize_response_head_for_body_length,
+    serialize_response, serialize_response_connection,
+    serialize_response_head_for_body_length_connection,
     bounded_response_wire,
     response_wire_parts_fit, with_default_security_headers
 }
@@ -27,7 +28,9 @@ use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
 use os.apps.servers_user.database_persistence_adapter.{
     simpleos_database_dbfs_vfs_caps
 }
-use os.apps.servers_user.http1_request_frame_owner.{recv_http1_request_owned}
+use os.apps.servers_user.http1_request_frame_owner.{
+    recv_http1_request_owned_with_tail
+}
 use os.apps.servers_user.rfc6455_server_owner.{
     Rfc6455ServerConnectionOwner, Rfc6455ServerEvent,
     validate_rfc6455_server_handshake
@@ -51,6 +54,7 @@ val DB_PRIVATE_KEY_PATH: text = SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1
 val MAX_DB_CREDENTIAL_BYTES: u64 = 128u64
 val MAX_WIRE_RESPONSE: u64 = 65536
 val MAX_WEBSOCKET_READS: i32 = 200
+val MAX_HTTP_REQUESTS_PER_CONNECTION: i32 = 32
 
 fn debug_line(message: text):
     val bytes = text_to_bytes_pure(message + "\n")
@@ -101,18 +105,20 @@ fn http_wire_parts_fit(parts: HttpWireParts, max_wire_bytes: u64) -> bool:
     val body_len = parts.body.len().to_u64()
     response_wire_parts_fit(head_len, body_len, max_wire_bytes)
 
-fn _text_response_parts(response: HttpResponse) -> HttpWireParts:
-    HttpWireParts(head: text_to_bytes_pure(serialize_response(response)), body: [])
+fn _text_response_parts(response: HttpResponse, close_connection: bool) -> HttpWireParts:
+    HttpWireParts(
+        head: text_to_bytes_pure(serialize_response_connection(
+            response, close_connection)), body: [])
 
 fn _text_response_parts_for_method(
-    response: HttpResponse, head_only: bool
+    response: HttpResponse, head_only: bool, close_connection: bool
 ) -> HttpWireParts:
     if not head_only:
-        return _text_response_parts(response)
+        return _text_response_parts(response, close_connection)
     # HEAD selects exactly the same representation as GET. Preserve that
     # representation's Content-Length while transferring no message body.
-    val head = serialize_response_head_for_body_length(
-        response, response.body.len().to_i64())
+    val head = serialize_response_head_for_body_length_connection(
+        response, response.body.len().to_i64(), close_connection)
     HttpWireParts(head: text_to_bytes_pure(head), body: [])
 
 fn http_frame_rejection_wire(error: text, max_wire_bytes: u64) -> [u8]:
@@ -128,8 +134,11 @@ fn http_frame_rejection_wire(error: text, max_wire_bytes: u64) -> [u8]:
         return []
     text_to_bytes_pure(wire)
 
-fn _byte_response_parts(response: HttpResponse, body: [u8]) -> HttpWireParts:
-    val head = serialize_response_head_for_body_length(response, body.len().to_i64())
+fn _byte_response_parts(
+    response: HttpResponse, body: [u8], close_connection: bool
+) -> HttpWireParts:
+    val head = serialize_response_head_for_body_length_connection(
+        response, body.len().to_i64(), close_connection)
     HttpWireParts(head: text_to_bytes_pure(head), body: body)
 
 fn bind_listener(port: u16) -> Result<Socket, text>:
@@ -163,7 +172,7 @@ fn _head_routing_request(request: text) -> (bool, text):
     val get_line = "GET {parsed.1} {parsed.2}"
     (true, get_line + request.slice(line_end, request.len()))
 
-fn http_response(request: text) -> HttpWireParts:
+fn http_response(request: text, close_connection: bool) -> HttpWireParts:
     val projection = _head_routing_request(request)
     val head_only = projection.0
     val route = http_classify_request(projection.1)
@@ -198,7 +207,8 @@ fn http_response(request: text) -> HttpWireParts:
                 return _text_response_parts_for_method(with_default_security_headers(
                     HttpResponse(
                         status: HttpStatus.NotFound, headers: [],
-                        body: "ERR file not found\n"), false), head_only)
+                        body: "ERR file not found\n"), false), head_only,
+                    close_connection)
             val mounted_path = public_path.unwrap()
             match read_file_bytes_direct(mounted_path, 65536):
                 Err(_):
@@ -209,12 +219,14 @@ fn http_response(request: text) -> HttpWireParts:
                         headers: [("Content-Type", mime_from_path(mounted_path))],
                         body: ""
                     ), false)
-                    val file_parts = _byte_response_parts(file_response, bytes)
+                    val file_parts = _byte_response_parts(
+                        file_response, bytes, close_connection)
                     if head_only:
                         return HttpWireParts(head: file_parts.head, body: [])
                     return file_parts
     _text_response_parts_for_method(
-        with_default_security_headers(response, false), head_only)
+        with_default_security_headers(response, false), head_only,
+        close_connection)
 
 fn send_websocket_events(client: Socket, events: [Rfc6455ServerEvent]) -> bool:
     for event in events:
@@ -300,8 +312,23 @@ class WebSocketTransportOwner:
             Err(_): false
             Ok(client):
                 var client_transferred = false
-                val frame = recv_http1_request_owned(client, policy)
-                if frame.complete:
+                var connection_tail: [u8] = []
+                var served: i32 = 0
+                var connection_done = false
+                while not connection_done and
+                    served < MAX_HTTP_REQUESTS_PER_CONNECTION:
+                    val frame = recv_http1_request_owned_with_tail(
+                        client, policy, connection_tail)
+                    if not frame.complete:
+                        # EOF/no-progress after at least one complete response
+                        # is a normal keep-alive shutdown, not a second 4xx.
+                        if ((served == 0 or frame.scanned_bytes > 0) and
+                            not frame.error.starts_with("transport:")):
+                            val wire = http_frame_rejection_wire(
+                                frame.error, MAX_WIRE_RESPONSE)
+                            if wire.len() > 0u64:
+                                val _ = send_all(client, wire)
+                        break
                     if frame.websocket_upgrade_candidate:
                         val decision = validate_rfc6455_server_handshake(frame.request)
                         if (decision.accepted and
@@ -317,17 +344,26 @@ class WebSocketTransportOwner:
                             val wire = serialize_response(
                                 with_default_security_headers(rejected, false))
                             val _ = send_all(client, text_to_bytes_pure(wire))
+                        connection_done = true
                     else:
-                        val response = http_response(frame.request)
-                        if http_wire_parts_fit(response, MAX_WIRE_RESPONSE):
+                        val limit_reached = served + 1 >=
+                            MAX_HTTP_REQUESTS_PER_CONNECTION
+                        val close_after = frame.close_connection or limit_reached
+                        val response = http_response(frame.request, close_after)
+                        if not http_wire_parts_fit(response, MAX_WIRE_RESPONSE):
+                            connection_done = true
+                        else:
                             val head_sent = send_all(client, response.head)
+                            var body_sent = true
                             if head_sent and response.body.len() > 0:
-                                val _body_sent = send_all(client, response.body)
-                else:
-                    val wire = http_frame_rejection_wire(
-                        frame.error, MAX_WIRE_RESPONSE)
-                    if wire.len() > 0u64:
-                        val _ = send_all(client, wire)
+                                body_sent = send_all(client, response.body)
+                            if not head_sent or not body_sent:
+                                connection_done = true
+                            else:
+                                served = served + 1
+                                connection_tail = frame.connection_tail
+                                if close_after:
+                                    connection_done = true
                 if not client_transferred:
                     close_fd(client.fd)
                 true

@@ -4,16 +4,20 @@
 # API owns it for the whole connection, so no caller can forge scan offsets,
 # line counters, or a cached Content-Length resume tuple.
 
-use os.userlib.net.{Socket, socket_recv}
+use os.userlib.net.{Socket, socket_recv, socket_send_range}
 use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, secure_server_policy_error}
-use std.nogc_sync_mut.http_server.parser.{parse_request_line, headers_decision}
+use std.nogc_sync_mut.http_server.parser.{parse_request_line}
+use std.common.net.http_core.{body_decision}
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
 
 pub class Http1OwnedFrameResult:
     complete: bool
     request: text
     websocket_upgrade_candidate: bool
     upgrade_tail: [u8]
+    connection_tail: [u8]
+    close_connection: bool
     error: text
     scanned_bytes: i64
 
@@ -47,6 +51,21 @@ fn _http_field_name_is_expect(line_bytes: [u8], colon: i64) -> bool:
         (line_bytes[3u64] == 69u8 or line_bytes[3u64] == 101u8) and
         (line_bytes[4u64] == 67u8 or line_bytes[4u64] == 99u8) and
         (line_bytes[5u64] == 84u8 or line_bytes[5u64] == 116u8))
+
+fn _http_hex_byte(byte: u8) -> i64:
+    if byte >= 48u8 and byte <= 57u8: return (byte - 48u8) as i64
+    if byte >= 65u8 and byte <= 70u8: return (byte - 55u8) as i64
+    if byte >= 97u8 and byte <= 102u8: return (byte - 87u8) as i64
+    -1
+
+val CHUNK_SIZE: i32 = 0
+val CHUNK_SIZE_LF: i32 = 1
+val CHUNK_DATA: i32 = 2
+val CHUNK_DATA_CR: i32 = 3
+val CHUNK_DATA_LF: i32 = 4
+val CHUNK_TRAILER: i32 = 5
+val CHUNK_TRAILER_LF: i32 = 6
+val CHUNK_COMPLETE: i32 = 7
 
 fn _host_ascii_alpha_numeric(ch: text) -> bool:
     (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
@@ -240,6 +259,23 @@ class Http1RequestFrameOwner:
     maximum_retained: i64
     websocket_upgrade_candidate: bool
     upgrade_tail: [u8]
+    body_start: i64
+    chunked: bool
+    transfer_encoding_seen: bool
+    expect_seen: bool
+    expect_continue: bool
+    connection_close: bool
+    connection_keep_alive: bool
+    chunk_phase: i32
+    chunk_cursor: i64
+    chunk_line_start: i64
+    chunk_line_length: i64
+    chunk_size_value: i64
+    chunk_size_digits: i32
+    chunk_extension: bool
+    chunk_remaining: i64
+    chunk_decoded: i64
+    chunk_trailer_count: i32
 
     static fn create(policy: SecureServerPolicy) -> Http1RequestFrameOwner:
         Http1RequestFrameOwner(
@@ -260,9 +296,29 @@ class Http1RequestFrameOwner:
             maximum_retained: policy.max_request_line as i64 + 2 +
                 policy.max_header_count as i64 *
                     (policy.max_header_line as i64 + 2) + 2 +
-                policy.max_body as i64,
+                # One-byte chunks can carry five framing bytes (`1\r\nX\r\n`)
+                # per decoded byte. Keep the encoded cap finite while allowing
+                # every body admitted by the decoded-size policy.
+                policy.max_body as i64 * 6 + 5,
             websocket_upgrade_candidate: false,
-            upgrade_tail: []
+            upgrade_tail: [],
+            body_start: -1,
+            chunked: false,
+            transfer_encoding_seen: false,
+            expect_seen: false,
+            expect_continue: false,
+            connection_close: false,
+            connection_keep_alive: false,
+            chunk_phase: CHUNK_SIZE,
+            chunk_cursor: -1,
+            chunk_line_start: -1,
+            chunk_line_length: 0,
+            chunk_size_value: 0,
+            chunk_size_digits: 0,
+            chunk_extension: false,
+            chunk_remaining: 0,
+            chunk_decoded: 0,
+            chunk_trailer_count: 0
         )
 
     fn terminal() -> bool:
@@ -296,7 +352,7 @@ class Http1RequestFrameOwner:
             return
 
         if line == "":
-            val decision = headers_decision(self.headers, self.policy.max_body)
+            val decision = body_decision(self.headers, self.policy.max_body, true)
             if decision.0 != "":
                 self._fail(decision.0)
                 return
@@ -308,12 +364,25 @@ class Http1RequestFrameOwner:
                 # are separate policy work and are not inferred here.
                 self._fail("400 HTTP/1.1 requires one non-empty Host header")
                 return
+            if self.request_version == "HTTP/1.0" and decision.2:
+                self._fail("400 HTTP/1.0 does not support chunked request bodies")
+                return
+            if self.websocket_upgrade_candidate and
+                (decision.1 > 0 or decision.2):
+                self._fail("400 WebSocket upgrade request must not carry a body")
+                return
             self.headers_complete = true
+            self.body_start = self.retained.len() as i64
+            self.chunked = decision.2
+            self.chunk_cursor = self.body_start
+            self.chunk_line_start = self.body_start
             # A WebSocket candidate has no HTTP request body. Any bytes after
             # the header are owned frame tail and are validated only after the
             # complete handshake is accepted.
             self.expected_total = if self.websocket_upgrade_candidate:
                 self.retained.len() as i64
+            elif self.chunked:
+                -1
             else:
                 self.retained.len() as i64 + decision.1 as i64
             if self.expected_total > self.maximum_retained:
@@ -339,10 +408,13 @@ class Http1RequestFrameOwner:
             name_index = name_index + 1
         val name = line.slice(0, colon)
         val value = line.slice(colon + 1, line.len()).trim()
-        if (self.request_version == "HTTP/1.1" and
-            _http_field_name_is_expect(line_bytes, colon)):
-            self._fail("417 Expectation Failed: interim responses are not supported")
-            return
+        if _http_field_name_is_expect(line_bytes, colon):
+            if self.expect_seen or self.request_version != "HTTP/1.1" or
+                value.lower() != "100-continue":
+                self._fail("417 Expectation Failed")
+                return
+            self.expect_seen = true
+            self.expect_continue = true
         if _http_field_name_is_host(line_bytes, colon):
             if not http1_host_authority_is_valid(value):
                 self._fail("400 Invalid Host authority")
@@ -353,7 +425,143 @@ class Http1RequestFrameOwner:
             for token in value.split(","):
                 if token.trim().lower() == "websocket":
                     self.websocket_upgrade_candidate = true
+        if name.lower() == "transfer-encoding":
+            # This transport implements exactly the RFC 9112 chunked coding.
+            # Reject stacked/unknown codings instead of letting different
+            # downstream owners disagree about the message boundary.
+            if self.transfer_encoding_seen or value.lower().trim() != "chunked":
+                self._fail("501 Transfer-Encoding is not supported")
+                return
+            self.transfer_encoding_seen = true
+        if name.lower() == "connection":
+            for token in value.split(","):
+                val normalized = token.trim().lower()
+                if normalized == "close":
+                    self.connection_close = true
+                elif normalized == "keep-alive":
+                    self.connection_keep_alive = true
         self.headers.push((name, value))
+
+    me _validate_chunk_trailer(line_start: i64, line_end: i64) -> bool:
+        val line_bytes = self.retained.slice(line_start as u64, line_end as u64)
+        val line = bytes_to_string(line_bytes)
+        if line.starts_with(" ") or line.starts_with("\t"):
+            return false
+        val colon = line.index_of(":")
+        if colon <= 0:
+            return false
+        var index: i64 = 0
+        while index < colon:
+            if not _http_field_token_byte(line_bytes[index as u64]):
+                return false
+            index = index + 1
+        val name = line.slice(0, colon).lower()
+        # Framing, routing, authentication, and upgrade authority cannot be
+        # introduced after the route owner has consumed the header section.
+        not (name == "content-length" or name == "transfer-encoding" or
+            name == "host" or name == "authorization" or
+            name == "connection" or name == "upgrade")
+
+    me _scan_chunked_body():
+        while (self.terminal_error == "" and
+            self.chunk_phase != CHUNK_COMPLETE and
+            self.chunk_cursor < self.retained.len() as i64):
+            if self.chunk_phase == CHUNK_DATA:
+                val available = self.retained.len() as i64 - self.chunk_cursor
+                val take = if available < self.chunk_remaining:
+                    available
+                else:
+                    self.chunk_remaining
+                self.chunk_cursor = self.chunk_cursor + take
+                self.chunk_remaining = self.chunk_remaining - take
+                self.chunk_decoded = self.chunk_decoded + take
+                if self.chunk_decoded > self.policy.max_body as i64:
+                    self._fail("413 Chunked body exceeds decoded-size policy")
+                elif self.chunk_remaining == 0:
+                    self.chunk_phase = CHUNK_DATA_CR
+                continue
+
+            val byte = self.retained[self.chunk_cursor as u64]
+            self.chunk_cursor = self.chunk_cursor + 1
+            if self.chunk_phase == CHUNK_SIZE:
+                self.chunk_line_length = self.chunk_line_length + 1
+                if self.chunk_line_length > self.policy.max_header_line as i64:
+                    self._fail("431 Chunk-size line exceeds policy")
+                elif byte == 13u8:
+                    if self.chunk_size_digits == 0:
+                        self._fail("400 Malformed chunk size")
+                    else:
+                        self.chunk_phase = CHUNK_SIZE_LF
+                elif byte == 10u8 or byte < 32u8 or byte == 127u8:
+                    self._fail("400 Malformed chunk-size line")
+                elif byte == 59u8:
+                    if not self.chunk_extension:
+                        self.chunk_extension = true
+                elif not self.chunk_extension:
+                    val digit = _http_hex_byte(byte)
+                    if digit < 0:
+                        self._fail("400 Malformed chunk size")
+                    elif self.chunk_size_value > 134217727 / 16:
+                        self._fail("413 Chunk size exceeds policy")
+                    else:
+                        self.chunk_size_value = self.chunk_size_value * 16 + digit
+                        self.chunk_size_digits = self.chunk_size_digits + 1
+            elif self.chunk_phase == CHUNK_SIZE_LF:
+                if byte != 10u8:
+                    self._fail("400 Malformed chunk-size terminator")
+                elif self.chunk_size_value == 0:
+                    self.chunk_phase = CHUNK_TRAILER
+                    self.chunk_line_start = self.chunk_cursor
+                    self.chunk_line_length = 0
+                else:
+                    if self.chunk_decoded + self.chunk_size_value >
+                        self.policy.max_body as i64:
+                        self._fail("413 Chunked body exceeds decoded-size policy")
+                    else:
+                        self.chunk_remaining = self.chunk_size_value
+                        self.chunk_phase = CHUNK_DATA
+                self.chunk_size_value = 0
+                self.chunk_size_digits = 0
+                self.chunk_extension = false
+                self.chunk_line_length = 0
+            elif self.chunk_phase == CHUNK_DATA_CR:
+                if byte != 13u8:
+                    self._fail("400 Malformed chunk data terminator")
+                else:
+                    self.chunk_phase = CHUNK_DATA_LF
+            elif self.chunk_phase == CHUNK_DATA_LF:
+                if byte != 10u8:
+                    self._fail("400 Malformed chunk data terminator")
+                else:
+                    self.chunk_phase = CHUNK_SIZE
+                    self.chunk_line_start = self.chunk_cursor
+            elif self.chunk_phase == CHUNK_TRAILER:
+                if byte == 13u8:
+                    self.chunk_phase = CHUNK_TRAILER_LF
+                elif byte == 10u8 or (byte < 32u8 and byte != 9u8) or byte == 127u8:
+                    self._fail("400 Malformed chunk trailer")
+                else:
+                    self.chunk_line_length = self.chunk_line_length + 1
+                    if self.chunk_line_length > self.policy.max_header_line as i64:
+                        self._fail("431 Chunk trailer line exceeds policy")
+            elif self.chunk_phase == CHUNK_TRAILER_LF:
+                if byte != 10u8:
+                    self._fail("400 Malformed chunk trailer terminator")
+                elif self.chunk_line_length == 0:
+                    self.chunk_phase = CHUNK_COMPLETE
+                    self.expected_total = self.chunk_cursor
+                else:
+                    if not self._validate_chunk_trailer(
+                        self.chunk_line_start, self.chunk_cursor - 2):
+                        self._fail("400 Invalid chunk trailer field")
+                    else:
+                        self.chunk_trailer_count = self.chunk_trailer_count + 1
+                        if self.chunk_trailer_count > self.policy.max_header_count:
+                            self._fail("431 Too many chunk trailer fields")
+                        else:
+                            self.chunk_phase = CHUNK_TRAILER
+                            self.chunk_line_start = self.chunk_cursor
+                            self.chunk_line_length = 0
 
     me append(fragment: [u8]):
         if self.terminal():
@@ -373,14 +581,47 @@ class Http1RequestFrameOwner:
                     self.upgrade_tail.extend(fragment.slice(index, fragment.len()))
                     self.scanned_bytes = self.scanned_bytes + remaining as i64
                     return
-                val allowed = self.expected_total - self.retained.len() as i64
-                if remaining as i64 > allowed:
-                    self._fail("400 Bytes follow declared request body")
-                    return
-                if index == 0u64:
-                    self.retained.extend(fragment)
+                val incoming = if index == 0u64:
+                    fragment
                 else:
-                    self.retained.extend(fragment.slice(index, fragment.len()))
+                    fragment.slice(index, fragment.len())
+                if self.chunked:
+                    # One recv quantum may contain the terminal chunk plus the
+                    # next pipelined request. Permit that transient read-ahead,
+                    # split it at the canonical boundary, then apply the cap to
+                    # this request alone.
+                    if self.retained.len() as i64 + remaining as i64 >
+                        self.maximum_retained + 8192:
+                        self._fail("413 Request exceeds retained-byte policy")
+                        return
+                    self.retained.extend(incoming)
+                    self.scanned_bytes = self.scanned_bytes + remaining as i64
+                    self._scan_chunked_body()
+                    if self.terminal_error != "":
+                        return
+                    if self.chunk_phase != CHUNK_COMPLETE and
+                        self.retained.len() as i64 >
+                        self.maximum_retained:
+                        self._fail("413 Request exceeds retained-byte policy")
+                        return
+                    if self.chunk_phase == CHUNK_COMPLETE:
+                        if self.expected_total > self.maximum_retained:
+                            self._fail("413 Request exceeds retained-byte policy")
+                            return
+                        if self.retained.len() as i64 > self.expected_total:
+                            self.upgrade_tail = self.retained.slice(
+                                self.expected_total as u64, self.retained.len())
+                            self.retained = self.retained.slice(0u64, self.expected_total as u64)
+                    return
+                val allowed = self.expected_total - self.retained.len() as i64
+                val accepted = if remaining as i64 < allowed:
+                    remaining
+                else:
+                    allowed as u64
+                if accepted > 0u64:
+                    self.retained.extend(incoming.slice(0u64, accepted))
+                if remaining > accepted:
+                    self.upgrade_tail = incoming.slice(accepted, incoming.len())
                 self.scanned_bytes = self.scanned_bytes + remaining as i64
                 return
             if self.retained.len() as i64 >= self.maximum_retained:
@@ -426,6 +667,9 @@ class Http1RequestFrameOwner:
                 request: bytes_to_string(self.retained),
                 websocket_upgrade_candidate: self.websocket_upgrade_candidate,
                 upgrade_tail: self.upgrade_tail,
+                connection_tail: self.upgrade_tail,
+                close_connection: self.connection_close or
+                    (self.request_version == "HTTP/1.0" and not self.connection_keep_alive),
                 error: "",
                 scanned_bytes: self.scanned_bytes
             )
@@ -438,6 +682,8 @@ class Http1RequestFrameOwner:
             request: "",
             websocket_upgrade_candidate: false,
             upgrade_tail: [],
+            connection_tail: [],
+            close_connection: true,
             error: message,
             scanned_bytes: self.scanned_bytes
         )
@@ -465,20 +711,50 @@ fn _invalid_policy_result(message: text) -> Http1OwnedFrameResult:
         request: "",
         websocket_upgrade_candidate: false,
         upgrade_tail: [],
+        connection_tail: [],
+        close_connection: true,
         error: "400 Invalid HTTP framing policy: {message}",
         scanned_bytes: 0
     )
 
+fn _send_http1_continue(socket: Socket) -> bool:
+    val wire = text_to_bytes_pure("HTTP/1.1 100 Continue\r\n\r\n")
+    var sent: u64 = 0u64
+    var attempts: i32 = 0
+    while sent < wire.len().to_u64() and attempts < 16:
+        match socket_send_range(socket, wire, sent, 4096u64):
+            case Err(_): return false
+            case Ok(progress):
+                if progress.0 == 0u64:
+                    attempts = attempts + 1
+                else:
+                    sent = sent + progress.0
+    sent == wire.len().to_u64()
+
 # Production entry point.  No resumable state crosses this boundary.
 fn recv_http1_request_owned(
     socket: Socket, policy: SecureServerPolicy
+) -> Http1OwnedFrameResult:
+    recv_http1_request_owned_with_tail(socket, policy, [])
+
+fn recv_http1_request_owned_with_tail(
+    socket: Socket, policy: SecureServerPolicy, initial: [u8]
 ) -> Http1OwnedFrameResult:
     val policy_error = secure_server_policy_error(policy)
     if policy_error != "":
         return _invalid_policy_result(policy_error)
     var owner = Http1RequestFrameOwner.create(policy)
     var progress = Http1ReceiveProgressOwner.create(policy.max_read_iters)
+    var continue_sent = false
+    if initial.len() > 0u64:
+        owner.append(initial)
     while not owner.terminal():
+        if (owner.headers_complete and owner.expect_continue and
+            not continue_sent):
+            if not _send_http1_continue(socket):
+                owner._fail("transport: failed to send 100 Continue")
+                break
+            continue_sent = true
         match socket_recv(socket, 8192u64):
             Ok(fragment):
                 if fragment.len() == 0u64:
@@ -522,6 +798,7 @@ fn http1_no_progress_terminal_index_for_test(
     -1
 
 export Http1OwnedFrameResult
-export recv_http1_request_owned, frame_http1_fragments_owned_for_test
+export recv_http1_request_owned, recv_http1_request_owned_with_tail
+export frame_http1_fragments_owned_for_test
 export http1_no_progress_terminal_index_for_test
 export http1_host_authority_is_valid
