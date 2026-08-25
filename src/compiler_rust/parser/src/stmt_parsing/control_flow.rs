@@ -314,15 +314,16 @@ impl<'a> Parser<'a> {
             // Parse elif/else branches as expressions
             let else_branch = if self.check(&TokenKind::Elif) {
                 self.advance();
-                // Recursively parse as inline if expression
-                let elif_expr = self.parse_if_expr_after_condition()?;
+                // Continue through the shared expression parser so every
+                // nested branch accepts the same inline-or-block grammar.
+                let elif_expr = self.parse_if_expr()?;
                 Some(Box::new(elif_expr))
             } else if self.check(&TokenKind::Else) {
                 self.advance();
                 if self.check(&TokenKind::If) {
                     // else if -> treat as elif
                     self.advance();
-                    let elif_expr = self.parse_if_expr_after_condition()?;
+                    let elif_expr = self.parse_if_expr()?;
                     Some(Box::new(elif_expr))
                 } else {
                     self.expect(&TokenKind::Colon)?;
@@ -440,41 +441,6 @@ impl<'a> Parser<'a> {
             else_block,
             is_suspend: false,
         }))
-    }
-
-    /// Helper for parsing inline if expression after the condition has been parsed
-    fn parse_if_expr_after_condition(&mut self) -> Result<Expr, ParseError> {
-        let (let_pattern, condition) = self.parse_optional_let_pattern()?;
-        self.expect(&TokenKind::Colon)?;
-        let then_expr = self.parse_expression()?;
-
-        // Skip newlines before checking for else/elif (allows multi-line inline if)
-        while self.check(&TokenKind::Newline) {
-            self.advance();
-        }
-
-        let else_branch = if self.check(&TokenKind::Elif) {
-            self.advance();
-            Some(Box::new(self.parse_if_expr_after_condition()?))
-        } else if self.check(&TokenKind::Else) {
-            self.advance();
-            if self.check(&TokenKind::If) {
-                self.advance();
-                Some(Box::new(self.parse_if_expr_after_condition()?))
-            } else {
-                self.expect(&TokenKind::Colon)?;
-                Some(Box::new(self.parse_expression()?))
-            }
-        } else {
-            None
-        };
-
-        Ok(Expr::If {
-            let_pattern,
-            condition: Box::new(condition),
-            then_branch: Box::new(then_expr),
-            else_branch,
-        })
     }
 
     pub(crate) fn parse_for(&mut self) -> Result<Node, ParseError> {
