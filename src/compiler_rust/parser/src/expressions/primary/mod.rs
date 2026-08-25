@@ -76,13 +76,18 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Expression-position `unsafe(...)` / `danger(...)` block, e.g.
+    /// `val v = unsafe(capabilities: [ffi]):`.
+    ///
+    /// Deliberately does NOT accept the bare `unsafe:` form here. A bare
+    /// `unsafe:` block is a STATEMENT (parser_impl/core.rs), and accepting it
+    /// in expression position makes any ordinary variable named `unsafe`
+    /// swallow the enclosing block header's colon:
+    /// `for e in unsafe:` / `while unsafe:` / `if unsafe:` then fail with
+    /// "expected Colon, found If". See
+    /// doc/08_tracking/bug/seed_redeploy_breaks_test_runner_accessor_rewrite_parse_2026-08-25.md
     pub(crate) fn parse_unsafe_block_primary(&mut self) -> Result<Expr, ParseError> {
         self.advance();
-        if self.check(&TokenKind::Colon) {
-            self.advance();
-            return self.parse_block().map(|block| Expr::UnsafeBlock(block.statements));
-        }
-
         self.expect(&TokenKind::LParen)?;
         let mut depth = 1usize;
         while depth > 0 {
@@ -162,9 +167,7 @@ impl<'a> Parser<'a> {
                 self.parse_tensor_literal_from_ident()
             }
             TokenKind::Identifier { ref name, .. }
-                if (name == "unsafe" || name == "danger")
-                    && (self.peek_is(&TokenKind::Colon)
-                        || self.unsafe_block_header_is_valid()) =>
+                if (name == "unsafe" || name == "danger") && self.unsafe_block_header_is_valid() =>
             {
                 self.parse_unsafe_block_primary()
             }
@@ -192,8 +195,6 @@ impl<'a> Parser<'a> {
             | TokenKind::Alias
             | TokenKind::Bounds
             | TokenKind::Default
-            | TokenKind::Case
-            | TokenKind::Invariant
             | TokenKind::From
             | TokenKind::To
             | TokenKind::Loop
