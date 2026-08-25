@@ -130,11 +130,22 @@ fn deprecated_dunder_facts(lines: [text]) -> [DeprecatedDunderFact]:
         line_i = line_i + 1
     result
 
-fn first_code_pattern_columns(lines: [text], pattern: text) -> [i64]:
-    """Return one-based first code-only match per line, tracking docstrings."""
+struct CodePatternProjection:
+    columns: [i64]
+    target_column: i64
+
+fn _first_code_pattern_projection(
+    lines: [text], pattern: text, target_line: i64, collect_all: bool
+) -> CodePatternProjection:
+    if not collect_all and (target_line < 0 or target_line >= lines.len()):
+        return CodePatternProjection([], 0)
     var columns: [i64] = []
+    var target_column = 0
     var in_triple_string = false
-    for line in lines:
+    var line_i = 0
+    val stop_line = if collect_all: lines.len() - 1 else: target_line
+    while line_i <= stop_line:
+        val line = lines[line_i]
         var column = 0
         var i = 0
         val n = line.len()
@@ -173,8 +184,24 @@ fn first_code_pattern_columns(lines: [text], pattern: text) -> [i64]:
                     i = i + pattern.len()
                     continue
             i = i + 1
-        columns.push(column)
-    columns
+        if collect_all:
+            columns.push(column)
+        else:
+            target_column = column
+        line_i = line_i + 1
+    CodePatternProjection(columns, target_column)
+
+fn first_code_pattern_columns(lines: [text], pattern: text) -> [i64]:
+    """Return one-based first code-only match per line, tracking docstrings."""
+    _first_code_pattern_projection(lines, pattern, -1, true).columns
+
+fn first_code_pattern_column_at(lines: [text], pattern: text, target_line: i64) -> i64:
+    """Return one code-only column without allocating a per-line result array.
+
+    `target_line` is a zero-based physical-line index. Earlier lines are scanned
+    only to preserve multiline triple-string state; later lines are untouched.
+    """
+    _first_code_pattern_projection(lines, pattern, target_line, false).target_column
 
 struct CodePatternLineFacts:
     first_executable_column: i64

@@ -13,6 +13,10 @@ The paired executable specifications prove:
 - mixed lexical input emits exactly one JSON diagnostic at line 3, column 18.
 - multiline docstrings suppress interior matches and resume after closing;
 - same-line strings/docstrings resume at the exact real-code column.
+- requested-line projection preserves prefix triple-string state, exact columns,
+  and invalid-index zero behavior without constructing all line columns;
+- both code-action owners use the scalar projection and no longer loop over
+  every source line for postprocessing.
 
 Static source review confirms production diagnostics, JSON collection, and both
 code-action routes consume the same request-local column projection. No manual
@@ -37,3 +41,27 @@ val result = _collect_lint_diagnostics_json("sample.spl", source)
 expect(result.0).to_equal(1)
 expect(result.1).to_equal("{\"severity\":2,\"code\":\"DEPR002\",\"message\":\"'.new()' constructor is deprecated\",\"line\":3,\"col\":18,\"end_line\":3,\"end_col\":23,\"tags\":[2],\"source\":\"simple-lint\"}")
 ```
+
+```simple
+val lines = [
+    "# Fake.new()", "val docs = \"\"\"", "Fake.new()",
+    "\"\"\"; val p = Point.new()", "val later = Other.new()"]
+expect(deprecated_new_column_at(lines, 2)).to_equal(0)
+expect(deprecated_new_column_at(lines, 3)).to_equal(19)
+expect(deprecated_new_column_at(lines, -1)).to_equal(0)
+expect(deprecated_new_column_at(lines, lines.len())).to_equal(0)
+```
+
+The executable owner-wiring scenario reads both
+`src/app/cli/query_commands.spl` and `src/app/cli/query_navigation.spl`, bounds
+each `query_code_actions` source region, and requires:
+
+``` text
+deprecated_new_column_at(source_lines, sli)
+val sli = line_num - 1
+```
+
+It rejects `deprecated_new_columns(` and the former
+`while sli < source_lines.len()` loop within both bounded regions. This is a
+structural routing contract; semantic behavior remains pinned by the scalar
+projection examples above.

@@ -1,5 +1,6 @@
-use app.cli.query_lint_scan.{deprecated_new_column, deprecated_new_columns}
+use app.cli.query_lint_scan.{deprecated_new_column, deprecated_new_column_at, deprecated_new_columns}
 use app.cli.query_check.{_collect_lint_diagnostics_json}
+use std.io_runtime.file_read
 use std.spec.step
 
 describe "DEPR002 lexical detection":
@@ -47,3 +48,37 @@ describe "DEPR002 lexical detection":
         val result = _collect_lint_diagnostics_json("sample.spl", source)
         expect(result.0).to_equal(1)
         expect(result.1).to_equal("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'Vec__new()' uses deprecated Type__method() syntax\",\"line\":2,\"col\":5,\"end_line\":2,\"end_col\":13,\"tags\":[2],\"source\":\"simple-lint\"}")
+
+    it "projects one requested DEPR002 line with prefix lexical state":
+        step("Stop after the requested line without allocating all columns")
+        val lines = [
+            "# Fake.new()",
+            "val docs = \"\"\"",
+            "Fake.new()",
+            "\"\"\"; val p = Point.new()",
+            "val later = Other.new()"]
+        expect(deprecated_new_column_at(lines, 0)).to_equal(0)
+        expect(deprecated_new_column_at(lines, 2)).to_equal(0)
+        expect(deprecated_new_column_at(lines, 3)).to_equal(19)
+        expect(deprecated_new_column_at(lines, 4)).to_equal(18)
+        expect(deprecated_new_column_at(lines, -1)).to_equal(0)
+        expect(deprecated_new_column_at(lines, lines.len())).to_equal(0)
+
+    it "routes both code-action owners through the scalar projection":
+        step("Reject full-file DEPR002 column arrays and all-line postprocessing")
+        val paths = [
+            "src/app/cli/query_commands.spl",
+            "src/app/cli/query_navigation.spl"]
+        for path in paths:
+            val source = file_read(path)
+            val start = source.index_of("fn query_code_actions(")
+            val marker = source.index_of("# Also run source-level lint", start)
+            val finish = source.index_of("if format == \"json\":\n        print", marker)
+            expect(start).to_be_greater_than(-1)
+            expect(marker).to_be_greater_than(start)
+            expect(finish).to_be_greater_than(marker)
+            val owner = source.slice(marker, finish)
+            expect(owner).to_contain("deprecated_new_column_at(source_lines, sli)")
+            expect(owner).to_contain("val sli = line_num - 1")
+            expect(owner).not.to_contain("deprecated_new_columns(")
+            expect(owner).not.to_contain("while sli < source_lines.len()")

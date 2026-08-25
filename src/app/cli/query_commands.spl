@@ -15,7 +15,7 @@ use app.cli.query_ast_query.{engine_ast_query}
 use app.cli.query_sem_query.{engine_sem_query}
 use app.cli.query_schema.{engine_query_schema}
 use app.cli.query_helpers.{_has_flag, _replace_word, _collect_symbol_sets, _classify_token, _count_indent, _extract_flag}
-use app.cli.query_lint_scan.{deprecated_new_columns}
+use app.cli.query_lint_scan.{deprecated_new_column_at}
 use compiler.driver.driver.{check_file}
 use compiler.driver.driver_types.{CompileResult}
 use compiler.tools.fix.main.{collect_fixes_from_source}
@@ -199,38 +199,31 @@ fn query_code_actions(file: text, line_num: i64, cmd_args: [text]) -> i64:
 
             # Also run source-level lint to surface EasyFix actions
             val source_lines = source.split("\n")
-            val deprecated_columns = deprecated_new_columns(source_lines)
-            var sli = 0
-            while sli < source_lines.len():
+            if line_num > 0 and line_num <= source_lines.len():
+                val sli = line_num - 1
                 val sline = source_lines[sli]
                 val strimmed = sline.trim()
-                val sline_num = sli + 1
+                # DEPR002: .new() -> suggest StructName(field: value)
+                if deprecated_new_column_at(source_lines, sli) > 0:
+                    if format == "json":
+                        actions.push("{\"title\":\"Replace .new() with constructor syntax\",\"kind\":\"quickfix\",\"isPreferred\":true}")
+                    else:
+                        has_fixes = true
 
-                # Only check the requested line
-                if sline_num == line_num:
-                    # DEPR002: .new() -> suggest StructName(field: value)
-                    if deprecated_columns[sli] > 0:
+                # DEPR003: bare pass -> suggest pass_do_nothing
+                if (strimmed == "pass" or strimmed.starts_with("pass ") or strimmed.starts_with("pass#")):
+                    if not strimmed.starts_with("pass_"):
                         if format == "json":
-                            actions.push("{\"title\":\"Replace .new() with constructor syntax\",\"kind\":\"quickfix\",\"isPreferred\":true}")
+                            val indent_len = sline.len() - strimmed.len()
+                            var ep: [text] = []
+                            ep.push("{\"title\":\"Replace 'pass' with 'pass_do_nothing'\",\"kind\":\"quickfix\",\"isPreferred\":true")
+                            ep.push(",\"edit\":{\"changes\":{")
+                            ep.push("{emitter.encode_string(file)}:[")
+                            ep.push("{\"range\":{\"start\":{\"line\":{sli},\"character\":{indent_len}},\"end\":{\"line\":{sli},\"character\":{indent_len + 4}}},\"newText\":\"pass_do_nothing\"}")
+                            ep.push("]}}}")
+                            actions.push(ep.join(""))
                         else:
                             has_fixes = true
-
-                    # DEPR003: bare pass -> suggest pass_do_nothing
-                    if (strimmed == "pass" or strimmed.starts_with("pass ") or strimmed.starts_with("pass#")):
-                        if not strimmed.starts_with("pass_"):
-                            if format == "json":
-                                val indent_len = sline.len() - strimmed.len()
-                                var ep: [text] = []
-                                ep.push("{\"title\":\"Replace 'pass' with 'pass_do_nothing'\",\"kind\":\"quickfix\",\"isPreferred\":true")
-                                ep.push(",\"edit\":{\"changes\":{")
-                                ep.push("{emitter.encode_string(file)}:[")
-                                ep.push("{\"range\":{\"start\":{\"line\":{sli},\"character\":{indent_len}},\"end\":{\"line\":{sli},\"character\":{indent_len + 4}}},\"newText\":\"pass_do_nothing\"}")
-                                ep.push("]}}}")
-                                actions.push(ep.join(""))
-                            else:
-                                has_fixes = true
-
-                sli = sli + 1
 
     if format == "json":
         print "[{actions.join(\",\")}]"

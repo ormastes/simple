@@ -926,3 +926,12 @@ only source line, identifier byte span, and accepted name. The query lint owner
 constructs that list once per source and owns severity/message rendering.
 Neither comments nor string payload may cross the fact boundary, and renderers
 must not recompute names or columns from trimmed text.
+
+# Requested-line lexical projection ownership
+
+`query_source_mask.first_code_pattern_column_at` owns scalar prefix-state
+projection for code-action requests. It validates a zero-based target line,
+scans earlier lines only to reconstruct multiline lexical state, finishes the
+target line, and never allocates a per-line result vector. Code-action owners
+directly inspect only that validated target; whole-file diagnostic owners retain
+the vector projection when every line is consumed.

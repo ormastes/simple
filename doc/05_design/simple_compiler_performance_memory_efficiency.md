@@ -1252,3 +1252,13 @@ leading/trailing dunders and requires `(` at the exact token end. Only then does
 it allocate the diagnostic name slice. Facts append in physical-line and token
 order. `_emit_basic_line_lints` advances one fact cursor alongside its canonical
 line loop, preserving rule and same-line diagnostic order.
+
+# Requested-line DEPR002 projection design
+
+`first_code_pattern_column_at(lines, pattern, target_line)` returns zero for an
+invalid zero-based target. For a valid target it carries triple-string state
+across the prefix, preserves comment/ordinary-string masking and same-line
+resumption, and returns the first original one-based byte column on exactly the
+target line. `deprecated_new_column_at` binds `.new(`. Both code-action owners
+validate once, derive `sli = line_num - 1`, trim only `source_lines[sli]`, and
+use that scalar for DEPR002 while retaining the same target for DEPR003.

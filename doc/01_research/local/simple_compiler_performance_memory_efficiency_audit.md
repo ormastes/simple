@@ -3579,6 +3579,22 @@ tier checker. Each source is scanned once in O(N) time with one integer result
 per physical line and no masked text construction for DEPR002. No timing,
 allocation, or RSS measurement was run under the no-verification override.
 
+# 2026-08-25 follow-up: requested-line DEPR002 projection
+
+Both duplicated code-action owners built DEPR002 columns and trimmed every
+physical line even though only the requested line could produce an action. The
+postprocessor paid O(B) line work and O(L) extra column storage for B source
+bytes and L lines on every cursor request.
+
+`deprecated_new_column_at` now scans only through the requested zero-based line
+to reconstruct triple-string state and returns one scalar original-byte column.
+Both owners validate, directly index, and trim only that line while retaining
+identical DEPR002/DEPR003 action behavior. This postprocessing becomes
+O(B<=r + R) work and O(1) auxiliary storage beyond the existing split lines,
+for prefix bytes through line r and target-line bytes R. The broader request
+still performs compiler/fix collection and is not claimed to be prefix-bounded.
+No execution or timing/RSS measurement was run.
+
 # 2026-08-24 follow-up: flat-bridge string construction
 
 Every ordinary non-raw string entered the interpolation scanner even when it

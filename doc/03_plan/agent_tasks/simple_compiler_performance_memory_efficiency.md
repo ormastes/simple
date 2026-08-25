@@ -1734,6 +1734,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No manual execution was run under the user override; static semantic,
   performance, and fixture review is required before sync.
 
+# Completed tranche: requested-line DEPR002 projection (2026-08-25)
+
+- Added a bounds-safe scalar lexical projection that scans only through the
+  requested line while preserving multiline triple-string state.
+- Removed whole-file DEPR002 arrays and all-line trim loops from both code-action
+  owners; each now directly inspects one validated target.
+- Preserved exact DEPR002/DEPR003 output and original byte columns.
+- Added paired prefix-state, bounds, exact-column, and owner-wiring evidence and
+  refreshed the canonical manual.
+- Static target: O(B<=r + R) postprocessing and O(1) auxiliary storage beyond
+  split lines; no manual execution or timing/RSS measurement was run.
+
 # Completed tranche: flat-bridge string construction (2026-08-24)
 
 - Added no-brace and no-doubled-brace identity paths for non-raw literals.
