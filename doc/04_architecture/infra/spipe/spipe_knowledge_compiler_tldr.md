@@ -29,6 +29,11 @@ runtime adapters.
 - Transactions durably journal plan, original/intended hashes and staged bytes
   before mutation; atomic apply is validated before snapshot publication.
   Startup resumes or rolls back from hashes and never guesses.
+- Only `RefactorService` receives transaction/snapshot/path-bound
+  `SafeFilesystem.Refactor` through `RefactorSafeFilesystemPort`; the distinct
+  materializer receives `SafeFilesystem.Materializer` through
+  `MaterializerSafeFilesystemPort`. Neither least-authority capability implies
+  the other; both APIs are descriptor-relative and no-follow.
 - Rebalancing must-links cover generated spec/manual pairs and explicitly
   protected bundles. Trace is normally weighted, avoiding giant collapsed
   clusters; strict policy can co-locate sole verification evidence explicitly.
@@ -51,11 +56,14 @@ and deny-wins authorization reject traversal, symlink/junction escape,
 cross-root mutation, cache leakage, and unapproved view writes. Repository text
 is untrusted data, not agent policy. Remote semantics is explicit opt-in.
 
-## Performance gates
+## Wave-0 qualification candidates
 
-- Warm startup <=250 ms P95; exact resolve/read <=20 ms.
-- Warm list <=50 ms and lexical search at 50k artifacts <=100 ms P95.
-- One-artifact update <=100 ms and at least 20x cheaper than full rebuild.
+- Absolute latency values are candidates until Wave 0 locks the hardware,
+  corpus, provider, and measurement profile; they are not unconditional gates.
+- Warm startup candidate <=250 ms P95; exact resolve/read <=20 ms.
+- Warm list candidate <=50 ms and lexical search at 50k artifacts <=100 ms P95.
+- NFR-SPKC-014 remains normative: median warm one-artifact update is at least
+  20x faster than full rebuild on the qualified fixture.
 - Unchanged virtual files rewritten: zero; required provider parity: 100%.
 
 Inspect the full architecture at

@@ -81,6 +81,8 @@ ports or parent-applied deltas.
 | `ProjectionPort` | List/read bounded virtual resources from a pinned snapshot |
 | `AuthorizationPort` | Deny-wins read/write/publish decisions |
 | `TransactionJournalPort` | Durable transaction state, receipts, recovery |
+| `RefactorSafeFilesystemPort` | Descriptor-relative canonical refactor mutations and durability |
+| `MaterializerSafeFilesystemPort` | Descriptor-relative generated-view mutations and durability |
 | `ClockPort` | Injectable time for TTL, staleness, and deterministic tests |
 
 Ports return typed capability or error results. No fallback may claim a
@@ -93,11 +95,58 @@ are versioned external protocol roles. `LexicalSearchPort` and
 `SemanticSearchPort` adapt `SearchProvider` capabilities; `SymbolIndexPort`
 adapts `SourceSymbolProvider`; `ProjectionPort` adapts `ProjectionProvider` for
 external delivery while SPipe retains projection truth and authorization.
-Workspace, identity, graph, storage, authorization, transaction, and snapshot-
-publication authority remain internal and cannot be delegated. No
+Workspace, identity, graph, storage, authorization, transaction, safe-filesystem,
+and snapshot-publication authority remain internal and cannot be delegated. No
 `StorageProvider` is part of this shared contract.
 
-### 3.3 Common records
+### 3.3 Safe filesystem capability and API freeze
+
+`AuthorizationPort.authorize_refactor(plan, principal, snapshot)` issues one
+non-copyable `SafeFilesystem.Refactor` bound to transaction, project, worktree,
+pinned snapshot, allowed canonical relative paths/operations, metadata policy,
+and expiry. Only `RefactorService` may hold it. The exact
+`RefactorSafeFilesystemPort` API is:
+
+```text
+open_project_root(capability) -> SafeRoot
+read_regular(root, relative_path, expected_hash) -> bytes
+capture_metadata(root, relative_path) -> FileMetadata
+stage_regular(root, transaction_id, relative_path, bytes, FileMetadata) -> StagedFile
+create_directory(root, relative_path, DirectoryMetadata) -> CreatedDirectory
+atomic_replace(root, StagedFile, destination, expected_old_hash?) -> AppliedMutation
+atomic_move(root, source, destination, expected_source_hash, expected_destination_hash?) -> AppliedMutation
+restore_metadata(root, relative_path, FileMetadata) -> AppliedMutation
+remove_empty_directory(root, relative_path, expected_metadata) -> AppliedMutation
+sync_file(root, relative_path) -> DurabilityReceipt
+sync_directory(root, relative_path) -> DurabilityReceipt
+```
+
+Paths are descriptor-relative and no-follow. There is no absolute-path, raw
+write, recursive-delete, or symlink-following mutation. Content removal is an
+atomic move into the transaction rollback area; cleanup follows commit receipt.
+
+`AuthorizationPort.authorize_materializer(view, principal, snapshot)` separately
+issues non-copyable `SafeFilesystem.Materializer`, bound to one worktree's view
+root, projection/snapshot, generated relative paths, budget, and expiry. Only
+the `ProjectionService` materializer adapter may hold it. The exact
+`MaterializerSafeFilesystemPort` API is:
+
+```text
+open_view_root(capability) -> SafeViewRoot
+stage_generated(root, projection_uid, relative_path, bytes) -> StagedGeneratedFile
+create_generated_directory(root, relative_path) -> CreatedDirectory
+atomic_replace_generated(root, StagedGeneratedFile, destination) -> AppliedMutation
+remove_generated(root, relative_path, expected_projection_uid) -> AppliedMutation
+sync_generated_file(root, relative_path) -> DurabilityReceipt
+sync_generated_directory(root, relative_path) -> DurabilityReceipt
+```
+
+Both ports are descriptor-relative and no-follow. `SafeFilesystem.Refactor` and
+`SafeFilesystem.Materializer` are least-authority and non-implying: neither port
+accepts the other capability, and neither canonical/rollback root namespace can
+address a generated-view root or vice versa.
+
+### 3.4 Common records
 
 The frozen vocabulary is `WorkspaceId`, `ProjectId`, `WorktreeId`,
 `RevisionId`, `ArtifactUid`, `SectionUid`, `EdgeUid`, `SnapshotId`,
@@ -221,7 +270,7 @@ shared immutable committed-revision base segments
   = request-pinned KnowledgeSnapshot
 ```
 
-Snapshot identity is exactly the `snapshot_v1` tuple defined in Section 3.3.
+Snapshot identity is exactly the `snapshot_v1` tuple defined in Section 3.4.
 Repository identity is resolved into the registered project/worktree UIDs before
 serialization. Optional semantic model/revision is query/provider evidence and
 may key its own cache, but does not alter canonical snapshot identity. A
@@ -309,8 +358,8 @@ indexes; pages contain at most 100 entries, 200 Markdown lines, and an
 approximately 6,000-token payload. Collision suffixes use a deterministic short
 UID and every generated entry declares canonical UID/path.
 
-Every virtual entry/page has `ProjectionUid = spkp1-<digest>`, where `digest`
-is lowercase SHA-256 of canonical SDN bytes for exactly
+Every virtual entry/page has `ProjectionUid = spkp1-<lowercase sha256>`, where
+the digest is SHA-256 of canonical SDN bytes for exactly
 `projection_v1(workspace_uid, snapshot_id, view_kind,
 normalized_logical_path, normalized_parameters_hash,
 effective_auth_scope_hash, page_start_key)`. Text follows SnapshotId's UTF-8 NFC
@@ -322,7 +371,7 @@ Resources and tools expose equivalent list/read/search/resolve/trace/
 diagnostics behavior. Mutation tools default to plan-only and require a
 separate apply capability/token.
 
-Materialization traverses from a pre-opened view-root descriptor with
+`MaterializerSafeFilesystemPort` traverses from a pre-opened view-root descriptor with
 descriptor-relative no-follow operations, verifies each opened object, and
 keeps staging/replace beneath the held parent descriptor. String-prefix checks
 and check-then-open realpaths are not security boundaries; platforms without

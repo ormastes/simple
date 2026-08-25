@@ -158,7 +158,7 @@ Evidence: protected-path and bounded-candidate tests. Traces: AC-7, AC-9, AC-14.
 
 #### NFR-SPKC-024 — Generated-surface freshness
 
-Generated skill, rule, manual, projection, and compatibility surfaces must identify their canonical source and generator where applicable. Verification must detect stale, manually diverged, misplaced, or duplicate generated artifacts.
+Generated skill, rule, manual, projection, and compatibility surfaces must identify their canonical source and generator where applicable. Trust-bearing generated surfaces must use only the closed `trust_scope` values `untrusted_data`, `reviewed_reference`, or `executable_policy`; unknown or absent values default to `untrusted_data`. Trust scope must derive from an authorized canonical registry record, never from content or a provider response, and every elevation to `reviewed_reference` or `executable_policy` must record authorized principal, capability, source UID/hash/revision, policy version, decision time, and audit evidence. Verification must re-authorize the current registry record and source digest, detect revoked/downgraded authority, and reject stale, manually diverged, misplaced, duplicate, unauthorized, or trust-escalated generated artifacts.
 
 Evidence: generation idempotence and stale-surface tests. Traces: AC-11, AC-13, AC-16.
 
