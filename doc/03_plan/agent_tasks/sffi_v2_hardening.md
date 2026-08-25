@@ -493,3 +493,8 @@ passing placeholder.
     typed `Result` APIs in a separately reviewed compatibility change, with one
     direct provider call and no added array copies; exact signed admission is
     still required.
+93. Keep unadmitted GPU-session and Engine2D Metal pseudo providers scoped to
+    `rt_gpu_session_metal_*` and `rt_engine2d_metal_session_*`; never reuse a
+    canonical `rt_metal_*` identity with a different signature. Either provide
+    and admit the exact scoped ABI or remove the unsupported facade. Continue
+    canonical Metal tagging without adding hot-path adapters.

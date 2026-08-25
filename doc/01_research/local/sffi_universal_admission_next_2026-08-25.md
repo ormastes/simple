@@ -898,3 +898,30 @@ rows increase from 1,308 to 1,356, untouched rows decrease from 10,256 to
 10,208, and exact-artifact verified-and-signed admission remains zero. The raw
 tags identify the unsafe boundary but do not make dummy-resource, zero-tuple,
 or boolean failure wrappers typed or verified.
+
+## Metal symbol-identity collision checkpoint
+
+Metal review found that `rt_metal_create_device` and `rt_metal_present` did not
+have one repository-wide ABI. The canonical owner declares indexed device
+creation and boolean presentation, while the GPU-session facade redeclared
+zero-argument creation and text presentation under the same symbol names. The
+Engine2D session also redeclared device creation and compute-pipeline creation
+with incompatible signatures. A linker could therefore resolve a valid symbol
+whose calling contract belonged to a different consumer.
+
+The two unadmitted pseudo-provider families now use scoped
+`rt_gpu_session_metal_*` and `rt_engine2d_metal_session_*` identities. All 14
+declarations are explicitly `unsafe(ffi)` and state that their providers are
+not admitted. Missing providers now fail symbol resolution rather than
+accidentally binding to an incompatible canonical Metal implementation. A
+static audit rejects restoration of the colliding declarations and fixes both
+pseudo-provider inventories.
+
+The rename changes no successful provider call, branch, allocation, copy, or
+GPU data path because no matching provider implementations were found for the
+pseudo-provider contracts. It removes an ABI-confusion path rather than adding
+a compatibility adapter. Declaration totals remain unchanged; 14 previously
+untagged rows are now unsafe-tagged. An authoritative unique-symbol recount is
+required after the complete Metal pass because separating formerly colliding
+identities intentionally changes symbol cardinality. Exact-artifact signed
+admission remains zero.
