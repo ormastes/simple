@@ -7,6 +7,13 @@
 use os.kernel.types.task_types.{CpuTopologyInfo, scheduler_register_platform_cpu_topology}
 use os.kernel.acpi.madt.{acpi_madt_lapic_ids}
 use os.kernel.smp.smp.{smp_online_count, smp_register_firmware_apic_ids}
+use os.kernel.interrupts.apic.{apic_get_id}
+use os.kernel.smp.cpu_topology_identity_owner_v1.{
+    CpuHardwareIdentityKindV1, CpuTopologyIdentityOwnerV1,
+}
+use os.kernel.smp.cpu_identity_runtime_surface_v1.{
+    cpu_identity_runtime_publish_v1,
+}
 
 val X86_CPUID_TOPOLOGY_V2: u32 = 0x1F
 val X86_CPUID_TOPOLOGY_V1: u32 = 0x0B
@@ -17,6 +24,41 @@ val X86_CPUID_LEVEL_TYPE_CORE: u32 = 2u32
 # temporary aggregate from early freestanding code used the hosted field-tag
 # validator before its metadata was initialized and trapped with #UD.
 extern fn rt_x86_topology_field(selector: u32) -> u32
+
+fn x86_publish_cpu_identity_from_apic_ids_v1(apic_ids: [u32]) -> bool:
+    """Publish the exact firmware APIC census as logical-ID authority."""
+    if apic_ids.len() == 0:
+        return false
+    var owner = CpuTopologyIdentityOwnerV1.create(
+        CpuHardwareIdentityKindV1.X86Apic)
+    var logical = 0
+    while logical < apic_ids.len():
+        if not owner.register_x86_apic(logical.to_u32(), apic_ids[logical]):
+            return false
+        logical = logical + 1
+    val sealed = owner.seal()
+    if not sealed.accepted:
+        return false
+    cpu_identity_runtime_publish_v1(sealed.snapshot)
+
+fn x86_apic_ids_bsp_first_v1(apic_ids: [u32], bsp_apic_id: u32) -> [u32]:
+    """Return the firmware census with the executing BSP bound to logical 0."""
+    var ordered: [u32] = []
+    var found_bsp = false
+    var i = 0
+    while i < apic_ids.len():
+        if apic_ids[i] == bsp_apic_id:
+            found_bsp = true
+        i = i + 1
+    if not found_bsp:
+        return ordered
+    ordered.push(bsp_apic_id)
+    i = 0
+    while i < apic_ids.len():
+        if apic_ids[i] != bsp_apic_id:
+            ordered.push(apic_ids[i])
+        i = i + 1
+    ordered
 
 fn x86_select_topology_leaf(max_basic_leaf: u32) -> u32:
     """Select the best x86 topology CPUID leaf supported by this CPU."""
@@ -91,6 +133,9 @@ fn x86_install_scheduler_topology_from_cpuid():
     val smt_shift = rt_x86_topology_field(0u32)
     val core_shift = rt_x86_topology_field(1u32)
     val x2apic_id = rt_x86_topology_field(2u32)
+    # This fallback has no firmware census. Publish only the executing BSP's
+    # observed xAPIC identity; never synthesize identities from package shape.
+    x86_publish_cpu_identity_from_apic_ids_v1([apic_get_id()])
     scheduler_register_platform_cpu_topology(
         x86_scheduler_topology_from_shape(
             cpu_count: cpu_count,
@@ -104,8 +149,14 @@ fn x86_install_scheduler_topology_from_rsdp(rsdp_phys: u64) -> bool:
     """Register scheduler topology using MADT APIC ids plus CPUID shape."""
     if rsdp_phys == 0u64:
         return false
-    val apic_ids = acpi_madt_lapic_ids(rsdp_phys)
+    val firmware_apic_ids = acpi_madt_lapic_ids(rsdp_phys)
+    if firmware_apic_ids.len() == 0:
+        return false
+    val apic_ids = x86_apic_ids_bsp_first_v1(
+        firmware_apic_ids, apic_get_id())
     if apic_ids.len() == 0:
+        return false
+    if not x86_publish_cpu_identity_from_apic_ids_v1(apic_ids):
         return false
     smp_register_firmware_apic_ids(apic_ids)
     val smt_shift = rt_x86_topology_field(0u32)
