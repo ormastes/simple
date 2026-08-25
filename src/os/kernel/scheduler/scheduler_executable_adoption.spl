@@ -66,7 +66,15 @@ use os.kernel.types.riscv32_mapping_handle_v1.{
 use os.kernel.types.x86_32_mapping_handle_v1.{
     scheduler_x86_32_mapping_handle_absent_v1
 }
-use os.kernel.scheduler.process_execution_observation.{scheduler_execution_observe_adoption_with_launch_v1}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionObservationHandleV1,
+    scheduler_execution_observe_adoption_handle_with_launch_v1,
+    scheduler_execution_cancel_adoption_handle_v1
+}
+use os.kernel.scheduler.scheduler_executable_source_cleanup_owner_v1.{
+    scheduler_executable_source_cleanup_reserve_v1,
+    scheduler_executable_source_cleanup_retry_v1
+}
 use os.kernel.scheduler.server_data_launch_grant_registry.{
     ServerDataLaunchGrantInstallStatusV1,
     server_data_launch_grant_install_before_publication_v1,
@@ -296,8 +304,9 @@ impl Scheduler:
             return _scheduler_adoption_fail_and_close(
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.AuthorityRejected)
-        if not scheduler_execution_observe_adoption_with_launch_v1(
-            id.id, self.current.id, handle, owned_launch):
+        val observation = scheduler_execution_observe_adoption_handle_with_launch_v1(
+            id.id, self.current.id, handle, owned_launch)
+        if observation == nil:
             if server_data_install.handle != nil:
                 val grant_handle = server_data_install.handle.unwrap()
                 if not server_data_launch_grant_rollback_before_publication_v1(grant_handle):
@@ -308,6 +317,24 @@ impl Scheduler:
             return _scheduler_adoption_fail_and_close(
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.ConsumerExhausted)
+        val observation_handle: SchedulerExecutionObservationHandleV1 =
+            observation.unwrap()
+        # Publication is irreversible. Retain the exact source-close authority
+        # under this lifecycle first, matching the hardened 32-bit lanes.
+        val cleanup_reserved = scheduler_executable_source_cleanup_reserve_v1(
+            id.id, lifecycle_generation, table, authorities, token)
+        if cleanup_reserved.indeterminate or cleanup_reserved.complete:
+            _ = scheduler_execution_cancel_adoption_handle_v1(observation_handle)
+            if server_data_install.handle != nil:
+                val grant_handle = server_data_install.handle.unwrap()
+                if not server_data_launch_grant_rollback_before_publication_v1(grant_handle):
+                    _ = server_data_launch_grant_quarantine_before_publication_v1(grant_handle)
+            destroy_user_address_space(space)
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.AuthorityRejected)
         val user_ctx = _initial_user_task_context(entry_point, user_sp)
         val task_caps = capability_set_bind_owner(caps, id.id)
         val tcb = TaskControlBlock(
@@ -338,12 +365,13 @@ impl Scheduler:
             published_owner.state, SchedulerExecutableAdoptionOwnerEventV1.Confirm)
         self._record_authenticated_executable_adoption_v1(
             authorized_owner.state, id.id, token)
-        val closed = executable_loader_release_retrieved(table, authorities, token)
-        val final_state = if closed.is_ok():
+        val closed = scheduler_executable_source_cleanup_retry_v1(
+            id.id, lifecycle_generation)
+        val final_state = if closed.complete:
             ExecutableLoadConsumerStateV1.Adopted
         else:
             ExecutableLoadConsumerStateV1.AdoptedCloseRetryable
-        val final_error = if closed.is_err():
+        val final_error = if not closed.complete:
             ExecutableLoadConsumerErrorV1.CloseFailed
         else:
             ExecutableLoadConsumerErrorV1.None

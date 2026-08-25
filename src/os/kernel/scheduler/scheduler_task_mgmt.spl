@@ -105,6 +105,13 @@ fn _sched_arm32_retry_adoption_cleanup_v1(task: TaskControlBlock) -> bool:
 @cfg(not(arm32))
 fn _sched_arm32_retry_adoption_cleanup_v1(_task: TaskControlBlock) -> bool: true
 
+fn _sched_retry_executable_source_cleanup_v1(task: TaskControlBlock) -> bool:
+    use os.kernel.scheduler.scheduler_executable_source_cleanup_owner_v1.{
+        scheduler_executable_source_cleanup_retry_v1
+    }
+    scheduler_executable_source_cleanup_retry_v1(
+        task.id.id, task.lifecycle_generation).complete
+
 @cfg(riscv32)
 fn _sched_riscv32_reap_mapping_v1(task: TaskControlBlock) -> i32:
     use os.kernel.loader.riscv32_sv32_mapping_owner_v1.{
@@ -248,6 +255,7 @@ pub fn sched_exit_task_by_id_impl(
     _ = server_data_launch_grant_revoke_task_lifecycle_v1(
         task.id.id, task.lifecycle_generation)
     _ = _sched_arm32_retry_adoption_cleanup_v1(task)
+    _ = _sched_retry_executable_source_cleanup_v1(task)
     if (not _sched_arm32_mark_terminal_v1(task) or
         not _sched_x86_32_mark_terminal_v1(task)):
         new_tasks[slot] = task
@@ -312,6 +320,7 @@ pub fn sched_finalize_exit_task_by_id_with_code_impl(
     _ = server_data_launch_grant_revoke_task_lifecycle_v1(
         task.id.id, task.lifecycle_generation)
     _ = _sched_arm32_retry_adoption_cleanup_v1(task)
+    _ = _sched_retry_executable_source_cleanup_v1(task)
     var new_tasks = tasks
     if (not _sched_arm32_mark_terminal_v1(task) or
         not _sched_x86_32_mark_terminal_v1(task)):
@@ -507,6 +516,9 @@ pub fn sched_wait_for_collect_impl(
                         # Zombie and mapping published until source cleanup has
                         # a terminal owner receipt.
                         if not _sched_arm32_retry_adoption_cleanup_v1(task):
+                            return (WaitCollectResult(
+                                pid: 0, status: 0, error: -5), new_tasks, false)
+                        if not _sched_retry_executable_source_cleanup_v1(task):
                             return (WaitCollectResult(
                                 pid: 0, status: 0, error: -5), new_tasks, false)
                         val arm32_reap = _sched_arm32_reap_mapping_v1(task)

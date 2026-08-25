@@ -20,11 +20,13 @@ use os.tools.simplebox.simplebox_mutation_applets.{
     simplebox_touch, simplebox_ln
 }
 use os.libc.simpleos_stdlib_num.{libc_strtoul}
-use std.io_runtime.{get_args}
+use std.io_runtime.{get_args, thread_sleep}
 
 val SIMPLEBOX_SEQ_MAX_OUTPUT_BYTES: i64 = 65536
 val SIMPLEBOX_SEQ_MAX_COUNT: i64 = 12773
 val SIMPLEBOX_SEQ_MAX_PARSE_BYTES: i64 = 64
+val SIMPLEBOX_SLEEP_MAX_PARSE_BYTES: i64 = 64
+val SIMPLEBOX_SLEEP_MAX_MILLIS: i64 = 86400000
 
 struct SimpleboxSeqPlan:
     count: i64
@@ -37,6 +39,61 @@ struct SimpleboxSeqCountAdmission:
     count: i64
     inspected_input_bytes: i64
     accepted: bool
+
+struct SimpleboxSleepPlan:
+    milliseconds: i64
+    accepted: bool
+    error: text
+
+fn simplebox_sleep_plan(args: [text]) -> SimpleboxSleepPlan:
+    """Parse one bounded integer duration: N, Ns, Nm, Nh, or Nd."""
+    if args.len() == 0u64:
+        return SimpleboxSleepPlan(milliseconds: 0, accepted: false, error: "missing duration")
+    if args.len() != 1u64:
+        return SimpleboxSleepPlan(milliseconds: 0, accepted: false, error: "too many operands")
+    val spec = args[0]
+    val length = spec.len().to_i64()
+    if length == 0 or length > SIMPLEBOX_SLEEP_MAX_PARSE_BYTES:
+        return SimpleboxSleepPlan(milliseconds: 0, accepted: false, error: "invalid duration")
+    val bytes = spec.bytes()
+    var digits = length
+    var multiplier: i64 = 1000
+    val suffix = bytes[length - 1]
+    if suffix == 115: # s
+        digits = length - 1
+    elif suffix == 109: # m
+        digits = length - 1
+        multiplier = 60000
+    elif suffix == 104: # h
+        digits = length - 1
+        multiplier = 3600000
+    elif suffix == 100: # d
+        digits = length - 1
+        multiplier = 86400000
+    if digits == 0:
+        return SimpleboxSleepPlan(milliseconds: 0, accepted: false, error: "invalid duration")
+    var value: i64 = 0
+    var index: i64 = 0
+    val max_value = SIMPLEBOX_SLEEP_MAX_MILLIS / multiplier
+    while index < digits:
+        val ch = bytes[index]
+        if ch < 48 or ch > 57:
+            return SimpleboxSleepPlan(milliseconds: 0, accepted: false, error: "invalid duration")
+        val digit = ch - 48
+        if (value > max_value / 10 or
+            (value == max_value / 10 and digit > max_value % 10)):
+            return SimpleboxSleepPlan(milliseconds: 0, accepted: false, error: "duration exceeds 24-hour limit")
+        value = value * 10 + digit
+        index = index + 1
+    SimpleboxSleepPlan(milliseconds: value * multiplier, accepted: true, error: "")
+
+fn _applet_sleep(args: [text]) -> i32:
+    val plan = simplebox_sleep_plan(args)
+    if not plan.accepted:
+        print "sleep: {plan.error}"
+        return 1
+    thread_sleep(plan.milliseconds)
+    0
 
 fn _simplebox_seq_checked_count(args: [text]) -> SimpleboxSeqCountAdmission:
     if args.len() == 0:
@@ -124,6 +181,8 @@ fn simplebox_run(argv: [text]) -> i32:
     val args = argv.slice(start, argv.len())
     if applet == "seq":
         return _applet_seq(args)
+    if applet == "sleep":
+        return _applet_sleep(args)
     if applet == "cat":
         return simplebox_cat(args)
     if applet == "head":

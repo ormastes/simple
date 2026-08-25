@@ -35,6 +35,7 @@ val SSH_FXP_READ: u8 = 5
 val SSH_FXP_WRITE: u8 = 6
 val SSH_FXP_LSTAT: u8 = 7
 val SSH_FXP_FSTAT: u8 = 8
+val SSH_FXP_REALPATH: u8 = 16
 val SSH_FXP_STAT: u8 = 17
 val SSH_FXP_OPENDIR: u8 = 11
 val SSH_FXP_READDIR: u8 = 12
@@ -273,6 +274,45 @@ fn _path_is_admitted(bytes: [u8]) -> bool:
     not ((component_len == 1u64 and component_dots == 1u64) or
         (component_len == 2u64 and component_dots == 2u64))
 
+fn _canonical_absolute_path(bytes: [u8]) -> Option<[u8]>:
+    # REALPATH is lexical here: it canonicalizes an already-contained absolute
+    # namespace path, but never invents filesystem nodes or follows fabricated
+    # directory entries.  A parent component at the namespace root is denied.
+    if bytes.len() == 0u64 or bytes.len() > SFTP_MAX_PATH or bytes[0] != 47u8:
+        return nil
+    var components: [[u8]] = []
+    var component: [u8] = []
+    var i: u64 = 1u64
+    while i <= bytes.len():
+        val at_end = i == bytes.len()
+        val byte = if at_end: 47u8 else: bytes[i]
+        if byte == 0u8:
+            return nil
+        if byte == 47u8:
+            if component.len() == 1u64 and component[0] == 46u8:
+                component = []
+            elif component.len() == 2u64 and component[0] == 46u8 and
+                component[1] == 46u8:
+                if components.len() == 0u64:
+                    return nil
+                components.pop()
+                component = []
+            elif component.len() > 0u64:
+                components.push(component)
+                component = []
+        else:
+            component.push(byte)
+        i = i + 1u64
+    var canonical: [u8] = [47u8]
+    var ci: u64 = 0u64
+    while ci < components.len():
+        if ci > 0u64: canonical.push(47u8)
+        for byte in components[ci]: canonical.push(byte)
+        ci = ci + 1u64
+    if canonical.len() > SFTP_MAX_PATH:
+        return nil
+    Some(canonical)
+
 fn _open_flags(pflags: u32) -> OpenFlags:
     var flags = if (pflags & SSH_FXF_READ) != 0u32 and (pflags & SSH_FXF_WRITE) != 0u32:
         OpenFlags.read_write()
@@ -359,16 +399,50 @@ impl SftpSessionV3:
             slot = slot + 1u64
         -1
 
-    fn _lookup_node(path: text) -> Option<FsNode>:
-        if path == "/": return nil
+    fn _lookup_node(path: text) -> Result<Option<FsNode>, text>:
+        if path == "/": return Ok(nil)
         var parent = path_dirname(path)
         if parent == "": parent = "/"
         val base = path_basename(path)
-        if base == "": return nil
-        val entries = g_vfs_readdir(parent)
-        for entry in entries:
-            if entry.name == base: return Some(entry.node)
-        nil
+        if base == "": return Ok(nil)
+        match g_vfs_readdir(parent):
+            Err(error): Err(error)
+            Ok(entries):
+                for entry in entries:
+                    if entry.name == base: return Ok(Some(entry.node))
+                Ok(nil)
+
+    me _handle_realpath(frame: [u8], request_id: u32) -> [u8]:
+        if frame.len() < 13u64:
+            return _status(request_id, SSH_FX_BAD_MESSAGE,
+                "truncated realpath request")
+        val path_len = ssh_get_u32(frame, 9u64).to_u64()
+        if path_len == 0u64 or path_len > SFTP_MAX_PATH or
+            13u64 + path_len != frame.len():
+            return _status(request_id, SSH_FX_BAD_MESSAGE,
+                "invalid realpath framing")
+        var path_bytes: [u8] = []
+        var i: u64 = 0u64
+        while i < path_len:
+            path_bytes.push(frame[13u64 + i])
+            i = i + 1u64
+        match validated_utf8_bytes_to_text_linear(path_bytes):
+            Err(_): _status(request_id, SSH_FX_BAD_MESSAGE,
+                "path is not valid UTF-8")
+            Ok(_):
+                if val canonical = _canonical_absolute_path(path_bytes):
+                    # V3 NAME requires filename, longname, and ATTRS.  Empty
+                    # ATTRS truthfully reports no filesystem metadata because
+                    # lexical canonicalization did not perform a lookup.
+                    var body: [u8] = [SSH_FXP_NAME]
+                    body = ssh_put_u32(body, request_id)
+                    body = ssh_put_u32(body, 1u32)
+                    body = ssh_put_string(body, canonical)
+                    body = ssh_put_string(body, canonical)
+                    body = ssh_put_u32(body, 0u32)
+                    return _frame(body)
+                _status(request_id, SSH_FX_PERMISSION_DENIED,
+                    "path escapes absolute namespace")
 
     me _handle_opendir(frame: [u8], request_id: u32) -> [u8]:
         if frame.len() < 13u64:
@@ -387,29 +461,41 @@ impl SftpSessionV3:
             Err(_): _status(request_id, SSH_FX_BAD_MESSAGE, "path is not valid UTF-8")
             Ok(path):
                 if path != "/":
-                    if val node = self._lookup_node(path):
-                        if node.kind != FsNodeKind.Directory:
-                            return _status(request_id, SSH_FX_FAILURE, "path is not a directory")
-                    else:
-                        return _status(request_id, SSH_FX_NO_SUCH_FILE, "directory not found")
-                val entries = g_vfs_readdir(path)
-                # The canonical compatibility API maps both an empty directory
-                # and a backend error to []. Refuse the ambiguous case so an
-                # I/O failure is never reported as a successful empty listing.
-                if entries.len() == 0u64:
-                    return _status(request_id, SSH_FX_FAILURE, "empty or unavailable directory unsupported")
-                if entries.len() > SFTP_MAX_DIR_ENTRIES:
-                    return _status(request_id, SSH_FX_FAILURE, "directory snapshot limit reached")
-                for entry in entries:
-                    if text_to_bytes_linear(entry.name).len() > SFTP_MAX_PATH:
-                        return _status(request_id, SSH_FX_FAILURE, "directory entry name too long")
-                val slot = self._alloc_directory(entries)
-                if slot < 0:
-                    return _status(request_id, SSH_FX_FAILURE, "handle limit reached")
-                var body: [u8] = [SSH_FXP_HANDLE]
-                body = ssh_put_u32(body, request_id)
-                body = ssh_put_string(body, self._handle_token(slot.to_u64()))
-                _frame(body)
+                    match self._lookup_node(path):
+                        Err(error):
+                            return _status(request_id,
+                                _namespace_error_status(error),
+                                "directory lookup failed")
+                        Ok(maybe_node):
+                            if val node = maybe_node:
+                                if node.kind != FsNodeKind.Directory:
+                                    return _status(request_id, SSH_FX_FAILURE,
+                                        "path is not a directory")
+                            else:
+                                return _status(request_id, SSH_FX_NO_SUCH_FILE,
+                                    "directory not found")
+                match g_vfs_readdir(path):
+                    Err(error): _status(request_id,
+                        _namespace_error_status(error), "opendir failed")
+                    Ok(entries):
+                        if entries.len() > SFTP_MAX_DIR_ENTRIES:
+                            return _status(request_id, SSH_FX_FAILURE,
+                                "directory snapshot limit reached")
+                        for entry in entries:
+                            if text_to_bytes_linear(entry.name).len() > SFTP_MAX_PATH:
+                                return _status(request_id, SSH_FX_FAILURE,
+                                    "directory entry name too long")
+                        # Ok([]) is a real empty directory snapshot.  Allocate
+                        # its handle normally; the first READDIR reports EOF.
+                        val slot = self._alloc_directory(entries)
+                        if slot < 0:
+                            return _status(request_id, SSH_FX_FAILURE,
+                                "handle limit reached")
+                        var body: [u8] = [SSH_FXP_HANDLE]
+                        body = ssh_put_u32(body, request_id)
+                        body = ssh_put_string(body,
+                            self._handle_token(slot.to_u64()))
+                        _frame(body)
 
     me _handle_readdir(frame: [u8], request_id: u32) -> [u8]:
         val slot = self._decode_handle(frame, 9u64)
@@ -809,6 +895,8 @@ impl SftpSessionV3:
             return self._handle_stat(frame, request_id, false)
         if kind == SSH_FXP_FSTAT:
             return self._handle_fstat(frame, request_id)
+        if kind == SSH_FXP_REALPATH:
+            return self._handle_realpath(frame, request_id)
         if kind == SSH_FXP_SETSTAT_V3 or kind == SSH_FXP_FSETSTAT_V3:
             return self._handle_setstat(frame)
         if kind == SSH_FXP_OPENDIR:

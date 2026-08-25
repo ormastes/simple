@@ -130,8 +130,15 @@ class StaticCompressionCache:
         self.put_variant(path, encoding, "", compressed)
 
     me put_variant(path: text, encoding: text, validator: text, compressed: [u8]):
-        """Store bytes for one exact on-disk representation version."""
+        """Store bytes for one exact on-disk representation version.
+
+        A non-empty validator supersedes every cached encoding of an older
+        version of the same file. Re-inserting the exact key replaces it.
+        This keeps repeated edits from consuming the bounded cache with
+        representations that can never be served again.
+        """
         val sz = compressed.len()
+        self.remove_superseded(path, encoding, validator)
         # Reject entries that can never fit.
         if sz > self.max_bytes:
             return
@@ -149,6 +156,19 @@ class StaticCompressionCache:
         )
         self.entries = self.entries.push(entry)
         self.current_size = self.current_size + sz
+
+    me remove_superseded(path: text, encoding: text, validator: text):
+        """Remove an exact replacement and stale versions of one file."""
+        var retained: [CacheEntry] = []
+        var retained_size: i64 = 0
+        for entry in self.entries:
+            val exact_key = entry.path == path and entry.encoding == encoding and entry.validator == validator
+            val stale_version = validator != "" and entry.path == path and entry.validator != validator
+            if not exact_key and not stale_version:
+                retained = retained.push(entry)
+                retained_size = retained_size + entry.size
+        self.entries = retained
+        self.current_size = retained_size
 
     me evict_oldest():
         """Remove the least-recently-used entry (index 0)."""

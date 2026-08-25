@@ -47,7 +47,7 @@ use common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_render_snapshot, active_wm_theme_id, WmChromeColors}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use common.color.convert.{int_to_hex}
-use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_GUI, HOST_CONTENT_OWNER_LOCAL_WEB, WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, host_content_owner_default, host_content_owner_for_frame, host_content_owner_requires_browser_renderer, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
+use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_GUI, HOST_CONTENT_OWNER_LOCAL_WEB, WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, host_content_owner_default, host_content_owner_for_frame, host_content_owner_requires_browser_renderer, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_clamp_to_work_area, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_action.{WmAction}
 use common.window_protocol.compositor_methods.{COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 use common.ui.native_scalar_text.{ui_native_i64_text}
@@ -1629,20 +1629,36 @@ class HostCompositor:
         if (width.to_i64() * height.to_i64() >
             HOST_WM_MAX_FRAMEBUFFER_PIXELS):
             return
+        val prior_windows = self.windows
         var i = 0
         while i < self.windows.len():
-            if self.windows[i].maximized:
-                var window = self.windows[i]
+            var window = self.windows[i]
+            if window.maximized:
                 window.x = 0
                 window.y = WM_WORK_AREA_TOP
                 window.w = width
                 window.h = height - WM_WORK_AREA_TOP - WM_WORK_AREA_BOTTOM
                 if window.h < 1:
                     window.h = 1
-                self.windows[i] = window
+            else:
+                # Display resize uses the same work-area policy as interactive
+                # lifecycle changes. Keep host-private window metadata in
+                # place; only copy the canonical geometry result back.
+                val clamped = wm_lifecycle_clamp_to_work_area(
+                    host_window_to_lifecycle_state(window), width, height
+                )
+                window.x = clamped.x
+                window.y = clamped.y
+                window.w = clamped.w
+                window.h = clamped.h
+            self.windows[i] = window
             i = i + 1
         self.width = width
         self.height = height
+        # Besides old/new rect damage, this invalidates any cached external
+        # content frame whose window extent changed, so its next scene is
+        # laid out at the clamped content size.
+        self._mark_geometry_damage(prior_windows)
         self.dirty.add_full_screen(width, height)
         if self.native_pixel_lane:
             # Native lane: the pixel mirror is authoritative; the headless
