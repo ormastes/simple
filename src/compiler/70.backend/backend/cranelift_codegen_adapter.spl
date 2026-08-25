@@ -19,6 +19,7 @@ use compiler.backend.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_a
 use compiler.backend.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void}
 use compiler.backend.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.sffi.codegen.*
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
@@ -72,6 +73,23 @@ val CL_FCMP_GE: i64 = 5
 val CL_LINKAGE_EXPORT: i64 = 0
 val CL_LINKAGE_IMPORT: i64 = 1
 val CL_LINKAGE_LOCAL: i64 = 2
+val CL_LINKAGE_HIDDEN: i64 = 3
+val CRANELIFT_STATIC_MAX_ALIGNMENT: i64 = 4096
+
+fn cranelift_static_linkage(visibility: Visibility) -> i64:
+    match visibility:
+        case Visibility.Public: CL_LINKAGE_EXPORT
+        case Visibility.Private: CL_LINKAGE_LOCAL
+        case Visibility.Peer | Visibility.Up | Visibility.Internal | Visibility.Package: CL_LINKAGE_HIDDEN
+
+fn cranelift_static_alignment(static_: MirStatic) -> i64:
+    if static_.alignment == 0:
+        return static_.type_.alignment()
+    if static_.alignment < 0 or static_.alignment > CRANELIFT_STATIC_MAX_ALIGNMENT:
+        return -1
+    if (static_.alignment & (static_.alignment - 1)) != 0:
+        return -1
+    static_.alignment
 
 # Calling convention
 val CL_CC_PLATFORM: i64 = -1
@@ -314,7 +332,14 @@ fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, i64>:
         # SymbolId is local to one HIR lowering, so suffixing it here split an
         # imported module global into multiple physical slots.
         val name = "__simple_global_{static_.name}"
-        val handle = cranelift_declare_global_data(cl_module, name, mir_type_to_cl(static_.type_), initial_bits)
+        val alignment = cranelift_static_alignment(static_)
+        if alignment <= 0:
+            print "[cranelift] invalid module static alignment for '{name}': {static_.alignment}"
+            handles[STATICS_FAILED_KEY] = 1
+            return handles
+        val handle = cranelift_declare_global_data_with_metadata(
+            cl_module, name, mir_type_to_cl(static_.type_), initial_bits,
+            cranelift_static_linkage(static_), alignment)
         if handle == 0:
             print "[cranelift] declare_global_data failed for '{name}'"
             handles[STATICS_FAILED_KEY] = 1
@@ -583,8 +608,14 @@ fn cl_translate_instruction(
             val value_ = cl_translate_operand(ctx, cl_module, value, value_map, slot_map, func)
             cranelift_store(ctx, value_, addr, 0)
 
-        case GlobalAddr(_, _, _):
-            panic("Cranelift backend does not support GlobalAddr")
+        case GlobalAddr(dest, symbol, _):
+            if not global_handles.has(symbol.id):
+                panic("Cranelift global address missing declaration: {symbol.id}")
+            val addr = cranelift_data_addr_in_func(ctx, global_handles[symbol.id])
+            if addr == 0:
+                panic("Cranelift global address unavailable: {symbol.id}")
+            value_map[dest.id] = addr
+            store_local_result(ctx, dest, addr, slot_map, func)
 
         case GetElementPtr(dest, base, indices):
             # GEP: base + index * element_size

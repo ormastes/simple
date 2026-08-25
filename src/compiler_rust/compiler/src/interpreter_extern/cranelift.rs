@@ -276,6 +276,28 @@ pub fn rt_cranelift_declare_global_data(args: &[Value]) -> Result<Value, Compile
     Ok(Value::Int(handle))
 }
 
+pub fn rt_cranelift_declare_global_data_v2(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 7 {
+        return Err(CompileError::runtime(
+            "rt_cranelift_declare_global_data_v2: expected 7 arguments".to_string(),
+        ));
+    }
+    let module = expect_i64(args, 0, "rt_cranelift_declare_global_data_v2")?;
+    let name_ptr = expect_i64(args, 1, "rt_cranelift_declare_global_data_v2")?;
+    let name_len = expect_i64(args, 2, "rt_cranelift_declare_global_data_v2")?;
+    let type_code = expect_i64(args, 3, "rt_cranelift_declare_global_data_v2")?;
+    let initial_bits = expect_i64(args, 4, "rt_cranelift_declare_global_data_v2")?;
+    let linkage = expect_i64(args, 5, "rt_cranelift_declare_global_data_v2")?;
+    let alignment = expect_i64(args, 6, "rt_cranelift_declare_global_data_v2")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_declare_global_data_v2")?;
+    let handle = unsafe {
+        cranelift_sffi::rt_cranelift_declare_global_data_v2(
+            module, name_ptr, name_len, type_code, initial_bits, linkage, alignment,
+        )
+    };
+    Ok(Value::Int(handle))
+}
+
 /// Materialize a previously-declared data object's address as an SSA value
 /// in the function currently being built.
 /// Args: ctx (i64), data_handle (i64)

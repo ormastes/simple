@@ -903,6 +903,9 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_cranelift_declare_global_data" => {
             crate::codegen::cranelift_sffi::rt_cranelift_declare_global_data as *const () as usize
         }
+        "rt_cranelift_declare_global_data_v2" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_declare_global_data_v2 as *const () as usize
+        }
         "rt_cranelift_data_addr_in_func" => {
             crate::codegen::cranelift_sffi::rt_cranelift_data_addr_in_func as *const () as usize
         }
