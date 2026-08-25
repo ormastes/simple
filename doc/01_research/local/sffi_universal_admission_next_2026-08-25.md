@@ -196,6 +196,37 @@ identity, trusted signatures, and proof receipts remain unresolved. This lane
 and the wider estate are not globally verified or signed;
 verified-and-signed admission remains 0.
 
+## x86 filesystem-exec ring-3 loader authority checkpoint
+
+`src/os/kernel/loader/x86_64_fs_exec_ring3.spl` now declares all eight local
+serial, page-allocation, streaming, text-copy, heap-handoff, and exit-state ABI
+families with explicit authority. Ten raw-memory and control-transfer owners
+require `ffi, raw_ptr`; the owned text-to-byte length conversion uses one
+minimal lexical `unsafe(ffi)` scope instead of making its caller unsafe.
+
+The loader's executable admission remains unchanged: ELF and program-header
+bounds, segment-count/image-span caps, overflow checks, user-range separation,
+overlap rejection, W+X rejection including shared pages, and a file-backed
+executable entry point are retained before mapping or transfer. The
+annotation-only change adds no allocation, mapping, copy, loop, branch,
+lookup, lock, hash, signature operation, dispatch layer, or forced inlining.
+
+The focused authority/provider/performance ratchet passed. None of the eight
+freestanding symbols appears in both typed registries, two appear in one, and
+six appear in neither. That incomplete registry coverage remains explicit
+rather than being treated as verification. The census changed exactly by the
+39 formerly unbounded calls:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,215 -> 14,176
+- lexical unsafe: 3,401 -> 3,402
+- function unsafe: 1,230 -> 1,268
+
+Physical-page provenance, streaming destination extent, scheduler handoff,
+freestanding provider closure, exact artifact identity, trusted signatures,
+and proof receipts remain unresolved. This loader and the wider estate are not
+globally verified or signed; verified-and-signed admission remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
