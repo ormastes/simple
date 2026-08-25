@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 module="$root/src/compiler/99.loader/loader/smf_mmap_native.spl"
+loader="$root/src/compiler/99.loader/loader/module_loader.spl"
 
 symbols='rt_file_size rt_ptr_write_u8 rt_ptr_write_i32 rt_ptr_write_i64 rt_ptr_read_u8 rt_array_data_ptr rt_ptr_write_bytes_raw rt_mmap_raw rt_munmap_raw rt_mprotect rt_madvise_raw rt_msync_flags rt_mlock rt_munlock rt_open_fd rt_close_fd'
 
@@ -26,4 +27,14 @@ for owner in native_munmap native_mmap_read_bytes native_mmap_read_string native
     grep -B1 -q "^fn ${owner}(" "$module"
 done
 
-echo "SMF mmap SFFI authority audit: PASS (16 raw ABIs confined; 12 mandatory-inline owners; 21 pointer-bearing APIs remain unsafe; unused page-size ABI removed)"
+# Invalid function addresses are typed errors, never fabricated integer zero.
+for arity in 0 1 2 3; do
+    grep -q "^fn native_call_function_${arity}(.*) -> Result<i64, text>:" "$module"
+done
+[ "$(grep -c 'return Err("cannot call a null or invalid native function address")' "$module")" -eq 4 ]
+! grep -A4 '^fn native_call_function_[0-3]' "$module" | grep -q 'return 0'
+[ "$(grep -c 'native_call_function_0(symbol.address)' "$loader")" -eq 2 ]
+[ "$(grep -c 'unsafe(capabilities: \[raw_ptr\]):' "$loader")" -ge 2 ]
+! grep -q 'Ok(native_call_function_0(symbol.address))' "$loader"
+
+echo "SMF mmap SFFI authority audit: PASS (16 raw ABIs confined; 12 mandatory-inline owners; 21 pointer-bearing APIs remain unsafe; invalid calls return typed errors)"

@@ -254,6 +254,14 @@ signature, or loader admission was run. The SMF mmap loader and wider SFFI
 estate remain neither globally verified nor signed; verified-and-signed
 admission remains 0.
 
+Follow-up caller review removed the loader copy's remaining fabricated-zero
+function-call contract. All four arbitrary-address helpers now reject null or
+negative addresses as `Result.Err` and return successful foreign values as
+`Result.Ok`; the loaded-main dispatcher propagates that result directly inside
+minimal `raw_ptr` authority instead of wrapping it in a second `Ok`. This adds
+no success-path allocation, lookup, or dispatch beyond the pre-existing
+`Result` contract already used by the parallel top-level implementation.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
