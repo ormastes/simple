@@ -36,6 +36,7 @@ use os.installer.hosted_safe_artifact_io_v1.{
     hosted_safe_artifact_read_once_v1,
     hosted_safe_artifact_bundle3_begin_v1,
     hosted_safe_artifact_bundle3_read_stage_v1,
+    hosted_safe_artifact_bundle3_slot_size_v1,
     hosted_safe_artifact_bundle3_slot_complete_v1,
     hosted_safe_artifact_bundle3_identity_v1,
     hosted_safe_artifact_bundle3_stage_scr1_v1,
@@ -527,6 +528,33 @@ fn _produce_signed_clang_bundle_v1(
         _ = hosted_safe_artifact_root_close_v1(authority)
         return Err("signed Clang bundle begin rejected: " + reason)
     val bundle = begun.unwrap()
+    # Reject impossible executable inputs from the retained stat snapshot
+    # before allocating/copying any payload bytes.  Admission below has the
+    # same 256 MiB ceiling, but discovering that only after accumulation could
+    # transiently retain up to the caller's 1 GiB slot bound.
+    var preflight_slot: i64 = 0
+    while preflight_slot < 3:
+        val sized = hosted_safe_artifact_bundle3_slot_size_v1(
+            bundle, preflight_slot)
+        if val Err(reason) = sized:
+            _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+            _ = hosted_safe_artifact_root_close_v1(authority)
+            return Err("signed Clang source size rejected: " + reason)
+        val source_size = sized.unwrap()
+        if source_size > request.max_artifact_bytes[preflight_slot]:
+            _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+            _ = hosted_safe_artifact_root_close_v1(authority)
+            return Err("signed Clang payload exceeds its slot bound")
+        if source_size == 0:
+            _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+            _ = hosted_safe_artifact_root_close_v1(authority)
+            return Err("signed Clang payload identity size mismatch")
+        if source_size > IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1:
+            _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+            _ = hosted_safe_artifact_root_close_v1(authority)
+            return Err("signed Clang payload executable admission rejected: " +
+                request.canonical_guest_paths[preflight_slot])
+        preflight_slot = preflight_slot + 1
     var receipts: [text] = []
     var artifact_sha256: [text] = []
     var slot: i64 = 0
