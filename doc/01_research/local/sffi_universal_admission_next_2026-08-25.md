@@ -629,3 +629,26 @@ One tagged declaration/symbol is added for the checked ABI: 11,943 rows / 3,157
 symbols, 1,190 tagged, 638 `unsafe_contract_declared`, 10,487 untouched, and
 zero exact-artifact verified-and-signed. The broader TLS/SFFI surface remains
 unsafe and unadmitted.
+
+## TLS server checked-read checkpoint
+
+The rustls server read now has the same explicit three-state contract as the
+client: checked failure is `nil`, clean EOF is empty text, and data is nonempty
+text. Hosted legacy and checked symbols share one inlineable implementation;
+the compile-time checked flag is consulted only on failure paths. Successful
+reads retain one handle lookup, one bounded buffer allocation, one socket read,
+and one text lift with no added copy, descriptor, retry, lookup, or dispatch.
+
+The web serve loop now imports the checked canonical declaration, reports I/O
+failure separately from EOF, and no longer redeclares the byte-write provider.
+The canonical friendly server-read wrapper is `Result<text,text>` and cannot
+manufacture empty text for an invalid handle. SimpleOS exports the same checked
+symbol and returns `nil` because its live netstack provider is unavailable.
+
+The focused static audit and hosted client/server failure-identity test passed.
+Production Simple checking remains unavailable under the repository runtime
+policy and was not replaced with a seed run. Adding one canonical tagged
+declaration while deleting one application duplicate keeps 11,943 declaration
+rows; there are now 3,158 symbols, 1,191 tagged declarations, 639
+`unsafe_contract_declared`, 10,486 untouched, and zero exact-artifact
+verified-and-signed.

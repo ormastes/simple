@@ -682,10 +682,31 @@ fn tls_server_write_bytes_impl(conn: i64, bytes: &[u8]) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_tls_server_read(conn: i64, max_bytes: i64) -> crate::value::RuntimeValue {
-    if max_bytes <= 0 { return empty_text(); }
+    tls_server_read_impl(conn, max_bytes, false)
+}
+
+/// Checked server read: NIL is an I/O/contract failure, empty text is clean EOF.
+#[no_mangle]
+pub extern "C" fn rt_tls_server_read_checked(
+    conn: i64,
+    max_bytes: i64,
+) -> crate::value::RuntimeValue {
+    tls_server_read_impl(conn, max_bytes, true)
+}
+
+#[inline]
+fn tls_server_read_impl(
+    conn: i64,
+    max_bytes: i64,
+    checked: bool,
+) -> crate::value::RuntimeValue {
+    if max_bytes <= 0 { return tls_client_read_failure(checked); }
     let entry_arc = {
         let guard = TLS_CONNS.lock().unwrap();
-        match guard.get(&conn) { Some(a) => a.clone(), None => return empty_text() }
+        match guard.get(&conn) {
+            Some(entry) => entry.clone(),
+            None => return tls_client_read_failure(checked),
+        }
     };
     let size = max_bytes.min(65_536) as usize;
     let mut buf = vec![0u8; size];
@@ -693,7 +714,10 @@ pub extern "C" fn rt_tls_server_read(conn: i64, max_bytes: i64) -> crate::value:
         let mut entry_guard = entry_arc.lock().unwrap();
         let entry = &mut *entry_guard;
         let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
-        match tls_stream.read(&mut buf) { Ok(n) => n, Err(_) => return empty_text() }
+        match tls_stream.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return tls_client_read_failure(checked),
+        }
     };
     if n == 0 { return empty_text(); }
     unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), n as u64) }
@@ -877,7 +901,10 @@ pub extern "C" fn rt_tls_hash_cert(_cert_path: crate::value::RuntimeValue) -> cr
 
 #[cfg(test)]
 mod platform_trust_tests {
-    use super::{rt_tls_client_read, rt_tls_client_read_checked, TLS_CLIENT_CONFIG};
+    use super::{
+        rt_tls_client_read, rt_tls_client_read_checked, rt_tls_server_read,
+        rt_tls_server_read_checked, TLS_CLIENT_CONFIG,
+    };
 
     #[test]
     fn platform_verifier_initializes() {
@@ -885,8 +912,10 @@ mod platform_trust_tests {
     }
 
     #[test]
-    fn checked_read_distinguishes_invalid_handle_from_legacy_empty_text() {
+    fn checked_client_and_server_reads_distinguish_failure_from_legacy_empty_text() {
         assert!(rt_tls_client_read_checked(-1, 1024).is_nil());
         assert!(!rt_tls_client_read(-1, 1024).is_nil());
+        assert!(rt_tls_server_read_checked(-1, 1024).is_nil());
+        assert!(!rt_tls_server_read(-1, 1024).is_nil());
     }
 }

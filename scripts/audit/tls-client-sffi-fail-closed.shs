@@ -11,6 +11,8 @@ runtime_value_mod="$root/src/compiler_rust/runtime/src/value/mod.rs"
 runtime_lib="$root/src/compiler_rust/runtime/src/lib.rs"
 runtime_tls="$root/src/compiler_rust/runtime/src/value/net_tls.rs"
 web_client="$root/src/app/ui.web/tls_client.spl"
+web_server="$root/src/app/ui.web/tls_serve_loop.spl"
+simpleos_tls="$root/src/os/kernel/net/tls_shim.spl"
 failed=0
 
 if grep -n -E '_ => (RuntimeValue::NIL|0)|unwrap_or\((0|false)\)' "$source_file"; then
@@ -34,8 +36,20 @@ if ! grep -q '^export use std\.nogc_sync_mut\.io\.tls_sffi\.\*$' "$app_facade"; 
     echo "application TLS facade must re-export the canonical owner" >&2
     failed=1
 fi
-if [ "$(grep -c '^[[:space:]]*extern fn rt_tls_' "$canonical_facade")" -ne 36 ]; then
+if [ "$(grep -c '^[[:space:]]*extern fn rt_tls_' "$canonical_facade")" -ne 37 ]; then
     echo "canonical TLS declaration inventory changed without contract review" >&2
+    failed=1
+fi
+if ! grep -q 'extern fn rt_tls_server_read_checked(conn: i64, max_bytes: i64) -> text?' "$canonical_facade" ||
+   ! grep -q 'fn tls_server_read(conn: TlsServerConnection, max_bytes: i64) -> Result<text, text>:' "$canonical_facade" ||
+   ! grep -q 'rt_tls_server_read_checked' "$web_server" ||
+   grep -q '^[[:space:]]*rt_tls_server_read,$' "$web_server" ||
+   grep -q '^extern fn rt_tls_server_write_bytes' "$web_server"; then
+    echo "web TLS server must use canonical checked reads and declarations" >&2
+    failed=1
+fi
+if ! grep -q '^fn rt_tls_server_read_checked(conn: i64, max_bytes: i64) -> text?:' "$simpleos_tls"; then
+    echo "SimpleOS TLS shim must fail closed for checked server reads" >&2
     failed=1
 fi
 if ! grep -q 'extern fn rt_tls_client_read_checked(conn: i64, max_bytes: i64) -> text?' "$canonical_facade" ||
@@ -44,7 +58,9 @@ if ! grep -q 'extern fn rt_tls_client_read_checked(conn: i64, max_bytes: i64) ->
     echo "web TLS client must use nullable checked reads, not ambiguous empty-text reads" >&2
     failed=1
 fi
-if ! grep -q 'return crate::value::RuntimeValue::NIL' "$runtime_tls" ||
+if ! grep -q 'if checked { crate::value::RuntimeValue::NIL } else { empty_text() }' "$runtime_tls" ||
+   ! grep -q 'pub extern "C" fn rt_tls_client_read_checked' "$runtime_tls" ||
+   ! grep -q 'pub extern "C" fn rt_tls_server_read_checked' "$runtime_tls" ||
    ! grep -q 'if n == 0' "$runtime_tls"; then
     echo "checked TLS provider must distinguish failure NIL from clean EOF" >&2
     failed=1

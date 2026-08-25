@@ -419,3 +419,10 @@ passing placeholder.
     descriptor, copy, retry, lookup, allocation, or dispatch. Migrate server
     reads and remaining browser/client declarations next; exact-artifact
     signing/admission remains zero and must not be inferred from this check.
+80. Keep hosted and SimpleOS server reads on `rt_tls_server_read_checked`: nil
+    is failure and empty text is clean EOF. The canonical friendly wrapper must
+    remain Result-bearing, and the web serve loop must not redeclare raw TLS
+    providers. Preserve the shared inlineable single-read path with no added
+    success-path allocation, copy, lookup, descriptor, retry, or dispatch. Next
+    type server accept/write/close and remove their fabricated wrapper values;
+    exact-artifact admission remains a separate unmet gate.

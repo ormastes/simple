@@ -29,6 +29,8 @@ extern fn rt_tls_server_create(port: i64, cert_path: text, key_path: text) -> i6
 extern fn rt_tls_server_accept(server: i64) -> i64  # Returns client connection
 extern fn rt_tls_server_write(conn: i64, data: text) -> i64
 extern fn rt_tls_server_read(conn: i64, max_bytes: i64) -> text
+@unsafe(reason: "raw rustls server-read ABI; nil means contract or I/O failure, empty text means clean EOF", capabilities: [ffi])
+extern fn rt_tls_server_read_checked(conn: i64, max_bytes: i64) -> text?
 extern fn rt_tls_server_close_connection(conn: i64) -> bool
 extern fn rt_tls_server_shutdown(server: i64) -> bool
 
@@ -230,12 +232,15 @@ fn tls_server_write(conn: TlsServerConnection, data: text) -> i64:
 
     rt_tls_server_write(conn.handle, data)
 
-fn tls_server_read(conn: TlsServerConnection, max_bytes: i64) -> text:
-    """Read data from client connection"""
+fn tls_server_read(conn: TlsServerConnection, max_bytes: i64) -> Result<text, text>:
+    """Read data from client connection; empty text is clean EOF."""
     if is_invalid_handle(conn.handle):
-        return ""
+        return Err("TLS server read: invalid handle")
 
-    rt_tls_server_read(conn.handle, max_bytes)
+    val data = rt_tls_server_read_checked(conn.handle, max_bytes)
+    if data == nil:
+        return Err("TLS server read failed")
+    Ok(data!)
 
 fn tls_server_close_connection(conn: TlsServerConnection) -> bool:
     """Close client connection"""
@@ -396,5 +401,5 @@ export tls_is_handshake_complete, tls_generate_self_signed_cert, tls_cert_finger
 export rt_tls_client_connect, rt_tls_client_connect_with_sni
 export rt_tls_client_write, rt_tls_client_read, rt_tls_client_close
 export rt_tls_server_create, rt_tls_server_accept, rt_tls_server_write
-export rt_tls_server_read, rt_tls_server_write_bytes, rt_tls_server_close_connection
+export rt_tls_server_read, rt_tls_server_read_checked, rt_tls_server_write_bytes, rt_tls_server_close_connection
 export rt_tls_server_shutdown

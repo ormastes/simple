@@ -1000,7 +1000,8 @@ pub use value::{
     rt_tls_is_handshake_complete, rt_tls_load_cert, rt_tls_load_key, rt_tls_server_accept,
     rt_tls_server_close_connection, rt_tls_server_config_free, rt_tls_server_config_new,
     rt_tls_server_config_require_client_cert, rt_tls_server_config_set_alpn, rt_tls_server_create,
-    rt_tls_server_create_from_der, rt_tls_server_read, rt_tls_server_shutdown, rt_tls_server_write,
+    rt_tls_server_create_from_der, rt_tls_server_read, rt_tls_server_read_checked,
+    rt_tls_server_shutdown, rt_tls_server_write,
     rt_tls_server_write_bytes, rt_tls_verify_cert,
 };
 

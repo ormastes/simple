@@ -9,7 +9,7 @@
 
 use std.nogc_sync_mut.io.tls_sffi.{
     rt_tls_server_accept,
-    rt_tls_server_read,
+    rt_tls_server_read_checked,
     rt_tls_server_write,
     rt_tls_server_write_bytes,
     rt_tls_server_close_connection
@@ -31,7 +31,6 @@ use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
 use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_json_security_headers, ui_web_html_security_headers, ui_web_request_head_allowed, ui_web_request_head_status}
 use std.io_runtime.{file_exists, read_file}
 
-extern fn rt_tls_server_write_bytes(handle: i64, data: [u8]) -> i64
 extern fn rt_time_ms() -> u64
 
 fn tls_serve_loop_time_ms() -> u64:
@@ -40,8 +39,8 @@ fn tls_serve_loop_time_ms() -> u64:
 fn tls_serve_loop_accept(handle: i64) -> i64:
     rt_tls_server_accept(handle)
 
-fn tls_serve_loop_read(handle: i64, max: i64) -> text:
-    rt_tls_server_read(handle, max)
+fn tls_serve_loop_read(handle: i64, max: i64) -> text?:
+    rt_tls_server_read_checked(handle, max)
 
 fn tls_serve_loop_write(handle: i64, data: text) -> i64:
     rt_tls_server_write(handle, data)
@@ -108,10 +107,14 @@ class ConnStream:
                         return Ok(line)
             else:
                 val chunk = tls_serve_loop_read(self.tls_handle, 4096)
-                if chunk == "":
+                if chunk == nil:
+                    self.open = false
+                    return Err("TLS read failed")
+                val chunk_text = chunk!
+                if chunk_text == "":
                     self.open = false
                     return Err("connection closed")
-                self.buffer = self.buffer + chunk
+                self.buffer = self.buffer + chunk_text
                 if not ui_web_request_head_allowed(self.buffer.len()):
                     self.open = false
                     return Err("request_head_too_large")
@@ -137,10 +140,14 @@ class ConnStream:
                     return Err("connection closed")
 
                 val chunk = tls_serve_loop_read(self.tls_handle, 4096)
-                if chunk == "":
+                if chunk == nil:
+                    self.open = false
+                    return Err("TLS read failed")
+                val chunk_text = chunk!
+                if chunk_text == "":
                     self.open = false
                     return Err("connection closed")
-                self.buffer = self.buffer + chunk
+                self.buffer = self.buffer + chunk_text
 
     me read_bytes(n: i64) -> Result<[u8], text>:
         """Read exactly n bytes as a byte array from the stream."""
