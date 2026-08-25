@@ -856,3 +856,24 @@ rows increase from 1,259 to 1,308, untouched rows decrease from 10,353 to
 annotations identify unsafe ownership only; exact target ABI fingerprints and
 signed provider admission are still required before SIMD can be called fully
 verified.
+
+## Rapier2D canonical-owner consolidation checkpoint
+
+`app.io.rapier2d_sffi` duplicated the canonical 472-line Rapier2D wrapper and
+all 48 `rt_rapier2d_*` declarations. The app copy's only semantic divergence
+was weaker validation at nine resource-construction sites: `handle != 0`
+accepted negative provider error sentinels, while the canonical library owner
+requires `handle > 0`. The app module is now a two-line compatibility re-export
+of `std.nogc_sync_mut.io.rapier2d_sffi`.
+
+This removes a duplicate foreign boundary and selects the stricter existing
+semantics. It adds no runtime call, branch, lookup, allocation, copy, or layout
+change. A static owner ratchet requires exactly 48 declarations in the
+canonical owner and forbids declarations, wrappers, or negative-handle
+acceptance in the app facade; it passed with the whitespace check.
+
+Totals decrease from 11,870 to 11,822 `rt_*` declaration rows while unique
+symbols remain 3,135. Unsafe-tagged rows remain 1,308, untouched rows decrease
+from 10,304 to 10,256, and exact-artifact verified-and-signed admission remains
+zero. The canonical Rapier2D declarations and fallible wrapper returns still
+need contract tagging and typed-error review.

@@ -484,3 +484,7 @@ passing placeholder.
     target-specific vector signature and provider implementation to an ABI
     fingerprint and exact signed artifact; retain direct typed calls on the hot
     path and keep feature/profile values semantically typed.
+91. Keep `app.io.rapier2d_sffi` a zero-cost re-export of the canonical owner;
+    never restore its 48 declarations or `handle != 0` resource validation.
+    Tag and type the canonical Rapier2D boundary next, preserving one direct
+    provider call per operation and avoiding copies or generic dispatch.
