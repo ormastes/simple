@@ -99,6 +99,34 @@ identity, trusted signatures, and proof receipts remain unresolved. This
 Curve25519 boundary and the wider estate are not globally verified or signed;
 verified-and-signed admission remains 0.
 
+## Simplebox filesystem stdout authority checkpoint
+
+The 42 unresolved calls in
+`src/os/tools/simplebox/simplebox_fs_applets.spl` were all writes to the same
+`stdout_write(text)` provider. They now route through one mandatory-inline
+lexical `unsafe(ffi)` owner, leaving readlink, tee, cat, head, tail, and other
+streaming filesystem applets safe at this boundary.
+
+The rewrite preserves every message and output ordering. Mandatory inlining
+prevents an added per-write frame; the 64 MiB file/input cap, 64 KiB chunks,
+operand bounds, partial-write retry, and zero/invalid-progress rejection remain
+unchanged. No filesystem read/write, allocation, copy, loop, branch, lookup,
+lock, hash, signature operation, or runtime dispatch was added.
+
+The focused authority/provider/performance ratchet passed. `stdout_write`
+appears in only one typed registry, so provider closure remains incomplete.
+Consolidating repeated boundary ownership changed the census as follows:
+
+- raw call sites: 18,744 -> 18,703
+- missing authority: 13,948 -> 13,906
+- lexical unsafe: 3,406 -> 3,407
+- function unsafe: unchanged at 1,390
+
+Stdout error semantics, provider closure, exact artifact identity, trusted
+signatures, and proof receipts remain unresolved. These applets and the wider
+estate are not globally verified or signed; verified-and-signed admission
+remains 0.
+
 ## Driver source-parsing authority checkpoint
 
 The phase-2 parsing driver now confines its seven raw process, environment,
