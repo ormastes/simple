@@ -494,6 +494,34 @@ annotation change. Typed resources, backend-branded handles, registrations,
 artifact identity, and signatures remain absent; verified-and-signed admission
 remains 0.
 
+## Vulkan facade authority checkpoint
+
+`src/lib/nogc_sync_mut/io/vulkan_sffi.spl` now keeps 33 device-selection,
+buffer, shader, pipeline, descriptor, command, image, sampler, framebuffer,
+swapchain, and ambiguous-error facades explicitly unsafe. The wrapper structs
+are copyable integer handles without ownership, device/backend branding, or
+command-order state, so `is_valid` cannot make destruction or cross-object use
+safe. The two helper-to-wrapper propagation points remain unsafe as well.
+
+Only availability, global init/shutdown status, device count, and device idle
+wait remain safe behind five lexical owners. Semantic statuses remain `bool`.
+All 38 wrapper/helper paths are mandatory-inline, adding no command traversal,
+allocation, buffer copy, lookup, lock, branch, or dispatch.
+
+The focused static authority/provider/performance ratchet passed. Among the 39
+used symbols (40 calls), 21 appear in both typed-native and interpreter
+registries, ten in one, and eight in neither. The census changed:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,364 -> 14,324
+- lexical unsafe: 3,397 -> 3,402
+- function unsafe: 1,085 -> 1,120
+
+No production optimizer/Vulkan runtime test was run for this Pure Simple
+annotation change. Typed resources, device/order validation, remaining
+providers, artifact identity, and signatures remain absent;
+verified-and-signed admission remains 0.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
