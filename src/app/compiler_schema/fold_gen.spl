@@ -24,7 +24,7 @@ use std.io_runtime.{file_write, dir_create_all}
 use app.compiler_schema.extract.{VariantRow}
 use app.compiler_schema.visitor_gen.{DeclUniverse, NodeDecl, FieldDecl, FieldClass}
 use app.compiler_schema.visitor_gen.{parse_payload_fields, _binders, _snake, _contains}
-use app.compiler_schema.visitor_gen.{_sort_texts, _wild_arm, _join, _strip_opt}
+use app.compiler_schema.visitor_gen.{_sort_texts, _wild_arm, _join, _strip_opt, _split_top}
 
 # ============================================================================
 # Dialect description
@@ -231,6 +231,182 @@ fn d_carrier_variant_total(u: DeclUniverse, d: Dialect) -> i64:
     total
 
 # ============================================================================
+# Frontend semantic-value encoding
+# ============================================================================
+
+fn ast_semantic_roots() -> [text]:
+    """The parser value surface; flat declaration `Node` is not a value root."""
+    ["Expr", "Stmt", "Type", "Pattern"]
+
+fn load_ast_semantic_universe(repo_root: text) -> DeclUniverse:
+    """Semantic encoding additionally owns typed custom-block payloads without
+    broadening the ordinary frontend fold visitor's traversal surface."""
+    DeclUniverse.load_from(repo_root, [
+        "src/compiler/10.frontend/parser_types_expr.spl",
+        "src/compiler/10.frontend/ast.spl",
+        "src/compiler/15.blocks/blocks/value.spl"
+    ], ["AstModule", "Span", "Token", "Any"])
+
+fn ast_semantic_closure(u: DeclUniverse) -> [text]:
+    """Every parser-owned aggregate reachable from the four value roots."""
+    var work = ast_semantic_roots()
+    var seen: [text] = []
+    var i = 0
+    while i < work.len():
+        val name = work[i]
+        i = i + 1
+        if _contains(seen, name):
+            continue
+        seen.push(name)
+        val decl = u.decl_of(name)
+        if decl.is_enum:
+            for row in decl.variants:
+                for f in parse_payload_fields(row.payload_schema):
+                    val c = u.classify(f.type_text)
+                    if c.cat == "prim" or c.cat == "opaque": continue
+                    if c.a != "": work = _push_unique(work, c.a)
+                    if c.b != "": work = _push_unique(work, c.b)
+        else:
+            for f in decl.fields:
+                val c = u.classify(f.type_text)
+                if c.cat == "prim" or c.cat == "opaque": continue
+                if c.a != "": work = _push_unique(work, c.a)
+                if c.b != "": work = _push_unique(work, c.b)
+    seen
+
+fn ast_semantic_emit_order(u: DeclUniverse) -> [text]:
+    var out = ast_semantic_roots()
+    var rest: [text] = []
+    for name in ast_semantic_closure(u):
+        if not _contains(out, name): rest.push(name)
+    for name in _sort_texts(rest): out.push(name)
+    out
+
+fn _semantic_fn(name: text) -> text:
+    "ast_semantic_encode_" + _snake(name)
+
+fn _semantic_is_span(type_text: text) -> bool:
+    _strip_opt(type_text) == "Span"
+
+fn _semantic_is_metadata(field: FieldDecl) -> bool:
+    _semantic_is_span(field.type_text) or field.binder.starts_with("_")
+
+fn _semantic_primitive_expr(type_text: text, v: text) -> text:
+    val t = _strip_opt(type_text)
+    if t == "text": return "_ast_semantic_mix_scalar_text(state, \"text\", " + v + ")"
+    if t == "bool": return "_ast_semantic_mix_scalar_i64(state, \"bool\", if " + v + ": 1 else: 0)"
+    if t == "f64": return "_ast_semantic_mix_scalar_i64(state, \"f64\", f64_to_bits(" + v + ") as i64)"
+    if t == "f32": return "_ast_semantic_mix_scalar_i64(state, \"f32\", f32_to_bits(" + v + ") as i64)"
+    if t == "char": return "_ast_semantic_mix_scalar_i64(state, \"char\", " + v + ".to_i64())"
+    "_ast_semantic_mix_scalar_i64(state, \"" + t + "\", " + v + " as i64)"
+
+fn _semantic_value_lines(u: DeclUniverse, type_text: text, v: text, indent: text, idx: i64) -> text:
+    """Encode one field without constructing an AST serialization buffer."""
+    if _semantic_is_span(type_text): return ""
+    val optional = type_text.trim().ends_with("?")
+    val c = u.classify(type_text)
+    if optional:
+        var out = indent + "if " + v + " == nil:\n"
+        out = out + indent + "    state = _ast_semantic_mix_tag(state, \"nil\")\n"
+        out = out + indent + "else:\n"
+        out = out + indent + "    state = _ast_semantic_mix_tag(state, \"some\")\n"
+        return out + _semantic_value_lines(u, _strip_opt(type_text), v, indent + "    ", idx)
+    if c.cat == "node":
+        return indent + "state = " + _semantic_fn(c.a) + "(" + v + ", state)\n"
+    if c.cat == "prim":
+        return indent + "state = " + _semantic_primitive_expr(type_text, v) + "\n"
+    val t = _strip_opt(type_text)
+    if c.cat == "pair":
+        var out = indent + "state = _ast_semantic_mix_i64(state, " + v + ".len())\n"
+        out = out + indent + "for (ska{idx}, skb{idx}) in " + v + ":\n"
+        val sides = _split_top(t.substring(2, t.len() - 2))
+        out = out + _semantic_value_lines(u, sides[0], "ska{idx}", indent + "    ", idx + 1)
+        return out + _semantic_value_lines(u, sides[1], "skb{idx}", indent + "    ", idx + 2)
+    if t.starts_with("[") and t.ends_with("]"):
+        val elem = _strip_opt(t.substring(1, t.len() - 1))
+        var out = indent + "state = _ast_semantic_mix_i64(state, " + v + ".len())\n"
+        out = out + indent + "for sv{idx} in " + v + ":\n"
+        return out + _semantic_value_lines(u, elem, "sv{idx}", indent + "    ", idx + 1)
+    if t == "Any":
+        return indent + "state = _ast_semantic_mark_uncacheable(state, \"Any\")\n"
+    indent + "state = _ast_semantic_mark_uncacheable(state, \"unsupported:" + t + "\")\n"
+
+fn _semantic_enum_arms(u: DeclUniverse, decl: NodeDecl, indent: text) -> text:
+    var out = ""
+    for row in decl.variants:
+        val fields = parse_payload_fields(row.payload_schema)
+        out = out + indent + "case " + row.variant + _binders(u, fields, true) + ":\n"
+        out = out + indent + "    handled = true\n"
+        out = out + indent + "    state = _ast_semantic_mix_tag(state, \"" + row.variant + "\")\n"
+        var idx = 0
+        for f in fields:
+            out = out + _semantic_value_lines(u, f.type_text, "b_" + f.binder, indent + "    ", idx)
+            idx = idx + 3
+    out
+
+fn _semantic_struct_lines(u: DeclUniverse, decl: NodeDecl, indent: text) -> text:
+    var out = ""
+    var idx = 0
+    for f in decl.fields:
+        if f.binder == "kind" and _contains(ast_semantic_roots(), decl.name): continue
+        if _semantic_is_metadata(f): continue
+        val guard = u.guard_of(decl, f)
+        if guard == "":
+            out = out + _semantic_value_lines(u, f.type_text, "node." + f.binder, indent, idx)
+        else:
+            out = out + indent + "state = _ast_semantic_mix_i64(state, if node." + guard + ": 1 else: 0)\n"
+            out = out + indent + "if node." + guard + ":\n"
+            out = out + _semantic_value_lines(u, f.type_text, "node." + f.binder, indent + "    ", idx)
+        idx = idx + 3
+    out
+
+fn emit_one_ast_semantic_encoder(u: DeclUniverse, name: text) -> text:
+    val row = d_carrier_row(dialect_ast(), name)
+    var out = "fn " + _semantic_fn(name) + "(node: " + name + ", initial: AstSemanticHash) -> AstSemanticHash:\n"
+    out = out + "    if node == nil:\n        return _ast_semantic_mix_tag(initial, \"nil:" + name + "\")\n"
+    out = out + "    var state = _ast_semantic_mix_tag(initial, \"" + name + "\")\n"
+    if row.len() > 0 and row[0] != "":
+        out = out + _semantic_struct_lines(u, u.decl_of(name), "    ")
+        out = out + "    var handled = false\n    match node.kind:\n"
+        out = out + _semantic_enum_arms(u, u.decl_of(row[1]), "        ")
+        out = out + "        case _:\n            handled = false\n"
+        out = out + "    if not handled:\n        _ast_semantic_unhandled(\"" + row[1] + "\", \"" + _semantic_fn(name) + "\")\n"
+        return out + "    state\n"
+    val decl = u.decl_of(name)
+    if decl.is_enum:
+        out = out + "    var handled = false\n    match node:\n"
+        out = out + _semantic_enum_arms(u, decl, "        ")
+        out = out + "        case _:\n            handled = false\n"
+        out = out + "    if not handled:\n        _ast_semantic_unhandled(\"" + name + "\", \"" + _semantic_fn(name) + "\")\n"
+        return out + "    state\n"
+    out + _semantic_struct_lines(u, decl, "    ") + "    state\n"
+
+fn emit_ast_semantic_file(u: DeclUniverse) -> text:
+    var out = "# GENERATED — do not edit; regenerate with: bin/simple run src/app/compiler_schema/main.spl folds\n"
+    out = out + "# registry-hash: " + registry_hash(u, dialect_ast()) + "\n"
+    out = out + "# Span/doc-free SHA-256 stream. O(nodes + scalar bytes), O(depth) stack, O(1) retained state.\n\n"
+    out = out + "use compiler.frontend.parser_types_expr.*\n"
+    out = out + "use compiler.blocks.blocks.value.*\n"
+    out = out + "use std.common.binary_io.{{f32_to_bits, f64_to_bits}}\n"
+    out = out + "use std.common.crypto.sha256.{{Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex}}\n"
+    out = out + "use std.nogc_sync_mut.io_runtime.{{exit}}\n\n"
+    out = out + "class AstSemanticHash:\n    stream: Sha256StreamV1\n    scratch: [u8]\n    units: i64\n    cacheable: bool\n\n"
+    out = out + "fn ast_semantic_hash_seed() -> AstSemanticHash:\n    AstSemanticHash(sha256_stream_v1_new(), [0u8; 8], 0, true)\n\n"
+    out = out + "fn _ast_semantic_mix_i64(state: AstSemanticHash, value: i64) -> AstSemanticHash:\n    var shift = 0\n    while shift < 64:\n        state.scratch[shift / 8] = ((value >> shift) & 255) as u8\n        shift = shift + 8\n    if not sha256_stream_v1_update(state.stream, state.scratch): state.cacheable = false\n    state.units = state.units + 1\n    state\n\n"
+    out = out + "fn _ast_semantic_mix_text(state: AstSemanticHash, value: text) -> AstSemanticHash:\n    var result = _ast_semantic_mix_i64(state, value.len())\n    var i = 0\n    while i < value.len():\n        result = _ast_semantic_mix_i64(result, value.byte_at(i) as i64)\n        i = i + 1\n    result\n\n"
+    out = out + "fn _ast_semantic_mix_tag(state: AstSemanticHash, tag: text) -> AstSemanticHash:\n    _ast_semantic_mix_text(state, tag)\n\n"
+    out = out + "fn _ast_semantic_mix_scalar_i64(state: AstSemanticHash, width_tag: text, value: i64) -> AstSemanticHash:\n    var result = _ast_semantic_mix_tag(state, width_tag)\n    _ast_semantic_mix_i64(result, value)\n\n"
+    out = out + "fn _ast_semantic_mix_scalar_text(state: AstSemanticHash, width_tag: text, value: text) -> AstSemanticHash:\n    var result = _ast_semantic_mix_tag(state, width_tag)\n    _ast_semantic_mix_text(result, value)\n\n"
+    out = out + "fn _ast_semantic_mark_uncacheable(state: AstSemanticHash, reason: text) -> AstSemanticHash:\n    state.cacheable = false\n    _ast_semantic_mix_tag(state, reason)\n\n"
+    out = out + "fn ast_semantic_hash_finish(state: AstSemanticHash) -> text:\n    if not state.cacheable: return \"\"\n    sha256_stream_v1_finish_hex(state.stream) ?? \"\"\n\n"
+    out = out + "fn _ast_semantic_unhandled(kind: text, where_: text):\n    print \"E-AST-SEMANTIC-UNHANDLED: {{kind}} at {{where_}}; regenerate encoder\"\n    exit(1)\n\n"
+    for name in ast_semantic_emit_order(u): out = out + emit_one_ast_semantic_encoder(u, name) + "\n"
+    out = out + "export AstSemanticHash, ast_semantic_hash_seed, ast_semantic_hash_finish\n"
+    var names: [text] = []
+    for name in ast_semantic_roots(): names.push(_semantic_fn(name))
+    out + "export " + _join(names, ", ") + "\n"
+
+# ============================================================================
 # Registry hash — a change in any covered variant changes the emitted header
 # ============================================================================
 
@@ -427,7 +603,10 @@ fn emit_fold_init(d: Dialect) -> text:
     out = out + "#\n# Generated " + d.title + " visitor package (hardening plan §11.5).\n\n"
     val mod = if d.key == "hir": "compiler.hir.generated" else: "compiler.frontend.generated"
     val stem = d.out_file.substring(0, d.out_file.len() - 4)
-    out + "export use " + mod + "." + stem + ".*\n"
+    out = out + "export use " + mod + "." + stem + ".*\n"
+    if d.key == "ast":
+        out = out + "export use compiler.frontend.generated.ast_semantic_value.*\n"
+    out
 
 # ============================================================================
 # Driver
@@ -449,6 +628,8 @@ fn generate_folds_into(repo_root: text, out_root: text) -> i64:
         if d.key != "hir":
             # The HIR package __init__ is owned by visitor_gen, which already
             # re-exports this file; a second writer would fight it.
+            val semantic_u = load_ast_semantic_universe(repo_root)
+            file_write(dir + "/ast_semantic_value.spl", emit_ast_semantic_file(semantic_u))
             file_write(dir + "/__init__.spl", emit_fold_init(d))
         files = files + 1
     files
@@ -466,5 +647,7 @@ export Dialect, dialect_hir, dialect_ast, all_dialects, load_dialect
 export d_carrier_row, d_is_carrier, d_is_kind_enum, d_walk_name, d_kind_name_fn
 export d_unhandled_fn, d_roots, d_node_closure, d_emit_order
 export d_variant_total, d_carrier_variant_total, registry_hash
+export ast_semantic_roots, load_ast_semantic_universe, ast_semantic_closure, ast_semantic_emit_order
+export emit_one_ast_semantic_encoder, emit_ast_semantic_file
 export emit_one_walk, emit_fold_kind_name_fns, emit_fold_file, emit_fold_init
 export generate_folds_into, fold_variant_report
