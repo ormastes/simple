@@ -27,7 +27,9 @@ use os.kernel.log.klog_api.{log_raw_println}
 use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_file_exists}
 use os.kernel.net.http_route.{http_classify_request, HttpRoute, HttpRouteKind}
 
+@unsafe(reason: "raw listener descriptor; negative sentinel means bind failed", capabilities: [ffi])
 extern fn rt_io_tcp_bind(addr: text) -> i64
+@unsafe(reason: "raw accepted descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 @unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
@@ -74,7 +76,8 @@ fn start_http_server_baremetal():
     """Start a minimal single-core HTTP loop on the boot core."""
     log_raw_println("[http_baremetal] Starting minimal HTTP loop...")
 
-    val listener = rt_io_tcp_bind(SIMPLEOS_HTTP_LISTEN_ADDR)
+    val listener = unsafe(capabilities: [ffi]):
+        rt_io_tcp_bind(SIMPLEOS_HTTP_LISTEN_ADDR)
     if listener < 0:
         log_raw_println("[http_baremetal] ERROR: bind failed")
         return
@@ -82,7 +85,8 @@ fn start_http_server_baremetal():
     log_raw_println("[http_baremetal] Listening on 0.0.0.0:8080")
     log_raw_println("[http] serving on 0.0.0.0:8080")
     while true:
-        val client = rt_io_tcp_accept_timeout(listener, 1)
+        val client = unsafe(capabilities: [ffi]):
+            rt_io_tcp_accept_timeout(listener, 1)
         if client >= 0:
             val request_bytes = unsafe(capabilities: [ffi]):
                 rt_io_tcp_read(client, HTTP_MAX_REQUEST_BYTES)
