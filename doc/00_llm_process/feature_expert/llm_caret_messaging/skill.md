@@ -113,3 +113,23 @@ forward declarations, json_helpers shadowed by std.mcp.helpers, `}}`
 fixtures in claude_cli_spec. Still environment-blocked: cli_cached,
 cli_hidden_cached, native_closure, tui_pty, messaging_phase_cli (need a
 cached self-hosted artifact / stage binaries).
+
+Mail hardening (2026-08-25): the three recorded production gaps are closed or
+honestly filed. (1) IMAP FETCH replies are parsed by the literal-aware RFC
+3501 parser in `std.nogc_sync_mut.imap.parse` (`imap_response_complete` frames
+by `{N}` byte count on BOTH transports; `imap_parse_fetch_response` returns
+typed items; `imap_build_uid_fetch` added), spec
+`test/01_unit/lib/nogc_sync_mut/imap/fetch_parse_spec.spl` (sabotage-verified).
+(2) Every mail read is deadline-bounded (`tls_read_timeout` facade over the
+already-backed `rt_tls_client_read_timeout`; error
+`mail server timed out after N ms`), spec
+`test/01_unit/app/llm_caret/infra_mail_timeout_spec.spl` (silent listener,
+2 s budget, wall < 5 s). (3) STARTTLS negotiation is fully implemented as a
+transport-free state machine (`infra_mail_starttls.spl`, transcript spec
+`infra_mail_starttls_spec.spl`), but the socket upgrade stays refused: no
+runtime `rt_tls_client_from_fd` exists — C-side design filed in
+`doc/08_tracking/bug/tls_no_fd_upgrade_blocks_starttls_2026-08-25.md`; a live
+STARTTLS wrapper row stays BLOCKED until the runtime lane backs it. The live
+wrapper's classify_log now derives live rows as passed-skipped == 2 gated
+rows, so extra permanently-BLOCKED rows (ftp + wiki) don't break PASS.
+Lane state: `.spipe/llm_caret_mail_hardening/state.md`.

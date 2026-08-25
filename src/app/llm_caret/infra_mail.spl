@@ -4,10 +4,11 @@
 # Only reachable through tools.spl::run_tool (the permission gate).
 #
 # Facades reused (never raw rt_* externs):
-#   std.nogc_sync_mut.imap        - IMAP command builders / tags
+#   std.nogc_sync_mut.imap        - IMAP command builders / RFC 3501 FETCH parser
 #   std.nogc_sync_mut.smtp.*      - SMTP command builders, AUTH PLAIN, message
 #   std.nogc_sync_mut.io.tcp      - plaintext transport (fd helpers)
 #   std.nogc_sync_mut.io.tls_sffi - implicit-TLS transport (IMAPS 993 / SMTPS 465)
+#   app.llm_caret.infra_mail_starttls - STARTTLS negotiation (transport-free)
 #
 # Config comes from the `[mail]` section of llm_caret.sdn (config.spl):
 #   imap_host, imap_port, smtp_host, smtp_port, user, secret_env
@@ -15,8 +16,13 @@
 #
 # Transport selection is by port: 993 (imaps_default_port) and 465
 # (smtps_default_port) use implicit TLS; any other port is plaintext. SMTP
-# submission on 587 needs a STARTTLS upgrade which the TLS facade cannot do on
-# an existing socket, so it is refused with an honest error.
+# submission on 587 needs a STARTTLS upgrade of the live socket, which the
+# runtime cannot do (no rt_tls_client_from_fd), so it is refused before any
+# connect with an error naming the missing runtime symbol.
+#
+# Every server read is bounded: a reply that does not complete within
+# mail_read_timeout_ms() fails the tool call with
+# "mail server timed out after N ms" instead of hanging the caret.
 #
 # Exec order in every tool: validate arguments -> config present -> secret
 # present -> connect. Nothing touches the network before the last step.
@@ -26,9 +32,12 @@ use app.llm_caret.config.{
     config_mail_smtp_host, config_mail_smtp_port,
     config_mail_user, config_mail_secret_env, config_mail_secret
 }
+use app.llm_caret.infra_mail_starttls.{starttls_runtime_gap_error}
 use std.nogc_sync_mut.imap.{
-    imap_session_new, imap_next_tag, imap_tag_to_text,
-    imap_build_login, imap_build_select, imap_build_fetch, imap_build_logout
+    ImapTag, imap_tag_to_text,
+    imap_build_login, imap_build_select, imap_build_fetch, imap_build_uid_fetch, imap_build_logout,
+    imap_response_complete, imap_parse_fetch_response, imap_status_is_ok,
+    imap_fetch_uid, imap_fetch_item_prefixed, imap_parse_header_fields, imap_header_value
 }
 use std.nogc_sync_mut.imap.secure.{imaps_default_port}
 use std.nogc_sync_mut.smtp.secure.{smtps_default_port, smtp_starttls_port}
@@ -42,12 +51,26 @@ use std.nogc_sync_mut.io.tcp.{
     TcpStream, tcp_fd_write_text, tcp_fd_read_line_or_empty, tcp_fd_close,
     tcp_fd_set_read_timeout
 }
-use std.nogc_sync_mut.io.tls_sffi.{TlsClientConnection, tls_connect, tls_write, tls_read, tls_close}
+use std.nogc_sync_mut.io.tls_sffi.{TlsClientConnection, tls_connect, tls_write, tls_read_timeout, tls_close}
+use std.io_runtime.{time_now_monotonic_ms}
 
 val MAIL_NOT_CONFIGURED = "mail not configured: set [mail] in llm_caret.sdn"
 val MAIL_CONNECT_TIMEOUT_MS = 15000
+val MAIL_DEFAULT_READ_TIMEOUT_MS = 15000
 val MAIL_MAX_LIST = 200
 val MAIL_MAX_BODY = 60000
+
+# Per-reply read budget. Specs lower it (a stalled fixture server must fail
+# fast); production keeps the default.
+var _mail_read_timeout_ms: i64 = 15000
+
+fn mail_read_timeout_ms() -> i64:
+    if _mail_read_timeout_ms <= 0:
+        return MAIL_DEFAULT_READ_TIMEOUT_MS
+    _mail_read_timeout_ms
+
+fn mail_set_read_timeout_ms(ms: i64):
+    _mail_read_timeout_ms = ms
 
 # ============================================================================
 # JSON schema entries (Anthropic `input_schema` shape)
@@ -107,7 +130,7 @@ fn _uses_implicit_tls(port: i64) -> bool:
     port == imaps_default_port() or port == smtps_default_port()
 
 # ============================================================================
-# Transport (plaintext fd or implicit TLS)
+# Transport (plaintext fd or implicit TLS) with bounded reads
 # ============================================================================
 
 struct MailLink:
@@ -115,6 +138,14 @@ struct MailLink:
     fd: i64
     tls: TlsClientConnection
     ok: bool
+    error: text
+
+# One complete server reply. `raw` keeps the exact wire bytes (IMAP literals
+# intact) for the RFC 3501 parser; `lines` are CRLF-stripped for SMTP and
+# status checks. `error` is "" unless the read timed out or the peer closed.
+struct MailReply:
+    lines: [text]
+    raw: text
     error: text
 
 fn _link_error(msg: text) -> MailLink:
@@ -128,7 +159,7 @@ fn _connect(host: text, port: i64) -> MailLink:
     val fd = TcpStream.connect_fd_timeout(host + ":" + port.to_text(), MAIL_CONNECT_TIMEOUT_MS)
     if fd < 0:
         return _link_error("tcp connect to " + host + ":" + port.to_text() + " failed")
-    tcp_fd_set_read_timeout(fd, MAIL_CONNECT_TIMEOUT_MS)
+    tcp_fd_set_read_timeout(fd, mail_read_timeout_ms())
     MailLink(secure: false, fd: fd, tls: TlsClientConnection(handle: -1, host: "", port: 0, is_valid: false), ok: true, error: "")
 
 fn _send(link: MailLink, data: text) -> bool:
@@ -147,64 +178,80 @@ fn _close(link: MailLink):
 fn _strip_crlf(line: text) -> text:
     var s = line
     while s.ends_with("\n") or s.ends_with("\r"):
-        s = s.substring(0, s.len() - 1)
+        s = s.substring(0, s.length() - 1)
     s
 
-# Reads server lines until `done(line)` would be true for the last line.
-# IMAP: the line starting with our tag. SMTP: a line whose 4th char is a space.
-fn _read_until_tag(link: MailLink, tag: text) -> [text]:
-    _read_lines(link, tag, false)
+fn _timeout_error() -> text:
+    "mail server timed out after " + mail_read_timeout_ms().to_text() + " ms"
 
-fn _read_smtp_reply(link: MailLink) -> [text]:
-    _read_lines(link, "", true)
-
-fn _is_final_line(line: text, tag: text, smtp: bool) -> bool:
-    if smtp:
-        return (line.len() >= 4 and line.substring(3, 4) == " ") or line.len() == 3
-    line.starts_with(tag + " ")
-
-fn _read_lines(link: MailLink, tag: text, smtp: bool) -> [text]:
-    var out: [text] = []
+# One bounded read: at most `budget_ms` of waiting. "" means timeout or EOF;
+# the caller tells them apart by the clock.
+fn _read_chunk(link: MailLink, budget_ms: i64) -> text:
     if link.secure:
-        var chunks: [text] = []
-        var buf = ""
-        var guard = 0
-        while guard < 100000:
-            guard = guard + 1
-            val chunk = tls_read(link.tls, 65536)
-            if chunk == "":
-                break
-            chunks.push(chunk)
-            if not chunk.contains("\n"):
-                continue
-            buf = chunks.join("")
-            val lines = buf.split("\n")
-            # last element may be a partial line; check completed lines only
-            var i = 0
-            var finished = false
-            while i < lines.len() - 1:
-                if _is_final_line(_strip_crlf(lines[i]), tag, smtp):
-                    finished = true
-                i = i + 1
-            if finished:
-                break
-        buf = chunks.join("")
-        for l in buf.split("\n"):
-            val s = _strip_crlf(l)
-            if s != "" or out.len() > 0:
-                out.push(s)
-        return out
-    var guard2 = 0
-    while guard2 < 100000:
-        guard2 = guard2 + 1
-        val raw = tcp_fd_read_line_or_empty(link.fd)
-        if raw == "":
-            break
-        val line = _strip_crlf(raw)
-        out.push(line)
-        if _is_final_line(line, tag, smtp):
-            break
+        return tls_read_timeout(link.tls, 65536, budget_ms)
+    tcp_fd_set_read_timeout(link.fd, budget_ms)
+    tcp_fd_read_line_or_empty(link.fd)
+
+# SMTP reply is complete when the last full line is "NNN text" (space after
+# the code) or a bare 3-digit code.
+fn _smtp_reply_complete(buf: text) -> bool:
+    val n = buf.length()
+    if n == 0 or buf.substring(n - 1, n) != "\n":
+        return false
+    val lines = buf.split("\n")
+    var i = lines.len() - 2
+    while i >= 0:
+        val line = _strip_crlf(lines[i])
+        if line != "":
+            return (line.length() >= 4 and line.substring(3, 4) == " ") or line.length() == 3
+        i = i - 1
+    false
+
+fn _lines_of(buf: text) -> [text]:
+    var out: [text] = []
+    for l in buf.split("\n"):
+        val s = _strip_crlf(l)
+        if s != "" or out.len() > 0:
+            out.push(s)
+    # drop the trailing empty element produced by the final CRLF
+    if out.len() > 0 and out[out.len() - 1] == "":
+        var trimmed: [text] = []
+        var i = 0
+        while i < out.len() - 1:
+            trimmed.push(out[i])
+            i = i + 1
+        return trimmed
     out
+
+# Reads one complete reply or fails with a timeout/closed error. IMAP framing
+# is literal-aware (a `{N}` body can never fake the tagged line); `tag` "*"
+# accepts the greeting.
+fn _read_reply(link: MailLink, tag: text, smtp: bool) -> MailReply:
+    val budget = mail_read_timeout_ms()
+    val deadline = time_now_monotonic_ms() + budget
+    var chunks: [text] = []
+    var buf = ""
+    var guard = 0
+    while guard < 1000000:
+        guard = guard + 1
+        if smtp:
+            if _smtp_reply_complete(buf):
+                return MailReply(lines: _lines_of(buf), raw: buf, error: "")
+        else:
+            val done = imap_response_complete(buf, tag)
+            if done >= 0:
+                return MailReply(lines: _lines_of(buf), raw: buf.substring(0, done), error: "")
+        val remaining = deadline - time_now_monotonic_ms()
+        if remaining <= 0:
+            return MailReply(lines: _lines_of(buf), raw: buf, error: _timeout_error())
+        val chunk = _read_chunk(link, remaining)
+        if chunk == "":
+            if time_now_monotonic_ms() >= deadline:
+                return MailReply(lines: _lines_of(buf), raw: buf, error: _timeout_error())
+            return MailReply(lines: _lines_of(buf), raw: buf, error: "mail server closed the connection before replying")
+        chunks.push(chunk)
+        buf = chunks.join("")
+    MailReply(lines: _lines_of(buf), raw: buf, error: "mail reply exceeded the read guard")
 
 fn _last(lines: [text]) -> text:
     if lines.len() == 0:
@@ -215,115 +262,96 @@ fn _last(lines: [text]) -> text:
 # IMAP
 # ============================================================================
 
-fn _imap_ok(lines: [text], tag: text) -> bool:
-    val last = _last(lines)
-    last.starts_with(tag + " OK")
+# std.imap's ImapSession tag counter never advances (imap_next_tag returns
+# the same seq), so the session keeps its own monotonic tag here.
+fn _imap_tag(seq: i64) -> ImapTag:
+    ImapTag(seq: seq)
 
-fn _imap_command(link: MailLink, session, wire: text) -> ([text], text, bool):
-    # `wire` already carries the tag; recover it to detect the tagged reply.
+fn _imap_ok(reply: MailReply, tag: text) -> bool:
+    _last(reply.lines).starts_with(tag + " OK")
+
+# Sends `wire` (already tagged) and reads until its tagged reply.
+fn _imap_command(link: MailLink, wire: text) -> (MailReply, text):
     val tag = wire.split(" ")[0]
     if not _send(link, wire):
-        return ([], tag, false)
-    val lines = _read_until_tag(link, tag)
-    (lines, tag, _imap_ok(lines, tag))
+        return (MailReply(lines: [], raw: "", error: "imap send failed while writing '" + tag + "'"), tag)
+    (_read_reply(link, tag, false), tag)
 
-fn _imap_login(link: MailLink, session) -> text:
-    # Greeting first (untagged "* OK ...").
-    _read_until_tag(link, "*")
-    val tag = imap_next_tag(session)
-    val (_lines, _t, ok) = _imap_command(link, session, imap_build_login(tag, config_mail_user(), config_mail_secret()))
-    if not ok:
+# Returns "" on success, else the error to surface (timeouts propagate as-is).
+fn _imap_login(link: MailLink, tag: ImapTag) -> text:
+    val greeting = _read_reply(link, "*", false)
+    if greeting.error != "":
+        return greeting.error
+    val (reply, t) = _imap_command(link, imap_build_login(tag, config_mail_user(), config_mail_secret()))
+    if reply.error != "":
+        return reply.error
+    if not _imap_ok(reply, t):
         return "imap login failed for user '" + config_mail_user() + "'"
     ""
 
-fn _imap_select(link: MailLink, session, mailbox: text) -> (bool, i64):
-    val tag = imap_next_tag(session)
-    val (lines, _t, ok) = _imap_command(link, session, imap_build_select(tag, mailbox))
-    if not ok:
-        return (false, 0)
+fn _imap_select(link: MailLink, tag: ImapTag, mailbox: text) -> (text, i64):
+    val (reply, t) = _imap_command(link, imap_build_select(tag, mailbox))
+    if reply.error != "":
+        return (reply.error, 0)
+    if not _imap_ok(reply, t):
+        return ("imap select '" + mailbox + "' failed", 0)
     var exists = 0
-    for l in lines:
+    for l in reply.lines:
         if l.starts_with("* ") and l.ends_with(" EXISTS"):
             val parts = l.split(" ")
             if parts.len() >= 3:
                 exists = parts[1].to_i64() ?? 0
-    (true, exists)
+    ("", exists)
 
-fn _header_value(line: text, name: text) -> text:
-    val lower = line.to_lower()
-    if lower.starts_with(name.to_lower() + ":"):
-        return line.substring(name.len() + 1).trim()
-    ""
-
-fn _uid_from_fetch_line(line: text) -> text:
-    val marker = "UID "
-    val parts = line.split(marker)
-    if parts.len() < 2:
-        return ""
-    val rest = parts[1]
-    var uid = ""
-    var i = 0
-    while i < rest.len():
-        val ch = rest[i]
-        if ch >= "0" and ch <= "9":
-            uid = uid + ch
-        else:
-            break
-        i = i + 1
-    uid
-
-# Turns a FETCH (UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)]) response
-# into "uid=<n> | <date> | <from> | <subject>" rows, newest first.
-fn _format_list(lines: [text]) -> text:
+# Turns FETCH (UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)]) messages into
+# "uid=<n> | <date> | <from> | <subject>" rows, newest first.
+fn _format_list(raw: text, tag: text) -> (bool, text):
+    val parsed = imap_parse_fetch_response(raw, tag)
+    if parsed.error != "":
+        return (false, "imap fetch parse error: " + parsed.error)
+    if not imap_status_is_ok(parsed.tag_status):
+        return (false, "imap fetch failed: " + parsed.tag_message)
     var rows: [text] = []
-    var uid = ""
-    var subject = ""
-    var from = ""
-    var date = ""
-    var in_msg = false
-    for l in lines:
-        if l.starts_with("* ") and l.contains(" FETCH "):
-            if in_msg and uid != "":
-                rows.push("uid=" + uid + " | " + date + " | " + from + " | " + subject)
-            uid = _uid_from_fetch_line(l)
-            subject = ""
-            from = ""
-            date = ""
-            in_msg = true
+    for m in parsed.messages:
+        val uid = imap_fetch_uid(m)
+        if uid == "":
             continue
-        if not in_msg:
-            continue
-        val s = _header_value(l, "Subject")
-        if s != "":
-            subject = s
-        val f = _header_value(l, "From")
-        if f != "":
-            from = f
-        val d = _header_value(l, "Date")
-        if d != "":
-            date = d
-    if in_msg and uid != "":
-        rows.push("uid=" + uid + " | " + date + " | " + from + " | " + subject)
+        val fields = imap_parse_header_fields(imap_fetch_item_prefixed(m, "BODY[HEADER"))
+        rows.push("uid=" + uid + " | " + imap_header_value(fields, "Date") + " | " +
+            imap_header_value(fields, "From") + " | " + imap_header_value(fields, "Subject"))
     var rev: [text] = []
     var i = rows.len() - 1
     while i >= 0:
         rev.push(rows[i])
         i = i - 1
-    rev.join("\n")
+    (true, rev.join("\n"))
+
+# Extracts the BODY[] literal of a UID FETCH reply.
+fn _format_message(raw: text, tag: text, uid: text) -> (bool, text):
+    val parsed = imap_parse_fetch_response(raw, tag)
+    if parsed.error != "":
+        return (false, "imap uid fetch parse error: " + parsed.error)
+    if not imap_status_is_ok(parsed.tag_status):
+        return (false, "imap uid fetch failed: " + parsed.tag_message)
+    if parsed.messages.len() == 0:
+        return (false, "mail_read: no message with uid " + uid)
+    var body = imap_fetch_item_prefixed(parsed.messages[0], "BODY[")
+    if body.length() > MAIL_MAX_BODY:
+        body = body.substring(0, MAIL_MAX_BODY) + "\n... [truncated at " + MAIL_MAX_BODY.to_text() + " bytes]"
+    (true, body)
 
 fn _imap_session_run(mailbox: text, on_selected_uid: text, limit: i64) -> (bool, text):
     val link = _connect(config_mail_imap_host(), config_mail_imap_port())
     if not link.ok:
         return (false, link.error)
-    val session = imap_session_new()
-    val login_err = _imap_login(link, session)
+    val login_err = _imap_login(link, _imap_tag(1))
     if login_err != "":
         _close(link)
         return (false, login_err)
-    val (sel_ok, exists) = _imap_select(link, session, mailbox)
-    if not sel_ok:
+    val (sel_err, exists) = _imap_select(link, _imap_tag(2), mailbox)
+    if sel_err != "":
         _close(link)
-        return (false, "imap select '" + mailbox + "' failed")
+        return (false, sel_err)
     var result = ""
     var ok = true
     if on_selected_uid == "":
@@ -333,51 +361,26 @@ fn _imap_session_run(mailbox: text, on_selected_uid: text, limit: i64) -> (bool,
             var lo = exists - limit + 1
             if lo < 1:
                 lo = 1
-            val tag = imap_next_tag(session)
-            val wire = imap_build_fetch(tag, lo.to_text() + ":" + exists.to_text(), "(UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
-            val (lines, _t, fok) = _imap_command(link, session, wire)
-            if fok:
-                result = _format_list(lines)
-            else:
+            val wire = imap_build_fetch(_imap_tag(3), lo.to_text() + ":" + exists.to_text(), "(UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])")
+            val (reply, t) = _imap_command(link, wire)
+            if reply.error != "":
                 ok = false
-                result = "imap fetch failed: " + _last(lines)
+                result = reply.error
+            else:
+                val (fok, formatted) = _format_list(reply.raw, t)
+                ok = fok
+                result = formatted
     else:
-        # Facade gap: imap_build_fetch emits FETCH, not UID FETCH; build the
-        # UID form from the same tag text.
-        val tag = imap_next_tag(session)
-        val wire = imap_tag_to_text(tag) + " UID FETCH " + on_selected_uid + " (BODY.PEEK[])\r\n"
-        val (lines, _t, fok) = _imap_command(link, session, wire)
-        if fok:
-            var body: [text] = []
-            var seen_fetch = false
-            for l in lines:
-                if not seen_fetch:
-                    if l.starts_with("* ") and l.contains(" FETCH "):
-                        seen_fetch = true
-                    continue
-                if l.starts_with(_t + " "):
-                    break
-                body.push(l)
-            # drop the closing ")" of the FETCH response
-            if body.len() > 0 and _last(body) == ")":
-                var trimmed: [text] = []
-                var bi = 0
-                while bi < body.len() - 1:
-                    trimmed.push(body[bi])
-                    bi = bi + 1
-                body = trimmed
-            if not seen_fetch:
-                ok = false
-                result = "mail_read: no message with uid " + on_selected_uid
-            else:
-                result = body.join("\n")
-                if result.len() > MAIL_MAX_BODY:
-                    result = result.substring(0, MAIL_MAX_BODY) + "\n... [truncated at " + MAIL_MAX_BODY.to_text() + " bytes]"
-        else:
+        val wire = imap_build_uid_fetch(_imap_tag(3), on_selected_uid, "(BODY.PEEK[])")
+        val (reply, t) = _imap_command(link, wire)
+        if reply.error != "":
             ok = false
-            result = "imap uid fetch failed: " + _last(lines)
-    val ltag = imap_next_tag(session)
-    _imap_command(link, session, imap_build_logout(ltag))
+            result = reply.error
+        else:
+            val (fok, formatted) = _format_message(reply.raw, t, on_selected_uid)
+            ok = fok
+            result = formatted
+    _imap_command(link, imap_build_logout(_imap_tag(4)))
     _close(link)
     (ok, result)
 
@@ -418,17 +421,19 @@ fn mail_read(uid: text) -> (bool, text):
 
 fn _smtp_code(lines: [text]) -> i64:
     val last = _last(lines)
-    if last.len() < 3:
+    if last.length() < 3:
         return 0
     last.substring(0, 3).to_i64() ?? 0
 
 fn _smtp_step(link: MailLink, wire: text, want: i64) -> text:
     if not _send(link, wire):
         return "smtp send failed while writing '" + wire.trim() + "'"
-    val reply = _read_smtp_reply(link)
-    val code = _smtp_code(reply)
+    val reply = _read_reply(link, "", true)
+    if reply.error != "":
+        return reply.error
+    val code = _smtp_code(reply.lines)
     if code != want:
-        return "smtp expected " + want.to_text() + " after '" + wire.trim().split(" ")[0] + "', got: " + _last(reply)
+        return "smtp expected " + want.to_text() + " after '" + wire.trim().split(" ")[0] + "', got: " + _last(reply.lines)
     ""
 
 fn mail_send(to: text, subject: text, body: text) -> (bool, text):
@@ -442,7 +447,7 @@ fn mail_send(to: text, subject: text, body: text) -> (bool, text):
         return (false, MAIL_NOT_CONFIGURED)
     val port = config_mail_smtp_port()
     if port == smtp_starttls_port():
-        return (false, "mail_send: smtp_port 587 needs STARTTLS, which the TLS facade cannot upgrade in place; use 465 (implicit TLS) or a plaintext port")
+        return (false, "mail_send: smtp_port 587 needs STARTTLS: " + starttls_runtime_gap_error(port))
     val user = config_mail_user()
     if user != "":
         val serr = mail_secret_error()
@@ -451,10 +456,13 @@ fn mail_send(to: text, subject: text, body: text) -> (bool, text):
     val link = _connect(config_mail_smtp_host(), port)
     if not link.ok:
         return (false, link.error)
-    val greet = _read_smtp_reply(link)
-    if _smtp_code(greet) != 220:
+    val greet = _read_reply(link, "", true)
+    if greet.error != "":
         _close(link)
-        return (false, "smtp greeting was not 220: " + _last(greet))
+        return (false, greet.error)
+    if _smtp_code(greet.lines) != 220:
+        _close(link)
+        return (false, "smtp greeting was not 220: " + _last(greet.lines))
     var err = _smtp_step(link, smtp_command_ehlo("localhost"), 250)
     if err == "" and user != "":
         err = _smtp_step(link, smtp_command_auth_plain().trim() + " " + auth_plain_encode(user, config_mail_secret()) + "\r\n", 235)
