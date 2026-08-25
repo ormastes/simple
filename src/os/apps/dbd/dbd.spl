@@ -68,6 +68,7 @@ use os.tls13.server.{
 }
 use std.common.contracts.execution.simpleos_server_v1.{ServerLifecycleState, ServerLifecycleV1, server_lifecycle_v1_default}
 use std.common.string_core.{text_to_bytes}
+use os.userlib.server_startup.{server_startup_evidence_consume_v1}
 
 extern fn serial_println(msg: text)
 extern fn rt_net_socket(proto: i64) -> i64
@@ -240,6 +241,7 @@ pub class DbdServer:
     next_auth_session_id: i64
     dbfs_adapter: DbdDbfsAdapter
     provisioning: DbdProvisioningOwnerV1
+    startup_evidence_consumed: bool
 
 impl DbdServer:
     pub static fn new() -> DbdServer:
@@ -253,12 +255,24 @@ impl DbdServer:
                   credential_provider: DbdCredentialProvider.new(),
                   next_auth_session_id: 1,
                   dbfs_adapter: DbdDbfsAdapter.detached("dbfs-root-driver-unavailable"),
-                  provisioning: DbdProvisioningOwnerV1.new())
+                  provisioning: DbdProvisioningOwnerV1.new(),
+                  startup_evidence_consumed: false)
+
+    pub static fn new_filesystem_launched_v1() -> DbdServer:
+        """Acquire one-shot startup evidence only for the canonical FS entry."""
+        var server = DbdServer.new()
+        server.startup_evidence_consumed =
+            server_startup_evidence_consume_v1()
+        server
+
+    pub fn startup_evidence_ready_v1() -> bool:
+        self.startup_evidence_consumed
 
     pub me provision_service(
         principal: text, credential: [u8], cert_chain: [[u8]],
         private_key: [u8], signature_scheme: u16
     ) -> bool:
+        if not self.startup_evidence_consumed: return false
         if not self.provisioning.admit(
             principal, credential, cert_chain, private_key, signature_scheme):
             self.credential_provider.revoke()
@@ -267,10 +281,13 @@ impl DbdServer:
         true
 
     pub fn service_ready() -> bool:
-        self.provisioning.ready() and self.credential_provider.configured and
+        self.startup_evidence_consumed and
+            self.provisioning.ready() and self.credential_provider.configured and
             self.dbfs_adapter.ready() and self.persistence.healthy
 
     pub fn service_blocker() -> text:
+        if not self.startup_evidence_consumed:
+            return "server-startup-evidence-unavailable"
         if not self.provisioning.ready(): return self.provisioning.blocker()
         if not self.dbfs_adapter.ready(): return self.dbfs_adapter.blocker()
         if not self.persistence.healthy: return "dbd-persistence-quarantined"
@@ -294,6 +311,7 @@ impl DbdServer:
     pub me attach_filesystem_dbfs_vfs(
         dbfs_root: bool, durable_sync: bool, transactional_replace: bool
     ) -> bool:
+        if not self.startup_evidence_consumed: return false
         # A live adapter already owns its mount-generation lease and staging
         # generation.  Reconstructing it from repeated compatibility claims
         # would reset the temporary-name sequence and could collide with an
@@ -588,6 +606,7 @@ impl DbdServer:
     # ------------------------------------------------------------------
 
     pub me bind_listener(port: i64) -> i64:
+        if not self.startup_evidence_consumed: return DBD_STARTUP_BLOCKED_RC
         if self.listener_close.owns_fd() or
             self.lifecycle.state != ServerLifecycleState.Created:
             return -16

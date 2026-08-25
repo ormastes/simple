@@ -9,7 +9,10 @@ use os.kernel.loader.fs_exec_spawn.{
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
-use os.kernel.abi.syscall_shim.{shim_init}
+use os.kernel.abi.syscall_shim.{
+    shim_init, shim_server_startup_runtime_owner_enable_v1,
+    shim_server_startup_runtime_owner_disable_v1
+}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
@@ -112,8 +115,10 @@ pub fn arm64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
             path, argv, envp, launch_id.id))
     val launch_log = KernelLog.new(256)
     shim_init(prepared.scheduler, launch_ipc, launch_log)
+    shim_server_startup_runtime_owner_enable_v1()
     val rc = dispatch_fs_exec_user_handoff(Architecture.Arm64, prepared.pid as u64, prepared.scheduler)
     net_arm64_task_teardown(launch_id.id)
+    shim_server_startup_runtime_owner_disable_v1()
     shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(64))
     rc
 
@@ -157,8 +162,17 @@ pub fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
             exit_code: prepared.pid, evidence: nil, scheduler: prepared.scheduler)
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
     val child = TaskId(id: prepared.pid.to_u64())
+    var launch_ipc = IpcManager.new()
+    launch_ipc.cap_manager.init_task(
+        child, arm64_fs_exec_launch_caps_with_launch_v1(
+            path, argv, envp, child.id))
+    val launch_log = KernelLog.new(256)
+    shim_init(prepared.scheduler, launch_ipc, launch_log)
+    shim_server_startup_runtime_owner_enable_v1()
     val exit_code = dispatch_fs_exec_user_handoff(
         Architecture.Arm64, child.id, prepared.scheduler)
+    shim_server_startup_runtime_owner_disable_v1()
+    shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(64))
     var owner = prepared.scheduler
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
