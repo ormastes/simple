@@ -29,4 +29,10 @@
 - Windows: legacy execution remains functional with unavailable evidence; observed Job accounting/enforcement acceptance is blocked with owner, implementation steps, and resume command in `doc/08_tracking/todo/simple_build_test_abnormality_windows_job_receipt_2026-08-24.md`.
 - macOS: process-group/RLIMIT execution remains functional with unavailable evidence; observed direct-child/sampled-tree acceptance is blocked with owner, implementation steps, and resume command in `doc/08_tracking/todo/simple_build_test_abnormality_macos_receipt_2026-08-24.md`.
 
+## Open acceptance debt
+
+The executable spec does not yet cover every selected requirement through a
+production path. The authoritative completion checklist is
+`doc/08_tracking/todo/simple_build_test_abnormality_acceptance_completion_2026-08-25.md`.
+
 The executable scenario lives under `test/03_system/app/perf/feature/`; its mirrored manual is Markdown only under `doc/06_spec/03_system/app/perf/feature/`.
