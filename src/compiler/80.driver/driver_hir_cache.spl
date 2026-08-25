@@ -14,9 +14,9 @@
 # siblings that are not import edges. So the key folds a digest of ALL frozen
 # surfaces, not the import closure alone; a per-import key would serve a stale
 # module after an edit to a non-imported sibling that adds a same-named
-# declaration. The price is that any source edit invalidates every entry --
-# acceptable, because the win this cache exists for is the repeated bootstrap
-# stages over an IDENTICAL tree.
+# declaration. Frozen semantic surface identities let implementation-only and
+# comment edits preserve dependent entries; unsupported semantic payloads fall
+# back to conservative whole-file invalidation.
 #   key = sha256( sha256(source file) | closure digest | is_entry
 #                 | the env switches that change what lowering emits
 #                 | codec header )
@@ -97,16 +97,56 @@ fn hir_cache_dir() -> text:
     val lane_name = if lane == "": "default" else: lane
     "build/bootstrap/native_cache/{lane_name}/hir"
 
-# Digest of every frozen surface, computed ONCE per build. Folds the fields
-# that identify a surface's content: its canonical path and content hash plus
-# the names it is registered under (an alias change moves what a sibling
-# resolves to without changing any file hash).
+# Digest of every frozen surface, computed ONCE per build. A cacheable surface
+# carries the span/body-free semantic identity published by registry freeze;
+# ordinary body and comment edits therefore preserve importer HIR entries.
+# A surface whose projection met an opaque value fails closed to its whole-file
+# identity. Canonical path and registry names remain independent identity
+# terms: an alias change can move sibling resolution without changing either
+# declaration semantics or file bytes.
 fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
-    var parts: [text] = ["{surfaces.surfaces.len()}\n"]
+    # Construction-time limbs cover declarations only. Routes, origins, alias
+    # mappings, and preferred names become authoritative at freeze, so an
+    # unfrozen or generation-misaligned registry must never produce a key.
+    if not surfaces.frozen or surfaces.generation <= 0:
+        return ""
+    if surfaces.ordered_names.len() != surfaces.ordered_indices.len():
+        return ""
+    # A promoted staged/native registry may have released its transient Dict;
+    # that carrier reports a negative length while the flat ordered mapping
+    # remains authoritative and intact.
+    val compatibility_count = surfaces.index_by_name.len()
+    if (compatibility_count >= 0 and
+        compatibility_count != surfaces.ordered_names.len()):
+        return ""
+    var parts: [text] = ["hir-closure-semantic-v1\n{surfaces.surfaces.len()}\n"]
     var i = 0
     while i < surfaces.surfaces.len():
         val s = surfaces.surfaces[i]
-        parts = parts.push(s.canonical_path + "|" + "{s.content_hash}" + "|" + "{s.content_length}" + "|" + s.module_name + "|" + s.logical_name + "\n")
+        if not s.frozen or s.generation != surfaces.generation:
+            return ""
+        val dependency_identity = if s.semantic_cacheable:
+            "semantic|{s.semantic_hash0}|{s.semantic_hash1}|{s.semantic_hash2}|{s.semantic_hash3}"
+        else:
+            # Unsupported/opaque semantic payload: preserve the prior safe
+            # whole-file invalidation instead of risking a stale HIR hit.
+            "source|{s.content_hash}|{s.content_length}"
+        parts = parts.push(s.canonical_path + "|" + dependency_identity + "|" + s.module_name + "|" + s.logical_name + "|" + s.preferred_registry_name + "\n")
+        i = i + 1
+    # HIR lookup consumes the authoritative ordered registry mapping. When its
+    # transient compatibility Dict still exists, validate agreement too. Keep
+    # exact order because package-sibling and re-export traversal observe it.
+    i = 0
+    while i < surfaces.ordered_names.len():
+        val name = surfaces.ordered_names[i]
+        val surface_index = surfaces.ordered_indices[i]
+        if surface_index < 0 or surface_index >= surfaces.surfaces.len():
+            return ""
+        if compatibility_count >= 0:
+            if (not surfaces.index_by_name.contains_key(name) or
+                surfaces.index_by_name[name] != surface_index):
+                return ""
+        parts = parts.push("registry|" + name + "|{surface_index}\n")
         i = i + 1
     sha256_text(parts.join(""))
 
