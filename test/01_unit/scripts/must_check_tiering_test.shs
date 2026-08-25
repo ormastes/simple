@@ -39,6 +39,7 @@ trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer" "$rules_fixtur
 
 # The production external-evidence validator owns the acceptance matrix. Prove
 # one valid row and adjacent semantic mutations before testing recorder wiring.
+export MUST_CHECK_SELFTEST=1
 mkdir -p "$external_fixture/evidence" "$external_fixture/scripts/check/lib" \
     "$external_fixture/scripts/bootstrap" "$external_fixture/config/check" \
     "$external_fixture/src/compiler" "$external_fixture/src/lib" "$external_fixture/src/app" \
@@ -67,16 +68,16 @@ external_fp=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 external_run=run-001
 cat > "$external_fixture/evidence/command.env" <<EOF
 evidence_schema=simple.must-check-command/v1
-gate_id=web-server-request-port
+gate_id=fixture-generic
 source_fingerprint=$external_fp
 run_id=$external_run
-command=check-web-server-request-port
+command=check-fixture-generic
 exit_status=0
 final_verdict=PASS
 EOF
 cat > "$external_fixture/evidence/target.env" <<EOF
 evidence_schema=simple.must-check-target/v1
-gate_id=web-server-request-port
+gate_id=fixture-generic
 run_id=$external_run
 target_kind=native-host
 target_id=fixture-host
@@ -84,14 +85,14 @@ final_verdict=PASS
 EOF
 cat > "$external_fixture/evidence/toolchain.env" <<EOF
 evidence_schema=simple.must-check-toolchain/v1
-gate_id=web-server-request-port
+gate_id=fixture-generic
 run_id=$external_run
 toolchain_id=fixture-toolchain
 final_verdict=PASS
 EOF
 cat > "$external_fixture/evidence/observations.env" <<EOF
 evidence_schema=simple.must-check-observations/v1
-gate_id=web-server-request-port
+gate_id=fixture-generic
 source_fingerprint=$external_fp
 run_id=$external_run
 acceptance_ids=configurable-port,listen,request,response,ownership,stop,no-leak
@@ -113,7 +114,7 @@ observations_sha=$(sha256sum "$external_fixture/evidence/observations.env" | awk
 external_artifact="$external_fixture/evidence/summary.env"
 cat > "$external_artifact" <<'EOF'
 evidence_schema=simple.must-check-external-evidence/v2
-gate_id=web-server-request-port
+gate_id=fixture-generic
 source_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 final_verdict=PASS
 producer_id=server-producer
@@ -129,7 +130,7 @@ toolchain_identity_path=evidence/toolchain.env
 toolchain_identity_sha256=TOOLCHAIN_SHA
 observations_path=evidence/observations.env
 observations_sha256=OBSERVATIONS_SHA
-acceptance_contract=web-server-request-port/v1
+acceptance_contract=fixture-generic/v1
 acceptance_ids=configurable-port,listen,request,response,ownership,stop,no-leak
 EOF
 sed -i "s/COMMAND_SHA/$command_sha/; s/TARGET_SHA/$target_sha/; s/TOOLCHAIN_SHA/$toolchain_sha/; s/OBSERVATIONS_SHA/$observations_sha/" "$external_artifact"
@@ -145,7 +146,7 @@ external_signed_commit=$(git -C "$external_fixture" rev-parse HEAD)
 MUST_CHECK_ROOT="$external_fixture" \
 MUST_CHECK_RECEIPT_FILE="$external_receipt" \
 MUST_CHECK_ARTIFACT_FILE="$external_artifact" \
-MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+MUST_CHECK_EXPECTED_GATE=fixture-generic \
 MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     sh "$external_validator" | grep -q '^STATUS: PASS '
 
@@ -162,7 +163,7 @@ for caret_case in \
     caret_gate=${caret_case%%|*}
     caret_ids=${caret_case#*|}
     sed \
-        -e "s/^gate_id=web-server-request-port$/gate_id=$caret_gate/" \
+        -e "s/^gate_id=fixture-generic$/gate_id=$caret_gate/" \
         -e "s|^command_receipt_path=.*$|command_receipt_path=../../hostile|" \
         -e "s|^acceptance_contract=.*$|acceptance_contract=$caret_gate/v1|" \
         -e "s|^acceptance_ids=.*$|acceptance_ids=$caret_ids|" \
@@ -193,6 +194,50 @@ git -C "$external_fixture" show "$external_signed_commit:evidence/reviewer.sig" 
 git -C "$external_fixture" add evidence/reviewer.sig
 git -C "$external_fixture" commit -qm restore-web-reviewer-signature
 
+# The remaining production rows below also have no registry-owned semantic
+# replay checker. A valid reviewer signature authenticates the summary bytes,
+# but generic PASS labels must still fail before a hostile attachment is read.
+for generic_case in \
+    'web-server-request-port|configurable-port,listen,request,response,ownership,stop,no-leak' \
+    'web-server-gpu-nginx|request-port,cpu-result,gpu-device-hit,gpu-result-parity,nginx-throughput,nginx-latency' \
+    'db-server-request-port|configurable-port,listen,query,result,ownership,stop,no-leak' \
+    'db-server-gpu-sql|request-port,cpu-result,gpu-device-hit,gpu-result-parity,postgresql-parity,mysql-parity' \
+    'simpleos-sbc-qemu-ls|image-identity,sbc-boot,sbc-ls,qemu-boot,qemu-ls,paired-parity' \
+    'simple-generated-vhdl-linux|stage4-generator,generator-provenance,rtl-tools,vhdl-generated,linux-boot,linux-ls'; do
+    generic_gate=${generic_case%%|*}
+    generic_ids=${generic_case#*|}
+    sed \
+        -e "s/^gate_id=fixture-generic$/gate_id=$generic_gate/" \
+        -e "s|^command_receipt_path=.*$|command_receipt_path=../../hostile|" \
+        -e "s|^acceptance_contract=.*$|acceptance_contract=$generic_gate/v1|" \
+        -e "s|^acceptance_ids=.*$|acceptance_ids=$generic_ids|" \
+        "$external_artifact" > "$external_fixture/generic.artifact"
+    openssl dgst -sha256 -sign "$external_fixture/reviewer-private.pem" \
+        -out "$external_fixture/evidence/reviewer.sig" "$external_fixture/generic.artifact"
+    generic_signature_sha=$(sha256sum "$external_fixture/evidence/reviewer.sig" | awk '{print $1}')
+    printf '%s\n' \
+        'reviewer_signature_path=evidence/reviewer.sig' \
+        "reviewer_signature_sha256=$generic_signature_sha" > "$external_fixture/generic.receipt"
+    git -C "$external_fixture" add evidence/reviewer.sig
+    git -C "$external_fixture" commit -qm "signed-quarantined-$generic_gate"
+    if MUST_CHECK_ROOT="$external_fixture" \
+        MUST_CHECK_RECEIPT_FILE="$external_fixture/generic.receipt" \
+        MUST_CHECK_ARTIFACT_FILE="$external_fixture/generic.artifact" \
+        MUST_CHECK_EXPECTED_GATE="$generic_gate" \
+        MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        sh "$external_validator" > "$external_fixture/generic.out" 2>&1; then
+        echo "FAIL: generic signed production receipt was admitted: $generic_gate"
+        exit 1
+    fi
+    grep -Fq "semantic-validator-not-implemented-$generic_gate" "$external_fixture/generic.out" || {
+        echo "FAIL: production receipt did not fail at semantic quarantine: $generic_gate"
+        exit 1
+    }
+done
+git -C "$external_fixture" show "$external_signed_commit:evidence/reviewer.sig" > "$external_fixture/evidence/reviewer.sig"
+git -C "$external_fixture" add evidence/reviewer.sig
+git -C "$external_fixture" commit -qm restore-generic-reviewer-signature
+
 for mutation in \
     's/producer_id=server-producer/producer_id=fixture-reviewer/' \
     's/reviewer_key_id=fixture-reviewer/reviewer_key_id=other-reviewer/' \
@@ -202,7 +247,7 @@ for mutation in \
     MUST_CHECK_ROOT="$external_fixture" \
     MUST_CHECK_RECEIPT_FILE="$external_receipt" \
     MUST_CHECK_ARTIFACT_FILE="$external_fixture/external-bad.artifact" \
-    MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+    MUST_CHECK_EXPECTED_GATE=fixture-generic \
     MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
         sh "$external_validator" >/dev/null 2>&1 && {
             echo "FAIL: external semantic evidence mutation was accepted: $mutation"
@@ -219,7 +264,7 @@ git -C "$external_fixture" commit -qm replace-reviewer-key-with-wrong-key
 MUST_CHECK_ROOT="$external_fixture" \
 MUST_CHECK_RECEIPT_FILE="$external_receipt" \
 MUST_CHECK_ARTIFACT_FILE="$external_artifact" \
-MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+MUST_CHECK_EXPECTED_GATE=fixture-generic \
 MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     sh "$external_validator" >/dev/null 2>&1 && {
         echo 'FAIL: external summary signed by another key was accepted'
@@ -236,7 +281,7 @@ git -C "$external_fixture" commit -qm tampered-observations-after-review
 MUST_CHECK_ROOT="$external_fixture" \
 MUST_CHECK_RECEIPT_FILE="$external_receipt" \
 MUST_CHECK_ARTIFACT_FILE="$external_artifact" \
-MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+MUST_CHECK_EXPECTED_GATE=fixture-generic \
 MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     sh "$external_validator" >/dev/null 2>&1 && {
         echo 'FAIL: changed committed observation blob retained its old admission'
@@ -259,7 +304,7 @@ for contradiction in FAIL BLOCKED; do
     MUST_CHECK_ROOT="$external_fixture" \
     MUST_CHECK_RECEIPT_FILE="$external_receipt" \
     MUST_CHECK_ARTIFACT_FILE="$external_artifact" \
-    MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+    MUST_CHECK_EXPECTED_GATE=fixture-generic \
     MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
         sh "$external_validator" >/dev/null 2>&1 && {
             echo "FAIL: contradictory $contradiction acceptance was admitted"
@@ -276,7 +321,7 @@ printf '%s\n' '# RV32 projection' > "$external_fixture/src/rv32/core.spl"
 printf '%s\n' '# RV64 projection' > "$external_fixture/src/rv64/core.spl"
 for kind in command target toolchain observations; do
     git -C "$external_fixture" show "$external_signed_commit:evidence/$kind.env" > "$external_fixture/evidence/$kind.env"
-    sed -i 's/web-server-request-port/riscv32-riscv64-shared/g' "$external_fixture/evidence/$kind.env"
+    sed -i 's/fixture-generic/riscv32-riscv64-shared/g' "$external_fixture/evidence/$kind.env"
 done
 sed -i 's/server-producer/riscv-producer/' "$external_fixture/evidence/command.env" 2>/dev/null || true
 cat > "$external_fixture/evidence/observations.env" <<EOF
@@ -649,6 +694,8 @@ sh "$external_fixture/scripts/check/check-binary-size-go-parity.shs" \
         echo 'FAIL: divergent binary-size semantic output was accepted'
         exit 1
     }
+
+unset MUST_CHECK_SELFTEST
 
 # A --ref scan must parse policy from that commit, not a hostile/dirty working
 # rules.sdl. The dirty command would sleep and fail if the checker read it.
