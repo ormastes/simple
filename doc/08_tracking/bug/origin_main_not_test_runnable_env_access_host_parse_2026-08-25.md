@@ -35,10 +35,44 @@ Last commit touching the file: `98215e0f708 feat: implement MC/DC RT HAL hardeni
 A fresh clone of `main` cannot run its own test suite. Every session currently reporting green
 tests is doing so against a working tree that differs from `main`.
 
-## Suggested guard
-A pre-push check that parses the committed `src/app/**` + `src/lib/**` (e.g. `simple compile`
-or a parse-only entry point) from a `git worktree` of the new tip — the `.spl` analogue of
-`check-seed-builds-push.shs`, and fail-closed the same way.
+## Guard (landed 2026-08-25) — `scripts/check/check-main-test-runnable-push.shs`
+
+The guard suggested here now exists and is wired as a blocking `push` row
+(`push-main-test-runnable`) in `config/check/must_check_gates.sdn`. It materialises the
+pushed tip with `git worktree add --detach` and runs `test/fixtures/doctest/green.md`
+inside it; verdict convention matches the other pre-push guards, and a missing binary,
+missing fixture, or unmaterialisable worktree is ERROR, never a pass.
+
+**It is narrower than this section originally asked for, and is named for what it checks.**
+A trivial doctest opens ~82 stdlib sources, not the ~14k `.spl` in the tree, so the
+invariant is "the committed tree is test-runnable", not "every committed `.spl` parses" — a
+syntax error in a module nothing loads at startup still gets through. That is a deliberate
+cost trade: `simple lint` over the tree is unaffordable per push (superlinear per-declaration
+cost, `.claude/rules/commands.md`), whereas this pays the compiler's startup path once, which
+is the path this incident broke and the one whose failure invalidates every other session's
+test evidence. The whole-tree parse sweep remains a separate, more expensive guard that does
+not yet exist.
+
+Cost ~70s cold, 0.1s warm. Skips are positive-proof only: a content-keyed green marker over
+the git tree ids of `src/app` + `src/lib` + the fixture, the same pattern as
+`check-seed-builds-push.shs`, so a skip means "this exact content already ran green here",
+never "the range looked unrelated".
+
+Selftest fatal, 6 fixtures. Two near-misses during development are worth recording, because
+each would have produced a guard that passed forever:
+
+- Matching only a non-zero exit made the incident-replay fixture vacuous. A fresh worktree
+  has no `bin/simple` (gitignored symlink) and the doctest runner spawns a CHILD compiler
+  from that path, so every block failed with or without the injected bug — which briefly made
+  this guard report a healthy `origin/main` as broken. The guard now provisions the symlink,
+  fixture C1 requires the clean worktree to run green first, and C2 requires the failure
+  detail to NAME the parse error.
+- If stdlib resolution ever escapes the tree under test (the nested-`.git` mode where a
+  binary read `src/lib` from an unrelated worktree), C2 goes green and the fatal selftest
+  stops the run.
+
+Verified on `origin/main` at `c2504144e5a`: `PASS — 1 fixture invocation executed ... tree is
+test-runnable`.
 
 ## Resolution (2026-08-25, same day)
 
