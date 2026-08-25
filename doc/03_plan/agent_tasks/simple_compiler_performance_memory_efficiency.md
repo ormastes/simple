@@ -1734,6 +1734,20 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No manual execution was run under the user override; static semantic,
   performance, and fixture review is required before sync.
 
+# Completed tranche: compiler-output ANSI spans (2026-08-25)
+
+- Replaced chained stdout/newline/stderr concatenation with one fixed-fragment
+  join.
+- Replaced per-visible-character ANSI cleanup fragments with visible spans and
+  a plain-output identity fast path.
+- Preserved the exact discard-through-`m`, unterminated, Unicode, newline, and
+  cross-stream contracts.
+- Added paired behavior/structural evidence and a canonical manual.
+- Parallel semantic and performance review passed; evidence review found only
+  optional fixture expansion, which was excluded to stop scope growth.
+- No tests, builds, SPipe, optimizer, benchmark, timing, allocation, or RSS
+  command was run under the user's no-verification override.
+
 # Completed tranche: severity override allocation hardening (2026-08-25)
 
 - Replaced per-digit substring creation with byte classification.

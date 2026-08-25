@@ -968,3 +968,14 @@ clean compiler output. Counting and JSON collection keep independent semantic
 owners but must share this boundary function, consume only one transient line at
 a time, preserve source order, and never retain a whole-output split array.
 Existing trim and diagnostic parsing remain downstream authorities.
+
+# Compiler-output cleanup ownership
+
+`query_diagnostics._clean_check_output` owns the exact stdout, one-newline,
+stderr composition and must publish it with one fixed-fragment join.
+`query_diagnostics._strip_ansi` is the sole owner of the legacy ANSI cleanup
+contract: plain input is returned unchanged; each ESC suppresses bytes through
+the next ASCII `m`; an unterminated escape suppresses the remainder. It must
+retain visible spans rather than one text object per character. Combining
+streams before stripping is intentional and preserves cross-stream escape
+handling.

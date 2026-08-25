@@ -3579,6 +3579,24 @@ tier checker. Each source is scanned once in O(N) time with one integer result
 per physical line and no masked text construction for DEPR002. No timing,
 allocation, or RSS measurement was run under the no-verification override.
 
+# 2026-08-25 follow-up: compiler-output ANSI span cleanup
+
+`_clean_check_output` previously built stdout, the mandatory newline, and
+stderr with chained immutable concatenation. `_strip_ansi` then retained one
+text fragment per visible character before joining those fragments. The new
+path joins the fixed three input fragments once and, only when an ESC byte is
+present, retains complete visible spans while preserving the historical
+discard-through-ASCII-`m` contract. Cleanup still runs after stream
+composition, so an escape begun in stdout may terminate in stderr.
+
+For N combined bytes, E escape runs, and V visible bytes, cleanup is O(N).
+Plain output returns the combined text without a second rewrite. ANSI output
+uses O(V + E) auxiliary output storage beyond the combined input; the complete
+cleaning path has conservative peak owned output O(N + V + E). This is a
+fragment-count and copying improvement, not a zero-copy claim. No compiler,
+test, timing, allocation, or RSS execution was performed under the user's
+no-verification override.
+
 # 2026-08-25 follow-up: severity override rewrite allocation
 
 Active diagnostic policy scanned the severity digit run by constructing a

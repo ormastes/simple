@@ -1299,3 +1299,13 @@ otherwise advances to `line_end + 1`. This deliberately visits the synthetic
 empty terminal segment after a trailing LF, matching split semantics; downstream
 admission ignores it. Count retains only trim/prefix state. Collection invokes
 the canonical line-to-JSON parser once and appends only nonempty results.
+
+# Compiler-output ANSI span design
+
+Compose `[stdout, "\n", stderr]` once, then locate the first ESC byte. If none
+exists, return the composed text unchanged. Otherwise retain the visible prefix,
+scan monotonically, append each subsequent visible interval as one substring,
+and skip ESC sequences through ASCII `m`. If no terminator exists, join and
+return the retained prefix. A final visible interval is appended once. This
+keeps O(N) traversal, replaces per-character fragment growth with O(E) retained
+regions, and preserves the established malformed and cross-stream behavior.

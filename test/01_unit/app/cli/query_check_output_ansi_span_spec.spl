@@ -1,0 +1,46 @@
+"""Prove compiler output composition and ANSI cleanup use bounded spans."""
+
+use app.cli.query_diagnostics.{_clean_check_output, _strip_ansi}
+use std.io_runtime.file_read
+use std.spec.step
+
+describe "query check output ANSI spans":
+    it "preserves plain Unicode malformed and cross-stream escape behavior":
+        step("Keep the historical discard-through-m contract over joined output")
+        val plain = "plain ✓ 日本語"
+        expect(_strip_ansi(plain)).to_equal(plain)
+        expect(_strip_ansi("a\033[31mred\033[0mz")).to_equal("aredz")
+        expect(_strip_ansi("a\033[31m\033[1mb")).to_equal("ab")
+        expect(_strip_ansi("prefix\033[unterminated")).to_equal("prefix")
+        expect(_strip_ansi("✓\033[31m日本語\033[0m café")).to_equal(
+            "✓日本語 café")
+        expect(_clean_check_output("", "")).to_equal("\n")
+        expect(_clean_check_output("out", "err")).to_equal("out\nerr")
+        expect(_clean_check_output("a\033[31", "mred")).to_equal("ared")
+
+    it "joins streams once and retains one fragment per visible span":
+        step("Reject chained output copies and per-character text fragments")
+        val source = file_read("src/app/cli/query_diagnostics.spl")
+        val clean_start = source.index_of("fn _clean_check_output(")
+        val clean_end = source.index_of(
+            "fn _should_run_lint_after_clean_output(", clean_start)
+        expect(clean_start).to_be_greater_than(-1)
+        expect(clean_end).to_be_greater_than(clean_start)
+        val clean = source.slice(clean_start, clean_end)
+        expect(clean).to_contain("[check_stdout, \"\\n\", check_stderr]")
+        expect(clean).to_contain("_strip_ansi(parts.join(\"\"))")
+        expect(clean).not.to_contain("check_stdout + \"\\n\" + check_stderr")
+
+        val strip_start = source.index_of("fn _strip_ansi(")
+        val strip_end = source.index_of(
+            "fn _count_check_output_diagnostics(", strip_start)
+        expect(strip_start).to_be_greater_than(-1)
+        expect(strip_end).to_be_greater_than(strip_start)
+        val strip = source.slice(strip_start, strip_end)
+        expect(strip).to_contain("first_escape = _find_in_line_from(")
+        expect(strip).to_contain("s.byte_at(i) == 27")
+        expect(strip).to_contain("s.byte_at(i) != 109")
+        expect(strip).to_contain("parts.push(s.substring(span_start, i))")
+        expect(strip).to_contain("parts.join(\"\")")
+        expect(strip).not.to_contain("for ch in s:")
+        expect(strip).not.to_contain("parts.push(ch)")
