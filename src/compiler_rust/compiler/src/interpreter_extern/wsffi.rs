@@ -116,7 +116,7 @@ pub fn spl_dynlib_snapshot_linux(args: &[Value]) -> Result<Value, CompileError> 
 /// Open a shared library and return its handle as i64.
 ///
 /// Callable from Simple as: `spl_dlopen(path: text) -> i64`
-/// Returns 0 on failure.
+/// Loader failures are interpreter errors; they are never fabricated handles.
 pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("spl_dlopen requires 1 argument (path)"));
@@ -131,7 +131,11 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     {
         let c_path = match CString::new(path.as_str()) {
             Ok(c) => c,
-            Err(_) => return Ok(Value::Int(0)),
+            Err(_) => {
+                return Err(CompileError::runtime(
+                    "E-SFFI-001: spl_dlopen path contains an interior NUL",
+                ));
+            }
         };
 
         let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
@@ -140,9 +144,15 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
             let err = unsafe { libc::dlerror() };
             if !err.is_null() {
                 let err_str = unsafe { CStr::from_ptr(err) }.to_string_lossy();
-                tracing::warn!("spl_dlopen failed for '{}': {}", path, err_str);
+                return Err(CompileError::runtime(format!(
+                    "E-SFFI-001: spl_dlopen failed for '{}': {}",
+                    path, err_str
+                )));
             }
-            Ok(Value::Int(0))
+            Err(CompileError::runtime(format!(
+                "E-SFFI-001: spl_dlopen failed for '{}'",
+                path
+            )))
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -152,13 +162,17 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     {
         use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
         if path.contains('\0') {
-            return Ok(Value::Int(0));
+            return Err(CompileError::runtime(
+                "E-SFFI-001: spl_dlopen path contains an interior NUL",
+            ));
         }
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
         if handle.is_null() {
-            tracing::warn!("spl_dlopen failed for '{}'", path);
-            Ok(Value::Int(0))
+            Err(CompileError::runtime(format!(
+                "E-SFFI-001: spl_dlopen failed for '{}'",
+                path
+            )))
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -166,15 +180,16 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
 
     #[cfg(not(any(unix, windows)))]
     {
-        tracing::warn!("spl_dlopen not supported on this platform");
-        Ok(Value::Int(0))
+        Err(CompileError::runtime(
+            "E-SFFI-014: spl_dlopen is unsupported on this platform",
+        ))
     }
 }
 
 /// Look up a symbol in a loaded library by name.
 ///
 /// Callable from Simple as: `spl_dlsym(handle: i64, name: text) -> i64`
-/// Returns 0 if the symbol is not found.
+/// Resolution failures are interpreter errors, never null function pointers.
 pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
         return Err(CompileError::runtime("spl_dlsym requires 2 arguments (handle, name)"));
@@ -184,6 +199,11 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
         Value::Int(h) => *h as usize,
         _ => return Err(CompileError::runtime("spl_dlsym: handle must be an integer")),
     };
+    if handle_val == 0 {
+        return Err(CompileError::runtime(
+            "E-SFFI-001: spl_dlsym received a null library handle",
+        ));
+    }
 
     let name = match &args[1] {
         Value::Str(s) => s.clone(),
@@ -192,13 +212,23 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
 
     let c_name = match CString::new(name.as_str()) {
         Ok(c) => c,
-        Err(_) => return Ok(Value::Int(0)),
+        Err(_) => {
+            return Err(CompileError::runtime(
+                "E-SFFI-001: spl_dlsym name contains an interior NUL",
+            ));
+        }
     };
 
     #[cfg(unix)]
     {
         let handle = handle_val as *mut libc::c_void;
         let sym = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
+        if sym.is_null() {
+            return Err(CompileError::runtime(format!(
+                "E-SFFI-001: unresolved foreign symbol: {}",
+                name
+            )));
+        }
         Ok(Value::Int(sym as usize as i64))
     }
 
@@ -208,12 +238,20 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
             fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *mut std::ffi::c_void;
         }
         let sym = unsafe { GetProcAddress(handle_val as isize, c_name.as_ptr() as *const u8) };
+        if sym.is_null() {
+            return Err(CompileError::runtime(format!(
+                "E-SFFI-001: unresolved foreign symbol: {}",
+                name
+            )));
+        }
         Ok(Value::Int(sym as usize as i64))
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        Ok(Value::Int(0))
+        Err(CompileError::runtime(
+            "E-SFFI-014: spl_dlsym is unsupported on this platform",
+        ))
     }
 }
 
@@ -230,6 +268,11 @@ pub fn spl_dlclose(args: &[Value]) -> Result<Value, CompileError> {
         Value::Int(h) => *h as usize,
         _ => return Err(CompileError::runtime("spl_dlclose: handle must be an integer")),
     };
+    if handle_val == 0 {
+        return Err(CompileError::runtime(
+            "E-SFFI-018: spl_dlclose received a null library handle",
+        ));
+    }
 
     #[cfg(unix)]
     {
@@ -666,6 +709,27 @@ mod tests {
             Value::Float(v) => assert_eq!(v, 2.0),
             other => panic!("expected float result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dynload_rejects_interior_nul_instead_of_returning_zero() {
+        let result = spl_dlopen(&[Value::text("bad\0provider".to_string())]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn symbol_lookup_rejects_null_handle_instead_of_returning_zero() {
+        let result = spl_dlsym(&[
+            Value::Int(0),
+            Value::text("rt_probe".to_string()),
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn close_rejects_null_handle_instead_of_reporting_success() {
+        let result = spl_dlclose(&[Value::Int(0)]);
+        assert!(result.is_err());
     }
 
     #[cfg(target_os = "linux")]

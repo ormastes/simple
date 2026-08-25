@@ -51,6 +51,13 @@ provider is absent and no longer caches or invokes a null symbol. Provider and
 first-resolution failures are fatal; the established cached-symbol hot path is
 unchanged and gains no branch, lookup, allocation, or copy.
 
+Checkpoint: the Rust interpreter dynload bridge now uses its existing
+`Result<Value, CompileError>` channel for malformed paths, null handles,
+missing libraries/symbols, and unsupported platforms. It no longer converts
+those failures to integer zero. Success performs the same single OS call and
+value lift; the added checks are boundary failure checks, not hot foreign-call
+dispatch work.
+
 ### 3. Complete resolved-HIR inventory
 
 Checkpoint: the bounded source ledgers now report 12,128 `rt_*` declaration
