@@ -38,6 +38,7 @@ reads the verdict back from `capture-pane`.
 #### launches the suite in a window and the pane shows the Results verdict
 
 - Launch the caret suite in a dedicated tmux window
+   - Expected: launched.status equals `ok`
    - Expected: target equals `caret-suite:caret_suite`
 - Wait for the runner's authoritative per-file verdict on the pane
 - The pane reports the suite passed, not merely finished
@@ -48,7 +49,7 @@ reads the verdict back from `capture-pane`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -61,7 +62,9 @@ val ws = agent_workspace("caret-suite", root, root + "/build/test-artifacts/llm_
 session_kill(ws)
 
 step("Launch the caret suite in a dedicated tmux window")
-val target = launch_caret_suite(ws, root, SUITE)
+val launched = launch_caret_suite(ws, root, SUITE)
+expect(launched.status).to_equal("ok")
+val target = launched.output
 expect(target).to_equal("caret-suite:caret_suite")
 expect(list_panes(ws)).to_contain("caret-suite:caret_suite.0")
 

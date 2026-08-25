@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -192,12 +192,98 @@ dir_remove_all(root)
 
 </details>
 
+### LLM Caret workspace recursion protection
+
+#### refuses to launch a suite from inside a workspace-launched child
+
+- A fresh process is at depth 0 and stamps depth 1 on what it spawns
+   - Expected: workspace_depth() equals `0`
+   - Expected: with_depth("echo hi") equals `LLM_CARET_WORKSPACE_DEPTH=1 echo hi`
+   - Expected: with_depth("") equals ``
+- At depth 1 the suite launch is refused before tmux is touched
+   - Expected: r.status equals `error`
+   - Expected: r.reason equals `recursion_limit`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("A fresh process is at depth 0 and stamps depth 1 on what it spawns")
+env_set("LLM_CARET_WORKSPACE_DEPTH", "")
+expect(workspace_depth()).to_equal(0)
+expect(depth_exceeded()).to_be(false)
+expect(with_depth("echo hi")).to_equal("LLM_CARET_WORKSPACE_DEPTH=1 echo hi")
+expect(with_depth("")).to_equal("")
+
+step("At depth 1 the suite launch is refused before tmux is touched")
+env_set("LLM_CARET_WORKSPACE_DEPTH", "1")
+expect(depth_exceeded()).to_be(true)
+val ws = agent_workspace("caret-depth", cwd(), _scratch("depth"))
+val r = launch_caret_suite(ws, cwd(), "test/x_spec.spl")
+expect(r.status).to_equal("error")
+expect(r.reason).to_equal("recursion_limit")
+expect(session_alive(ws)).to_be(false)
+env_set("LLM_CARET_WORKSPACE_DEPTH", "")
+```
+
+</details>
+
+#### never broadcasts into the pane it is running from
+
+- Pretend this process lives in the first pane (tmux sets TMUX_PANE)
+- A broadcast reaches every OTHER pane only
+   - Expected: reached.len() equals `1`
+   - Expected: list_panes(ws).len() equals `2`
+   - Expected: list_panes_except(ws, own).len() equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+if not tmux_available():
+    pending("BLOCKED: tmux not installed on this host")
+    return
+val root = _scratch("ownpane")
+dir_remove_all(root)
+dir_create_all(root)
+val ws = agent_workspace("caret-own", root, root + "/trees")
+session_kill(ws)
+expect(session_ensure(ws, root).status).to_equal("ok")
+expect(pane_split(ws, "0", root).status).to_equal("ok")
+
+step("Pretend this process lives in the first pane (tmux sets TMUX_PANE)")
+val (ids, _e, _c) = process_run("tmux", ["-L", ws.socket, "list-panes", "-s",
+    "-t", ws.session, "-F", "#" + "{" + "pane_id" + "}"])
+val own = ids.split("\n")[0].trim()
+expect(own.starts_with("%")).to_be(true)
+env_set("TMUX_PANE", own)
+
+step("A broadcast reaches every OTHER pane only")
+val reached = send_to_each_pane(ws, "echo OWN_PANE_SKIPPED")
+expect(reached.len()).to_equal(1)
+expect(list_panes(ws).len()).to_equal(2)
+expect(list_panes_except(ws, own).len()).to_equal(1)
+env_set("TMUX_PANE", "")
+session_kill(ws)
+dir_remove_all(root)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
