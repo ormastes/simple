@@ -348,6 +348,13 @@ one partial block. `finish` applies SHA padding and the checked bit length
 without materializing `domain + payload + padding`. Calling update/finish after
 finalization or overflowing the declared byte budget fails closed.
 
+`begin` accepts only the fixed provider domain separator and rejects domains
+longer than 63 raw bytes as `invalid_hash_domain`. This keeps construction
+compression-free: every compression, including padding blocks, is charged as
+one `hash_blocks` unit immediately before execution and is followed by a
+request-scoped checkpoint. All protocol-defined provider domains are below the
+bound.
+
 Every domain-separated provider hash feeds exact domain bytes and length
 bindings before content. The existing one-shot functions remain compatibility
 facades and, after parity, may internally instantiate `Sha256StreamV1`; the
@@ -450,17 +457,18 @@ struct ProviderCheckpointProgressV1:
     comparisons: i64
 
 trait ProviderCheckpointPort:
-    me checkpoint(request: ProviderRequestControlHandleV1,
-                  progress: ProviderCheckpointProgressV1) \
-        -> Result<(), text>
+    me checkpoint(progress: ProviderCheckpointProgressV1) -> Result<(), text>
 ```
 
 The budget owner charges raw/decoded/output bytes, JSON events/depth,
 normalization/case/token carry, tokens/terms/candidates/comparisons, logical
 allocations, and durable-record growth before allocation or append. The
-checkpoint owner validates per-step progress, queries the monotonic clock held
-by request control, and returns only `cancelled`, `deadline_exceeded`,
-`limit_exceeded`, or an internal clock/control failure. Algorithms do not read
+session owner constructs one request-scoped checkpoint capability and binds the
+validated `ProviderRequestControlHandleV1` exactly once. The checkpoint owner
+validates per-step progress, queries the monotonic clock held by request
+control, and returns only `cancelled`, `deadline_exceeded`, `limit_exceeded`, or
+an internal clock/control failure. Algorithms receive only that bound
+capability: they neither supply nor fabricate request identity and do not read
 time or cancellation state through hidden globals.
 
 ### 6.2 Cancellation and commit admission

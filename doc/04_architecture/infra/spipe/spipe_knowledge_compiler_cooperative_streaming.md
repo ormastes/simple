@@ -171,6 +171,13 @@ has closed; it does not claim that a candidate, terminal record, publication,
 or other mutation is durable. The detail design may expand supporting record
 fields, but it may not change these public operations.
 
+`ProviderCheckpointPort` is a request-scoped capability constructed by the
+session owner from that validated handle. Its leaf operation is
+`checkpoint(progress: ProviderCheckpointProgressV1)`: algorithms never pass,
+select, or fabricate request identity. Cancellation and monotonic-deadline
+authority remain in request control, and a child work capsule cannot inspect a
+sibling request.
+
 Each `ProviderFrameDecodeStepV1` carries at most one closed event kind:
 `none`, `header`, or `payload`. `header` is emitted exactly once after the
 eighth header byte and before any payload byte is consumed. `payload` owns
@@ -334,8 +341,11 @@ buffer, and the encoder computes the prefix from exact segment lengths.
 
 SHA state owns eight working words, a partial 64-byte block, and a checked total
 byte count. Domain bytes, length binding, and canonical payload bytes are fed in
-order. Updates process bounded blocks and checkpoint; finalization pads the
-partial block without copying or rereading the whole payload. Chunk partition
+order. Construction accepts a fixed raw-byte domain separator of at most 63
+bytes so it cannot perform an unbudgeted compression. Updates charge one
+`hash_blocks` unit immediately before each bounded block and checkpoint;
+finalization pads the partial block, then charges and checkpoints each padding
+compression without copying or rereading the whole payload. Chunk partition
 never changes the digest. A sink transform can update SHA while JSON emits.
 
 ### 7.3 Streaming analyzer

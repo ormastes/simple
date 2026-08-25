@@ -60,6 +60,11 @@ ProviderSessionOwnerV1.run_tick(stream: ProviderByteStreamPort) -> Result<Provid
 ProviderSessionOwnerV1.finished() -> bool
 ```
 
+`ProviderCheckpointPort` is request-scoped: the session owner binds the
+validated `ProviderRequestControlHandleV1` once at construction, and leaf work
+calls only `checkpoint(progress: ProviderCheckpointProgressV1)`. No algorithm
+accepts, chooses, or fabricates a request handle at a checkpoint.
+
 The focused architecture's Section 4.1 is the normative signature authority.
 Both byte results use the closed four-state status
 `data | timeout | eof | error`; positive progress is `data`, while zero-byte
