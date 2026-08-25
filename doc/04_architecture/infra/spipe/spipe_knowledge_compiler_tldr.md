@@ -1,0 +1,62 @@
+<!-- codex-architecture -->
+# SPipe Knowledge Compiler Architecture — TLDR
+
+SPipe keeps one lifecycle-first canonical tree and compiles it into an immutable
+typed `KnowledgeSnapshot`. Artifact/section UIDs are identity; paths, headings,
+keys, aliases, and every feature/component/layer/trace tree are names or
+read-only projections.
+
+## Core shape
+
+`KnowledgeCompiler` is the sole parent publication authority. Parsers,
+identity, graph, index, projections, and diagnostics return deterministic
+deltas. `RefactorService` alone writes canonical files. Rebalancing and common
+promotion return proposals only. Security, metrics, cache policy, and tracing
+wrap stable ports as MDSOC feature transforms; Simple/JS implementations are
+runtime adapters.
+
+## Resolved contracts
+
+- Edges store one active-verb direction: evidence/test/source/task -> what it
+  supports, verifies, implements, or schedules. Inverses are query views.
+- Explicit and deterministic generated accepted edges may satisfy strict trace;
+  structural, lexical, semantic, and LLM inference remain proposals.
+- Stable section markers are mandatory once a section is referenced, traced,
+  or transaction-managed. Heading rename retains UID and slug alias.
+- Shared state is limited to immutable committed content-addressed segments.
+  Dirty overlays, locks, journals, materialized views, and private caches are
+  isolated by repository + worktree identity.
+- Transactions durably journal plan, original/intended hashes and staged bytes
+  before mutation; atomic apply is validated before snapshot publication.
+  Startup resumes or rolls back from hashes and never guesses.
+- Rebalancing must-links cover generated spec/manual pairs and explicitly
+  protected bundles. Trace is normally weighted, avoiding giant collapsed
+  clusters; strict policy can co-locate sole verification evidence explicitly.
+- MCP negotiates an explicit supported version, preserves legacy stdio, targets
+  `2026-07-28`, exposes deterministic pagination, and never marks private or
+  authorization-filtered content publicly cacheable.
+- Dependency-free JS is the normative lexical provider. Simple acceleration
+  must match tokenization, fixed-point scores, ties, explanations, updates, and
+  exhaustive top-k exactly; optional semantics only add candidates.
+
+## Runtime and security
+
+Startup recovers journals and loads manifests/aliases lazily—no full scan.
+List/read/resolve/search/trace pin one snapshot and perform no writes, retry
+sleeps, repeated rereads, or per-request subprocess launches. Deltas invalidate
+only affected objects, reverse edges, postings, projections, and diagnostics.
+
+All URIs resolve through registered workspace/project/revision/UID. Realpath
+and deny-wins authorization reject traversal, symlink/junction escape,
+cross-root mutation, cache leakage, and unapproved view writes. Repository text
+is untrusted data, not agent policy. Remote semantics is explicit opt-in.
+
+## Performance gates
+
+- Warm startup <=250 ms P95; exact resolve/read <=20 ms.
+- Warm list <=50 ms and lexical search at 50k artifacts <=100 ms P95.
+- One-artifact update <=100 ms and at least 20x cheaper than full rebuild.
+- Unchanged virtual files rewritten: zero; required provider parity: 100%.
+
+Inspect the full architecture at
+`doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md`.
