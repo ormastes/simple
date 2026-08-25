@@ -1039,3 +1039,26 @@ Unsafe-tagged rows increase from 1,493 to 1,533, untouched rows decrease from
 9,985 to 9,945, and exact-artifact verified-and-signed admission remains zero.
 The tags do not prove GLFW pointer lifetimes, extent checks, or provider
 identity; those require executable contracts and exact signed admission.
+
+## Compiler minimal-runtime raw-contract checkpoint
+
+The compiler's minimal runtime ABI contains 41 declarations, not 40: the
+source-only untouched ranking showed 40 because one declaration already had
+recognized contract state. All 41 now carry adjacent, operation-specific
+`@unsafe(... capabilities: [ffi])` contracts. The metadata distinguishes GC
+mutation and allocation, owned runtime-value construction/cloning/release,
+borrowed pointer/length strings, discriminants and projections, arithmetic
+owned results, tagged-string and exclusive deep-array release, filesystem
+pointer/length operations, and environment pointer/length operations.
+
+A static ratchet fixes the inventory at 41 and requires every declaration to
+retain its tag. It passed with the whitespace check. This pass changes no ABI
+signature, allocation, clone, free, collection traversal, filesystem or
+environment call, branch, copy, or runtime-value layout; core hot paths remain
+unchanged. Production Simple and optimizer verification remain unavailable.
+
+Estimated totals remain 11,736 `rt_*` declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,533 to 1,573, untouched rows decrease from
+9,945 to 9,905, and exact-artifact verified-and-signed admission remains zero.
+The raw string out-length and pointer ownership contracts still require typed
+ABI validation before this module can be called safe.

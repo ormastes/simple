@@ -524,3 +524,7 @@ passing placeholder.
     Preserve one presentation call and the existing pixel storage: enforce
     width/height/count overflow and pointer-lifetime contracts at the boundary
     without adding frame copies, per-frame lookup, or generic dispatch.
+100. Keep all 41 compiler minimal-runtime declarations explicitly tagged
+     `unsafe(ffi)`. Validate the string out-length ABI and owned/borrowed pointer
+     distinctions before safe publication; preserve existing allocation,
+     clone/free, environment, and filesystem call counts.
