@@ -10,6 +10,8 @@
 use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
 use std.fs_driver.types.{ExecuteTrust}
 use std.fs_driver.error.{FsError}
+use os.services.vfs.vfs_boot_init.{vfs_ambient_enforce}
+use os.services.vfs.vfs_write_ops.{g_vfs_root_path}
 
 @cfg(arm64)
 use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
@@ -52,15 +54,38 @@ fn _vfs_read_executable_backend_bytes_v1(path: text) -> [u8]:
 @cfg(riscv32)
 fn _vfs_read_executable_backend_bytes_v1(path: text) -> [u8]:
     g_vfs_read_executable_bytes(path)
+
+pub fn vfs_read_executable_bytes_result_v1(path: text) -> Result<[u8], FsError>:
+    """Read executable bytes after the shared ambient authority decision.
+
+    The namespace and file-grant gate intentionally runs before architecture
+    dispatch.  In particular, ARM's minimal FAT32 boot bridge must not bypass
+    the same ambient authority enforced by the x86 and RISC-V VFS reader.
+    Backend selection remains compile-time-only and no backend fallback is
+    added.  Preserve denial, invalid-path, and missing-file distinctions for
+    callers able to consume FsError.
+    """
+    if path == "":
+        return Err(FsError.InvalidArg)
+    val authority = vfs_ambient_enforce("read", g_vfs_root_path(path))
+    if authority.is_err():
+        return Err(FsError.Permission)
+    val bytes = _vfs_read_executable_backend_bytes_v1(path)
+    if bytes.len() == 0:
+        return Err(FsError.NotFound)
+    Ok(bytes)
 
 pub fn vfs_read_executable_bytes_v1(path: text) -> [u8]:
-    """Read executable bytes through the target's VFS-owned source.
+    """Compatibility byte-only reader; prefer the typed result surface.
 
-    Returns an empty array when the active source cannot produce bytes. The
-    selected backend retains its existing path, mount, cache, and device
-    authority; this function adds no fallback and grants no execution right.
+    Historical loader callers use an empty array as their failure channel.
+    Keep that API stable while the result-returning entry point preserves the
+    exact shared-boundary denial class for newer callers.
     """
-    _vfs_read_executable_backend_bytes_v1(path)
+    val result = vfs_read_executable_bytes_result_v1(path)
+    if result.is_err():
+        return []
+    result.unwrap()
 
 pub fn vfs_open_authenticated_executable_v1(
     mut table: MountTable, path: text, trust: ExecuteTrust
