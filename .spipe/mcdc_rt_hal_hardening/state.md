@@ -53,7 +53,7 @@ Deliver production-grade pure-Simple MC/DC instrumentation, enforcement, RT/HAL 
 
 ## Phase
 
-implementation-in-progress-unverified
+verification-blocked-stage3-surface-freeze-segv
 
 ## Log
 
@@ -169,3 +169,11 @@ implementation-in-progress-unverified
   implement `rthal-scalar-v1`. A typed plan builds them with pinned compiler
   identities, hashes the outputs, and admits them to the exact process arena;
   Pure Simple remains the effect and semantic owner.
+- verification recovery: fixed misplaced recoverable-unwind borrow definitions
+  and an erased-receiver `batch.find` mis-lowering to `rt_string_find`. A fresh
+  Stage 2 then passed native build, frontend/positional-entry sanity, independent
+  struct-receiver/runtime proof, and admission. The admitted one-thread Stage 3
+  loaded 992 surfaces but SIGSEGV'd in `surface_freeze` at about 10.3 GiB RSS.
+  The three-cycle cap is exhausted; the release-blocking evidence and unblock
+  condition are recorded in
+  `doc/08_tracking/bug/stage3_surface_freeze_segv_blocks_mcdc_rt_hal_verification_2026-08-25.md`.
