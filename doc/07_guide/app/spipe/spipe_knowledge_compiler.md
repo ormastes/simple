@@ -631,3 +631,52 @@ implementation. Rebuild child state and write it back once, make the whole
 engine update atomic, correct the ABI, complete the oracle, and use a capable
 pure-Simple runtime for the next fresh bounded run. Wave 4 remains
 `IN PROGRESS`.
+
+### 13.2 Analyzer V1 handoff
+
+Do not accept the current analyzer candidate: static status is `FAIL`,
+admissible files `[]`, because it is unbounded and its parity claim is false.
+The analyzer lane owns only `src/lib/common/search/analyzer.spl` and
+`test/01_unit/lib/common/search/analyzer_contract_spec.spl`;
+`src/lib/common/search/__init__.spl` is merge-owned. The generated UCD17
+tables and manifest are missing from `main` and must land first.
+
+The common batch ABI consists of
+`SearchFieldIdentityV1(Identifier|Title|Heading|Classification|Body)`,
+`AnalyzerErrorV1(InvalidLimits|InvalidFieldIdentity|InputLimitExceeded|
+InvalidUtf8|NormalizedLimitExceeded|TokenBytesLimitExceeded|
+TokenCountLimitExceeded|DistinctTermLimitExceeded)`,
+`AnalyzerIdentityV1` with eleven text fields
+`analyzer_id,unicode_version,unicode_manifest_sha256,normalization_id,
+lowercase_id,tokenizer_id,stop_words_id,stop_words_sha256,stemming_id,
+field_schema_id,limits_schema_id`, and `AnalyzerLimitsV1` with five i64
+fields `max_input_bytes,max_normalized_bytes,max_token_bytes,max_tokens,
+max_distinct_terms`.
+
+Result types are `AnalyzedTokenV1(value:text,position:i64,
+exact_identifier:bool)`,
+`AnalyzedTextV1(normalized:text,tokens:[AnalyzedTokenV1])`,
+`AnalyzedQueryTermV1(value:text,qtf:i64)`, and
+`AnalyzedQueryV1(normalized:text,terms:[AnalyzedQueryTermV1])`. Call
+`analyze_field_v1(text,SearchFieldIdentityV1,AnalyzerIdentityV1,
+AnalyzerLimitsV1)->Result<AnalyzedTextV1,AnalyzerErrorV1>`,
+`analyze_query_v1(text,AnalyzerIdentityV1,AnalyzerLimitsV1)
+->Result<AnalyzedQueryV1,AnalyzerErrorV1>`, or
+`unsigned_utf8_less(text,text)->bool`.
+
+Semantics are UCD17 NFC -> default lowercase, not folding -> NFC; maximal
+`Alphabetic|Decimal_Number|Mark|_` tokens; pre-stopword one-based positions;
+`[a,an,and,of,the,to]` with SHA-256
+`6f0a7c26d3d0e3d06a2fbbbeaa1843294f83c3be26baf1c04651191e011510bf`;
+identifier full-normalized/no-trim append-last token at position zero with
+deduplication; and QTF terms sorted by unsigned UTF-8.
+
+Use query limits `4096/4096/4096/128/128` in struct order. Field input
+hard-caps at 1,048,576 bytes and configured `max_tokens` at 524,288. Unicode
+manifest, stopword, limits, and schema identities are cache identity. Analyzer
+code must not embed, spawn a process, access a network, or use locale state.
+
+This batch layer feeds but does not replace `ProviderAnalyzerLimitsV1`,
+`ProviderAnalyzedTokenV1`, `ProviderAnalyzedTokenSinkPort`, or
+`ProviderStreamingAnalyzerV1`; adapter parity is required. Wave 4 remains
+`IN PROGRESS`.

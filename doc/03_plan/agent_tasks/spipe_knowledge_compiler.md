@@ -515,3 +515,49 @@ next bounded Lane E task is value-semantic child-copy/writeback, one atomic
 engine transaction, ABI repair, and the complete oracle, followed by fresh
 bounded execution on a capable pure-Simple runtime. Wave 4 remains
 `IN PROGRESS`.
+
+### 10.5 Analyzer V1 contract and ownership freeze
+
+The common batch seam is distinct from, and requires adapter parity with, the
+unchanged provider streaming seam. Exact types are
+`SearchFieldIdentityV1(Identifier|Title|Heading|Classification|Body)`;
+`AnalyzerErrorV1(InvalidLimits|InvalidFieldIdentity|InputLimitExceeded|
+InvalidUtf8|NormalizedLimitExceeded|TokenBytesLimitExceeded|
+TokenCountLimitExceeded|DistinctTermLimitExceeded)`;
+`AnalyzerIdentityV1` with eleven text fields
+`analyzer_id,unicode_version,unicode_manifest_sha256,normalization_id,
+lowercase_id,tokenizer_id,stop_words_id,stop_words_sha256,stemming_id,
+field_schema_id,limits_schema_id`; and `AnalyzerLimitsV1` with five i64 fields
+`max_input_bytes,max_normalized_bytes,max_token_bytes,max_tokens,
+max_distinct_terms`.
+
+Results are `AnalyzedTokenV1(value:text,position:i64,exact_identifier:bool)`,
+`AnalyzedTextV1(normalized:text,tokens:[AnalyzedTokenV1])`,
+`AnalyzedQueryTermV1(value:text,qtf:i64)`, and
+`AnalyzedQueryV1(normalized:text,terms:[AnalyzedQueryTermV1])`. Functions are
+`analyze_field_v1(text,SearchFieldIdentityV1,AnalyzerIdentityV1,
+AnalyzerLimitsV1)->Result<AnalyzedTextV1,AnalyzerErrorV1>`,
+`analyze_query_v1(text,AnalyzerIdentityV1,AnalyzerLimitsV1)
+->Result<AnalyzedQueryV1,AnalyzerErrorV1>`, and
+`unsigned_utf8_less(text,text)->bool`.
+
+Semantics are UCD17 NFC -> default lowercase, not folding -> NFC; maximal
+`Alphabetic|Decimal_Number|Mark|_` tokens; pre-stopword one-based positions;
+fixed stopwords `[a,an,and,of,the,to]` with digest
+`6f0a7c26d3d0e3d06a2fbbbeaa1843294f83c3be26baf1c04651191e011510bf`;
+identifier exact full-normalized/no-trim token appended last at position zero
+with deduplication; and QTF terms sorted by unsigned UTF-8 bytes.
+
+Query limits are `4096/4096/4096/128/128` in struct order. Field input
+hard-caps at 1,048,576 bytes and configured `max_tokens <= 524288`. Unicode
+manifest, stopword, limits, and schema identities are cache identity. No
+embedding, process, network, or locale access is allowed.
+
+The analyzer lane owns only `src/lib/common/search/analyzer.spl` and
+`test/01_unit/lib/common/search/analyzer_contract_spec.spl`;
+`src/lib/common/search/__init__.spl` is merge-owned. The UCD17 generated
+tables and manifest are missing from `main` and must land first. Current
+analyzer status is `FAIL`, admissible `[]`: its parity claim is false and
+bounds are incomplete. Preserve `ProviderAnalyzerLimitsV1`,
+`ProviderAnalyzedTokenV1`, `ProviderAnalyzedTokenSinkPort`, and
+`ProviderStreamingAnalyzerV1` unchanged. Wave 4 remains `IN PROGRESS`.

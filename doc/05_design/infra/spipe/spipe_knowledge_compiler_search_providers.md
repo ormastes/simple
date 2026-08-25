@@ -2275,3 +2275,95 @@ file is accepted. The next slice must rebuild and write back value-semantic
 child copies, commit the complete engine transaction atomically, correct the
 frozen ABI, complete the oracle, and then run a fresh bounded execution on a
 capable pure-Simple runtime. Wave 4 remains `IN PROGRESS`.
+
+### 15.2 Canonical analyzer batch/identity contract freeze
+
+The current analyzer candidate is `FAIL`; its admissible file set is `[]`.
+Freeze this separate `std.common.search` algorithm seam:
+
+```text
+enum SearchFieldIdentityV1:
+  Identifier; Title; Heading; Classification; Body
+
+enum AnalyzerErrorV1:
+  InvalidLimits; InvalidFieldIdentity; InputLimitExceeded; InvalidUtf8;
+  NormalizedLimitExceeded; TokenBytesLimitExceeded; TokenCountLimitExceeded;
+  DistinctTermLimitExceeded
+
+struct AnalyzerIdentityV1:
+  analyzer_id:text
+  unicode_version:text
+  unicode_manifest_sha256:text
+  normalization_id:text
+  lowercase_id:text
+  tokenizer_id:text
+  stop_words_id:text
+  stop_words_sha256:text
+  stemming_id:text
+  field_schema_id:text
+  limits_schema_id:text
+
+struct AnalyzerLimitsV1:
+  max_input_bytes:i64
+  max_normalized_bytes:i64
+  max_token_bytes:i64
+  max_tokens:i64
+  max_distinct_terms:i64
+
+struct AnalyzedTokenV1:
+  value:text
+  position:i64
+  exact_identifier:bool
+
+struct AnalyzedTextV1:
+  normalized:text
+  tokens:[AnalyzedTokenV1]
+
+struct AnalyzedQueryTermV1:
+  value:text
+  qtf:i64
+
+struct AnalyzedQueryV1:
+  normalized:text
+  terms:[AnalyzedQueryTermV1]
+
+analyze_field_v1(input:text, field:SearchFieldIdentityV1,
+                 identity:AnalyzerIdentityV1, limits:AnalyzerLimitsV1)
+  -> Result<AnalyzedTextV1,AnalyzerErrorV1>
+analyze_query_v1(input:text, identity:AnalyzerIdentityV1,
+                 limits:AnalyzerLimitsV1)
+  -> Result<AnalyzedQueryV1,AnalyzerErrorV1>
+unsigned_utf8_less(left:text, right:text) -> bool
+```
+
+This batch seam neither renames nor replaces `ProviderAnalyzerLimitsV1`,
+`ProviderAnalyzedTokenV1`, `ProviderAnalyzedTokenSinkPort`, or
+`ProviderStreamingAnalyzerV1`. The provider streaming seam adapts the
+canonical algorithm layer, and byte-for-byte token/position/error parity is an
+acceptance requirement.
+
+V1 analysis is UCD 17.0.0 NFC, Unicode Default Lowercase Conversion (not case
+folding), then NFC. Tokens are maximal runs of Unicode `Alphabetic`,
+`Decimal_Number`, `Mark`, or `_`. Positions are one-based and assigned
+before removing the exact stop-word set `[a,an,and,of,the,to]`, whose SHA-256
+is
+`6f0a7c26d3d0e3d06a2fbbbeaa1843294f83c3be26baf1c04651191e011510bf`.
+For `Identifier`, append the full normalized value last, without trimming,
+at position zero, and deduplicate it. Query terms retain QTF and sort by
+unsigned UTF-8 bytes.
+
+Query limits are exactly `AnalyzerLimitsV1(4096,4096,4096,128,128)` in field
+order. Field input has a hard 1,048,576-byte ceiling; its configured token
+count cannot exceed 524,288. The full limit tuple, Unicode manifest digest,
+stop-word ID/digest, and field/limit schema IDs participate in snapshot/cache
+identity. Analysis performs no embedding, process launch, network access, or
+locale-dependent operation.
+
+Analyzer-lane ownership is limited to
+`src/lib/common/search/analyzer.spl` and
+`test/01_unit/lib/common/search/analyzer_contract_spec.spl`;
+`src/lib/common/search/__init__.spl` is merge-owned. The required generated
+UCD 17 bundle and manifest from Section 14.7 are absent on `main`, so they are
+a prerequisite, not analyzer-lane output. The existing candidate is unbounded
+and its parity claim is false; accept none of it. Wave 4 remains
+`IN PROGRESS`.

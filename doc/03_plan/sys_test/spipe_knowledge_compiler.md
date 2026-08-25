@@ -1392,3 +1392,49 @@ unaccepted positive design input. The next evidence must come from rebuilt
 child copies with one owner writeback, an atomic engine transaction, corrected
 ABI, the complete oracle, and a fresh bounded run on a capable pure-Simple
 runtime. Wave 4 remains `IN PROGRESS`.
+
+#### 13.9.11 Analyzer V1 contract freeze and failed candidate
+
+The exact batch test seam is:
+
+- `SearchFieldIdentityV1`: `Identifier,Title,Heading,Classification,Body`;
+- `AnalyzerErrorV1`: `InvalidLimits,InvalidFieldIdentity,InputLimitExceeded,
+  InvalidUtf8,NormalizedLimitExceeded,TokenBytesLimitExceeded,
+  TokenCountLimitExceeded,DistinctTermLimitExceeded`;
+- `AnalyzerIdentityV1`: eleven text fields
+  `analyzer_id,unicode_version,unicode_manifest_sha256,normalization_id,
+  lowercase_id,tokenizer_id,stop_words_id,stop_words_sha256,stemming_id,
+  field_schema_id,limits_schema_id`;
+- `AnalyzerLimitsV1`: five i64 fields
+  `max_input_bytes,max_normalized_bytes,max_token_bytes,max_tokens,
+  max_distinct_terms`;
+- `AnalyzedTokenV1(value:text,position:i64,exact_identifier:bool)`;
+- `AnalyzedTextV1(normalized:text,tokens:[AnalyzedTokenV1])`;
+- `AnalyzedQueryTermV1(value:text,qtf:i64)`;
+- `AnalyzedQueryV1(normalized:text,terms:[AnalyzedQueryTermV1])`;
+- `analyze_field_v1(text,SearchFieldIdentityV1,AnalyzerIdentityV1,
+  AnalyzerLimitsV1)->Result<AnalyzedTextV1,AnalyzerErrorV1>`;
+- `analyze_query_v1(text,AnalyzerIdentityV1,AnalyzerLimitsV1)
+  ->Result<AnalyzedQueryV1,AnalyzerErrorV1>`;
+- `unsigned_utf8_less(text,text)->bool`.
+
+The oracle must prove UCD17 NFC -> default lowercase (never fold) -> NFC;
+maximal `Alphabetic|Decimal_Number|Mark|_` tokens; one-based positions before
+stopword removal; exact `[a,an,and,of,the,to]` stopwords with digest
+`6f0a7c26d3d0e3d06a2fbbbeaa1843294f83c3be26baf1c04651191e011510bf`;
+identifier full-normalized/no-trim exact token appended last at position zero
+and deduplicated; and QTF terms in unsigned UTF-8 order.
+
+Query limits are `4096,4096,4096,128,128` in struct order. Field input is at
+most 1,048,576 bytes and configured `max_tokens <= 524288`. Cache identity
+changes for Unicode manifest, stopwords, any limit, or either schema. Tests
+must prove zero embedding/process/network/locale use.
+
+This layer sits beneath the unchanged `ProviderAnalyzerLimitsV1`,
+`ProviderAnalyzedTokenV1`, `ProviderAnalyzedTokenSinkPort`, and
+`ProviderStreamingAnalyzerV1`; adapter parity is mandatory. The analyzer lane
+owns only `src/lib/common/search/analyzer.spl` and
+`test/01_unit/lib/common/search/analyzer_contract_spec.spl`; `__init__.spl`
+is merge-owned. UCD17 tables/manifest are absent on `main` and prerequisite.
+The existing candidate is unbounded and parity-false: static review `FAIL`,
+admissible `[]`. Wave 4 remains `IN PROGRESS`.
