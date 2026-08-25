@@ -10,6 +10,10 @@ use std.io_runtime.{getpid}
 use std.io_runtime.{dir_create_all, dir_remove_all}
 use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb}
+use app.cli.native_build_warm_receipt.{
+    NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_receipt_prepare,
+    native_build_warm_receipt_finish
+}
 
 # Absolute path of the current bootstrap-stage compiler.
 fn self_exe() -> text:
@@ -524,6 +528,11 @@ fn run_native_build_worker(args: [text]) -> i64:
     env_set("SIMPLE_BINARY", simple_bin)
     val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
+    val warm_receipt = native_build_warm_receipt_prepare(args, simple_bin)
+    val old_warm_candidate = env_get(NATIVE_BUILD_WARM_CANDIDATE_ENV) ?? ""
+    # Never leak a caller's stale candidate into warm-up children. The real
+    # worker receives only this invocation's pid-private path below.
+    env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, "")
     # process_run_timeout_live relays the worker's stdout/stderr to ours AS
     # THEY ARE PRODUCED (see process_ops.spl), so a slow-but-progressing
     # multi-minute worker no longer reads as a silent hang. stdout/stderr
@@ -535,17 +544,28 @@ fn run_native_build_worker(args: [text]) -> i64:
     # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
-    if shard_count > 1:
+    if warm_receipt.hit:
+        print "[native-build-warm] exact receipt hit; skipping parse/HIR warming children"
+    elif shard_count > 1:
         run_parse_shards(args, shard_count, simple_bin, native_build_timeout_ms(args))
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
     # phase is then pure cache hits.
     val hir_shard_count = native_build_hir_shard_count(args)
-    if hir_shard_count > 1:
+    if not warm_receipt.hit and hir_shard_count > 1:
         run_hir_shards(args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
+    # Publish the candidate path only for the real worker. Parse-shard_main
+    # computes its closure before setting SIMPLE_PARSE_SHARD, so inheriting this
+    # env into warm-up children would let a partial child author the candidate.
+    if warm_receipt.eligible:
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, warm_receipt.candidate_path)
     val (stdout, stderr, code) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
+    val output_ok = output_path != "" and file_exists(output_path)
+    val _warm_promoted = native_build_warm_receipt_finish(
+        warm_receipt, stdout, code == 0, output_ok)
+    env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
     if code == 0 and output_path != "" and not file_exists(output_path):
         # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
         # worker chain died in a way that still reports success (an early-exit
