@@ -2384,6 +2384,31 @@ Provider lanes still disagree on malformed byte-to-text behavior and no exact
 artifact proof/signature receipt exists, so this module remains unsafe rather
 than verified-and-signed; repository admission remains 0.
 
+## SSH PTY raw-pointer checkpoint
+
+The PTY facade retains one native `unsafe_addr_of` declaration and eight raw
+address extractions, now covered by five minimal `unsafe(ffi, raw_ptr)` scopes.
+The unused `mmio_read8` declaration was removed.  Pipe descriptor and buffer
+addresses must be nonzero before use; pipe reads cannot claim more than the
+bounded requested extent, and writes cannot claim more than the source array.
+Zero-length reads now return immediately instead of entering the pipe wait
+path.  The focused `ssh-pty-sffi-contract.shs` ratchet passed and confirmed the
+native provider signature.
+
+The authoritative census moved exactly the eight calls into lexical authority:
+
+- raw call sites: unchanged at 20,653
+- missing authority: 16,748 -> 16,740
+- lexical unsafe: 2,986 -> 2,994
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+All new validation is O(1) around the existing pipe operations.  It adds no
+allocation, copy, lookup, lock, hashing, signing, or generic dispatch, and the
+zero-length fast path avoids unnecessary blocking.  Pointer lifetime/layout
+and exact-artifact evidence remain unproved, so this facade is explicitly
+unsafe, not verified-and-signed; repository admission remains 0.
+
 ## SSH KEX call-authority and hot-path checkpoint
 
 The SSH session KEX owner no longer dispatches its 113 constant packet-byte
