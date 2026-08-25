@@ -1,0 +1,362 @@
+# LLM Caret - Infrastructure: wiki tools (search/read/write)
+#
+# Server-facing code for the `wiki_search`, `wiki_read` and `wiki_write`
+# tools. Only reachable through tools.spl::run_tool (the permission gate).
+#
+# Backends (selected by `[wiki] backend`, never by platform branching):
+#   confluence - the existing devhub adapter (app.devhub.adapter_confluence,
+#                the code path `bin/itf wiki` runs on). Auth is Basic
+#                user:token; the token is read ONLY from the env var named by
+#                `token_env`, handed to the adapter through ItfConfig's
+#                token_cmd seam (`printenv <NAME>`), so nothing is stored at
+#                rest and the devhub auth.sdn fallback is never consulted.
+#   local      - a markdown directory (`root`, default `doc` under the
+#                workspace root). A page id is the .md path relative to root.
+#                search = case-insensitive substring over *.md (path + body),
+#                read = file text, write = file write under root only.
+#                Works with no server at all.
+#
+# Config: `[wiki]` in llm_caret.sdn (config.spl):
+#   backend, base_url, space, user, token_env, root
+#
+# Exec order: validate arguments -> config present -> token present -> I/O.
+# Every failure is a (false, message) return; no arm aborts the process.
+
+use app.llm_caret.config.{
+    config_wiki_backend, config_wiki_base_url, config_wiki_space, config_wiki_user,
+    config_wiki_token_env, config_wiki_token, config_wiki_root
+}
+use app.devhub.config.{ItfConfig}
+use app.devhub.adapter_confluence.{
+    PageRef, PageContent, PageListItem,
+    confluence_search_pages, confluence_get_page, confluence_create_page, confluence_update_page
+}
+use app.devhub.convert_storage.{storage_to_markdown}
+use std.io_runtime.{read_file_text, file_write, file_exists, dir_exists, dir_walk, dir_create_all}
+
+val WIKI_NOT_CONFIGURED = "wiki not configured: set [wiki] in llm_caret.sdn"
+val WIKI_SEARCH_MAX = 100
+val WIKI_READ_MAX_BYTES = 262144
+val WIKI_WRITE_MAX_BYTES = 4194304
+
+# ============================================================================
+# JSON schema entries (Anthropic `input_schema` shape)
+# ============================================================================
+
+fn _LB() -> text:
+    (123 as char).to_text()
+
+fn _RB() -> text:
+    (125 as char).to_text()
+
+fn _prop(name: text, kind: text, desc: text) -> text:
+    "\"" + name + "\": " + _LB() + "\"type\": \"" + kind + "\", \"description\": \"" + desc + "\"" + _RB()
+
+fn _schema(name: text, desc: text, props: [text], required: [text]) -> text:
+    var req: [text] = []
+    for r in required:
+        req.push("\"" + r + "\"")
+    _LB() + "\"name\": \"" + name + "\", \"description\": \"" + desc + "\", \"input_schema\": " +
+        _LB() + "\"type\": \"object\", \"properties\": " + _LB() + props.join(", ") + _RB() +
+        ", \"required\": [" + req.join(", ") + "]" + _RB() + _RB()
+
+fn wiki_tool_schemas() -> [text]:
+    [
+        _schema("wiki_search", "Search the configured wiki (read-only). One line per hit: page id, title, url (tab-separated).",
+            [_prop("query", "string", "Search text (Confluence: title match; local: case-insensitive substring over *.md)")],
+            ["query"]),
+        _schema("wiki_read", "Read one wiki page as text (read-only): title, id, then the body.",
+            [_prop("page_id", "string", "Page id from wiki_search (Confluence page id or local .md path relative to the wiki root)")],
+            ["page_id"]),
+        _schema("wiki_write", "Create or update a wiki page. MUTATING: requires explicit permission. Give page_id to update, or parent + title to create.",
+            [_prop("page_id", "string", "Existing page id to update (optional)"),
+             _prop("parent", "string", "Parent page id (Confluence) or sub-directory under the wiki root (local) for a new page (optional)"),
+             _prop("title", "string", "Page title (required when creating)"),
+             _prop("body", "string", "Page body text (markdown for local; storage/HTML for Confluence)")],
+            ["body"])
+    ]
+
+# ============================================================================
+# Config resolution (pure; no I/O)
+# ============================================================================
+
+fn wiki_configured() -> bool:
+    config_wiki_backend() != ""
+
+fn _is_env_name(s: text) -> bool:
+    if s == "":
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        i = i + 1
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            return false
+    true
+
+# "" when usable, else an honest error. Never echoes a token value.
+fn wiki_config_error() -> text:
+    if not wiki_configured():
+        return WIKI_NOT_CONFIGURED
+    val backend = config_wiki_backend()
+    if backend == "local":
+        return ""
+    if backend != "confluence":
+        return "wiki backend '" + backend + "' is not supported (expected confluence | local)"
+    if config_wiki_base_url() == "":
+        return "wiki not configured: set [wiki] base_url in llm_caret.sdn"
+    if config_wiki_user() == "":
+        return "wiki not configured: set [wiki] user in llm_caret.sdn"
+    val token_env = config_wiki_token_env()
+    if token_env == "":
+        return "wiki token not configured: set [wiki] token_env in llm_caret.sdn"
+    if not _is_env_name(token_env):
+        return "wiki token_env '" + token_env + "' is not a valid environment variable name"
+    if config_wiki_token() == "":
+        return "wiki token not set: environment variable '" + token_env + "' is empty"
+    ""
+
+# ItfConfig for the devhub adapter. The token reaches resolve_auth_token
+# through the token_cmd seam; token_env is validated as an identifier above
+# so it is safe to place in the command line.
+fn _confluence_cfg() -> ItfConfig:
+    ItfConfig(
+        confluence_url: config_wiki_base_url(),
+        confluence_user: config_wiki_user(),
+        confluence_default_space: config_wiki_space(),
+        jira_url: "",
+        jira_acli_path: "acli",
+        jira_email: "",
+        default_output: "text",
+        color_mode: "auto",
+        editor_override: "",
+        pager_override: "",
+        token_cmds: [("confluence", "printenv " + config_wiki_token_env())],
+        wiki_default_backend: "confluence",
+        tasks_default_backend: "",
+        tasks_jira_done_status: ""
+    )
+
+fn _confluence_page_url(page_id: text) -> text:
+    var base = config_wiki_base_url()
+    while base.ends_with("/"):
+        base = base.substring(0, base.len() - 1)
+    base + "/pages/" + page_id
+
+# ============================================================================
+# Local backend helpers
+# ============================================================================
+
+fn _norm_dir(p: text) -> text:
+    var r = p
+    while r.len() > 1 and r.ends_with("/"):
+        r = r.substring(0, r.len() - 1)
+    r
+
+fn _local_root(ws_root: text) -> text:
+    val root = config_wiki_root()
+    if root.starts_with("/"):
+        return _norm_dir(root)
+    _norm_dir(_norm_dir(ws_root) + "/" + root)
+
+fn _has_dotdot(path: text) -> bool:
+    for part in path.split("/"):
+        if part == "..":
+            return true
+    false
+
+# Returns (full_path, error). error == "" means the path is under root.
+fn _local_guard(root: text, rel: text) -> (text, text):
+    if rel == "":
+        return ("", "page id is empty")
+    if _has_dotdot(rel):
+        return ("", "path traversal ('..') is not allowed: " + rel)
+    var full = rel
+    if not rel.starts_with("/"):
+        full = root + "/" + rel
+    if full == root or full.starts_with(root + "/"):
+        return (full, "")
+    ("", "page escapes the wiki root: " + rel)
+
+fn _local_title(rel: text, body: text) -> text:
+    for line in body.split("\n"):
+        val t = line.trim()
+        if t.starts_with("# "):
+            return t.substring(2).trim()
+    val parts = rel.split("/")
+    var name = parts[parts.len() - 1]
+    if name.ends_with(".md"):
+        name = name.substring(0, name.len() - 3)
+    name
+
+fn _slug(title: text) -> text:
+    var out = ""
+    val lowered = title.lower()
+    var i = 0
+    while i < lowered.len():
+        val ch = lowered.substring(i, i + 1)
+        i = i + 1
+        val keep = (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9")
+        if keep:
+            out = out + ch
+        elif out != "" and not out.ends_with("_"):
+            out = out + "_"
+    while out.ends_with("_"):
+        out = out.substring(0, out.len() - 1)
+    out
+
+fn _local_search(ws_root: text, query: text) -> (bool, text):
+    val root = _local_root(ws_root)
+    if not dir_exists(root):
+        return (false, "wiki_search: local wiki root not found: " + root)
+    val needle = query.lower()
+    var rows: [text] = []
+    var hits = 0
+    for path in dir_walk(root):
+        if not path.ends_with(".md"):
+            continue
+        val rel = path.substring(root.len() + 1)
+        val body = read_file_text(path)
+        if rel.lower().contains(needle) or body.lower().contains(needle):
+            hits = hits + 1
+            if hits > WIKI_SEARCH_MAX:
+                rows.push("... [more hits omitted]")
+                break
+            rows.push(rel + "\t" + _local_title(rel, body) + "\tfile://" + path)
+    if rows.len() == 0:
+        return (true, "(no pages under " + root + " match '" + query + "')")
+    (true, rows.join("\n"))
+
+fn _local_read(ws_root: text, page_id: text) -> (bool, text):
+    val root = _local_root(ws_root)
+    val (full, err) = _local_guard(root, page_id)
+    if err != "":
+        return (false, "wiki_read: " + err)
+    if not file_exists(full):
+        return (false, "wiki_read: page not found: " + page_id)
+    var body = read_file_text(full)
+    if body.len() > WIKI_READ_MAX_BYTES:
+        body = body.substring(0, WIKI_READ_MAX_BYTES) + "\n... [truncated at " + WIKI_READ_MAX_BYTES.to_text() + " bytes]"
+    (true, "Title: " + _local_title(page_id, body) + "\nId: " + page_id + "\n\n" + body)
+
+fn _dirname(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1:
+        return ""
+    var dir_parts: [text] = []
+    var i = 0
+    while i < parts.len() - 1:
+        dir_parts.push(parts[i])
+        i = i + 1
+    dir_parts.join("/")
+
+fn _local_write(ws_root: text, page_id: text, parent: text, title: text, body: text) -> (bool, text):
+    val root = _local_root(ws_root)
+    var rel = page_id
+    if rel == "":
+        if title == "":
+            return (false, "wiki_write: give page_id (update) or title (create)")
+        val slug = _slug(title)
+        if slug == "":
+            return (false, "wiki_write: title yields an empty file name: " + title)
+        rel = slug + ".md"
+        if parent != "":
+            rel = _norm_dir(parent) + "/" + rel
+    if not rel.ends_with(".md"):
+        rel = rel + ".md"
+    val (full, err) = _local_guard(root, rel)
+    if err != "":
+        return (false, "wiki_write: " + err)
+    val existed = file_exists(full)
+    val dir = _dirname(full)
+    if dir != "" and not dir_exists(dir):
+        if not dir_create_all(dir):
+            return (false, "wiki_write: cannot create directory " + dir)
+    if not file_write(full, body):
+        return (false, "wiki_write: failed to write " + rel)
+    var verb = "created"
+    if existed:
+        verb = "updated"
+    (true, verb + " " + rel + " (" + body.len().to_text() + " bytes)")
+
+# ============================================================================
+# Confluence backend helpers
+# ============================================================================
+
+fn _confluence_search(query: text) -> (bool, text):
+    val (ok, items, err) = confluence_search_pages(_confluence_cfg(), query, config_wiki_space(), WIKI_SEARCH_MAX)
+    if not ok:
+        return (false, "wiki_search: " + err)
+    if items.len() == 0:
+        return (true, "(no pages match '" + query + "')")
+    var rows: [text] = []
+    for it in items:
+        rows.push(it.id + "\t" + it.title + "\t" + _confluence_page_url(it.id))
+    (true, rows.join("\n"))
+
+fn _confluence_read(page_id: text) -> (bool, text):
+    val (ok, page, err) = confluence_get_page(_confluence_cfg(), page_id)
+    if not ok:
+        return (false, "wiki_read: " + err)
+    var body = storage_to_markdown(page.body_storage)
+    if body.len() > WIKI_READ_MAX_BYTES:
+        body = body.substring(0, WIKI_READ_MAX_BYTES) + "\n... [truncated at " + WIKI_READ_MAX_BYTES.to_text() + " bytes]"
+    (true, "Title: " + page.ref.title + "\nId: " + page.ref.id + "\n\n" + body)
+
+fn _confluence_write(page_id: text, parent: text, title: text, body: text) -> (bool, text):
+    val cfg = _confluence_cfg()
+    if page_id != "":
+        val (got, page, gerr) = confluence_get_page(cfg, page_id)
+        if not got:
+            return (false, "wiki_write: " + gerr)
+        var new_title = title
+        if new_title == "":
+            new_title = page.ref.title
+        val (ok, ref, err) = confluence_update_page(cfg, page_id, new_title, body, page.ref.version, "llm_caret wiki_write")
+        if not ok:
+            return (false, "wiki_write: " + err)
+        return (true, "updated " + ref.id + " (version " + ref.version.to_text() + ") " + _confluence_page_url(ref.id))
+    if title == "":
+        return (false, "wiki_write: give page_id (update) or title (create)")
+    val space = config_wiki_space()
+    if space == "":
+        return (false, "wiki_write: [wiki] space is required to create a Confluence page")
+    val (ok, ref, err) = confluence_create_page(cfg, space, title, body, parent)
+    if not ok:
+        return (false, "wiki_write: " + err)
+    (true, "created " + ref.id + " " + _confluence_page_url(ref.id))
+
+# ============================================================================
+# Public tool operations: (success, content)
+# ============================================================================
+
+fn wiki_search(ws_root: text, query: text) -> (bool, text):
+    if query == "":
+        return (false, "wiki_search: missing required 'query'")
+    val cerr = wiki_config_error()
+    if cerr != "":
+        return (false, cerr)
+    if config_wiki_backend() == "local":
+        return _local_search(ws_root, query)
+    _confluence_search(query)
+
+fn wiki_read(ws_root: text, page_id: text) -> (bool, text):
+    if page_id == "":
+        return (false, "wiki_read: missing required 'page_id'")
+    val cerr = wiki_config_error()
+    if cerr != "":
+        return (false, cerr)
+    if config_wiki_backend() == "local":
+        return _local_read(ws_root, page_id)
+    _confluence_read(page_id)
+
+fn wiki_write(ws_root: text, page_id: text, parent: text, title: text, body: text) -> (bool, text):
+    if body.len() > WIKI_WRITE_MAX_BYTES:
+        return (false, "wiki_write: body is " + body.len().to_text() + " bytes, over the tool cap of " + WIKI_WRITE_MAX_BYTES.to_text())
+    val cerr = wiki_config_error()
+    if cerr != "":
+        return (false, cerr)
+    if config_wiki_backend() == "local":
+        return _local_write(ws_root, page_id, parent, title, body)
+    _confluence_write(page_id, parent, title, body)

@@ -1,0 +1,69 @@
+# LLM Caret - one-shot tool invocation CLI
+#
+#   simple run src/app/llm_caret/tool_cli.spl <tool> <input-json-file> [--allow]
+#                                              [--config <llm_caret.sdn>] [--root <dir>]
+#
+# Runs exactly one caret tool through the permission gate (tools.spl::run_tool)
+# and prints the tool_result content. Exit 0 = success, 1 = tool error
+# (message on stdout), 2 = usage error. `--allow` grants that single tool;
+# without it mutating tools are denied by the default (ask/non-interactive)
+# policy, exactly as in the chat agent loop.
+#
+# This is the process boundary the MCP server uses
+# (src/app/mcp/main_lazy_caret_tools.spl): the server never imports the
+# llm_caret / devhub / imap / smtp module graph, so its startup path is
+# unchanged; each caret_* call pays one child interpreter start instead.
+
+use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
+use std.io_runtime.{read_file_text, file_exists, env_get, cwd}
+use app.llm_caret.tools.{run_tool, default_policy, policy_with_allow, new_tool_call, is_known_tool}
+use app.llm_caret.config.{load_config}
+
+fn _usage() -> i64:
+    print "usage: tool_cli.spl <tool> <input-json-file> [--allow] [--config <llm_caret.sdn>] [--root <dir>]"
+    2
+
+fn run_tool_cli(args: [text]) -> i64:
+    if args.len() < 2:
+        return _usage()
+    val tool = args[0]
+    val input_path = args[1]
+    var grant = false
+    var config_path = env_get("LLM_CARET_CONFIG") ?? ""
+    var root = cwd()
+    var i = 2
+    while i < args.len():
+        val a = args[i]
+        if a == "--allow":
+            grant = true
+        elif a == "--config" and i + 1 < args.len():
+            config_path = args[i + 1]
+            i = i + 1
+        elif a == "--root" and i + 1 < args.len():
+            root = args[i + 1]
+            i = i + 1
+        else:
+            return _usage()
+        i = i + 1
+    if not is_known_tool(tool):
+        print "unknown tool: " + tool
+        return 1
+    if not file_exists(input_path):
+        print "input file not found: " + input_path
+        return 2
+    if config_path != "":
+        val err = load_config(config_path)
+        if err != "":
+            print "config: " + err
+            return 1
+    var policy = default_policy(root)
+    if grant:
+        policy = policy_with_allow(root, [tool])
+    val res = run_tool(policy, new_tool_call("cli", tool, read_file_text(input_path)))
+    print res.content
+    if res.is_error:
+        return 1
+    0
+
+fn main() -> i64:
+    run_tool_cli(get_cli_args())

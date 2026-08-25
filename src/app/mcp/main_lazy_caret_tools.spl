@@ -1,0 +1,94 @@
+# MCP Caret Tool Handlers — LLM Caret infrastructure tools over MCP
+#
+# Exposes caret's mail / wiki / storage tools (src/app/llm_caret/tools.spl)
+# to any MCP client (Claude Code, Codex, ...) as `caret_<tool>`:
+#   caret_mail_list / caret_mail_read / caret_mail_send
+#   caret_wiki_search / caret_wiki_read / caret_wiki_write
+#   caret_storage_ls / caret_storage_get / caret_storage_put
+#
+# Process boundary, on purpose: importing app.llm_caret.tools here would pull
+# the llm_caret + devhub + imap/smtp/tls module graph into the MCP server's
+# import path and was measured to double `initialize` latency (1.6 s -> 3.8 s
+# in source mode). So every call spawns the one-shot caret CLI
+# (src/app/llm_caret/tool_cli.spl) through the same simple binary the other
+# CLI-passthrough tools use; this module imports nothing the server has not
+# already loaded.
+#
+# Permission: every call still traverses caret's run_tool gate inside the
+# child. Read-only tools run under caret's default policy (auto-allowed).
+# MUTATING tools (caret_mail_send / caret_wiki_write / caret_storage_put) are
+# DENIED here unless the client passes `confirm: true`; with it the child is
+# started with `--allow`, which grants exactly that one tool for that call.
+#
+# Config: the child reads $LLM_CARET_CONFIG (llm_caret.sdn) when set;
+# otherwise caret's own honest "not configured" errors surface as tool errors.
+# The workspace root (local wiki root base, file guards) is the server cwd.
+
+use .main_lazy_json.{extract_field, make_tool_error, make_tool_result, strip_ansi}
+use .main_lazy_query_tools.{_mcp_find_simple_binary}
+use std.io_runtime.{file_write, file_exists, dir_create_all, getpid, time_now_unix_micros, process_run_bounded, file_delete}
+
+val _CARET_PREFIX = "caret_"
+val _CARET_TOOL_CLI = "src/app/llm_caret/tool_cli.spl"
+val _CARET_TIMEOUT_MS = 120000
+val _CARET_MAX_OUTPUT_BYTES = 1048576
+val _CARET_TMP_DIR = "build/tmp/mcp_caret"
+
+fn _caret_inner(name: text) -> text:
+    name.substring(_CARET_PREFIX.len())
+
+fn is_caret_tool(name: text) -> bool:
+    if not name.starts_with(_CARET_PREFIX):
+        return false
+    val inner = _caret_inner(name)
+    inner == "mail_list" or inner == "mail_read" or inner == "mail_send" or
+        inner == "wiki_search" or inner == "wiki_read" or inner == "wiki_write" or
+        inner == "storage_ls" or inner == "storage_get" or inner == "storage_put"
+
+fn is_caret_mutating(name: text) -> bool:
+    name == "caret_mail_send" or name == "caret_wiki_write" or name == "caret_storage_put"
+
+fn caret_tool_names() -> [text]:
+    ["caret_mail_list", "caret_mail_read", "caret_mail_send",
+     "caret_wiki_search", "caret_wiki_read", "caret_wiki_write",
+     "caret_storage_ls", "caret_storage_get", "caret_storage_put"]
+
+fn _confirmed(body: text) -> bool:
+    extract_field(body, "confirm") == "true"
+
+# The tool arguments travel to the child through a private file, never argv
+# or a shell, so quoting and size are not a concern.
+fn _write_input(body: text) -> text:
+    dir_create_all(_CARET_TMP_DIR)
+    val path = _CARET_TMP_DIR + "/" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".json"
+    if not file_write(path, body):
+        return ""
+    path
+
+fn handle_caret_tool(id: text, name: text, body: text) -> text:
+    if not is_caret_tool(name):
+        return make_tool_error(id, -32601, "Unknown caret tool: " + name)
+    if is_caret_mutating(name) and not _confirmed(body):
+        return make_tool_error(id, -32602, name + " is MUTATING and was denied: pass \"confirm\": true to run it")
+    if not file_exists(_CARET_TOOL_CLI):
+        return make_tool_error(id, -32603, name + ": caret tool CLI not found at " + _CARET_TOOL_CLI + " (server must run from the repo root)")
+    val input_path = _write_input(body)
+    if input_path == "":
+        return make_tool_error(id, -32603, name + ": cannot write tool input under " + _CARET_TMP_DIR)
+    var argv = ["run", _CARET_TOOL_CLI, _caret_inner(name), input_path]
+    if is_caret_mutating(name):
+        argv.push("--allow")
+    # stdout only: the child interpreter writes engine banners and gc-warnings
+    # to stderr, which must not leak into the tool result.
+    val (stdout, stderr, code) = process_run_bounded(_mcp_find_simple_binary(), argv, _CARET_TIMEOUT_MS, _CARET_MAX_OUTPUT_BYTES)
+    file_delete(input_path)
+    var out = strip_ansi(stdout).trim()
+    if code == 124 or (code == -1 and stderr.contains("[TIMEOUT: Process killed after ")):
+        return make_tool_error(id, -32603, name + " timed out after " + _CARET_TIMEOUT_MS.to_text() + "ms")
+    if code != 0:
+        if out == "":
+            out = strip_ansi(stderr).trim()
+        return make_tool_error(id, -32603, out)
+    make_tool_result(id, out)
+
+export is_caret_tool, is_caret_mutating, caret_tool_names, handle_caret_tool
