@@ -12,6 +12,37 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Simple-core tagged-value authority checkpoint
+
+The pure-Simple tagged-value layer retains eight explicitly tagged raw
+interfaces.  All 20 former ambient calls are now routed through eight
+mandatory-inline, minimal-capability owners: pointer allocation/load/store use
+`ffi, raw_ptr`, while enum projections, float-bit conversion, and fail-closed
+termination use only `ffi`.  The focused
+`simple-core-values-authority.shs` ratchet passed and pins both compiler
+backends' mandatory-inline recognition plus the enum providers.
+
+Review found one fabricated-value failure path.  `rt_value_u64` previously
+returned tagged `nil` when its fixed 16-byte allocation failed, even though
+the function promises a lossless unsigned value.  It now terminates through
+the existing abort boundary instead of manufacturing absence.  The successful
+path retains the same one allocation, two stores, layout, and return encoding.
+The semantic boolean interface is unchanged: callers provide full-width 0/1,
+and the established true/false tags remain 11/19 across the runtime lanes.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,688 -> 19,676
+- lexical unsafe: 3,171 -> 3,179
+- function unsafe: unchanged at 919
+- missing authority: 15,598 -> 15,578
+
+This reduces the source inventory because eight owner calls replace 20
+scattered calls.  It adds no successful-path branch, allocation, copy, lookup,
+lock, hashing, signing, or generic dispatch.  Production execution and exact
+artifact evidence were not available, so this is static authority evidence
+only; verified-and-signed admission remains 0.
+
 Do not reuse the 2026-08-23 totals as current-tree statistics. They use an older
 scanner and generous file-level unsafe attribution. Newer declaration and call
 totals are also historical checkpoints with different units. The source call

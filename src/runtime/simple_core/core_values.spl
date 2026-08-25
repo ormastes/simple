@@ -3,14 +3,62 @@
 # This file intentionally implements only runtime symbols that do not require
 # host memory, string, stdio, time, or process primitives.
 
+@unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: i64) -> i64
+@unsafe(reason: "raw tagged-enum identity projection ABI", capabilities: [ffi])
 extern fn rt_enum_id(value: i64) -> i64
+@unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
 extern fn rt_enum_payload(value: i64) -> i64
+@unsafe(reason: "raw libc zeroed heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
 extern fn calloc(count: i64, size: i64) -> i64
+@unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer/offset i64 store ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw fail-closed process termination ABI", capabilities: [ffi])
 extern fn abort()
+@unsafe(reason: "raw f64 bit-representation ABI", capabilities: [ffi])
 extern fn spl_f64_to_bits(value: f64) -> i64
+
+@always_inline
+fn _sffi_rt_enum_discriminant(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+@always_inline
+fn _sffi_rt_enum_id(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_id(value)
+
+@always_inline
+fn _sffi_rt_enum_payload(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_payload(value)
+
+@always_inline
+fn _sffi_calloc(count: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        calloc(count, size)
+
+@always_inline
+fn _sffi_load_i64(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_i64(ptr, offset)
+
+@always_inline
+fn _sffi_store_i64(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_i64(ptr, offset, value)
+
+@always_inline
+fn _sffi_abort():
+    unsafe(capabilities: [ffi]):
+        abort()
+
+@always_inline
+fn _sffi_f64_to_bits(value: f64) -> i64:
+    unsafe(capabilities: [ffi]):
+        spl_f64_to_bits(value)
 
 var transient_scope_active: bool = false
 var transient_scope_paused: bool = false
@@ -77,23 +125,24 @@ pub fn rt_value_int(value: i64) -> i64:
 pub fn rt_value_as_int(value: i64) -> i64:
     if (value & 7) == 1:
         val ptr = value & -8
-        if ptr >= 4096 and (spl_load_i64(ptr, 0) & 4294967295) == 0x55494E54:
-            return spl_load_i64(ptr, 8)
+        if ptr >= 4096 and (_sffi_load_i64(ptr, 0) & 4294967295) == 0x55494E54:
+            return _sffi_load_i64(ptr, 8)
     return value >> 3
 
 pub fn rt_value_u64(bits: i64) -> i64:
-    val ptr = calloc(1, 16)
+    val ptr = _sffi_calloc(1, 16)
     if ptr < 1:
+        _sffi_abort()
         return 3
-    spl_store_i64(ptr, 0, 0x55494E54)
-    spl_store_i64(ptr, 8, bits)
+    _sffi_store_i64(ptr, 0, 0x55494E54)
+    _sffi_store_i64(ptr, 8, bits)
     return ptr | 1
 
 pub fn rt_value_as_u64(value: i64) -> i64:
     if (value & 7) == 1:
         val ptr = value & -8
-        if ptr >= 4096 and (spl_load_i64(ptr, 0) & 4294967295) == 0x55494E54:
-            return spl_load_i64(ptr, 8)
+        if ptr >= 4096 and (_sffi_load_i64(ptr, 0) & 4294967295) == 0x55494E54:
+            return _sffi_load_i64(ptr, 8)
     return value >> 3
 
 pub fn rt_pool_safepoint() -> i64:
@@ -110,7 +159,7 @@ pub fn rt_pool_safepoint() -> i64:
 # runtime carried until 2026-08-10, one lane over -- see
 # doc/08_tracking/bug/native_lane_prints_every_f64_as_denormal_garbage_2026-08-10.md.
 pub fn rt_value_float(value: f64) -> i64:
-    val raw_bits = spl_f64_to_bits(value)
+    val raw_bits = _sffi_f64_to_bits(value)
     return (raw_bits & -8) | 2
 
 pub fn rt_value_bool(value: i64) -> i64:
@@ -125,9 +174,9 @@ pub fn rt_is_some(value: i64) -> i8:
 pub fn rt_is_none(value: i64) -> i8:
     if value == 3:
         return 1
-    if rt_enum_id(value) != 1:
+    if _sffi_rt_enum_id(value) != 1:
         return 0
-    return if rt_enum_discriminant(value) == 1: 1 else: 0
+    return if _sffi_rt_enum_discriminant(value) == 1: 1 else: 0
 
 pub fn rt_unwrap_or_self(value: i64) -> i64:
     # Only the canonical Option (enum_id 1, Some=0/None=1) unwraps here.
@@ -135,8 +184,8 @@ pub fn rt_unwrap_or_self(value: i64) -> i64:
     # gating on that alone unwraps user enums to their raw payload instead
     # of returning the enum itself -- see
     # doc/08_tracking/bug/stage3_nil_coalesce_unwraps_user_enum_payload_2026-08-08.md.
-    if rt_enum_id(value) == 1 and rt_enum_discriminant(value) >= 0:
-        return rt_enum_payload(value)
+    if _sffi_rt_enum_id(value) == 1 and _sffi_rt_enum_discriminant(value) >= 0:
+        return _sffi_rt_enum_payload(value)
     value
 
 pub fn rt_unwrap_or_trap(value: i64) -> i64:
@@ -144,24 +193,24 @@ pub fn rt_unwrap_or_trap(value: i64) -> i64:
     # discriminants (Some=0, None=1). Result values have no reserved enum id,
     # so native lowering identifies Ok/Err by the same stable 32-bit variant
     # hashes used by the hosted runtime and code generator.
-    val enum_id = rt_enum_id(value)
+    val enum_id = _sffi_rt_enum_id(value)
     if enum_id < 0:
         return value
-    val discriminant = rt_enum_discriminant(value)
+    val discriminant = _sffi_rt_enum_discriminant(value)
     if enum_id == 1:
         if discriminant == 0 or discriminant == 4053299545:
-            return rt_enum_payload(value)
+            return _sffi_rt_enum_payload(value)
         if discriminant == 1 or discriminant == 2371748697:
-            abort()
+            _sffi_abort()
             return 3
         return value
     if discriminant == 2405352012:
-        return rt_enum_payload(value)
+        return _sffi_rt_enum_payload(value)
     if discriminant == 4200179024:
-        abort()
+        _sffi_abort()
         return 3
     return value
 
 pub fn rt_enum_check_discriminant(value: i64, expected: i64) -> i8:
-    val discriminant = rt_enum_discriminant(value)
+    val discriminant = _sffi_rt_enum_discriminant(value)
     return if discriminant < expected or discriminant > expected: 0 else: 1
