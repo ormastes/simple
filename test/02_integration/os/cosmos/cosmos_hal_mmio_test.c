@@ -20,6 +20,7 @@
 #define TEST_CONTROL_MAP_BYTES 0x00002000U
 #define TEST_TOGGLE_ADDRESS    COSMOS_NFC_TOGGLE_POOL_BASE
 #define TEST_NO_CHANNEL        UINT_MAX
+#define FSBL_VECTOR_COUNT      7U
 
 #define CHECK(condition)                                                      \
     do {                                                                      \
@@ -385,39 +386,52 @@ static struct cosmos_nfc_io test_nfc_io(unsigned int channel) {
 }
 
 static int test_fsbl_handoff(void) {
-    static const struct {
+    struct fsbl_vector {
         unsigned int locksta;
         unsigned int arm_clk;
         unsigned int ddr_clk;
         unsigned int pss_rst;
         unsigned int a9_rst;
         unsigned int devcfg_int_sts;
-        int expected;
-    } vectors[] = {
-        {1U, 0x1FU << 24U, 3U, 0U, 0U,
-         COSMOS_ZYNQ_DEVCFG_PCFG_DONE, COSMOS_OK},
-        {0U, 0x1FU << 24U, 3U, 0U, 0U,
-         COSMOS_ZYNQ_DEVCFG_PCFG_DONE, COSMOS_HW_ERROR},
-        {1U, 0x1EU << 24U, 3U, 0U, 0U,
-         COSMOS_ZYNQ_DEVCFG_PCFG_DONE, COSMOS_HW_ERROR},
-        {1U, 0x1FU << 24U, 2U, 0U, 0U,
-         COSMOS_ZYNQ_DEVCFG_PCFG_DONE, COSMOS_HW_ERROR},
-        {1U, 0x1FU << 24U, 3U, 1U, 0U,
-         COSMOS_ZYNQ_DEVCFG_PCFG_DONE, COSMOS_HW_ERROR},
-        {1U, 0x1FU << 24U, 3U, 0U, 1U,
-         COSMOS_ZYNQ_DEVCFG_PCFG_DONE, COSMOS_HW_ERROR},
-        {1U, 0x1FU << 24U, 3U, 0U, 0U, 0U, COSMOS_HW_ERROR}
-    };
+        unsigned int expected;
+    } vectors[FSBL_VECTOR_COUNT];
+    const char *fixture_path = getenv("COSMOS_FSBL_VECTOR_TSV");
+    FILE *fixture;
+    char line[192];
+    char trailing;
+    size_t vector_count = 0U;
     size_t index;
 
-    for (index = 0U; index < sizeof(vectors) / sizeof(vectors[0]); index++) {
+    CHECK(fixture_path != NULL && fixture_path[0] != '\0');
+    fixture = fopen(fixture_path, "r");
+    CHECK(fixture != NULL);
+    while (fgets(line, sizeof(line), fixture) != NULL) {
+        CHECK(vector_count < FSBL_VECTOR_COUNT);
+        CHECK(sscanf(line, "%u\t%u\t%u\t%u\t%u\t%u\t%u %c",
+                     &vectors[vector_count].locksta,
+                     &vectors[vector_count].arm_clk,
+                     &vectors[vector_count].ddr_clk,
+                     &vectors[vector_count].pss_rst,
+                     &vectors[vector_count].a9_rst,
+                     &vectors[vector_count].devcfg_int_sts,
+                     &vectors[vector_count].expected, &trailing) == 7);
+        CHECK(vectors[vector_count].expected <= 1U);
+        vector_count++;
+    }
+    CHECK(ferror(fixture) == 0);
+    CHECK(fclose(fixture) == 0);
+    CHECK(vector_count == FSBL_VECTOR_COUNT);
+
+    for (index = 0U; index < vector_count; index++) {
         mock.slcr_lock = vectors[index].locksta;
         mock.arm_clock = vectors[index].arm_clk;
         mock.ddr_clock = vectors[index].ddr_clk;
         mock.pss_reset = vectors[index].pss_rst;
         mock.a9_reset = vectors[index].a9_rst;
         mock.devcfg_status = vectors[index].devcfg_int_sts;
-        CHECK_STATUS(cosmos_fsbl_validate_handoff(), vectors[index].expected);
+        CHECK_STATUS(cosmos_fsbl_validate_handoff(),
+                     vectors[index].expected != 0U
+                         ? COSMOS_OK : COSMOS_HW_ERROR);
     }
     CHECK_STATUS(cosmos_fsbl_selftest(), COSMOS_OK);
     CHECK(mock.pl_reads == 0U && mock.pl_writes == 0U);

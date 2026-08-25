@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -23,7 +23,7 @@ Verifies the nvme cosmos openssd boot behaviour end to end so maintainers of thi
 | Plan | doc/03_plan/sys_test/cosmos_openssd_production_hal.md |
 | Design | doc/05_design/cosmos_openssd_production_hal.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl` |
-| Updated | 2026-08-24 |
+| Updated | 2026-08-25 |
 | Generator | Manual source-parity update; docgen not rerun |
 
 ## Purpose and audience
@@ -39,6 +39,24 @@ unrelated sibling features are out of scope.
 ## Scenarios
 
 ### Cosmos+ OpenSSD production HAL
+
+#### keeps the Pure-Simple FSBL decision core in MC/DC parity with C
+
+- Load the canonical decimal TSV shared by the C and Simple lanes.
+- Require exactly seven well-formed vectors: one valid handoff and six isolated
+  fail-closed conditions.
+- Evaluate the same ordered six-condition decision core for every row.
+- Expected: each Pure-Simple result equals the fixture's Boolean oracle.
+
+The shared fixture is
+`test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv`; the C host harness consumes
+the same file, so neither language owns a copied oracle table. Runtime coverage
+evidence is pending. Produce it only with a provenance-admitted full Stage-4
+CLI using `scripts/check/produce-cosmos-fsbl-fail-closed-coverage.shs`, then
+validate the retained receipt with
+`scripts/check/check-cosmos-fsbl-fail-closed-coverage-receipt.shs`. Missing
+Stage-4 CLI/provenance or output is a blocking failure; the Rust seed is never
+an alternative.
 
 #### should execute the host FSBL, NFC, and PCIe MMIO state machines
 

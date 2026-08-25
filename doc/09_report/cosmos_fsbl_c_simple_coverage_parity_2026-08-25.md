@@ -1,62 +1,67 @@
 # Cosmos FSBL C / Pure-Simple coverage parity — 2026-08-25
 
-## Scope and result
+## Current status
 
-This host lane covers the six-input FSBL handoff decision used by the
-Cosmos+ Zynq-7000 silicon profile.  It does not claim ARM32 firmware linkage:
-`doc/08_tracking/bug/pure_simple_arm32_emit_object_ignored_2026-08-24.md`
-remains open, so the Pure-Simple compiler cannot yet provide the relocatable
-ARM object required by the firmware link.
+**Evidence pending.** The parity infrastructure is implemented, but this update
+was intentionally not executed or verified. It does not contain or imply a new
+PASS receipt. The authoritative result becomes available only when the producer
+finishes and the independent structural checker accepts its retained receipt.
 
-The C oracle and Pure-Simple decision core use the same seven vectors.  One
-valid vector establishes the baseline; six further vectors independently
-toggle SLCR lock, ARM clock, DDR clock, PS primary reset, A9 CPU0 reset, and
-DEVCFG PCFG_DONE.  Every atomic condition is therefore shown to affect the
-result independently (6/6 MC/DC conditions, 100%).  Expected results are one
-valid handoff and six fail-closed handoffs.
+The earlier development run reported 14/14 input-reachable C arcs and seven
+passing semantic vectors, but its raw artifacts were not retained and its
+Pure-Simple run used a Rust bootstrap seed. Those observations are historical
+diagnostics only and are not admissible coverage evidence.
 
-## Measured C branch evidence
+## Shared semantic input
 
-GCC `--coverage -O0`, `gcov -b -c`, the silicon/mock-MMIO profile, and the
-normal-process-per-case runner were used before and after the vector change.
-The source under measurement was
-`src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c`.
+`test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv` is the single canonical
+decimal TSV consumed by both:
 
-| Measurement | Branches executed | Arcs taken at least once |
-| --- | ---: | ---: |
-| Before | 75.00% (12/16) | 50.00% (8/16) |
-| After, raw gcov denominator | 100.00% (16/16) | 87.50% (14/16) |
-| After, host-executable decision denominator | 100.00% (14/14) | 100.00% (14/14) |
+- `test/02_integration/os/cosmos/cosmos_hal_mmio_test.c`
+- `test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl`
 
-The two raw arcs not taken are the deliberately failing returns inside
-`cosmos_fsbl_selftest`: one would require the all-good register tuple to be
-rejected, and the other would require the missing-PCFG tuple to be accepted.
-They cannot be activated through inputs without breaking the helper being
-self-tested.  The test executes both decisions and their required success
-outcomes; they are excluded only from the input-reachable denominator, not
-reported as covered.
+Its seven rows contain one all-good handoff and six rows that independently
+make SLCR lock, ARM clock, DDR clock, PS primary reset, A9 CPU0 reset, or
+DEVCFG PCFG_DONE invalid. The final column is the Boolean expected result.
+There are no copied language-specific vector tables.
 
-The `COSMOS_IS_QEMU` compile-time `COSMOS_UNAVAILABLE` branch is a distinct
-target configuration and is absent from this silicon-profile gcov binary.
-Physical BootROM/FSBL handoff and PL hardware behavior likewise require the
-target and remain separate from host mock-MMIO evidence.
+The C and Pure-Simple decision cores evaluate the same six predicates as
+ordered scalar fail-closed guards. This retains the original short-circuit
+order while making each condition outcome directly attributable. Both hot
+paths remain O(1), use scalar register values, perform no allocation or
+aggregate copy, and add no production instrumentation.
 
-## Pure-Simple evidence and efficiency
+## Producing and checking evidence
 
-The parity scenario in
-`test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl` uses all
-seven vectors. An equivalent isolated probe passed in interpreter mode during
-development. `SIMPLE_COVERAGE=1` emitted an SDN artifact, but
-the available binary identifies itself as the Rust bootstrap seed and its
-aggregate artifact did not attribute decision records to the imported
-platform module. Therefore this report claims 100% vector/MC/DC
-condition evidence, not fabricated per-file runtime-probe percentages.  A
-Pure-Simple Stage-4 coverage rerun remains required after bootstrap deployment.
+From the repository root, with a current provenance-admitted full Stage-4
+Pure-Simple CLI:
 
-The canonical decision core is O(1), performs six scalar mask comparisons,
-allocates no memory, copies no aggregate data, and uses only direct dispatch.
-The production C path was not changed.  The optimizer reported only normal MIR
-dead-code-elimination opportunities for the core; no algorithm, allocation,
-layout, loop-hoisting, or dispatch regression was introduced.  Timing/RSS
-comparison is not meaningful for this test-only vector expansion and pure
-scalar function addition, so no performance claim is made.
+```sh
+SIMPLE_BINARY=/absolute/path/to/stage4/simple \
+  sh scripts/check/produce-cosmos-fsbl-fail-closed-coverage.shs
+sh scripts/check/check-cosmos-fsbl-fail-closed-coverage-receipt.shs
+```
+
+The producer measures the six C guards with GCC/gcov, runs the existing SSpec
+with Simple decision/condition coverage enabled, and writes artifacts below
+`build/evidence/cosmos-fsbl-fail-closed/`. It refuses a missing CLI, missing
+coverage output, invalid Stage-4 provenance, and any Rust bootstrap path.
+
+The checker independently recomputes the helper-bounded C arcs and parses the
+SDN decision and condition sections. It requires exactly six uniquely keyed
+decision rows and six uniquely keyed condition rows on the exact core owner and
+guard lines, with both outcomes nonzero and no unexpected core row. It also
+validates the canonical decimal TSV, all artifact digests, C harness and Simple
+spec identities, the forced profile and Zynq register headers, producer
+identity, exact compiler flags/tool/version, and the live Stage-4
+binary/provenance binding. Both retained run logs are digest-bound and the
+checker independently requires their exact C and Simple PASS verdicts. It fails
+closed if evidence is missing, stale, malformed, duplicated, or moved.
+
+## Claim boundary
+
+An accepted receipt proves host-executable decision parity and full outcomes
+for the six scalar fail-closed guards. It does not prove ARM32 relocatable
+Pure-Simple linkage, physical BootROM/FSBL handoff, clocks, DDR, resets, or PL
+hardware. `doc/08_tracking/bug/pure_simple_arm32_emit_object_ignored_2026-08-24.md`
+remains the firmware-linkage blocker.

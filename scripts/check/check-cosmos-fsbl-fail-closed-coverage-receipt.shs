@@ -1,0 +1,176 @@
+#!/bin/sh
+# Fail-closed structural validator for measured Cosmos FSBL coverage evidence.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+receipt=${1:-build/evidence/cosmos-fsbl-fail-closed/receipt.env}
+
+fail() {
+    echo "STATUS: FAIL cosmos-fsbl-fail-closed-coverage-receipt reason=$1" >&2
+    exit 1
+}
+case "$receipt" in ''|/*|../*|*'/../'*|*'//'*) fail unsafe-receipt-path ;; esac
+receipt_abs="$root/$receipt"
+[ -s "$receipt_abs" ] || fail receipt-absent
+
+value() {
+    count=$(grep -c "^$1=" "$receipt_abs" || true)
+    [ "$count" -eq 1 ] || fail "missing-or-duplicate-field:$1"
+    sed -n "s/^$1=//p" "$receipt_abs"
+}
+require() { [ "$(value "$1")" = "$2" ] || fail "field-mismatch:$1"; }
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+artifact() {
+    rel=$(value "$1")
+    case "$rel" in ''|/*|../*|*'/../'*|*'//'*) fail "unsafe-artifact-path:$1" ;; esac
+    [ -s "$root/$rel" ] || fail "artifact-absent:$1"
+    [ "$(hash_file "$root/$rel")" = "$(value "$2")" ] ||
+        fail "artifact-digest-mismatch:$1"
+}
+
+require schema cosmos-fsbl-fail-closed-coverage-v1
+require status pass
+require measurement_status measured
+require vector_count 7
+require isolated_fail_closed_vectors 6
+require c_core_branch_arcs_total 12
+require c_core_branch_arcs_covered 12
+require simple_core_lines 40,42,44,46,48,50
+require simple_decision_rows_total 6
+require simple_decision_rows_dual_outcome 6
+require simple_condition_rows_total 6
+require simple_condition_rows_dual_outcome 6
+require fallback_used false
+require production_instrumentation false
+
+artifact fixture_path fixture_sha256
+artifact c_source_path c_source_sha256
+artifact c_harness_path c_harness_sha256
+artifact c_zynq_header_path c_zynq_header_sha256
+artifact c_profile_header_path c_profile_header_sha256
+artifact c_run_log_path c_run_log_sha256
+artifact c_gcov_path c_gcov_sha256
+artifact c_compiler_version_path c_compiler_version_sha256
+artifact simple_source_path simple_source_sha256
+artifact simple_spec_path simple_spec_sha256
+artifact simple_run_log_path simple_run_log_sha256
+artifact simple_coverage_path simple_coverage_sha256
+artifact producer_path producer_sha256
+
+c_run_log="$root/$(value c_run_log_path)"
+simple_run_log="$root/$(value simple_run_log_path)"
+grep -Fxq 'STATUS: PASS cosmos host mock-MMIO integration' "$c_run_log" ||
+    fail c-specific-pass-verdict-absent
+grep -Fxq 'STATUS: PASS cosmos-fsbl-simple-decision-parity' "$simple_run_log" ||
+    fail simple-specific-pass-verdict-absent
+
+expected_cflags='-std=c11 -O0 -g --coverage -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2 -Wno-int-to-pointer-cast -DCOSMOS_SILICON=1 -DCOSMOS_MMIO_TEST=1 -DCOSMOS_POLL_LIMIT=16U -DCOSMOS_NFC_POLL_LIMIT=16U'
+[ "$(value c_compiler_flags)" = "$expected_cflags" ] || fail c-compiler-flags-mismatch
+cc_path=$(value c_compiler_path)
+[ -x "$cc_path" ] || fail c-compiler-absent
+case "$cc_path" in /*) : ;; *) fail c-compiler-path-not-absolute ;; esac
+[ "$(readlink -f "$(command -v cc)")" = "$cc_path" ] || fail c-compiler-identity-mismatch
+[ "$(hash_file "$cc_path")" = "$(value c_compiler_sha256)" ] ||
+    fail c-compiler-digest-mismatch
+version_path="$root/$(value c_compiler_version_path)"
+[ "$("$cc_path" --version 2>&1)" = "$(cat "$version_path")" ] ||
+    fail c-compiler-version-mismatch
+
+c_source="$root/$(value c_source_path)"
+c_gcov="$root/$(value c_gcov_path)"
+c_start=$(grep -n '^static int cosmos_fsbl_handoff_valid' "$c_source" | cut -d: -f1)
+c_end=$(awk -v start="$c_start" 'NR > start && /^}/ { print NR; exit }' "$c_source")
+set -- $(awk -v start="$c_start" -v end="$c_end" '
+    /^[[:space:]]*[0-9#=-]+:[[:space:]]*[0-9]+:/ {
+        split($0, fields, ":"); line=fields[2]+0
+    }
+    /^[[:space:]]*branch [0-9]+/ && line>=start && line<=end {
+        total++
+        if ($0 !~ /taken 0|never executed/) covered++
+    }
+    END { print total+0, covered+0 }
+' "$c_gcov")
+[ "$1" -eq 12 ] && [ "$2" -eq 12 ] || fail c-core-gcov-arcs-not-12-of-12
+[ "$1" = "$(value c_core_branch_arcs_total)" ] || fail c-core-total-receipt-mismatch
+[ "$2" = "$(value c_core_branch_arcs_covered)" ] || fail c-core-covered-receipt-mismatch
+
+simple_source="$root/$(value simple_source_path)"
+simple_raw="$root/$(value simple_coverage_path)"
+simple_start=$(grep -n '^pub fn cosmos_fsbl_handoff_valid_registers(' "$simple_source" | cut -d: -f1)
+simple_end=$(awk -v start="$simple_start" 'NR > start && /^struct CosmosPlatform:/ { print NR - 1; exit }' "$simple_source")
+simple_lines=$(awk -v start="$simple_start" -v end="$simple_end" \
+    'NR >= start && NR <= end && /^[[:space:]]*if / { if (out != "") out=out ","; out=out NR } END { print out }' \
+    "$simple_source")
+[ "$simple_lines" = "$(value simple_core_lines)" ] || fail simple-core-lines-receipt-mismatch
+set -- $(awk -F', *' -v root="$root/" -v owner="src/os/kernel/arch/arm32/platform/cosmos_openssd.spl" \
+    -v start="$simple_start" -v end="$simple_end" -v expected="$simple_lines" '
+    BEGIN { n=split(expected, lines, ","); for (i=1; i<=n; i++) wanted[lines[i]]=1 }
+    /^decisions \|id, file, line, column, true_count, false_count\|$/ { section="decisions"; next }
+    /^conditions \|decision_id, condition_id, file, line, column, true_count, false_count\|$/ { section="conditions"; next }
+    /^[^[:space:]]/ { if ($0 !~ /^(decisions|conditions) \|/) section="" }
+    section=="decisions" && /cosmos_openssd\.spl/ && NF!=6 { bad=1 }
+    section=="decisions" && NF==6 {
+        file=$2; sub(/^[[:space:]]+|[[:space:]]+$/, "", file); if (index(file,root)==1) file=substr(file,length(root)+1)
+        line=$3+0
+        if (file==owner && line>=start && line<=end) {
+            if (!wanted[line] || ++decision_line[line]!=1 || seen_decision[$1]++) bad=1
+            if (($5+0)<=0 || ($6+0)<=0) bad=1
+            decision_id[$1]=line; decisions++
+        }
+    }
+    section=="conditions" && /cosmos_openssd\.spl/ && NF!=7 { bad=1 }
+    section=="conditions" && NF==7 {
+        file=$3; sub(/^[[:space:]]+|[[:space:]]+$/, "", file); if (index(file,root)==1) file=substr(file,length(root)+1)
+        line=$4+0
+        if (file==owner && line>=start && line<=end) {
+            key=$1 SUBSEP $2
+            if (!wanted[line] || ++condition_line[line]!=1 || seen_condition[key]++) bad=1
+            if (($6+0)<=0 || ($7+0)<=0) bad=1
+            condition_decision[$1]=line; conditions++
+        }
+    }
+    END {
+        for (line in wanted) if (decision_line[line]!=1 || condition_line[line]!=1) bad=1
+        for (id in condition_decision) if (!(id in decision_id) || condition_decision[id]!=decision_id[id]) bad=1
+        if (bad || decisions!=6 || conditions!=6) exit 1
+        print decisions, conditions
+    }
+' "$simple_raw") || fail simple-core-coverage-structure-invalid
+[ "$1" = "$(value simple_decision_rows_total)" ] || fail simple-decision-total-receipt-mismatch
+[ "$1" = "$(value simple_decision_rows_dual_outcome)" ] || fail simple-decision-covered-receipt-mismatch
+[ "$2" = "$(value simple_condition_rows_total)" ] || fail simple-condition-total-receipt-mismatch
+[ "$2" = "$(value simple_condition_rows_dual_outcome)" ] || fail simple-condition-covered-receipt-mismatch
+
+simple=$(value stage4_binary_path)
+provenance=$(value stage4_provenance_path)
+[ -x "$simple" ] || fail stage4-binary-absent
+case "$simple" in *compiler_rust*|*'/bootstrap/'*) fail rust-seed-forbidden ;; esac
+[ "$(hash_file "$simple")" = "$(value stage4_binary_sha256)" ] ||
+    fail stage4-binary-digest-mismatch
+[ -s "$provenance" ] || fail stage4-provenance-absent
+[ "$(hash_file "$provenance")" = "$(value stage4_provenance_sha256)" ] ||
+    fail stage4-provenance-digest-mismatch
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+stage4_verify_candidate_provenance "$provenance" "$simple" "$root" ||
+    fail stage4-provenance-invalid
+
+awk -F '\t' '
+    BEGIN {
+        expected[1]="1\t520093696\t3\t0\t0\t4\t1"
+        expected[2]="0\t520093696\t3\t0\t0\t4\t0"
+        expected[3]="1\t503316480\t3\t0\t0\t4\t0"
+        expected[4]="1\t520093696\t2\t0\t0\t4\t0"
+        expected[5]="1\t520093696\t3\t1\t0\t4\t0"
+        expected[6]="1\t520093696\t3\t0\t1\t4\t0"
+        expected[7]="1\t520093696\t3\t0\t0\t0\t0"
+    }
+    NF != 7 || $0 != expected[NR] { exit 1 }
+    END { if (NR != 7) exit 1 }
+' "$root/$(value fixture_path)" || fail fixture-not-canonical-decimal-tsv
+
+echo "STATUS: PASS cosmos-fsbl-fail-closed-coverage-receipt"

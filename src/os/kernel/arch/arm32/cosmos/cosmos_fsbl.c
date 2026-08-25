@@ -31,15 +31,22 @@ static int cosmos_fsbl_handoff_valid(unsigned int locksta,
     if ((locksta & COSMOS_SLCR_LOCKED) == 0U) {
         return 0;
     }
-    if ((arm_clk & COSMOS_ARM_CLK_ACTIVE) != COSMOS_ARM_CLK_ACTIVE ||
-        (ddr_clk & COSMOS_DDR_CLK_ACTIVE) != COSMOS_DDR_CLK_ACTIVE) {
+    if ((arm_clk & COSMOS_ARM_CLK_ACTIVE) != COSMOS_ARM_CLK_ACTIVE) {
         return 0;
     }
-    if ((pss_rst & COSMOS_PSS_PRIMARY_RESET) != 0U ||
-        (a9_rst & COSMOS_A9_CPU0_STOPPED) != 0U) {
+    if ((ddr_clk & COSMOS_DDR_CLK_ACTIVE) != COSMOS_DDR_CLK_ACTIVE) {
         return 0;
     }
-    return cosmos_zynq_pcfg_done(devcfg_int_sts);
+    if ((pss_rst & COSMOS_PSS_PRIMARY_RESET) != 0U) {
+        return 0;
+    }
+    if ((a9_rst & COSMOS_A9_CPU0_STOPPED) != 0U) {
+        return 0;
+    }
+    if (!cosmos_zynq_pcfg_done(devcfg_int_sts)) {
+        return 0;
+    }
+    return 1;
 }
 
 int cosmos_fsbl_validate_handoff(void) {
