@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/lib/nogc_sync_mut/sffi/io.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+[ "$(grep -c '^extern fn ' "$module")" -eq 34 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 36 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 24 ]
+[ "$(( $(grep -c '^@unsafe(' "$module") - 34 ))" -eq 18 ]
+
+symbols=$(sed -n 's/^extern fn \([A-Za-z0-9_]*\)(.*/\1/p' "$module")
+both=0
+one=0
+none=0
+for symbol in $symbols; do
+    providers=0
+    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry" && providers=$((providers + 1))
+    grep -q "insert_simple!(\"$symbol\"" "$interpreter" && providers=$((providers + 1))
+    case "$providers" in
+        2) both=$((both + 1)) ;;
+        1) one=$((one + 1)) ;;
+        0) none=$((none + 1)) ;;
+    esac
+done
+[ "$both" -eq 25 ]
+[ "$one" -eq 3 ]
+[ "$none" -eq 6 ]
+
+# Semantic statuses stay boolean and nullable reads lift into Result.
+grep -q '^fn file_exists(path: text) -> bool:' "$module"
+grep -q '^fn file_write_text(path: text, content: text) -> bool:' "$module"
+grep -q '^fn file_read_lines(path: text) -> Result<\[text\], text>:' "$module"
+grep -q '^fn file_mmap_read_bytes(path: text) -> Result<\[i64\], text>:' "$module"
+
+echo "I/O SFFI authority audit: PASS (34 declarations; 24 lexical owners; 18 unsafe ambiguous/raw-handle facades; 25 both/3 one/6 no-provider; direct paths mandatory-inline)"

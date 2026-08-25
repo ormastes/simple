@@ -410,6 +410,34 @@ change. The thirteen ambiguous facades require typed `Option`/`Result` redesign,
 and provider/artifact/signature evidence remains absent; verified-and-signed
 admission remains 0.
 
+## I/O facade authority checkpoint
+
+`src/lib/nogc_sync_mut/sffi/io.spl` now confines every raw call while keeping
+authority narrow. Eighteen direct filesystem scalar/status facades plus the
+four existing nullable-read and lock owners use lexical `unsafe(ffi)`.
+Fourteen runtime-owned text/array/path facades remain unsafe because their
+types do not represent failure or ownership. Raw lock acquire/release and the
+two deprecated descriptor APIs also remain explicitly unsafe; the resource
+wrapper grants authority only while it owns a live descriptor.
+
+Semantic filesystem results remain `bool`, and nullable line/mmap reads retain
+their existing `Result` lift. All 36 direct raw owners are mandatory-inline, so
+no extra call frame, filesystem probe, read, allocation, copy, lookup, branch,
+or dispatch was introduced. Provider inventory found 25 of 34 symbols in both
+typed-native and interpreter registries, three in one, and six in neither.
+
+The focused static authority/provider/performance ratchet passed. The census
+changed:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,460 -> 14,428
+- lexical unsafe: 3,365 -> 3,381
+- function unsafe: 1,021 -> 1,037
+
+No production optimizer/runtime test was run for this Pure Simple annotation
+change. Ambiguous result types, missing providers, artifact identity, and
+signatures remain open; verified-and-signed admission remains 0.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
