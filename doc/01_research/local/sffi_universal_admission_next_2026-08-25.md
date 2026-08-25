@@ -5575,3 +5575,32 @@ The authoritative census changed as follows:
 Annotations add no runtime branch, allocation, copy, lookup, lock, hash,
 signature operation, dispatch, or data-layout change. This dead legacy adapter
 is not safe or critical-admissible; verified-and-signed admission remains 0.
+
+## Legacy compression/archive wrapper authority checkpoint
+
+All 24 gzip, deflate, zip, tar, and tar-gzip declarations are unbacked and
+absent from both typed registries. Their 24 direct wrappers plus four
+convenience wrappers now carry explicit `unsafe(ffi)` authority. This exposes
+the unresolved binary-in-text representation, decompression expansion, archive
+traversal/link/overwrite, handle lifecycle, partial status, and output ownership
+obligations instead of presenting the adapter as safe.
+
+The focused `compress-sffi-authority.shs` audit passed. It pins 24 declarations,
+24 call sites, 28 wrapper authorities including the four transitive APIs, zero
+registered providers, and no added wrapper or forced-inline layer. Existing
+boolean status comparisons, text/list results, handles, and sentinels remain
+unchanged because no real provider error ABI exists from which to derive safe
+`Result` semantics or bounded decompression behavior.
+
+The authoritative census changed as follows:
+
+- raw call sites: unchanged at 18,519
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,087
+- missing authority: 13,445 -> 13,421
+- lexical unsafe: unchanged at 3,428
+- function unsafe: 1,646 -> 1,670
+
+Annotations add no runtime branch, allocation, copy, lookup, lock, hash,
+signature operation, dispatch, or data-layout change. This adapter remains
+unsafe and critical-ineligible; verified-and-signed admission remains 0.
