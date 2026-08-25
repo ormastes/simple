@@ -39,22 +39,23 @@ wiki / file-server access from caret and from dev tools (MCP); bootstrap redeplo
 ## Gap ledger (production-level = all rows closed or explicitly accepted)
 | # | gap | status | unblock condition / owner |
 |---|---|---|---|
-| G1 | All evidence so far is on the Rust SEED, not the self-hosted binary | OPEN | redeploy lane lands Stage-4 CLI; rerun census (plan §3) |
-| G2 | 5 specs env-blocked (cli_cached, cli_hidden_cached, native_closure, tui_pty, messaging_phase_cli) | OPEN | qualified cached caret artifact + SIMPLE_STAGE3/4_BINARY from the redeploy |
-| G3 | Deployed seed cannot parse origin stdlib (`unsafe(...)`) | OPEN | same redeploy; bug record deployed_seed_cannot_parse_value_bound_unsafe_2026-08-25 |
-| G4 | No STARTTLS (587/143) | OPEN → agent | fd-upgrade facade or honest runtime-gap record with extern design |
-| G5 | IMAP FETCH parsed by lenient line scanner; no `UID FETCH` builder | OPEN → agent | RFC 3501 parser in imap/parse.spl + transcripts spec |
-| G6 | No read timeout on TLS/TCP mail path (stalled server hangs tool) | OPEN → agent | bounded reads, `timed out after N ms` error, wall-time spec |
-| G7 | FTP storage backend unbacked (`rt_ftp_*`, ftp_sffi.spl:17) | ACCEPTED-BLOCKED | runtime lane backs the extern or a pure-Simple FTP client over io.tcp is requested |
-| G8 | Wiki access from caret; caret tools not reachable from dev tools | OPEN → agent | infra_wiki (Confluence + local md) + MCP `caret_*` lazy group with confirm gating |
-| G9 | Name-keyed co-compiled function registry (silent shadowing by load order) | OPEN → agent | (module,name) keyed registry in seed + self-hosted; sabotage-proven specs |
-| G10 | `}}` in literals | CLOSED (documented escape; pinned) | — |
-| G11 | pure_sql reopen of checkpointed `TEXT NOT NULL` file stack-overflows | OPEN, filed | pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25; DB lane |
-| G12 | json_serialize sorts keys (by design) — order-insensitive assertions only | ACCEPTED | — |
-| G13 | Live infra evidence only on a Docker host (ERROR elsewhere by design) | ACCEPTED | CI runner with Docker |
-| G14 | LSP code-action emitter must emit `}}}}` / concatenate | OPEN, needs record | IDE lane |
-| G15 | Seed lexer name-collision diagnostic env-gated (`SIMPLE_DIAG_SAME_SIGNATURE_COLLISION`) | folds into G9 | — |
-| G16 | Tracked stage binaries SEGV (advisory guard RED) | OPEN, pre-existing | bootstrap lane; check-stage-binaries-runnable promotes to mandatory after redeploy |
+| G1 | All evidence on the Rust SEED, not the self-hosted binary | OPEN | redeploy lane: Stage 4 CLI; then rerun the 67-spec census |
+| G2 | 5 specs env-blocked (cli_cached, cli_hidden_cached, native_closure, tui_pty, messaging_phase_cli) | OPEN → agent | qualified cached caret artifact + SIMPLE_STAGE3/4_BINARY |
+| G3 | Deployed seed cannot parse origin stdlib (`unsafe(...)`) | **CLOSED 2026-08-25** | seed redeployed 05:16 (60641352, sha 706fa636…); orchestrator probe printed the value |
+| G4 | No STARTTLS (587/143) | **PARTIAL** — negotiation shipped, transport BLOCKED | no fd-upgrade extern exists anywhere; `rt_tls_client_from_fd` designed in tls_no_fd_upgrade_blocks_starttls_2026-08-25; runtime lane |
+| G5 | IMAP FETCH via lenient line scanner; no `UID FETCH` | **CLOSED 2026-08-25** | RFC 3501 parser + literal-aware framer + builder; fetch_parse 9/9, sabotage-proven |
+| G6 | No read timeout on the mail path | **CLOSED 2026-08-25** | tls_read_timeout facade + monotonic deadlines; timeout spec 3/3, wall < 5 s |
+| G7 | FTP storage backend unbacked (`rt_ftp_*`) | ACCEPTED-BLOCKED | runtime lane backs it, or a pure-Simple FTP client over io.tcp is requested |
+| G8 | Wiki access; caret tools unreachable from dev tools | **CLOSED 2026-08-25** | infra_wiki (Confluence + local md) + 9 confirm-gated MCP `caret_*` tools; stdio spec 3/3; startup +1 module |
+| G9 | Name-keyed co-compiled function registry (silent shadowing) | OPEN → agent | (module,name) keyed registry in both compilers; sabotage specs |
+| G10 | `}}` in literals | CLOSED | documented brace escape; pinned in both frontends |
+| G11 | pure_sql reopen of checkpointed `TEXT NOT NULL` overflows | OPEN, filed | pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25; DB lane |
+| G12 | json_serialize sorts keys (by design) | ACCEPTED | order-insensitive assertions only |
+| G13 | Live infra evidence needs a Docker host | ACCEPTED | CI runner with Docker |
+| G14 | LSP code-action emitter must emit `}}}}`/concatenate | OPEN, needs record | IDE lane |
+| G16 | Tracked stage binaries SEGV (advisory guard RED) | OPEN, pre-existing | bootstrap lane; guard promotes to mandatory after redeploy |
+| G17 | Seed deployed 05:16 cannot parse easy_fix/accessor_rewrite.spl (aborts md doctests, demotes JIT) | OPEN → agent | fix-forward in src/compiler_rust/parser; agent recommends deploy-or-rollback |
+| G18 | MCP core tool set serves 3 tools, specs pin 20 (pre-existing at origin) | OPEN, filed | mcp_core_tool_set_has_3_tools_spec_expects_20_2026-08-25 |
 
 ## Rejected shortcuts (do not retry)
 - Subagent stripped spec docstrings/@req/step() while "fixing one line" (2x) — restore origin spec, re-apply hunk only.
