@@ -895,6 +895,7 @@ pub use net::{
     rt_io_tcp_write_text,
     rt_io_tcp_write_text_read_exact_len,
     rt_io_udp_close,
+    rt_io_udp_bind,
     rt_tls_client_close,
     rt_tls_client_config_add_root_cert,
     rt_tls_client_config_enable_sni,

@@ -1615,6 +1615,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_io_tcp_write_text_read_exact_len",
         interpreter_native_net::rt_io_tcp_write_text_read_exact_len_interp
     );
+    insert_simple!("rt_io_udp_bind", interpreter_native_net::rt_io_udp_bind_interp);
     insert_simple!("rt_io_udp_close", interpreter_native_net::rt_io_udp_close_interp);
     insert_simple!("rt_is_debug_mode_enabled", system::rt_is_debug_mode_enabled);
     insert_simple!("rt_is_interpreter_runtime", system::rt_is_interpreter_runtime);

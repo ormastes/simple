@@ -1345,6 +1345,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_io_tcp_connect_timeout", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_io_tcp_accept_timeout", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_io_udp_close", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_udp_bind", &[I64], &[I64]),
     // rt_io_tcp_close(fd: i64) -> ok: bool
     RuntimeFuncSpec::new("rt_io_tcp_close", &[I64], &[I8]),
     // rt_event_loop_create() -> epfd: i64
@@ -2640,6 +2641,16 @@ mod tests {
             .expect("UDP close must be registered for native codegen");
         assert_eq!(spec.params, [I64]);
         assert_eq!(spec.returns, [I8]);
+    }
+
+    #[test]
+    fn udp_bind_uses_scalar_descriptor_abi() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_io_udp_bind")
+            .expect("UDP bind must be registered for native codegen");
+        assert_eq!(spec.params, [I64]);
+        assert_eq!(spec.returns, [I64]);
     }
 
     #[test]

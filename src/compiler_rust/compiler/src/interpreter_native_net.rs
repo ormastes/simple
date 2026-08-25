@@ -1039,6 +1039,14 @@ pub fn native_udp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+pub fn rt_io_udp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let addr = extract_socket_addr(args, 0)?;
+    match UdpSocket::bind(addr) {
+        Ok(socket) => Ok(Value::Int(allocate_socket(SocketHandle::UdpSocket(socket)))),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
 pub fn rt_io_udp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     Ok(Value::Bool(release_socket(handle)))
@@ -1344,5 +1352,10 @@ mod tcp_read_contract_tests {
             rt_io_udp_close_interp(&[Value::Int(-1)]),
             Ok(Value::Bool(false))
         ));
+    }
+
+    #[test]
+    fn invalid_udp_bind_is_bridge_error() {
+        assert!(rt_io_udp_bind_interp(&[Value::Nil]).is_err());
     }
 }

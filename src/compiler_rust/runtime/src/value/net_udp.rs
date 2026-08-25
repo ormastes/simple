@@ -332,6 +332,16 @@ pub extern "C" fn native_udp_close(handle: i64) -> i64 {
     close_socket(handle)
 }
 
+/// Simple-facing UDP bind contract: a negative value means bind failed.
+#[no_mangle]
+pub extern "C" fn rt_io_udp_bind(addr: crate::value::RuntimeValue) -> i64 {
+    let Some((ptr, len)) = runtime_text_ptr_len(addr) else {
+        return -(NetError::InvalidAddress as i64);
+    };
+    let (handle, err) = unsafe { native_udp_bind(ptr, len) };
+    if err == NetError::Success as i64 { handle } else { -err }
+}
+
 /// Simple-facing close contract: false means the handle was not live.
 #[no_mangle]
 pub extern "C" fn rt_io_udp_close(handle: i64) -> bool {
@@ -345,5 +355,10 @@ mod udp_close_contract_tests {
     #[test]
     fn invalid_udp_close_is_false() {
         assert!(!rt_io_udp_close(-1));
+    }
+
+    #[test]
+    fn invalid_udp_bind_is_negative() {
+        assert!(rt_io_udp_bind(crate::value::RuntimeValue::NIL) < 0);
     }
 }
