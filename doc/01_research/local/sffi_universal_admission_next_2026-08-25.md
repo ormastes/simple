@@ -12,6 +12,31 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Simple-core BDD authority checkpoint
+
+The pure-Simple native-SPipe BDD subset retains four explicitly tagged raw
+interfaces.  All 13 former ambient calls are now routed through four
+mandatory-inline owners; only the boxed-`u64` probe requires `ffi, raw_ptr`.
+The stdout/string owners require only `ffi`.  The focused
+`simple-core-bdd-authority.shs` ratchet passed and pins the providers and both
+compilers' mandatory-inline recognition.
+
+BDD pass/fail and boxed-zero state remain semantic Simple booleans.  The
+truthiness path still performs one header load and only performs its payload
+load after the boxed-`u64` magic matches.  Output order, counters, branches,
+allocation count, and asymptotic O(1) work are unchanged; no copy, lookup,
+lock, hash, signature operation, or generic dispatch was added.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,662 -> 19,653
+- lexical unsafe: 3,183 -> 3,187
+- function unsafe: unchanged at 919
+- missing authority: 15,560 -> 15,547
+
+Production execution and exact artifact evidence remain unavailable, so
+verified-and-signed admission remains 0.
+
 ## Simple-core dynamic-arithmetic authority checkpoint
 
 The pure-Simple `Any` arithmetic layer now retains only its four used raw
