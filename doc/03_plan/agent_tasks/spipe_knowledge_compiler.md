@@ -445,3 +445,19 @@ is absent, scratch cursor state mutates before sink/SHA/checkpoint acceptance,
 and first/middle/final plus cap-boundary fault cases are missing. Accept no
 decoder/emitter source or spec; keep the lane `IN PROGRESS` and
 `W4-SRCH-31 FAIL` unchanged.
+
+### 10.2 V2 closure handoff
+
+Decoder v2 ran `PASS 8/8` three times. Preserve its structurally sound central
+single cursor and trial transition, but accept no files: final high review is
+`FAIL` because escape assertions are length-only, token/member boundaries are
+seeded rather than cumulative, all failure classes do not prove stable
+`push`/`next_event`/`finish` terminal behavior, and evidence is bootstrap-seed.
+
+Emitter v2 ran `1/8`, `8/8`, then `11/11`. Preserve the repaired trial cursor,
+child-copy, exact-size/cap/fault mechanics, and member-close behavior, but
+accept no files. Final high review is `FAIL`: enforce an immutable global
+ceiling `<= 1,048,576`; fix payload/page/explanation maxima at
+1,048,576/524,288/65,536 rather than caller input; and remove exported
+generic/raw construction paths that bypass typed builders. Its evidence is also
+bootstrap-seed. Overall remains `IN PROGRESS`; `W4-SRCH-31 FAIL` is unchanged.

@@ -1318,3 +1318,21 @@ predicted-output-size validation is absent, scratch cursor mutation precedes
 sink/SHA/checkpoint acceptance, and the oracle omits first/middle/final and
 cap-boundary fault injection. No decoder/emitter source/spec is accepted.
 Overall status remains `IN PROGRESS`; `W4-SRCH-31` remains `FAIL`.
+
+#### 13.9.8 V2 decoder/emitter closure record
+
+Decoder v2 executed `PASS 8/8` in all three permitted cycles. Central
+single-cursor and trial-transition structure is sound, but final high review is
+`FAIL`: escape vectors compare only lengths, token/member boundaries seed
+counters instead of exercising cumulative transitions, every failure class is
+not checked for stable `push`/`next_event`/`finish` terminal results, and the
+runtime is bootstrap-seed. No source/spec is accepted.
+
+Emitter v2 executed `1/8`, `8/8`, and `11/11`. Trial cursor/child-copy,
+exact-size/cap/fault behavior, and the member-close defect are repaired. Final
+high review remains `FAIL`: no fixed global output cap guarantees
+`<= 1,048,576`; payload/page/explanation maxima are caller-controlled rather
+than protocol-fixed at 1,048,576/524,288/65,536; exported generic/raw
+constructors bypass typed-only schema builders; and execution is bootstrap-
+seed. No source/spec is accepted. Overall status remains `IN PROGRESS` and
+`W4-SRCH-31` remains `FAIL`.

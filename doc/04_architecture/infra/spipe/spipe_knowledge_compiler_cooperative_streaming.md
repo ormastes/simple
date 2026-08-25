@@ -671,3 +671,22 @@ was made after the cap and is unexecuted. Highest-capability review remains
 scratch cursor before sink/SHA/checkpoint acceptance, and lacks first/middle/
 final plus cap-boundary fault evidence. No emitter source/spec is accepted.
 Overall status remains `IN PROGRESS`; `W4-SRCH-31` remains `FAIL`.
+
+### 14.2 V2 closure review
+
+The decoder v2 matrix executed `PASS 8/8` in each of three permitted cycles.
+Central single-cursor ownership and trial-state transition are structurally
+sound, but final highest-capability review remains `FAIL`: escape tests assert
+only lengths rather than exact decoded values; token/member ceilings are
+reached through seeded state rather than real cumulative transitions; not every
+failure path proves stable results across `push`, `next_event`, and `finish`;
+and execution used bootstrap-seed provenance. No decoder file is accepted.
+
+Emitter v2 cycles executed `1/8`, `8/8`, and `11/11`. Trial cursor/child-copy,
+exact-size, cap/fault mechanics, and the member-close defect were repaired.
+Final review nevertheless remains `FAIL`: there is no fixed global output
+ceiling of at most 1,048,576 bytes; payload/page/explanation maxima remain
+caller-controlled instead of protocol-fixed at 1,048,576/524,288/65,536; and
+exported generic/raw constructors bypass the typed-only schema boundary.
+Execution again used bootstrap-seed provenance. No emitter file is accepted.
+Overall status remains `IN PROGRESS`; `W4-SRCH-31` remains `FAIL`.

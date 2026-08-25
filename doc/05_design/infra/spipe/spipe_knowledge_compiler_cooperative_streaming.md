@@ -1130,3 +1130,22 @@ predicted-output-size validation, scratch-cursor mutation before sink/SHA/
 checkpoint acceptance, and no complete first/middle/final or cap-boundary fault
 matrix. Emitter source/spec remains unaccepted. Wave status is `IN PROGRESS`;
 the independent SHA gate remains `W4-SRCH-31 FAIL`.
+
+### 16.2 V2 closure evidence
+
+Decoder v2 produced `PASS 8/8` for all three permitted cycles. Its central
+single cursor and trial transition pass structural inspection, but final high
+review is `FAIL`: the escape oracle verifies lengths rather than exact values,
+token/member limits use seeded counters instead of cumulative real input, some
+failure classes do not prove identical terminal results from `push`,
+`next_event`, and `finish`, and the executable has bootstrap-seed provenance.
+No source/spec is accepted.
+
+Emitter v2 produced `1/8`, `8/8`, and `11/11`. The candidate repairs trial
+cursor/child-copy behavior, exact-size/cap/fault mechanics, and member close.
+It still lacks an immutable global `maximum_output_bytes <= 1,048,576` rule;
+payload, page, and explanation maxima are caller-selected rather than fixed to
+1,048,576, 524,288, and 65,536 bytes; and exported generic/raw constructors
+permit bypass of typed schema builders. Its execution also used bootstrap-seed
+provenance. Final high review is `FAIL`; no files are accepted. Overall status
+is `IN PROGRESS`, with `W4-SRCH-31 FAIL` unchanged.
