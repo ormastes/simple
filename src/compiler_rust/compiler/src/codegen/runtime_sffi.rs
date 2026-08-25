@@ -1341,6 +1341,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_io_tcp_set_read_timeout", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_io_tcp_set_write_timeout", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_io_tcp_shutdown", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_connect", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_connect_timeout", &[I64, I64], &[I64]),
     // rt_io_tcp_close(fd: i64) -> ok: bool
     RuntimeFuncSpec::new("rt_io_tcp_close", &[I64], &[I8]),
     // rt_event_loop_create() -> epfd: i64
@@ -2599,6 +2601,23 @@ mod tests {
             .expect("TCP shutdown must be registered for native codegen");
         assert_eq!(spec.params, [I64, I64]);
         assert_eq!(spec.returns, [I8]);
+    }
+
+    #[test]
+    fn tcp_connect_signatures_are_registered() {
+        let connect = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_io_tcp_connect")
+            .expect("TCP connect must be registered for native codegen");
+        assert_eq!(connect.params, [I64]);
+        assert_eq!(connect.returns, [I64]);
+
+        let timeout = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_io_tcp_connect_timeout")
+            .expect("TCP connect timeout must be registered for native codegen");
+        assert_eq!(timeout.params, [I64, I64]);
+        assert_eq!(timeout.returns, [I64]);
     }
 
     #[test]

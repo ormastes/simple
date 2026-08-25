@@ -12623,8 +12623,48 @@ int64_t rt_io_tcp_connect(int64_t addr_val) {
 }
 
 int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
-    (void)ms;
-    return rt_io_tcp_connect(addr_val);
+    if (ms <= 0) return -1;
+    const char* a = rt_extract_cstr(addr_val);
+    if (!a) return -1;
+    struct sockaddr_in sa;
+    if (rt_parse_addr_port(a, &sa) < 0) return -1;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    int connected = connect(fd, (struct sockaddr*)&sa, sizeof(sa));
+    if (connected < 0 && errno != EINPROGRESS) {
+        close(fd);
+        return -1;
+    }
+    if (connected < 0) {
+        struct pollfd pfd;
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        int timeout_ms = ms > INT_MAX ? INT_MAX : (int)ms;
+        if (poll(&pfd, 1, timeout_ms) <= 0) {
+            close(fd);
+            return -1;
+        }
+        int socket_error = 0;
+        socklen_t socket_error_len = sizeof(socket_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_len) < 0 ||
+            socket_error != 0) {
+            close(fd);
+            return -1;
+        }
+    }
+    if (fcntl(fd, F_SETFL, flags) < 0) {
+        close(fd);
+        return -1;
+    }
+    return (int64_t)fd;
 }
 
 int64_t rt_io_tcp_read(int64_t fd, int64_t size) {

@@ -451,10 +451,13 @@ pub extern "C" fn rt_io_tcp_connect(addr: crate::value::RuntimeValue) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_connect_timeout(addr: crate::value::RuntimeValue, ms: i64) -> i64 {
+    if ms <= 0 {
+        return -(NetError::InvalidInput as i64);
+    }
     let Some((ptr, len)) = runtime_text_ptr_len(addr) else {
         return -(NetError::InvalidAddress as i64);
     };
-    let timeout_ns = if ms <= 0 { 0 } else { ms.saturating_mul(1_000_000) };
+    let timeout_ns = ms.saturating_mul(1_000_000);
     let (handle, _local_addr, err) = unsafe { native_tcp_connect_timeout(ptr, len, timeout_ns) };
     if err == NetError::Success as i64 { handle } else { -err }
 }
@@ -704,6 +707,14 @@ mod tcp_read_contract_tests {
         assert_eq!(timeout_nanos_from_ms(0), -1);
         assert_eq!(timeout_nanos_from_ms(25), 25_000_000);
         assert_eq!(timeout_nanos_from_ms(i64::MAX), i64::MAX);
+    }
+
+    #[test]
+    fn connect_timeout_rejects_non_positive_budget_before_network_io() {
+        assert_eq!(
+            rt_io_tcp_connect_timeout(crate::value::RuntimeValue::NIL, 0),
+            -(NetError::InvalidInput as i64)
+        );
     }
 
     #[test]

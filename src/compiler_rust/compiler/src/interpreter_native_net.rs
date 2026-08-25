@@ -615,12 +615,14 @@ pub fn rt_io_tcp_connect_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_io_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let addr = extract_socket_addr(args, 0)?;
-    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
-    let timeout = if timeout_ms <= 0 {
-        Duration::from_millis(0)
-    } else {
-        Duration::from_millis(timeout_ms as u64)
-    };
+    let timeout_ms = args
+        .get(1)
+        .and_then(|v| v.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(1, "i64"))?;
+    if timeout_ms <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let timeout = Duration::from_millis(timeout_ms as u64);
     match TcpStream::connect_timeout(&addr, timeout) {
         Ok(stream) => Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
         Err(_) => Ok(Value::Int(-1)),
@@ -1305,5 +1307,15 @@ mod tcp_read_contract_tests {
         let args = [Value::Int(-1), Value::text("not milliseconds")];
         assert!(rt_io_tcp_set_read_timeout_interp(&args).is_err());
         assert!(rt_io_tcp_set_write_timeout_interp(&args).is_err());
+    }
+
+    #[test]
+    fn tcp_connect_timeout_rejects_invalid_budget_before_connecting() {
+        let address = Value::text("127.0.0.1:1");
+        assert!(rt_io_tcp_connect_timeout_interp(&[address.clone(), Value::text("bad")]).is_err());
+        assert!(matches!(
+            rt_io_tcp_connect_timeout_interp(&[address, Value::Int(0)]),
+            Ok(Value::Int(-1))
+        ));
     }
 }
