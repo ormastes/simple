@@ -2053,3 +2053,25 @@ to 18,117 repository-wide and 10,037 to 9,947 in production. All 90 became
 function-scoped authorities. Declaration totals remain 11,627, with 2,449
 tagged and 8,999 untouched; exact-artifact verified-and-signed admission
 remains zero.
+
+## Engine2D Vulkan alias-facade authority checkpoint
+
+The sibling `ffi_vulkan.spl` module is an alias facade over the canonical
+`rt_vulkan_*` ABI rather than a separate provider. Its 48 production calls now
+carry function-scoped FFI authority across the raw `VulkanDynFfi` methods and
+the global `vulkan_ffi_*` compatibility entry points. These APIs remain unsafe
+because they expose generationless raw handles and cannot establish provider
+identity, object lifetime, or aliasing from their scalar inputs.
+
+Dynamic mode remains resolve-only: it looks up
+`vkEnumerateInstanceVersion` but does not invoke an operational generic
+dispatcher. Static mode continues to call the existing typed canonical
+thunks. The annotations add no provider call, allocation, copy, lookup, lock,
+hash, signing work, runtime branch, or dispatch overhead.
+
+The source census measured missing authority decreasing by exactly 48: 18,117
+to 18,069 repository-wide and 9,947 to 9,899 in production. All 48 became
+function-scoped authorities. The broader `rt_vulkan` family now has 134
+explicit and 324 missing call sites. Declaration totals remain 11,627, with
+2,449 tagged and 8,999 untouched; exact-artifact verified-and-signed admission
+remains zero.
