@@ -4,9 +4,9 @@ Source: `test/01_unit/app/cli_native_build_main_contract_spec.spl`
 
 ## Native build main dispatch contract
 
-The spec verifies that `src/app/cli/native_build_main.spl` uses the in-process
-`cli_native_build(args)` path by default while preserving the bounded worker
-fallback for bootstrap, interpreter, explicit worker, and `--timeout` cases.
+The spec verifies that `src/app/cli/native_build_main.spl` keeps native-build
+dispatch on its bounded worker path and routes worker process ownership through
+the canonical `app.io.process_ops` facade.
 
 Checked contract snippets:
 
@@ -18,9 +18,10 @@ fn native_build_should_use_worker(args: [text]) -> bool:
 SIMPLE_NATIVE_BUILD_FORCE_WORKER
 SIMPLE_BOOTSTRAP
 native_build_has_timeout(args)
-return run_native_build_worker(args)
-cli_native_build(args)
-worker_args.push("--mode=interpreter")
+run_native_build_worker(args)
+process_spawn_async(simple_bin, shard_args)
+process_wait(pid, timeout_ms)
+no leaf rt_process_spawn_async / rt_process_wait symbols
 ```
 
 The startup flag filter is also pinned to indexed array traversal so deployed
