@@ -145,6 +145,20 @@ path: bootstrap runs `--selftest`, and push supplies an explicit committed range
 to `--scan-only`. Do not use scan-only without an explicit range or treat it as
 self-test evidence.
 
+The automated Caret suite is bootstrap-only and runs through
+`check-caret-suite-bootstrap.shs` with the exact admitted Stage 4 binary and its
+adjacent, verified provenance receipt. Each spec uses the deterministic
+interpreter test command (`--no-session-daemon --sequential --no-db --no-cache
+--assert-ran --fail-fast`), requires its pinned nonzero scenario count, and
+accepts exactly one canonical `Results:` summary. Missing, duplicate,
+malformed, zero, or count-drift summaries fail closed. The provider-wrapper and
+multi-manager specs intentionally inject `/bin/echo`; they prove argv,
+spawn/poll/stop, capacity, and derived-terminal fixture contracts only. They do
+not prove that Claude, Codex, Gemini, or Kimi is installed or that sustained
+production supervision works. That live claim remains the separate
+`caret-production-multi-manager-launch` external-receipt TODO. These Caret
+commands must not be wired into a push-tier script.
+
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
 checker or a committed, semantically validated receipt:
 

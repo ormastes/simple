@@ -260,14 +260,14 @@ run_automated_gate() {
             return 2
         }
         if [ -n "$AUTOMATED_SIMPLE_BINARY" ]; then
-            SIMPLE_BINARY="$AUTOMATED_SIMPLE_BINARY" SIMPLE_BIN="$AUTOMATED_SIMPLE_BINARY" sh "$MUST_CHECK_GATE_RUNNER" "$_gate_command"
+            SIMPLE_BINARY="$AUTOMATED_SIMPLE_BINARY" SIMPLE_BIN="$AUTOMATED_SIMPLE_BINARY" CARET_STAGE4_PROVENANCE="$STAGE4_PROVENANCE" sh "$MUST_CHECK_GATE_RUNNER" "$_gate_command"
         else
             sh "$MUST_CHECK_GATE_RUNNER" "$_gate_command"
         fi
         return $?
     fi
     if [ -n "$AUTOMATED_SIMPLE_BINARY" ]; then
-        (cd "$ROOT" && SIMPLE_BINARY="$AUTOMATED_SIMPLE_BINARY" SIMPLE_BIN="$AUTOMATED_SIMPLE_BINARY" sh -c "$_gate_command")
+        (cd "$ROOT" && SIMPLE_BINARY="$AUTOMATED_SIMPLE_BINARY" SIMPLE_BIN="$AUTOMATED_SIMPLE_BINARY" CARET_STAGE4_PROVENANCE="$STAGE4_PROVENANCE" sh -c "$_gate_command")
     else
         (cd "$ROOT" && sh -c "$_gate_command")
     fi
@@ -333,10 +333,14 @@ EOF
     for _phase in 1 2 3 4; do printf 'phase%s evidence\n' "$_phase" > "$_tmp/phase$_phase.receipt"; done
     printf '%s\n' '#!/bin/sh' 'printf "%s\n" compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass' > "$_tmp/phase-validator"
     printf '%s\n' "printf '%s\\n' compiler-stage1-evidence=$_tmp/phase1.receipt compiler-stage2-evidence=$_tmp/phase2.receipt compiler-stage3-evidence=$_tmp/phase3.receipt compiler-stage4-evidence=$_tmp/phase4.receipt" >> "$_tmp/phase-validator"
-    printf '%s\n' '#!/bin/sh' "[ \"\${SIMPLE_BINARY:-}\" = \"$_tmp/stage4\" ] || { echo 'STATUS: FAIL wrong-stage4-binary'; exit 1; }" "[ \"\${SIMPLE_BIN:-}\" = \"$_tmp/stage4\" ] || { echo 'STATUS: FAIL wrong-stage4-bin'; exit 1; }" 'echo "STATUS: PASS self-test automated gate"' > "$_tmp/gate-runner"
+    printf '%s\n' '#!/bin/sh' "[ \"\${SIMPLE_BINARY:-}\" = \"$_tmp/stage4\" ] || { echo 'STATUS: FAIL wrong-stage4-binary'; exit 1; }" "[ \"\${SIMPLE_BIN:-}\" = \"$_tmp/stage4\" ] || { echo 'STATUS: FAIL wrong-stage4-bin'; exit 1; }" "[ \"\${CARET_STAGE4_PROVENANCE:-}\" = \"$_tmp/phase4.receipt\" ] || { echo 'STATUS: FAIL wrong-caret-stage4-provenance'; exit 1; }" 'echo "STATUS: PASS self-test automated gate"' > "$_tmp/gate-runner"
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$_tmp/stage4"
     chmod +x "$_tmp/phase-validator" "$_tmp/stage4"
     chmod +x "$_tmp/gate-runner"
+    ! SIMPLE_BINARY="$_tmp/stage4" SIMPLE_BIN="$_tmp/stage4" CARET_STAGE4_PROVENANCE= sh "$_tmp/gate-runner" ignored >/dev/null 2>&1 || {
+        echo "bootstrap-must-check selftest: gate runner accepted missing Caret Stage4 provenance" >&2
+        exit 1
+    }
     SIMPLE_BINARY="$_tmp/wrong-ambient-simple" SIMPLE_BIN="$_tmp/wrong-ambient-simple-bin" MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
     grep -q 'compiler-stage1, pass' "$_tmp/ledger.sdn" || exit 1
     grep -q 'compiler-stage2, pass' "$_tmp/ledger.sdn" || exit 1
