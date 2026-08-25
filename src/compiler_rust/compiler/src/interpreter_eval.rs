@@ -108,6 +108,13 @@ fn record_flattened_import_binding(marker: &str) {
                 entries.insert(name.clone(), binding.clone());
             }
         }
+        // Record the glob SOURCE itself under a `"*<owner>"` key (one per glob
+        // import, so multiple globs don't clobber each other). `*` is not a
+        // legal identifier, so no name lookup can ever hit these entries; the
+        // cross-module function resolver (`filter_overloads_by_caller_binding`
+        // in interpreter_call/mod.rs) reads them to learn which owners a glob
+        // import makes eligible for bare-name calls.
+        entries.insert(format!("*{source_owner}"), (Arc::clone(&source_owner), "*".to_string()));
     } else {
         let binding = crate::interpreter::owner_bindings(&source_owner)
             .and_then(|source_bindings| source_bindings.get(source_name).cloned())
@@ -453,6 +460,25 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     super::BITFIELDS.with(|cell| cell.borrow_mut().clear());
     // Clear the struct/class overload registry from previous runs.
     CLASS_OVERLOADS.with(|cell| cell.borrow_mut().clear());
+
+    // Top-level statements of the flattened entry module execute under the
+    // "<entry>" owner — the same sentinel entry-defined functions register
+    // under and `append_root_import_binding_markers` records the entry's
+    // import bindings under. Without this, a bare call made from module
+    // top-level (or from a lambda created there, e.g. a spec `it` block) has
+    // CURRENT_EXEC_MODULE=None and cross-module duplicate resolution
+    // (`filter_overloads_by_caller_binding`) cannot see the entry's imports.
+    // RAII so every early return restores the caller's owner (nested module
+    // evaluation re-enters here).
+    struct EntryExecModuleGuard(Option<Arc<str>>);
+    impl Drop for EntryExecModuleGuard {
+        fn drop(&mut self) {
+            crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = self.0.take());
+        }
+    }
+    let _entry_exec_module_guard = EntryExecModuleGuard(
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow_mut().replace(Arc::from("<entry>"))),
+    );
 
     let mut env = Env::new();
     let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
