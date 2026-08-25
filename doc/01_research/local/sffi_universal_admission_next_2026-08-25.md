@@ -12,6 +12,40 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## RISC-V boot-services authority checkpoint
+
+`riscv_services.spl` had twelve PCI/network/storage/log interfaces and 63
+ambient calls.  All declarations are explicitly tagged and all calls now use
+mandatory-inline `ffi` owners.  The focused
+`riscv-services-sffi-authority.shs` ratchet passed and keeps eleven target-owned
+symbols tied to the repository's authoritative unbacked-extern baseline rather
+than treating example-tree C implementations as production evidence.
+
+Review found three fail-open classes.  An untrusted PCI device count could
+drive an effectively unbounded boot scan; values outside 0..256 now reject the
+scan.  Storage initialization/read/NVFS statuses now use the same wrapped-signed
+decoder as network statuses, so encoded negative failures cannot become
+success.  A successful TCP bind no longer declares the network ready when its
+close probe fails.  These add constant-time boot-only checks.  No per-packet,
+per-sector, steady-state loop, allocation, copy, lookup, lock, hash, signature
+operation, or generic dispatch changed.
+
+Readiness state remains semantic Simple `bool`; signed `i64` values are retained
+only for foreign status/error carriers.  This fixes status interpretation
+rather than replacing booleans with numbers.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,262 -> 19,211
+- lexical unsafe: 3,244 -> 3,256
+- function unsafe: unchanged at 919
+- missing authority: 15,099 -> 15,036
+
+The file now reports twelve raw rows, all lexically authorized, and zero missing
+authority.  Because eleven production providers are still unbacked and no
+exact artifact is signed, this lane remains explicitly unsafe;
+verified-and-signed admission remains 0.
+
 ## LLVM-library expression translation authority checkpoint
 
 `llvm_lib_translate_expr.spl` had six local declarations; unused
