@@ -2409,6 +2409,29 @@ zero-length fast path avoids unnecessary blocking.  Pointer lifetime/layout
 and exact-artifact evidence remain unproved, so this facade is explicitly
 unsafe, not verified-and-signed; repository admission remains 0.
 
+## SSH autostart serial-boundary checkpoint
+
+The x86_64 SSH autostart module's five direct `serial_println` calls now route
+through one inline helper containing the only minimal `unsafe(ffi)` scope.
+The declaration carries explicit FFI authority, and the focused
+`ssh-autostart-sffi-contract.shs` ratchet pins both the C header and native
+provider to their void return contract.
+
+The authoritative census reflects four duplicate raw call sites eliminated
+and the retained wrapper call bounded:
+
+- raw call sites: 20,653 -> 20,649
+- missing authority: 16,740 -> 16,735
+- lexical unsafe: 2,994 -> 2,995
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Inlining preserves one serial dispatch per emitted message.  No additional
+formatting, allocation, copy, lookup, lock, hashing, signing, or generic
+dispatch is introduced; this is a cold boot path rather than a packet hot
+path.  Serial output integrity and exact-artifact evidence remain unproved,
+so it remains explicitly unsafe and verified-and-signed admission remains 0.
+
 ## SSH KEX call-authority and hot-path checkpoint
 
 The SSH session KEX owner no longer dispatches its 113 constant packet-byte
