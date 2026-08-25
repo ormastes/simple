@@ -79,6 +79,10 @@ struct ActiveFdContextOwnerV1:
     quarantined: bool
     next_nonce: u64
     active_slot: i32
+    # Most syscall bursts repeatedly enter the same task context.  Retain only
+    # a validated slot coordinate so that the common lookup does not rescan the
+    # fixed 256-slot owner table on every descriptor operation.
+    last_lookup_slot: i32
     slots: [ActiveFdContextSlotV1]
 
 fn _active_fd_empty_key_v1() -> FdTaskLifecycleKeyV1:
@@ -102,7 +106,7 @@ fn _active_fd_empty_slots_v1() -> [ActiveFdContextSlotV1]:
 val _active_fd_mutex_v1: i64 = mutex_raw_create()
 var _active_fd_owner_v1 = ActiveFdContextOwnerV1(
     initialized: false, quarantined: false, next_nonce: 1u64,
-    active_slot: -1, slots: [])
+    active_slot: -1, last_lookup_slot: -1, slots: [])
 
 fn _active_fd_initialize_v1():
     if _active_fd_owner_v1.initialized: return
@@ -110,11 +114,18 @@ fn _active_fd_initialize_v1():
     _active_fd_owner_v1.initialized = true
 
 fn _active_fd_find_key_v1(key: FdTaskLifecycleKeyV1) -> i32:
+    val hinted = _active_fd_owner_v1.last_lookup_slot
+    if hinted >= 0 and hinted < _active_fd_owner_v1.slots.len():
+        val slot = _active_fd_owner_v1.slots[hinted]
+        if (slot.occupied and slot.key.task_id == key.task_id and
+            slot.key.lifecycle_generation == key.lifecycle_generation):
+            return hinted
     var i = 0
     while i < _active_fd_owner_v1.slots.len():
         val slot = _active_fd_owner_v1.slots[i]
         if (slot.occupied and slot.key.task_id == key.task_id and
             slot.key.lifecycle_generation == key.lifecycle_generation):
+            _active_fd_owner_v1.last_lookup_slot = i
             return i
         i = i + 1
     -1
@@ -183,6 +194,7 @@ pub fn active_fd_context_begin_v1(
         fresh.fork_prepared = false
         fresh.transaction_nonce = 0u64
         _active_fd_owner_v1.slots[index] = fresh
+        _active_fd_owner_v1.last_lookup_slot = index
     val current = _active_fd_owner_v1.slots[index]
     if current.cleanup_reserved:
         _ = mutex_raw_unlock(_active_fd_mutex_v1)
