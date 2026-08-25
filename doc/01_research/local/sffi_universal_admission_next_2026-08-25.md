@@ -504,3 +504,17 @@ The focused static ratchet passed. Production execution remains blocked by the
 policy-rejected bootstrap runtime, and exact-artifact admission remains zero.
 One duplicate declaration row is removed: 11,983 rows / 3,156 symbols, 1,189
 tagged, 637 `unsafe_contract_declared`, 10,528 untouched, and zero signed.
+
+## Credential-store entropy-owner checkpoint
+
+Credential key-salt and AES-CBC IV generation now use the canonical checked
+CSPRNG owner instead of a local `rt_random_hex` declaration. Both paths retain
+their existing nullable fail-closed behavior and exactly one provider call per
+fresh salt or IV. Canonical validation adds only bounded scans of the returned
+32-character strings and no copy, lookup, retry, or allocation. The existing
+JIT re-materialization workaround remains untouched after validation.
+
+The focused static ratchet passed; executable and signed-artifact admission
+remain unavailable. One declaration row is removed: 11,982 rows / 3,156
+symbols, 1,189 tagged, 637 `unsafe_contract_declared`, 10,527 untouched, and
+zero exact-artifact verified-and-signed.

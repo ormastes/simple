@@ -385,3 +385,8 @@ passing placeholder.
     declaration or bypass presence/length/hex/nonzero checks. Next migrate the
     OAuth, WebSocket, credential-store, and security-type duplicates with typed
     failure propagation; never map entropy failure to zero or empty data.
+73. Keep credential salt and IV entropy on canonical checked `random_hex`, one
+    provider call per value, with the existing nullable failure behavior and
+    JIT text re-materialization intact. Do not restore a credential-local raw
+    declaration. The remaining security-types/OAuth/WebSocket duplicates need
+    typed API changes because they currently fabricate usable values.
