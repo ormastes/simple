@@ -32,10 +32,34 @@ use compiler.core.ast.{lexer_core_indent_stack_get, lexer_core_indent_stack_set}
 use compiler.core.ast.{lexer_cur_kind2_get, lexer_cur_kind2_set, lexer_cur_text2_get, lexer_cur_text2_set}
 use compiler.core.ast.{lexer_cur_line2_get, lexer_cur_line2_set, lexer_cur_col2_get, lexer_cur_col2_set}
 use compiler.core.ast.{lexer_cur_suffix2_get, lexer_cur_suffix2_set}
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw file-to-text read ABI; nil means read/provider failure", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+@unsafe(reason: "raw process environment lookup ABI; nil means unset or provider failure", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw process environment update status ABI", capabilities: [ffi])
 extern fn rt_env_set(key: text, value: text) -> bool
+@unsafe(reason: "raw owned tagged-array release ABI", capabilities: [ffi])
 extern fn rt_array_free(array: i64)
+
+@always_inline
+fn _sffi_file_read_text(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_env_set(key: text, value: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_env_set(key, value)
+
+@always_inline
+fn _sffi_array_free(array: i64):
+    unsafe(capabilities: [ffi]):
+        rt_array_free(array)
 
 export use compiler.frontend.lexer_types.{TokenKind}
 
@@ -131,14 +155,14 @@ fn lex_init_with_path(source: text, source_path: text):
         lex_token_start_direct = [0]
     if lex_token_end_direct.len() == 0:
         lex_token_end_direct = [0]
-    lex_env_save_enabled[0] = (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
+    lex_env_save_enabled[0] = (_sffi_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
     lex_generic_close_pending[0] = false
     core_token_env_save_set(lex_env_save_enabled[0])
     # Keep the active lexer on the exact caller source. Rereading a non-empty
     # source from disk can differ from preprocessed or generated text.
     var core_source = source
     if core_source == "" and source_path != "":
-        core_source = rt_file_read_text(source_path) ?? ""
+        core_source = _sffi_file_read_text(source_path) ?? ""
         # Fail-closed: a NAMED source file that reaches the lexer as empty text
         # is the "reads every source as empty" failure. Silently lexing "" then
         # yields an immediate EOF (or, with the pre-2026-08-09 kind-0 read-back
@@ -152,9 +176,9 @@ fn lex_init_with_path(source: text, source_path: text):
     # the next init produced a deterministic native Stage-3 use-after-release.
     lex_inline_source_slot = [core_source]
     if env_value_nul_free(core_source):
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", core_source)
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", core_source)
     if env_value_nul_free(source_path):
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", source_path)
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", source_path)
     lex_state_set("pos", "0")
     lex_state_set("core_pos", "0")
     lex_state_set("line", "1")
@@ -202,11 +226,11 @@ fn env_value_nul_free(value: text) -> bool:
     true
 
 fn lex_state_get(key: text, fallback: text) -> text:
-    rt_env_get("SIMPLE_BOOTSTRAP_STATE_{key}") ?? fallback
+    _sffi_env_get("SIMPLE_BOOTSTRAP_STATE_{key}") ?? fallback
 
 fn lex_state_set(key: text, value: text):
     if env_value_nul_free(value):
-        rt_env_set("SIMPLE_BOOTSTRAP_STATE_{key}", value)
+        _sffi_env_set("SIMPLE_BOOTSTRAP_STATE_{key}", value)
 
 fn lex_source_len() -> i64:
     current_core_source_get().len()
@@ -281,8 +305,8 @@ pub fn lexer_release_parse_source_globals():
     lex_source_codes = []
     lex_source_char_count_slot = [0]
     lex_source_code_base_slot = [0]
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", "")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", "")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", "")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", "")
 
 fn lex_cur_kind_get_slot() -> i64:
     lex_cur_kind_direct[0]
@@ -290,7 +314,7 @@ fn lex_cur_kind_get_slot() -> i64:
 fn lex_cur_kind_set(value: i64):
     lex_cur_kind_direct[0] = value
     if lex_env_save_enabled[0]:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_KIND", "{value}")
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_KIND", "{value}")
 
 fn lex_cur_line_get_slot() -> i64:
     lex_cur_line_direct[0]
@@ -298,7 +322,7 @@ fn lex_cur_line_get_slot() -> i64:
 fn lex_cur_line_set(value: i64):
     lex_cur_line_direct[0] = value
     if lex_env_save_enabled[0]:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_LINE", "{value}")
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_LINE", "{value}")
 
 fn lex_cur_col_get_slot() -> i64:
     lex_cur_col_direct[0]
@@ -306,7 +330,7 @@ fn lex_cur_col_get_slot() -> i64:
 fn lex_cur_col_set(value: i64):
     lex_cur_col_direct[0] = value
     if lex_env_save_enabled[0]:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_COL", "{value}")
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_COL", "{value}")
 
 fn lex_cur_text_get_slot() -> text:
     lex_cur_text_direct[0]
@@ -316,9 +340,9 @@ fn lex_cur_text_set(value: text):
     if lex_env_save_enabled[0]:
         val nul = char_from_code(0)
         if value.contains(nul):
-            rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", "")
+            _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", "")
         else:
-            rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", value)
+            _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", value)
 
 fn lex_cur_suffix_get_slot() -> text:
     lex_cur_suffix_direct[0]
@@ -326,7 +350,7 @@ fn lex_cur_suffix_get_slot() -> text:
 fn lex_cur_suffix_set(value: text):
     lex_cur_suffix_direct[0] = value
     if lex_env_save_enabled[0]:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_SUFFIX", value)
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_SUFFIX", value)
 
 fn lex_token_start_get() -> i64:
     if lex_token_start_direct.len() > 0:
@@ -344,7 +368,7 @@ fn lex_cur_no_interp_get() -> bool:
     false
 
 fn lex_env_i64(key: text, fallback: i64) -> i64:
-    val raw = rt_env_get(key) ?? ""
+    val raw = _sffi_env_get(key) ?? ""
     if raw == "":
         return fallback
     raw.to_int()
@@ -412,12 +436,12 @@ fn current_core_source_get() -> text:
     # Guest-first: the module-global slot persists where the env var does not.
     if lex_inline_source_slot.len() > 0 and lex_inline_source_slot[0] != "":
         return lex_inline_source_slot[0]
-    val inline_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val inline_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     if inline_source != "":
         return inline_source
-    val source_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? module_get_path()
+    val source_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? module_get_path()
     if source_path != "":
-        val content = rt_file_read_text(source_path) ?? ""
+        val content = _sffi_file_read_text(source_path) ?? ""
         return content
     ""
 
@@ -452,13 +476,13 @@ fn current_core_lexer_load() -> CoreLexer:
     var at_line_start = true
     var paren_depth = 0
     var indent_stack_raw = "0"
-    val raw_pos = rt_env_get("SIMPLE_BOOTSTRAP_LEX_POS") ?? ""
-    val raw_line = rt_env_get("SIMPLE_BOOTSTRAP_LEX_LINE") ?? ""
-    val raw_col = rt_env_get("SIMPLE_BOOTSTRAP_LEX_COL") ?? ""
-    val raw_pending = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PENDING") ?? ""
-    val raw_line_start = rt_env_get("SIMPLE_BOOTSTRAP_LEX_LINE_START") ?? ""
-    val raw_paren = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PAREN") ?? ""
-    val raw_indent = rt_env_get("SIMPLE_BOOTSTRAP_LEX_INDENT") ?? ""
+    val raw_pos = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_POS") ?? ""
+    val raw_line = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_LINE") ?? ""
+    val raw_col = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_COL") ?? ""
+    val raw_pending = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PENDING") ?? ""
+    val raw_line_start = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_LINE_START") ?? ""
+    val raw_paren = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PAREN") ?? ""
+    val raw_indent = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_INDENT") ?? ""
     if raw_pos != "":
         pos = raw_pos.to_int()
     if raw_line != "":
@@ -492,25 +516,25 @@ fn current_core_lexer_load() -> CoreLexer:
 fn current_core_lexer_save(lexer: CoreLexer):
     if not lex_env_save_enabled[0]:
         return
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_POS", "{lexer.pos}")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE", "{lexer.line}")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_COL", "{lexer.col}")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PENDING", "{lexer.pending_dedents}")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_POS", "{lexer.pos}")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_LINE", "{lexer.line}")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_COL", "{lexer.col}")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PENDING", "{lexer.pending_dedents}")
     if lexer.at_line_start:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE_START", "1")
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_LINE_START", "1")
     else:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE_START", "0")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PAREN", "{lexer.paren_depth}")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_INDENT", "0")
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_LINE_START", "0")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PAREN", "{lexer.paren_depth}")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_INDENT", "0")
 
 fn current_core_lexer_reset_file():
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_POS", "0")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE", "1")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_COL", "1")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PENDING", "0")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_LINE_START", "1")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PAREN", "0")
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_INDENT", "0")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_POS", "0")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_LINE", "1")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_COL", "1")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PENDING", "0")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_LINE_START", "1")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PAREN", "0")
+    _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_INDENT", "0")
 
 fn lex_next_token_record() -> Token:
     val kind = lex_next()
@@ -568,7 +592,7 @@ fn lex_next() -> i64:
             lex_dead_reported = [false]
         if not lex_dead_reported[0]:
             lex_dead_reported[0] = true
-            val dead_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+            val dead_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
             val dead_line = core_lexer_last_line_get()
             val dead_col = core_lexer_last_col_get()
             val dead_len = current_core_source_get().len()
@@ -593,8 +617,8 @@ fn lex_next() -> i64:
     lex_token_end_direct[0] = loaded.pos
     lex_cur_no_interp_direct[0] = loaded.cur_no_interp
     if env_save:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{loaded.cur_start}")
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{loaded.pos}")
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{loaded.cur_start}")
+        _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{loaded.pos}")
     if env_save:
         lex_cur_text_set(loaded.cur_text)
         lex_cur_line_set(core_lexer_last_line_get())
@@ -798,7 +822,7 @@ fn lex_snapshot_restore(snapshot: LexSnapshot):
         lex_generic_close_pending[0] = nums[11] == 1
     # Restore the independent stack captured by lex_snapshot_save. Speculative
     # restore must not serialize through text or environment-backed state.
-    rt_array_free(lx.indent_stack)
+    _sffi_array_free(lx.indent_stack)
     lx.indent_stack = snapshot.indent_stack
     current_core_lexer_slot[0] = lx
     # Restore direct slots only. Environment mirrors are synchronized by the
@@ -824,10 +848,10 @@ fn lex_snapshot_restore(snapshot: LexSnapshot):
     lex_token_end_direct[0] = nums[0]
 
 fn lex_snapshot_release(snapshot: LexSnapshot, release_indent_stack: bool):
-    rt_array_free(snapshot.nums)
-    rt_array_free(snapshot.texts)
+    _sffi_array_free(snapshot.nums)
+    _sffi_array_free(snapshot.texts)
     if release_indent_stack:
-        rt_array_free(snapshot.indent_stack)
+        _sffi_array_free(snapshot.indent_stack)
 
 fn lex_snapshot_commit(snapshot: LexSnapshot):
     # No lexer transfer occurred: the snapshot owns every array.

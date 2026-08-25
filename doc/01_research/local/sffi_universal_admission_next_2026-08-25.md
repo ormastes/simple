@@ -12,6 +12,35 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Compiler lexer authority checkpoint
+
+The core lexer had four genuine file/environment/array runtime interfaces and
+47 ambient calls.  All declarations are now explicitly tagged and all calls
+route through mandatory-inline `ffi` owners.  The focused
+`compiler-lexer-sffi-authority.shs` ratchet passed, pins the compiler ABI
+registry, and proves the per-character embedded-NUL validation loop remains
+free of foreign dispatch.
+
+`rt_file_read_text` and `rt_env_get` incorrectly promised non-optional text
+despite existing callers using `??` for read failure/unset state.  Their
+declarations now truthfully return `text?`.  Environment writes remain
+best-effort mirrors of authoritative module state, as required by the guest
+lane where env get/set may be unavailable; ignoring their boolean status does
+not manufacture lexer success.  No token loop, character scan, environment
+operation count, allocation, copy, cache, lock, hash, signature operation, or
+generic dispatch changed.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,348 -> 19,305
+- lexical unsafe: 3,236 -> 3,240
+- function unsafe: unchanged at 919
+- missing authority: 15,193 -> 15,146
+
+The file now reports four raw rows, all lexically authorized, and zero missing
+authority.  Provider proof and exact signed compiler artifacts remain absent,
+so verified-and-signed admission remains 0.
+
 ## Parser type-expression authority checkpoint
 
 `parser_types_expr.spl` had five genuine environment/diagnostic/enum/tuple
