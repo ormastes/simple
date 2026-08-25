@@ -8,3 +8,8 @@ export * from "./alias.js";
 export * from "./view.js";
 export * from "./snapshot.js";
 export * from "./schema.js";
+export * from "./source_location.js";
+export * from "./trace.js";
+export * from "./classification.js";
+export * from "./graph_node.js";
+export * from "./migration.js";

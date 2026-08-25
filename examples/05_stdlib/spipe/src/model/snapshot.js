@@ -11,6 +11,7 @@ import {
 import { sortArtifacts } from "./artifact.js";
 import { sortEdges } from "./edge.js";
 import { sortSections } from "./section.js";
+import { createGraphDelta as createWave3GraphDelta } from "../graph/delta.js";
 
 function hashes(value, field) {
   return sortedUnique(value, field, (item) => normalizeHash(item, `${field} entry`));
@@ -72,6 +73,9 @@ export function createArtifactDelta(input = {}) {
 }
 
 export function createGraphDelta(input = {}) {
+  if (input?.base_snapshot_uid !== undefined || input?.base_graph_root !== undefined || input?.nodes !== undefined || input?.edges !== undefined) {
+    return createWave3GraphDelta(input);
+  }
   return immutableRecord({
     type: "graph_delta",
     added: Object.freeze(sortEdges(input.added ?? [])),

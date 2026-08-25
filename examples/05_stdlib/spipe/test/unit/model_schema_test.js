@@ -116,7 +116,7 @@ test("edge model preserves active direction and strict authority rules", () => {
   });
   assert.equal(edge.from_uid.startsWith("T-"), true);
   assert.equal(edge.to_uid.startsWith("A-"), true);
-  assert.equal(isStrictEvidence(edge), true);
+  assert.equal(isStrictEvidence(edge), false, "schema-v1 edges remain advisory after Wave 3");
   const inferred = createEdgeRecord({ ...edge, uid: "E-01K3R8G3N70ZMT43W6QJ7YHX4Q", origin: "lexical_inference", status: "proposed" });
   assert.equal(isStrictEvidence(inferred), false);
   assert.throws(() => createEdgeRecord({ ...edge, uid: "E-01K3R8G3N70ZMT43W6QJ7YHX4R", to_uid: "P-P-01K3R8G3N70ZMT43W6QJ7YHX4P-" + "b".repeat(64) }), /provisional/);

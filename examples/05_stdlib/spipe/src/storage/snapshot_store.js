@@ -117,7 +117,10 @@ export function createSnapshotMetadata(input) {
     canonical_tuple: canonicalSnapshotTuple(input)
   };
   for (const field of ["overlay_segment", "alias_root", "graph_root", "lexical_root", "projection_root", "diagnostics_root", "config_hash", "parser_set_hash"]) {
-    if (record[field] !== null) record[field] = hashField(record[field], field);
+    if (record[field] !== null) {
+      const normalized = hashField(record[field], field);
+      record[field] = field === "graph_root" ? `sha256:${normalized}` : normalized;
+    }
   }
   return freezeDeep(JSON.parse(canonicalJson(record)));
 }

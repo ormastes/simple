@@ -9,7 +9,8 @@ import { createHash } from "node:crypto";
  */
 
 export const UID_PREFIXES = Object.freeze([
-  "A", "S", "SS", "SY", "E", "P", "W", "R", "T", "C", "K", "V", "D"
+  "A", "S", "SS", "SY", "E", "P", "W", "WS", "WT", "R", "RQ", "NFR",
+  "T", "F", "C", "L", "TG", "AL", "M", "K", "V", "D"
 ]);
 
 export const TRUST_SCOPES = Object.freeze([
@@ -177,6 +178,34 @@ export function sha256(value) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** Encode the first 130 digest bits MSB-first, zero-padding the final 2 bits. */
+export function crockfordDigestPayload(bytes) {
+  const digest = createHash("sha256").update(bytes).digest();
+  let bits = 0;
+  let bitCount = 0;
+  let output = "";
+  for (const byte of digest) {
+    bits = (bits << 8) | byte;
+    bitCount += 8;
+    while (bitCount >= 5 && output.length < 26) {
+      bitCount -= 5;
+      output += CROCKFORD_ALPHABET[(bits >> bitCount) & 31];
+      bits &= (1 << bitCount) - 1;
+    }
+    if (output.length === 26) break;
+  }
+  if (output.length < 26) output += CROCKFORD_ALPHABET[(bits << (5 - bitCount)) & 31];
+  return output;
+}
+
+export function deriveCanonicalUid(prefix, domain, value) {
+  if (!UID_PREFIXES.includes(prefix) || prefix === "W") fail("SPK005", "unsupported derived UID prefix", { prefix });
+  const bytes = Buffer.concat([Buffer.from(`${domain}\0`, "utf8"), canonicalBytes(value)]);
+  return `${prefix}-${crockfordDigestPayload(bytes)}`;
+}
+
 function digestOrderedTuple(name, fields, values) {
   const lines = [name];
   for (let index = 0; index < fields.length; index += 1) {
@@ -227,13 +256,16 @@ export function canonicalSnapshotTuple(tuple) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(text)) fail("SPK023", `${field} is not a canonical version identifier`, { field, value });
     return text;
   };
+  const schemaVersion = integerVersion(tuple.schema_version, "schema_version");
+  const worktreePrefixes = schemaVersion === 1 ? ["W"] : schemaVersion === 2 ? ["WT"] : [];
+  if (worktreePrefixes.length === 0) fail("SPK023", "schema_version must be 1 or 2", { schema_version: schemaVersion });
   const normalized = {
     project_uid: assertCanonicalUid(tuple.project_uid, "project_uid", ["P"]),
-    worktree_uid: assertCanonicalUid(tuple.worktree_uid, "worktree_uid", ["W"]),
+    worktree_uid: assertCanonicalUid(tuple.worktree_uid, "worktree_uid", worktreePrefixes),
     revision_id: normalizeRevision(tuple.revision_id, "revision_id"),
     base_generation_hash: normalizeDigestHex(tuple.base_generation_hash, "base_generation_hash"),
     overlay_generation_hash: normalizeDigestHex(tuple.overlay_generation_hash, "overlay_generation_hash"),
-    schema_version: integerVersion(tuple.schema_version, "schema_version"),
+    schema_version: schemaVersion,
     parser_version: versionId(tuple.parser_version, "parser_version"),
     analyzer_version: versionId(tuple.analyzer_version, "analyzer_version"),
     provider_contract_version: versionId(tuple.provider_contract_version, "provider_contract_version"),

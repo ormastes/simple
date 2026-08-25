@@ -7,9 +7,46 @@ import { createSectionRecord } from "../model/section.js";
 import { createKnowledgeDelta } from "../model/snapshot.js";
 import { TRUST_SCOPES } from "../model/identity.js";
 import { isTrustedAuthorizationPort } from "./authorization.js";
+import { compileKnowledgeGraph } from "./knowledge_graph.js";
+import { graphRecordHash, hashGraphDelta } from "../graph/index.js";
+import { GraphSnapshotStore } from "../storage/graph_snapshot_store.js";
+import { canonicalGraphBytes } from "../graph/canonical.js";
+import { createDiagnosticRecord } from "../diagnostics/record.js";
 
 function compare(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalDiagnostic(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("compiler diagnostic must be an object");
+  }
+  return createDiagnosticRecord({
+    code: value.code,
+    severity: value.severity,
+    message_key: value.message_key,
+    arguments: value.arguments ?? value.details ?? {},
+    project_uid: value.project_uid ?? null,
+    revision_id: value.revision_id ?? null,
+    snapshot_uid: value.snapshot_uid ?? null,
+    artifact_uid: value.artifact_uid ?? null,
+    source_span: value.source_span ?? null,
+    related_uids: value.related_uids ?? [],
+    remediation: value.remediation ?? null,
+    cause_chain: value.cause_chain ?? []
+  });
+}
+
+/** Return the deterministic, canonical union used by results, deltas, and roots. */
+function mergeDiagnostics(...groups) {
+  const records = new Map();
+  for (const value of groups.flat()) {
+    const record = canonicalDiagnostic(value);
+    records.set(canonicalJson(record), record);
+  }
+  return [...records.entries()]
+    .sort(([left], [right]) => compare(left, right))
+    .map(([, record]) => record);
 }
 
 function positiveSafeInteger(value, field) {
@@ -151,7 +188,7 @@ export function applyInputDelta(inputs, changes) {
 }
 
 /** Compile an explicit bounded input set. Filesystem enumeration belongs to a workspace adapter. */
-function compileInventory(options = {}, authorizationPort = null) {
+function compileInventory(options = {}, authorizationPort = null, graphSnapshotStore = null) {
   const context = {
     projectUid: String(options.project_uid ?? ""),
     worktreeUid: String(options.worktree_uid ?? ""),
@@ -223,8 +260,7 @@ function compileInventory(options = {}, authorizationPort = null) {
     sections: (item.sections ?? []).filter((section) => section.uid).map((section) => createSectionRecord({ ...section, marker_present: true }))
   }));
   const identity = buildIdentityIndex(parsed);
-  const diagnostics = [...parsed.flatMap((item) => item.diagnostics ?? []), ...identity.diagnostics]
-    .sort((a, b) => compare(canonicalJson(a), canonicalJson(b)));
+  const diagnostics = mergeDiagnostics(parsed.flatMap((item) => item.diagnostics ?? []), identity.diagnostics);
   if (diagnostics.length > limits.max_diagnostics) throw new RangeError("SPK022 diagnostic_limit_exceeded");
   const baseGenerationHash = sha256Hex(canonicalJson(parsed.map((item) => ({
     path: item.artifact.canonical_path,
@@ -247,7 +283,7 @@ function compileInventory(options = {}, authorizationPort = null) {
     diagnostics_root: sha256Hex(canonicalJson(diagnostics)),
     parser_set_hash: sha256Hex(canonicalJson([...new Set(parsed.map((item) => item.parser.id))].sort()))
   });
-  return freeze({
+  const inventory = {
     snapshot,
     artifacts: parsed.map((item) => item.artifact),
     sections: parsed.flatMap((item) => item.sections ?? []),
@@ -258,6 +294,35 @@ function compileInventory(options = {}, authorizationPort = null) {
     identity,
     parsed,
     source_inputs: inputs
+  };
+  const graph = compileKnowledgeGraph(inventory, {
+    symbol_provider: options.symbol_provider ?? null,
+    principal: options.principal,
+    profile: options.trace_profile ?? "standard",
+    authorization_port: authorizationPort,
+    authorization_receipts: options.authorization_receipts ?? null
+  });
+  const finalDiagnostics = mergeDiagnostics(diagnostics, graph.diagnostics);
+  if (finalDiagnostics.length > limits.max_diagnostics) throw new RangeError("SPK022 diagnostic_limit_exceeded");
+  const coherentSnapshot = createSnapshotMetadata({
+    ...snapshot,
+    graph_root: graph.graph_root,
+    diagnostics_root: sha256Hex(canonicalJson(finalDiagnostics))
+  });
+  let publication = null;
+  if (graphSnapshotStore !== null) {
+    const stage = graphSnapshotStore.stage(coherentSnapshot, [
+      { hash: graph.graph_root, bytes: canonicalGraphBytes(graph.nodes, graph.edges) }
+    ]);
+    publication = graphSnapshotStore.publish(options.expected_current_snapshot_uid ?? null, stage);
+  }
+  return freeze({
+    ...inventory,
+    snapshot: coherentSnapshot,
+    diagnostics: finalDiagnostics,
+    graph,
+    graph_diagnostics: graph.diagnostics,
+    publication
   });
 }
 
@@ -267,20 +332,25 @@ export function compileKnowledgeInventory(options = {}) {
 
 export class KnowledgeCompiler {
   #authorizationPort;
+  #graphSnapshotStore;
 
-  constructor({ authorizationPort = null } = {}) {
+  constructor({ authorizationPort = null, graphSnapshotStore = null } = {}) {
     if (authorizationPort !== null && !isTrustedAuthorizationPort(authorizationPort)) {
       throw new TypeError("KnowledgeCompiler requires a trusted AuthorizationPort");
     }
+    if (graphSnapshotStore !== null && !(graphSnapshotStore instanceof GraphSnapshotStore)) {
+      throw new TypeError("KnowledgeCompiler requires a GraphSnapshotStore");
+    }
     this.#authorizationPort = authorizationPort;
+    this.#graphSnapshotStore = graphSnapshotStore;
   }
 
   compile(options = {}) {
-    return compileInventory(options, this.#authorizationPort);
+    return compileInventory(options, this.#authorizationPort, this.#graphSnapshotStore);
   }
 
   compileDelta(previous, changes, options = {}) {
-    return compileDelta(previous, changes, options, this.#authorizationPort);
+    return compileDelta(previous, changes, options, this.#authorizationPort, this.#graphSnapshotStore);
   }
 }
 
@@ -296,7 +366,18 @@ function sectionCandidateMap(inventory) {
   return new Map(inventory.section_candidates.map((section) => [section.candidate_id, section]));
 }
 
-function compileDelta(previous, changes, options = {}, authorizationPort = null) {
+function graphOperations(beforeValues = [], afterValues = [], kind) {
+  const before = new Map(beforeValues.map((record) => [record.uid, record]));
+  const after = new Map(afterValues.map((record) => [record.uid, record]));
+  return {
+    added: [...after.entries()].filter(([uid]) => !before.has(uid)).map(([, record]) => record),
+    updated: [...after.entries()].filter(([uid, record]) => before.has(uid) && canonicalJson(before.get(uid)) !== canonicalJson(record))
+      .map(([uid, record]) => ({ before_hash: graphRecordHash(before.get(uid)), [kind]: record })),
+    removed: [...before.entries()].filter(([uid]) => !after.has(uid)).map(([uid, record]) => ({ uid, before_hash: graphRecordHash(record) }))
+  };
+}
+
+function compileDelta(previous, changes, options = {}, authorizationPort = null, graphSnapshotStore = null) {
   if (!previous?.snapshot || !Array.isArray(previous.source_inputs)) throw new TypeError("previous inventory with source_inputs is required");
   const nextInputs = applyInputDelta(previous.source_inputs, changes);
   const inventory = compileInventory({
@@ -308,9 +389,14 @@ function compileDelta(previous, changes, options = {}, authorizationPort = null)
     strict_sections: options.strict_sections,
     authorization_receipt: options.authorization_receipt,
     policy_version: options.policy_version,
+    symbol_provider: options.symbol_provider,
+    principal: options.principal,
+    trace_profile: options.trace_profile,
+    authorization_receipts: options.authorization_receipts,
     limits: options.limits,
-    inputs: nextInputs
-  }, authorizationPort);
+    inputs: nextInputs,
+    expected_current_snapshot_uid: options.expected_current_snapshot_uid ?? previous.snapshot.snapshot_uid
+  }, authorizationPort, null);
   const before = artifactMap(previous);
   const after = artifactMap(inventory);
   const added = [...after.entries()].filter(([uid]) => !before.has(uid)).map(([, value]) => value);
@@ -330,6 +416,12 @@ function compileDelta(previous, changes, options = {}, authorizationPort = null)
   const section_candidates_updated = [...afterCandidates.entries()]
     .filter(([id, value]) => beforeCandidates.has(id) && canonicalJson(beforeCandidates.get(id)) !== canonicalJson(value))
     .map(([, value]) => value);
+  const graph = {
+    base_snapshot_uid: previous.snapshot.snapshot_uid,
+    base_graph_root: previous.graph.graph_root,
+    nodes: graphOperations(previous.graph.nodes, inventory.graph.nodes, "node"),
+    edges: graphOperations(previous.graph.edges, inventory.graph.edges, "edge")
+  };
   const delta = createKnowledgeDelta({
     base_snapshot_uid: previous.snapshot.snapshot_uid,
     project_uid: previous.snapshot.project_uid,
@@ -338,7 +430,7 @@ function compileDelta(previous, changes, options = {}, authorizationPort = null)
       added, updated, removed_uids, sections_added, sections_updated, sections_removed_uids,
       section_candidates_added, section_candidates_updated, section_candidates_removed_ids
     },
-    graph: {},
+    graph,
     index: {
       added_document_ids: added.map(({ uid }) => uid),
       updated_document_ids: updated.map(({ uid }) => uid),
@@ -348,7 +440,25 @@ function compileDelta(previous, changes, options = {}, authorizationPort = null)
     projection_invalidations: [...new Set([...added, ...updated].flatMap(({ features, components, layers }) => [...features, ...components, ...layers]))],
     diagnostics: inventory.diagnostics
   });
-  return freeze({ inventory, delta });
+  let publishedInventory = inventory;
+  if (graphSnapshotStore !== null) {
+    const replayRecord = {
+      delta_hash: hashGraphDelta(delta.graph),
+      base_snapshot_uid: previous.snapshot.snapshot_uid,
+      base_graph_root: previous.graph.graph_root,
+      output_snapshot_uid: inventory.snapshot.snapshot_uid,
+      output_graph_root: inventory.graph.graph_root
+    };
+    const stage = graphSnapshotStore.stage(inventory.snapshot, [
+      {
+        hash: inventory.graph.graph_root,
+        bytes: canonicalGraphBytes(inventory.graph.nodes, inventory.graph.edges)
+      }
+    ], { replay_record: replayRecord });
+    const publication = graphSnapshotStore.publish(options.expected_current_snapshot_uid ?? previous.snapshot.snapshot_uid, stage);
+    publishedInventory = freeze({ ...inventory, publication });
+  }
+  return freeze({ inventory: publishedInventory, delta });
 }
 
 
