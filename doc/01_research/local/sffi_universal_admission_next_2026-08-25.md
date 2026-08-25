@@ -5315,3 +5315,38 @@ The executable system test remains blocked by the previously recorded hosted
 environment parser failure. Exact x86 provider artifact identity, signed
 admission, and device-level proof remain absent, so verified-and-signed
 admission remains 0.
+
+## Direct FAT32 boot-reader authority checkpoint
+
+The direct FAT32 boot reader's four used runtime families now carry explicit
+FFI authority and route through mandatory-inline owners. Two unused runtime
+declarations were removed. The packed-byte file-chain path retains its exact
+requested-size allocation, one checked typed-byte append per copied byte, the
+512 MiB whole-file ceiling, bounded cluster count, Floyd-style cycle guard,
+and reused DMA scratch buffer.
+
+The prior `_vfs_boot_byte` out-of-range fallback manufactured byte zero, which
+can be interpreted as an end-of-directory marker. It now fails closed. The
+boot-sector length check was moved before diagnostic byte reads so malformed
+short sectors still produce the existing typed `Err("boot-sector-short")`
+rather than reaching that assertion. The focused
+`direct-fat32-boot-sffi-authority.shs` audit passed. It records three providers
+in both typed registries and the expected interpreter-only boot logger; this
+registration coverage is not signature or proof evidence.
+
+The authoritative census changed as follows:
+
+- raw call sites: 18,615 -> 18,592
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,088
+- missing authority: 13,700 -> 13,673
+- lexical unsafe: 3,420 -> 3,424
+- function unsafe: unchanged at 1,495
+
+The hot file-copy path has unchanged `O(size)` complexity, allocation count,
+copy count, and one provider status branch per byte. Mandatory inlining avoids
+new dispatch overhead. No lookup, lock, hash, signature operation, generic
+marshalling, or per-cluster allocation was added. Legacy array-return lookup
+helpers still conflate not-found/read failure with valid empty data and the
+DMA/MMIO artifact chain remains unsigned and unproved, so this module is not
+globally verified or signed; verified-and-signed admission remains 0.
