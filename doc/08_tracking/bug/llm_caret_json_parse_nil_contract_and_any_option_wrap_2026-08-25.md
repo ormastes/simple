@@ -148,3 +148,57 @@ copies) — not introduced here.
    itself returns `session=[advanced-session]` on the fixed std (probed
    directly), so the field is dropped in `src/app/llm_caret/provider.spl`'s
    `dispatch_send_advanced` path — caret-owned.
+
+### Residual follow-up (2026-08-25, second pass) — all three closed
+
+Verified on the same fresh-seed worktree, one spec per run:
+
+| spec | before (post json fix) | after |
+|---|---|---|
+| `test/01_unit/app/llm_caret/claude_cli_spec.spl` | `84 total, 66 passed, 18 failed` | `84 total, 84 passed, 0 failed` |
+| `test/01_unit/app/llm_caret/provider_spec.spl` | `36 total, 35 passed, 1 failed` | `38 total, 38 passed, 0 failed` |
+| `test/01_unit/lib/common/parsers_json_core_spec.spl` | `94 total, 94 passed, 0 failed` | `98 total, 98 passed, 0 failed` |
+| `test/01_unit/lib/common/parsers_json_ops_spec.spl` | `64 total, 64 passed, 0 failed` | `64 total, 64 passed, 0 failed` |
+
+1. **`}}` literal collapse** — spec-only fix. All 20 raw `}}` runs in
+   `claude_cli_spec.spl` now end the literal at a single `}` and append
+   `+ RB()` (the helper already imported from `std.mcp.helpers`); one
+   mid-literal case (`...:4}},"session_id"...`) is split the same way.
+   Assertions unchanged. The lexer bug itself stays open in
+   `string_literal_double_brace_collapse_2026-06-16.md`.
+2. **`json_serialize` ints / key order** — `src/lib/common/json/serializer.spl`
+   gains `_json_serialize_number`: the parser stores every number as f64
+   (`to_float()`), so an integral value in the exact-i64 band (|n| <= 2^53)
+   now serialises as `42`, not `42.0`; fractions (`1.5`) unchanged, `1e3`
+   -> `1000`. **Key order is NOT insertion order by design**: probed
+   `{"zeta","alpha","mid"}.keys()` -> `[alpha, mid, zeta]`, i.e. the dict
+   backing `json_object` is key-sorted, so no sorting was added and the one
+   spec whose expected string was non-alphabetical
+   (`structured_output` `name/items/note`) now asserts the members
+   order-insensitively. Reproduce + similar cases (42, 0, -1, 1e3, 1.5, 2.5,
+   nested array/object) added under `context "json_serialize"` in
+   `parsers_json_core_spec.spl`. Lint of `serializer.spl`: the only errors
+   are the two pre-existing COLL006 at lines 14/79, byte-identical on the
+   HEAD copy; the new function adds 0 findings.
+3. **`advanced-session` drop — NOT a provider.spl defect.** Probe
+   (`bin/simple run`): `dispatch_send_advanced` and `claude_cli_send` both
+   return `is_error=true, error="claude CLI exited with code 70: advanced CLI
+   arguments were not forwarded", session=""` with the spec's arguments
+   (`session_id=""`, `max_turns=0`, `tools=["Read"]`), and `claude_cli_send`
+   returns `session=advanced-session` only with `"advanced-resume", 3,
+   ["Read","Write"]` — exactly what
+   `test/fixtures/llm_caret/mock_claude_cli.shs:143-151` enforces and what
+   `test/03_system/.../llm_caret_claude_cli_advanced_spec.spl:39` already
+   passes. The two unit examples (`provider_spec.spl` "preserve Claude CLI
+   fields through advanced dispatch", `claude_cli_spec.spl` "forward advanced
+   arguments and preserve response metadata") were stale against the
+   tightened fixture; their arguments now match. `provider.spl` is unchanged
+   (it forwards `resp.session_id` verbatim). Similar cases added to
+   `provider_spec.spl`: session preserved on a plain `dispatch_send`
+   (`fixture-success` -> `resume-1`), preserved on advanced send, and empty
+   when the CLI fails closed (exit 70).
+
+Consumer sweep for the number-format change: of the other `json_serialize`
+specs only `test/01_unit/lib/common/json/json_control_char_escape_spec.spl:105`
+pinned the old emission (`{"k\b":1.0}`, an example about key escaping, not
+number format); updated to `{"k\b":1}` -> `9 total, 9 passed, 0 failed`.
