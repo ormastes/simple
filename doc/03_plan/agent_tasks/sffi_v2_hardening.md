@@ -589,3 +589,13 @@ passing placeholder.
      `unsafe(ffi)` until its raw-name import surface can be migrated to the
      canonical owner. Preserve boolean results and direct opaque-handle calls;
      do not add registry lookups, AST walks, allocations, copies, or dispatch.
+116. Keep all 27 SQLite declarations in each legacy library/application facade
+     explicitly tagged `unsafe(ffi)` until a single generated owner replaces
+     them. Introduce status/out v2 across native C, Rust interpreter, and Simple
+     atomically: distinguish row/done/error, null/value/error, and valid-zero/
+     failure without extra SQL calls, statement steps, column reads, string
+     copies, allocations, registry lookups, or generic dispatch.
+117. Retain the native SQLite O(1) heap-tag guards and reject `close(nil)` as
+     failure. Keep transaction control on static C strings so begin/commit/
+     rollback add no temporary runtime-string allocation or copy. Full stale/
+     wrong-kind handle safety still requires generation-checked typed handles.

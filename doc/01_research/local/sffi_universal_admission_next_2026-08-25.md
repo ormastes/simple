@@ -1372,3 +1372,44 @@ ratchet covers both surfaces. No ABI, boolean representation, registry access,
 AST traversal, allocation, copy, release, branch, or dispatch changed.
 Estimated unsafe-tagged rows increase from 1,891 to 1,920 and untouched rows
 decrease from 9,563 to 9,534; signed exact-artifact admission remains zero.
+
+## SQLite legacy raw-contract checkpoint
+
+All 27 `rt_sqlite_*` declarations in each of the canonical no-GC library,
+application SFFI, and application FFI surfaces now carry adjacent
+operation-specific `unsafe(ffi)` metadata. They remain deliberately unverified:
+the native C provider returns nullable tagged handles and integer sentinels,
+while the Rust interpreter fabricates zero or empty text for several invalid
+handles. In particular, query stepping conflates done with failure; scalar zero
+can be a valid value or failure; and column text can represent SQL NULL,
+invalid access, or an empty value.
+
+Fixing this requires one status/out v2 contract introduced atomically across C,
+Rust interpreter dispatch, and Simple wrappers. A one-lane return change would
+create cross-engine ABI divergence. This annotation pass adds no query,
+statement step, column read, string conversion, allocation, copy, branch,
+lookup, or dispatch. A static ratchet fixes all three inventories at 27 and
+keeps the principal ambiguities explicit. The Simple edits are metadata-only,
+so optimizer output would not measure a runtime transformation; native runtime
+behavior is covered separately below.
+
+Estimated declaration totals remain 11,652 / 3,137 symbols. Unsafe-tagged rows
+increase from 1,920 to 2,001, untouched rows decrease from 9,534 to 9,453, and
+exact-artifact verified-and-signed admission remains zero.
+
+The native C provider now rejects non-heap scalar values before pointer
+untagging on every connection/statement operation, and `close(nil)` no longer
+fabricates success. This is an O(1) bit-tag branch with no registry or
+allocation. It cannot distinguish a stale or wrong-kind heap object, so the
+boundary remains unsafe pending generation-checked typed handles. Transaction
+begin/commit/rollback now execute static C literals directly instead of
+allocating and copying a temporary runtime string on every call. Strict C11
+`-Wall -Wextra -Werror` syntax lint and Clang static analysis completed without
+diagnostics; these checks do not constitute artifact signing or formal proof.
+
+The existing ACID probe then passed all eight focused transaction stages across
+memory and file databases, including non-vacuous inserts and rollback recovery.
+Its later native enterprise-store compilation failed because 14 closure
+functions still require the interpreter. That blocker is recorded in
+`doc/08_tracking/bug/sqlite_acid_native_store_closure_blocked_2026-08-25.md`;
+the overall gate is therefore FAIL, not verified, and was not rerun.
