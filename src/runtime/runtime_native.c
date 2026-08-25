@@ -12676,8 +12676,8 @@ int64_t rt_io_tcp_flush(int64_t fd) {
     return 1;
 }
 
-int64_t rt_io_tcp_close(int64_t fd) {
-    return close((int)fd) == 0 ? 1 : 0;
+int8_t rt_io_tcp_close(int64_t fd) {
+    return close((int)fd) == 0;
 }
 
 int64_t rt_io_tcp_local_addr(int64_t fd) {
@@ -12821,7 +12821,7 @@ int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_flush(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_close(int64_t f) { (void)f; return 0; }
+int8_t rt_io_tcp_close(int64_t f) { (void)f; return false; }
 int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
 int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
 int64_t rt_io_tcp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }

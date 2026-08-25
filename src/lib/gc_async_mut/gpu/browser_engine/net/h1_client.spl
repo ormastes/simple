@@ -26,6 +26,7 @@ extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
 @unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_flush(fd: i64) -> bool
+@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
 extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
@@ -369,7 +370,8 @@ class H1Client:
             browser_monotonic_ms(), deadline_ms
         )
         if remaining == 0:
-            val _ = rt_io_tcp_close(fd)
+            val _ = unsafe(capabilities: [ffi]):
+                rt_io_tcp_close(fd)
             return Err(network_error("h1: TCP connect deadline exceeded"))
         val _ = rt_io_tcp_set_nodelay(fd, true)
         val _ = rt_io_tcp_set_read_timeout(fd, Some(remaining))
@@ -388,7 +390,8 @@ class H1Client:
             browser_monotonic_ms(), deadline_ms
         )
         if write_budget == 0:
-            val _ = rt_io_tcp_close(conn.tcp_fd)
+            val _ = unsafe(capabilities: [ffi]):
+                rt_io_tcp_close(conn.tcp_fd)
             return Err(network_error("h1: TCP write deadline exceeded"))
         val _ = rt_io_tcp_set_write_timeout(
             conn.tcp_fd, Some(write_budget)
@@ -396,14 +399,17 @@ class H1Client:
         val written = unsafe(capabilities: [ffi]):
             rt_io_tcp_write_text(conn.tcp_fd, request_bytes)
         if not h1_write_complete(written, request_bytes.len()):
-            val _ = rt_io_tcp_close(conn.tcp_fd)
+            val _ = unsafe(capabilities: [ffi]):
+                rt_io_tcp_close(conn.tcp_fd)
             return Err(network_error("h1: incomplete TCP write for {conn.host}:{conn.port}"))
         val flushed = rt_io_tcp_flush(conn.tcp_fd)
         if not flushed:
-            val _ = rt_io_tcp_close(conn.tcp_fd)
+            val _ = unsafe(capabilities: [ffi]):
+                rt_io_tcp_close(conn.tcp_fd)
             return Err(network_error("h1: TCP flush failed for {conn.host}:{conn.port}"))
         val read_result = read_tcp_response_bytes(conn.tcp_fd, deadline_ms)
-        val _ = rt_io_tcp_close(conn.tcp_fd)
+        val _ = unsafe(capabilities: [ffi]):
+            rt_io_tcp_close(conn.tcp_fd)
         val raw_response = read_result?
         if raw_response.len() == 0:
             return Err(network_error("h1: TCP read returned no response for {conn.host}:{conn.port}"))
