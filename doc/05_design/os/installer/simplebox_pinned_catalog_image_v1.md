@@ -1,8 +1,9 @@
 # Simplebox pinned catalog image v1
 
-The freestanding boot boundary owns three immutable inputs: the installed
-Simplebox payload bytes, its SCR1 record bytes, and the ordered trusted signer
-set. Loader-package code deep-copies those bounded inputs with
+The freestanding boot boundary owns the installed Simplebox payload bytes, its
+SCR1 record bytes, their real media paths, the expected platform target, and
+the ordered trusted signer set. Loader-package code deep-copies the bounded
+bytes and roots with
 `simplebox_pinned_catalog_image_create_v1`; no public constructor or catalog
 mutation method exists.
 

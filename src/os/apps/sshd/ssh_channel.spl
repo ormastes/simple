@@ -166,9 +166,14 @@ impl ChannelTable:
         false
 
     pub me session_channel_open_response(remote_id: u32, remote_window: u32, remote_max_packet: u32) -> [u8]:
-        val local_id: u32 = 0
-        if !self.seed_open(local_id, ChannelType.Session, remote_id, remote_window, remote_max_packet):
-            val reason = if self._find_local_index(local_id) >= 0 or self.has_remote_id(remote_id): "channel already open" else: "channel capacity exhausted"
+        # Allocate through the sole channel-table owner.  Pinning every
+        # server-side identifier to zero made the first channel work but
+        # rejected every later RFC 4254 session on the same connection, even
+        # though this table owns a bounded multiplexed channel set.
+        val local_id = self.open(
+            ChannelType.Session, remote_id, remote_window, remote_max_packet)
+        if local_id == SSH_INVALID_CHANNEL_ID:
+            val reason = if self.has_remote_id(remote_id): "channel already open" else: "channel capacity exhausted"
             return ssh_build_channel_open_failure(remote_id, 4, reason)
         ssh_build_channel_open_confirmation(remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
 

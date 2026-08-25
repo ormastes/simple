@@ -17,7 +17,8 @@ use std.common.structural.wire.{
     wire_magic, wire_envelope_len, wire_check_envelope, wire_has, wire_get_u32
 }
 use os.installer.hosted_safe_artifact_io_v1.{
-    HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1
+    HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1,
+    hosted_safe_artifact_relative_path_valid_v1
 }
 use os.installer.simplebox_signed_catalog_provisioner_v1.{
     SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1,
@@ -45,6 +46,9 @@ use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{
 }
 
 pub(package) struct SimpleboxPinnedCatalogImageV1:
+    artifact_path: text
+    scr1_path: text
+    expected_target: ManifestTarget
     payload_bytes: [u8]
     scr1_bytes: [u8]
     trust_roots: [ExecutableManifestTrustedSignerV1]
@@ -153,6 +157,10 @@ fn _pinned_roots_shape_valid_v1(
 fn _pinned_empty_target_v1() -> ManifestTarget:
     ManifestTarget(os: "", arch: "", abi: "")
 
+fn _pinned_receipt_path_v1(path: text) -> text:
+    if path.starts_with("/"): return path.substring(1, path.len())
+    path
+
 fn _pinned_fail_v1(
     error: SimpleboxPinnedCatalogImageErrorV1,
     ingestion_error: SimpleboxSignedCatalogBootIngestionErrorV1 =
@@ -166,18 +174,30 @@ fn _pinned_fail_v1(
         artifact_sha256: "", signed_record_sha256: "")
 
 pub(package) fn simplebox_pinned_catalog_image_create_v1(
+    artifact_path: text,
+    scr1_path: text,
+    expected_target: ManifestTarget,
     payload_bytes: [u8],
     scr1_bytes: [u8],
     trust_roots: [ExecutableManifestTrustedSignerV1],
 ) -> SimpleboxPinnedCatalogImageV1?:
     """Deep-pin immutable image bytes and roots inside the loader package."""
-    if payload_bytes.len() == 0 or
+    val artifact_receipt_path = _pinned_receipt_path_v1(artifact_path)
+    val scr1_receipt_path = _pinned_receipt_path_v1(scr1_path)
+    if not artifact_path.starts_with("/") or not scr1_path.starts_with("/") or
+        not hosted_safe_artifact_relative_path_valid_v1(artifact_receipt_path) or
+        not hosted_safe_artifact_relative_path_valid_v1(scr1_receipt_path) or
+        artifact_receipt_path == scr1_receipt_path or
+        expected_target.os != "simpleos" or expected_target.abi != "simpleos" or
+        expected_target.arch == "" or payload_bytes.len() == 0 or
         payload_bytes.len() > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
         scr1_bytes.len() == 0 or
         scr1_bytes.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
         not _pinned_roots_shape_valid_v1(trust_roots):
         return nil
     Some(SimpleboxPinnedCatalogImageV1(
+        artifact_path: artifact_path, scr1_path: scr1_path,
+        expected_target: expected_target,
         payload_bytes: _pinned_copy_bytes_v1(payload_bytes),
         scr1_bytes: _pinned_copy_bytes_v1(scr1_bytes),
         trust_roots: _pinned_copy_roots_v1(trust_roots), clang_bundle: nil))
@@ -192,6 +212,8 @@ pub(package) fn simplebox_pinned_catalog_image_attach_clang_v1(
        bundle.policy.trust_roots != image.trust_roots:
         return nil
     Some(SimpleboxPinnedCatalogImageV1(
+        artifact_path: image.artifact_path, scr1_path: image.scr1_path,
+        expected_target: image.expected_target,
         payload_bytes: _pinned_copy_bytes_v1(image.payload_bytes),
         scr1_bytes: _pinned_copy_bytes_v1(image.scr1_bytes),
         trust_roots: _pinned_copy_roots_v1(image.trust_roots),
@@ -270,6 +292,10 @@ pub(package) fn simplebox_pinned_catalog_image_ingest_v1(
         return _pinned_fail_v1(SimpleboxPinnedCatalogImageErrorV1.Scr1Rejected)
     val candidate = decoded.unwrap()
     val target = candidate.record.manifest.target
+    if target.os != image.expected_target.os or
+        target.arch != image.expected_target.arch or
+        target.abi != image.expected_target.abi:
+        return _pinned_fail_v1(SimpleboxPinnedCatalogImageErrorV1.BundleRejected)
     val provisioned = simplebox_signed_catalog_candidate_plan_v1(
         target, image.trust_roots, candidate,
         image.scr1_bytes, image.payload_bytes)
@@ -283,10 +309,10 @@ pub(package) fn simplebox_pinned_catalog_image_ingest_v1(
     val pinned_provisioned = SimpleboxSignedCatalogProvisionResultV1(
         ok: true, error: SimpleboxSignedCatalogProvisionErrorV1.None,
         receipt: SimpleboxSafeArtifactBindingReceiptV1(
-            artifact_relative_path: "boot/bin/simplebox",
+            artifact_relative_path: _pinned_receipt_path_v1(image.artifact_path),
             artifact_sha256: provisioned.receipt.artifact_sha256,
             artifact_byte_count: provisioned.receipt.artifact_byte_count,
-            signed_record_relative_path: "boot/catalog/simplebox.scr1",
+            signed_record_relative_path: _pinned_receipt_path_v1(image.scr1_path),
             signed_record_sha256: provisioned.receipt.signed_record_sha256,
             sam1_identity_sha256: provisioned.receipt.sam1_identity_sha256),
         plan: provisioned.plan)

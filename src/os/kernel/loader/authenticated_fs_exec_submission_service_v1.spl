@@ -49,7 +49,9 @@ use os.kernel.loader.spawn_recipes.{
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use os.services.vfs.vfs_boot_state.{
     VfsMountTableOwnerHandleV1,
+    vfs_state_mount_table_owner_handle_v1,
     vfs_state_mount_table_owner_handle_is_live_v1,
+    vfs_state_mount_table_owner_handles_same_live_v1,
     vfs_state_mount_table_lease_begin_v1,
     vfs_state_mount_table_lease_restore_v1
 }
@@ -336,21 +338,44 @@ pub(package) fn authenticated_fs_exec_user_install_mount_table_v1(
 ) -> bool:
     """Install only the canonical VFS owner's epoch handle during boot.
 
-    Returning false for a second installation prevents a later subsystem from
-    replacing the namespace beneath already-armed authority coordinates. No
-    filesystem driver or MountTable value crosses this seam.
+    Repeating the exact currently-live epoch is idempotent for converging boot
+    adapters. A different or stale epoch fails, preventing a later subsystem
+    from replacing the namespace beneath already-armed authority coordinates.
+    No filesystem driver or MountTable value crosses this seam.
     """
-    if not vfs_state_mount_table_owner_handle_is_live_v1(owner):
-        return false
     if not _authenticated_fs_exec_user_lock_v1():
         return false
     if g_authenticated_fs_exec_user_vfs_owner_v1.?:
+        # Multiple high-level boot adapters may converge on this seam. Treat
+        # only the exact still-live epoch as an idempotent installation. A VFS
+        # reset advances the epoch, so it cannot be hidden as duplicate success.
+        if not g_authenticated_fs_exec_user_service_v1.?:
+            g_authenticated_fs_exec_user_quarantined_v1 = true
+            val _released = _authenticated_fs_exec_user_unlock_v1()
+            return false
+        val same_live = vfs_state_mount_table_owner_handles_same_live_v1(
+            g_authenticated_fs_exec_user_vfs_owner_v1.unwrap(), owner)
+        val released = _authenticated_fs_exec_user_unlock_v1()
+        return same_live and released
+    if not vfs_state_mount_table_owner_handle_is_live_v1(owner):
         val _released = _authenticated_fs_exec_user_unlock_v1()
         return false
     g_authenticated_fs_exec_user_service_v1 =
         Some(AuthenticatedFsExecUserServiceV1.new())
     g_authenticated_fs_exec_user_vfs_owner_v1 = Some(owner)
     _authenticated_fs_exec_user_unlock_v1()
+
+pub fn authenticated_fs_exec_user_install_canonical_vfs_owner_v1() -> bool:
+    """Boot-only adapter from canonical VFS state to the syscall broker.
+
+    Call only after the final successful VFS reset/mount sequence. The adapter
+    copies an epoch coordinate, never MountTable state, and deliberately does
+    not admit or arm an executable. Only the same live epoch is idempotent; an
+    intervening VFS reset remains visible as a failed installation.
+    """
+    val owner = vfs_state_mount_table_owner_handle_v1()
+    if not owner.?: return false
+    authenticated_fs_exec_user_install_mount_table_v1(owner.unwrap())
 
 pub(package) fn authenticated_fs_exec_user_arm_v1(
     caller: i64,

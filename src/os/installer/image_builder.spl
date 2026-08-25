@@ -25,7 +25,16 @@ use os.port.clang_sysroot_include_manifest_v1.{
     clang_include_manifest_build_v1
 }
 use os.tools.simplebox.simplebox_artifact_contract.{SIMPLEBOX_CANONICAL_PATH_V1, simplebox_canonical_aliases_v1}
+use os.installer.signed_catalog_record_producer_v1.{
+    SignedCatalogRecordProduceRequestV1, signed_catalog_record_produce_v1}
+use os.installer.hosted_safe_artifact_io_v1.{
+    HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1,
+    hosted_safe_artifact_root_acquire_v1, hosted_safe_artifact_root_close_v1,
+    hosted_safe_artifact_read_once_v1}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{bytes_to_text}
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -39,6 +48,8 @@ val EFI_PARTITION_SIZE_MB: u64 = 64
 pub const MIN_IMAGE_SIZE_MB_V1: u64 = 67
 val _ROOT_LAYOUT = [
     "/boot",
+    "/boot/bin",
+    "/boot/catalog",
     "/boot/efi",
     "/bin",
     "/sbin",
@@ -80,7 +91,17 @@ struct ImageConfig:
     package_dir: text
     simple_binary: text
     simplebox_artifact: ImageSimpleboxArtifactV1
+    signed_catalog_media: ImageSignedCatalogMediaV1
     include_installer: bool
+
+struct ImageSignedCatalogMediaV1:
+    enabled: bool
+    scr1_bytes: [u8]
+    trust_config_bytes: [u8]
+
+fn _empty_signed_catalog_media_v1() -> ImageSignedCatalogMediaV1:
+    ImageSignedCatalogMediaV1(
+        enabled: false, scr1_bytes: [], trust_config_bytes: [])
 
 pub struct ImageSimpleboxArtifactV1:
     bytes: [u8]
@@ -147,6 +168,24 @@ fn _valid_simplebox_sha256_v1(value: text) -> bool:
         if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
             return false
     true
+
+fn _valid_simplebox_provenance_receipt_v1(
+    receipt: ImageSimpleboxArtifactReceiptV1,
+) -> bool:
+    receipt.schema_version == 1 and
+        _valid_simplebox_sha256_v1(receipt.artifact_sha256) and
+        (receipt.target == "x86_64-unknown-simpleos" or
+         receipt.target == "aarch64-unknown-simpleos" or
+         receipt.target == "riscv64gc-unknown-simpleos" or
+         receipt.target == "riscv32-unknown-simpleos") and
+        receipt.canonical_role == SIMPLEBOX_CANONICAL_PATH_V1 and
+        receipt.entry == "src/os/tools/simplebox/simplebox_main.spl" and
+        receipt.entry_closure and
+        (receipt.backend == "llvm" or receipt.backend == "cranelift") and
+        _safe_simplebox_receipt_scalar_v1(receipt.compiler) and
+        not receipt.compiler.contains("compiler_rust") and
+        not receipt.compiler.contains("simple_seed") and
+        not receipt.compiler.contains("target/bootstrap")
 
 fn _validate_simplebox_artifact_v1(
     artifact: ImageSimpleboxArtifactV1, arch: PkgArch,
@@ -223,25 +262,156 @@ fn _load_simplebox_artifact_v1(
     val bytes = image_read_file_bounded_v1(
         artifact_path, IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1,
         "SimpleOS simplebox artifact")?
+    val receipt = _load_simplebox_receipt_v1(receipt_path)?
+    Ok(ImageSimpleboxArtifactV1(bytes: bytes, receipt: receipt))
+
+fn _load_simplebox_receipt_v1(
+    receipt_path: text,
+) -> Result<ImageSimpleboxArtifactReceiptV1, text>:
+    if receipt_path == "":
+        return Err("SimpleOS simplebox build receipt path is required")
     val text_receipt = image_read_text_bounded_v1(
         receipt_path, IMAGE_MAX_BUILD_STAMP_BYTES_V1,
         "SimpleOS simplebox artifact receipt")?
-    val artifact = ImageSimpleboxArtifactV1(
-        bytes: bytes,
-        receipt: ImageSimpleboxArtifactReceiptV1(
-            schema_version: _simplebox_receipt_field_v1(
-                text_receipt, "schema_version")?.to_i64(),
-            artifact_sha256: _simplebox_receipt_field_v1(
-                text_receipt, "artifact_sha256")?,
-            target: _simplebox_receipt_field_v1(text_receipt, "target")?,
-            canonical_role: _simplebox_receipt_field_v1(
-                text_receipt, "canonical_role")?,
-            entry: _simplebox_receipt_field_v1(text_receipt, "entry")?,
-            entry_closure: _simplebox_receipt_field_v1(
-                text_receipt, "entry_closure")? == "true",
-            backend: _simplebox_receipt_field_v1(text_receipt, "backend")?,
-            compiler: _simplebox_receipt_field_v1(text_receipt, "compiler")?))
-    Ok(artifact)
+    _parse_simplebox_receipt_v1(text_receipt)
+
+fn _parse_simplebox_receipt_v1(
+    text_receipt: text,
+) -> Result<ImageSimpleboxArtifactReceiptV1, text>:
+    Ok(ImageSimpleboxArtifactReceiptV1(
+        schema_version: _simplebox_receipt_field_v1(
+            text_receipt, "schema_version")?.to_i64(),
+        artifact_sha256: _simplebox_receipt_field_v1(
+            text_receipt, "artifact_sha256")?,
+        target: _simplebox_receipt_field_v1(text_receipt, "target")?,
+        canonical_role: _simplebox_receipt_field_v1(
+            text_receipt, "canonical_role")?,
+        entry: _simplebox_receipt_field_v1(text_receipt, "entry")?,
+        entry_closure: _simplebox_receipt_field_v1(
+            text_receipt, "entry_closure")? == "true",
+        backend: _simplebox_receipt_field_v1(text_receipt, "backend")?,
+        compiler: _simplebox_receipt_field_v1(text_receipt, "compiler")?))
+
+struct ImageSignedCatalogRequestV1:
+    trusted_root: text
+    artifact_relative_path: text
+    build_receipt_relative_path: text
+    manifest_relative_path: text
+    identity_receipt_relative_path: text
+    signer_seed_relative_path: text
+    trust_config_relative_path: text
+    aliases_relative_path: text
+    output_scr1_relative_path: text
+
+struct ImageSignedCatalogLoadV1:
+    media: ImageSignedCatalogMediaV1
+    artifact_bytes: [u8]
+    receipt: ImageSimpleboxArtifactReceiptV1
+
+fn _signed_catalog_request_present_v1(request: ImageSignedCatalogRequestV1) -> bool:
+    request.trusted_root != "" or request.artifact_relative_path != "" or
+        request.manifest_relative_path != "" or
+        request.identity_receipt_relative_path != "" or
+        request.signer_seed_relative_path != "" or
+        request.trust_config_relative_path != "" or
+        request.aliases_relative_path != "" or
+        request.output_scr1_relative_path != ""
+
+fn _signed_catalog_request_complete_v1(request: ImageSignedCatalogRequestV1) -> bool:
+    if request.trusted_root == "" or request.artifact_relative_path == "" or
+        request.build_receipt_relative_path == "" or
+        request.manifest_relative_path == "" or
+        request.identity_receipt_relative_path == "" or
+        request.signer_seed_relative_path == "" or
+        request.trust_config_relative_path == "" or
+        request.output_scr1_relative_path == "":
+        return false
+    val required = [request.artifact_relative_path,
+        request.build_receipt_relative_path,
+        request.manifest_relative_path, request.identity_receipt_relative_path,
+        request.signer_seed_relative_path, request.trust_config_relative_path,
+        request.output_scr1_relative_path]
+    var index: i64 = 0
+    while index < required.len():
+        var prior: i64 = 0
+        while prior < index:
+            if required[prior] == required[index]: return false
+            prior = prior + 1
+        if request.aliases_relative_path != "" and
+            request.aliases_relative_path == required[index]:
+            return false
+        index = index + 1
+    true
+
+fn _produce_and_load_signed_catalog_media_v1(
+    request: ImageSignedCatalogRequestV1,
+) -> Result<ImageSignedCatalogLoadV1, text>:
+    # This is deliberately the pinned Simplebox catalog path, not a general
+    # Clang/LLVM payload path.  The boot ingestion owner enforces this same
+    # 16 MiB payload ceiling before catalog mutation.
+    if not _signed_catalog_request_complete_v1(request):
+        return Err("signed catalog requested but required signing inputs are missing")
+    # Validate build provenance before the producer durably publishes SCR1.
+    # The receipt is still read beneath the same no-follow trusted root.
+    val receipt_root = hosted_safe_artifact_root_acquire_v1(request.trusted_root)
+    if val Err(reason) = receipt_root:
+        return Err("signed catalog receipt root rejected: " + reason)
+    val receipt_authority = receipt_root.unwrap()
+    val build_receipt = hosted_safe_artifact_read_once_v1(
+        receipt_authority, request.build_receipt_relative_path,
+        IMAGE_MAX_BUILD_STAMP_BYTES_V1)
+    val receipt_closed = hosted_safe_artifact_root_close_v1(receipt_authority)
+    if val Err(reason) = receipt_closed:
+        return Err("signed catalog receipt root close failed: " + reason)
+    if val Err(reason) = build_receipt:
+        return Err("signed Simplebox build receipt read rejected: " + reason)
+    val parsed_receipt = _parse_simplebox_receipt_v1(
+        bytes_to_text(build_receipt.unwrap()))?
+    if not _valid_simplebox_provenance_receipt_v1(parsed_receipt):
+        return Err("signed catalog requires a valid self-hosted Simplebox build receipt")
+    val produced = signed_catalog_record_produce_v1(
+        SignedCatalogRecordProduceRequestV1(
+            trusted_absolute_root: request.trusted_root,
+            manifest_relative_path: request.manifest_relative_path,
+            artifact_receipt_relative_path: request.identity_receipt_relative_path,
+            signer_seed_relative_path: request.signer_seed_relative_path,
+            trust_config_relative_path: request.trust_config_relative_path,
+            aliases_relative_path: request.aliases_relative_path,
+            output_scr1_relative_path: request.output_scr1_relative_path))
+    if not produced.ok:
+        return Err("signed catalog production rejected: " + produced.reason)
+
+    val opened = hosted_safe_artifact_root_acquire_v1(request.trusted_root)
+    if val Err(reason) = opened:
+        return Err("signed catalog media root rejected: " + reason)
+    val authority = opened.unwrap()
+    val artifact = hosted_safe_artifact_read_once_v1(
+        authority, request.artifact_relative_path,
+        HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1)
+    val scr1 = hosted_safe_artifact_read_once_v1(
+        authority, request.output_scr1_relative_path,
+        SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1)
+    val trust = hosted_safe_artifact_read_once_v1(
+        authority, request.trust_config_relative_path, 16384)
+    val closed = hosted_safe_artifact_root_close_v1(authority)
+    if val Err(reason) = closed:
+        return Err("signed catalog media root close failed: " + reason)
+    if val Err(reason) = artifact:
+        return Err("signed Simplebox artifact read rejected (payload must be at most " +
+            HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1.to_text() + " bytes): " + reason)
+    if val Err(reason) = scr1:
+        return Err("signed catalog SCR1 read rejected: " + reason)
+    if val Err(reason) = trust:
+        return Err("signed catalog trust config read rejected: " + reason)
+    val artifact_bytes = artifact.unwrap()
+    if artifact_bytes.len() == 0 or
+        sha256_u8_hex(artifact_bytes) != parsed_receipt.artifact_sha256:
+        return Err("signed catalog retained artifact does not match image artifact")
+    Ok(ImageSignedCatalogLoadV1(
+        media: ImageSignedCatalogMediaV1(
+            enabled: true, scr1_bytes: scr1.unwrap(),
+            trust_config_bytes: trust.unwrap()),
+        artifact_bytes: artifact_bytes, receipt: parsed_receipt))
 struct PartitionLayout:
     efi_start_sector: u64
     efi_size_sectors: u64
@@ -422,6 +592,8 @@ impl ImageBuilder:
             "simpleos-kernel", "runtime-kernel", kernel_bytes)
         manifest = manifest + self._stage_simplebox_payload(
             rootfs_root, simplebox_decision)?
+        manifest = manifest + self._stage_signed_catalog_media(
+            rootfs_root, simplebox_decision)?
         manifest = manifest + _manifest_file("/SYS/ROOTFS.CFG", "rootfs-boot-marker", "simpleos-core")
 
         val packages = list_all_packages(self.config.arch)
@@ -461,6 +633,32 @@ impl ImageBuilder:
         manifest = manifest + "[artifact_receipt]\npath = \"{SIMPLEBOX_CANONICAL_PATH_V1}\"\nschema_version = {receipt.schema_version}\nartifact_sha256 = \"{receipt.artifact_sha256}\"\ntarget = \"{receipt.target}\"\ncanonical_role = \"{receipt.canonical_role}\"\nentry = \"{receipt.entry}\"\nentry_closure = {receipt.entry_closure}\nbackend = \"{receipt.backend}\"\ncompiler = \"{receipt.compiler}\"\n\n"
         for alias in simplebox_canonical_aliases_v1():
             manifest = manifest + "[deploy_alias]\npath = \"{alias}\"\nalias_of = \"{SIMPLEBOX_CANONICAL_PATH_V1}\"\nartifact_sha256 = \"{receipt.artifact_sha256}\"\n\n"
+        Ok(manifest)
+
+    fn _stage_signed_catalog_media(
+        rootfs_root: text,
+        validated: ImageSimpleboxValidatedDecisionV1,
+    ) -> Result<text, text>:
+        val media = self.config.signed_catalog_media
+        if not media.enabled: return Ok("")
+        if validated.artifact.bytes.len() == 0 or
+            media.scr1_bytes.len() == 0 or media.trust_config_bytes.len() == 0:
+            return Err("signed catalog media is incomplete")
+        if not rt_file_write_bytes(
+            "{rootfs_root}/boot/bin/simplebox", validated.artifact.bytes):
+            return Err("signed catalog boot payload staging failed")
+        if not rt_file_write_bytes(
+            "{rootfs_root}/boot/catalog/simplebox.scr1", media.scr1_bytes):
+            return Err("signed catalog SCR1 staging failed")
+        if not rt_file_write_bytes(
+            "{rootfs_root}/boot/catalog/simplebox.trust", media.trust_config_bytes):
+            return Err("signed catalog trust config staging failed")
+        var manifest = _manifest_file(
+            "/boot/bin/simplebox", "boot-catalog-payload", "simpleos-loader")
+        manifest = manifest + _manifest_file(
+            "/boot/catalog/simplebox.scr1", "boot-catalog-scr1", "simpleos-loader")
+        manifest = manifest + _manifest_file(
+            "/boot/catalog/simplebox.trust", "boot-catalog-trust", "simpleos-loader")
         Ok(manifest)
 
     fn _stage_simple_toolchain_payload(rootfs_root: text) -> Result<text, text>:
@@ -714,6 +912,7 @@ fn build_usb_installer_image(
         package_dir: package_dir,
         simple_binary: "",
         simplebox_artifact: _empty_simplebox_artifact_v1(),
+        signed_catalog_media: _empty_signed_catalog_media_v1(),
         include_installer: true
     )
     _image_builder_rootfs_backend = "fat32"
@@ -736,6 +935,7 @@ fn build_usb_installer_image_with_rootfs(
         package_dir: package_dir,
         simple_binary: "",
         simplebox_artifact: _empty_simplebox_artifact_v1(),
+        signed_catalog_media: _empty_signed_catalog_media_v1(),
         include_installer: true
     )
     _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
@@ -757,6 +957,7 @@ fn build_install_image(
         package_dir: package_dir,
         simple_binary: "",
         simplebox_artifact: _empty_simplebox_artifact_v1(),
+        signed_catalog_media: _empty_signed_catalog_media_v1(),
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
@@ -779,6 +980,7 @@ fn build_install_image_with_simple_binary(
         package_dir: package_dir,
         simple_binary: simple_binary,
         simplebox_artifact: _empty_simplebox_artifact_v1(),
+        signed_catalog_media: _empty_signed_catalog_media_v1(),
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
@@ -801,6 +1003,7 @@ pub fn build_install_image_with_simplebox_artifact(
         package_dir: package_dir,
         simple_binary: "",
         simplebox_artifact: artifact,
+        signed_catalog_media: _empty_signed_catalog_media_v1(),
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
@@ -824,6 +1027,7 @@ pub fn build_install_image_with_simplebox_artifact_observed_v1(
         package_dir: package_dir,
         simple_binary: "",
         simplebox_artifact: artifact,
+        signed_catalog_media: _empty_signed_catalog_media_v1(),
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
@@ -848,13 +1052,14 @@ fn build_install_image_with_rootfs(
         package_dir: package_dir,
         simple_binary: "",
         simplebox_artifact: _empty_simplebox_artifact_v1(),
+        signed_catalog_media: _empty_signed_catalog_media_v1(),
         include_installer: false
     )
     _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
     _build_image_v1(config)
 
 fn _print_image_usage():
-    print "Usage: image-builder create [--arch=ARCH] [--output=PATH] [--size=MB] [--kernel=PATH] [--packages=DIR] [--simple-binary=PATH] [--simplebox-artifact=PATH --simplebox-receipt=PATH] [--rootfs=fat32|dbfs|nvfs] [--screen-type=T] [--screen-res=WxH] [--screen-simd=S] [--installer]"
+    print "Usage: image-builder create [--arch=ARCH] [--output=PATH] [--size=MB] [--kernel=PATH] [--packages=DIR] [--simple-binary=PATH] [--simplebox-artifact=PATH --simplebox-receipt=PATH] [--signed-catalog-root=DIR --signed-catalog-artifact=REL --simplebox-receipt=REL --signed-catalog-sam1=REL --signed-catalog-identity-receipt=REL --signed-catalog-seed=REL --signed-catalog-trust=REL --signed-catalog-output=REL [--signed-catalog-aliases=REL]] [--rootfs=fat32|dbfs|nvfs] [--screen-type=T] [--screen-res=WxH] [--screen-simd=S] [--installer]"
 
 fn run_image_builder(args: [text]) -> i32:
     for arg in args:
@@ -873,6 +1078,12 @@ fn run_image_builder(args: [text]) -> i32:
     var simple_binary = ""
     var simplebox_artifact_path = ""
     var simplebox_receipt_path = ""
+    var signed_catalog = ImageSignedCatalogRequestV1(
+        trusted_root: "", artifact_relative_path: "",
+        build_receipt_relative_path: "", manifest_relative_path: "",
+        identity_receipt_relative_path: "", signer_seed_relative_path: "",
+        trust_config_relative_path: "", aliases_relative_path: "",
+        output_scr1_relative_path: "")
     var installer = false
     var rootfs_backend = "fat32"
     var screen_type = ""
@@ -898,6 +1109,22 @@ fn run_image_builder(args: [text]) -> i32:
             simplebox_artifact_path = arg.slice(21, arg.len())
         else if arg.starts_with("--simplebox-receipt="):
             simplebox_receipt_path = arg.slice(20, arg.len())
+        else if arg.starts_with("--signed-catalog-root="):
+            signed_catalog.trusted_root = arg.slice(22, arg.len())
+        else if arg.starts_with("--signed-catalog-artifact="):
+            signed_catalog.artifact_relative_path = arg.slice(26, arg.len())
+        else if arg.starts_with("--signed-catalog-sam1="):
+            signed_catalog.manifest_relative_path = arg.slice(22, arg.len())
+        else if arg.starts_with("--signed-catalog-identity-receipt="):
+            signed_catalog.identity_receipt_relative_path = arg.slice(34, arg.len())
+        else if arg.starts_with("--signed-catalog-seed="):
+            signed_catalog.signer_seed_relative_path = arg.slice(22, arg.len())
+        else if arg.starts_with("--signed-catalog-trust="):
+            signed_catalog.trust_config_relative_path = arg.slice(23, arg.len())
+        else if arg.starts_with("--signed-catalog-aliases="):
+            signed_catalog.aliases_relative_path = arg.slice(25, arg.len())
+        else if arg.starts_with("--signed-catalog-output="):
+            signed_catalog.output_scr1_relative_path = arg.slice(24, arg.len())
         else if arg.starts_with("--rootfs="):
             rootfs_backend = arg.slice(9, arg.len())
         else if arg.starts_with("--screen-type="):
@@ -922,7 +1149,21 @@ fn run_image_builder(args: [text]) -> i32:
         return 1
 
     var simplebox_artifact = _empty_simplebox_artifact_v1()
-    if simplebox_artifact_path != "" or simplebox_receipt_path != "":
+    var signed_catalog_media = _empty_signed_catalog_media_v1()
+    if _signed_catalog_request_present_v1(signed_catalog):
+        if simplebox_artifact_path != "":
+            print "Error: signed catalog mode reads the artifact only from --signed-catalog-root; do not also pass --simplebox-artifact"
+            return 1
+        signed_catalog.build_receipt_relative_path = simplebox_receipt_path
+        val loaded = _produce_and_load_signed_catalog_media_v1(signed_catalog)
+        if val Err(e) = loaded:
+            print "Error: {e}"
+            return 1
+        val signed = loaded.unwrap()
+        signed_catalog_media = signed.media
+        simplebox_artifact = ImageSimpleboxArtifactV1(
+            bytes: signed.artifact_bytes, receipt: signed.receipt)
+    else if simplebox_artifact_path != "" or simplebox_receipt_path != "":
         val loaded = _load_simplebox_artifact_v1(
             simplebox_artifact_path, simplebox_receipt_path)
         if val Err(e) = loaded:
@@ -940,6 +1181,7 @@ fn run_image_builder(args: [text]) -> i32:
             package_dir: packages,
             simple_binary: simple_binary,
             simplebox_artifact: simplebox_artifact,
+            signed_catalog_media: signed_catalog_media,
             include_installer: true
         )
         _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
@@ -954,6 +1196,7 @@ fn run_image_builder(args: [text]) -> i32:
             package_dir: packages,
             simple_binary: simple_binary,
             simplebox_artifact: simplebox_artifact,
+            signed_catalog_media: signed_catalog_media,
             include_installer: false
         )
         _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
