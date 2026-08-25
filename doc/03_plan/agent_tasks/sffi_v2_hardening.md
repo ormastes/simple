@@ -702,3 +702,12 @@ passing placeholder.
      retain one direct `cuLaunchKernel` call. Continue using typed static thunks
      for CUDA out-parameter operations. Add no per-launch allocation, copy,
      hash, signature check, discovery, lock, lookup, or adapter dispatch.
+134. Keep all 23 ROCm I/O declarations explicitly tagged and raw calls
+     lexically scoped. Preserve the real Linux runtime provider's direct HIP
+     calls and existing array-layout staging; do not treat the interpreter's
+     fixed unavailable simulation as cross-lane verification. Retain nullable
+     managed-text lifting, allocation/copy extent checks, launch geometry and
+     overflow guards, and error-path release. Do not add successful-path
+     provider calls, staging allocations, copies, dynamic lookups, locks,
+     hashes, signature checks, or generic dispatch. Generated typed contracts,
+     handle generations, and exact signed provider admission remain required.

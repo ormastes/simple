@@ -1809,3 +1809,32 @@ symbol, lock, hash, signing work, provider call, or adapter layer.
 Estimated repository totals decrease to 11,627 declarations / 3,141 symbols.
 Unsafe-tagged rows increase from 2,366 to 2,375, untouched rows decrease from
 9,094 to 9,073, and exact-artifact verified-and-signed admission remains zero.
+
+## ROCm I/O raw-contract checkpoint
+
+The ROCm I/O facade's 23 declarations are backed by a real optional Linux C
+provider that loads HIP/HIPRTC once and caches typed function pointers. The
+Rust interpreter lane is not that provider: it is a fixed unavailable
+simulation returning false, zero, `-3`, and empty text. Source presence and
+registration therefore do not establish cross-lane semantic verification.
+
+All 23 declarations now carry operation-specific `unsafe(ffi)` metadata, with
+`raw_ptr` for memory, module, function, stream, span, and launch operations.
+Every raw call is lexically scoped. Device-name and last-error managed-text
+returns are nullable at the raw boundary; their existing nonoptional public
+APIs fail closed if runtime allocation returns nil rather than fabricating
+text. Invalid release/wait no longer reports success.
+
+Allocation rejects non-positive extents. Host/device/device copies validate
+known allocation sizes, launch validates positive geometry and shared memory,
+and one-dimensional grid rounding avoids overflow and division by zero. A
+failed host-data transfer releases its allocation and returns invalid. These
+are constant-time checks; successful calls add no provider invocation,
+allocation, staging buffer, copy, lookup, lock, hash, signature operation, or
+generic dispatch. The provider's existing array-layout staging and per-launch
+argument allocations remain a performance/ownership verification obligation,
+not a regression introduced here.
+
+Estimated repository totals remain 11,627 declarations / 3,141 symbols.
+Unsafe-tagged rows increase from 2,375 to 2,398, untouched rows decrease from
+9,073 to 9,050, and exact-artifact verified-and-signed admission remains zero.
