@@ -380,3 +380,8 @@ passing placeholder.
     the duplicate app facade. Ledger: 11,984 rows / 3,156 symbols, 10,529
     untouched, and zero exact-artifact signed/admitted. A policy-accepted
     self-hosted runtime is still required for executable/performance evidence.
+72. Keep web session-token entropy routed through canonical `random_hex` with
+    exactly one provider call and bounded validation. Do not restore its local
+    declaration or bypass presence/length/hex/nonzero checks. Next migrate the
+    OAuth, WebSocket, credential-store, and security-type duplicates with typed
+    failure propagation; never map entropy failure to zero or empty data.

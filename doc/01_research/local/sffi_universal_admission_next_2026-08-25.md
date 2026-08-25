@@ -489,3 +489,18 @@ Thirty-three declaration rows and sixteen unsupported symbol identities are
 removed. The source-only ledger is now 11,984 rows / 3,156 symbols: 1,189
 tagged, 637 `unsafe_contract_declared`, 10,529 untouched, and zero
 exact-artifact verified-and-signed.
+
+## Web session-token entropy-owner checkpoint
+
+`app.ui.web.session_token` no longer redeclares or directly calls
+`rt_random_hex`. Token IDs and development-secret entropy use the canonical
+checked CSPRNG facade, which preserves the existing fail-closed unwrap while
+also rejecting missing, wrong-length, non-lowercase-hex, or all-zero output.
+Issuance still performs exactly one provider call. The additional validation
+is one bounded linear scan (64 characters for a token ID, 16 for the current
+development-secret request) with no copy, lookup, retry, or allocation.
+
+The focused static ratchet passed. Production execution remains blocked by the
+policy-rejected bootstrap runtime, and exact-artifact admission remains zero.
+One duplicate declaration row is removed: 11,983 rows / 3,156 symbols, 1,189
+tagged, 637 `unsafe_contract_declared`, 10,528 untouched, and zero signed.
