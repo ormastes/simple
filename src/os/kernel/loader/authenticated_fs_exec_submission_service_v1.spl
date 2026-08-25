@@ -17,7 +17,13 @@ use os.kernel.loader.executable_admission_pipeline.{
 }
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.scheduler.process_execution_observation.{
-    SchedulerExecutionEvidenceTokenV1
+    SchedulerExecutionEvidenceTokenV1,
+    scheduler_execution_attach_argv_file_bindings_v1,
+    scheduler_execution_evidence_consume_once_v2
+}
+use os.kernel.loader.authenticated_argv_file_binding_owner_v1.{
+    AuthenticatedArgvFileLeaseV1,
+    authenticated_argv_file_binding_finish_v1
 }
 
 @cfg(x86_64)
@@ -57,6 +63,31 @@ pub(package) struct AuthenticatedFsExecSubmissionResultV1:
     exit_code: i64
     evidence: SchedulerExecutionEvidenceTokenV1?
     cleanup_indeterminate: bool
+
+pub(package) fn authenticated_fs_exec_submit_with_argv_file_v1(
+    scheduler: Scheduler,
+    table: MountTable,
+    submission: AuthenticatedFsExecSubmissionV1,
+    path: text,
+    argv: [text],
+    argv_file: AuthenticatedArgvFileLeaseV1
+) -> AuthenticatedFsExecSubmissionResultV1:
+    """Run while one owner-issued argv snapshot remains generation-live."""
+    val result = authenticated_fs_exec_submit_v1(
+        scheduler, table, submission, path, argv)
+    val binding = authenticated_argv_file_binding_finish_v1(table, argv_file)
+    if result.exit_code != 0 or not result.evidence.?:
+        return AuthenticatedFsExecSubmissionResultV1(
+            exit_code: result.exit_code, evidence: result.evidence,
+            cleanup_indeterminate: result.cleanup_indeterminate or binding.is_err())
+    if binding.is_err() or not scheduler_execution_attach_argv_file_bindings_v1(
+        result.evidence.unwrap(), [binding.unwrap()]):
+        val retired = scheduler_execution_evidence_consume_once_v2(
+            result.evidence.unwrap()).is_some()
+        return AuthenticatedFsExecSubmissionResultV1(
+            exit_code: -10, evidence: nil,
+            cleanup_indeterminate: binding.is_err() or not retired)
+    result
 
 fn _retire_failed_submission_v1(
     table: MountTable,

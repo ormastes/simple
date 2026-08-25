@@ -4,6 +4,7 @@ use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use os.kernel.loader.executable_launch_arguments_v1.{
     ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
 }
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
 
 pub(package) struct SchedulerExecutionObservationHandleV1:
     slot: i64
@@ -14,6 +15,21 @@ pub struct SchedulerExecutionEvidenceTokenV1:
     slot: i64
     generation: u64
     nonce: u64
+
+pub enum SchedulerArgvFileRoleV1:
+    SourceInput
+    ArtifactInput
+
+pub(package) struct SchedulerArgvFileBindingV1:
+    role: SchedulerArgvFileRoleV1
+    argv_index: i64
+    canonical_path: text
+    content_sha256: text
+    mount_id: u64
+    mount_generation: u64
+    namespace_generation: u64
+    file_generation: u64
+    size: u64
 
 pub enum SchedulerExecutionDeliveryStatusV2:
     Delivered
@@ -51,6 +67,7 @@ pub struct SchedulerExecutionEvidenceV1:
     command_observed: bool
     executable_path: text
     argv: [text]
+    argv_file_bindings: [SchedulerArgvFileBindingV1]
     exit_code: i32
     stdout_bytes: [u8]
     stderr_bytes: [u8]
@@ -74,6 +91,7 @@ struct SchedulerExecutionObservationV1:
     command_observed: bool
     executable_path: text
     argv: [text]
+    argv_file_bindings: [SchedulerArgvFileBindingV1]
     exit_code: i32
     exited: bool
     reaped: bool
@@ -92,6 +110,7 @@ struct SchedulerExecutionObservationStateV1:
 val OBSERVATION_LIMIT: i64 = 256
 val STDOUT_LIMIT: i64 = 65536
 val STDERR_LIMIT: i64 = 65536
+val ARGV_FILE_BINDING_LIMIT: i64 = 8
 val _observation_mutex: i64 = mutex_raw_create()
 var _observation_state = SchedulerExecutionObservationStateV1(
     nonce_counter: 0x5343484544455649u64, exhausted: false, observations: [])
@@ -138,7 +157,7 @@ fn _consume_index(index: i64):
         canonical_source_path: "",
         target_os: "", target_arch: "", target_abi: "",
         mount_generation: 0u64, file_generation: 0u64,
-        command_observed: false, executable_path: "", argv: [], exit_code: 0,
+        command_observed: false, executable_path: "", argv: [], argv_file_bindings: [], exit_code: 0,
         exited: false, reaped: false, delivered: false, consumed: true,
         stdout_bytes: [], stderr_bytes: [], stdout_truncated: false,
         stderr_truncated: false)
@@ -185,7 +204,7 @@ fn _reserve_observation_locked(
         target_abi: image.target.abi,
         mount_generation: image.mount_generation,
         file_generation: image.file_generation, command_observed: command_observed,
-        executable_path: executable_path, argv: argv, exit_code: 0, exited: false,
+        executable_path: executable_path, argv: argv, argv_file_bindings: [], exit_code: 0, exited: false,
         reaped: false, delivered: false, consumed: false, stdout_bytes: [], stderr_bytes: [],
         stdout_truncated: false, stderr_truncated: false)
     if reusable >= 0: _observation_state.observations[reusable] = fresh
@@ -221,6 +240,52 @@ pub(package) fn scheduler_execution_observe_adoption_with_launch_v1(
 ) -> bool:
     scheduler_execution_observe_adoption_handle_with_launch_v1(
         child_id, parent_id, image, launch).is_some()
+
+pub(package) fn scheduler_execution_attach_argv_file_bindings_v1(
+    token: SchedulerExecutionEvidenceTokenV1,
+    bindings: [SchedulerArgvFileBindingV1]
+) -> bool:
+    """Attach one bounded owner-issued copy before evidence is consumed."""
+    if bindings.len() < 1 or bindings.len() > ARGV_FILE_BINDING_LIMIT:
+        return false
+    var owned: [SchedulerArgvFileBindingV1] = []
+    var i: i64 = 0
+    while i < bindings.len():
+        val binding = bindings[i]
+        if binding.argv_index < 0 or binding.canonical_path == "" or
+           not binding.canonical_path.starts_with("/") or
+           not hash256_hex_valid(binding.content_sha256) or
+           hash256_is_zero(binding.content_sha256) or binding.mount_id == 0u64 or
+           binding.mount_generation == 0u64 or
+           binding.namespace_generation == 0u64 or
+           binding.file_generation == 0u64 or binding.size == 0u64:
+            return false
+        var prior: i64 = 0
+        while prior < owned.len():
+            if owned[prior].role == binding.role or
+               owned[prior].argv_index == binding.argv_index:
+                return false
+            prior = prior + 1
+        owned.push(binding)
+        i = i + 1
+    if not _lock(): return false
+    val handle = SchedulerExecutionObservationHandleV1(
+        slot: token.slot, generation: token.generation, nonce: token.nonce)
+    val index = _handle_index(handle)
+    if index < 0 or not _observation_state.observations[index].delivered or
+       _observation_state.observations[index].argv_file_bindings.len() != 0:
+        _ = _unlock()
+        return false
+    val argv = _observation_state.observations[index].argv
+    var valid = true
+    i = 0
+    while i < owned.len() and valid:
+        valid = owned[i].argv_index < argv.len() and
+            argv[owned[i].argv_index] == owned[i].canonical_path
+        i = i + 1
+    if valid: _observation_state.observations[index].argv_file_bindings = owned
+    if not _unlock(): return false
+    valid
 
 pub(package) fn scheduler_execution_observe_adoption_handle_v1(
     child_id: u64, parent_id: u64, image: ExecutableImageHandleV1
@@ -494,6 +559,7 @@ pub fn scheduler_execution_evidence_consume_once_v1(token: SchedulerExecutionEvi
         mount_generation: observed.mount_generation,
         file_generation: observed.file_generation, command_observed: observed.command_observed,
         executable_path: observed.executable_path, argv: observed.argv,
+        argv_file_bindings: observed.argv_file_bindings,
         exit_code: observed.exit_code,
         stdout_bytes: observed.stdout_bytes, stderr_bytes: observed.stderr_bytes,
         stdout_truncated: observed.stdout_truncated, stderr_truncated: observed.stderr_truncated)
@@ -524,6 +590,7 @@ pub fn scheduler_execution_evidence_consume_once_v2(
         mount_generation: observed.mount_generation,
         file_generation: observed.file_generation, command_observed: true,
         executable_path: observed.executable_path, argv: observed.argv,
+        argv_file_bindings: observed.argv_file_bindings,
         exit_code: observed.exit_code, stdout_bytes: observed.stdout_bytes,
         stderr_bytes: observed.stderr_bytes,
         stdout_truncated: observed.stdout_truncated,
@@ -533,6 +600,7 @@ pub fn scheduler_execution_evidence_consume_once_v2(
     Some(evidence)
 
 export SchedulerExecutionEvidenceTokenV1, SchedulerExecutionEvidenceV1
+export SchedulerArgvFileRoleV1
 export scheduler_execution_evidence_consume_once_v1
 export scheduler_execution_evidence_consume_once_v2
 export scheduler_execution_take_reaped_token_v1, scheduler_execution_deliver_reaped_handle_v1
