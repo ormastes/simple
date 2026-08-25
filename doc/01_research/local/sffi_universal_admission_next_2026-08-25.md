@@ -257,6 +257,39 @@ No production self-hosted optimizer or benchmark was available.  Exact
 artifact identity, signatures, and evidence admission remain absent;
 verified-and-signed admission remains 0.
 
+## Netstack IPC extent and authority checkpoint
+
+The kernel IPC netstack dispatcher now rejects short socket, bind, listen,
+connect, accept, send, receive, and close payloads before any payload read.
+This closes the prior unsigned `payload_len - 4` underflow in the send path,
+which could otherwise drive a very large byte-copy loop. Socket protocol
+discriminants outside the declared TCP/UDP domain now return an IPC error
+instead of being fabricated as UDP.
+
+The 14 local MMIO declarations and the 10 raw IPC call owners carry explicit
+`ffi`/`raw_ptr` authority. The unused file-local `unsafe_addr_of` declaration
+was removed. The focused `netstack-ipc-sffi-authority.shs` ratchet covers 20
+direct syscall/MMIO calls and confirms that none of the four MMIO primitives
+is present in either hosted typed registry. Provider absence remains visible;
+it is not treated as verification.
+
+The authoritative census changed exactly by the 33 newly bounded calls:
+
+- raw call sites: unchanged at 18,671
+- distinct called symbols: unchanged at 3,260
+- caller files: unchanged at 3,088
+- missing authority: 13,801 -> 13,768
+- lexical unsafe: unchanged at 3,411
+- function unsafe: 1,459 -> 1,492
+
+The dispatch adds one constant-time length comparison per request and no
+allocation, copy, lookup, lock, hash, signature operation, or generic
+dispatch. Valid send payloads retain the existing single linear copy loop.
+The raw message-header allocation extent, kernel pointer lifetime, provider
+artifact identity, and signed evidence admission remain unresolved. This
+module and the wider SFFI estate are therefore not globally verified or
+signed; verified-and-signed admission remains 0.
+
 ## Font provider authority checkpoint
 
 `src/lib/nogc_sync_mut/sffi/spl_fonts.spl` now declares all eight raw dynamic
