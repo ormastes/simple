@@ -1,0 +1,77 @@
+# codex-impl
+# Three-way, field-authoritative remote projection planning.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.lifecycle.model.{RemoteBinding, SyncConflict}
+use std.scv.lifecycle.codec.{LifecycleRecord}
+use std.scv.lifecycle.store.{lifecycle_store_write}
+use std.scv.lifecycle.entity_codec.{sync_conflict_record_typed}
+
+struct SyncFieldPlan:
+    field: text
+    action: text
+    value: text
+    conflict: SyncConflict?
+
+struct LifecycleOutboxEvent:
+    specversion: text
+    event_id: text
+    source: text
+    event_type: text
+    subject: text
+    time: text
+    data_schema: text
+    correlation_id: text
+    causation_id: text
+    idempotency_key: text
+    provider_delivery_id: text
+    payload_digest: text
+
+fn lifecycle_sync_field(binding: RemoteBinding, field: text, base_value: text, local_value: text, remote_value: text, authority: text) -> SyncFieldPlan:
+    if local_value == remote_value:
+        return SyncFieldPlan(field: field, action: "unchanged", value: local_value, conflict: nil)
+    if local_value == base_value:
+        return SyncFieldPlan(field: field, action: "pull_remote", value: remote_value, conflict: nil)
+    if remote_value == base_value:
+        return SyncFieldPlan(field: field, action: "push_local", value: local_value, conflict: nil)
+    if authority == "local":
+        return SyncFieldPlan(field: field, action: "push_local_authoritative", value: local_value, conflict: nil)
+    if authority == "remote":
+        return SyncFieldPlan(field: field, action: "pull_remote_authoritative", value: remote_value, conflict: nil)
+    val conflict_id = "sync_" + sha256_text(binding.binding_id + "|" + field + "|" + base_value + "|" + local_value + "|" + remote_value)
+    val conflict = SyncConflict(conflict_id: conflict_id, binding_id: binding.binding_id, field: field, base_value: base_value, local_value: local_value, remote_value: remote_value, policy: authority, state: "open")
+    SyncFieldPlan(field: field, action: "conflict", value: "", conflict: conflict)
+
+fn lifecycle_outbox_id(source: text, event_type: text, subject: text, idempotency_key: text, payload_digest: text) -> text:
+    "evt_" + sha256_text(source + "|" + event_type + "|" + subject + "|" + idempotency_key + "|" + payload_digest)
+
+fn lifecycle_outbox_event(source: text, event_type: text, subject: text, correlation_id: text, causation_id: text, idempotency_key: text, payload_digest: text) -> LifecycleOutboxEvent:
+    LifecycleOutboxEvent(
+        specversion: "1.0",
+        event_id: lifecycle_outbox_id(source, event_type, subject, idempotency_key, payload_digest),
+        source: source, event_type: event_type, subject: subject,
+        time: "", data_schema: "scv-lifecycle/1",
+        correlation_id: correlation_id, causation_id: causation_id,
+        idempotency_key: idempotency_key, provider_delivery_id: "",
+        payload_digest: payload_digest
+    )
+
+fn lifecycle_outbox_event_at(source: text, event_type: text, subject: text, occurred_at: text, data_schema: text, correlation_id: text, causation_id: text, idempotency_key: text, payload_digest: text) -> LifecycleOutboxEvent:
+    val event = lifecycle_outbox_event(source, event_type, subject, correlation_id, causation_id, idempotency_key, payload_digest)
+    LifecycleOutboxEvent(
+        specversion: event.specversion, event_id: event.event_id, source: event.source,
+        event_type: event.event_type, subject: event.subject, time: occurred_at,
+        data_schema: data_schema, correlation_id: event.correlation_id,
+        causation_id: event.causation_id, idempotency_key: event.idempotency_key,
+        provider_delivery_id: event.provider_delivery_id, payload_digest: event.payload_digest
+    )
+
+fn lifecycle_sync_conflict_record(conflict: SyncConflict) -> LifecycleRecord:
+    sync_conflict_record_typed(conflict)
+
+fn lifecycle_persist_sync_conflict(root: text, plan: SyncFieldPlan) -> bool:
+    if plan.action != "conflict" or plan.conflict == nil:
+        return false
+    lifecycle_store_write(root, lifecycle_sync_conflict_record(plan.conflict.?))
+
+export SyncFieldPlan, LifecycleOutboxEvent, lifecycle_sync_field, lifecycle_outbox_id, lifecycle_outbox_event, lifecycle_outbox_event_at, lifecycle_sync_conflict_record, lifecycle_persist_sync_conflict

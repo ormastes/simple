@@ -1,0 +1,31 @@
+"""DevHub lifecycle inspection is versioned, idempotency-aware, and read-only."""
+# @req: REQ-004
+# @ac: AC-7
+use std.spec.{describe, it, expect, step}
+use app.devhub.cmd_lifecycle.{lifecycle_capabilities_json, lifecycle_inspect_json, lifecycle_projection_version}
+use std.io_runtime.{file_write, dir_create_all}
+
+describe "DevHub typed lifecycle inspection":
+    it "advertises the versioned observe-only capability surface":
+        val payload = lifecycle_capabilities_json()
+        expect(payload).to_contain('"output_version":"devhub/v1"')
+        expect(payload).to_contain('"mutation":"disabled-by-default"')
+
+    it "retains idempotency identity and explains local inspection":
+        step("Inspect one stable local change identity")
+        val (payload, code) = lifecycle_inspect_json("change", "chg_1", "idem-1", true)
+        expect(code).to_equal(0)
+        expect(payload).to_contain('"idempotency_key":"idem-1"')
+        expect(payload).to_contain('"mutation":"none"')
+        expect(payload).to_contain('"explain":')
+
+    it "rejects unsupported provider-neutral domains explicitly":
+        val (payload, code) = lifecycle_inspect_json("pull-request", "42", "idem-2", true)
+        expect(code).to_equal(2)
+        expect(payload).to_contain("DOMAIN_UNSUPPORTED")
+
+    it "reads the actual Simple version declaration rather than a comment substring":
+        val path = "build/test-artifacts/devhub-version-comment-trap.spl"
+        expect(dir_create_all("build/test-artifacts")).to_be(true)
+        expect(file_write(path, "# version 1.0.0-RC\nfn get_version() -> text:\n    \"0.9.0\"\n")).to_be(true)
+        expect(lifecycle_projection_version(path)).to_equal("0.9.0")
