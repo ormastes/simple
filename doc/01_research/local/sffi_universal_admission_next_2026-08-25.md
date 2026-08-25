@@ -1343,3 +1343,25 @@ Unsafe-tagged rows increase from 1,832 to 1,862, untouched rows decrease from
 9,593 to 9,563, and exact-artifact verified-and-signed admission remains zero.
 Ambiguous non-optional empty results and lock/mmap sentinels still require typed
 contracts and exact provider admission.
+
+## Canonical AST raw-contract checkpoint
+
+The two no-GC sync AST library modules previously carried the same 29 raw
+declarations and wrappers. `std.nogc_sync_mut.sffi.ast` is now the sole owner;
+the legacy `std.nogc_sync_mut.ffi.ast` module is a zero-cost re-export facade.
+All 29 canonical declarations have adjacent, operation-specific
+`@unsafe(... capabilities: [ffi])` metadata covering opaque expression,
+argument, and node handles; unchecked indexed child access; runtime-owned text;
+release operations; and process-global registry invalidation.
+
+The owner ratchet fixes the inventory at 29, requires every canonical
+declaration to retain its tag, and rejects foreign declarations in the legacy
+facade. This pass changes no ABI signature, registry lookup, AST traversal,
+allocation, string copy, release call, branch, or dispatch. The application
+interpreter's separate 28-declaration raw facade remains untouched pending an
+ownership/import migration. Production Simple and optimizer verification remain
+unavailable.
+
+Estimated totals decrease from 11,681 to 11,652 declaration rows while symbols
+remain 3,137. Unsafe-tagged rows increase from 1,862 to 1,891, untouched rows
+remain 9,563, and exact-artifact verified-and-signed admission remains zero.

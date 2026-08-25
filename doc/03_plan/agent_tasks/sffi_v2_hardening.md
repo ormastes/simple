@@ -580,3 +580,8 @@ passing placeholder.
      Migrate ambiguous empty text/array/hash and lock/mmap sentinels to typed
      results without extra filesystem calls, hash passes, lock attempts, mmap
      operations, recursive scans, path transforms, allocations, or copies.
+114. Keep `std.nogc_sync_mut.ffi.ast` a zero-cost re-export of the canonical
+     `std.nogc_sync_mut.sffi.ast` owner and keep all 29 owner declarations
+     explicitly tagged `unsafe(ffi)`. Validate opaque-handle generation,
+     kind/index access, owned text, and release contracts without extra registry
+     lookups, AST walks, allocations, string copies, branches, or dispatch.
