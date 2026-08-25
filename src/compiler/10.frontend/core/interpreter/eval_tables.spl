@@ -692,11 +692,60 @@ var enum_reg_variants: [text] = []
 var enum_hm_buckets: [i64] = []
 var enum_hm_nexts: [i64] = []
 
+# Reverse variant index for the pattern-classification hot path. Counts, rather
+# than booleans, preserve a variant that is declared by more than one enum when
+# one owner is unloaded.
+var enum_variant_reg_names: [text] = []
+var enum_variant_reg_counts: [i64] = []
+var enum_variant_hm_buckets: [i64] = []
+var enum_variant_hm_nexts: [i64] = []
+
+fn _enum_variant_index_add(variant: text):
+    # enum_variant_is_declared has always rejected the empty spelling.
+    if variant == "": return
+    if enum_variant_hm_buckets.len() == 0:
+        enum_variant_hm_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(variant) % HM_SIZE
+    var idx = enum_variant_hm_buckets[bucket]
+    while idx != -1:
+        if enum_variant_reg_names[idx] == variant:
+            enum_variant_reg_counts[idx] = enum_variant_reg_counts[idx] + 1
+            return
+        idx = enum_variant_hm_nexts[idx]
+    val new_idx = enum_variant_reg_names.len()
+    enum_variant_reg_names.push(variant)
+    enum_variant_reg_counts.push(1)
+    enum_variant_hm_nexts.push(enum_variant_hm_buckets[bucket])
+    enum_variant_hm_buckets[bucket] = new_idx
+
+fn _enum_variant_index_remove(variant: text):
+    if variant == "" or enum_variant_hm_buckets.len() == 0: return
+    val bucket = hm_hash_text(variant) % HM_SIZE
+    var idx = enum_variant_hm_buckets[bucket]
+    while idx != -1:
+        if enum_variant_reg_names[idx] == variant:
+            if enum_variant_reg_counts[idx] > 0:
+                enum_variant_reg_counts[idx] = enum_variant_reg_counts[idx] - 1
+            return
+        idx = enum_variant_hm_nexts[idx]
+
+fn _enum_variant_index_add_csv(variants_csv: text):
+    for variant in variants_csv.split(","):
+        _enum_variant_index_add(variant)
+
+fn _enum_variant_index_remove_csv(variants_csv: text):
+    for variant in variants_csv.split(","):
+        _enum_variant_index_remove(variant)
+
 fn enum_table_reset():
     enum_reg_names = []
     enum_reg_variants = []
     enum_hm_buckets = hm_make_global_buckets()
     enum_hm_nexts = []
+    enum_variant_reg_names = []
+    enum_variant_reg_counts = []
+    enum_variant_hm_buckets = hm_make_global_buckets()
+    enum_variant_hm_nexts = []
 
 # Bare enum names already warned about, so a repeatedly re-registered enum
 # reports once instead of once per module. Mirrors `_ftr_collision_warned`.
@@ -730,11 +779,15 @@ fn enum_table_register(name: text, variants: [text]):
             _enum_warn_bare_name_collision(name, enum_reg_variants[idx], variants.join(","))
             return
         idx = enum_hm_nexts[idx]
+    val variants_csv = variants.join(",")
     val new_idx = enum_reg_names.len()
     enum_reg_names.push(name)
-    enum_reg_variants.push(variants.join(","))
+    enum_reg_variants.push(variants_csv)
     enum_hm_nexts.push(enum_hm_buckets[bucket])
     enum_hm_buckets[bucket] = new_idx
+    # The legacy scan ignored the empty enum-name sentinel entirely.
+    if name != "":
+        _enum_variant_index_add_csv(variants_csv)
 
 fn enum_table_lookup(name: text) -> text:
     if enum_hm_buckets.len() == 0: return ""
@@ -751,12 +804,13 @@ fn enum_variant_is_declared(variant: text) -> bool:
     enum_table_lookup — match_pattern needs it to tell a nullary variant
     pattern (`case Red:`) apart from a binding pattern (`case other:`)."""
     if variant == "": return false
-    var ei = 0
-    while ei < enum_reg_names.len():
-        if enum_reg_names[ei] != "":
-            for v in enum_reg_variants[ei].split(","):
-                if v == variant: return true
-        ei = ei + 1
+    if enum_variant_hm_buckets.len() == 0: return false
+    val bucket = hm_hash_text(variant) % HM_SIZE
+    var idx = enum_variant_hm_buckets[bucket]
+    while idx != -1:
+        if enum_variant_reg_names[idx] == variant:
+            return enum_variant_reg_counts[idx] > 0
+        idx = enum_variant_hm_nexts[idx]
     false
 
 fn enum_table_remove(name: text) -> bool:
@@ -766,6 +820,8 @@ fn enum_table_remove(name: text) -> bool:
     var idx = enum_hm_buckets[bucket]
     while idx != -1:
         if enum_reg_names[idx] == name:
+            if name != "":
+                _enum_variant_index_remove_csv(enum_reg_variants[idx])
             if prev == -1:
                 enum_hm_buckets[bucket] = enum_hm_nexts[idx]
             else:
