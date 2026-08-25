@@ -2432,6 +2432,37 @@ dispatch is introduced; this is a cold boot path rather than a packet hot
 path.  Serial output integrity and exact-artifact evidence remain unproved,
 so it remains explicitly unsafe and verified-and-signed admission remains 0.
 
+## simple-core string raw-memory authority checkpoint
+
+Four compiler-owned pointer intrinsics (`spl_load_i64`, `spl_store_i64`,
+`spl_load_u8`, and `spl_store_u8`) accounted for 192 source-level accesses in
+`core_string.spl`.  They now carry both `ffi` and `raw_ptr` declaration
+authority and are called only by four minimal capability-owner functions.
+Ordinary string-runtime code calls those owners without acquiring file- or
+function-wide unsafe authority.
+
+The owners use `@always_inline`, which the Rust LLVM backend maps to LLVM
+`alwaysinline` and the self-hosted MIR policy recognizes as an unconditional
+inline marker.  Both Cranelift and LLVM intrinsic lowering tables remain
+pinned by `simple-core-string-memory-authority.shs`; the focused ratchet
+passed.
+
+The authoritative source census (which reports distinct recognized call rows,
+not every same-line source occurrence) changed as follows:
+
+- raw call sites: 20,649 -> 20,470
+- missing authority: 16,735 -> 16,552
+- lexical unsafe: 2,995 -> 2,999
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+After mandatory inlining the machine-level operation remains the same direct
+load/store intrinsic: no per-byte call, allocation, copy, lookup, lock, hash,
+signature check, or generic dispatch is added.  Production binary timing/RSS
+was not available, so this is static code-shape evidence rather than measured
+performance verification.  Pointer provenance and artifact evidence remain
+unproved; verified-and-signed admission remains 0.
+
 ## SSH KEX call-authority and hot-path checkpoint
 
 The SSH session KEX owner no longer dispatches its 113 constant packet-byte
