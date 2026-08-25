@@ -17,20 +17,29 @@ use std.nogc_sync_mut.io.sffi_common.{is_valid_handle, is_invalid_handle}
 
 extern fn rt_tls_client_connect(host: text, port: i64) -> i64
 extern fn rt_tls_client_connect_with_sni(host: text, port: i64, server_name: text) -> i64
+@unsafe(reason: "raw rustls write-count ABI; negative sentinel means contract or I/O failure", capabilities: [ffi])
 extern fn rt_tls_client_write(conn: i64, data: text) -> i64
+@unsafe(reason: "legacy raw rustls read ABI; empty text conflates failure with clean EOF", capabilities: [ffi])
 extern fn rt_tls_client_read(conn: i64, max_bytes: i64) -> text
 @unsafe(reason: "raw rustls read ABI; nil means contract or I/O failure, empty text means clean EOF", capabilities: [ffi])
 extern fn rt_tls_client_read_checked(conn: i64, max_bytes: i64) -> text?
+@unsafe(reason: "raw rustls close-status ABI; false means invalid, stale, or already closed handle", capabilities: [ffi])
 extern fn rt_tls_client_close(conn: i64) -> bool
 
 # --- TLS Server ---
 
 extern fn rt_tls_server_create(port: i64, cert_path: text, key_path: text) -> i64
+@unsafe(reason: "raw rustls accept-handle ABI; negative sentinel means invalid listener or accept failure", capabilities: [ffi])
 extern fn rt_tls_server_accept(server: i64) -> i64  # Returns client connection
+@unsafe(reason: "raw rustls write-count ABI; negative sentinel means contract or I/O failure", capabilities: [ffi])
 extern fn rt_tls_server_write(conn: i64, data: text) -> i64
+@unsafe(reason: "raw rustls byte-write count ABI; negative sentinel means contract or I/O failure", capabilities: [ffi])
+extern fn rt_tls_server_write_bytes(conn: i64, data: [u8]) -> i64
+@unsafe(reason: "legacy raw rustls server-read ABI; empty text conflates failure with clean EOF", capabilities: [ffi])
 extern fn rt_tls_server_read(conn: i64, max_bytes: i64) -> text
 @unsafe(reason: "raw rustls server-read ABI; nil means contract or I/O failure, empty text means clean EOF", capabilities: [ffi])
 extern fn rt_tls_server_read_checked(conn: i64, max_bytes: i64) -> text?
+@unsafe(reason: "raw rustls close-status ABI; false means invalid, stale, or already closed handle", capabilities: [ffi])
 extern fn rt_tls_server_close_connection(conn: i64) -> bool
 extern fn rt_tls_server_shutdown(server: i64) -> bool
 
@@ -149,7 +158,7 @@ fn tls_connect_with_sni(host: text, port: i64, server_name: text) -> TlsClientCo
     val handle = rt_tls_client_connect_with_sni(host, port, server_name)
     TlsClientConnection(handle: handle, host: host, port: port, is_valid: is_valid_handle(handle))
 
-fn tls_write(conn: TlsClientConnection, data: text) -> i64:
+fn tls_write(conn: TlsClientConnection, data: text) -> Result<i64, text>:
     """Write data to TLS connection
 
     Args:
@@ -161,11 +170,14 @@ fn tls_write(conn: TlsClientConnection, data: text) -> i64:
         bytes_sent = tls_write(conn, "Hello, server!")
     """
     if is_invalid_handle(conn.handle):
-        return 0
+        return Err("TLS write: invalid handle")
 
-    rt_tls_client_write(conn.handle, data)
+    val written = rt_tls_client_write(conn.handle, data)
+    if written < 0:
+        return Err("TLS write failed")
+    Ok(written)
 
-fn tls_read(conn: TlsClientConnection, max_bytes: i64) -> text:
+fn tls_read(conn: TlsClientConnection, max_bytes: i64) -> Result<text, text>:
     """Read data from TLS connection
 
     Args:
@@ -178,16 +190,21 @@ fn tls_read(conn: TlsClientConnection, max_bytes: i64) -> text:
         print "Received: {data}"
     """
     if is_invalid_handle(conn.handle):
-        return ""
+        return Err("TLS read: invalid handle")
 
-    rt_tls_client_read(conn.handle, max_bytes)
+    val data = rt_tls_client_read_checked(conn.handle, max_bytes)
+    if data == nil:
+        return Err("TLS read failed")
+    Ok(data!)
 
-fn tls_close(conn: TlsClientConnection) -> bool:
+fn tls_close(conn: TlsClientConnection) -> Result<(), text>:
     """Close TLS connection"""
     if is_invalid_handle(conn.handle):
-        return false
+        return Err("TLS close: invalid handle")
 
-    rt_tls_client_close(conn.handle)
+    if not rt_tls_client_close(conn.handle):
+        return Err("TLS close failed")
+    Ok(())
 
 # --- TLS Server ---
 
@@ -209,7 +226,7 @@ fn tls_server_create(port: i64, cert_path: text, key_path: text) -> TlsServer:
     val handle = rt_tls_server_create(port, cert_path, key_path)
     TlsServer(handle: handle, port: port, is_valid: is_valid_handle(handle))
 
-fn tls_server_accept(server: TlsServer) -> TlsServerConnection:
+fn tls_server_accept(server: TlsServer) -> Result<TlsServerConnection, text>:
     """Accept incoming TLS connection
 
     Returns: TlsServerConnection for client
@@ -220,17 +237,22 @@ fn tls_server_accept(server: TlsServer) -> TlsServerConnection:
             data = tls_server_read(conn, 1024)
     """
     if is_invalid_handle(server.handle):
-        return TlsServerConnection(handle: 0, is_valid: false)
+        return Err("TLS accept: invalid server handle")
 
     val handle = rt_tls_server_accept(server.handle)
-    TlsServerConnection(handle: handle, is_valid: is_valid_handle(handle))
+    if is_invalid_handle(handle):
+        return Err("TLS accept failed")
+    Ok(TlsServerConnection(handle: handle, is_valid: true))
 
-fn tls_server_write(conn: TlsServerConnection, data: text) -> i64:
+fn tls_server_write(conn: TlsServerConnection, data: text) -> Result<i64, text>:
     """Write data to client connection"""
     if is_invalid_handle(conn.handle):
-        return 0
+        return Err("TLS server write: invalid handle")
 
-    rt_tls_server_write(conn.handle, data)
+    val written = rt_tls_server_write(conn.handle, data)
+    if written < 0:
+        return Err("TLS server write failed")
+    Ok(written)
 
 fn tls_server_read(conn: TlsServerConnection, max_bytes: i64) -> Result<text, text>:
     """Read data from client connection; empty text is clean EOF."""
@@ -242,12 +264,14 @@ fn tls_server_read(conn: TlsServerConnection, max_bytes: i64) -> Result<text, te
         return Err("TLS server read failed")
     Ok(data!)
 
-fn tls_server_close_connection(conn: TlsServerConnection) -> bool:
+fn tls_server_close_connection(conn: TlsServerConnection) -> Result<(), text>:
     """Close client connection"""
     if is_invalid_handle(conn.handle):
-        return false
+        return Err("TLS server close: invalid handle")
 
-    rt_tls_server_close_connection(conn.handle)
+    if not rt_tls_server_close_connection(conn.handle):
+        return Err("TLS server close failed")
+    Ok(())
 
 fn tls_server_shutdown(server: TlsServer) -> bool:
     """Shutdown TLS server"""

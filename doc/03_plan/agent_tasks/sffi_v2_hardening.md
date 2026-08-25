@@ -426,3 +426,10 @@ passing placeholder.
     success-path allocation, copy, lookup, descriptor, retry, or dispatch. Next
     type server accept/write/close and remove their fabricated wrapper values;
     exact-artifact admission remains a separate unmet gate.
+81. Keep canonical TLS client write/read/close and server accept/write/read/
+    close wrappers Result-bearing; never restore zero, false, empty text, or a
+    dummy resource as safe-wrapper failure. Preserve semantic boolean close
+    status and one-call/one-branch success paths. Raw accept/write/read/close
+    declarations must retain minimal `unsafe(ffi)` tags. Next type connect,
+    server create/shutdown, certificate, and configuration families; signed
+    exact-artifact admission remains zero.

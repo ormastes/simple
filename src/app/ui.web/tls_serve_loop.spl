@@ -36,20 +36,31 @@ extern fn rt_time_ms() -> u64
 fn tls_serve_loop_time_ms() -> u64:
     rt_time_ms()
 
-fn tls_serve_loop_accept(handle: i64) -> i64:
-    rt_tls_server_accept(handle)
+fn tls_serve_loop_accept(handle: i64) -> Result<i64, text>:
+    val accepted = rt_tls_server_accept(handle)
+    if not is_valid_handle(accepted):
+        return Err("TLS accept failed")
+    Ok(accepted)
 
 fn tls_serve_loop_read(handle: i64, max: i64) -> text?:
     rt_tls_server_read_checked(handle, max)
 
-fn tls_serve_loop_write(handle: i64, data: text) -> i64:
-    rt_tls_server_write(handle, data)
+fn tls_serve_loop_write(handle: i64, data: text) -> Result<i64, text>:
+    val written = rt_tls_server_write(handle, data)
+    if written < 0:
+        return Err("TLS write failed")
+    Ok(written)
 
-fn tls_serve_loop_write_bytes(handle: i64, data: [u8]) -> i64:
-    rt_tls_server_write_bytes(handle, data)
+fn tls_serve_loop_write_bytes(handle: i64, data: [u8]) -> Result<i64, text>:
+    val written = rt_tls_server_write_bytes(handle, data)
+    if written < 0:
+        return Err("TLS byte write failed")
+    Ok(written)
 
-fn tls_serve_loop_close_connection(handle: i64):
-    rt_tls_server_close_connection(handle)
+fn tls_serve_loop_close_connection(handle: i64) -> Result<(), text>:
+    if not rt_tls_server_close_connection(handle):
+        return Err("TLS close failed")
+    Ok(())
 
 # =========================================================================
 # ConnStream — thin adapter wrapping either a TLS connection handle or a
@@ -180,11 +191,11 @@ class ConnStream:
                 Ok(()):
                     return Ok(())
         else:
-            val written = tls_serve_loop_write(self.tls_handle, data)
-            if written < 0:
-                self.open = false
-                return Err("write failed")
-            return Ok(())
+            match tls_serve_loop_write(self.tls_handle, data):
+                Err(e):
+                    self.open = false
+                    return Err(e)
+                Ok(_): return Ok(())
 
     me write_all_bytes(data: [u8]) -> Result<(), text>:
         """Write all bytes to the stream."""
@@ -199,11 +210,11 @@ class ConnStream:
                 Ok(()):
                     return Ok(())
         else:
-            val written = tls_serve_loop_write_bytes(self.tls_handle, data)
-            if written < 0:
-                self.open = false
-                return Err("write failed")
-            return Ok(())
+            match tls_serve_loop_write_bytes(self.tls_handle, data):
+                Err(e):
+                    self.open = false
+                    return Err(e)
+                Ok(_): return Ok(())
 
     me close():
         """Close the underlying connection."""
@@ -213,7 +224,7 @@ class ConnStream:
                 val tcp = self.tcp_stream as TcpStream
                 tcp.close()
             else:
-                tls_serve_loop_close_connection(self.tls_handle)
+                val _ = tls_serve_loop_close_connection(self.tls_handle)
 
 # =========================================================================
 # TLS HTTP Server
@@ -279,17 +290,17 @@ class TlsWebServer:
         WebSocket read loop on one client does not stall new accepts or the
         event/file-watcher pump — mirrors the server.spl TCP pattern."""
         while self.running:
-            val conn_handle = tls_serve_loop_accept(tls_server_handle)
-            if is_valid_handle(conn_handle):
-                var conn = ConnStream.from_tls(conn_handle)
-                val handler = thread_spawn_with_args(conn, self, \c, server:
-                    val tls_server: TlsWebServer = server
-                    TlsWebServer.handle_connection_thread(tls_server, c)
-                )
-                handler.free()
-            else:
-                # No connection ready; yield briefly so the event loop can run
-                thread_sleep(10)
+            match tls_serve_loop_accept(tls_server_handle):
+                Ok(conn_handle):
+                    var conn = ConnStream.from_tls(conn_handle)
+                    val handler = thread_spawn_with_args(conn, self, \c, server:
+                        val tls_server: TlsWebServer = server
+                        TlsWebServer.handle_connection_thread(tls_server, c)
+                    )
+                    handler.free()
+                Err(_):
+                    # No connection ready; yield briefly so the event loop can run
+                    thread_sleep(10)
 
             self.process_events()
 

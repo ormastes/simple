@@ -652,3 +652,26 @@ declaration while deleting one application duplicate keeps 11,943 declaration
 rows; there are now 3,158 symbols, 1,191 tagged declarations, 639
 `unsafe_contract_declared`, 10,486 untouched, and zero exact-artifact
 verified-and-signed.
+
+## TLS accept/write/close typed-wrapper checkpoint
+
+The hosted provider already reports accept/write failure with a negative i64
+and close outcome with a semantic boolean. No replacement numeric convention
+or second provider ABI was needed. The canonical client write/read/close and
+server accept/write/read/close wrappers now return typed `Result` values rather
+than manufacturing zero, false, empty text, or an invalid resource object.
+The mail and web-server callers propagate or explicitly handle those results.
+
+Web accept/write/close helpers retain one provider call and move their existing
+status branch into the helper. `Result.Ok` carries the existing scalar/resource
+directly; no payload copy, retry, lookup, descriptor, generic dispatch, or heap
+buffer was introduced. The Rust provider is unchanged. The canonical raw
+accept/write/read/close declarations now carry minimal `unsafe(ffi)` contract
+tags, and the previously missing canonical byte-write declaration replaces the
+application-local duplicate removed in the preceding slice.
+
+The focused static gate passed. Production Simple checking and optimizer
+evidence remain unavailable under the repository runtime policy. The estimate
+is now 11,944 declaration rows / 3,158 symbols, 1,199 tagged declarations, 647
+`unsafe_contract_declared`, 10,479 untouched, and zero exact-artifact
+verified-and-signed.
