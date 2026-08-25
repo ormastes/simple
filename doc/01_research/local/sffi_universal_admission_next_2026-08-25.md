@@ -39,6 +39,38 @@ authority.  This fixes the false-pass harness but does not cryptographically
 verify the invoked tools or runtime artifact; verified-and-signed admission
 remains 0.
 
+## CUDA raw-wrapper unsafe-surface checkpoint
+
+The compiler CUDA facade exposes raw integer device/context/module/function
+handles, host/device pointers, byte extents, and overloaded status/handle
+results.  Without typed resources, lifetime validation, or exact provider
+evidence, none of its Tier-2 wrappers can honestly be a safe API.  All 21 raw
+declarations and all 21 smallest wrappers are now explicitly `unsafe(ffi)`.
+
+Each wrapper still invokes its raw CUDA ABI directly once.  No extra owner,
+branch, allocation, copy, synchronization, lookup, hash, lock, loop, or generic
+dispatch was added.  Existing semantic status integers and device-count/name
+types were preserved rather than converted to booleans or fabricated defaults.
+
+Provider coverage remains split:
+
+- typed native and interpreter: 13 symbols
+- typed native only: 1 symbol
+- interpreter only: 7 symbols
+- neither: 0 symbols
+
+The focused unsafe-surface ratchet passed.  The authoritative census changed:
+
+- raw call sites: unchanged at 18,875
+- missing authority: 14,598 -> 14,577
+- lexical unsafe: unchanged at 3,320
+- function unsafe: 957 -> 978
+
+No production self-hosted optimizer or CUDA benchmark was available.  Provider
+parity, typed ownership, bounds, exact artifact identity, signatures, and
+evidence admission remain absent, so CUDA and the wider SFFI estate are not
+globally verified or signed; verified-and-signed admission remains 0.
+
 ## Driver source-parsing authority checkpoint
 
 The phase-2 parsing driver now confines its seven raw process, environment,
