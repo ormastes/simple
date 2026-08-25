@@ -148,3 +148,13 @@ and cross-module `char.to_i64()`. See
 - Design: `doc/05_design/llm_caret_claude_cli_full_parity.md`
 - Plan: `doc/03_plan/agent_tasks/llm_caret_claude_cli_full_parity_impl_plan.md`
 - Trace gate (docs-coverage only): `llm_caret_claude_cli_harden.md`
+
+### Live infrastructure evidence
+
+`sh scripts/check/check-llm-caret-infra-live.shs` starts MinIO and greenmail
+in Docker on free localhost ports, writes a temporary `llm_caret.sdn` with
+secrets in env, runs `infra_servers_system_spec.spl` with the `*_LIVE=1`
+gates, and tears its own containers down. Verdict is the last stdout line
+(`PASS — 2 live row(s) executed …` / `FAIL` / `ERROR` exit 2 without Docker);
+`--selftest` proves the verdict logic (a run with skipped rows never PASSes).
+~10 s warm. The FTP row stays BLOCKED until `rt_ftp_*` is backed.
