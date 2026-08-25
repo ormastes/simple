@@ -659,9 +659,42 @@ class Compositor:
     me resize_window(id: u64, width: i32, height: i32):
         val i = self.surface_index(id)
         if i >= 0:
+            if self.screen_width <= 0 or self.screen_height <= 0:
+                return
             var surface = self.surfaces[i]
-            surface.width = width
-            surface.height = height
+            # Every producer, including remote WM actions, commits through
+            # this owner. Apply the same lifecycle bounds here rather than
+            # relying on the pointer path to sanitize its inputs first.
+            val bounded_width = wm_lifecycle_bounded_window_width(
+                width, self.screen_width
+            )
+            val bounded_height = wm_lifecycle_bounded_window_height(
+                height, self.screen_height
+            )
+            # Resize retains the origin when it still fits, but remote move or
+            # create requests may have left it outside the display. Clamp via
+            # subtraction (never `x + width`) so hostile i32 coordinates
+            # cannot overflow the geometry check.
+            val max_x = self.screen_width - bounded_width
+            val max_y = self.screen_height - bounded_height
+            var bounded_x = surface.x
+            var bounded_y = surface.y
+            if bounded_x < 0:
+                bounded_x = 0
+            elif bounded_x > max_x:
+                bounded_x = max_x
+            if bounded_y < 0:
+                bounded_y = 0
+            elif bounded_y > max_y:
+                bounded_y = max_y
+            if (surface.x == bounded_x and surface.y == bounded_y and
+                surface.width == bounded_width and
+                surface.height == bounded_height):
+                return
+            surface.x = bounded_x
+            surface.y = bounded_y
+            surface.width = bounded_width
+            surface.height = bounded_height
             surface.dirty = true
             self.surfaces[i] = surface
 
@@ -723,6 +756,10 @@ class Compositor:
             surface.state = wm_window_state_maximize(surface.state)
             surface.dirty = true
             self.surfaces[i] = surface
+            # Route the internal fullscreen geometry through the same owner
+            # bounds as pointer and remote resize (relevant on very small or
+            # reconfigured displays where `screen_height - 100` is invalid).
+            self.resize_window(id, surface.width, surface.height)
             self._cancel_drag_for_window(surface.id)
             self.focus_window(surface.id)
 
@@ -745,6 +782,9 @@ class Compositor:
             surface.maximized = surface.state == WM_WINDOW_STATE_MAXIMIZED
             surface.dirty = true
             self.surfaces[i] = surface
+            # Saved restore geometry may predate a display-size change or a
+            # hostile remote move. Revalidate it at the common resize owner.
+            self.resize_window(id, surface.width, surface.height)
             self.focus_window(surface.id)
 
     me _release_gui_content(handle: i64):

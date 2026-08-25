@@ -96,6 +96,27 @@ fn _token_list_count(value: text, expected: text) -> i32:
             count = count + 1
     count
 
+fn _request_line_has_three_nonempty_parts(wire: [u8]) -> bool:
+    # Reuse the already-bounded wire snapshot before either split allocation.
+    # RFC 9112's request-line has exactly two SP separators and no empty
+    # component; HTAB is not an alternate separator.
+    var spaces: i32 = 0
+    var token_bytes: u64 = 0u64
+    var index: u64 = 0u64
+    while index < wire.len() and wire[index] != 13u8:
+        val byte = wire[index]
+        if byte == 32:
+            if token_bytes == 0u64 or spaces >= 2:
+                return false
+            spaces = spaces + 1
+            token_bytes = 0u64
+        elif byte == 9u8:
+            return false
+        else:
+            token_bytes = token_bytes + 1u64
+        index = index + 1u64
+    index < wire.len() and spaces == 2 and token_bytes > 0u64
+
 fn _token_list_valid(value: text, allow_protocol_version: bool) -> bool:
     for raw_part in value.split(","):
         val part = raw_part.trim()
@@ -179,12 +200,14 @@ pub fn validate_rfc6455_server_handshake(request: text) -> Rfc6455HandshakeDecis
         return _handshake_reject("handshake exceeds 65550 bytes")
     if not _strict_crlf(wire) or not request.ends_with("\r\n\r\n"):
         return _handshake_reject("handshake requires strict CRLF framing")
+    if not _request_line_has_three_nonempty_parts(wire):
+        return _handshake_reject("malformed WebSocket request line")
     val lines = request.split("\r\n")
     if lines.len() < 3:
         return _handshake_reject("handshake is incomplete")
-    val request_parts = lines[0].split(" ")
     if lines[0].len().to_u64() > RFC6455_MAX_HANDSHAKE_LINE_BYTES:
         return _handshake_reject("handshake request line exceeds 8192 bytes")
+    val request_parts = lines[0].split(" ")
     if request_parts.len() != 3 or request_parts[0] != "GET" or
         request_parts[2] != "HTTP/1.1":
         return _handshake_reject("WebSocket upgrade requires GET HTTP/1.1")

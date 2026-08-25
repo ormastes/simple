@@ -794,6 +794,15 @@ impl SshSession:
         if self.scp_pending and recipient == self.scp_local_id:
             self._scp_step(payload)
             return
+        if self.channels.shell_input_allowed(recipient):
+            if self.shell == nil:
+                self.transition_closed()
+                return
+        elif self.shell != nil:
+            # A multiplexed sibling owns no access to the session's mutable
+            # shell. Ignore its application bytes rather than injecting them
+            # into another channel's terminal stream.
+            return
         if val shell = self.shell:
             if not shell.feed_remote_input(rt_string_from_byte_array(data)):
                 self.transition_closed()
@@ -963,6 +972,12 @@ impl SshSession:
             self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
             self.sftp_tx_pending = []
             self.sftp_tx_head = 0u64
+        if channel.terminal_request == ChannelTerminalRequestV1.Shell:
+            # The shell object is session-owned but its mutable stream belongs
+            # to this exact channel. Once that close is consumed, discard the
+            # terminal state so a later sibling can claim a fresh shell rather
+            # than inheriting commands/output from the removed owner.
+            self.shell = nil
         val remote_id = channel.remote_id
         val decision = self.channels.accept_peer_close(recipient)
         if decision == ChannelPeerCloseDecisionV1.Invalid:

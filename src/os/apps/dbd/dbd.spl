@@ -110,6 +110,13 @@ fn _dbd_bytes_equal(a: [u8], b: [u8]) -> bool:
         i = i + 1
     true
 
+fn _dbd_journal_wire_bytes_valid(bytes: [u8]) -> bool:
+    """Admit only printable ASCII J1 bytes and LF record boundaries."""
+    for byte in bytes:
+        if byte != 10u8 and (byte < 32u8 or byte > 126u8):
+            return false
+    true
+
 fn _dbd_byte_window(bytes: [u8], start: u64, maximum: u64) -> [u8]:
     var out: [u8] = []
     var i = start
@@ -362,7 +369,15 @@ impl DbdServer:
                 self.persistence.mark_unhealthy()
                 _dbd_log("[dbd] DBFS recovery blocked reason=" + recovered.unwrap_err())
                 return
-            self.log_text = rt_string_from_byte_array(recovered.unwrap())
+            val recovered_bytes = recovered.unwrap()
+            if not _dbd_journal_wire_bytes_valid(recovered_bytes):
+                self.persistence = DbdPersistenceBudget.restored(
+                    0, recovered_bytes.len().to_i64())
+                self.persistence.mark_unhealthy()
+                val _ = self.dbfs_adapter.quarantine(
+                    "dbfs-recovery-noncanonical-journal-bytes")
+                return
+            self.log_text = rt_string_from_byte_array(recovered_bytes)
             val replayed = self.engine.replay_journal(self.log_text)
             if replayed < 0:
                 self.persistence = DbdPersistenceBudget.restored(0, self.log_text.len())
@@ -381,6 +396,14 @@ impl DbdServer:
             _dbd_log("[dbd] backend=vfs-log (no existing log)")
             return
         val bytes = g_vfs_read_file_bytes(DBD_LOG_PATH)
+        if not _dbd_journal_wire_bytes_valid(bytes):
+            _dbd_log("[dbd] noncanonical journal bytes rejected; service quarantined")
+            self.log_text = ""
+            self.persistence = DbdPersistenceBudget.restored(
+                0, bytes.len().to_i64())
+            self.persistence.mark_unhealthy()
+            self.quarantine_present = _dbd_quarantine_exact(bytes)
+            return
         self.log_text = rt_string_from_byte_array(bytes)
         # Replay every journaled mutation through the REAL engine (dbd_protocol
         # decodes each line and re-dispatches via RedisServer.dispatch()).
