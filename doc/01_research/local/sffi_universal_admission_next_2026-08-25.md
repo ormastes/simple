@@ -250,6 +250,27 @@ Estimated declaration totals remain 11,651 / 3,137 symbols. Unsafe-tagged rows
 increase from 2,154 to 2,178, untouched rows decrease from 9,302 to 9,278, and
 exact-artifact verified-and-signed admission remains zero.
 
+## Bootstrap math ABI-conflict checkpoint
+
+The bootstrap core math module declares 24 `rt_math_*` functions with `f32`
+parameters/results, but the canonical Rust runtime exports those exact symbol
+names with `f64` ABIs. This is an ABI conflict on native lanes, not a numerical
+precision preference. Changing the shared provider to `f32` would break the
+canonical `f64` API; widening the bootstrap public API would also be an
+incompatible workaround.
+
+Every bootstrap declaration now explicitly records the conflict as
+`unsafe(ffi)`. A static ratchet fixes both sides while the correct solution is
+implemented: generated `_f32` provider symbols and typed direct thunks, with
+both signature families in the ABI registry. That solution preserves the
+public `f32` API and adds no allocation, boxing, lookup, conversion loop, or
+generic dispatch. The current annotation pass changes no math call, branch,
+conversion, result, or memory behavior and does not claim verification.
+
+Estimated declaration totals remain 11,651 / 3,137 symbols. Unsafe-tagged rows
+increase from 2,178 to 2,202, untouched rows decrease from 9,278 to 9,254, and
+exact-artifact verified-and-signed admission remains zero.
+
 ## UDP scalar-option ABI checkpoint
 
 The UDP `connect`, `set_broadcast`, `set_read_timeout`, and `set_nonblocking`

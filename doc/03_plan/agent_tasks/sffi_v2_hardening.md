@@ -624,3 +624,8 @@ passing placeholder.
      values with one lookup. Migrate ambiguous file/list/path results to typed
      errors without extra filesystem scans, process launches, captures,
      allocations, copies, environment reads, or generic dispatch.
+123. Keep all 24 bootstrap math `f32` declarations explicitly unsafe until
+     generated `_f32` symbols/thunks separate them from canonical `f64`
+     providers. Preserve the public `f32` API and direct hardware/libm call
+     shape; add no heap allocation, boxing, lookup, conversion loop, or generic
+     dispatch. Bind both typed symbol sets into the ABI registry.
