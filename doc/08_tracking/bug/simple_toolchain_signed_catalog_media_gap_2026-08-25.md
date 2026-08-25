@@ -80,3 +80,19 @@ the actual shared artifact bytes once, binds every record to the selected
 and trust-root digest, and verifies every Ed25519 signature over the canonical
 manifest signing domain. The resulting batch carries no publication or boot
 authority, so it creates no false reachability while the atomic owner is absent.
+
+## Wave 19 atomic owner
+
+The retained-root transaction now has bounded additive staging for exact source
+copies and immutable byte leaves. The toolchain producer streams and hashes the
+source once into a private directory, pins its descriptor identity, creates and
+authenticates all three canonical SCR1 records, stages three payloads, three
+SAM1 projections, three SCR1 envelopes, and one shared trust configuration,
+then syncs every leaf and publishes the directory with the transaction owner's
+single no-replace rename. Any failure consumes and removes the private tree.
+
+The boot composer accepts the authenticated triplet as one policy input and
+adds all three rows before the catalog's sole seal operation. The ingestion
+entry remains package-private; ordinary boot does not require this optional
+media and the authenticated launch bridge remains dormant until boot supplies
+the real authority registry and parent task context.

@@ -750,20 +750,34 @@ class Compositor:
     me _release_gui_content(handle: i64):
         if handle <= 0:
             return
-        var kept_handles: [i64] = []
-        var kept_trees: [UITree] = []
-        var kept_focused_ids: [text] = []
+        # Validate the complete parallel-array invariant before resolving an
+        # index. Checking only the matched index would still partially mutate
+        # a registry with an extra or missing trailing tree/focus entry.
+        if (self.gui_content_handles.len() != self.gui_content_trees.len() or
+            self.gui_content_handles.len() !=
+                self.gui_content_focused_ids.len()):
+            return
         var i = 0
+        var found = -1
         # cpu-lane-loop-ok: linear lookup of one GUI content handle in the handle registry; bound is the live handle count
         while i < self.gui_content_handles.len():
-            if self.gui_content_handles[i] != handle:
-                kept_handles.push(self.gui_content_handles[i])
-                kept_trees.push(self.gui_content_trees[i])
-                kept_focused_ids.push(self.gui_content_focused_ids[i])
+            if self.gui_content_handles[i] == handle:
+                # Handles are unique owner-issued identities. A duplicate is
+                # corruption: removing only one leaves ambiguous authority,
+                # while removing both would guess which tree/focus owner was
+                # valid. Fail before mutating any of the three arrays.
+                if found >= 0:
+                    return
+                found = i
             i = i + 1
-        self.gui_content_handles = kept_handles
-        self.gui_content_trees = kept_trees
-        self.gui_content_focused_ids = kept_focused_ids
+        if found < 0:
+            return
+        # These arrays are one owner-held, index-aligned registry. Stable
+        # in-place shifts preserve every surviving handle/tree/focus binding
+        # and avoid three replacement allocations and copies.
+        self.gui_content_handles.remove(found)
+        self.gui_content_trees.remove(found)
+        self.gui_content_focused_ids.remove(found)
 
     me _release_pixel_content(handle: i64):
         if not pixel_content_store_release(
