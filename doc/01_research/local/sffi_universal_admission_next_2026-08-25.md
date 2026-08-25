@@ -2463,6 +2463,41 @@ remaining text provider lacks exact-artifact proof/signature admission, so the
 SSH helper family and wider SFFI surface remain not globally verified or
 signed; exact-artifact verified-and-signed admission remains 0.
 
+## SSH interactive channel and SCP boundary checkpoint
+
+The SSH channel owner removed 24 raw serial diagnostics, four per-byte append
+calls, five whole-array concatenations, two raw slices, and three duplicate
+byte-to-text calls.  Raw byte scanning now uses the bounds-checked Pure Simple
+SSH helper, while basename and command paths use already-validated Simple
+slices.
+
+SCP control records now collect decimal digits in reverse once and append them
+directly into the output, followed by one pass over the filename.  This removes
+the former temporary one-byte array and prepend-concatenation for every digit,
+plus four subsequent whole-array concatenations.  The algorithm remains linear
+but performs fewer allocations and copies.
+
+One generated text-lift wrapper rejects non-empty input becoming empty text.
+The four x86_64 FAT/MMIO declarations now carry explicit `ffi`/`raw_ptr`
+authority and their calls use minimal lexical scopes.  File sizes remain capped
+at 4 MiB; the buffer extent cannot overflow its address; stream reads must
+report the exact size before MMIO access.  The existing bounded sleep retains
+one minimal lexical scope.
+
+The focused static boundary ratchet passed.  The authoritative census changed:
+
+- raw call sites: 20,763 -> 20,725
+- distinct called symbols: 3,263 -> 3,261
+- missing authority: 16,871 -> 16,828
+- lexical unsafe: 2,973 -> 2,978
+- function unsafe: unchanged at 919
+
+No hashing, signing, lookup, lock, generic dispatch, or additional data copy
+was introduced.  FAT/MMIO ownership and exact provider artifact/proof/signature
+evidence remain unresolved, so the channel family and wider SFFI surface are
+not globally verified or signed; exact-artifact verified-and-signed admission
+remains 0.
+
 ## Synchronous SIMD SFFI facade checkpoint
 
 `src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
