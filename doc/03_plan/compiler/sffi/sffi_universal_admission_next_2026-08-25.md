@@ -169,6 +169,16 @@ Simple `rt_mkdir_p` declaration. The lint passed once. No per-call hashing,
 lookup, allocation, copy, or new loop was introduced; runtime performance
 measurement remains blocked on the admitted self-hosted compiler.
 
+Checkpoint: all 20 raw Simple `rt_sleep_ms` declarations were replaced by the
+canonical blocking `thread_sleep` wrapper and a compatibility Simple function;
+the boundary remains one scoped `rt_thread_sleep` call. The nullable
+`rt_env_cwd` contract is now owned by `std.io_runtime` as `text?`, with a total
+`"."` lift. That removes the previous `pwd` subprocess and prevents provider
+nil from entering non-optional text. Bootstrap-library mirrors use the same
+optional contract and lexical authority. The refreshed full ledger is 12,070
+`rt_*` declaration rows / 3,171 distinct symbols, with 10,835 / 2,243 still
+untouched and zero production admissions.
+
 For each row, prefer a pure-Simple owner. Otherwise require either:
 
 1. admitted exact evidence plus a typed safe wrapper; or

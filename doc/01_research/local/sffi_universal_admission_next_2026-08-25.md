@@ -60,6 +60,23 @@ its already-scoped `rt_dir_create_all` owner. The focused lint now rejects any
 reintroduction. This changes neither asymptotic work nor allocation count; it
 removes a duplicate boundary and an unconditional LLVM declaration.
 
+After the subsequent sleep and current-directory consolidations, one final
+full inventory run for this checkpoint reported:
+
+| Unit | Total | Unsafe tagged | Signed/admitted | Untouched |
+| --- | ---: | ---: | ---: | ---: |
+| `rt_*` declaration rows | 12,070 | 963 | 0 | 10,835 |
+| distinct `rt_*` symbols | 3,171 | 697 | 0 | 2,243 |
+
+The distinct provider split is now 1,319 linked-native/unknown, 1,012 with no
+provider observed, 591 Rust, and 249 C/C++. `rt_sleep_ms` no longer has a raw
+Simple declaration: callers use the existing scoped `rt_thread_sleep` owner.
+`rt_env_cwd` now has one hosted declaration with the truthful `text?` contract;
+the total wrapper maps provider failure to `"."` and replaces the former
+`pwd` subprocess. The four bootstrap-library mirrors also declare `text?` and
+place calls inside lexical `unsafe(ffi)` scopes. Zero production symbols are
+cryptographically admitted, so global safety and verification remain false.
+
 ## Current enforcement boundary
 
 - Normal and bootstrap MIR lowering now reject non-unit fallthrough with
