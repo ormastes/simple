@@ -873,6 +873,44 @@ require_fixed 'extern fn rt_io_udp_set_read_timeout(fd: i64, ms: i64) -> bool' \
 require_fixed 'extern fn rt_io_udp_set_nonblocking(fd: i64, enabled: bool) -> bool' \
     test/05_perf/bench/http_server/bench_udp_echo.spl
 
+for symbol in \
+    rt_io_udp_local_addr \
+    rt_io_udp_recv \
+    rt_io_udp_recv_from \
+    rt_io_udp_send \
+    rt_io_udp_send_to
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+    require_fixed "pub extern \"C\" fn $symbol" \
+        src/compiler_rust/runtime/src/value/net_udp.rs
+    require_fixed "\"$symbol\"" \
+        src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+    require_fixed "interpreter_native_net::${symbol}_interp" \
+        src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+    require_raw_symbol_scoped "$symbol"
+done
+require_fixed 'if (size < 0 || size > 65535) return rt_core_nil();' \
+    src/runtime/runtime_native.c
+require_fixed 'rt_array_free(arr);' src/runtime/runtime_native.c
+require_fixed 'extern fn rt_io_udp_recv(fd: i64, size: i64) -> [u8]?' \
+    src/lib/nogc_sync_mut/io/udp.spl
+require_fixed 'extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?' \
+    src/lib/nogc_sync_mut/io/udp.spl
+reject_text 'extern fn rt_io_udp_recv_from\(fd: i64, size: i64\) -> \[u8\]' test
+reject_text 'rt_io_udp_recv_from\(efd, 65536\)' test
+
+udp_data_region=$(sed -n \
+    '/const UDP_MAX_PAYLOAD:/,/\/\/\/ Simple-facing UDP bind contract:/p' \
+    "$root/src/compiler_rust/runtime/src/value/net_udp.rs")
+if printf '%s\n' "$udp_data_region" | rg -q \
+    'Vec<|to_vec\(|collect\(|to_string\(|HashMap|RwLock|sha|dlsym|dlopen'; then
+    echo 'SFFI lint: UDP runtime data path gained copy/allocation/lookup work' >&2
+    failed=1
+fi
+require_fixed 'bytes: [u8; 64]' src/compiler_rust/runtime/src/value/net_udp.rs
+require_fixed 'rt_array_free(array);' src/compiler_rust/runtime/src/value/net_udp.rs
+
 if [ "$failed" -ne 0 ]; then
     exit 1
 fi

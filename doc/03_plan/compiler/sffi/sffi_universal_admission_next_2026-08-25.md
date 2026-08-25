@@ -233,6 +233,16 @@ contract-documented and unsafe-minimized, 10,581 untouched, and zero
 exact-artifact verified-and-signed. Full provider-language provenance and
 self-hosted optimizer evidence remain pending the admitted Stage-4 toolchain.
 
+Checkpoint: UDP receive now preserves `nil` versus a valid empty datagram, and
+`recv_from` returns the declared `(bytes, peer)` tuple instead of a bytes-only
+fabrication. Send failures are negative while zero remains a valid empty send.
+Native receive writes directly into one bounded packed buffer and frees it on
+failure; Rust formats peer addresses on a fixed stack buffer. The bytes-only
+benchmark avoids peer tuple/text allocation. Focused C/runtime/compiler/static
+evidence passed. The source-only ledger is now 12,038 `rt_*` rows / 3,179
+symbols: 1,200 unsafe-tagged, 568 contract-documented and unsafe-minimized,
+10,572 untouched, and zero exact-artifact verified-and-signed.
+
 ### 7. Verify once, then stop
 
 - Run sabotage and parity across interpreter, JIT, native, sealed dynload, and

@@ -256,3 +256,29 @@ executable reason contract and minimal unsafe scope, 10,581 remain untouched,
 and zero are exact-artifact verified-and-signed. Source-only mode deliberately
 reports provider language as `none_observed`; the older C/Rust/Simple/C++
 provider counts are not reused as if they described this changed revision.
+
+## UDP data-path null/empty and ownership checkpoint
+
+The UDP data path now distinguishes a valid zero-length datagram from provider
+failure in every implemented lane. `rt_io_udp_recv` returns `[u8]?` and
+`rt_io_udp_recv_from` returns `([u8], text)?`: `nil` means invalid input,
+`WouldBlock`, or provider failure, while a present empty array means an actual
+zero-length datagram. Send operations return a negative status on invalid input
+or provider failure; zero remains the valid length of an empty datagram. Receive
+sizes outside `0..65535` fail before allocation or system I/O.
+
+The C and Rust providers allocate one packed runtime byte buffer and receive
+directly into it. Every failed receive frees that buffer. Rust peer-address
+formatting uses a fixed 64-byte stack buffer and only the required runtime text
+allocation; it does not create an intermediate `String`. The benchmark now uses
+the connected-shape receive API when it intentionally discards the peer address,
+so it avoids tuple/text allocation and correctly counts zero-length datagrams.
+A static ratchet rejects payload copies, intermediate collections/strings,
+hashing, dynamic lookup, and new registry types in the Rust data wrapper.
+
+Focused evidence passed: C syntax, 5 runtime tests including a real loopback
+zero-length datagram, 11 compiler interpreter/codegen tests, mirrored benchmark
+parity, and the cross-lane SFFI ratchet. The refreshed source-only ledger is
+12,038 `rt_*` declaration rows / 3,179 symbols: 1,200 unsafe-tagged, 568
+contract-documented and unsafe-minimized, 10,572 untouched, and zero
+exact-artifact verified-and-signed.

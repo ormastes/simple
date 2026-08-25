@@ -68,7 +68,9 @@ use std.io_runtime.{file_exists}
 use std.io_runtime.{time_now_unix_micros}
 use std.common.string_core.{bytes_to_text}
 use std.common.string_core.{text_to_bytes}
+@unsafe(reason: "raw UDP receive writes one bounded runtime buffer; nil means provider failure or no datagram", capabilities: [ffi])
 extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
+@unsafe(reason: "raw UDP send borrows packed bytes for the call; negative result means provider failure", capabilities: [ffi])
 extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
 
 extern fn rt_event_loop_create() -> i64
@@ -715,14 +717,16 @@ class IoDriver:
 
             elif ot == _OP_UDP_SEND:
                 val udp_bytes = text_to_bytes(self._p_data[i])
-                val udp_sent = rt_io_udp_send_to(fd, udp_bytes, self._p_path[i])
+                val udp_sent = unsafe(capabilities: [ffi]):
+                    rt_io_udp_send_to(fd, udp_bytes, self._p_path[i])
                 self._complete_fd(oid, udp_sent, 0, "", fd)
                 i = i + 1
                 continue
 
             elif ot == _OP_UDP_RECV:
                 if (not ev_has_results) or self._ready_contains(ready_fds, fd):
-                    val udp_result = rt_io_udp_recv_from(fd, self._p_size[i])
+                    val udp_result = unsafe(capabilities: [ffi]):
+                        rt_io_udp_recv_from(fd, self._p_size[i])
                     if udp_result != nil:
                         val udp_data = udp_result.0
                         val udp_addr = udp_result.1

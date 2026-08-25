@@ -361,6 +361,190 @@ pub extern "C" fn rt_io_udp_connect(handle: i64, addr: crate::value::RuntimeValu
     unsafe { native_udp_connect(handle, ptr, len) == NetError::Success as i64 }
 }
 
+const UDP_MAX_PAYLOAD: i64 = 65_535;
+
+fn runtime_packed_bytes(value: crate::value::RuntimeValue) -> Option<(*mut u8, usize)> {
+    if value.heap_type() != Some(crate::value::HeapObjectType::Array) {
+        return None;
+    }
+    let array = value.as_heap_ptr() as *mut crate::value::RuntimeArray;
+    unsafe {
+        if !(*array).is_byte_packed() || (*array).len > (*array).capacity {
+            return None;
+        }
+        if (*array).len > 0 && (*array).data.is_null() {
+            return None;
+        }
+        Some(((*array).data as *mut u8, (*array).len as usize))
+    }
+}
+
+fn udp_receive_buffer(size: i64) -> Option<(crate::value::RuntimeValue, *mut u8)> {
+    if !(0..=UDP_MAX_PAYLOAD).contains(&size) {
+        return None;
+    }
+    let array = crate::value::collections::rt_byte_array_new(size as u64);
+    let Some((data, _)) = runtime_packed_bytes(array) else {
+        if !array.is_nil() {
+            crate::value::collections::rt_array_free(array);
+        }
+        return None;
+    };
+    Some((array, data))
+}
+
+struct SocketAddrText {
+    bytes: [u8; 64],
+    len: usize,
+    overflowed: bool,
+}
+
+impl std::fmt::Write for SocketAddrText {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let end = self.len.saturating_add(text.len());
+        if end > self.bytes.len() {
+            self.overflowed = true;
+            return Err(std::fmt::Error);
+        }
+        self.bytes[self.len..end].copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+fn runtime_socket_addr_text(addr: &SocketAddr) -> crate::value::RuntimeValue {
+    let mut text = SocketAddrText {
+        bytes: [0; 64],
+        len: 0,
+        overflowed: false,
+    };
+    if std::fmt::write(&mut text, format_args!("{addr}")).is_err() || text.overflowed {
+        return crate::value::RuntimeValue::NIL;
+    }
+    crate::value::collections::rt_string_new(text.bytes.as_ptr(), text.len as u64)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_udp_recv(handle: i64, size: i64) -> crate::value::RuntimeValue {
+    let Some((array, data)) = udp_receive_buffer(size) else {
+        return crate::value::RuntimeValue::NIL;
+    };
+    let result = {
+        let registry = SOCKET_REGISTRY.lock().unwrap();
+        let Some(SocketEntry::UdpSocket(socket)) = registry.get(&handle) else {
+            crate::value::collections::rt_array_free(array);
+            return crate::value::RuntimeValue::NIL;
+        };
+        let buffer = unsafe { std::slice::from_raw_parts_mut(data, size as usize) };
+        socket.recv(buffer)
+    };
+    let Ok(received) = result else {
+        crate::value::collections::rt_array_free(array);
+        return crate::value::RuntimeValue::NIL;
+    };
+    let header = crate::value::collections::rt_array_header_ptr(array);
+    if !crate::value::collections::rt_array_set_len_known(header, received as i64) {
+        crate::value::collections::rt_array_free(array);
+        return crate::value::RuntimeValue::NIL;
+    }
+    array
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_udp_recv_from(handle: i64, size: i64) -> crate::value::RuntimeValue {
+    let Some((array, data)) = udp_receive_buffer(size) else {
+        return crate::value::RuntimeValue::NIL;
+    };
+    let result = {
+        let registry = SOCKET_REGISTRY.lock().unwrap();
+        let Some(SocketEntry::UdpSocket(socket)) = registry.get(&handle) else {
+            crate::value::collections::rt_array_free(array);
+            return crate::value::RuntimeValue::NIL;
+        };
+        let buffer = unsafe { std::slice::from_raw_parts_mut(data, size as usize) };
+        socket.recv_from(buffer)
+    };
+    let Ok((received, peer)) = result else {
+        crate::value::collections::rt_array_free(array);
+        return crate::value::RuntimeValue::NIL;
+    };
+    let header = crate::value::collections::rt_array_header_ptr(array);
+    if !crate::value::collections::rt_array_set_len_known(header, received as i64) {
+        crate::value::collections::rt_array_free(array);
+        return crate::value::RuntimeValue::NIL;
+    }
+    let address = runtime_socket_addr_text(&peer);
+    if address.is_nil() {
+        crate::value::collections::rt_array_free(array);
+        return crate::value::RuntimeValue::NIL;
+    }
+    let tuple = crate::value::collections::rt_tuple_new(2);
+    if tuple.is_nil() {
+        crate::value::collections::rt_string_free(address);
+        crate::value::collections::rt_array_free(array);
+        return crate::value::RuntimeValue::NIL;
+    }
+    crate::value::collections::rt_tuple_set(tuple, 0, array);
+    crate::value::collections::rt_tuple_set(tuple, 1, address);
+    tuple
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_udp_send(handle: i64, data: crate::value::RuntimeValue) -> i64 {
+    let Some((data, len)) = runtime_packed_bytes(data) else {
+        return -(NetError::InvalidInput as i64);
+    };
+    let registry = SOCKET_REGISTRY.lock().unwrap();
+    let Some(SocketEntry::UdpSocket(socket)) = registry.get(&handle) else {
+        return -(NetError::InvalidHandle as i64);
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    socket.send(bytes).map(|sent| sent as i64).unwrap_or_else(|error| -(NetError::from(error) as i64))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_udp_send_to(
+    handle: i64,
+    data: crate::value::RuntimeValue,
+    addr: crate::value::RuntimeValue,
+) -> i64 {
+    let Some((data, len)) = runtime_packed_bytes(data) else {
+        return -(NetError::InvalidInput as i64);
+    };
+    let Some((addr_ptr, addr_len)) = runtime_text_ptr_len(addr) else {
+        return -(NetError::InvalidAddress as i64);
+    };
+    let address = unsafe {
+        match parse_socket_addr(addr_ptr, addr_len) {
+            Ok(address) => address,
+            Err(error) => return -(error as i64),
+        }
+    };
+    let registry = SOCKET_REGISTRY.lock().unwrap();
+    let Some(SocketEntry::UdpSocket(socket)) = registry.get(&handle) else {
+        return -(NetError::InvalidHandle as i64);
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    socket
+        .send_to(bytes, address)
+        .map(|sent| sent as i64)
+        .unwrap_or_else(|error| -(NetError::from(error) as i64))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_udp_local_addr(handle: i64) -> crate::value::RuntimeValue {
+    let result = {
+        let registry = SOCKET_REGISTRY.lock().unwrap();
+        let Some(SocketEntry::UdpSocket(socket)) = registry.get(&handle) else {
+            return crate::value::RuntimeValue::NIL;
+        };
+        socket.local_addr()
+    };
+    result
+        .map(|address| runtime_socket_addr_text(&address))
+        .unwrap_or(crate::value::RuntimeValue::NIL)
+}
+
 /// Simple-facing UDP bind contract: a negative value means bind failed.
 #[no_mangle]
 pub extern "C" fn rt_io_udp_bind(addr: crate::value::RuntimeValue) -> i64 {
@@ -381,6 +565,10 @@ pub extern "C" fn rt_io_udp_close(handle: i64) -> bool {
 mod udp_contract_tests {
     use super::*;
 
+    fn runtime_text(text: &str) -> crate::value::RuntimeValue {
+        crate::value::collections::rt_string_new(text.as_ptr(), text.len() as u64)
+    }
+
     #[test]
     fn invalid_udp_close_is_false() {
         assert!(!rt_io_udp_close(-1));
@@ -397,5 +585,51 @@ mod udp_contract_tests {
         assert!(!rt_io_udp_set_broadcast(-1, true));
         assert!(!rt_io_udp_set_read_timeout(-1, 1));
         assert!(!rt_io_udp_set_nonblocking(-1, true));
+    }
+
+    #[test]
+    fn invalid_udp_data_inputs_do_not_fabricate_empty_success() {
+        assert!(rt_io_udp_recv(-1, 1).is_nil());
+        assert!(rt_io_udp_recv_from(-1, 1).is_nil());
+        assert!(rt_io_udp_recv(-1, -1).is_nil());
+        assert!(rt_io_udp_recv_from(-1, 65_536).is_nil());
+        assert!(rt_io_udp_send(-1, crate::value::RuntimeValue::NIL) < 0);
+        assert!(rt_io_udp_send_to(
+            -1,
+            crate::value::RuntimeValue::NIL,
+            crate::value::RuntimeValue::NIL,
+        ) < 0);
+        assert!(rt_io_udp_local_addr(-1).is_nil());
+    }
+
+    #[test]
+    fn zero_length_datagram_is_some_empty_with_peer_address() {
+        let receiver_bind = runtime_text("127.0.0.1:0");
+        let sender_bind = runtime_text("127.0.0.1:0");
+        let receiver = rt_io_udp_bind(receiver_bind);
+        let sender = rt_io_udp_bind(sender_bind);
+        assert!(receiver > 0 && sender > 0);
+
+        let receiver_addr = rt_io_udp_local_addr(receiver);
+        assert!(!receiver_addr.is_nil());
+        let empty = crate::value::collections::rt_byte_array_new(0);
+        assert_eq!(rt_io_udp_send_to(sender, empty, receiver_addr), 0);
+
+        let datagram = rt_io_udp_recv_from(receiver, 1);
+        assert!(!datagram.is_nil());
+        let payload = crate::value::collections::rt_tuple_get(datagram, 0);
+        let peer = crate::value::collections::rt_tuple_get(datagram, 1);
+        assert_eq!(crate::value::collections::rt_array_len(payload), 0);
+        assert!(crate::value::collections::rt_string_len(peer) > 0);
+
+        assert!(rt_io_udp_close(receiver));
+        assert!(rt_io_udp_close(sender));
+        crate::value::collections::rt_array_free(empty);
+        crate::value::collections::rt_array_free(payload);
+        crate::value::collections::rt_string_free(peer);
+        crate::value::collections::rt_tuple_free(datagram);
+        crate::value::collections::rt_string_free(receiver_addr);
+        crate::value::collections::rt_string_free(receiver_bind);
+        crate::value::collections::rt_string_free(sender_bind);
     }
 }

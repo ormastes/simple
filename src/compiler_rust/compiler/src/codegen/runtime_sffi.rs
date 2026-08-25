@@ -1347,6 +1347,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_io_udp_close", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_io_udp_bind", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_io_udp_connect", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_udp_local_addr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_recv", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_recv_from", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_send", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_send_to", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_io_udp_set_broadcast", &[I64, I8], &[I8]),
     RuntimeFuncSpec::new("rt_io_udp_set_read_timeout", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_io_udp_set_nonblocking", &[I64, I8], &[I8]),
@@ -2688,6 +2693,25 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} must be registered for native codegen"));
             assert_eq!(spec.params, params);
             assert_eq!(spec.returns, [I8]);
+        }
+    }
+
+    #[test]
+    fn udp_data_path_uses_typed_runtime_value_abi() {
+        let expected = [
+            ("rt_io_udp_local_addr", &[I64][..]),
+            ("rt_io_udp_recv", &[I64, I64][..]),
+            ("rt_io_udp_recv_from", &[I64, I64][..]),
+            ("rt_io_udp_send", &[I64, I64][..]),
+            ("rt_io_udp_send_to", &[I64, I64, I64][..]),
+        ];
+        for (name, params) in expected {
+            let spec = RUNTIME_FUNCS
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered for native codegen"));
+            assert_eq!(spec.params, params);
+            assert_eq!(spec.returns, [I64]);
         }
     }
 

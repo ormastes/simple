@@ -1623,6 +1623,20 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_io_udp_close", interpreter_native_net::rt_io_udp_close_interp);
     insert_simple!("rt_io_udp_connect", interpreter_native_net::rt_io_udp_connect_interp);
     insert_simple!(
+        "rt_io_udp_local_addr",
+        interpreter_native_net::rt_io_udp_local_addr_interp
+    );
+    insert_simple!("rt_io_udp_recv", interpreter_native_net::rt_io_udp_recv_interp);
+    insert_simple!(
+        "rt_io_udp_recv_from",
+        interpreter_native_net::rt_io_udp_recv_from_interp
+    );
+    insert_simple!("rt_io_udp_send", interpreter_native_net::rt_io_udp_send_interp);
+    insert_simple!(
+        "rt_io_udp_send_to",
+        interpreter_native_net::rt_io_udp_send_to_interp
+    );
+    insert_simple!(
         "rt_io_udp_set_broadcast",
         interpreter_native_net::rt_io_udp_set_broadcast_interp
     );

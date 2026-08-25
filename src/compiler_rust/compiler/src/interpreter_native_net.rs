@@ -1099,6 +1099,81 @@ pub fn rt_io_udp_set_nonblocking_interp(args: &[Value]) -> Result<Value, Compile
     ))
 }
 
+fn extract_udp_payload_size(args: &[Value], idx: usize) -> Result<Option<usize>, CompileError> {
+    let size = args
+        .get(idx)
+        .and_then(|value| value.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(idx, "i64"))?;
+    if !(0..=65_535).contains(&size) {
+        return Ok(None);
+    }
+    Ok(Some(size as usize))
+}
+
+pub fn rt_io_udp_recv_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let Some(size) = extract_udp_payload_size(args, 1)? else {
+        return Ok(Value::Nil);
+    };
+    let mut bytes = vec![0u8; size];
+    match with_udp_socket(handle, |socket| socket.recv(&mut bytes)) {
+        Ok(received) => {
+            bytes.truncate(received);
+            Ok(Value::array(
+                bytes.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
+            ))
+        }
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+pub fn rt_io_udp_recv_from_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let Some(size) = extract_udp_payload_size(args, 1)? else {
+        return Ok(Value::Nil);
+    };
+    let mut bytes = vec![0u8; size];
+    match with_udp_socket(handle, |socket| socket.recv_from(&mut bytes)) {
+        Ok((received, peer)) => {
+            bytes.truncate(received);
+            let data = Value::array(
+                bytes.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
+            );
+            Ok(Value::Tuple(vec![data, Value::text(peer.to_string())]))
+        }
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+pub fn rt_io_udp_send_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let bytes = extract_bytes(args, 1)?;
+    Ok(Value::Int(
+        with_udp_socket(handle, |socket| socket.send(&bytes))
+            .map(|sent| sent as i64)
+            .unwrap_or(-1),
+    ))
+}
+
+pub fn rt_io_udp_send_to_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let bytes = extract_bytes(args, 1)?;
+    let address = extract_socket_addr(args, 2)?;
+    Ok(Value::Int(
+        with_udp_socket(handle, |socket| socket.send_to(&bytes, address))
+            .map(|sent| sent as i64)
+            .unwrap_or(-1),
+    ))
+}
+
+pub fn rt_io_udp_local_addr_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    Ok(match with_udp_socket(handle, |socket| socket.local_addr()) {
+        Ok(address) => Value::text(address.to_string()),
+        Err(_) => Value::Nil,
+    })
+}
+
 pub fn native_udp_connect_interp(args: &[Value]) -> Result<Value, CompileError> {
     let addr = extract_socket_addr(args, 1)?;
     with_udp_socket_op!(args, 0, |socket| socket.connect(addr).map(|_| Value::Nil))
@@ -1438,6 +1513,39 @@ mod tcp_read_contract_tests {
         assert!(matches!(
             rt_io_udp_set_nonblocking_interp(&[Value::Int(-1), Value::Bool(true)]),
             Ok(Value::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn udp_receive_bounds_fail_as_nil_and_types_are_bridge_errors() {
+        assert!(matches!(
+            rt_io_udp_recv_interp(&[Value::Int(-1), Value::Int(-1)]),
+            Ok(Value::Nil)
+        ));
+        assert!(matches!(
+            rt_io_udp_recv_from_interp(&[Value::Int(-1), Value::Int(65_536)]),
+            Ok(Value::Nil)
+        ));
+        assert!(rt_io_udp_recv_interp(&[Value::Int(-1), Value::text("bad")]).is_err());
+    }
+
+    #[test]
+    fn invalid_udp_data_handles_do_not_fabricate_empty_success() {
+        assert!(matches!(
+            rt_io_udp_recv_interp(&[Value::Int(-1), Value::Int(1)]),
+            Ok(Value::Nil)
+        ));
+        assert!(matches!(
+            rt_io_udp_recv_from_interp(&[Value::Int(-1), Value::Int(1)]),
+            Ok(Value::Nil)
+        ));
+        assert!(matches!(
+            rt_io_udp_send_interp(&[Value::Int(-1), Value::array(Vec::new())]),
+            Ok(Value::Int(-1))
+        ));
+        assert!(matches!(
+            rt_io_udp_local_addr_interp(&[Value::Int(-1)]),
+            Ok(Value::Nil)
         ));
     }
 }
