@@ -358,11 +358,29 @@ fn render_simple_web_html_content(backend: CompositorBackend, cx: i32, cy: i32, 
 # the exact same request construction as the host and must never replace live
 # window HTML with the title-based compatibility/demo markup.
 fn render_simple_web_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, body_html: text):
+    render_simple_web_content_scrolled(
+        backend, title, cx, cy, cw, ch, body_html, 0
+    )
+
+fn render_simple_web_content_scrolled(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, body_html: text, scroll_y: i32):
     if cw <= 0 or ch <= 0:
         return
-    val req = simple_web_content_render_request_with_theme(_active_or_default_wm_theme_id(), title, body_html, cw, ch).with_pixel_output()
+    val clamped_scroll = _clamp_scroll_px(scroll_y)
+    val full_h = content_paint_full_height(ch, clamped_scroll)
+    if full_h <= 0:
+        return
+    if cw.to_i64() * full_h.to_i64() > 2147483647:
+        return
+    val req = simple_web_content_render_request_with_theme(
+        _active_or_default_wm_theme_id(), title, body_html, cw, full_h
+    ).with_pixel_output()
     val artifact = compositor_render_request_artifact(req)
-    blit_simple_web_pixels(backend, cx, cy, cw, ch, artifact.pixels)
+    val visible = _window_scrolled_pixels(
+        artifact.pixels, cw, full_h, ch, clamped_scroll
+    )
+    if visible.len().to_i64() != cw.to_i64() * ch.to_i64():
+        return
+    blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
 
 # Content-scroll headroom cap: HostCompositor.scroll_offsets accumulates raw
 # wheel delta unboundedly (no clamp at the input side — see
@@ -391,7 +409,10 @@ fn simple_web_bounded_scroll_y(scroll_y: i32) -> i32:
 # simple_web_content_frame_cached renders at, without duplicating the clamp
 # constant/logic.
 fn content_paint_full_height(ch: i32, scroll_y: i32) -> i32:
-    ch + _clamp_scroll_px(scroll_y)
+    val clamped_scroll = _clamp_scroll_px(scroll_y)
+    if ch <= 0 or ch > 2147483647 - clamped_scroll:
+        return 0
+    ch + clamped_scroll
 
 fn simple_web_external_content_frame(
     window_id: text,
@@ -598,14 +619,25 @@ fn simple_web_external_content_frame_with_theme_receipt(
     )
 
 # Slices the `ch`-tall visible window starting at row `scroll_y` out of a
-# `cw` x `full_h` row-major pixel buffer (full_h >= ch + scroll_y). Rows
-# beyond the source buffer are left as-is (caller pre-sizes full_h so this
-# never triggers in practice); this is pure translation, not resampling —
-# each output row is a verbatim copy of source row `scroll_y + row`.
+# `cw` x `full_h` row-major pixel buffer (full_h >= ch + scroll_y). Invalid
+# dimensions or a partial renderer artifact fail closed before indexing. This
+# is pure translation, not resampling — each output row is a verbatim copy of
+# source row `scroll_y + row`.
 fn _window_scrolled_pixels(pixels: [u32], cw: i32, full_h: i32, ch: i32, scroll_y: i32) -> [u32]:
+    if (cw <= 0 or ch <= 0 or full_h < ch or scroll_y < 0 or
+        scroll_y > full_h - ch):
+        return []
+    val full_len = cw.to_i64() * full_h.to_i64()
+    val out_len_wide = cw.to_i64() * ch.to_i64()
+    if (full_len <= 0 or full_len > 2147483647 or
+        out_len_wide <= 0 or out_len_wide > 2147483647 or
+        pixels.len().to_i64() != full_len):
+        return []
     if scroll_y <= 0:
+        # The caller's full height equals the viewport at zero scroll, so the
+        # already shape-validated artifact can be forwarded without a copy.
         return pixels
-    val out_len = cw * ch
+    val out_len = out_len_wide as i32
     var out: [u32] = [0u32; out_len]
     var row = 0
     while row < ch:
@@ -640,7 +672,11 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
     if window_id.len() == 0 or scene_revision <= 0 or content_revision <= 0 or width <= 0 or height <= 0:
         return WmContentFrame(window_id: window_id, scene_revision: scene_revision, content_revision: content_revision, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: width, height: height, pixels: [], checksum: 0u64, parent_window_id: parent_window_id, offset_x: offset_x, offset_y: offset_y)
     val clamped_scroll = _clamp_scroll_px(scroll_y)
-    val full_h = height + clamped_scroll
+    val full_h = content_paint_full_height(height, clamped_scroll)
+    if full_h <= 0:
+        return WmContentFrame(window_id: window_id, scene_revision: scene_revision, content_revision: content_revision, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: width, height: height, pixels: [], checksum: 0u64, parent_window_id: parent_window_id, offset_x: offset_x, offset_y: offset_y)
+    if width.to_i64() * full_h.to_i64() > 2147483647:
+        return WmContentFrame(window_id: window_id, scene_revision: scene_revision, content_revision: content_revision, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: width, height: height, pixels: [], checksum: 0u64, parent_window_id: parent_window_id, offset_x: offset_x, offset_y: offset_y)
     val req = simple_web_content_render_request_with_theme(theme, title, body_html, width, full_h).with_pixel_output()
     val artifact = if animation_clock_ms >= 0:
         cache.request_to_pixel_artifact_at_time(
@@ -719,9 +755,15 @@ fn render_simple_web_html_content_scrolled(backend: CompositorBackend, cx: i32, 
     if cw <= 0 or ch <= 0:
         return
     val clamped_scroll = _clamp_scroll_px(scroll_y)
-    val full_h = ch + clamped_scroll
+    val full_h = content_paint_full_height(ch, clamped_scroll)
+    if full_h <= 0:
+        return
+    if cw.to_i64() * full_h.to_i64() > 2147483647:
+        return
     val artifact = simple_web_html_pixel_artifact(html, cw, full_h)
     val visible = _window_scrolled_pixels(artifact.pixels, cw, full_h, ch, clamped_scroll)
+    if visible.len().to_i64() != cw.to_i64() * ch.to_i64():
+        return
     blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
 
 fn blit_simple_web_pixels(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, pixels: [u32]):
