@@ -88,6 +88,14 @@ fn cli_native_build_resolve_output(output: text, output_explicit: bool, entry_po
     else:
         "build/native/{_cli_native_build_stem(entry_point)}"
 
+# A dynload build currently produces the native artifact plus an ordinary SMF,
+# but no automatic aspect pack. Keep that partial success visible until the
+# pack producer publishes a real emission count into this success funnel.
+fn cli_native_build_dynload_pack_notice(build_mode: text, non_launchable_output: bool, automatic_pack_count: i64) -> text:
+    if build_mode != "dynload" or non_launchable_output or automatic_pack_count > 0:
+        return ""
+    "warning: W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED: --mode dynload completed without an automatically produced aspect pack; the native artifact remains usable, but dynamic aspect acquisition is unavailable (use --mode one-binary for the implemented artifact contract; automatic aspect-pack packaging is not yet available)"
+
 fn cli_native_build_is_entry_arg(arg: text) -> bool:
     arg == "--entry" or arg.starts_with("--entry=")
 
@@ -491,7 +499,7 @@ fn cli_native_build(args: [text]) -> i64:
             print "  -o <path>            Output binary path"
             print "  --entry <file>       Entry file"
             print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
-            print "  --mode <name>        Build mode: dynload (default) or one-binary"
+            print "  --mode <name>        Build mode: dynload (default; warns until automatic aspect-pack packaging is available) or one-binary"
             print "  --cache-dir <dir>    Native cache directory (default: build/native_cache)"
             print "  --release            Release build (standard optimization profile)"
             print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
@@ -1135,6 +1143,11 @@ fn cli_native_build(args: [text]) -> i64:
                     _cli_eprint("[native-build] Build successful: {output}")
                     if not non_launchable_output:
                         _cli_eprint("[native-build] Launch metadata: {metadata_path}")
+                # TODO(dynload-visible-skip): replace the zero with the real
+                # automatic pack emission receipt when CLI packaging lands.
+                val dynload_pack_notice = cli_native_build_dynload_pack_notice(build_mode, non_launchable_output, 0)
+                if dynload_pack_notice != "":
+                    _cli_eprint(dynload_pack_notice)
                 return 0
             case _:
                 _cli_file_remove_impl(staged_output)

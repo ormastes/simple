@@ -116,6 +116,19 @@ Not implemented here: automatic `--mode dynload` packaging and the typed
 facet-language surface remain open even though the producer and explicit
 ModuleLoader registration bridge now exist (§2).
 
+### 2026-08-25 update — silent downgrade closed; packaging remains open
+
+The pure-Simple native-build source now routes its successful launchable-output
+funnel through exactly one named-warning decision,
+`W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED`, after a launchable dynload
+artifact is published with zero automatic pack receipts. `one-binary`,
+object/archive/shared outputs, failed builds, and future positive pack receipts
+do not warn. The diagnostic points to the implemented `--mode one-binary`
+contract and does not advertise a nonexistent pack-input CLI. This closes only
+the source-level silent-success defect; runtime stderr evidence is pending the
+next admitted compiler build. Automatic aspect-pack packaging and typed facet
+routing remain open. Requirement: `REQ-ASPECT-DYNLOAD-VISIBLE-001`.
+
 ## 6. Prior art
 
 An unlanded lane exists at `/dev/shm/aspect-loader-operational-seal`
