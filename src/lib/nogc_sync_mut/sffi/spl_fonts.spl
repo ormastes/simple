@@ -57,8 +57,10 @@ use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, v
 # Raw SFFI externs (interpreter + native both provide these)
 # ============================================================================
 
-extern fn spl_dlopen(path: text) -> i64
-extern fn spl_dlsym(handle: i64, name: text) -> i64
+@unsafe(reason: "status/out font provider loader ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64
+@unsafe(reason: "status/out font symbol resolver ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_dlsym_checked(handle: i64, name: text, out_symbol: *mut i64) -> i64
 extern fn spl_dlclose(handle: i64) -> i64
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
@@ -66,6 +68,14 @@ use std.common.string_core.{text_to_bytes}
 extern fn spl_fonts_call_init_blob(fptr: i64, blob: [u8], digest: [u8]) -> i64
 extern fn spl_fonts_call_init_path(fptr: i64, path: [u8]) -> i64
 extern fn spl_fonts_call_layout_text(fptr: i64, text_bytes: [u8], size_px: i64, max_width: i64) -> i64
+
+fn _font_resolve_optional(handle: i64, name: text) -> i64:
+    var symbol: i64 = 0
+    val status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_dlsym_checked(handle, name, &mut symbol)
+    if status != 0 or symbol <= 0:
+        return 0
+    symbol
 
 fn font_rasterizer_void_transport_probe() -> bool:
     var meta: [i64] = [-1, -1, -1, -1, -1, -1]
@@ -238,8 +248,10 @@ impl FontRasterizer:
         # Reject a missing provider before reading a potentially multi-megabyte
         # font. In the interpreter each byte is boxed; probing four absent
         # dylibs after loading the font can otherwise retain gigabytes of RSS.
-        val h = spl_dlopen(dylib_path)
-        if h == 0:
+        var h: i64 = 0
+        val load_status = unsafe(capabilities: [ffi, raw_ptr]):
+            spl_dlopen_checked(dylib_path, &mut h)
+        if load_status != 0 or h <= 0:
             return FontRasterizer.invalid()
         val selected = selected_font_asset_candidate_for_path(ttf_path)
         val blob = if selected != nil:
@@ -266,26 +278,26 @@ impl FontRasterizer:
             spl_dlclose(h)
             return FontRasterizer.invalid()
         val init_fp = if selected != nil:
-            spl_dlsym(h, "rt_fonts_init_verified_bytes")
+            _font_resolve_optional(h, "rt_fonts_init_verified_bytes")
         else:
-            spl_dlsym(h, "rt_fonts_init")
+            _font_resolve_optional(h, "rt_fonts_init")
         val raster_fp = if selected != nil:
-            spl_dlsym(h, "rt_fonts_rasterize_glyph_native_only")
+            _font_resolve_optional(h, "rt_fonts_rasterize_glyph_native_only")
         else:
-            spl_dlsym(h, "rt_fonts_rasterize_glyph")
-        val subpixel_raster_fp = spl_dlsym(h, "rt_fonts_rasterize_glyph_subpixel")
-        val metric_fp = spl_dlsym(h, "rt_fonts_glyph_metric")
-        val pixel_fp = spl_dlsym(h, "rt_fonts_glyph_pixel")
-        val subpixel_pixel_fp = spl_dlsym(h, "rt_fonts_glyph_subpixel_pixel")
-        val kern_fp = spl_dlsym(h, "rt_fonts_horizontal_kern")
-        val line_metric_fp = spl_dlsym(h, "rt_fonts_horizontal_line_metric")
-        val layout_fp = spl_dlsym(h, "rt_fonts_layout_text")
-        val layout_glyph_metric_fp = spl_dlsym(h, "rt_fonts_layout_glyph_metric")
-        val glyph_pixels_ptr_fp = spl_dlsym(h, "rt_fonts_glyph_pixels_ptr")
-        val glyph_pixels_len_fp = spl_dlsym(h, "rt_fonts_glyph_pixels_len")
-        val glyph_free_fp = spl_dlsym(h, "rt_fonts_glyph_free")
-        val has_glyph_fp = spl_dlsym(h, "rt_fonts_has_glyph")
-        val generation_fp = spl_dlsym(h, "rt_fonts_generation")
+            _font_resolve_optional(h, "rt_fonts_rasterize_glyph")
+        val subpixel_raster_fp = _font_resolve_optional(h, "rt_fonts_rasterize_glyph_subpixel")
+        val metric_fp = _font_resolve_optional(h, "rt_fonts_glyph_metric")
+        val pixel_fp = _font_resolve_optional(h, "rt_fonts_glyph_pixel")
+        val subpixel_pixel_fp = _font_resolve_optional(h, "rt_fonts_glyph_subpixel_pixel")
+        val kern_fp = _font_resolve_optional(h, "rt_fonts_horizontal_kern")
+        val line_metric_fp = _font_resolve_optional(h, "rt_fonts_horizontal_line_metric")
+        val layout_fp = _font_resolve_optional(h, "rt_fonts_layout_text")
+        val layout_glyph_metric_fp = _font_resolve_optional(h, "rt_fonts_layout_glyph_metric")
+        val glyph_pixels_ptr_fp = _font_resolve_optional(h, "rt_fonts_glyph_pixels_ptr")
+        val glyph_pixels_len_fp = _font_resolve_optional(h, "rt_fonts_glyph_pixels_len")
+        val glyph_free_fp = _font_resolve_optional(h, "rt_fonts_glyph_free")
+        val has_glyph_fp = _font_resolve_optional(h, "rt_fonts_has_glyph")
+        val generation_fp = _font_resolve_optional(h, "rt_fonts_generation")
         if init_fp == 0 or raster_fp == 0 or metric_fp == 0 or pixel_fp == 0 or glyph_pixels_ptr_fp == 0 or glyph_pixels_len_fp == 0 or glyph_free_fp == 0 or has_glyph_fp == 0 or generation_fp == 0:
             spl_dlclose(h)
             return FontRasterizer.invalid()
