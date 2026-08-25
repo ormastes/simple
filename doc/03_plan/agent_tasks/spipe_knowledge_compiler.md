@@ -430,3 +430,18 @@ accepted. The next owner must run the unchanged focused five-case spec once in
 a fresh session and, on a complete PASS only, request highest-capability
 call-graph review of the redesigned ownership/prevalidation/finalization/
 publication boundary. Decoder remains `7/8`; SHA remains `W4-SRCH-31 FAIL`.
+
+### 10.1 Current evidence supersession
+
+The decoder's final permitted cycle 3 subsequently ran `PASS 8/8`, but highest-
+capability review returned `FAIL`: `transport_bytes` is a second cursor, and an
+incomplete C2 prefix reports consumed/transport advance while raw/SHA lag.
+That violates one authoritative raw cursor and exact consumed-prefix hashing.
+Improved value-semantic rollback does not admit its source/spec.
+
+Emitter cycles then ran `2/5`, `2/5`, and `4/5`; a post-cap second-take fix is
+unexecuted. High review remains `FAIL` because exact predicted-size validation
+is absent, scratch cursor state mutates before sink/SHA/checkpoint acceptance,
+and first/middle/final plus cap-boundary fault cases are missing. Accept no
+decoder/emitter source or spec; keep the lane `IN PROGRESS` and
+`W4-SRCH-31 FAIL` unchanged.

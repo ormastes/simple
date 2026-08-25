@@ -654,3 +654,20 @@ prevalidation, exact-size validation, sole cursor/capability ownership,
 append/hash/checkpoint ordering, terminal failure latching, finalize-before-
 ready, and ready-only exactly-once publication. The decoder remains at its
 separate executed `7/8` status and `W4-SRCH-31` remains `FAIL`.
+
+### 14.1 Subsequent decoder/emitter evidence
+
+The decoder's final permitted cycle 3 subsequently executed `PASS 8/8`, but
+highest-capability review returned `FAIL`. The candidate introduced a parallel
+`transport_bytes` cursor: on incomplete C2 input it reports consumed/transport
+advance while the authoritative raw cursor and SHA lag. That contradicts the
+frozen single raw cursor and exact consumed-prefix hashing contract. Its
+value-semantic rollback behavior improved, but neither decoder source nor spec
+is accepted.
+
+Fresh emitter cycles executed `2/5`, `2/5`, and `4/5`. A second-take correction
+was made after the cap and is unexecuted. Highest-capability review remains
+`FAIL`: the candidate lacks exact predicted-size validation, advances its
+scratch cursor before sink/SHA/checkpoint acceptance, and lacks first/middle/
+final plus cap-boundary fault evidence. No emitter source/spec is accepted.
+Overall status remains `IN PROGRESS`; `W4-SRCH-31` remains `FAIL`.

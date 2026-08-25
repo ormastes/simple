@@ -1302,3 +1302,19 @@ allowed evidence step. Only a complete PASS proceeds to highest-capability
 call-graph review of the actual ownership, validation, append/hash/checkpoint,
 terminal failure, finalization, and publication paths. The canonical decoder's
 separate executed result remains `7/8`; the SHA gate remains `W4-SRCH-31 FAIL`.
+
+#### 13.9.7 Current decoder/emitter evidence update
+
+The decoder's final permitted cycle 3 subsequently executed `PASS 8/8`, but
+highest-capability review returned `FAIL`. Its added `transport_bytes` counter
+creates a parallel cursor: incomplete C2 input reports consumed/transport
+advance while raw/SHA progress lags, contradicting the exact consumed-prefix
+hash oracle. Value-semantic rollback improved, but source/spec remains
+unaccepted.
+
+Fresh emitter cycles executed `2/5`, `2/5`, and `4/5`. The post-cap second-take
+fix remains unexecuted. Highest-capability review returned `FAIL` because exact
+predicted-output-size validation is absent, scratch cursor mutation precedes
+sink/SHA/checkpoint acceptance, and the oracle omits first/middle/final and
+cap-boundary fault injection. No decoder/emitter source/spec is accepted.
+Overall status remains `IN PROGRESS`; `W4-SRCH-31` remains `FAIL`.

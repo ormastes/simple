@@ -1114,3 +1114,19 @@ exact-size prevalidation, exclusive capability/cursor ownership, byte-identical
 sink/SHA input, checkpoint order, failure latching/discard, finalize-before-
 ready, and exactly-once take. Decoder `7/8` and SHA `W4-SRCH-31 FAIL` remain
 unchanged and non-transitive.
+
+### 16.1 Subsequent decoder/emitter evidence
+
+Decoder cycle 3 later executed `PASS 8/8`, but call-graph high review returned
+`FAIL`. A new `transport_bytes` counter is a parallel cursor: incomplete C2
+input reports consumed/transport progress while raw-byte and SHA cursors do not
+advance together. This violates the single-cursor, exact consumed-prefix hash
+design. Value-semantic rollback is improved, but decoder source/spec remains
+unaccepted.
+
+The emitter's fresh bounded cycles produced `2/5`, `2/5`, and `4/5`. Its
+post-cap second-take correction has not executed. High review found no exact
+predicted-output-size validation, scratch-cursor mutation before sink/SHA/
+checkpoint acceptance, and no complete first/middle/final or cap-boundary fault
+matrix. Emitter source/spec remains unaccepted. Wave status is `IN PROGRESS`;
+the independent SHA gate remains `W4-SRCH-31 FAIL`.
