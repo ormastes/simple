@@ -1633,3 +1633,37 @@ mutex, hash, or string lookup to each call.
 - [x] Pin the `rt-safety-census` consumer to the canonical inventory schema and
   repair its language/unsafe/contract/evidence/scope column mapping. The
   corrected census now reports current `rt_*` counts instead of false zeros.
+
+### Current census and next execution order (2026-08-25)
+
+Current authoritative static baseline:
+
+- 11,590 declaration rows / 3,137 distinct `rt_*` symbols;
+- 2,826 rows / 1,779 symbols explicitly FFI-unsafe;
+- 8,515 rows / 1,825 symbols untouched;
+- 263 symbols with source-signature variants;
+- zero evidence-verified, signature-verified, or verified-and-signed symbols.
+
+Next work is ordered by the defect prevented, not by easiest annotation count:
+
+1. Reconcile the 263 source-signature variants against compiler-owned canonical
+   type identity. Reject unresolved conflicts rather than choosing an arity or
+   lowering unsupported values to zero.
+2. Minimize production authority for `rt_file`, `rt_process`, `rt_env`,
+   `rt_time`, and `rt_dir`. Use one canonical owner per family, typed
+   `Option`/`Result` return semantics, and the smallest lexical
+   `unsafe(capabilities: [ffi])` region.
+3. Separate declarations with no observed provider from optional capability
+   providers. Missing required providers fail admission; optional providers
+   become an explicit `Option<Provider>`, never a fabricated call result.
+4. Bind generated typed slots to freshly replayed evidence admission. Until a
+   provider's exact artifact and signature pass, its safe-wrapper eligibility
+   remains false even when source annotations and local contracts exist.
+5. Ratchet production untouched and signature-variant counts downward without
+   treating test declarations or source-only claims as proof.
+
+Performance/memory gate for every slice: no per-call digest/signature work,
+name lookup, dictionary lookup, mutex, generic dispatcher, or new allocation.
+Admission is one-time; the hot path is a cached typed call and its mandatory
+contract checks. Any change that cannot demonstrate this shape remains unsafe
+and unpromoted.
