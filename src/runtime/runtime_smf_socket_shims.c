@@ -13,19 +13,9 @@
 // rt_io_tcp_socket_create".
 //
 // This file provides exactly those six as host-linkable C symbols so the loader's
-// static symbol registry can resolve them. build.rs lists this file in BOTH
-// `c_sources` (so it links) and `LINKED_C_SOURCES` (so entries are generated).
-//
-// Note: rt_io_tcp_bind itself is intentionally NOT defined here — it is owned by
-// the Rust runtime (net_tcp.rs) and would collide. Five of the six are
-// self-contained POSIX wrappers taking only integer fd/flag arguments.
-//
-// rt_io_tcp_bind_fd takes a `text` address argument whose decoding requires the
-// host RuntimeValue text ABI (not the C RtCoreString ABI used by runtime_native.c).
-// It is provided here as a link-resolving stub returning failure (-1/0), mirroring
-// the freestanding convention in runtime_native.c. The benchmark workload never
-// invokes it; a functional host impl belongs in net_tcp.rs (Rust) and is out of
-// scope for this change.
+// static symbol registry can resolve them when this source is explicitly linked.
+// The host RuntimeValue functions, including rt_io_tcp_bind_fd, are owned by the
+// Rust runtime (`value/net_tcp.rs`) and MUST NOT be shadowed by failure stubs.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -109,10 +99,3 @@ bool rt_io_tcp_set_reuseport(int64_t fd, bool enabled) {
 }
 
 #endif /* _WIN32 */
-
-// Link-resolving stub: see header note. Requires host RuntimeValue text ABI to be
-// functional; provided here only so relocations resolve for the never-invoked path.
-bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
-    (void)fd; (void)addr_val;
-    return 0;
-}
