@@ -2388,6 +2388,33 @@ lock, hash, signature check, or generic dispatch was added.  Production
 timing/RSS and signed exact-artifact proof remain unavailable, so this file is
 authority-bounded but not verified-and-signed; repository admission remains 0.
 
+## simple-core filesystem high-volume authority checkpoint
+
+Six operations account for 122 source-level calls in `core_fs.spl`: heap
+release, FILE close, descriptor close, runtime string construction, and byte
+loads/stores.  Each now has one `@always_inline` minimal owner.  Pointer-bearing
+operations require `ffi, raw_ptr`; integer file-descriptor close retains only
+`ffi`.  Signed close status and tagged string handles remain unchanged rather
+than being converted to booleans or empty values.
+
+`simple-core-fs-authority.shs` passed, pinning exact raw-call confinement,
+mandatory inlining, the source inventory, and both compiler pointer-intrinsic
+lowerings.  The authoritative census recognized 120 of the 122 source
+occurrences and changed as follows:
+
+- raw call sites: 20,150 -> 20,036
+- missing authority: 16,179 -> 16,059
+- lexical unsafe: 3,052 -> 3,058
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+The transformation preserves every release, close, allocation-producing
+string lift, and byte operation.  Mandatory inlining adds no function
+dispatch, allocation, copy, scan, lookup, lock, hash, or signature check.
+Production timing/RSS and exact-artifact proof remain unavailable; the file
+still has lower-volume unbounded calls and verified-and-signed admission
+remains 0.
+
 ## Pure Simple SSH cipher boundary checkpoint
 
 The general SSH cipher no longer declares or calls `serial_println` or
