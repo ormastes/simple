@@ -952,3 +952,11 @@ and message slices without rescanning diagnostic prefixes.
 related payloads, and the last help payload. Query check consumes it directly;
 query diagnostics may expose only a delegation wrapper for compatibility.
 Consumers must not retain a copied metadata suffix or construct a split array.
+
+# Diagnostic severity override ownership
+
+`query_rich_common._diag_emit_or_collect` remains the sole policy gate. A zero
+override count bypasses code/severity parsing. Mapped negative values suppress
+before output; mapped nonnegative values delegate to one byte-based severity
+rewriter. Missing or malformed severity fields preserve the original diagnostic,
+and an already-equal digit run must not allocate rewritten JSON.

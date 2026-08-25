@@ -3579,6 +3579,22 @@ tier checker. Each source is scanned once in O(N) time with one integer result
 per physical line and no masked text construction for DEPR002. No timing,
 allocation, or RSS measurement was run under the no-verification override.
 
+# 2026-08-25 follow-up: severity override rewrite allocation
+
+Active diagnostic policy scanned the severity digit run by constructing a
+one-byte text per digit. A changed severity then used chained immutable text
+concatenation, copying the prefix through an intermediate before constructing
+the final diagnostic. Even an already-equal severity rebuilt the full JSON.
+Malformed severity fields accepted the marker but no digits and were corrupted
+by inserting the override before the existing value.
+
+Severity scanning now uses ASCII byte bounds and fails closed when no digit is
+present. It compares the full existing digit run with the requested severity;
+an exact match returns the original text. Changed output uses three bounded
+fragments and one final join. Zero-policy routing performs no field scan; active
+routing is O(N) with O(1) scan state, while only a real change constructs O(N)
+output. No execution, allocation, timing, or RSS measurement was run.
+
 # 2026-08-25 follow-up: streaming structured-error metadata
 
 `query_check` and `query_diagnostics` independently parsed `|||RELATED:` and

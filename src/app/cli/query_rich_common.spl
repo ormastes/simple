@@ -64,9 +64,8 @@ fn query_mcp_diagnostics_wrapper_json(diagnostics: [text]) -> text:
 fn query_emit_mcp_diagnostics_wrapper(diagnostics: [text]):
     print query_mcp_diagnostics_wrapper_json(diagnostics)
 
-fn _diag_is_digit(c: text) -> bool:
-    (c == "0" or c == "1" or c == "2" or c == "3" or c == "4"
-     or c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
+fn _diag_is_digit_byte(byte: i64) -> bool:
+    byte >= 48 and byte <= 57
 
 fn _diag_code_of(json_str: text) -> text:
     """Extract the "code":"XXX" value from a diagnostic JSON string ("" if absent)."""
@@ -88,9 +87,22 @@ fn _diag_rewrite_severity(json_str: text, sev: i64) -> text:
         return json_str
     val vstart = start + marker.len()
     var vend = vstart
-    while vend < json_str.len() and _diag_is_digit(json_str.substring(vend, vend + 1)):
+    while vend < json_str.len() and _diag_is_digit_byte(json_str.byte_at(vend)):
         vend = vend + 1
-    json_str.substring(0, vstart) + sev.to_string() + json_str.substring(vend)
+    if vend == vstart:
+        return json_str
+    val severity_text = sev.to_string()
+    var same = severity_text.len() == vend - vstart
+    var si = 0
+    while same and si < severity_text.len():
+        if json_str.byte_at(vstart + si) != severity_text.byte_at(si):
+            same = false
+        si = si + 1
+    if same:
+        return json_str
+    var parts: [text] = [
+        json_str.substring(0, vstart), severity_text, json_str.substring(vend)]
+    parts.join("")
 
 fn _diag_emit_or_collect(json_str: text):
     """Either print or collect a JSON diagnostic string depending on mode.

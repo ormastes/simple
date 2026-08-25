@@ -1734,6 +1734,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No manual execution was run under the user override; static semantic,
   performance, and fixture review is required before sync.
 
+# Completed tranche: severity override allocation hardening (2026-08-25)
+
+- Replaced per-digit substring creation with byte classification.
+- Added malformed/no-digit fail-closed behavior and full digit-run equality.
+- Returned unchanged diagnostics without reconstruction when severity matches.
+- Replaced chained immutable concatenation with three fragments and one join.
+- Preserved zero-policy bypass, unknown-code identity, exact rewrite, and
+  suppression ordering with paired evidence and a canonical manual.
+- Static bound: O(1) policy bypass, O(N) active scans, and O(N) allocation only
+  for changed output; no manual execution or timing/RSS measurement was run.
+
 # Completed tranche: structured-error streaming (2026-08-25)
 
 - Moved RELATED/HELP metadata semantics into one shared parser.

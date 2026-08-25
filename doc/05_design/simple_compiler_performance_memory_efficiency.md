@@ -1281,3 +1281,12 @@ sliced and trimmed at a time. RELATED payloads append in order; HELP overwrites
 the previous help value; empty and unknown segments do not alter control flow.
 The final no-match terminates the loop, including trailing and consecutive
 separators. The compatibility wrapper contains no parser loop, search, or slice.
+
+# Severity override rewrite design
+
+After locating the exact severity marker, `_diag_rewrite_severity` consumes the
+maximal adjacent ASCII digit run with `byte_at`. No digits returns the original.
+The requested severity is formatted once and byte-compared against the complete
+run, so equal multi-digit values also return the original while leading-zero
+normalization remains a rewrite. A changed value publishes prefix, severity,
+and suffix through one fragment join; chained immutable concatenation is banned.
