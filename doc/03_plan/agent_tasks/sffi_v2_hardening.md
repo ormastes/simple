@@ -390,3 +390,7 @@ passing placeholder.
     JIT text re-materialization intact. Do not restore a credential-local raw
     declaration. The remaining security-types/OAuth/WebSocket duplicates need
     typed API changes because they currently fabricate usable values.
+74. Keep WebSocket handshake-key and mask generation Result-bearing and routed
+    through canonical checked entropy. All six browser-client call sites must
+    propagate failure; never emit a zero/short mask or retry silently. Preserve
+    one provider call and the existing counter-mix schedule on success.

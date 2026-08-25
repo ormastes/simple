@@ -518,3 +518,18 @@ The focused static ratchet passed; executable and signed-artifact admission
 remain unavailable. One declaration row is removed: 11,982 rows / 3,156
 symbols, 1,189 tagged, 637 `unsafe_contract_declared`, 10,527 untouched, and
 zero exact-artifact verified-and-signed.
+
+## WebSocket entropy-result checkpoint
+
+Browser WebSocket handshake keys and client-frame masks now use canonical
+checked entropy. The local non-null `rt_random_hex` declaration is removed;
+both generators return browser `Result`, and the connect/send/receive-control/
+close/ping callers propagate failure before emitting an unmasked or predictable
+frame. Success performs exactly one CSPRNG call and the existing counter mix.
+Validation scans only 32 handshake-key hex characters or 8 mask characters;
+there is no retry, lookup, generic dispatch, or additional entropy buffer.
+
+The focused static ratchet passed. Production execution and signed admission
+remain blocked as recorded above. One declaration row is removed: 11,981 rows
+/ 3,156 symbols, 1,189 tagged, 637 `unsafe_contract_declared`, 10,526
+untouched, and zero exact-artifact verified-and-signed.
