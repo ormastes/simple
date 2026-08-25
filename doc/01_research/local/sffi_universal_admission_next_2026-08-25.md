@@ -12,6 +12,39 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Simple-core closure authority checkpoint
+
+The pure-Simple closure provider retains five explicitly tagged raw
+interfaces and routes all 11 former ambient calls through mandatory-inline
+owners.  Allocation and pointer loads/stores require `ffi, raw_ptr`; the
+fail-closed termination owner requires only `ffi`.  The focused
+`simple-core-closure-authority.shs` ratchet passed and pins the pointer
+intrinsics plus both compilers' mandatory-inline recognition.
+
+The constructor still returns the raw nil sentinel for invalid function
+pointers or capture counts, preserving its existing input contract.  Fixed-size
+or capture-storage allocation failure is no longer conflated with that state:
+it terminates through the existing abort boundary.  Successful construction
+retains one allocation, the exact header/capture layout, registry link, and
+bounds behavior.  No valid-path branch, allocation, copy, lookup, lock, hash,
+signature operation, or generic dispatch was added.
+
+Closure membership validation remains an O(number of live closures) intrusive
+registry walk.  It avoids dereferencing arbitrary tagged integers without a
+separate allocation per entry, but its scalability has no production profile;
+this checkpoint therefore keeps the provider unsafe and does not claim the
+registry or captured-object lifetimes verified.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,645 -> 19,639
+- lexical unsafe: 3,202 -> 3,207
+- function unsafe: unchanged at 919
+- missing authority: 15,524 -> 15,513
+
+Production execution and exact artifact evidence remain unavailable, so
+verified-and-signed admission remains 0.
+
 ## Simple-core async authority checkpoint
 
 The pure-Simple async/future provider now tags nine raw interfaces and routes
