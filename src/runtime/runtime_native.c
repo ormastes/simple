@@ -12585,7 +12585,7 @@ int64_t rt_io_tcp_bind(int64_t addr_val) {
     return (int64_t)fd;
 }
 
-int64_t rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
+bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return 0;
     struct sockaddr_in sa;
@@ -12593,8 +12593,8 @@ int64_t rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
     return bind((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_listen(int64_t fd, int64_t backlog) {
-    return listen((int)fd, (int)backlog) == 0 ? 1 : 0;
+bool rt_io_tcp_listen(int64_t fd, int64_t backlog) {
+    return listen((int)fd, (int)backlog) == 0;
 }
 
 int64_t rt_io_tcp_accept(int64_t fd) {
@@ -12676,7 +12676,7 @@ int64_t rt_io_tcp_flush(int64_t fd) {
     return 1;
 }
 
-int8_t rt_io_tcp_close(int64_t fd) {
+bool rt_io_tcp_close(int64_t fd) {
     return close((int)fd) == 0;
 }
 
@@ -12694,19 +12694,19 @@ int64_t rt_io_tcp_peer_addr(int64_t fd) {
     return rt_make_addr_string(&sa);
 }
 
-int64_t rt_io_tcp_set_nonblocking(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_nonblocking(int64_t fd, bool enabled) {
     int flags = fcntl((int)fd, F_GETFL, 0);
     if (flags < 0) return 0;
     if (enabled) flags |= O_NONBLOCK; else flags &= ~O_NONBLOCK;
     return fcntl((int)fd, F_SETFL, flags) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_nodelay(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_nodelay(int64_t fd, bool enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseport(int64_t fd, bool enabled) {
 #ifdef SO_REUSEPORT
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEPORT, &flag, sizeof(flag)) == 0 ? 1 : 0;
@@ -12715,7 +12715,7 @@ int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
 #endif
 }
 
-int64_t rt_io_tcp_set_reuseaddr(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
@@ -12809,8 +12809,8 @@ int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
 #else /* _WIN32 stubs */
 int64_t rt_io_tcp_socket_create(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_bind(int64_t a) { (void)a; return -1; }
-int64_t rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
-int64_t rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return 0; }
+bool rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return false; }
+bool rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return false; }
 int64_t rt_io_tcp_accept(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_accept_timeout(int64_t f, int64_t m) { (void)f; (void)m; return -1; }
 int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
@@ -12821,13 +12821,13 @@ int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_flush(int64_t f) { (void)f; return 0; }
-int8_t rt_io_tcp_close(int64_t f) { (void)f; return false; }
+bool rt_io_tcp_close(int64_t f) { (void)f; return false; }
 int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
 int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
-int64_t rt_io_tcp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_nodelay(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_reuseport(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_reuseaddr(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+bool rt_io_tcp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_nodelay(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_reuseport(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_reuseaddr(int64_t f, bool e) { (void)f; (void)e; return false; }
 int64_t rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
 int64_t rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
 int64_t rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return 0; }

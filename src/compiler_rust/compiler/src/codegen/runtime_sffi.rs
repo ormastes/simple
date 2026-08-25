@@ -1324,18 +1324,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_io_tcp_write_text_read_exact_len", &[I64, I64], &[I64]),
     // rt_io_tcp_socket_create(family: i64) -> fd: i64
     RuntimeFuncSpec::new("rt_io_tcp_socket_create", &[I64], &[I64]),
-    // rt_io_tcp_set_reuseaddr(fd: i64, enabled: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_set_reuseaddr", &[I64, I64], &[I64]),
-    // rt_io_tcp_set_reuseport(fd: i64, enabled: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_set_reuseport", &[I64, I64], &[I64]),
-    // rt_io_tcp_set_nonblocking(fd: i64, enabled: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_set_nonblocking", &[I64, I64], &[I64]),
-    // rt_io_tcp_set_nodelay(fd: i64, enabled: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_set_nodelay", &[I64, I64], &[I64]),
-    // rt_io_tcp_bind_fd(fd: i64, addr_ptr: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_bind_fd", &[I64, I64], &[I64]),
-    // rt_io_tcp_listen(fd: i64, backlog: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_listen", &[I64, I64], &[I64]),
+    // Socket options use the C/Rust bool ABI (i8), not integer transport.
+    RuntimeFuncSpec::new("rt_io_tcp_set_reuseaddr", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_reuseport", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_nonblocking", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_nodelay", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_bind_fd", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_listen", &[I64, I64], &[I8]),
     // rt_io_tcp_accept(fd: i64) -> client_fd: i64
     RuntimeFuncSpec::new("rt_io_tcp_accept", &[I64], &[I64]),
     // rt_io_tcp_read(fd: i64, size: i64) -> array_ptr: i64
@@ -2545,6 +2540,26 @@ mod tests {
             .expect("TCP close must be registered for native codegen");
         assert_eq!(spec.params, [I64]);
         assert_eq!(spec.returns, [I8]);
+    }
+
+    #[test]
+    fn tcp_configuration_uses_boolean_abi() {
+        let expected = [
+            ("rt_io_tcp_set_reuseaddr", &[I64, I8][..]),
+            ("rt_io_tcp_set_reuseport", &[I64, I8][..]),
+            ("rt_io_tcp_set_nonblocking", &[I64, I8][..]),
+            ("rt_io_tcp_set_nodelay", &[I64, I8][..]),
+            ("rt_io_tcp_bind_fd", &[I64, I64][..]),
+            ("rt_io_tcp_listen", &[I64, I64][..]),
+        ];
+        for (name, params) in expected {
+            let spec = RUNTIME_FUNCS
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered for native codegen"));
+            assert_eq!(spec.params, params);
+            assert_eq!(spec.returns, [I8]);
+        }
     }
 
     #[test]

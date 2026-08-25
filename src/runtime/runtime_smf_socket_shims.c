@@ -28,6 +28,7 @@
 // scope for this change.
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -49,21 +50,21 @@ int64_t rt_io_tcp_socket_create(int64_t family) {
     return (s == INVALID_SOCKET) ? -1 : (int64_t)s;
 }
 
-int64_t rt_io_tcp_listen(int64_t fd, int64_t backlog) {
-    return listen((SOCKET)fd, (int)backlog) == 0 ? 1 : 0;
+bool rt_io_tcp_listen(int64_t fd, int64_t backlog) {
+    return listen((SOCKET)fd, (int)backlog) == 0;
 }
 
-int64_t rt_io_tcp_set_nonblocking(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_nonblocking(int64_t fd, bool enabled) {
     u_long mode = enabled ? 1 : 0;
     return ioctlsocket((SOCKET)fd, FIONBIO, &mode) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_reuseaddr(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((SOCKET)fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseport(int64_t fd, bool enabled) {
     /* SO_REUSEPORT is not available on Windows; return 0 (not supported). */
     (void)fd; (void)enabled; return 0;
 }
@@ -80,23 +81,23 @@ int64_t rt_io_tcp_socket_create(int64_t family) {
     return (int64_t)socket(af, SOCK_STREAM, 0);
 }
 
-int64_t rt_io_tcp_listen(int64_t fd, int64_t backlog) {
-    return listen((int)fd, (int)backlog) == 0 ? 1 : 0;
+bool rt_io_tcp_listen(int64_t fd, int64_t backlog) {
+    return listen((int)fd, (int)backlog) == 0;
 }
 
-int64_t rt_io_tcp_set_nonblocking(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_nonblocking(int64_t fd, bool enabled) {
     int flags = fcntl((int)fd, F_GETFL, 0);
     if (flags < 0) return 0;
     if (enabled) flags |= O_NONBLOCK; else flags &= ~O_NONBLOCK;
     return fcntl((int)fd, F_SETFL, flags) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_reuseaddr(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseport(int64_t fd, bool enabled) {
 #ifdef SO_REUSEPORT
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEPORT, &flag, sizeof(flag)) == 0 ? 1 : 0;
@@ -109,7 +110,7 @@ int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
 
 // Link-resolving stub: see header note. Requires host RuntimeValue text ABI to be
 // functional; provided here only so relocations resolve for the never-invoked path.
-int64_t rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
+bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
     (void)fd; (void)addr_val;
     return 0;
 }
