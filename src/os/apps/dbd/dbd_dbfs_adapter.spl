@@ -181,7 +181,7 @@ pub class DbdDbfsAdapter:
                 return Err(self.last_error)
             if not file_close_direct(fd):
                 self.state = DbdDbfsAdapterState.Quarantined
-                self.last_error = "dbfs-commit-close-failed"
+                self.last_error = "dbfs-commit-staging-close-failed"
                 return Err(self.last_error)
             if file_rename_direct(temp_path, path).is_err():
                 self.state = DbdDbfsAdapterState.Quarantined
@@ -243,13 +243,28 @@ pub class DbdDbfsAdapter:
         val closed = driver.close_handle(handle)
         if closed.is_err():
             self.state = DbdDbfsAdapterState.Quarantined
-            self.last_error = "dbfs-commit-close-failed"
+            self.last_error = "dbfs-commit-postpublish-close-failed"
             return Err(self.last_error)
         self.open_handles = self.open_handles - 1
         if self.state == DbdDbfsAdapterState.Quarantined:
             return Err(self.last_error)
         self.generation = self.generation + 1
         Ok(())
+
+    pub fn commit_outcome_uncertain() -> bool:
+        """Whether the last failed commit crossed its atomic publish point.
+
+        Once transactional rename succeeds, a later namespace-sync, close, or
+        mount-generation failure cannot honestly be reported as an abort: the
+        new journal name may already be visible and may survive restart.  The
+        adapter remains quarantined, and this predicate lets the protocol
+        distinguish that indeterminate result from failures before rename.
+        """
+        self.state == DbdDbfsAdapterState.Quarantined and (
+            self.last_error == "dbfs-commit-namespace-sync-failed" or
+            self.last_error == "dbfs-commit-namespace-close-failed" or
+            self.last_error == "dbfs-vfs-mount-changed-during-commit" or
+            self.last_error == "dbfs-commit-postpublish-close-failed")
 
     pub me quarantine(reason: text) -> bool:
         if reason.trim() == "" or self.open_handles != 0:

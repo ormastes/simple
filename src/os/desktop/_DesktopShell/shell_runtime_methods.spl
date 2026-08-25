@@ -274,7 +274,20 @@ impl DesktopShell:
             self.compositor = input_compositor
             self.drain_wm_actions()
             self.handle_pending_wm_pointer_step()
+            # drain_wm_actions may close, minimize, or refocus a surface after
+            # the pending key/text target was snapshotted above.  Revalidate
+            # input ownership at the final owner-port handoff; existence and
+            # an owner port alone do not authorize delivery to an old focus.
+            # This keeps a queued character paired with the focus epoch that
+            # selected its window without adding a second input/render path.
+            val remote_key_still_focused = (
+                remote_key_window_id > 0 and
+                self.compositor.focused_idx >= 0 and
+                self.compositor.focused_idx < self.compositor.surfaces.len() and
+                self.compositor.surfaces[self.compositor.focused_idx].id == remote_key_window_id
+            )
             if (remote_key_window_id > 0 and
+                remote_key_still_focused and
                 self.compositor.window_owner_port(remote_key_window_id.to_u64()) > 0):
                 val key_name = ps2_wm_key_name(remote_key_scancode)
                 if key_name != "":
@@ -297,7 +310,14 @@ impl DesktopShell:
                             )
                         )
                     )
+            val remote_text_still_focused = (
+                remote_text_window_id > 0 and
+                self.compositor.focused_idx >= 0 and
+                self.compositor.focused_idx < self.compositor.surfaces.len() and
+                self.compositor.surfaces[self.compositor.focused_idx].id == remote_text_window_id
+            )
             if (remote_text_window_id > 0 and
+                remote_text_still_focused and
                 self.compositor.window_owner_port(remote_text_window_id.to_u64()) > 0):
                 val committed_text = ps2_wm_character(remote_text_scancode, remote_text_shift)
                 if committed_text != "":

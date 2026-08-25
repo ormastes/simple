@@ -23,9 +23,11 @@
 # general path is usable freestanding is tracked as a separate blocker.
 
 use os.kernel.memory.vmm_address_space.{
-    create_user_address_space, vmm_map_user_low_page,
+    create_user_address_space, destroy_user_address_space,
+    vmm_map_user_low_page,
     vmm_clone_kernel_low_private, vmm_zero_phys_range
 }
+use os.kernel.memory.pmm.{pmm_free_page_raw}
 use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
 use os.kernel.types.task_types.{TaskContext, AddressSpace}
 use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_task}
@@ -387,6 +389,9 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, us
         val flags = if writable: VmFlags.user_rw() else: VmFlags.user_rx()
         if not vmm_map_user_low_page(space, VirtAddr(addr: va), PhysAddr(addr: phys), flags):
             serial_println("[spawn] FAIL map page va=0x{va}")
+            # The VMM destructor can only discover successfully installed
+            # leaves. This frame is still solely owned by the local mapper.
+            pmm_free_page_raw(phys)
             return 0
 
         var k: u64 = 0
@@ -457,11 +462,13 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
     # fixture/stack VAs too (fresh tables, no privatization triggers).
     if not vmm_clone_kernel_low_private(space.phys_root):
         serial_println("[spawn] FAIL clone kernel low private root={space.phys_root}")
+        destroy_user_address_space(space)
         return -1
     serial_println("[spawn] user AS ready (private low) root={space.phys_root}")
 
     if _map_pt_loads(space, blob, hdr_len, file_len, use_stream) == 0:
         serial_println("[spawn] FAIL segment mapping")
+        destroy_user_address_space(space)
         return -2
 
     # User stack: a bounded RW low-canonical region in the process-private page
@@ -480,10 +487,16 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
         val sph = pmm_alloc_page_raw()
         if sph == 0:
             serial_println("[spawn] FAIL stack alloc p={p}")
+            destroy_user_address_space(space)
             return -3
         vmm_zero_phys_range(sph, PAGE.to_u64())
         if not vmm_map_user_low_page(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph), VmFlags.user_rw()):
             serial_println("[spawn] FAIL stack map p={p}")
+            # The failed leaf never entered the page-table tree, so return it
+            # directly before recursively releasing the successfully mapped
+            # image/stack leaves and private paging structures.
+            pmm_free_page_raw(sph)
+            destroy_user_address_space(space)
             return -4
         # Capture the TOP stack page's physical address (p==0: sva==STACK_TOP-PAGE
         # ==top_page_base). Low-canonical phys is identity-mapped in the kernel, so
@@ -501,12 +514,14 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
     val user_rsp_u = _build_sysv_stack_frame(top_phys, STACK_TOP_U, binary_path, argv, envp)
     if user_rsp_u == 0:
         serial_println("[spawn] FAIL argv/envp exceed one-page startup bound")
+        destroy_user_address_space(space)
         return -4
     val frame_off: u64 = user_rsp_u - TOP_PAGE_BASE_U
     val argc_rb = _rd64(top_phys + frame_off, 0)
     val expected_argc = (argv.len() as u64) + 1
     serial_println("[spawn] frame argc readback={argc_rb} expected={expected_argc}")
     if argc_rb != expected_argc:
+        destroy_user_address_space(space)
         return -4
     serial_println("[spawn] user stack mapped top=0x{STACK_TOP} pages={STACK_PAGES} rsp=0x{user_rsp_u}")
 
@@ -543,10 +558,13 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
             val hph = pmm_alloc_page_raw()
             if hph == 0:
                 serial_println("[spawn] FAIL heap alloc page={hp}")
+                destroy_user_address_space(space)
                 return -5
             vmm_zero_phys_range(hph, HEAP_PAGE_SZ)
             if not vmm_map_user_low_page(space, VirtAddr(addr: HEAP_VA + (hp * HEAP_PAGE_SZ)), PhysAddr(addr: hph), VmFlags.user_rw()):
                 serial_println("[spawn] FAIL heap map page={hp}")
+                pmm_free_page_raw(hph)
+                destroy_user_address_space(space)
                 return -6
             hp = hp + 1
         rt_user_heap_init_returning(HEAP_VA, HEAP_PAGES * HEAP_PAGE_SZ)
@@ -572,10 +590,10 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
     # program's exit status up to the sshd accept loop, which then accepts the
     # next connection/command in the same boot.
     #
-    # Remaining gap: the user address space built above is abandoned (its PML4 +
-    # PT_LOAD/stack frames leak); each spawn calls create_user_address_space()
-    # fresh with fresh pmm frames, so a later command's ELF load cannot be
-    # corrupted by this one's mappings — but the frames are not reclaimed.
     val exit_rc = rt_x86_ring3_exit_rc()
+    # Control has returned to the kernel address space, so the process-private
+    # PML4 now has no execution owner. The VMM destructor recursively releases
+    # user leaves (PT_LOAD, stack, and optional heap) and private paging tables.
+    destroy_user_address_space(space)
     serial_println("[spawn] ring3 program exited rc={exit_rc} (kernel resumed)")
     exit_rc

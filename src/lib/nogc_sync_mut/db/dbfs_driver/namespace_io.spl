@@ -17,7 +17,10 @@ use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
     dbfs_owner_transaction_begin, dbfs_owner_transaction_end
 }
 use std.fs_driver.error.{FsError}
-use std.fs_driver.types.{FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo, FileStat}
+use std.fs_driver.types.{
+    FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo, FileStat,
+    ExecuteFileObservationV1
+}
 
 val DBFS_MAX_BOUNDED_PREAD_BYTES: i64 = 65536
 
@@ -63,6 +66,33 @@ impl DbFsDriver:
         if generation == 0u64:
             return Err(FsError.Corrupt)
         Ok(generation)
+
+    fn _execute_observation_v1_locked(
+        handle: FileHandle
+    ) -> Result<ExecuteFileObservationV1, FsError>:
+        """Capture identity, generation, and size in one owner transaction.
+
+        Keeping these facts under the same DBFS lease prevents a same-size
+        write or truncate from being spliced between separate fstat and
+        generation calls. Rename and unlink preserve the retained inode
+        identity, while every content mutation advances content_generation.
+        """
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.StaleHandle)
+        val inode = _dbfs_inodes[inode_idx]
+        if inode.content_generation == 0u64 or inode.size < 0:
+            return Err(FsError.Corrupt)
+        Ok(ExecuteFileObservationV1(
+            contract_version: 1u32,
+            object_identity: inode.id,
+            content_generation: inode.content_generation,
+            size: inode.size as u64))
 
     fn _stat_path_locked(path: Path) -> Result<StatInfo, FsError>:
         """Stat path: look up inode by name in module store."""
@@ -658,6 +688,12 @@ impl DbFsDriver:
     fn file_generation_v1(handle: FileHandle) -> Result<u64, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._file_generation_v1_locked(handle))
+
+    fn execute_observation_v1(
+        handle: FileHandle
+    ) -> Result<ExecuteFileObservationV1, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._execute_observation_v1_locked(handle))
 
     fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)

@@ -295,6 +295,9 @@ pub class Rfc6455ServerConnectionOwner:
     fragmented: [u8]
     fragmented_opcode: u8
     fragment_count: i32
+    utf8_remaining: i32
+    utf8_next_min: u8
+    utf8_next_max: u8
     terminal: bool
     failed: bool
 
@@ -302,7 +305,63 @@ pub class Rfc6455ServerConnectionOwner:
         Rfc6455ServerConnectionOwner(wire: [], fragmented: [],
             wire_start: 0u64, fragmented_opcode: 0u8,
             fragment_count: 0,
+            utf8_remaining: 0, utf8_next_min: 0x80u8,
+            utf8_next_max: 0xBFu8,
             terminal: false, failed: false)
+
+    me _reset_utf8_state():
+        self.utf8_remaining = 0
+        self.utf8_next_min = 0x80u8
+        self.utf8_next_max = 0xBFu8
+
+    me _accept_text_fragment(payload: [u8], final_fragment: bool) -> bool:
+        # RFC 6455 applies UTF-8 validity to the complete text message, whose
+        # code points may cross frame boundaries.  Keep the decoder state on
+        # the connection so every payload byte is inspected exactly once.
+        for byte in payload:
+            if self.utf8_remaining > 0:
+                if byte < self.utf8_next_min or byte > self.utf8_next_max:
+                    return false
+                self.utf8_remaining = self.utf8_remaining - 1
+                self.utf8_next_min = 0x80u8
+                self.utf8_next_max = 0xBFu8
+            elif byte <= 0x7Fu8:
+                pass
+            elif byte >= 0xC2u8 and byte <= 0xDFu8:
+                self.utf8_remaining = 1
+                self.utf8_next_min = 0x80u8
+                self.utf8_next_max = 0xBFu8
+            elif byte == 0xE0u8:
+                self.utf8_remaining = 2
+                self.utf8_next_min = 0xA0u8
+                self.utf8_next_max = 0xBFu8
+            elif byte >= 0xE1u8 and byte <= 0xECu8:
+                self.utf8_remaining = 2
+                self.utf8_next_min = 0x80u8
+                self.utf8_next_max = 0xBFu8
+            elif byte == 0xEDu8:
+                self.utf8_remaining = 2
+                self.utf8_next_min = 0x80u8
+                self.utf8_next_max = 0x9Fu8
+            elif byte >= 0xEEu8 and byte <= 0xEFu8:
+                self.utf8_remaining = 2
+                self.utf8_next_min = 0x80u8
+                self.utf8_next_max = 0xBFu8
+            elif byte == 0xF0u8:
+                self.utf8_remaining = 3
+                self.utf8_next_min = 0x90u8
+                self.utf8_next_max = 0xBFu8
+            elif byte >= 0xF1u8 and byte <= 0xF3u8:
+                self.utf8_remaining = 3
+                self.utf8_next_min = 0x80u8
+                self.utf8_next_max = 0xBFu8
+            elif byte == 0xF4u8:
+                self.utf8_remaining = 3
+                self.utf8_next_min = 0x80u8
+                self.utf8_next_max = 0x8Fu8
+            else:
+                return false
+        not final_fragment or self.utf8_remaining == 0
 
     me _fail(code: i64, message: text) -> Rfc6455ServerEvent:
         self.failed = true
@@ -312,13 +371,12 @@ pub class Rfc6455ServerConnectionOwner:
         self.fragmented = []
         self.fragmented_opcode = 0u8
         self.fragment_count = 0
+        self._reset_utf8_state()
         _event(Rfc6455ServerEventKind.ProtocolClose, [],
             _server_frame(8u8, _close_payload(code)), code, message)
 
     me _message(opcode: u8, payload: [u8]) -> Rfc6455ServerEvent:
         if opcode == 1u8:
-            if validated_utf8_bytes_to_text_linear(payload).is_err():
-                return self._fail(1007, "text message is not valid UTF-8")
             return _event(Rfc6455ServerEventKind.TextMessage, payload, [], 0, "")
         _event(Rfc6455ServerEventKind.BinaryMessage, payload, [], 0, "")
 
@@ -341,6 +399,7 @@ pub class Rfc6455ServerConnectionOwner:
             self.fragmented = []
             self.fragmented_opcode = 0u8
             self.fragment_count = 0
+            self._reset_utf8_state()
             return _event(Rfc6455ServerEventKind.PeerClose, payload,
                 _server_frame(8u8, payload), code, "")
         if opcode == 9u8:
@@ -357,6 +416,9 @@ pub class Rfc6455ServerConnectionOwner:
             if (self.fragmented.len() > RFC6455_MAX_MESSAGE_BYTES or
                 payload.len() > RFC6455_MAX_MESSAGE_BYTES - self.fragmented.len()):
                 return self._fail(1009, "fragmented message exceeds 65536 bytes")
+            if self.fragmented_opcode == 1u8 and
+                not self._accept_text_fragment(payload, fin):
+                return self._fail(1007, "text message is not valid UTF-8")
             self.fragmented.extend(payload)
             self.fragment_count = self.fragment_count + 1
             if fin:
@@ -365,12 +427,16 @@ pub class Rfc6455ServerConnectionOwner:
                 self.fragmented = []
                 self.fragmented_opcode = 0u8
                 self.fragment_count = 0
+                self._reset_utf8_state()
                 return self._message(message_opcode, complete)
             return _event(Rfc6455ServerEventKind.FragmentProgress, [], [], 0, "")
 
         if self.fragmented_opcode != 0u8:
             return self._fail(1002, "new data frame during fragmented message")
+        if opcode == 1u8 and not self._accept_text_fragment(payload, fin):
+            return self._fail(1007, "text message is not valid UTF-8")
         if fin:
+            self._reset_utf8_state()
             return self._message(opcode, payload)
         self.fragmented_opcode = opcode
         self.fragmented = payload
@@ -511,6 +577,7 @@ pub class Rfc6455ServerConnectionOwner:
         self.fragmented = []
         self.fragmented_opcode = 0u8
         self.fragment_count = 0
+        self._reset_utf8_state()
         _event(Rfc6455ServerEventKind.ProtocolClose, [],
             _server_frame(8u8, _close_payload(1001)), 1001,
             "server connection policy ended the session")

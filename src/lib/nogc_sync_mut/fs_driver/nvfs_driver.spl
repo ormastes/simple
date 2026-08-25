@@ -9,7 +9,7 @@
 
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.error.{FsError}
-use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry, StatInfo}
+use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry, StatInfo, ExecuteFileObservationV1}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.capability.{Capability, FsCapabilitySet}
 use std.fs_driver.extension.{Extension, DirectIoExt}
@@ -138,6 +138,38 @@ impl NvfsDriver:
         a live source snapshot.
         """
         self.inner.file_generation_v1(handle)
+
+    fn execute_observation_v1(handle: FileHandle) -> Result<ExecuteFileObservationV1, FsError>:
+        """Capture one coherent executable version from the retained handle.
+
+        Metadata and generation are separate DBFS queries.  Bracketing fstat
+        with the handle's content generation rejects a truncate/write that
+        lands between those queries instead of publishing a mixed tuple.
+        Rename and CoW namespace publication do not disturb the observation:
+        every query resolves the inode retained by the open descriptor.
+        """
+        val generation_before = self.inner.file_generation_v1(handle)?
+        val stat = self.inner.fstat(handle)?
+        val generation_after = self.inner.file_generation_v1(handle)?
+        if generation_before != generation_after:
+            return Err(FsError.Transient(code: 0u32))
+        if (stat.mode & 0o170000) == 0o040000:
+            return Err(FsError.InvalidArg)
+        Ok(ExecuteFileObservationV1(
+            contract_version: 1u32, object_identity: stat.inode,
+            content_generation: generation_after, size: stat.size))
+
+    fn execute_observation_current_v1(
+        handle: FileHandle, observation: ExecuteFileObservationV1
+    ) -> bool:
+        if observation.contract_version != 1u32:
+            return false
+        val current = match self.execute_observation_v1(handle):
+            case Err(_): return false
+            case Ok(value): value
+        current.object_identity == observation.object_identity and
+            current.content_generation == observation.content_generation and
+            current.size == observation.size
 
     fn stat(path: Path) -> Result<FileStat, FsError>:
         self.inner.file_stat_path(path)

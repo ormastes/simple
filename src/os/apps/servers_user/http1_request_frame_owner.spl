@@ -562,10 +562,18 @@ class Http1RequestFrameOwner:
                         self.chunk_line_start, self.chunk_cursor - 2):
                         self._fail("400 Invalid chunk trailer field")
                     else:
-                        self.chunk_trailer_count = self.chunk_trailer_count + 1
-                        if self.chunk_trailer_count > self.policy.max_header_count:
+                        # The configured field-count bound applies to the
+                        # complete request, not independently to the header
+                        # and trailer sections.  Separate allowances let a
+                        # chunked request nearly double the parser's bounded
+                        # field-processing work and retained metadata budget.
+                        # Compare before incrementing so the subtraction stays
+                        # within the validated positive policy range.
+                        if self.chunk_trailer_count >=
+                            self.policy.max_header_count - self.header_count:
                             self._fail("431 Too many chunk trailer fields")
                         else:
+                            self.chunk_trailer_count = self.chunk_trailer_count + 1
                             self.chunk_phase = CHUNK_TRAILER
                             self.chunk_line_start = self.chunk_cursor
                             self.chunk_line_length = 0
