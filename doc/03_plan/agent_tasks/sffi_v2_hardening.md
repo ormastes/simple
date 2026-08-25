@@ -548,3 +548,7 @@ passing placeholder.
      `unsafe(ffi)`. Enforce partial-I/O, stdio element extents, mmap sentinels
      and lifetimes, directory-entry borrowing, and path validity without extra
      path copies, directory scans, allocations, or syscalls.
+106. Keep hosted entry free of local `rt_winit_*` declarations and preserve the
+     canonical boolean fullscreen/release contracts. Keep all 35 Winit owner
+     declarations tagged and the four irreducible hosted time/env/args externs
+     tagged, without adding event polls, wrappers, copies, or render work.

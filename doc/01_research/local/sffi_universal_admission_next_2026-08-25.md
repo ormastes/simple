@@ -1171,3 +1171,27 @@ Unsafe-tagged rows increase from 1,719 to 1,753, untouched rows decrease from
 9,759 to 9,725, and exact-artifact verified-and-signed admission remains zero.
 Partial-I/O, mmap failure sentinels, directory-entry lifetime, and exact libc
 identity still require executable validation and signed admission.
+
+## Hosted Winit canonical-owner checkpoint
+
+`os.hosted.hosted_entry` locally redeclared 30 Winit functions. Six were absent
+from the canonical owner, while overlapping declarations disagreed on ABI:
+event/window/loop release returned `bool` canonically but was declared void in
+hosted entry, and fullscreen read/write returned `bool` canonically but was
+declared `i64` locally. The six missing scancode, shifted-key, wheel-x, native
+surface-kind, native-display, and native-window contracts are now canonical,
+and hosted entry imports all 30 symbols directly from that owner.
+
+Hosted fullscreen logic now uses the canonical boolean values rather than
+numeric comparisons/conversions. This fixes the declared ABI instead of
+representing booleans as numbers. The four irreducible wall-clock, monotonic
+clock, nullable environment, and argument-array declarations remain local and
+are explicitly `unsafe(ffi)`.
+
+The owner audit requires 35 tagged canonical Winit declarations, forbids local
+Winit externs, fixes the four local declarations, and rejects numeric boolean
+adaptation. It passed with the whitespace check. No wrapper, event poll,
+provider call, branch, allocation, buffer copy, or render/event data-layout
+change was added. Estimated totals decrease from 11,736 to 11,712 declaration
+rows while symbols remain 3,137; unsafe-tagged rows become 1,762, untouched
+rows become 9,692, and exact signed admission remains zero.
