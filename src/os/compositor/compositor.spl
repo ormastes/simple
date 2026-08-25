@@ -87,6 +87,13 @@ val WM_CONTENT_KIND_WEB_DOCUMENT: i32 = 2
 val WM_CONTENT_KIND_PIXEL_SURFACE: i32 = 3
 val WM_CONTENT_SCROLL_STEP_PX: i32 = 40
 val WM_CONTENT_SCROLL_MAX_WHEEL_STEPS: i32 = 16
+# Keep the runtime compositor's canonical surface owner within the same
+# bounded admission envelope as the WM service.  This is deliberately checked
+# before an id is consumed or the input/focus epoch is changed: callers may
+# retry after a close, and a rejected remote/filesystem launch is a true no-op.
+# The bound also caps every O(window-count) render, hit-test, focus, and lookup
+# path owned by this class.
+val WM_COMPOSITOR_MAX_WINDOWS: i32 = 256
 
 fn _ps2_wm_pointer_button_code(left_btn: bool, right_btn: bool, middle_btn: bool) -> i32:
     """Map PS/2 mouse status-byte button bits (status byte bits 0/1/2) to
@@ -383,6 +390,9 @@ class Compositor:
         # contract.  Window id zero is already the compositor's invalid-id
         # sentinel, so wrappers can safely retain their existing no-op flow.
         if self.screen_width <= 0 or self.screen_height <= 0:
+            return 0
+        if (self.surfaces.len() >= WM_COMPOSITOR_MAX_WINDOWS or
+            self.next_id <= 0 or self.next_id == 2147483647):
             return 0
         # Creating a window transfers keyboard ownership to it.  Backend
         # events already waiting in the ring were observed under the previous

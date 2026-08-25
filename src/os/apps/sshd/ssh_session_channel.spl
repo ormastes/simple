@@ -20,6 +20,7 @@ extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_thread_sleep(ms: i64) -> i64
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
+extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
 extern fn serial_println(msg: text)
 
 # The receive owner advertises a two-megabyte channel window. Retaining at
@@ -246,9 +247,12 @@ fn _scp_ctrl_line(size: i64, name_bytes: [u8]) -> [u8]:
 @cfg(x86_64)
 fn _scp_read_file_bytes(path: text) -> ([u8], i64):
     val fsize = simpleos_fat32_stream_open(path)
-    if fsize <= 0 or fsize > 4194304:
+    if fsize < 0 or fsize > 4194304:
         serial_println("[sshd-session] scp read-open-fail path={path} fsize={fsize}")
         return ([], -1)
+    # Empty regular files are valid SCP sources and need no FAT buffer.
+    if fsize == 0:
+        return ([], 0)
     val buf = simpleos_fat32_path_read_buffer_addr()
     if buf == 0.to_u64():
         return ([], -1)
@@ -327,12 +331,8 @@ fn _scp_basename_bytes(path_bytes: [u8]) -> [u8]:
         if rt_bytes_u8_at(path_bytes, i) == 0x2F:
             last_slash = i
         i = i + 1
-    var out: [u8] = []
-    var j = last_slash + 1
-    while j < n:
-        out = rt_push_byte(out, rt_bytes_u8_at(path_bytes, j))
-        j = j + 1
-    out
+    val start = last_slash + 1
+    rt_bytes_slice(path_bytes, start, n - start)
 
 fn _scp_source_path_admitted(path_bytes: [u8]) -> bool:
     """Admit one absolute SCP source path safe for its control record.
@@ -368,6 +368,51 @@ fn _scp_source_path_admitted(path_bytes: [u8]) -> bool:
     component_len > 0u64 and
         not (component_len == 1u64 and component_dots == 1u64) and
         not (component_len == 2u64 and component_dots == 2u64)
+
+pub fn ssh_scp_source_path_from_exec_payload_v1(payload: [u8], off: u64) -> [u8]:
+    """Extract one path only from the exact raw command `scp -f PATH`.
+
+    This is deliberately not a shell parser. It accepts one ASCII space at
+    each separator, the source-mode flag as its own token, and one unquoted
+    path consuming the rest of the SSH exec string. Sink mode, combined or
+    additional options, extra operands, tabs, quoting, and escapes all fail
+    closed. An empty result means rejection.
+    """
+    if off > payload.len() or payload.len() - off < 4u64:
+        return []
+    val command_len = _read_u32_stable(payload, off).to_u64()
+    val command_start = off + 4u64
+    if command_len < 8u64 or command_len > 4096u64 or
+        command_len > payload.len() - command_start or
+        command_start + command_len != payload.len():
+        return []
+    # Exact prefix `scp -f `; keeping -f as a separate token prevents -t,
+    # -pf/-fr, and option-order ambiguity from reaching the source owner.
+    val prefix: [u8] = [0x73, 0x63, 0x70, 0x20, 0x2D, 0x66, 0x20]
+    var prefix_i: u64 = 0u64
+    while prefix_i < prefix.len():
+        if ssh_session_u8_at(payload, command_start + prefix_i) !=
+            ssh_session_u8_at(prefix, prefix_i):
+            return []
+        prefix_i = prefix_i + 1u64
+    val path_start = command_start + prefix.len()
+    var path_i = path_start
+    val command_end = command_start + command_len
+    while path_i < command_end:
+        val byte = ssh_session_u8_at(payload, path_i)
+        # Whitespace would introduce another operand or require shell quoting;
+        # quotes/backslashes are rejected because no quoting semantics exist.
+        if byte == 0x20u8 or byte == 0x09u8 or byte == 0x22u8 or
+            byte == 0x27u8 or byte == 0x5Cu8:
+            return []
+        path_i = path_i + 1u64
+    # Copy the validated span once. Repeated rt_push_byte growth made command
+    # admission needlessly allocation-heavy for long paths.
+    val path = rt_bytes_slice(
+        payload, path_start.to_i64(), (command_end - path_start).to_i64())
+    if not _scp_source_path_admitted(path):
+        return []
+    path
 
 # ============================================================================
 # Types
@@ -779,8 +824,8 @@ impl SshSession:
             ssh_session_u8_at(payload, off + 6) == 0x70u8 and
             ssh_session_u8_at(payload, off + 7) == 0x20u8):
             serial_println("[sshd-session] exec scp-source command={command}")
-            val path_bytes = _scp_last_token_bytes(command)
-            if not _scp_source_path_admitted(path_bytes):
+            val path_bytes = ssh_scp_source_path_from_exec_payload_v1(payload, off)
+            if path_bytes.len() == 0u64:
                 if want_reply:
                     self.send_packet(_build_channel_failure_stable(remote_id))
                 self._finish_exec_request(local_id, remote_id, 1, [])
@@ -789,7 +834,7 @@ impl SshSession:
             val path_text = rt_string_from_byte_array(path_bytes)
             val (file_bytes, fsize) = _scp_read_file_bytes(path_text)
             serial_println("[sshd-session] scp read path={path_text} fsize={fsize}")
-            if fsize <= 0:
+            if fsize < 0:
                 if want_reply:
                     self.send_packet(_build_channel_failure_stable(remote_id))
                 self._finish_exec_request(local_id, remote_id, 1, [])

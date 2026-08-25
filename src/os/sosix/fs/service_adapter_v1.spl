@@ -9,6 +9,7 @@ that I/O has already happened.
 use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
 use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
 use os.sosix.fs.ipc_codec_v1.{
+    SOSIX_FS_IPC_MAX_REGISTERED_BUFFER_BYTES_V1,
     SosixFsIpcCompletionV1,
     sosix_fs_ipc_decode_request_v1,
     sosix_fs_ipc_encode_completion_v1
@@ -26,7 +27,7 @@ pub val SOSIX_FS_SERVICE_MAX_BUFFERS_V1: u64 = 1024
 # Per positioned request, not per file.  Large filesystem artifacts (including
 # the documented 150--280 MiB toolchain images) remain accessible by advancing
 # resource_offset and buffer_offset across multiple bounded requests.
-pub val SOSIX_FS_SERVICE_MAX_TRANSFER_BYTES_V1: u64 = 16u64 * 1024u64 * 1024u64
+pub val SOSIX_FS_SERVICE_MAX_TRANSFER_BYTES_V1: u64 = SOSIX_FS_IPC_MAX_REGISTERED_BUFFER_BYTES_V1
 
 pub struct SosixFsIpcReceiveFactsV1:
     source_authenticated: bool
@@ -174,6 +175,7 @@ pub fn sosix_fs_service_prepare_v1(
     var registration_id = 0u64
     var byte_length = 0u64
     var buffer_access = 0u32
+    var buffer_storage_valid = false
     for entry in registry.buffers:
         if entry.active and entry.ref_.slot == request.buffer.slot:
             buffer_slot_found = true
@@ -183,6 +185,9 @@ pub fn sosix_fs_service_prepare_v1(
                 registration_id = entry.registration_id
                 byte_length = entry.byte_length
                 buffer_access = entry.access
+                buffer_storage_valid = (
+                    entry.byte_length <= SOSIX_FS_SERVICE_MAX_TRANSFER_BYTES_V1 and
+                    entry.byte_length == entry.bytes.len().to_u64())
     if buffer_matches == 0:
         val reason = if buffer_slot_found: "stale-buffer" else: "unknown-buffer"
         return _rejected_service_prepare_v1(reason, SOSIX_FS_SERVICE_STATUS_STALE_V1)
@@ -190,6 +195,8 @@ pub fn sosix_fs_service_prepare_v1(
         return _rejected_service_prepare_v1("ambiguous-buffer", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
     if registration_id == 0:
         return _rejected_service_prepare_v1("invalid-buffer-registration", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
+    if not buffer_storage_valid:
+        return _rejected_service_prepare_v1("invalid-buffer-storage", SOSIX_FS_SERVICE_STATUS_INVALID_V1)
     if buffer_owner != facts.source_process_id:
         return _rejected_service_prepare_v1("buffer-owner-mismatch", SOSIX_FS_SERVICE_STATUS_DENIED_V1)
     # Bound the allocation and copy work performed by this positioned request.

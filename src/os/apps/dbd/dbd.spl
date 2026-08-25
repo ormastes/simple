@@ -88,6 +88,14 @@ val DBD_LOG_PATH: text = DBD_DBFS_JOURNAL_PATH_V1
 val DBD_QUARANTINE_PATH: text = DBD_DBFS_QUARANTINE_PATH_V1
 val DBD_MAX_LINE_BYTES: i64 = DBD_MAX_JOURNAL_LINE_BYTES
 val DBD_RECV_BOUND_BYTES: i64 = 4096  # bound on one socket read
+# Ciphertext is attacker-controlled work even when it authenticates to no
+# application bytes yet.  The plaintext session budget therefore cannot be
+# the only connection-lifetime bound: a peer could otherwise keep this
+# single-owner daemon occupied indefinitely with a fragmented TLS trickle.
+# These limits admit ample TLS framing overhead above the 64 KiB plaintext
+# budget while bounding receive dispatch and retained cryptographic work.
+val DBD_MAX_TLS_WIRE_BYTES_PER_SESSION: i64 = 2 * 1024 * 1024
+val DBD_MAX_TLS_RECEIVES_PER_SESSION: i64 = 4096
 val DBD_STARTUP_BLOCKED_RC: i64 = -95
 val DBD_MAX_SEND_ATTEMPTS: i64 = 256
 val DBD_SEND_RETRY_WINDOW_BYTES: u64 = 4096u64
@@ -724,10 +732,27 @@ impl DbdServer:
             return true
         val live = DbdLiveClientSessionV1.create(
             created.unwrap(), self.new_auth_owner())
+        var tls_wire_bytes: i64 = 0
+        var tls_receive_count: i64 = 0
         while true:
             val received = rt_net_recv_bytes(client_fd, DBD_RECV_BOUND_BYTES)
             if received.len() == 0:
                 break
+            val received_bytes = received.len().to_i64()
+            # Compare by subtraction so admission remains overflow-safe if
+            # either policy grows.  Count the socket dispatch separately:
+            # byte bounds alone do not stop a one-byte-at-a-time slow peer
+            # from monopolizing this synchronous service owner.
+            if (received_bytes <= 0 or
+                tls_receive_count >= DBD_MAX_TLS_RECEIVES_PER_SESSION or
+                tls_wire_bytes > DBD_MAX_TLS_WIRE_BYTES_PER_SESSION or
+                received_bytes >
+                    DBD_MAX_TLS_WIRE_BYTES_PER_SESSION - tls_wire_bytes):
+                live.close()
+                self.finish_client(client_fd, live.budget)
+                return true
+            tls_receive_count = tls_receive_count + 1
+            tls_wire_bytes = tls_wire_bytes + received_bytes
             var ingress = live.tls.ingest(received)
             if (ingress.status != DbdTlsIngressStatusV1.NeedMore and
                 ingress.status != DbdTlsIngressStatusV1.Authenticated):
