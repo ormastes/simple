@@ -1997,6 +1997,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle_identity_v1", &[I64,I64], &[I64]),
     RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle_stage_scr1_v1", &[I64,I64,I64], &[I64]),
     RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle_finish_v1", &[I64,I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle3_begin_v1", &[I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle3_read_stage_v1", &[I64,I64,I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle3_identity_v1", &[I64,I64,I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle3_stage_scr1_v1", &[I64,I64,I64,I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle3_finish_v1", &[I64,I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]),            // ptr, len -> RuntimeValue (byte array)
     RuntimeFuncSpec::new("rt_u32s_from_raw", &[I64, I64], &[I64]),             // ptr, count -> RuntimeValue (u32 array)
     RuntimeFuncSpec::new(

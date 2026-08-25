@@ -85,6 +85,9 @@ pub(package) struct SignedCatalogEncodedRecordV1:
     bytes: [u8]
     receipt_line: text
 
+pub(package) struct SignedCatalogEncodedBatch3V1:
+    records: [[u8]]
+
 fn _field(document: text, name: text) -> text:
     val prefix = name + "="
     var found = ""
@@ -201,22 +204,12 @@ fn _produce(authority: HostedSafeArtifactRootAuthorityV1,
     if not published.durable or published.byte_count != encoded.bytes.len(): return Err("scr1-publish-not-durable")
     Ok(encoded.receipt_line)
 
-pub(package) fn signed_catalog_encode_authenticated_receipt_v1(authority: HostedSafeArtifactRootAuthorityV1,
-    manifest_relative: text, receipt: text, seed_relative: text,
-    trust_relative: text, aliases_relative: text, output_relative: text,
+fn _signed_catalog_encode_authenticated_material_v1(
+    sam1: [u8], receipt: text, seed: [u8], trust_bytes: [u8],
+    alias_bytes: [u8], output_relative: text,
     expected_canonical_path: text = "",
     expected_target_arch: text = "",
 ) -> Result<SignedCatalogEncodedRecordV1, text>:
-    val sam1 = hosted_safe_artifact_read_once_v1(authority, manifest_relative, SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES)?
-    val seed = hosted_safe_artifact_read_once_v1(authority, seed_relative, 32)?
-    # Keep the raw signing seed owned by this frame and wipe its backing bytes
-    # on every success or error return after acquisition.
-    defer _wipe_seed(seed)
-    val trust_bytes = hosted_safe_artifact_read_once_v1(authority, trust_relative, 16384)?
-    var alias_bytes: [u8] = []
-    if aliases_relative != "":
-        alias_bytes = hosted_safe_artifact_read_once_v1(
-            authority, aliases_relative, _CONTROL_TEXT_MAX_V1)?
     if sam1.len() == 0 or receipt == "" or seed.len() != 32 or trust_bytes.len() == 0:
         return Err("empty-or-invalid-control-input")
     val trust = bytes_to_text(trust_bytes)
@@ -288,6 +281,47 @@ pub(package) fn signed_catalog_encode_authenticated_receipt_v1(authority: Hosted
     val record_bytes = encoded.unwrap()
     Ok(SignedCatalogEncodedRecordV1(bytes: record_bytes,
         receipt_line: "simpleos_catalog_scr1=" + output_relative + " artifact_sha256=" + artifact_hash + " artifact_size=" + artifact_size.to_text() + " artifact_identity=" + artifact_identity))
+
+pub(package) fn signed_catalog_encode_authenticated_receipt_v1(authority: HostedSafeArtifactRootAuthorityV1,
+    manifest_relative: text, receipt: text, seed_relative: text,
+    trust_relative: text, aliases_relative: text, output_relative: text,
+    expected_canonical_path: text = "",
+    expected_target_arch: text = "",
+) -> Result<SignedCatalogEncodedRecordV1, text>:
+    val sam1 = hosted_safe_artifact_read_once_v1(authority, manifest_relative, SIMPLE_ARTIFACT_MANIFEST_V1_MAX_SIGNING_BYTES)?
+    val seed = hosted_safe_artifact_read_once_v1(authority, seed_relative, 32)?
+    defer _wipe_seed(seed)
+    val trust_bytes = hosted_safe_artifact_read_once_v1(authority, trust_relative, 16384)?
+    var alias_bytes: [u8] = []
+    if aliases_relative != "":
+        alias_bytes = hosted_safe_artifact_read_once_v1(
+            authority, aliases_relative, _CONTROL_TEXT_MAX_V1)?
+    _signed_catalog_encode_authenticated_material_v1(
+        sam1, receipt, seed, trust_bytes, alias_bytes, output_relative,
+        expected_canonical_path, expected_target_arch)
+
+pub(package) fn signed_catalog_encode_authenticated_batch3_v1(
+    manifests: [[u8]], receipts: [text], seed: [u8], trust: [u8],
+    aliases: [[u8]], outputs: [text], canonical_paths: [text],
+    expected_target_arch: text,
+) -> Result<SignedCatalogEncodedBatch3V1, text>:
+    """Encode exactly three records from one pre-snapshotted control set."""
+    # The caller owns this already-snapshotted seed and is responsible for
+    # wiping it after this batch returns.  Do not silently consume or mutate a
+    # borrowed signing input here; callers may need one cleanup path covering
+    # both encoding and transaction rollback.
+    if manifests.len() != 3 or receipts.len() != 3 or aliases.len() != 3 or
+        outputs.len() != 3 or canonical_paths.len() != 3 or seed.len() != 32:
+        return Err("authenticated-batch3-shape")
+    var records: [[u8]] = []
+    var index: i64 = 0
+    while index < 3:
+        val encoded = _signed_catalog_encode_authenticated_material_v1(
+            manifests[index], receipts[index], seed, trust, aliases[index],
+            outputs[index], canonical_paths[index], expected_target_arch)?
+        records.push(encoded.bytes)
+        index = index + 1
+    Ok(SignedCatalogEncodedBatch3V1(records: records))
 
 pub fn signed_catalog_record_produce_v1(
     request: SignedCatalogRecordProduceRequestV1,

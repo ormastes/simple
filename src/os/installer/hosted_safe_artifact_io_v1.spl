@@ -32,6 +32,11 @@ extern fn rt_hosted_safe_artifact_bundle_read_stage_v1(token: i64, max_bytes: i6
 extern fn rt_hosted_safe_artifact_bundle_identity_v1(token: i64, field: i64) -> i64
 extern fn rt_hosted_safe_artifact_bundle_stage_scr1_v1(token: i64, payload: [u8], max_bytes: i64) -> i64
 extern fn rt_hosted_safe_artifact_bundle_finish_v1(token: i64, commit: bool) -> i64
+extern fn rt_hosted_safe_artifact_bundle3_begin_v1(root_handle: i64, source0: text, source1: text, source2: text, bundle: text, payload0: text, scr10: text, payload1: text, scr11: text, payload2: text, scr12: text, aggregate_max_bytes: i64) -> i64
+extern fn rt_hosted_safe_artifact_bundle3_read_stage_v1(token: i64, slot: i64, max_bytes: i64) -> [u8]?
+extern fn rt_hosted_safe_artifact_bundle3_identity_v1(token: i64, slot: i64, field: i64) -> i64
+extern fn rt_hosted_safe_artifact_bundle3_stage_scr1_v1(token: i64, slot: i64, payload: [u8], max_bytes: i64) -> i64
+extern fn rt_hosted_safe_artifact_bundle3_finish_v1(token: i64, commit: bool) -> i64
 
 pub(package) struct HostedSafeArtifactRootAuthorityV1:
     _generation: u64
@@ -57,6 +62,16 @@ pub(package) struct HostedSafeArtifactBundleCommitReceiptV1:
     bundle_published: bool
     rolled_back: bool
     durable: bool
+pub(package) struct HostedSafeArtifactBundle3GrantV1:
+    _generation: u64
+    _seal: u64
+pub(package) struct HostedSafeArtifactBundle3FinishReceiptV1:
+    committed: bool
+    rolled_back: bool
+    durable: bool
+    quarantined: bool
+    artifact_count: i64
+    detail: text
 
 struct HostedSafeArtifactOwnerStateV1:
     next_generation: u64
@@ -66,6 +81,14 @@ struct HostedSafeArtifactOwnerStateV1:
     root_handle: i64
     bundle_generation: u64
     bundle_token: i64
+    bundle3_generation: u64
+    bundle3_token: i64
+    bundle3_read_mask: i64
+    bundle3_identity_mask: i64
+    bundle3_scr1_mask: i64
+    bundle3_max_bytes: i64
+    bundle3_staged_bytes: i64
+    bundle3_scr1_bytes: i64
     quarantined: bool
 
 val _hosted_safe_artifact_mutex_v1 = mutex_raw_create()
@@ -73,6 +96,10 @@ var _hosted_safe_artifact_owner_v1 = HostedSafeArtifactOwnerStateV1(
     next_generation: 0u64, read_generation: 0u64,
     publish_generation: 0u64, root_generation: 0u64,
     root_handle: -1, bundle_generation: 0u64, bundle_token: -1,
+    bundle3_generation: 0u64, bundle3_token: -1,
+    bundle3_read_mask: 0, bundle3_identity_mask: 0, bundle3_scr1_mask: 0,
+    bundle3_max_bytes: 0,
+    bundle3_staged_bytes: 0, bundle3_scr1_bytes: 0,
     quarantined: false)
 
 pub fn hosted_safe_artifact_relative_path_valid_v1(relative_path: text) -> bool:
@@ -141,7 +168,8 @@ pub(package) fn hosted_safe_artifact_root_close_v1(
     if not _hosted_safe_artifact_root_matches_locked_v1(authority) or
         _hosted_safe_artifact_owner_v1.read_generation != 0u64 or
         _hosted_safe_artifact_owner_v1.publish_generation != 0u64 or
-        _hosted_safe_artifact_owner_v1.bundle_generation != 0u64:
+        _hosted_safe_artifact_owner_v1.bundle_generation != 0u64 or
+        _hosted_safe_artifact_owner_v1.bundle3_generation != 0u64:
         _ = _hosted_safe_artifact_unlock_v1()
         return Err("hosted-safe-io-root-invalid-busy-or-consumed")
     val handle = _hosted_safe_artifact_owner_v1.root_handle
@@ -386,6 +414,307 @@ pub(package) fn hosted_safe_artifact_bundle_finish_v1(grant: HostedSafeArtifactB
     _ = _hosted_safe_artifact_unlock_v1()
     if status == 1: return Ok(HostedSafeArtifactBundleCommitReceiptV1(bundle_published: commit, rolled_back: not commit, durable: true))
     Err(if status == -2: "hosted-safe-bundle-published-not-durable" else: "hosted-safe-bundle-finish-rejected")
+
+fn _hosted_safe_artifact_bundle3_leaf_valid_v1(leaf: text) -> bool:
+    leaf != "" and leaf.len() <= 255 and not leaf.contains("\0") and
+        not leaf.contains("/") and not leaf.contains("\\") and
+        leaf != "." and leaf != ".."
+
+fn _hosted_safe_artifact_bundle3_slot_bit_v1(slot: i64) -> i64:
+    if slot == 0: return 1
+    if slot == 1: return 2
+    if slot == 2: return 4
+    0
+
+fn _hosted_safe_artifact_bundle3_matches_locked_v1(
+    grant: HostedSafeArtifactBundle3GrantV1,
+) -> bool:
+    grant._generation != 0u64 and
+        grant._generation == _hosted_safe_artifact_owner_v1.bundle3_generation and
+        grant._seal == _hosted_safe_artifact_seal_v1(
+            grant._generation, 0x42554e33u64) and
+        _hosted_safe_artifact_owner_v1.bundle3_token > 0
+
+fn _hosted_safe_artifact_bundle3_clear_locked_v1():
+    _hosted_safe_artifact_owner_v1.bundle3_generation = 0u64
+    _hosted_safe_artifact_owner_v1.bundle3_token = -1
+    _hosted_safe_artifact_owner_v1.bundle3_read_mask = 0
+    _hosted_safe_artifact_owner_v1.bundle3_identity_mask = 0
+    _hosted_safe_artifact_owner_v1.bundle3_scr1_mask = 0
+    _hosted_safe_artifact_owner_v1.bundle3_max_bytes = 0
+    _hosted_safe_artifact_owner_v1.bundle3_staged_bytes = 0
+    _hosted_safe_artifact_owner_v1.bundle3_scr1_bytes = 0
+
+fn _hosted_safe_artifact_bundle3_rollback_locked_v1(
+    detail: text,
+) -> HostedSafeArtifactBundle3FinishReceiptV1:
+    var status = 0i64
+    unsafe(capabilities: [ffi]):
+        status = rt_hosted_safe_artifact_bundle3_finish_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, false)
+    _hosted_safe_artifact_bundle3_clear_locked_v1()
+    var quarantined = status != 1
+    if quarantined:
+        _hosted_safe_artifact_owner_v1.quarantined = true
+    if not _hosted_safe_artifact_unlock_v1():
+        quarantined = true
+    HostedSafeArtifactBundle3FinishReceiptV1(
+        committed: false, rolled_back: status == 1, durable: status == 1,
+        quarantined: quarantined, artifact_count: 0, detail: detail)
+
+pub(package) fn hosted_safe_artifact_bundle3_begin_v1(
+    authority: HostedSafeArtifactRootAuthorityV1,
+    source0: text, source1: text, source2: text, bundle: text,
+    payload0: text, scr10: text, payload1: text, scr11: text,
+    payload2: text, scr12: text, aggregate_max_bytes: i64,
+) -> Result<HostedSafeArtifactBundle3GrantV1, text>:
+    if (not hosted_safe_artifact_relative_path_valid_v1(source0) or
+        not hosted_safe_artifact_relative_path_valid_v1(source1) or
+        not hosted_safe_artifact_relative_path_valid_v1(source2) or
+        not hosted_safe_artifact_relative_path_valid_v1(bundle)):
+        return Err("hosted-safe-bundle3-invalid-path")
+    if (source0 == source1 or source0 == source2 or source0 == bundle or
+        source1 == source2 or source1 == bundle or source2 == bundle):
+        return Err("hosted-safe-bundle3-path-collision")
+    if (not _hosted_safe_artifact_bundle3_leaf_valid_v1(payload0) or
+        not _hosted_safe_artifact_bundle3_leaf_valid_v1(scr10) or
+        not _hosted_safe_artifact_bundle3_leaf_valid_v1(payload1) or
+        not _hosted_safe_artifact_bundle3_leaf_valid_v1(scr11) or
+        not _hosted_safe_artifact_bundle3_leaf_valid_v1(payload2) or
+        not _hosted_safe_artifact_bundle3_leaf_valid_v1(scr12)):
+        return Err("hosted-safe-bundle3-invalid-leaf")
+    if (payload0 == scr10 or payload0 == payload1 or payload0 == scr11 or
+        payload0 == payload2 or payload0 == scr12 or scr10 == payload1 or
+        scr10 == scr11 or scr10 == payload2 or scr10 == scr12 or
+        payload1 == scr11 or payload1 == payload2 or payload1 == scr12 or
+        scr11 == payload2 or scr11 == scr12 or payload2 == scr12):
+        return Err("hosted-safe-bundle3-leaf-collision")
+    # Three independently bounded artifacts may each consume the existing
+    # one-artifact 1 GiB ceiling; the native scalar ABI enforces the same sum.
+    if aggregate_max_bytes <= 0 or aggregate_max_bytes > 3221225472:
+        return Err("hosted-safe-bundle3-invalid-bound")
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    if (not _hosted_safe_artifact_root_matches_locked_v1(authority) or
+        _hosted_safe_artifact_owner_v1.read_generation != 0u64 or
+        _hosted_safe_artifact_owner_v1.publish_generation != 0u64 or
+        _hosted_safe_artifact_owner_v1.bundle_generation != 0u64 or
+        _hosted_safe_artifact_owner_v1.bundle3_generation != 0u64):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-bundle3-owner-busy")
+    val generation = _hosted_safe_artifact_next_generation_locked_v1()
+    if generation == 0u64:
+        _hosted_safe_artifact_owner_v1.quarantined = true
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-bundle3-generation-exhausted")
+    var token = -1i64
+    unsafe(capabilities: [ffi]):
+        token = rt_hosted_safe_artifact_bundle3_begin_v1(
+            _hosted_safe_artifact_owner_v1.root_handle,
+            source0, source1, source2, bundle, payload0, scr10,
+            payload1, scr11, payload2, scr12, aggregate_max_bytes)
+    if token <= 0:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-bundle3-begin-rejected")
+    _hosted_safe_artifact_owner_v1.bundle3_generation = generation
+    _hosted_safe_artifact_owner_v1.bundle3_token = token
+    _hosted_safe_artifact_owner_v1.bundle3_read_mask = 0
+    _hosted_safe_artifact_owner_v1.bundle3_identity_mask = 0
+    _hosted_safe_artifact_owner_v1.bundle3_scr1_mask = 0
+    _hosted_safe_artifact_owner_v1.bundle3_max_bytes = aggregate_max_bytes
+    _hosted_safe_artifact_owner_v1.bundle3_staged_bytes = 0
+    _hosted_safe_artifact_owner_v1.bundle3_scr1_bytes = 0
+    val grant = HostedSafeArtifactBundle3GrantV1(
+        _generation: generation,
+        _seal: _hosted_safe_artifact_seal_v1(generation, 0x42554e33u64))
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err("hosted-safe-io-owner-quarantined")
+    Ok(grant)
+
+pub(package) fn hosted_safe_artifact_bundle3_read_stage_v1(
+    grant: HostedSafeArtifactBundle3GrantV1, slot: i64, max_bytes: i64,
+) -> Result<[u8], HostedSafeArtifactBundle3FinishReceiptV1>:
+    if not _hosted_safe_artifact_lock_v1():
+        return Err(HostedSafeArtifactBundle3FinishReceiptV1(committed: false, rolled_back: false, durable: false, quarantined: true, artifact_count: 0, detail: "hosted-safe-io-owner-unavailable"))
+    val bit = _hosted_safe_artifact_bundle3_slot_bit_v1(slot)
+    if not _hosted_safe_artifact_bundle3_matches_locked_v1(grant):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err(HostedSafeArtifactBundle3FinishReceiptV1(committed: false, rolled_back: false, durable: false, quarantined: false, artifact_count: 0, detail: "hosted-safe-bundle3-invalid"))
+    if (bit == 0 or max_bytes <= 0 or
+        max_bytes > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        (_hosted_safe_artifact_owner_v1.bundle3_read_mask & bit) != 0):
+        return Err(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-read-invalid"))
+    var bytes: [u8]? = nil
+    unsafe(capabilities: [ffi]):
+        bytes = rt_hosted_safe_artifact_bundle3_read_stage_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, max_bytes)
+    if bytes == nil:
+        return Err(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-read-rejected"))
+    val staged = bytes ?? []
+    if not hosted_safe_artifact_provider_result_bounded_v1(staged, max_bytes):
+        return Err(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-read-overflow"))
+    if staged.len() > _hosted_safe_artifact_owner_v1.bundle3_max_bytes -
+        _hosted_safe_artifact_owner_v1.bundle3_staged_bytes:
+        return Err(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-aggregate-read-overflow"))
+    _hosted_safe_artifact_owner_v1.bundle3_staged_bytes =
+        _hosted_safe_artifact_owner_v1.bundle3_staged_bytes + staged.len()
+    # The provider marks EOF when the retained source's exact original size is
+    # consumed.  Query scalar progress rather than guessing from chunk length;
+    # this also makes an exact-bound final chunk unambiguous to the caller via
+    # `hosted_safe_artifact_bundle3_slot_complete_v1`.
+    var source_size = -1i64
+    var source_read = -1i64
+    unsafe(capabilities: [ffi]):
+        source_size = rt_hosted_safe_artifact_bundle3_identity_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, 2)
+        source_read = rt_hosted_safe_artifact_bundle3_identity_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, 5)
+    if source_size < 0 or source_read < 0 or source_read > source_size:
+        return Err(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-read-progress-invalid"))
+    if source_read == source_size:
+        _hosted_safe_artifact_owner_v1.bundle3_read_mask =
+            _hosted_safe_artifact_owner_v1.bundle3_read_mask | bit
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err(HostedSafeArtifactBundle3FinishReceiptV1(committed: false, rolled_back: false, durable: false, quarantined: true, artifact_count: 0, detail: "hosted-safe-io-owner-quarantined"))
+    Ok(staged)
+
+pub(package) fn hosted_safe_artifact_bundle3_slot_complete_v1(
+    grant: HostedSafeArtifactBundle3GrantV1, slot: i64,
+) -> Result<bool, text>:
+    """Report exact EOF observed by the retained provider for one slot."""
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    val bit = _hosted_safe_artifact_bundle3_slot_bit_v1(slot)
+    if not _hosted_safe_artifact_bundle3_matches_locked_v1(grant) or bit == 0:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-bundle3-invalid")
+    val complete = (_hosted_safe_artifact_owner_v1.bundle3_read_mask & bit) != 0
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err("hosted-safe-io-owner-quarantined")
+    Ok(complete)
+
+pub(package) fn hosted_safe_artifact_bundle3_identity_v1(
+    grant: HostedSafeArtifactBundle3GrantV1, slot: i64,
+) -> Result<[i64], HostedSafeArtifactBundle3FinishReceiptV1>:
+    if not _hosted_safe_artifact_lock_v1():
+        return Err(HostedSafeArtifactBundle3FinishReceiptV1(committed: false, rolled_back: false, durable: false, quarantined: true, artifact_count: 0, detail: "hosted-safe-io-owner-unavailable"))
+    val bit = _hosted_safe_artifact_bundle3_slot_bit_v1(slot)
+    if not _hosted_safe_artifact_bundle3_matches_locked_v1(grant):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err(HostedSafeArtifactBundle3FinishReceiptV1(committed: false, rolled_back: false, durable: false, quarantined: false, artifact_count: 0, detail: "hosted-safe-bundle3-invalid"))
+    if (bit == 0 or (_hosted_safe_artifact_owner_v1.bundle3_read_mask & bit) == 0 or
+        (_hosted_safe_artifact_owner_v1.bundle3_identity_mask & bit) != 0):
+        return Err(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-identity-invalid"))
+    var values: [i64] = []
+    unsafe(capabilities: [ffi]):
+        values.push(rt_hosted_safe_artifact_bundle3_identity_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, 0))
+        values.push(rt_hosted_safe_artifact_bundle3_identity_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, 1))
+        values.push(rt_hosted_safe_artifact_bundle3_identity_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, 2))
+        values.push(rt_hosted_safe_artifact_bundle3_identity_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, 3))
+        values.push(rt_hosted_safe_artifact_bundle3_identity_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, 4))
+        values.push(rt_hosted_safe_artifact_bundle3_identity_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, 5))
+    if (values.len() != 6 or values[0] < 0 or values[1] < 0 or
+        values[2] < 0 or values[3] < 0 or values[4] < 0 or values[5] < 0):
+        return Err(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-identity-rejected"))
+    _hosted_safe_artifact_owner_v1.bundle3_identity_mask =
+        _hosted_safe_artifact_owner_v1.bundle3_identity_mask | bit
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err(HostedSafeArtifactBundle3FinishReceiptV1(committed: false, rolled_back: false, durable: false, quarantined: true, artifact_count: 0, detail: "hosted-safe-io-owner-quarantined"))
+    Ok(values)
+
+pub(package) fn hosted_safe_artifact_bundle3_stage_scr1_v1(
+    grant: HostedSafeArtifactBundle3GrantV1, slot: i64,
+    scr1: [u8], max_bytes: i64,
+) -> Result<(), HostedSafeArtifactBundle3FinishReceiptV1>:
+    if not _hosted_safe_artifact_lock_v1():
+        return Err(HostedSafeArtifactBundle3FinishReceiptV1(committed: false, rolled_back: false, durable: false, quarantined: true, artifact_count: 0, detail: "hosted-safe-io-owner-unavailable"))
+    val bit = _hosted_safe_artifact_bundle3_slot_bit_v1(slot)
+    if not _hosted_safe_artifact_bundle3_matches_locked_v1(grant):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err(HostedSafeArtifactBundle3FinishReceiptV1(committed: false, rolled_back: false, durable: false, quarantined: false, artifact_count: 0, detail: "hosted-safe-bundle3-invalid"))
+    if (bit == 0 or (_hosted_safe_artifact_owner_v1.bundle3_read_mask & bit) == 0 or
+        (_hosted_safe_artifact_owner_v1.bundle3_identity_mask & bit) == 0 or
+        (_hosted_safe_artifact_owner_v1.bundle3_scr1_mask & bit) != 0 or
+        max_bytes <= 0 or max_bytes > _hosted_safe_artifact_owner_v1.bundle3_max_bytes or
+        not hosted_safe_artifact_provider_result_bounded_v1(scr1, max_bytes) or
+        _hosted_safe_artifact_owner_v1.bundle3_staged_bytes >
+            _hosted_safe_artifact_owner_v1.bundle3_max_bytes -
+                _hosted_safe_artifact_owner_v1.bundle3_scr1_bytes or
+        scr1.len() > _hosted_safe_artifact_owner_v1.bundle3_max_bytes -
+            _hosted_safe_artifact_owner_v1.bundle3_staged_bytes -
+            _hosted_safe_artifact_owner_v1.bundle3_scr1_bytes):
+        return Err(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-scr1-invalid"))
+    var status = 0i64
+    unsafe(capabilities: [ffi]):
+        status = rt_hosted_safe_artifact_bundle3_stage_scr1_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, slot, scr1, max_bytes)
+    if status != 1:
+        return Err(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-scr1-rejected"))
+    _hosted_safe_artifact_owner_v1.bundle3_scr1_mask =
+        _hosted_safe_artifact_owner_v1.bundle3_scr1_mask | bit
+    _hosted_safe_artifact_owner_v1.bundle3_scr1_bytes =
+        _hosted_safe_artifact_owner_v1.bundle3_scr1_bytes + scr1.len()
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err(HostedSafeArtifactBundle3FinishReceiptV1(committed: false, rolled_back: false, durable: false, quarantined: true, artifact_count: 0, detail: "hosted-safe-io-owner-quarantined"))
+    Ok(())
+
+pub(package) fn hosted_safe_artifact_bundle3_finish_v1(
+    grant: HostedSafeArtifactBundle3GrantV1, commit: bool,
+) -> Result<HostedSafeArtifactBundle3FinishReceiptV1, text>:
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    if not _hosted_safe_artifact_bundle3_matches_locked_v1(grant):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-bundle3-invalid")
+    if not commit:
+        return Ok(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-caller-rollback"))
+    if (_hosted_safe_artifact_owner_v1.bundle3_read_mask != 7 or
+        _hosted_safe_artifact_owner_v1.bundle3_identity_mask != 7 or
+        _hosted_safe_artifact_owner_v1.bundle3_scr1_mask != 7):
+        return Ok(_hosted_safe_artifact_bundle3_rollback_locked_v1(
+            "hosted-safe-bundle3-incomplete-rollback"))
+    var status = 0i64
+    unsafe(capabilities: [ffi]):
+        status = rt_hosted_safe_artifact_bundle3_finish_v1(
+            _hosted_safe_artifact_owner_v1.bundle3_token, true)
+    _hosted_safe_artifact_bundle3_clear_locked_v1()
+    # Native status -1 proves rejection plus complete rollback.  Status -2
+    # means the final rename is visible but durability/close is indeterminate;
+    # -3 (and unknown statuses) leave cleanup indeterminate.  Only the latter
+    # outcomes quarantine this singular owner.
+    val committed = status == 1 or status == -2
+    val rolled_back = status == -1
+    val quarantined_status = status == -2 or status == -3 or
+        (status != 1 and status != -1)
+    if quarantined_status:
+        _hosted_safe_artifact_owner_v1.quarantined = true
+    var quarantined = quarantined_status
+    if not _hosted_safe_artifact_unlock_v1():
+        quarantined = true
+    Ok(HostedSafeArtifactBundle3FinishReceiptV1(
+        committed: committed, rolled_back: rolled_back, durable: status == 1,
+        quarantined: quarantined,
+        artifact_count: if committed: 3 else: 0,
+        detail: if status == 1: "hosted-safe-bundle3-committed" else:
+            if status == -1: "hosted-safe-bundle3-commit-rejected-rolled-back" else:
+                if status == -2: "hosted-safe-bundle3-visible-not-durable" else:
+                    "hosted-safe-bundle3-cleanup-quarantined"))
 
 export HostedSafeArtifactPublishReceiptV1
 export hosted_safe_artifact_relative_path_valid_v1

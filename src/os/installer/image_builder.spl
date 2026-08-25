@@ -27,15 +27,23 @@ use os.port.clang_sysroot_include_manifest_v1.{
 use os.tools.simplebox.simplebox_artifact_contract.{SIMPLEBOX_CANONICAL_PATH_V1, simplebox_canonical_aliases_v1}
 use os.installer.signed_catalog_record_producer_v1.{
     SignedCatalogRecordProduceRequestV1, signed_catalog_record_produce_v1,
-    SignedCatalogBundleProduceRequestV1, signed_catalog_bundle_produce_v1}
+    SignedCatalogBundleProduceRequestV1, signed_catalog_bundle_produce_v1,
+    signed_catalog_encode_authenticated_batch3_v1}
 use os.installer.hosted_safe_artifact_io_v1.{
     HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1,
     hosted_safe_artifact_relative_path_valid_v1,
     hosted_safe_artifact_root_acquire_v1, hosted_safe_artifact_root_close_v1,
-    hosted_safe_artifact_read_once_v1}
+    hosted_safe_artifact_read_once_v1,
+    hosted_safe_artifact_bundle3_begin_v1,
+    hosted_safe_artifact_bundle3_read_stage_v1,
+    hosted_safe_artifact_bundle3_slot_complete_v1,
+    hosted_safe_artifact_bundle3_identity_v1,
+    hosted_safe_artifact_bundle3_stage_scr1_v1,
+    hosted_safe_artifact_bundle3_finish_v1}
 use os.installer.simplebox_signed_catalog_provisioner_v1.{
     SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.secure_memory.{secure_zero_u8_slots}
 use std.common.string_core.{bytes_to_text}
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
@@ -104,12 +112,18 @@ struct ImageSignedCatalogMediaV1:
     toolchain_artifact_bytes: [u8]
     toolchain_scr1_bytes: [[u8]]
     toolchain_trust_config_bytes: [u8]
+    signed_clang_enabled: bool
+    signed_clang_artifact_bytes: [[u8]]
+    signed_clang_scr1_bytes: [[u8]]
+    signed_clang_trust_config_bytes: [u8]
 
 fn _empty_signed_catalog_media_v1() -> ImageSignedCatalogMediaV1:
     ImageSignedCatalogMediaV1(
         enabled: false, scr1_bytes: [], trust_config_bytes: [],
         toolchain_enabled: false, toolchain_artifact_bytes: [],
-        toolchain_scr1_bytes: [], toolchain_trust_config_bytes: [])
+        toolchain_scr1_bytes: [], toolchain_trust_config_bytes: [],
+        signed_clang_enabled: false, signed_clang_artifact_bytes: [],
+        signed_clang_scr1_bytes: [], signed_clang_trust_config_bytes: [])
 
 pub fn image_builder_stage_clang_signed_bundle_v1(trusted_root: text,
     source_relative: text, bundle_relative: text, manifest_relative: text,
@@ -340,6 +354,19 @@ struct ImageSignedToolchainCatalogRequestV1:
     trust_config_relative_path: text
     output_scr1_relative_paths: [text]
 
+struct ImageSignedClangBundleRequestV1:
+    trusted_root: text
+    source_relative_paths: [text]
+    bundle_relative_path: text
+    payload_leaves: [text]
+    scr1_leaves: [text]
+    manifest_relative_paths: [text]
+    signer_seed_relative_path: text
+    trust_config_relative_path: text
+    canonical_guest_paths: [text]
+    max_artifact_bytes: [i64]
+    target_triple: text
+
 fn _signed_toolchain_request_present_v1(
     request: ImageSignedToolchainCatalogRequestV1,
 ) -> bool:
@@ -395,6 +422,184 @@ fn _produce_and_load_signed_toolchain_catalog_v1(
     # transaction. Keep disk ingestion fail-closed until a retained-directory
     # owner can stage, authenticate, publish, and consume the whole triplet.
     Err("signed toolchain catalog production requires atomic triplet publication")
+
+fn _signed_clang_bundle_present_v1(
+    request: ImageSignedClangBundleRequestV1,
+) -> bool:
+    request.trusted_root != "" or request.source_relative_paths.len() > 0 or
+        request.bundle_relative_path != "" or request.payload_leaves.len() > 0 or
+        request.scr1_leaves.len() > 0 or request.manifest_relative_paths.len() > 0 or
+        request.signer_seed_relative_path != "" or
+        request.trust_config_relative_path != "" or
+        request.canonical_guest_paths.len() > 0 or
+        request.max_artifact_bytes.len() > 0 or request.target_triple != ""
+
+fn _wipe_image_signing_seed_v1(seed: [u8]):
+    val _ = secure_zero_u8_slots(seed)
+
+fn _signed_clang_bundle_complete_v1(
+    request: ImageSignedClangBundleRequestV1, arch: PkgArch,
+) -> bool:
+    if (arch == PkgArch.Any or request.trusted_root == "" or
+        request.bundle_relative_path == "" or
+        request.signer_seed_relative_path == "" or
+        request.trust_config_relative_path == "" or
+        request.source_relative_paths.len() != 3 or
+        request.payload_leaves.len() != 3 or request.scr1_leaves.len() != 3 or
+        request.manifest_relative_paths.len() != 3 or
+        request.canonical_guest_paths !=
+            ["/usr/bin/clang", "/usr/bin/ld.lld", "/work/hello.elf"] or
+        request.max_artifact_bytes.len() != 3 or
+        request.target_triple != image_target_triple_v1(arch)):
+        return false
+    var aggregate: i64 = 0
+    var paths = [request.bundle_relative_path,
+        request.signer_seed_relative_path, request.trust_config_relative_path]
+    for path in request.source_relative_paths: paths.push(path)
+    for path in request.manifest_relative_paths: paths.push(path)
+    var index: i64 = 0
+    while index < paths.len():
+        if not hosted_safe_artifact_relative_path_valid_v1(paths[index]): return false
+        var prior: i64 = 0
+        while prior < index:
+            if paths[prior] == paths[index]: return false
+            prior = prior + 1
+        index = index + 1
+    for bound in request.max_artifact_bytes:
+        if bound <= 0 or bound > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+            aggregate > 3221225472 - bound:
+            return false
+        aggregate = aggregate + bound
+    aggregate <= 3221225472 - (3 * SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1)
+
+fn _produce_signed_clang_bundle_v1(
+    request: ImageSignedClangBundleRequestV1, arch: PkgArch,
+) -> Result<ImageSignedCatalogMediaV1, text>:
+    if not _signed_clang_bundle_complete_v1(request, arch):
+        return Err("signed Clang bundle requested but exact triplet inputs are incomplete")
+    val target_arch = match arch:
+        PkgArch.X86_64: "x86_64"
+        PkgArch.Arm64: "aarch64"
+        PkgArch.Riscv64: "riscv64"
+        PkgArch.Riscv32: "riscv32"
+        PkgArch.Any: ""
+    val opened = hosted_safe_artifact_root_acquire_v1(request.trusted_root)
+    if val Err(reason) = opened: return Err("signed Clang root rejected: " + reason)
+    val authority = opened.unwrap()
+    var manifests: [[u8]] = []
+    val aliases: [[u8]] = [[], [], []]
+    for path in request.manifest_relative_paths:
+        val read = hosted_safe_artifact_read_once_v1(authority, path, 262144)
+        if val Err(reason) = read:
+            _ = hosted_safe_artifact_root_close_v1(authority)
+            return Err("signed Clang manifest rejected: " + reason)
+        manifests.push(read.unwrap())
+    val seed_read = hosted_safe_artifact_read_once_v1(
+        authority, request.signer_seed_relative_path, 32)
+    if val Err(reason) = seed_read:
+        _ = hosted_safe_artifact_root_close_v1(authority)
+        return Err("signed Clang seed rejected: " + reason)
+    val seed = seed_read.unwrap()
+    defer _wipe_image_signing_seed_v1(seed)
+    val trust_read = hosted_safe_artifact_read_once_v1(
+        authority, request.trust_config_relative_path, 16384)
+    if val Err(reason) = trust_read:
+        _ = hosted_safe_artifact_root_close_v1(authority)
+        return Err("signed Clang trust rejected: " + reason)
+    val trust = trust_read.unwrap()
+    var aggregate: i64 = 3 * SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1
+    for bound in request.max_artifact_bytes: aggregate = aggregate + bound
+    val begun = hosted_safe_artifact_bundle3_begin_v1(
+        authority, request.source_relative_paths[0], request.source_relative_paths[1],
+        request.source_relative_paths[2], request.bundle_relative_path,
+        request.payload_leaves[0], request.scr1_leaves[0],
+        request.payload_leaves[1], request.scr1_leaves[1],
+        request.payload_leaves[2], request.scr1_leaves[2], aggregate)
+    if val Err(reason) = begun:
+        _ = hosted_safe_artifact_root_close_v1(authority)
+        return Err("signed Clang bundle begin rejected: " + reason)
+    val bundle = begun.unwrap()
+    var artifacts: [[u8]] = []
+    var receipts: [text] = []
+    var slot: i64 = 0
+    while slot < 3:
+        var artifact: [u8] = []
+        var complete = false
+        while not complete:
+            val remaining = request.max_artifact_bytes[slot] - artifact.len()
+            if remaining <= 0:
+                _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+                _ = hosted_safe_artifact_root_close_v1(authority)
+                return Err("signed Clang payload exceeds its slot bound")
+            # The retained provider deliberately caps each transfer at 16 MiB;
+            # the request bound is an artifact-wide ceiling, not a chunk size.
+            val chunk_bound = if remaining < 16777216: remaining else: 16777216
+            val read = hosted_safe_artifact_bundle3_read_stage_v1(
+                bundle, slot, chunk_bound)
+            if val Err(finish) = read:
+                _ = hosted_safe_artifact_root_close_v1(authority)
+                return Err("signed Clang payload staging rejected: " + finish.detail)
+            val chunk = read.unwrap()
+            if chunk.len() > request.max_artifact_bytes[slot] - artifact.len():
+                _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+                _ = hosted_safe_artifact_root_close_v1(authority)
+                return Err("signed Clang payload exceeds its slot bound")
+            for byte in chunk: artifact.push(byte)
+            val done = hosted_safe_artifact_bundle3_slot_complete_v1(bundle, slot)
+            if val Err(reason) = done:
+                _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+                _ = hosted_safe_artifact_root_close_v1(authority)
+                return Err("signed Clang completion rejected: " + reason)
+            complete = done.unwrap()
+            if not complete and chunk.len() == 0:
+                _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+                _ = hosted_safe_artifact_root_close_v1(authority)
+                return Err("signed Clang payload staging made no progress")
+        val identity_result = hosted_safe_artifact_bundle3_identity_v1(bundle, slot)
+        if val Err(finish) = identity_result:
+            _ = hosted_safe_artifact_root_close_v1(authority)
+            return Err("signed Clang identity rejected: " + finish.detail)
+        val identity = identity_result.unwrap()
+        if artifact.len() == 0 or identity[2] != artifact.len():
+            _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+            _ = hosted_safe_artifact_root_close_v1(authority)
+            return Err("signed Clang payload identity size mismatch")
+        val digest = sha256_u8_hex(artifact)
+        receipts.push("schema=simpleos-artifact-identity-v1\nartifact_sha256={digest}\nartifact_size={artifact.len()}\nartifact_identity=dev={identity[0]}:ino={identity[1]}:size={identity[2]}:mtime={identity[3]}.{identity[4]}\ncanonical_path={request.canonical_guest_paths[slot]}\ntarget_os=simpleos\ntarget_arch={target_arch}\ntarget_abi=simpleos\nmanifest_sam1_sha256={sha256_u8_hex(manifests[slot])}\n")
+        artifacts.push(artifact)
+        slot = slot + 1
+    val encoded = signed_catalog_encode_authenticated_batch3_v1(
+        manifests, receipts, seed, trust, aliases, request.scr1_leaves,
+        request.canonical_guest_paths, target_arch)
+    if val Err(reason) = encoded:
+        _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+        _ = hosted_safe_artifact_root_close_v1(authority)
+        return Err("signed Clang SCR1 encoding rejected: " + reason)
+    val records = encoded.unwrap().records
+    slot = 0
+    while slot < 3:
+        val staged = hosted_safe_artifact_bundle3_stage_scr1_v1(
+            bundle, slot, records[slot], SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1)
+        if val Err(finish) = staged:
+            _ = hosted_safe_artifact_root_close_v1(authority)
+            return Err("signed Clang SCR1 staging rejected: " + finish.detail)
+        slot = slot + 1
+    val finished = hosted_safe_artifact_bundle3_finish_v1(bundle, true)
+    if val Err(reason) = finished:
+        _ = hosted_safe_artifact_root_close_v1(authority)
+        return Err("signed Clang bundle finish rejected: " + reason)
+    val receipt = finished.unwrap()
+    val closed = hosted_safe_artifact_root_close_v1(authority)
+    if val Err(reason) = closed: return Err("signed Clang root close failed: " + reason)
+    if not receipt.committed or not receipt.durable or receipt.quarantined or
+        receipt.artifact_count != 3:
+        return Err("signed Clang bundle was not durably published: " + receipt.detail)
+    var media = _empty_signed_catalog_media_v1()
+    media.signed_clang_enabled = true
+    media.signed_clang_artifact_bytes = artifacts
+    media.signed_clang_scr1_bytes = records
+    media.signed_clang_trust_config_bytes = trust
+    Ok(media)
 
 fn _signed_catalog_request_present_v1(request: ImageSignedCatalogRequestV1) -> bool:
     request.trusted_root != "" or request.artifact_relative_path != "" or
@@ -502,7 +707,9 @@ fn _produce_and_load_signed_catalog_media_v1(
             enabled: true, scr1_bytes: scr1.unwrap(),
             trust_config_bytes: trust.unwrap(), toolchain_enabled: false,
             toolchain_artifact_bytes: [], toolchain_scr1_bytes: [],
-            toolchain_trust_config_bytes: []),
+            toolchain_trust_config_bytes: [], signed_clang_enabled: false,
+            signed_clang_artifact_bytes: [], signed_clang_scr1_bytes: [],
+            signed_clang_trust_config_bytes: []),
         artifact_bytes: artifact_bytes, receipt: parsed_receipt))
 struct PartitionLayout:
     efi_start_sector: u64
@@ -693,7 +900,7 @@ impl ImageBuilder:
             manifest = manifest + self._deploy_package(rootfs_root, pkg)?
 
         manifest = manifest + self._stage_simple_toolchain_payload(rootfs_root)?
-        manifest = manifest + self._stage_clang_toolchain_payload(rootfs_root)
+        manifest = manifest + self._stage_clang_toolchain_payload(rootfs_root)?
         manifest = manifest + self._stage_rust_toolchain_payload(rootfs_root)
         var font_index: i64 = 0
         while font_index < font_guest_paths.len() and font_index < font_blobs.len():
@@ -813,7 +1020,48 @@ impl ImageBuilder:
         manifest = manifest + _manifest_file("/SYS/SIMPLETOOL.SDN", "simple-toolchain-manifest", "simpleos-tools")
         Ok(manifest)
 
-    fn _stage_clang_toolchain_payload(rootfs_root: text) -> text:
+    fn _stage_clang_toolchain_payload(rootfs_root: text) -> Result<text, text>:
+        val signed_media = self.config.signed_catalog_media
+        if signed_media.signed_clang_enabled:
+            if signed_media.signed_clang_artifact_bytes.len() != 3 or
+                signed_media.signed_clang_scr1_bytes.len() != 3 or
+                signed_media.signed_clang_trust_config_bytes.len() == 0:
+                return Err("signed Clang media is incomplete")
+            val guest_paths = ["/usr/bin/clang", "/usr/bin/ld.lld", "/work/hello.elf"]
+            val boot_payloads = ["/boot/bin/clang", "/boot/bin/ld.lld", "/boot/bin/hello.elf"]
+            val boot_records = ["/boot/catalog/clang.scr1", "/boot/catalog/ld.lld.scr1",
+                "/boot/catalog/hello.elf.scr1"]
+            val architecture = image_target_architecture(self.config.arch)
+            var manifest = ""
+            var index: i64 = 0
+            while index < 3:
+                val bytes = signed_media.signed_clang_artifact_bytes[index]
+                if not image_native_executable_payload_admitted_v1(bytes, architecture):
+                    return Err("signed Clang payload executable admission rejected: " + guest_paths[index])
+                _ensure_parent_dirs(rootfs_root, guest_paths[index])
+                _ensure_parent_dirs(rootfs_root, boot_payloads[index])
+                if not rt_file_write_bytes(rootfs_root + guest_paths[index], bytes) or
+                    not rt_file_write_bytes(rootfs_root + boot_payloads[index], bytes):
+                    return Err("signed Clang payload staging failed: " + guest_paths[index])
+                if not rt_file_write_bytes(
+                    rootfs_root + boot_records[index],
+                    signed_media.signed_clang_scr1_bytes[index]):
+                    return Err("signed Clang SCR1 staging failed: " + boot_records[index])
+                manifest = manifest + _manifest_file(
+                    guest_paths[index], "signed-clang-toolchain-payload", "simpleos-tools")
+                manifest = manifest + _manifest_file(
+                    boot_payloads[index], "boot-catalog-payload", "simpleos-loader")
+                manifest = manifest + _manifest_file(
+                    boot_records[index], "boot-catalog-scr1", "simpleos-loader")
+                index = index + 1
+            if not rt_file_write_bytes(
+                "{rootfs_root}/boot/catalog/clang_toolchain.trust",
+                signed_media.signed_clang_trust_config_bytes):
+                return Err("signed Clang trust staging failed")
+            manifest = manifest + _manifest_file(
+                "/boot/catalog/clang_toolchain.trust", "boot-catalog-trust",
+                "simpleos-loader")
+            return Ok(manifest)
         val clang_binary = image_effective_clang_binary()
         if clang_binary == "" or not rt_file_exists(clang_binary):
             var blocked = ""
@@ -823,8 +1071,8 @@ impl ImageBuilder:
                     image_target_architecture(self.config.arch)).inventory_row
             _ensure_dir("{rootfs_root}/SYS")
             write_text("{rootfs_root}/SYS/CLANGTOOL.SDN", image_clang_fixture_payload())
-            return blocked + _manifest_file(
-                "/SYS/CLANGTOOL.SDN", "clang-toolchain-fixture", "simpleos-tools")
+            return Ok(blocked + _manifest_file(
+                "/SYS/CLANGTOOL.SDN", "clang-toolchain-fixture", "simpleos-tools"))
         val clang_bytes = image_read_file_bounded_v1(clang_binary, IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1, "SimpleOS Clang payload").unwrap_or([])
         val architecture = image_target_architecture(self.config.arch)
         if not image_native_executable_payload_admitted_v1(clang_bytes, architecture):
@@ -832,7 +1080,7 @@ impl ImageBuilder:
             for guest_path in IMAGE_CLANG_GUEST_BIN_PATHS:
                 blocked = blocked + image_package_payload_decision_v1(
                     "simpleos-tools", guest_path, [], architecture).inventory_row
-            return blocked
+            return Ok(blocked)
 
         var manifest = ""
         for guest_path in IMAGE_CLANG_GUEST_BIN_PATHS:
@@ -889,7 +1137,7 @@ impl ImageBuilder:
                 clang_binary, sysroot, sysroot_embedded, self.config.arch,
                 include_root_sha256))
         manifest = manifest + _manifest_file("/SYS/CLANGTOOL.SDN", "clang-toolchain-manifest", "simpleos-tools")
-        manifest
+        Ok(manifest)
 
     fn _stage_rust_toolchain_payload(rootfs_root: text) -> text:
         val rustc_binary = image_effective_rustc_binary()
@@ -1182,6 +1430,7 @@ fn build_install_image_with_rootfs(
 
 fn _print_image_usage():
     print "Usage: image-builder create [options] [--clang-bundle-root=DIR --clang-bundle-source=REL --clang-bundle-output=REL --clang-bundle-sam1=REL --clang-bundle-seed=REL --clang-bundle-trust=REL [--clang-bundle-aliases=REL]]"
+    print "Signed Clang triplet: --signed-clang-root=DIR --signed-clang-sources=CLANG,LLD,HELLO --signed-clang-bundle=REL --signed-clang-payload-leaves=CLANG,LLD,HELLO --signed-clang-scr1-leaves=CLANG,LLD,HELLO --signed-clang-sam1=CLANG,LLD,HELLO --signed-clang-seed=REL --signed-clang-trust=REL --signed-clang-canonical-paths=/usr/bin/clang,/usr/bin/ld.lld,/work/hello.elf --signed-clang-max-bytes=N,N,N --signed-clang-target=TRIPLE"
 
 fn run_image_builder(args: [text]) -> i32:
     for arg in args:
@@ -1211,6 +1460,11 @@ fn run_image_builder(args: [text]) -> i32:
         manifest_relative_paths: [], identity_receipt_relative_paths: [],
         signer_seed_relative_path: "", trust_config_relative_path: "",
         output_scr1_relative_paths: [])
+    var signed_clang = ImageSignedClangBundleRequestV1(
+        trusted_root: "", source_relative_paths: [], bundle_relative_path: "",
+        payload_leaves: [], scr1_leaves: [], manifest_relative_paths: [],
+        signer_seed_relative_path: "", trust_config_relative_path: "",
+        canonical_guest_paths: [], max_artifact_bytes: [], target_triple: "")
     var clang_bundle_root = ""
     var clang_bundle_source = ""
     var clang_bundle_output = ""
@@ -1276,6 +1530,30 @@ fn run_image_builder(args: [text]) -> i32:
         else if arg.starts_with("--signed-toolchain-outputs="):
             signed_toolchain.output_scr1_relative_paths =
                 arg.slice(27, arg.len()).split(",")
+        else if arg.starts_with("--signed-clang-root="):
+            signed_clang.trusted_root = arg.slice(20, arg.len())
+        else if arg.starts_with("--signed-clang-sources="):
+            signed_clang.source_relative_paths = arg.slice(23, arg.len()).split(",")
+        else if arg.starts_with("--signed-clang-bundle="):
+            signed_clang.bundle_relative_path = arg.slice(22, arg.len())
+        else if arg.starts_with("--signed-clang-payload-leaves="):
+            signed_clang.payload_leaves = arg.slice(30, arg.len()).split(",")
+        else if arg.starts_with("--signed-clang-scr1-leaves="):
+            signed_clang.scr1_leaves = arg.slice(27, arg.len()).split(",")
+        else if arg.starts_with("--signed-clang-sam1="):
+            signed_clang.manifest_relative_paths = arg.slice(20, arg.len()).split(",")
+        else if arg.starts_with("--signed-clang-seed="):
+            signed_clang.signer_seed_relative_path = arg.slice(20, arg.len())
+        else if arg.starts_with("--signed-clang-trust="):
+            signed_clang.trust_config_relative_path = arg.slice(21, arg.len())
+        else if arg.starts_with("--signed-clang-canonical-paths="):
+            signed_clang.canonical_guest_paths = arg.slice(31, arg.len()).split(",")
+        else if arg.starts_with("--signed-clang-max-bytes="):
+            signed_clang.max_artifact_bytes = []
+            for value in arg.slice(25, arg.len()).split(","):
+                signed_clang.max_artifact_bytes.push(value.to_i64())
+        else if arg.starts_with("--signed-clang-target="):
+            signed_clang.target_triple = arg.slice(22, arg.len())
         else if arg.starts_with("--clang-bundle-root="):
             clang_bundle_root = arg.slice(20, arg.len())
         else if arg.starts_with("--clang-bundle-source="):
@@ -1312,6 +1590,9 @@ fn run_image_builder(args: [text]) -> i32:
         clang_bundle_output != "" or clang_bundle_sam1 != "" or
         clang_bundle_seed != "" or clang_bundle_trust != "" or
         clang_bundle_aliases != ""
+    if clang_bundle_present and _signed_clang_bundle_present_v1(signed_clang):
+        print "Error: legacy and signed Clang bundle modes are mutually exclusive"
+        return 1
     if clang_bundle_present:
         if clang_bundle_root == "" or clang_bundle_source == "" or
             clang_bundle_output == "" or clang_bundle_sam1 == "" or
@@ -1385,6 +1666,17 @@ fn run_image_builder(args: [text]) -> i32:
         signed_catalog_media.toolchain_scr1_bytes = toolchain.toolchain_scr1_bytes
         signed_catalog_media.toolchain_trust_config_bytes =
             toolchain.toolchain_trust_config_bytes
+
+    if _signed_clang_bundle_present_v1(signed_clang):
+        val produced_clang = _produce_signed_clang_bundle_v1(signed_clang, arch)
+        if val Err(e) = produced_clang:
+            print "Error: {e}"
+            return 1
+        val clang_media = produced_clang.unwrap()
+        signed_catalog_media.signed_clang_enabled = clang_media.signed_clang_enabled
+        signed_catalog_media.signed_clang_artifact_bytes = clang_media.signed_clang_artifact_bytes
+        signed_catalog_media.signed_clang_scr1_bytes = clang_media.signed_clang_scr1_bytes
+        signed_catalog_media.signed_clang_trust_config_bytes = clang_media.signed_clang_trust_config_bytes
 
     val result = if installer:
         val config = ImageConfig(
