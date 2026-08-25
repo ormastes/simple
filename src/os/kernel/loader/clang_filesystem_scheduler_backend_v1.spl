@@ -18,8 +18,8 @@ use os.kernel.scheduler.process_execution_observation.{
 use os.kernel.loader.clang_filesystem_pipeline_owner_v1.{
     ClangFilesystemBackendCommandV1,
     ClangFilesystemBackendOutcomeV1,
-    ClangFilesystemTerminalHandleV1,
-    clang_filesystem_pipeline_finish_v1,
+    ClangFilesystemTerminalReceiptV1,
+    clang_filesystem_pipeline_finish_and_take_v1,
     clang_filesystem_pipeline_mark_outcome_unknown_v1
 }
 
@@ -96,7 +96,7 @@ pub(package) fn clang_filesystem_scheduler_launch_plan_v1(
 pub(package) fn clang_filesystem_scheduler_finish_success_v1(
     plan: ClangFilesystemSchedulerLaunchPlanV1,
     evidence: ClangFilesystemSchedulerEvidenceV1
-) -> Result<ClangFilesystemTerminalHandleV1, text>:
+) -> Result<ClangFilesystemTerminalReceiptV1, text>:
     """Consume three real scheduler observations and commit success once.
 
     All tokens are consumed before validation so a malformed middle stage
@@ -107,7 +107,9 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
     val link_seen = scheduler_execution_evidence_consume_once_v2(evidence.link)
     val execute_seen = scheduler_execution_evidence_consume_once_v2(evidence.execute)
     if not compile_seen.? or not link_seen.? or not execute_seen.?:
-        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(plan.command.dispatch)
+        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            plan.command.dispatch)
+        if retired.is_err(): return Err("scheduler-evidence-cleanup-indeterminate")
         return Err("scheduler-execution-evidence-missing")
 
     val compile_result = compile_seen.unwrap()
@@ -123,7 +125,8 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
         link_result, plan.link_path, plan.link_argv,
         dispatch.lld_sha256, filesystem_name, dispatch.actor.task_id,
         dispatch.target_triple):
-        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        if retired.is_err(): return Err("compiler-evidence-cleanup-indeterminate")
         return Err("compiler-stage-evidence-mismatch")
 
     val source_bytes = g_vfs_read_file_bytes(dispatch.source_path)
@@ -131,7 +134,8 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
     val executable_bytes = g_vfs_read_file_bytes(dispatch.executable_path)
     if source_bytes.len() == 0 or object_bytes.len() == 0 or
        executable_bytes.len() == 0:
-        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        if retired.is_err(): return Err("artifact-evidence-cleanup-indeterminate")
         return Err("filesystem-artifact-evidence-missing")
     val executable_sha256 = sha256_u8_hex(executable_bytes)
     if not _stage_matches_v1(
@@ -153,10 +157,11 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
        link_result.stderr_bytes.len() != 0 or
        execute_result.stderr_bytes.len() != 0 or
        execute_result.stdout_bytes != "Hello from SimpleOS\n".bytes():
-        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        if retired.is_err(): return Err("terminal-evidence-cleanup-indeterminate")
         return Err("terminal-execution-evidence-mismatch")
 
-    val finish_result = clang_filesystem_pipeline_finish_v1(
+    val finish_result = clang_filesystem_pipeline_finish_and_take_v1(
         plan.command,
         ClangFilesystemBackendOutcomeV1(
             actor: dispatch.actor,
@@ -166,7 +171,13 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
             source_sha256: sha256_u8_hex(source_bytes),
             object_sha256: sha256_u8_hex(object_bytes),
             executable_sha256: executable_sha256,
-            stdout_sha256: sha256_u8_hex(execute_result.stdout_bytes)))
+            stdout_sha256: sha256_u8_hex(execute_result.stdout_bytes)),
+        dispatch.actor)
     if finish_result.is_err():
-        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
-    finish_result
+        val finish_error = finish_result.unwrap_err()
+        if finish_error == "terminal-receipt-consumed-owner-quarantined":
+            return Err(finish_error)
+        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        if retired.is_err(): return Err("terminal-finish-cleanup-indeterminate")
+        return Err(finish_error)
+    Ok(finish_result.unwrap())

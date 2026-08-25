@@ -15,8 +15,7 @@ use os.kernel.loader.clang_filesystem_pipeline_owner_v1.{
     clang_filesystem_pipeline_dispatch_v1,
     clang_filesystem_pipeline_cancel_v1,
     clang_filesystem_pipeline_begin_current_v1,
-    clang_filesystem_pipeline_mark_outcome_unknown_v1,
-    clang_filesystem_pipeline_take_terminal_v1
+    clang_filesystem_pipeline_mark_outcome_unknown_v1
 }
 use os.kernel.loader.clang_filesystem_scheduler_backend_v1.{
     ClangFilesystemSchedulerEvidenceV1,
@@ -47,13 +46,21 @@ pub(package) fn clang_filesystem_pipeline_prepare_scheduler_backend_v1(
     val dispatch_result = clang_filesystem_pipeline_dispatch_v1(
         reservation, request.actor)
     if dispatch_result.is_err():
-        _ = clang_filesystem_pipeline_cancel_v1(reservation)
-        return Err(dispatch_result.unwrap_err())
+        val dispatch_error = dispatch_result.unwrap_err()
+        # Dispatch reports this only after the Dispatched state was committed.
+        # Cancellation accepts Reserved exclusively, so never blind-cancel an
+        # ambiguous committed transition.
+        if dispatch_error == "committed-unknown":
+            return Err("dispatch-committed-owner-quarantined")
+        val cancelled = clang_filesystem_pipeline_cancel_v1(reservation)
+        if cancelled.is_err(): return Err("dispatch-failed-cancel-indeterminate")
+        return Err(dispatch_error)
     val dispatch = dispatch_result.unwrap()
     val command_result = clang_filesystem_pipeline_begin_current_v1(
         admission, dispatch)
     if command_result.is_err():
-        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        if retired.is_err(): return Err("pipeline-begin-cleanup-indeterminate")
         return Err(command_result.unwrap_err())
     Ok(clang_filesystem_scheduler_launch_plan_v1(command_result.unwrap()))
 
@@ -66,9 +73,9 @@ fn _revoke_unused_submission_v1(
 
 fn _consume_failed_evidence_if_any_v1(
     token: SchedulerExecutionEvidenceTokenV1?
-):
-    if token.?:
-        _ = scheduler_execution_evidence_consume_once_v2(token.unwrap())
+) -> bool:
+    if not token.?: return true
+    scheduler_execution_evidence_consume_once_v2(token.unwrap()).is_some()
 
 pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
     scheduler: Scheduler,
@@ -88,27 +95,34 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
         scheduler, table, compile_submission,
         plan.compile_path, plan.compile_argv)
     if compile_run.exit_code != 0 or not compile_run.evidence.?:
-        _consume_failed_evidence_if_any_v1(compile_run.evidence)
+        val compile_evidence_retired =
+            _consume_failed_evidence_if_any_v1(compile_run.evidence)
         val link_retired = _revoke_unused_submission_v1(
             table, link_submission)
         val execute_retired = _revoke_unused_submission_v1(
             table, execute_submission)
         val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
             plan.command.dispatch)
-        if not link_retired or not execute_retired or pipeline_retired.is_err():
+        if compile_run.cleanup_indeterminate or
+           not compile_evidence_retired or not link_retired or
+           not execute_retired or pipeline_retired.is_err():
             return Err("clang-submit-cleanup-indeterminate")
         return Err("clang-authenticated-submit-failed")
 
     val link_run = authenticated_fs_exec_submit_v1(
         scheduler, table, link_submission, plan.link_path, plan.link_argv)
     if link_run.exit_code != 0 or not link_run.evidence.?:
-        _consume_failed_evidence_if_any_v1(compile_run.evidence)
-        _consume_failed_evidence_if_any_v1(link_run.evidence)
+        val compile_evidence_retired =
+            _consume_failed_evidence_if_any_v1(compile_run.evidence)
+        val link_evidence_retired =
+            _consume_failed_evidence_if_any_v1(link_run.evidence)
         val execute_retired = _revoke_unused_submission_v1(
             table, execute_submission)
         val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
             plan.command.dispatch)
-        if not execute_retired or pipeline_retired.is_err():
+        if link_run.cleanup_indeterminate or
+           not compile_evidence_retired or not link_evidence_retired or
+           not execute_retired or pipeline_retired.is_err():
             return Err("lld-submit-cleanup-indeterminate")
         return Err("lld-authenticated-submit-failed")
 
@@ -116,12 +130,17 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
         scheduler, table, execute_submission,
         plan.execute_path, plan.execute_argv)
     if execute_run.exit_code != 0 or not execute_run.evidence.?:
-        _consume_failed_evidence_if_any_v1(compile_run.evidence)
-        _consume_failed_evidence_if_any_v1(link_run.evidence)
-        _consume_failed_evidence_if_any_v1(execute_run.evidence)
+        val compile_evidence_retired =
+            _consume_failed_evidence_if_any_v1(compile_run.evidence)
+        val link_evidence_retired =
+            _consume_failed_evidence_if_any_v1(link_run.evidence)
+        val execute_evidence_retired =
+            _consume_failed_evidence_if_any_v1(execute_run.evidence)
         val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
             plan.command.dispatch)
-        if pipeline_retired.is_err():
+        if execute_run.cleanup_indeterminate or
+           not compile_evidence_retired or not link_evidence_retired or
+           not execute_evidence_retired or pipeline_retired.is_err():
             return Err("hello-submit-cleanup-indeterminate")
         return Err("hello-authenticated-submit-failed")
 
@@ -132,5 +151,4 @@ pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
             link: link_run.evidence.unwrap(),
             execute: execute_run.evidence.unwrap()))
     if terminal.is_err(): return Err(terminal.unwrap_err())
-    clang_filesystem_pipeline_take_terminal_v1(
-        terminal.unwrap(), plan.command.dispatch.actor)
+    Ok(terminal.unwrap())

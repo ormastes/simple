@@ -12,8 +12,13 @@ use os.kernel.loader.executable_authority_registry.{
 }
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 use os.kernel.loader.fs_exec_spawn.{FsExecAuthenticatedRunResultV1}
-use os.kernel.loader.executable_admission_pipeline.{executable_loader_revoke}
+use os.kernel.loader.executable_admission_pipeline.{
+    ExecutableLoaderAdmissionErrorV1, executable_loader_revoke
+}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionEvidenceTokenV1
+}
 
 @cfg(x86_64)
 use os.kernel.loader.x86_64_fs_exec_spawn.{
@@ -36,18 +41,33 @@ pub(package) struct AuthenticatedFsExecSubmissionV1:
     caller: i64
     recipe: i64
 
+pub(package) struct AuthenticatedFsExecSubmissionResultV1:
+    exit_code: i64
+    evidence: SchedulerExecutionEvidenceTokenV1?
+    cleanup_indeterminate: bool
+
 fn _retire_failed_submission_v1(
     table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
     result: FsExecAuthenticatedRunResultV1
-) -> FsExecAuthenticatedRunResultV1:
+) -> AuthenticatedFsExecSubmissionResultV1:
     # Adoption may reject before consuming the loader token.  Revoke in that
     # case; if adoption already consumed it, the failed revoke is harmless and
     # cannot recreate authority.
-    if result.exit_code != 0 or not result.evidence.?:
-        _ = executable_loader_revoke(
-            table, submission.authorities, submission.token)
-    result
+    val failed = result.exit_code != 0 or not result.evidence.?
+    val retired = if failed:
+        match executable_loader_revoke(
+            table, submission.authorities, submission.token):
+            case Ok(_): true
+            # Invalid here means adoption already consumed/retired the
+            # one-shot token, or no live authority existed to leak.
+            case Err(ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid): true
+            case Err(_): false
+    else:
+        true
+    AuthenticatedFsExecSubmissionResultV1(
+        exit_code: result.exit_code, evidence: result.evidence,
+        cleanup_indeterminate: failed and not retired)
 
 @cfg(x86_64)
 pub(package) fn authenticated_fs_exec_submit_v1(
@@ -56,7 +76,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
-) -> FsExecAuthenticatedRunResultV1:
+) -> AuthenticatedFsExecSubmissionResultV1:
     val result = x86_64_fs_exec_spawn_authenticated_with_launch_v1(
         scheduler, table, submission.authorities, submission.token,
         submission.consumer, submission.entry_point, submission.caller,
@@ -70,7 +90,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
-) -> FsExecAuthenticatedRunResultV1:
+) -> AuthenticatedFsExecSubmissionResultV1:
     val result = arm64_fs_exec_spawn_authenticated_with_launch_v1(
         scheduler, table, submission.authorities, submission.token,
         submission.consumer, submission.entry_point, submission.caller,
@@ -84,7 +104,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
-) -> FsExecAuthenticatedRunResultV1:
+) -> AuthenticatedFsExecSubmissionResultV1:
     val result = riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         scheduler, table, submission.authorities, submission.token,
         submission.consumer, submission.entry_point, submission.caller,
@@ -101,7 +121,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
-) -> FsExecAuthenticatedRunResultV1:
+) -> AuthenticatedFsExecSubmissionResultV1:
     # The x86-32 authenticated process-image handoff is not yet published.
     val _scheduler = scheduler
     val _path = path
@@ -117,7 +137,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
-) -> FsExecAuthenticatedRunResultV1:
+) -> AuthenticatedFsExecSubmissionResultV1:
     val _scheduler = scheduler
     val _path = path
     val _argv = argv
@@ -132,7 +152,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
-) -> FsExecAuthenticatedRunResultV1:
+) -> AuthenticatedFsExecSubmissionResultV1:
     val _scheduler = scheduler
     val _path = path
     val _argv = argv
