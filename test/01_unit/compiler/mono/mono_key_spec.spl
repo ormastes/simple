@@ -17,6 +17,7 @@ HIR-built key on the shared primitive forms.
 """
 
 use std.spec
+use std.io_runtime.{file_read}
 use compiler.hir.hir_types.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.monomorphize.types.{SpecializationKey, ConcreteType}
@@ -77,6 +78,27 @@ describe "MonoSemanticKey canonical form":
         val c = mono_semantic_key_new("sym#2", ["i64"], ["4"], [], [])
         expect(mono_semantic_key_equals(a, b)).to_equal(false)
         expect(mono_semantic_key_equals(a, c)).to_equal(false)
+
+    it "keeps exact FNV hashes while avoiding canonical byte-array copies":
+        step("Verify exact empty and UTF-8 semantic hashes")
+        val empty = mono_semantic_key_new("", [], [], [], [])
+        val utf8 = mono_semantic_key_new("café", [], [], [], [])
+        expect(mono_semantic_key_hash(empty)).to_equal(8557270265384451870)
+        expect(mono_semantic_key_hash(utf8)).to_equal(7751081073992686626)
+
+        step("Verify exact empty and UTF-8 artifact hashes")
+        val empty_artifact = mono_artifact_key_new(empty, "", 0, 0, "", 0, 0, 0)
+        val utf8_artifact = mono_artifact_key_new(utf8, "x86_64", 1, 2, "native", 3, 4, 5)
+        expect(mono_artifact_key_hash(empty_artifact)).to_equal(-1736315086156857178)
+        expect(mono_artifact_key_hash(utf8_artifact)).to_equal(-8783387035928482195)
+
+        step("Pin managed canonical hashing and raw-safe generic hashing")
+        val source = file_read("src/compiler/40.mono/monomorphize/mono_key.spl")
+        expect(source.split(".bytes()").len() - 1).to_equal(1)
+        expect(source.split("s.byte_at(i)").len() - 1).to_equal(1)
+        expect(source).to_contain("_mono_key_fnv1a_managed(mono_semantic_key_canonical_text(key))")
+        expect(source).to_contain("_mono_key_fnv1a_managed(mono_artifact_key_canonical_text(key))")
+        expect(source.contains("mono_key_fnv1a(mono_semantic_key_canonical_text(key))")).to_equal(false)
 
 describe "canonical type ids from HIR":
     it "renders nested generics span-free and deterministically":
