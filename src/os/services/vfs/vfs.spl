@@ -438,6 +438,18 @@ impl VfsManager:
             return Err("filesystem is read-only")
         val rel_old = self.strip_mount_prefix(old_path, entry.point.path)
         val rel_new = self.strip_mount_prefix(new_path, entry.point.path)
+        # POSIX rename of one resolved name onto itself succeeds without
+        # dispatching a namespace mutation.  Keep this check after both grant
+        # checks and the read-only check: spelling an identity rename must not
+        # bypass caller authority or mount policy.  Besides avoiding needless
+        # backend work, this protects drivers whose replace algorithm removes
+        # the destination before publishing the source.
+        if rel_old == rel_new:
+            # Identity does not make a missing source successful.
+            val existing = entry.fs.stat(rel_old)
+            if existing.is_err():
+                return Err(existing.unwrap_err())
+            return Ok(true)
         entry.fs.rename(rel_old, rel_new)
 
     me symlink(target: text, link_path: text) -> Result<bool, text>:
