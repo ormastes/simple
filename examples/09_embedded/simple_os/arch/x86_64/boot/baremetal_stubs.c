@@ -493,16 +493,6 @@ static RuntimeValue simpleos_expose_runtime_value(RuntimeValue v)
     return IS_INT(v) ? (RuntimeValue)DECODE_INT(v) : v;
 }
 
-RuntimeValue rt_x86_ap_trampoline_vector(void)
-{
-    return (RuntimeValue)SIMPLEOS_AP_TRAMPOLINE_VECTOR;
-}
-
-RuntimeValue rt_x86_ap_trampoline_phys(void)
-{
-    return (RuntimeValue)SIMPLEOS_AP_TRAMPOLINE_PHYS;
-}
-
 RuntimeValue rt_x86_prepare_ap_startup(RuntimeValue cpu_id_rv, RuntimeValue vector_rv)
 {
     uint32_t cpu_id = (uint32_t)cpu_id_rv;
