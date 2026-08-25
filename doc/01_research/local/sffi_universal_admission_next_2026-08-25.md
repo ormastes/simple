@@ -2310,3 +2310,32 @@ No production Simple optimizer/runtime measurement was possible because this
 worktree has no production self-hosted binary.  The static shape evidence is
 therefore useful but not performance verification.  Verified-and-signed SFFI
 admission remains 0.
+## Synchronous SIMD SFFI facade checkpoint
+
+`src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
+symbols.  All 48 calls now carry minimal lexical `unsafe(ffi)` authority.  The
+focused `nogc-sync-simd-sffi-authority.shs` audit passed and ratchets the call
+and scope counts.  It also rejects per-call signature verification, symbol
+lookup, locking, or generic FFI dispatch in these instruction-level hot paths.
+
+The raw profile result previously mapped every unknown discriminant to
+`SimdTier.scalar`, manufacturing a valid capability state from a provider
+contract violation.  Unknown values now fail closed; the nine valid match arms
+are unchanged.  Normal calls retain one direct foreign call and the same data
+movement, allocation count, and asymptotic complexity.  No C/Rust replacement
+for the Pure-Simple vector/ML-KEM algorithms was introduced.
+
+The authoritative call census changed exactly as expected:
+
+- missing authority: 17,689 -> 17,641
+- lexical unsafe: 2,569 -> 2,617
+- function unsafe: unchanged at 918
+
+Native Rust providers lower several vector structures through scalar lanes and
+out pointers, whereas the interpreter exposes typed `Value` structures.  This
+can be a compiler-owned lowering convention, but the current source census is
+not an ABI fingerprint or cross-lane proof.  Consequently these wrappers are
+unsafe-bounded, not verified or signed.  No production optimizer or runtime
+benchmark was available in this worktree; performance evidence is limited to
+the unchanged direct-call source shape.  Verified-and-signed admission remains
+0.
