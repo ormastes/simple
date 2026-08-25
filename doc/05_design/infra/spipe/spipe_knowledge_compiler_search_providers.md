@@ -363,21 +363,12 @@ separately named optional capability and sandbox policy explicitly permits it.
 Client request:
 
 ```json
-{"id":"1","op":"initialize","protocol":1,"client":"spipe","limits":{"max_frame_bytes":1048576}}
+{"client":"spipe","limits":{"max_frame_bytes":1048576},"operation":"initialize","protocol":{"major":1,"minor":0},"request_id":"1","required":{"analyzer":"spipe-unicode-lex-v1","explanation":"bm25-explain-v1","logical_index":"spipe-lexical-snapshot-v1","provider":"spipe-search-provider/1.0","score":"bm25-fixed-v1"}}
 ```
 
-Provider response includes:
-
-```text
-protocol = 1
-provider name/version/build identity
-score contract = bm25-fixed-v1
-analyzer identities
-capabilities: index_delta, lexical, phrase, explain, duplicate, symbols,
-              optional semantic, optional ann
-limits: frame bytes, documents per delta, query bytes, result count,
-        explanation terms, deadline range
-```
+The provider response is exactly the full `InitializeResultV1` in Section
+14.11 using the closed nested records in Section 14.20. This early overview
+does not define a shortened request or response variant.
 
 No request except `initialize` is accepted before a successful handshake.
 Capabilities are descriptive and immutable for the process lifetime.
@@ -387,15 +378,16 @@ Capabilities are descriptive and immutable for the process lifetime.
 Every request contains:
 
 ```text
-id                 opaque client correlation ID
-op                 closed operation vocabulary
+request_id         opaque client correlation ID
+operation          closed operation vocabulary
 workspace          stable workspace UID
 snapshot           required snapshot or expected parent snapshot
 deadline_ms        relative bounded deadline
 payload            operation-specific object
 ```
 
-Responses contain the same ID, `ok`, and exactly one of `result` or `error`.
+Responses contain the same request ID and operation, `ok`, and exactly one of
+`result` or `error`.
 Errors have stable code, safe message, retryable flag, and optional details.
 Initial operations:
 
@@ -707,14 +699,11 @@ use separate analyzers and are never mislabeled compiler-authoritative.
 
 ## 9. Failure handling and observability
 
-Stable errors include:
-
-```text
-unsupported_protocol, incompatible_contract, invalid_request, frame_too_large,
-deadline_exceeded, cancelled, snapshot_not_found, snapshot_conflict,
-analyzer_mismatch, unauthorized, limit_exceeded, provider_unavailable,
-index_corrupt, semantic_unavailable, internal
-```
+The single closed wire-error vocabulary and exact operation mapping is Section
+14.18. Pre-freeze names are CLI compatibility aliases only and never appear on
+the v1 wire: `unsupported_protocol -> protocol_unsupported`,
+`analyzer_mismatch -> incompatible_contract`,
+`index_corrupt -> snapshot_corrupt`, and `internal -> internal_error`.
 
 Logs never include document bodies, queries from private scopes, credentials,
 or raw authorization values. Debug explanations are bounded and redact fields
@@ -927,3 +916,997 @@ migration, and prevents mixed-version cache reuse.
 - Simple symbol export is compiler-authoritative and revisioned.
 - Every optimized path matches the exhaustive oracle.
 - Performance and security gates pass without embeddings or a remote service.
+
+## 14. Wave 4 normative contract freeze
+
+<!-- codex-design -->
+
+This section incorporates the completed Wave 4 provider, Simple-search, and
+acceptance-evidence audits. It is normative for Wave 4. Where earlier
+descriptive text leaves a choice open, the closed values below control. An
+incompatible change requires a new contract identifier, migration, fixtures,
+and explicit cache/index invalidation; it must not silently reinterpret a v1
+snapshot.
+
+### 14.1 Frozen identities and fields
+
+| Contract | Exact identity |
+|---|---|
+| Provider | `spipe-search-provider/1.0` |
+| Analyzer | `spipe-unicode-lex-v1` |
+| Score | `bm25-fixed-v1` |
+| Explanation | `bm25-explain-v1` |
+| Logical index | `spipe-lexical-snapshot-v1` |
+| Fusion | `rrf-fixed-v1` |
+
+`SearchDocumentV1` has the closed, ordered fields below. Each field occurs
+exactly once; unknown, duplicate, or reordered fields are rejected at a trust
+boundary. The weights are contract data, not provider configuration:
+
+| Ordinal | Field | Weight milli |
+|---:|---|---:|
+| 0 | `identifier` | 4000 |
+| 1 | `title` | 4000 |
+| 2 | `heading` | 2500 |
+| 3 | `classification` | 2000 |
+| 4 | `body` | 1000 |
+
+Canonical `SearchDocumentV1` is exactly
+`{document_id, revision, fields, facets, visibility_digest, content_hash}`.
+`fields` contains the five closed entries in the table order; `facets` sorts by
+unsigned UTF-8 `(name,value)`. Logical identity and hashing use canonical UTF-8
+JSON; storage ordinals, postings, segment boundaries, tombstone layout,
+provider implementation/version, and physical file paths are excluded. The
+external acceleration interface remains only `SearchProvider`; internal
+consumers see `LexicalSearchPort` and optional `SemanticSearchPort`. The
+dependency-free implementation identifies as `spipe_js` behind
+`InProcessSearchProviderAdapter` rather than creating another interface.
+
+### 14.2 `spipe-unicode-lex-v1`
+
+Input must be valid UTF-8. Analysis applies NFC, then Unicode default lowercase
+using the exact Unicode data-table revision shipped and named by the analyzer
+implementation. A release cannot claim `spipe-unicode-lex-v1` parity until the
+dependency-free JavaScript and Simple implementations use the same pinned table
+and pass every scalar-value fixture; ASCII-only approximation is a failed
+implementation gate.
+
+A token is a maximal sequence of Unicode `Alphabetic`, `Decimal_Number`, or
+`Mark` code points, plus `_`. Identifier fields additionally retain the full
+normalized field value as one exact token. Token positions advance before
+stop-word removal, so removing a stop word cannot collapse positional gaps.
+There is no stemming. The existing English stop-word set is frozen and
+hash-locked as `en-basic-v1`; analyzer identity includes its hash and the pinned
+Unicode table.
+
+Wave 4 query v1 is a bag of distinct analyzed terms plus equality facets.
+Phrase evaluation is not implemented or advertised: handshake capability is
+`phrase=false`, and phrase syntax returns `unsupported_capability`. Later
+phrase support requires a new query/analyzer contract and position-parity
+fixtures rather than opportunistic behavior under v1. Regex and wildcard
+capabilities are likewise `false`. Accepted hard bounds are 4,096 UTF-8 query
+bytes, 128 analyzed tokens, 32 filters, 64 values per filter, and 1,000 hits.
+
+### 14.3 Checked `bm25-fixed-v1`
+
+Statistics are per field: `N`, `df`, document length, and average length.
+`N` counts all live documents in the field corpus; a live document missing a
+field contributes length zero. Deleted documents contribute nothing. The
+scorer uses `SCALE=1_000_000`, `k1=1_200_000`, and `b=750_000`, with the
+non-negative IDF already specified in Section 3.4. Natural logarithm uses the
+existing seven-term atanh series extended through the `p13` term and
+`LN2=693147`.
+
+Every add, multiply, shift, division precondition, narrowing conversion, corpus
+statistic, and accumulator is checked. Overflow, zero/negative denominators,
+invalid `df/N`, or noncanonical arrays return a typed error and publish no
+result (`score_overflow` for arithmetic overflow). Division truncates toward
+zero. Internal score arithmetic remains at contract scale; conversion to the
+public `Score` milli representation happens exactly once after all weighted
+field contributions are accumulated. Results sort by score descending, then
+by ascending unsigned UTF-8 bytes of public document ID. `bm25-explain-v1`
+records canonical per-field/per-term inputs, intermediate checked values,
+weighted contribution, final conversion, and the applied tie rule; bounded
+explanations must recompute to the returned score exactly.
+
+### 14.4 Logical snapshots and deltas
+
+The graph-independent logical root is:
+
+```text
+sha256(canonicalJson({
+  contract: "spipe-lexical-snapshot-v1",
+  analyzer: "spipe-unicode-lex-v1",
+  score: "bm25-fixed-v1",
+  scope_digest,
+  documents: ScopedSearchDocumentV1 sorted by unsigned UTF-8 document ID bytes
+}))
+```
+
+Clean builds and all equivalent incremental histories must produce that same
+root regardless of provider or physical index layout. An `IndexDeltaV1` binds
+base logical root, result logical root, and three UID-disjoint, canonically
+sorted sets: `add` carries the complete new document; `replace` carries the
+complete new document plus expected prior revision and document hash; `delete`
+carries a document ID plus either an exact expected prior revision/hash pair or
+the paired null absence assertion defined in Section 14.12. The delta has a
+canonical operation ID and payload hash. Byte-identical replay returns the
+original byte-identical result envelope and receipt: replay is not a distinct
+result status or receipt outcome. A reused operation ID with different bytes
+is conflict.
+Publication linearizes through the one combined parent transaction defined in
+Section 14.17. For `published`, its compare-and-swap atomically commits the
+current-root pointer, terminal candidate record, signed operation receipt, and
+publication metadata after candidate documents/statistics are durable. None of
+those four records is separately visible. `stale_base` and `aborted` atomically
+commit candidate plus receipt without changing the root pointer.
+
+### 14.5 Provider framing, health, and fallback
+
+Wire frames are exactly eight **lowercase** hexadecimal ASCII length bytes
+followed immediately by canonical UTF-8 JSON. Maximum payload is 1 MiB before
+allocation or decoding; uppercase hex, malformed length, invalid UTF-8,
+noncanonical JSON, trailing bytes, and oversize frames fail closed.
+
+The adapter state machine is closed:
+
+```text
+new -> initializing -> healthy -> quarantined | unavailable -> closed
+```
+
+`quarantined` and `unavailable` may transition to `closed`; recovery creates a
+new provider generation and repeats initialization. A malformed, mismatched,
+poisoned, or unauthorized response quarantines the whole generation and
+invalidates all of its pending results and cursors. A crash or failed health
+check may fall back once to `JsFixedPointSearchProvider`: SPipe rebuilds or
+opens the same logical snapshot, proves the same logical root, records the
+degradation, and retries the logical request at most once. It never merges
+provider generations, resumes half a page, reuses a process-provider cursor,
+or returns a mixed page. If root parity cannot be proved, the operation returns
+`provider_unavailable` without results.
+
+Health is proven by successful initialization plus a bounded contract/root
+probe, not merely by process liveness. Provider identity, the five provider-side
+contract IDs, capabilities (including `phrase=false`), limits, generation, and
+logical root bind every request, response, cursor, cache entry, and receipt.
+SPipe binds adapter-local `rrf-fixed-v1` separately after provider validation.
+The canonical initialization result is exactly `InitializeResultV1` from
+Section 14.11, with the closed nested records and identical field set specified
+once in Section 14.20; this section defines no second or shortened schema. A
+major or semantic contract mismatch fails initialization. Unknown minor-version
+fields are accepted only when the response declares them optional. The adapter validates
+workspace, snapshot, query receipt, visible membership, authorization,
+score/order/ties, explanations, and limits on every response.
+
+Timeout/crash fallback emits a stable `SPK4xx` degradation diagnostic. Semantic
+failure removes only the semantic candidate source and remains explicit in the
+diagnostic and fusion explanation; it does not quarantine an otherwise valid
+lexical provider generation.
+
+### 14.6 Qualified performance evidence
+
+Performance is evidence only when its receipt records machine/CPU and memory,
+OS, toolchain, build identity/mode, provider identity, all contract versions,
+fixture hash and sizes, warm-up count, measured sample count, percentile method,
+raw samples, P95, maximum RSS, command, exit status, and timestamp. Functional
+parity, bounds, and absence of per-query spawning/full-tree scans are hard
+gates independent of timing. No provisional absolute latency or capacity value
+in this document may be reported as PASS until a checked-in benchmark profile
+qualifies the hardware, dataset, warmups, samples, variance rule, and budget.
+`measureQualifiedSearch` is the sole system-test helper allowed to issue a
+qualified performance receipt.
+
+The initial qualification fixture is 50,000 artifacts, 1,000,000 graph nodes,
+10 linked projects, and 5 worktrees. It uses one warm-up followed by at least
+20 alternating full-rebuild and one-document-update samples. Once its profile
+is checked in, the conditional gates are warm query P95 below 100 ms,
+one-document update P95 below 100 ms, and median full rebuild divided by median
+one-document update at least `20.0`. Peak RSS/index/cache budgets come from that
+profile. Degradation measurements are separate from steady-state samples.
+
+### 14.7 Unicode 17.0.0 table deliverable
+
+`spipe-unicode-lex-v1` freezes UCD **17.0.0**, released 2025-09-09. It never
+delegates semantics to the host JavaScript engine, locale, C library, ICU, or
+compiler runtime. Before analyzer implementation begins, Wave 4 must check in:
+
+```text
+examples/05_stdlib/spipe/src/search/generated/unicode_17_0_0.js
+src/lib/common/search/generated/unicode_17_0_0.spl
+examples/05_stdlib/spipe/test/fixture/wave4_search/unicode_17_0_0_manifest.json
+```
+
+The manifest records UCD version, generator source hash/version, source-file
+names and SHA-256 hashes, generated-file SHA-256 hashes, Unicode license, and
+generation command. Required UCD inputs are `UnicodeData.txt`,
+`DerivedCoreProperties.txt`, `PropList.txt`, `SpecialCasing.txt`,
+`CaseFolding.txt` (proven unused for lowercase), `CompositionExclusions.txt`,
+and `NormalizationTest.txt`. The implementation gate regenerates into a
+temporary directory, compares every byte and declared hash, runs the complete
+UCD normalization corpus plus cross-runtime scalar fixtures, and rejects a
+dirty or engine-derived table. The manifest's actual generated hashes are
+filled only by that reproducible generation; absence or a placeholder hash
+blocks Wave 4 implementation acceptance.
+
+Exact string analysis is: validate shortest-form UTF-8 and Unicode scalar
+values; normalize to NFC 17.0.0; apply locale-independent Unicode 17.0.0
+**Default Lowercase Conversion**, including unconditional and applicable
+contextual `SpecialCasing.txt` mappings but excluding locale-tailored mappings;
+then NFC-normalize the lowercase result once more before tokenization. This is
+lowercasing, not default case folding. Keys, facets, tokens, and canonical JSON
+strings use the resulting scalar sequence where their schema calls for
+analyzed text.
+
+### 14.8 Authorization-partitioned logical indexes
+
+There is no global corpus-statistics snapshot containing differently visible
+documents. `AuthorizationPort` first resolves a canonical `SearchScopeV1` from
+principal, workspace/revision, policy version and digest, permitted project and
+visibility partitions, and authorized field/facet set. Its
+`scope_digest = sha256(canonicalJson(SearchScopeV1))` contains no secret token.
+Only then may an adapter open or build a lexical snapshot.
+
+```text
+SearchScopeV1 {
+  contract:"spipe-search-scope-v1", principal_uid, workspace_uid,
+  revision_id, policy_version, policy_digest,
+  project_uids:[sorted], visibility_partitions:[sorted],
+  searchable_fields:[closed-order subset], facet_names:[UTF-8 sorted]
+}
+```
+
+The logical-root object in Section 14.4 additionally contains
+`scope_digest`. Its document set, `N`, every `df`, total/average field length,
+postings, facets, snippets, explanations, and result counts are computed solely
+from documents and fields authorized in that scope. Root, query receipt, cache
+key, cursor, delta, publication receipt, and provider request/response all bind
+the same scope digest. Scope mismatch is `unauthorized` before index/statistic
+access; scope partitions never share pages, cursors, score explanations, or
+mutable deltas even when their visible document sets happen to match.
+
+Redaction removes the field before analysis and statistics; it is not an empty
+field and cannot match, affect length/average/`df`, or appear in explanation.
+A document with no searchable authorized fields may remain resolvable by the
+SPipe identity tier when policy permits, but it is absent from lexical corpus
+statistics and candidates. Facet authorization is checked before lookup.
+Cross-scope golden fixtures prove that adding private documents or redacted
+terms changes no public root, statistic, score, tie, count, cursor, cache entry,
+or timing-visible error shape.
+
+### 14.9 Canonical JSON byte profile
+
+`spipe-canonical-json-v1` is the sole encoding used for logical roots, payload
+hashes, receipts, and provider canonicality checks:
+
+- bytes are valid shortest-form UTF-8 with no BOM;
+- every string and object key is UCD-17.0.0 NFC; two input keys that normalize
+  equal are a duplicate-key error before object construction;
+- object keys sort by unsigned UTF-8 bytes; arrays retain schema order unless a
+  field explicitly requires canonical sorting;
+- values are only objects, arrays, strings, booleans, null, and schema-bounded
+  signed integers; numbers use shortest base-10 digits, no leading zero,
+  exponent, decimal point, plus sign, or `-0`;
+- every integer must be within the receiving schema's bound and within signed
+  64-bit range; protocol parsers also reject values not exactly representable
+  by their implementation rather than round them;
+- strings escape only quotation mark, reverse solidus, and U+0000–U+001F,
+  using lowercase `\u00xx` for controls without a short JSON escape; all other
+  scalars are emitted as UTF-8, never surrogate escapes;
+- undefined, holes, duplicate fields, NaN, infinities, lone surrogates,
+  comments, and trailing data are errors.
+
+Hashed payload bytes contain no whitespace or trailing newline. A wire frame's
+eight-byte lowercase-hex length counts payload bytes only, excluding the header.
+Checked-in golden fixtures contain the source value, exact canonical byte
+sequence (hex), and SHA-256 for empty/boundary/nested/Unicode cases and every
+rejection class. JavaScript, Simple, fallback, DBFS, and process adapters must
+match those bytes and hashes.
+
+### 14.10 Normative checked BM25 evaluation
+
+All quantities below are nonnegative checked integers. Conceptual
+intermediates are signed i128. An implementation without i128 must prove before
+each operation that its i64 result is identical; otherwise it returns
+`score_overflow`. Division is integer truncation toward zero. No reassociation,
+floating point, saturation, or intermediate public-milli rounding is allowed.
+
+```text
+S = 1_000_000; K1 = 1_200_000; B = 750_000; LN2 = 693_147
+avg_scaled = checked_div(total_field_length * S, N)       # N > 0
+ratio_scaled = checked_div(document_length * S * S, avg_scaled)
+norm_scaled = (S - B) + checked_div(B * ratio_scaled, S)
+denom_scaled = tf * S + checked_div(K1 * norm_scaled, S)
+tf_scaled = checked_div(tf * (K1 + S) * S, denom_scaled)
+idf_arg_scaled = S + checked_div((2*N - 2*df + 1) * S, 2*df + 1)
+idf_scaled = fixed_ln(idf_arg_scaled)
+unweighted = checked_div(idf_scaled * tf_scaled, S)
+weighted = checked_div(unweighted * weight_milli, 1000)
+internal_total = checked_sum(weighted in field order, then term UTF-8 order)
+public_score_milli = checked_div(internal_total, 1000)
+```
+
+Terms absent from a field (`tf=0`) contribute zero without evaluating the
+denominator. A term that is scored requires `N>0`, `0<=df<=N`,
+`total_field_length>0`, and `avg_scaled>0`. Average length is exactly
+`floor(total_field_length*S/N)`; missing fields contributed zero when the total
+was built. Query terms are distinct and ordered by unsigned UTF-8 token bytes;
+`qtf` is explanation-only.
+
+`fixed_ln(x_scaled)` requires `x_scaled>0`. Repeated checked multiplication by
+2 or truncating division by 2 produces exponent `e` and mantissa `m` in
+`[S,2*S)`, with boundary values assigned to the lower inclusive interval.
+Then `y=checked_div((m-S)*S,m+S)`. Evaluate in this exact order:
+
+```text
+y2 = y*y/S
+sum = y
+power = y
+for denominator in 3,5,7,9,11,13:
+    power = power*y2/S
+    sum += power/denominator
+result = 2*sum + e*LN2
+```
+
+Every multiplication/addition and the final range is checked. Golden vectors
+cover `S-1`, `S`, `S+1`, `2*S-1`, `2*S`, range-reduction extremes, every
+rounding boundary, zero/one corpus, `df=0/N`, and each overflow/error branch.
+
+### 14.11 Closed provider protocol schemas
+
+The protocol field is always the object `{major:1,minor:0}`; integer `1` is
+invalid. All records below are closed: missing, extra, duplicate-normalized, or
+wrongly typed fields fail the whole generation unless an initialization field
+is explicitly listed in `optional_fields` for a compatible minor version.
+
+```text
+InitializeRequestV1 {
+  request_id, operation:"initialize", protocol:{major,minor}, client:"spipe",
+  required:{provider,analyzer,score,explanation,logical_index}, limits
+}
+InitializeResultV1 {
+  request_id, operation:"initialize", ok:true, result:{protocol,provider,implementation_digest,
+  provider_ids,analyzer_ids,score_ids,explanation_ids,logical_index_ids,
+  capabilities,limits,optional_fields}
+}
+RequestV1 {
+  request_id:RequestId, operation:closed-operation, protocol:{major:1,minor:0},
+  provider_generation:ProviderGeneration, workspace:WorkspaceId,
+  snapshot:SnapshotId, scope_digest:HashText,
+  query_receipt:QueryReceiptV1|null,
+  operation_receipt:OperationReceiptV1|null,
+  deadline_ms:DeadlineMs, payload:closed-operation-payload
+}
+SuccessResponseV1 {
+  request_id:RequestId, operation:closed-operation, ok:true, protocol,
+  provider_generation:ProviderGeneration, workspace:WorkspaceId,
+  snapshot:SnapshotId, scope_digest:HashText,
+  query_receipt:QueryReceiptV1|null,
+  operation_receipt:OperationReceiptV1|null, result:closed-operation-result
+}
+ErrorResponseV1 {
+  request_id:RequestId, operation:closed-operation, ok:false, protocol,
+  provider_generation:ProviderGeneration, workspace:WorkspaceId,
+  snapshot:SnapshotId, scope_digest:HashText,
+  query_receipt:QueryReceiptV1|null,
+  operation_receipt:OperationReceiptV1|null,
+  error:{code,message,retryable}
+}
+PreBindingErrorResponseV1 {
+  request_id, operation, ok:false, protocol,
+  error:{code,message,retryable:false}
+}
+```
+
+`PreBindingErrorResponseV1` is legal only for (a) `initialize` rejection or
+(b) `handshake_required` after any syntactically valid, canonical, closed
+operation request received before successful initialization. Case (b) echoes
+only the decoded `request_id`, `operation`, and protocol and intentionally has
+no `provider_generation`, workspace, snapshot, scope, or receipts because no
+binding exists yet. A malformed length header, invalid UTF-8/JSON, noncanonical
+JSON, unknown operation, or request from which those three fields cannot be
+recovered closes the transport silently; it never fabricates a response.
+Every post-initialization error uses `ErrorResponseV1` and echoes the exact
+request bindings. The adapter deterministically creates and sends a non-null
+`query_receipt` for `search` and `explain`; every bound success or error echoes
+it. Other operations send and echo `query_receipt:null`. Requests always send
+`operation_receipt:null`; successful or byte-identical replayed `index_apply`
+and `index_publish` return their non-null signed receipt, while their errors and
+all other responses return null. Thus only the explicitly pre-binding schema
+may omit workspace/snapshot/scope/receipt binding fields. Any bound-error
+mismatch quarantines the generation just like a mismatched success.
+
+Initialization requires exact support for `spipe-search-provider/1.0`,
+`spipe-unicode-lex-v1`, `bm25-fixed-v1`, `bm25-explain-v1`, and
+`spipe-lexical-snapshot-v1`; negotiated capabilities explicitly include
+`phrase:false`, `regex:false`, and `wildcard:false`. `rrf-fixed-v1` is
+adapter-local SPipe composition state: it is neither required from the provider
+nor accepted as an authoritative provider result. A provider may echo it only
+inside non-authoritative diagnostic metadata declared optional; it never binds
+or computes fusion.
+
+Operation payload/result schemas are closed per the operation table in Section
+4.3. Error responses cannot include `result`; success responses cannot include
+`error`. Before initialization only `InitializeRequestV1` may execute; any
+other syntactically valid closed operation request receives the pre-binding
+`handshake_required` response defined above and has no side effects.
+Correlation, generation, workspace, snapshot, scope, query receipt, capability, limit, and
+logical-root mismatches quarantine the generation.
+
+### 14.12 Closed operation payloads and results
+
+Wire aliases are normative: `IdText` is NFC UTF-8, 1–128 bytes, without control
+characters; `HashText` is lowercase `sha256:` plus 64 hex digits; `CursorText`
+is null or an authenticated base64url value of at most 8,192 bytes; `Count` is
+an integer in `[0,1_000_000]`; and arrays have the explicit maxima below. Every
+payload and result is a closed object.
+
+| Operation | Exact request `payload` | Exact success `result` |
+|---|---|---|
+| `index_open` | `{mode:"open"|"create", logical_root:HashText|null}`; null is legal only for `create` | `{logical_root:HashText, document_count:Count, state:"opened"|"created"}` |
+| `index_apply` | `{operation_id:IdText, payload_hash:HashText, base_logical_root:HashText, operations:[IndexOperationV1; max 1000]}` | `{status:"applied"|"no_op", base_logical_root:HashText, candidate_uid:IdText, candidate_logical_root:HashText, candidate_expires_at_ms:UnixMillis, added:Count, replaced:Count, deleted:Count}` |
+| `index_publish` | `{operation_id:IdText, payload_hash:HashText, action:"publish"|"abort", candidate_uid:IdText, expected_base_logical_root:HashText, candidate_logical_root:HashText}` | `{status:"published"|"aborted"|"stale_base", previous_logical_root:HashText, logical_root:HashText, candidate_uid:IdText}`; `stale_base` is a terminal success carrying that request's signed `OperationReceiptV1` and never mutates the current root |
+| `search` | `{query_text:string<=4096 UTF-8 bytes, filters:[EqualityFilterV1; max 32], limit:integer[1,1000], cursor:CursorText, explain:boolean}` | `{logical_root:HashText, hits:[SearchHitV1; max limit], next_cursor:CursorText, exhausted:boolean}` |
+| `explain` | `{document_id:IdText, query_text:string<=4096 bytes, filters:[EqualityFilterV1; max 32]}` | `{logical_root:HashText, document_id:IdText, explanation:SearchExplanationV1}` |
+| `duplicate_candidates` | `{document_ids:[IdText; max 1000], limit_per_document:integer[1,100], cursor:CursorText}` | no Wave 4 success schema; capability is false and the bound response is `unsupported_capability` |
+| `symbols_snapshot` | `{project_uid:IdText, revision:IdText, limit:integer[1,1000], cursor:CursorText}` | no Wave 4 success schema; capability is false and the bound response is `unsupported_capability` |
+| `stats` | `{logical_root:HashText}` | `{logical_root:HashText, document_count:Count, field_stats:[FieldStatsV1; exactly scope searchable-field count], index_bytes:integer[0,9007199254740991], cache_bytes:integer[0,9007199254740991], peak_rss_bytes:integer[0,9007199254740991]}` |
+| `cancel` | `{target_request_id:IdText}` | `{target_request_id:IdText, status:"cancelled"|"already_complete"}`; an unknown target is the bound error `cancel_target_not_found`, never a success |
+| `shutdown` | `{reason:"normal"|"fallback"|"host_shutdown"}` | `{status:"closing"}` |
+
+For `index_apply` and `index_publish`, `payload_hash` is non-circular. Remove
+exactly the top-level `payload_hash` field from the otherwise complete closed
+operation payload, canonicalize the remaining object, and hash:
+
+```text
+payload_hash = "sha256:" + sha256(
+  domain || u64be(canonical_payload_byte_length) || canonical_payload_bytes)
+apply domain   = "SPKC-INDEX-APPLY-PAYLOAD-V1\0"
+publish domain = "SPKC-INDEX-PUBLISH-PAYLOAD-V1\0"
+```
+
+No nested field, operation ID, or empty array is omitted. The transmitted
+`payload_hash` must equal this value before replay lookup or mutation.
+
+`IndexOperationV1` is exactly one of:
+
+```text
+{kind:"add", document_id:IdText, before_revision:null, before_hash:null,
+ after:ScopedSearchDocumentV1}
+{kind:"replace", document_id:IdText, before_revision:IdText,
+ before_hash:HashText, after:ScopedSearchDocumentV1}
+{kind:"delete", document_id:IdText,
+ before_revision:IdText|null, before_hash:HashText|null, after:null}
+```
+
+The two delete precondition fields form one closed tagged choice. Non-null /
+non-null asserts that the document is present at `base_logical_root` with that
+exact revision and scoped-document hash; an exact match deletes it, while an
+absent or different document returns `precondition_conflict`. Null / null
+asserts expected absence: an absent base document is a deterministic no-op,
+while a present base document returns `precondition_conflict`. Mixed null and
+non-null pairs are `invalid_request` and are rejected before replay lookup,
+candidate creation, or receipt issuance. Preconditions are evaluated only
+against the immutable base root, never against earlier operations in the same
+delta.
+
+An absence-delete no-op contributes zero to `deleted` and does not change the
+candidate logical root. If every operation is a no-op, `index_apply` still
+durably creates its deterministic candidate, returns `status:"no_op"`, and
+issues an `OperationReceiptV1` with `outcome:"no_op"`; later publish/abort uses
+the ordinary lifecycle. The null fields and `after:null` remain present in the
+canonical payload and therefore affect `payload_hash`. Identical replay returns
+the originally stored `no_op` envelope and receipt byte-for-byte. It neither
+re-evaluates absence nor issues a new receipt.
+
+Operations sort by unsigned UTF-8 `(document_id,kind)` and document IDs are
+unique across the delta. `EqualityFilterV1` is exactly
+`{name:IdText,values:[string;1..64]}`; names are unique/sorted and values are
+NFC, unique, and unsigned-UTF-8 sorted. Different filter records are ANDed; a
+record matches when its named facet equals any one of that record's values.
+An analyzed document is a lexical candidate when at least one distinct query
+term occurs; terms affect score but are not implicit AND predicates. Empty
+analyzed query text is legal only when at least one filter exists and yields
+score zero with ID ties.
+
+`SearchHitV1` is exactly `{document_id:IdText,score_milli:WireInteger,
+source_rank:integer[1,1000],matched_fields:[closed field names;max 5],
+explanation:SearchExplanationV1|null}`; explanation is non-null iff requested.
+`FieldStatsV1` is exactly `{field:closed field name,N:Count,
+total_length:WireInteger,average_length_scaled:WireInteger}` in closed field
+order. Search cursors bind provider generation, workspace, snapshot, scope,
+logical root, query receipt, query bytes, filters, limit, explain flag, and next
+rank; any mismatch is `stale_cursor`. Pagination returns each authorized hit at
+most once and never crosses a snapshot or provider generation.
+
+Wave 4 advertises only `index_delta`, `lexical`, `explain`, `stats`, `cancel`,
+and `shutdown`; it explicitly advertises `phrase:false`, `regex:false`,
+`wildcard:false`, `duplicate:false`, `symbols:false`, and `semantic:false`.
+Deferred operations remain in the closed vocabulary so callers receive a
+bound deterministic error, but no Wave 4 provider may return their success.
+
+### 14.13 Wire integer contract
+
+Every JSON numeric integer is in the inclusive JavaScript-safe range
+`[-9007199254740991,9007199254740991]` and also satisfies its narrower schema
+bound. Parsers reject `9007199254740992`, `-9007199254740992`, i64 extrema,
+rounding, or an implementation-specific bigint JSON extension. Counters,
+lengths, ranks, limits, versions, deadlines, scores, and frame-adjacent metadata
+are nonnegative unless their schema explicitly states otherwise.
+
+Checked conceptual i128 BM25 intermediates in `bm25-explain-v1` are encoded as
+strings, never JSON numbers, using `I128Decimal = /^(0|-?[1-9][0-9]{0,38})$/`
+and the inclusive mathematical bounds
+`-170141183460469231731687303715884105728` through
+`170141183460469231731687303715884105727`. `-0`, plus signs, leading zeros,
+whitespace, exponent notation, out-of-range 39-digit values, and values used in
+a field not declared `I128Decimal` are rejected. Explanation schema marks each
+intermediate as either safe `WireInteger` or `I128Decimal`; implementations
+must not choose dynamically between number and string for the same field.
+
+### 14.14 Closed explanation records
+
+`bm25-explain-v1` uses only the following closed records. `WireInteger` is the
+safe JSON integer from Section 14.13; every arithmetic intermediate declared
+`I128Decimal` is always a decimal string, even when its value would fit safely.
+
+```text
+SearchExplanationV1 {
+  contract:"bm25-explain-v1", analyzer:"spipe-unicode-lex-v1",
+  score_contract:"bm25-fixed-v1", logical_index:"spipe-lexical-snapshot-v1",
+  scope_digest:HashText, logical_root:HashText, document_id:IdText,
+  fields:[FieldExplanationV1; 0..authorized-field-count],
+  internal_total:I128Decimal, public_score_milli:WireInteger,
+  tie_key_utf8_hex:string[2..256 lowercase even hex]
+}
+FieldExplanationV1 {
+  field:closed-field-name, N:WireInteger, total_length:WireInteger,
+  average_length_scaled:I128Decimal,
+  document_length:WireInteger, weight_milli:WireInteger,
+  terms:[TermContributionV1; 0..128], field_total:I128Decimal
+}
+TermContributionV1 {
+  kind:"absent", term:string[1..4096 UTF-8 bytes],
+  qtf:WireInteger[1,128], df:WireInteger, tf:0,
+  idf_argument_scaled:null, idf_scaled:null, length_ratio_scaled:null,
+  norm_scaled:null, denominator_scaled:null, tf_scaled:null,
+  unweighted:"0", weighted:"0"
+} | {
+  kind:"scored", term:string[1..4096 UTF-8 bytes],
+  qtf:WireInteger[1,128], df:WireInteger, tf:WireInteger[1,max-field-length],
+  idf_argument_scaled:I128Decimal, idf_scaled:I128Decimal,
+  length_ratio_scaled:I128Decimal, norm_scaled:I128Decimal,
+  denominator_scaled:I128Decimal, tf_scaled:I128Decimal,
+  unweighted:I128Decimal, weighted:I128Decimal
+}
+```
+
+Fields occur once in canonical authorized-field order; absent/redacted fields
+do not occur. Terms occur once in ascending unsigned UTF-8 bytes, including
+zero-contribution terms only when the query term is absent from this field.
+Each term's `df` must not exceed its field's `N`. Bounds are the corresponding
+query/document/statistic bounds. `qtf` is the exact count of that normalized
+term in the pre-deduplicated analyzed query and never changes scoring. An
+absent contribution requires the exact zeros/nulls above and evaluates no IDF,
+length ratio, normalization, denominator, or division. A scored contribution
+requires every intermediate. Recompute every scored term using
+Section 14.10, checked-sum terms into `field_total`, checked-sum fields into
+`internal_total`, convert once into `public_score_milli`, and compare the tie
+key with the UTF-8 hex of `document_id`. Any missing, extra, reordered,
+nonrecomputable, unauthorized, or over-limit explanation quarantines the
+provider generation.
+
+### 14.15 Canonical versus scoped documents
+
+`SearchDocumentV1` is the compiler-owned, authorization-neutral projection and
+always contains exactly the five closed fields. It is never sent wholesale to
+a provider for a narrower caller. After `AuthorizationPort` resolves
+`SearchScopeV1`, the coordinator derives:
+
+```text
+ScopedSearchDocumentV1 {
+  document_id, revision,
+  fields:[authorized subset in canonical field order],
+  facets:[authorized subset sorted by UTF-8 name,value],
+  visibility_digest, scoped_content_hash, scope_digest
+}
+```
+
+`ScopedFieldV1` is exactly `{name:closed-field-name,value:NFC-string}` and may
+occur at most once. `ScopedFacetV1` is exactly `{name:IdText,value:NFC-string}`;
+duplicate `(name,value)` pairs are rejected. Both arrays are closed and sorted
+as stated. `scoped_content_hash` is SHA-256 of the canonical scoped record with
+that one field omitted; it therefore commits only authorized content and cannot
+be compared with the global `SearchDocumentV1.content_hash`.
+
+An empty authorized field subset removes the document from the lexical corpus.
+`FieldStatsV1` and explanation arrays contain only authorized fields, in their
+relative canonical order; absent fields have no zero placeholder and do not
+affect roots, `N`, `df`, total length, average length, postings, or caches. The
+five-field global projection and each scoped projection have different schemas
+and cannot share hashes.
+
+An adapter declares its supported scope partition modes in initialization. A
+DBFS adapter that cannot create independently authorized statistics for the
+requested `scope_digest` returns bound `unsupported_scope` before reading any
+postings/statistics; it cannot reuse a broader DBFS index and filter afterward.
+Conformance includes cross-scope Simple, JS, and applicable DBFS roots and
+statistics.
+
+Every provider-bound `index_open`, `IndexOperationV1.after`, replay payload,
+candidate object, logical root, and clean-build corpus uses
+`ScopedSearchDocumentV1` exclusively. `SearchDocumentV1` cannot cross the
+provider boundary. `stats.field_stats` has exactly the number and relative
+canonical order of `SearchScopeV1.searchable_fields`; a missing, extra,
+redacted, reordered, or broader field is `binding_mismatch` and quarantines the
+generation.
+
+### 14.16 Envelope scalar and receipt schemas
+
+All common fields use exact aliases:
+
+```text
+RequestId = IdText
+ProviderGeneration = "pg-" + 32 lowercase hex digits
+WorkspaceId = canonical WS- UID, at most 128 bytes
+SnapshotId = canonical spks1- snapshot UID, at most 128 bytes
+DeadlineMs = WireInteger in [1,30000]
+QueryReceiptId = null | "qr-" + 64 lowercase hex digits
+OperationReceiptId = null | "or-" + 64 lowercase hex digits
+CandidateExpiryReceiptId = "cer-" + 64 lowercase hex digits
+KeyId = "ed25519:" + 64 lowercase hex digits
+UnixMillis = WireInteger in [0,9007199254740991]
+```
+
+Deadlines are relative durations measured from receipt by an adapter monotonic
+clock; Unix milliseconds appear only in signed audit/expiry records and never
+drive an in-flight timeout.
+
+```text
+QueryReceiptV1 {
+  schema:"spipe-query-receipt-v1", receipt_id:QueryReceiptId(non-null),
+  key_id:KeyId, authority_id:IdText, authority_generation:WireInteger,
+  request_id:RequestId, operation:"search"|"explain",
+  provider_generation:ProviderGeneration, workspace:WorkspaceId,
+  snapshot:SnapshotId, scope_digest:HashText, logical_root:HashText,
+  query_hash:HashText, issued_at_ms:UnixMillis, expires_at_ms:UnixMillis,
+  policy_version:WireInteger, policy_digest:HashText,
+  revocation_generation:WireInteger,
+  signature:string[86 base64url Ed25519]
+}
+OperationReceiptV1 {
+  schema:"spipe-operation-receipt-v1", receipt_id:OperationReceiptId(non-null),
+  key_id:KeyId, authority_id:IdText, authority_generation:WireInteger,
+  operation_id:IdText,
+  operation:"index_apply"|"index_publish",
+  provider_generation:ProviderGeneration, workspace:WorkspaceId,
+  snapshot:SnapshotId, scope_digest:HashText, base_logical_root:HashText,
+  result_logical_root:HashText, candidate_uid:IdText|null,
+  payload_hash:HashText,
+  outcome:"applied"|"no_op"|"published"|"aborted"|"stale_base",
+  issued_at_ms:UnixMillis, expires_at_ms:UnixMillis,
+  policy_version:WireInteger, policy_digest:HashText,
+  revocation_generation:WireInteger,
+  signature:string[86 base64url Ed25519]
+}
+CandidateExpiryReceiptV1 {
+  schema:"spipe-candidate-expiry-receipt-v1",
+  receipt_id:CandidateExpiryReceiptId, key_id:KeyId,
+  authority_id:IdText, authority_generation:WireInteger,
+  candidate_uid:IdText, workspace:WorkspaceId, snapshot:SnapshotId,
+  scope_digest:HashText, base_logical_root:HashText,
+  candidate_logical_root:HashText, apply_operation_id:IdText,
+  apply_receipt_id:OperationReceiptId(non-null),
+  candidate_expires_at_ms:UnixMillis, expired_at_ms:UnixMillis,
+  policy_version:WireInteger, policy_digest:HashText,
+  revocation_generation:WireInteger,
+  outcome:"expired", signature:string[86 base64url Ed25519]
+}
+DurableTerminalErrorV1 {
+  schema:"spipe-durable-terminal-error-v1",
+  workspace:WorkspaceId, snapshot:SnapshotId, scope_digest:HashText,
+  operation:"index_publish", operation_id:IdText, payload_hash:HashText,
+  candidate_uid:IdText,
+  observed_terminal_state:"published"|"aborted"|"expired"|"stale_base",
+  observed_terminal_receipt_kind:"operation"|"candidate_expiry",
+  observed_terminal_receipt_id:OperationReceiptId(non-null)|CandidateExpiryReceiptId,
+  response:ErrorResponseV1, response_hash:HashText,
+  recorded_at_ms:UnixMillis
+}
+```
+
+The unsigned record is the closed receipt with exactly `receipt_id` and
+`signature` omitted. Signing input is `domain || u64be(byte_length) ||
+canonicalJson(unsigned_record)`, where domain is
+`SPKC-QUERY-RECEIPT-V1\0` or `SPKC-OPERATION-RECEIPT-V1\0`. Receipt ID is
+SHA-256 of that input and Ed25519 signs exactly that same input. Keys come only
+from a separately configured
+`ReceiptAuthorityPort`; `key_id` is the SHA-256 fingerprint of the admitted
+public key, never provider self-assertion. Verification checks signature,
+authority, expiry, revocation generation, policy, scope/root/request bindings,
+and canonical bytes before use.
+
+`CandidateExpiryReceiptV1` uses the same construction with domain
+`SPKC-CANDIDATE-EXPIRY-RECEIPT-V1\0`. Its unsigned record omits exactly
+`receipt_id` and `signature`, so neither value is inside its own canonical
+preimage. `authority_id` identifies the admitted `CandidateAuthorityPort`,
+`authority_generation` binds its durable scheduler epoch, policy fields bind
+the authorization policy that admitted the expiry, and
+`expired_at_ms >= candidate_expires_at_ms`. Verification additionally binds
+every candidate/apply field above. The authority fsyncs the receipt and
+terminal candidate record as specified by the single-commit rule in Section
+14.17; restart reloads and verifies both, and byte-identical internal expiry
+replay returns the same receipt bytes.
+
+On the provider boundary, envelope `query_receipt` is the complete signed
+`QueryReceiptV1` object or null and `operation_receipt` is the complete signed
+`OperationReceiptV1` object or null—never a bare receipt ID. The `*ReceiptId`
+aliases name only the nested `receipt_id` fields. Echo validation is byte-exact.
+
+The durable replay key is `(workspace,snapshot,scope_digest,operation,
+operation_id)`. Its payload hash, exact canonical success envelope, and verified
+receipt are fsynced before reply and reloaded/reverified after restart.
+Identical replay returns those same bytes with the original `applied`, `no_op`,
+`published`, `aborted`, or `stale_base` status and matching receipt outcome;
+there is no replay-only status or outcome;
+changed payload is `operation_conflict`; expired/revoked receipt makes recovery
+fail closed and requires an authorized audit/rebuild rather than re-execution.
+`DurableTerminalErrorV1` has the same replay key, and its nested response must
+bind that request and have `operation_receipt:null`. `response_hash` commits the
+exact canonical response bytes. It records only the winner receipt's kind/ID,
+never embeds or returns the winner receipt. Identical loser replay returns the
+stored response bytes; a payload mismatch is `operation_conflict`.
+
+### 14.17 Candidate publication lifecycle
+
+`index_apply` creates a candidate but never changes the current root. Its unique
+apply `operation_id` produces `{candidate_uid,candidate_logical_root,
+candidate_expires_at_ms}` in the result and signed operation receipt. Candidate
+UID is exactly `"cand-" + sha256(domain || u64be(length) || bytes)`, where
+domain is `SPKC-CANDIDATE-UID-V1\0` and bytes are canonical JSON of the closed
+record `{workspace,snapshot,scope_digest,base_logical_root,
+candidate_logical_root,apply_payload_hash}` (keys canonicalize normally).
+The prefix is ASCII and is not part of the hash preimage. No separator,
+concatenation shorthand, provider-local ID, or receipt field is permitted.
+Multiple candidates from one base may coexist.
+
+`CandidateRecordV1.state` is closed to `staged`, `published`, `aborted`,
+`expired`, or `stale_base`. Only `staged` may transition, exactly once, to one
+of the four terminal states. Its closed fields bind candidate UID, apply
+operation ID/receipt ID, workspace/snapshot/scope, base/candidate roots, payload
+hash, created/expiry Unix milliseconds, state, terminal operation ID, terminal
+receipt kind (`operation` or `candidate_expiry`), terminal receipt ID, and
+terminal timestamp. For `staged`, all four terminal fields are null. For
+`published`, `aborted`, or `stale_base`, terminal operation ID is non-null,
+receipt kind is `operation`, and receipt ID/timestamp are non-null. For
+`expired`, terminal operation ID is null, receipt kind is `candidate_expiry`,
+and receipt ID/timestamp are non-null. No other null/discriminator combination
+is legal.
+Published/aborted/stale-base transitions bind their request's
+`OperationReceiptV1`; only authority-owned expiry binds a
+`CandidateExpiryReceiptV1`. `OperationReceiptV1` remains request-owned: apply
+produces `applied` or `no_op`, successful publish produces `published`, abort
+produces `aborted`, and a publish request that itself wins the candidate CAS
+but finds a stale current root may durably record `stale_base`.
+
+`index_publish` uses a distinct publish `operation_id` and payload
+`{action:"publish"|"abort", candidate_uid, expected_base_logical_root,
+candidate_logical_root}`. Publish verifies the durable candidate and performs
+one parent-authoritative current-root CAS. The winner returns `published`; a
+request that claims its own still-staged candidate after another candidate has
+advanced the root terminalizes its candidate as `stale_base` and returns the
+typed successful `stale_base` result with its own signed operation receipt and
+no current-root mutation.
+`abort` durably marks an unpublished candidate aborted and returns `aborted`;
+replay is idempotent. Expiry durably transitions an unpublished candidate to
+`expired`. Aborted, expired, losing, corrupt, or wrong-scope candidates can
+never publish and are reclaimed only after their replay/audit retention period.
+
+`PublicationRecordV1` is the closed durable metadata record
+`{schema:"spipe-publication-v1",operation_id,payload_hash,candidate_uid,
+previous_logical_root,result_logical_root,operation_receipt_id,published_at_ms}`.
+For `published`, one parent-authoritative transaction evaluates both the
+candidate-state and expected-current-root predicates and, if both hold,
+atomically commits (1) the new current-root pointer, (2) terminal
+`CandidateRecordV1`, (3) exact signed `OperationReceiptV1`, and (4)
+`PublicationRecordV1`. The transaction is the sole publish linearization point.
+For `stale_base` and `aborted`, the same transaction facility atomically commits
+the terminal candidate plus its signed receipt, but no current-root pointer or
+publication record. Candidate document/statistic objects were already durable
+and immutable before any terminal transaction.
+
+Candidate time and transitions are owned by the parent adapter's
+`CandidateAuthorityPort`, using its monotonic scheduler plus signed Unix audit
+time; providers cannot self-expire or revive candidates. For every terminal
+transition, the authority first prepares and signs the matching receipt in
+memory, then performs the applicable atomic transaction above. There is no
+visible intermediate state containing only a root pointer, terminal candidate,
+receipt, or publication record subset; the transaction is fsynced before any
+response.
+Expiry uses the separate authority receipt above and has no fabricated client
+operation identity.
+Abort versus publish versus expiry races have one candidate-state CAS winner.
+A request that loses the candidate-state CAS returns its own request-bound `ErrorResponseV1`
+with `operation_receipt:null` and the exact terminal error (`candidate_expired`,
+`candidate_aborted`, or `stale_base`); it never receives or replays the winner's
+receipt. Before responding, the adapter atomically writes and fsyncs a closed
+`DurableTerminalErrorV1` under the losing request's replay key. An identical
+replay after completion or restart returns its exact stored bound error bytes.
+Only byte-identical replay of the winning request may return its winning
+`OperationReceiptV1`; expiry receipt replay is internal to the authority/audit
+API. Restart loads and verifies candidate plus the correctly discriminated
+receipt before permitting replay or publication. Corruption returns
+`snapshot_corrupt`/`fatal_provider_error` and quarantines without synthesizing
+a new outcome.
+
+#### 14.17.1 Normative closure wire vectors
+
+`provider_protocol_vectors.json` contains these records as exact UTF-8 bytes,
+not merely structural examples. Canonical serialization and framing assertions
+are:
+
+| Vector | Exact canonical payload | Payload bytes / frame header / SHA-256 |
+|---|---|---|
+| `preinit_search_handshake_required` | `{"error":{"code":"handshake_required","message":"initialize first","retryable":false},"ok":false,"operation":"search","protocol":{"major":1,"minor":0},"request_id":"req-pre-1"}` | `176` / `000000b0` / `dc4f4f42bbe0ef560712e07f5fccac703c6539535b1fa5f863454b5ed55a58d3` |
+| `cancel_unknown_bound_error` | `{"error":{"code":"cancel_target_not_found","message":"target request never existed in this generation","retryable":false},"ok":false,"operation":"cancel","operation_receipt":null,"protocol":{"major":1,"minor":0},"provider_generation":"pg-00000000000000000000000000000000","query_receipt":null,"request_id":"req-cancel-1","scope_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","snapshot":"spks1-test","workspace":"WS-TEST"}` | `456` / `000001c8` / `4c70646ba965bd9f3c4524ed322ef1d8e0cd3c1d9a74c250b0359dfa11054fc8` |
+
+Payload/identity vectors use actual NUL domain terminators:
+
+| Vector | Exact canonical preimage record | Bytes / domain-preimage SHA-256 |
+|---|---|---|
+| `apply_payload_without_hash` | `{"base_logical_root":"sha256:0000000000000000000000000000000000000000000000000000000000000000","operation_id":"apply-1","operations":[]}` | `136` / `53eac50845e9d3c9014580d3136062cb03e36c7863f947124e63bb674e38308f` |
+| `absence_delete_payload_without_hash` | `{"base_logical_root":"sha256:0000000000000000000000000000000000000000000000000000000000000000","operation_id":"delete-absence-1","operations":[{"after":null,"before_hash":null,"before_revision":null,"document_id":"doc-missing","kind":"delete"}]}` | `245` / `9f3366f906834cadde2ea4b02494f47f8dc80f37418729785841e7209d1d9f08` |
+| `publish_payload_without_hash` | `{"action":"publish","candidate_logical_root":"sha256:1111111111111111111111111111111111111111111111111111111111111111","candidate_uid":"cand-test","expected_base_logical_root":"sha256:0000000000000000000000000000000000000000000000000000000000000000","operation_id":"publish-1"}` | `277` / `cf61ac4db6bd270c671a5dd63e47bcc990714d2390cfe14acbfe6131e9042eee` |
+| `candidate_uid_record` | `{"apply_payload_hash":"sha256:53eac50845e9d3c9014580d3136062cb03e36c7863f947124e63bb674e38308f","base_logical_root":"sha256:0000000000000000000000000000000000000000000000000000000000000000","candidate_logical_root":"sha256:1111111111111111111111111111111111111111111111111111111111111111","scope_digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","snapshot":"spks1-test","workspace":"WS-TEST"}` | `424` / `4adcb8c9713f37d79044d0130b7117f7a4c8d1b3e57a255a9a34be40ffbdb191`; expected UID `cand-4adcb8c9713f37d79044d0130b7117f7a4c8d1b3e57a255a9a34be40ffbdb191` |
+
+The payload hashes use their respective apply/publish domains from Section
+14.12; the candidate vector uses `SPKC-CANDIDATE-UID-V1\0`. Including the
+transmitted `payload_hash` in its own preimage, removing the empty operations
+array, omitting either null from the absence-delete record, mixing a null with
+a non-null delete precondition, hashing the `cand-` prefix, changing the domain
+terminator, or raw field concatenation is a rejection vector. The absence
+fixture runs against both an absent and a present base document: only the
+absent case returns the stored `no_op` envelope/receipt and unchanged root;
+the present case returns `precondition_conflict` with null receipt and creates
+no candidate.
+
+The expiry vector's exact unsigned canonical record is:
+
+```json
+{"apply_operation_id":"apply-1","apply_receipt_id":"or-0000000000000000000000000000000000000000000000000000000000000000","authority_generation":7,"authority_id":"candidate-authority-test","base_logical_root":"sha256:0000000000000000000000000000000000000000000000000000000000000000","candidate_expires_at_ms":1000,"candidate_logical_root":"sha256:1111111111111111111111111111111111111111111111111111111111111111","candidate_uid":"cand-test","expired_at_ms":1001,"key_id":"ed25519:2222222222222222222222222222222222222222222222222222222222222222","outcome":"expired","policy_digest":"sha256:4444444444444444444444444444444444444444444444444444444444444444","policy_version":5,"revocation_generation":3,"schema":"spipe-candidate-expiry-receipt-v1","scope_digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","snapshot":"spks1-test","workspace":"WS-TEST"}
+```
+
+It is exactly 880 bytes. With domain
+`SPKC-CANDIDATE-EXPIRY-RECEIPT-V1\0` and its eight-byte big-endian length, the
+receipt preimage SHA-256—and therefore suffix of `receipt_id`—is
+`5bf2e3a55ccfba6130ed059cb4c063c0db39b0f4fbf4845953cabbdf06c268cc`.
+The former 771-byte record without the now-required policy fields has the
+correct NUL-domain preimage SHA-256
+`f13c7cce500d3d29b81c75880195f8ffcba4006ad16313a69ac1a43294731d40`
+and is a closed-schema rejection vector, not a valid expiry receipt.
+The fixture supplies the deterministic test key/signature and asserts that
+adding `receipt_id` or `signature` to the preimage changes verification to
+failure. Mutations of authority ID/generation, either time, candidate/apply
+binding, receipt kind, or durable replay bytes also fail.
+
+### 14.18 Closed provider error codes
+
+| Code | Operations | Exact condition |
+|---|---|---|
+| `invalid_request` | all | closed-schema/type/null/order violation |
+| `noncanonical_json` | all | canonical byte-profile violation |
+| `invalid_utf8` | all | invalid/non-shortest UTF-8 or surrogate scalar |
+| `frame_too_large` | pre-binding/all | declared frame length exceeds 1 MiB before allocation |
+| `limit_exceeded` | all | another declared structural/resource bound is exceeded |
+| `protocol_unsupported` | initialize/pre-binding | protocol major/minor cannot be negotiated |
+| `handshake_required` | all except initialize | operation received before healthy initialization |
+| `incompatible_contract` | initialize/all | analyzer/score/explanation/root identity mismatch |
+| `binding_mismatch` | bound operations | generation/workspace/snapshot/scope/root/receipt/field binding differs |
+| `unsupported_capability` | search/deferred operations | known operation/query feature is not negotiated |
+| `unsupported_scope` | index_open/apply/search/explain/stats | adapter cannot isolate authorized statistics before access |
+| `snapshot_not_found` | index_open/read operations | named snapshot/root is absent |
+| `snapshot_conflict` | index_open/apply/publish | requested snapshot conflicts with the bound workspace generation |
+| `snapshot_corrupt` | index_open/read/recovery | persisted snapshot bytes/hash/schema fail verification |
+| `invalid_corpus_n` | apply/search/explain/stats | `N` is zero where scoring is required or inconsistent with live corpus |
+| `invalid_document_frequency` | apply/search/explain/stats | `df<0`, `df>N`, or postings disagree with `df` |
+| `invalid_average_length` | apply/search/explain/stats | total/average is nonpositive or not exact |
+| `invalid_denominator` | search/explain | BM25/log division denominator is nonpositive |
+| `invalid_parallel_arrays` | apply/search/explain/stats | fields/statistics/postings/terms/weights differ in length/order |
+| `invalid_logarithm_input` | search/explain | fixed-ln input is nonpositive or range reduction misses `[S,2S)` |
+| `score_overflow` | apply/search/explain/stats | checked arithmetic/conversion exceeds declared type |
+| `unauthorized` | all scoped operations | scope/field/facet/root access denied before index access |
+| `stale_cursor` | search/deferred paged operations | cursor binding/generation/root/query mismatch or expiry |
+| `stale_base` | index_apply; index_publish only after losing its candidate-state CAS to an already terminal published/stale candidate | apply base is no longer current, or the request observes that terminal state; a still-staged candidate whose base lost the current-root CAS uses the signed `status:"stale_base"` success instead |
+| `operation_conflict` | index_apply/index_publish | replay key reused with a different payload hash |
+| `candidate_missing` | index_publish | candidate absent or belongs to another context |
+| `candidate_expired` | index_publish | candidate expired before publication |
+| `candidate_aborted` | index_publish | candidate was durably aborted |
+| `deadline_exceeded` | all bound operations | monotonic deadline crossed according to Section 14.19 |
+| `cancelled` | target operation | accepted cancellation won before target linearization |
+| `cancel_target_not_found` | cancel | target request never existed in this generation |
+| `semantic_unavailable` | optional future semantic source | source failed/was denied; lexical generation remains valid |
+| `semantic_mismatch` | optional future semantic source | model/snapshot/scope/result binding differs; semantic source quarantined |
+| `provider_unavailable` | all | generation/fallback cannot serve the same logical root |
+| `internal_error` | all | bounded recoverable implementation failure with no publication |
+| `fatal_provider_error` | all | invariant/storage corruption requires generation quarantine/close |
+
+Codes do not collapse into a generic score error. Each failure publishes no
+page/root unless its operation's lifecycle explicitly says a prior durable
+candidate exists.
+
+### 14.19 Cancellation, deadlines, and shutdown
+
+Each request owns an atomic state `pending -> linearized -> completed` or
+`pending -> cancelled -> completed`. `cancel` linearizes by CAS from pending to
+cancelled; `already_complete` means the target was already linearized or
+completed. A target that never existed in this provider generation returns the
+bound `cancel_target_not_found` error with `retryable:false`,
+`query_receipt:null`, and `operation_receipt:null`; `not_found` is not a success
+status. An accepted cancellation guarantees no result page, candidate, or
+current-root publication occurs afterward. For `index_apply`, linearization is
+durable candidate creation; for every terminal `index_publish` outcome
+(`published`, `stale_base`, or `aborted`), linearization is the single atomic
+terminal transaction in Section 14.17—not an earlier candidate check or a bare
+root-pointer CAS;
+for reads, immutable snapshot pin plus completed bounded result construction.
+
+The adapter samples a monotonic clock at request admission and computes a
+checked deadline from `deadline_ms`. Expiry before linearization returns
+`deadline_exceeded`; cancellation/deadline winning before the terminal
+transaction prevents that transaction and produces no terminal receipt.
+The atomic ordering is binary: cancellation/deadline ordered before the
+terminal transaction prevents it; cancellation/deadline ordered after the
+committed transaction reports `already_complete`/cannot relabel it, and the
+adapter returns or replays the terminal signed result. No observer can order
+inside the transaction. Workers check cancel/deadline at
+bounded work intervals and immediately before entering every durable
+linearization transaction.
+
+`shutdown` first linearizes `healthy -> closed-to-new-work`, rejects new work,
+and drains already-linearized operations. It cancels pending operations, waits
+up to its configured monotonic drain deadline, then kills the owned process
+group. A publish not linearized before shutdown/cancel cannot publish during or
+after drain. Replay storage and the current-root CAS determine restart state;
+process exit timing never does.
+
+### 14.20 Closed initialization negotiation
+
+Initialization nested records are exact:
+
+```text
+RequiredContractsV1 {
+  provider:"spipe-search-provider/1.0",
+  analyzer:"spipe-unicode-lex-v1", score:"bm25-fixed-v1",
+  explanation:"bm25-explain-v1",
+  logical_index:"spipe-lexical-snapshot-v1"
+}
+ProviderCapabilitiesV1 {
+  index_delta:true, lexical:true, explain:true, stats:true, cancel:true,
+  shutdown:true, phrase:false, regex:false, wildcard:false,
+  duplicate:false, symbols:false, semantic:false,
+  scope_partition:"independent"|"unsupported"
+}
+ProviderLimitsV1 {
+  max_frame_bytes:1048576, max_query_bytes:4096, max_query_tokens:128,
+  max_filters:32, max_values_per_filter:64, max_hits:1000,
+  max_delta_documents:1000, max_fields_per_document:5,
+  max_field_value_bytes:1048576, max_explanation_terms:128,
+  max_explanation_fields:5, max_explanation_bytes_per_hit:65536,
+  max_page_bytes:524288, min_deadline_ms:1, max_deadline_ms:30000
+}
+InitializeRequiredIdsV1 {
+  provider_ids:[1..16 unique UTF-8 sorted], analyzer_ids:[1..16],
+  score_ids:[1..16], explanation_ids:[1..16], logical_index_ids:[1..16]
+}
+```
+
+Every ID is `IdText`; arrays are unique and unsigned-UTF-8 sorted. The client
+request contains `required:RequiredContractsV1` and
+`limits:{max_frame_bytes:1048576}` only. The result contains protocol,
+`provider:"spipe-search-provider/1.0"`, `implementation_digest:HashText`, the
+five arrays from `InitializeRequiredIdsV1`, exactly
+`ProviderCapabilitiesV1`, exactly `ProviderLimitsV1`, and
+`optional_fields:[]`. Protocol 1.0 requires the optional list to be empty;
+future minor versions may name at most 32 `IdText` leaf fields, but cannot make
+a required/semantic field optional. Unknown nested keys or a value exceeding a
+client hard maximum rejects initialization. Negotiated effective limits are
+the componentwise minima; they are recorded in generation identity.
