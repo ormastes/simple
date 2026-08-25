@@ -81,6 +81,39 @@ one materially changed verification cycle, subject to its own guard.
 above are credible optimization targets but remain hypotheses until measured;
 they cannot convert the missing runtime result into acceptance.
 
+## Second qualified-ceiling attempt after bounded optimization
+
+After the bounded reusable-schedule optimization, the unchanged
+contract-complete **nine-scenario** matrix was launched once under the focused
+180-second ceiling. It reached the ceiling exactly and exited `124` without a
+test summary. `/usr/bin/time` was terminated with the test process, so this
+attempt has no maximum-RSS result and must not reuse the 43,852 KiB bounded
+guard-probe measurement.
+
+The execution receipt was:
+
+- resolved executable:
+  `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`;
+- reported version: `Simple Language v1.0.0-RC`;
+- executable SHA-256:
+  `3ef64bffc68d0b1c2dd851d1f02976ca98fba6f88fbb406dddf56ba7f3ca27c0`;
+- provenance: the wrapper warned that this is a Rust-built bootstrap seed, not
+  an admitted pure-Simple Stage 4 executable;
+- result: exit `124` at exactly 180 seconds, no summary, RSS unavailable.
+
+This is a second qualified-ceiling failure, distinct from the earlier
+approximately 3:09 uncontrolled termination. Static review of the complete
+nine-scenario matrix is finished, but no candidate matrix files are accepted
+and the full `W4-SRCH-31` gate remains `FAIL`. It proves neither Stage 4
+admission nor a passing 1-MiB oracle.
+
+The next remediation is instrumentation that emits bounded stage-level
+progress receipts (fixture construction, reference digest, streaming update,
+compression, checkpoint/finalization) before another qualified attempt, or
+execution of the unchanged matrix with a provenance-qualified pure-Simple
+Stage 4 executable. Do not weaken the timeout, shrink the matrix, report ten
+scenarios, infer RSS, or rerun this attempt unchanged.
+
 ## Cross-links
 
 - `doc/04_architecture/infra/spipe/spipe_knowledge_compiler_cooperative_streaming.md`

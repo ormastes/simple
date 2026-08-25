@@ -336,3 +336,20 @@ guard probe passed in 1.26 s at 43,852 KiB. That probe is not the qualified
 1-MiB oracle and cannot close the row. No further verification cycle is
 authorized in this session. See
 `doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.
+
+A later single execution of the contract-complete nine-scenario matrix after
+the bounded optimization hit exactly 180 seconds and exited `124` without a
+summary. The resolved release-path binary reported `Simple Language
+v1.0.0-RC`, SHA-256
+`3ef64bffc68d0b1c2dd851d1f02976ca98fba6f88fbb406dddf56ba7f3ca27c0`, while
+its wrapper identified Rust-bootstrap-seed provenance; it is not admitted
+Stage 4 evidence. `/usr/bin/time` was terminated, so RSS is unavailable. Keep
+this result distinct from the earlier approximately 3:09 uncontrolled run.
+Static high-capability matrix review is complete, but no candidate matrix files
+are accepted and `W4-SRCH-31` remains `FAIL`.
+
+The next assigned remediation must either add bounded stage-level progress
+receipts or supply a provenance-qualified pure-Simple Stage 4 executable for
+the unchanged matrix. It must not rerun unchanged, weaken 180 seconds, shrink
+the 1-MiB oracle, claim ten scenarios, claim Stage 4, or borrow an RSS value
+from the bounded probe.

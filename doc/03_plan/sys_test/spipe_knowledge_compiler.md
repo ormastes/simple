@@ -1174,3 +1174,21 @@ bounded cycle-3 guard probe passed in 1.26 s at 43,852 KiB. Status remains
 bounded probe do not admit the full qualified 1-MiB row. Three cycles are
 consumed and no further run is authorized in this session. Reproduction and acceptance criteria:
 `doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.
+
+The second qualified-ceiling attempt, made once after the bounded
+optimization, executed the contract-complete nine-scenario matrix and exited
+`124` at exactly 180 seconds without a summary. The resolved executable was
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
+reported `Simple Language v1.0.0-RC`, and had SHA-256
+`3ef64bffc68d0b1c2dd851d1f02976ca98fba6f88fbb406dddf56ba7f3ca27c0`;
+the wrapper warning identifies Rust-built bootstrap-seed provenance, so this
+is not admitted Stage 4 evidence. `/usr/bin/time` was killed and provides no
+RSS measurement. This exact-ceiling failure is separate from the earlier
+approximately 3:09 uncontrolled termination.
+
+The complete matrix has passed static highest-capability review, but no
+candidate matrix files are accepted and the executed full `W4-SRCH-31` gate
+remains `FAIL`. Before another qualified execution, capture bounded,
+payload-free stage progress receipts or use a provenance-qualified pure-Simple
+Stage 4 executable. The nine-scenario matrix, 1-MiB workload, and 180-second
+ceiling remain unchanged; no ten-scenario, Stage 4, or RSS claim is permitted.

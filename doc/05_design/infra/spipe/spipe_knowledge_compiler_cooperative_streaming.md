@@ -936,3 +936,21 @@ scale-sensitive value-array copies through an owner-local fixed block and
 bounded immutable byte-loan path; profile fixture, reference, update, and
 compression separately. Do not shrink the required 1 MiB oracle. See
 `doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.
+
+The subsequent contract-complete nine-scenario run after the bounded
+optimization reached the exact 180-second ceiling, exited `124`, and emitted
+no summary. Its resolved executable was
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
+(`Simple Language v1.0.0-RC`, SHA-256
+`3ef64bffc68d0b1c2dd851d1f02976ca98fba6f88fbb406dddf56ba7f3ca27c0`),
+but the wrapper classified it as a Rust-built bootstrap seed rather than an
+admitted Stage 4 artifact. `/usr/bin/time` died with the process, so this run
+has no RSS measurement. It is separate from the earlier approximately 3:09
+uncontrolled run. Complete-matrix static high review is done, but no candidate
+matrix files are accepted and the full gate remains `FAIL`.
+
+Before another execution, add a bounded, payload-free stage progress receipt
+that identifies fixture, reference, update/compression, checkpoint, and final
+emission progress, or acquire a provenance-qualified pure-Simple Stage 4
+executable and run the unchanged matrix. Do not extend the timeout, reduce the
+1-MiB workload, relabel the matrix as ten scenarios, or infer an RSS value.

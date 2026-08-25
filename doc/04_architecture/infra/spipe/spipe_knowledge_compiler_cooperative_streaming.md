@@ -527,3 +527,17 @@ full-versus-bounded parity, and its cycle-3 bounded guard probe passed in 1.26 s
 at 43,852 KiB. This is not the mandatory full qualified 1-MiB oracle and does
 not close `W4-SRCH-31`. See
 `doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.
+
+After that bounded optimization, one contract-complete nine-scenario attempt
+under the exact 180-second ceiling exited `124` with no summary. The resolved
+release-path executable reported `Simple Language v1.0.0-RC` and SHA-256
+`3ef64bffc68d0b1c2dd851d1f02976ca98fba6f88fbb406dddf56ba7f3ca27c0`, but
+the wrapper identified it as a Rust-built bootstrap seed; it is therefore not
+admitted Stage 4 evidence. `/usr/bin/time` was killed with the attempt, so RSS
+is unavailable. This failure is distinct from the earlier approximately 3:09
+uncontrolled termination. Static high-capability review covers the complete
+matrix, but no candidate matrix files are accepted and `W4-SRCH-31` remains
+`FAIL`. The next architectural remediation is a payload-free, bounded
+stage-level progress receipt or the same unchanged matrix under a
+provenance-qualified pure-Simple Stage 4 executable; neither the ceiling nor
+the nine-scenario oracle may be weakened.
