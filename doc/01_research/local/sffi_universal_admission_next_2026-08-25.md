@@ -12,6 +12,33 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## SimpleOS tools-test authority checkpoint
+
+`src/os/tools_test.spl` had sixty ambient calls to its one serial-output
+interface.  The declaration is now explicitly tagged and every call routes
+through one mandatory-inline `ffi` owner.  The focused
+`os-tools-test-sffi-authority.shs` ratchet passed and pins both hosted and
+freestanding runtime providers.
+
+Review found a direct fabricated-test-success defect: `test_run(code, name)`
+ignored every tool exit code and always invoked `test_ok`.  It now records PASS
+only for zero and records a named FAIL containing the nonzero exit code
+otherwise.  Successful runs retain the same tool invocation, one result line,
+counter update, allocation behavior, and O(1) harness work.  No lookup, lock,
+hash, signature operation, or generic dispatch was added.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,211 -> 19,152
+- lexical unsafe: 3,256 -> 3,257
+- function unsafe: unchanged at 919
+- missing authority: 15,036 -> 14,976
+
+The file now reports one raw row, lexically authorized, and zero missing
+authority.  This fixes the false-pass harness but does not cryptographically
+verify the invoked tools or runtime artifact; verified-and-signed admission
+remains 0.
+
 ## RISC-V boot-services authority checkpoint
 
 `riscv_services.spl` had twelve PCI/network/storage/log interfaces and 63
