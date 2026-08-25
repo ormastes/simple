@@ -61,30 +61,28 @@ use nogc_async_mut.wm.host.{WmHost2d, WmHostSurface, WmHostStatus, WmHostEventPo
 use std.common.window_protocol.window_protocol.{WmInputEvent}
 use std.common.window_protocol.geometry.{WindowId, Point, KeyCode, Modifiers, WmEventType}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color as FbColor}
-
-extern fn rt_port_inb(port: u64) -> u64
-extern fn rt_port_outb(port: u16, value: u8)
+use os.kernel.arch.x86.port_io_owner.{x86_port_inb, x86_port_outb}
 
 # ---------------------------------------------------------------------------
 # PS/2 controller — the real event source
 # ---------------------------------------------------------------------------
 
-fn _ps2_status_port() -> u64:
+fn _ps2_status_port() -> u16:
     0x64
 
-fn _ps2_data_port() -> u64:
+fn _ps2_data_port() -> u16:
     0x60
 
-fn _ps2_output_full() -> u64:
+fn _ps2_output_full() -> u8:
     0x01
 
 fn _ps2_has_byte() -> bool:
-    (rt_port_inb(_ps2_status_port()) & _ps2_output_full()) != 0
+    (x86_port_inb(_ps2_status_port()) & _ps2_output_full()) != 0
 
 fn _ps2_wait_write():
     var i: u64 = 0
     while i < 100000:
-        if (rt_port_inb(_ps2_status_port()) & 2) == 0:
+        if (x86_port_inb(_ps2_status_port()) & 2) == 0:
             return
         i = i + 1
 
@@ -99,7 +97,7 @@ fn _ps2_flush():
     var i: u64 = 0
     while i < 32:
         if _ps2_has_byte():
-            rt_port_inb(_ps2_data_port())
+            x86_port_inb(_ps2_data_port())
         i = i + 1
 
 fn ps2_event_source_init() -> bool:
@@ -118,20 +116,20 @@ fn ps2_event_source_init() -> bool:
     """
     _ps2_flush()
     _ps2_wait_write()
-    rt_port_outb(0x64, 0xAE)
+    x86_port_outb(0x64, 0xAE)
     _ps2_wait_write()
-    rt_port_outb(0x64, 0x20)
+    x86_port_outb(0x64, 0x20)
     _ps2_wait_read()
-    val config = rt_port_inb(_ps2_data_port())
+    val config = x86_port_inb(_ps2_data_port())
     _ps2_wait_write()
-    rt_port_outb(0x64, 0x60)
+    x86_port_outb(0x64, 0x60)
     _ps2_wait_write()
-    rt_port_outb(0x60, (config & 0xEF).to_u8())
+    x86_port_outb(0x60, (config & 0xEF).to_u8())
     _ps2_flush()
     _ps2_wait_write()
-    rt_port_outb(0x60, 0xF4)
+    x86_port_outb(0x60, 0xF4)
     _ps2_wait_read()
-    val ack = rt_port_inb(_ps2_data_port())
+    val ack = x86_port_inb(_ps2_data_port())
     _ps2_flush()
     ack == 0xFA
 
@@ -300,7 +298,7 @@ impl WmHost2d for WmHost2dSimpleOs:
                 state: "queue-empty",
                 event: WmInputEvent.mouse_move(WindowId(value: 0u64), Point.xy(0, 0))
             )
-        val scancode = rt_port_inb(_ps2_data_port())
+        val scancode = x86_port_inb(_ps2_data_port())
         val released = (scancode & 0x80) != 0
         val code = (scancode & 0x7F).to_u32()
         if released:
