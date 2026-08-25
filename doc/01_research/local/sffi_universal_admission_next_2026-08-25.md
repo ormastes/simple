@@ -282,6 +282,12 @@ facades rather than new runtime ABI calls. No production compiler, optimizer,
 runtime memory-safety tool, or benchmark was available, so executable mapping
 remains unverified beyond the static ratchet and is not signed.
 
+Adjacent module-loader propagation now confines its two owned mapping
+protection transitions and two validated entry-point calls to four minimal
+`raw_ptr` blocks. Two unused raw-memory imports were removed. Relocation,
+cache, and symbol-table algorithms are unchanged, and no authority was widened
+to the loader function or module level.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
