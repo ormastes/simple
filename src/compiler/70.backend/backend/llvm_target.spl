@@ -21,6 +21,22 @@ fn llvm_riscv64_hard_float_requested() -> bool:
     val arch = requested.split("-")[0]
     arch == "riscv64gc" or arch == "rv64gc"
 
+fn llvm_arm32_baremetal_environment(normalized_target: text) -> text:
+    """Preserve an explicit ARM EABI float contract in the LLVM triple.
+
+    ARM32 bare-metal code used to collapse both `...-eabi` and `...-eabihf`
+    to `armv7-unknown-none-eabi`.  That made `--target` untruthful and could
+    produce an object whose ELF attributes disagreed with a hard-float Cosmos
+    consumer.  Unknown/short ARM aliases retain the conservative soft-float
+    EABI default.
+    """
+    # `from_target_with_mode` normalizes the boundary value once. Do not
+    # allocate another trimmed/lowercased copy for every compiled module.
+    if normalized_target.contains("eabihf"):
+        "eabihf"
+    else:
+        "eabi"
+
 # ============================================================================
 # LLVM Target Triple
 # ============================================================================
@@ -91,7 +107,8 @@ impl LlvmTargetTriple:
                 case X86:
                     LlvmTargetTriple(arch: "i686", vendor: vendor, os: os, env: env)
                 case Arm:
-                    LlvmTargetTriple(arch: "armv7", vendor: vendor, os: os, env: Some("eabi"))
+                    val arm_env = llvm_arm32_baremetal_environment(requested_target)
+                    LlvmTargetTriple(arch: "armv7", vendor: vendor, os: os, env: Some(arm_env))
                 case Riscv32:
                     val contract = riscv_baremetal_target_contract(target)
                     LlvmTargetTriple(arch: contract.arch, vendor: contract.vendor, os: contract.os, env: contract.env)
@@ -535,3 +552,5 @@ fn detect_host_arch() -> text:
         case "armv7l" | "armv7" | "arm": "armv7"
         case "riscv32": "riscv32"
         case _: "x86_64"
+
+export llvm_arm32_baremetal_environment

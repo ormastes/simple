@@ -1,0 +1,112 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+cd "$root"
+
+simple_bin=${SIMPLE_BIN:-bin/simple}
+command -v "$simple_bin" >/dev/null 2>&1 || {
+    echo "FAIL: missing Pure Simple compiler: $simple_bin" >&2
+    exit 1
+}
+expected_compiler_sha=${SIMPLE_ADMITTED_COMPILER_SHA256:-}
+case "$expected_compiler_sha" in
+    ''|*[!0-9a-f]*)
+        echo "FAIL: SIMPLE_ADMITTED_COMPILER_SHA256 must bind the admitted compiler" >&2
+        exit 1
+        ;;
+esac
+[ "${#expected_compiler_sha}" -eq 64 ] || {
+    echo "FAIL: SIMPLE_ADMITTED_COMPILER_SHA256 must contain 64 lowercase hex digits" >&2
+    exit 1
+}
+digest_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "FAIL: no SHA-256 tool is available" >&2
+        return 1
+    fi
+}
+compiler_sha_before=$(digest_file "$simple_bin")
+[ "$compiler_sha_before" = "$expected_compiler_sha" ] || {
+    echo "FAIL: compiler hash does not match admission" >&2
+    exit 1
+}
+if ! compiler_version=$("$simple_bin" --version 2>&1); then
+    echo "FAIL: compiler identity command failed" >&2
+    exit 1
+fi
+[ -n "$compiler_version" ] || {
+    echo "FAIL: compiler identity is empty" >&2
+    exit 1
+}
+case "$compiler_version" in
+    *"Rust-built"*|*"bootstrap seed only"*|*"debug build"*)
+        echo "FAIL: ARM32 emit-object acceptance requires a Pure Simple compiler" >&2
+        exit 1
+        ;;
+esac
+
+for tool in readelf nm clang ld.lld; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "FAIL: missing required tool: $tool" >&2
+        exit 1
+    }
+done
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-arm32-emit-object.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+object="$work/simple_object_link_probe.o"
+combined="$work/cosmos_link_probe.o"
+log="$work/native-build.log"
+
+SIMPLE_NO_STUB_FALLBACK=1 "$simple_bin" native-build --backend llvm \
+    --source test/fixtures/os/cosmos \
+    --entry test/fixtures/os/cosmos/simple_object_link_probe.spl \
+    --entry-closure --target armv7-unknown-none-eabihf --emit-object \
+    --cache-dir "$work/cache" -o "$object" >"$log" 2>&1
+
+! grep -Eiq "unknown option.*emit-object|ignoring.*emit-object" "$log"
+header=$(LC_ALL=C readelf -hW "$object")
+printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF32'
+printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+REL([[:space:]]|$)'
+printf '%s\n' "$header" | grep -Eq 'Machine:[[:space:]]+ARM([[:space:]]|$)'
+printf '%s\n' "$header" | grep -Eq 'Flags:.*hard-float ABI'
+sections=$(LC_ALL=C readelf -SW "$object")
+printf '%s\n' "$sections" | grep -Eq '\.text([.[:space:]]|$)'
+printf '%s\n' "$sections" | grep -Eq '\.symtab([[:space:]]|$)'
+printf '%s\n' "$sections" | grep -Eq '\.strtab([[:space:]]|$)'
+readelf -Ws "$object" |
+    grep -Eq 'FUNC[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[1-9][0-9]*[[:space:]]+cosmos_simple_object_link_probe$'
+if nm -u "$object" | grep -Fq '__aeabi_unwind_cpp_pr0'; then
+    echo "FAIL: ARM32 object retains __aeabi_unwind_cpp_pr0" >&2
+    exit 1
+fi
+
+printf '%s\n' \
+    'extern unsigned cosmos_simple_object_link_probe(unsigned);' \
+    'unsigned cosmos_object_consumer(unsigned value) {' \
+    '    return cosmos_simple_object_link_probe(value);' \
+    '}' >"$work/consumer.c"
+clang --target=armv7-unknown-none-eabihf -mcpu=cortex-a9 -marm \
+    -ffreestanding -nostdlib -fno-builtin -c "$work/consumer.c" \
+    -o "$work/consumer.o"
+readelf -rW "$work/consumer.o" | grep -Fq 'cosmos_simple_object_link_probe'
+ld.lld -r "$object" "$work/consumer.o" -o "$combined"
+combined_header=$(LC_ALL=C readelf -hW "$combined")
+printf '%s\n' "$combined_header" | grep -Eq 'Type:[[:space:]]+REL([[:space:]]|$)'
+printf '%s\n' "$combined_header" | grep -Eq 'Machine:[[:space:]]+ARM([[:space:]]|$)'
+nm "$combined" | grep -Eq '[[:space:]]T[[:space:]]+cosmos_simple_object_link_probe$'
+if nm -u "$combined" | grep -Fq '__aeabi_unwind_cpp_pr0'; then
+    echo "FAIL: combined Cosmos object retains __aeabi_unwind_cpp_pr0" >&2
+    exit 1
+fi
+[ "$(digest_file "$simple_bin")" = "$compiler_sha_before" ] || {
+    echo "FAIL: compiler changed during acceptance" >&2
+    exit 1
+}
+
+echo "Pure Simple ARM32 emit-object Cosmos link: PASS"

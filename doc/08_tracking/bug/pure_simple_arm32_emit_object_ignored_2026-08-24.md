@@ -2,7 +2,11 @@
 
 ## Status
 
-OPEN — blocks linking Pure-Simple Cosmos HAL owners into the ARMv7 firmware.
+SOURCE FIX PRESENT; EXECUTION OPEN — the current Pure Simple source accepts
+`--emit-object`, preserves an explicit ARM32 `eabihf` bare-metal target, and
+has an exact Cosmos relocatable-link acceptance runner. A freshly admitted
+Pure Simple compiler has not executed that runner in this lane, so the
+firmware prerequisite is not yet claimed closed.
 
 ## Reported observation
 
@@ -58,6 +62,38 @@ Pure-Simple driver source. Do not feed this executable to the Cosmos firmware
 relocatable link or fall back to the Rust seed. The migration prerequisite is
 a Stage-4 Pure-Simple compiler that emits an ARM32 `REL` object and preserves
 the exported C symbol in this fixture.
+
+## Current source implementation
+
+The current Pure Simple CLI recognizes and advertises `--emit-object`, carries
+the selection through `SIMPLE_NATIVE_BUILD_EMIT_OBJECT`, and makes entry
+closure implicit for non-executable output. The driver copies a single backend
+object or combines multiple objects with `ld.lld -r`, then returns without the
+ET_EXEC/native link path.
+
+The ARM32 target owner now distinguishes an explicit
+`armv7-unknown-none-eabihf` request from the conservative `...-eabi` default.
+Previously the bare-metal triple builder collapsed both requests to `eabi`, so
+the emitted ELF attributes could disagree with a hard-float Cosmos consumer.
+
+Exact pending execution coverage is:
+
+```sh
+SIMPLE_BIN=<fresh-pure-simple-compiler> \
+SIMPLE_ADMITTED_COMPILER_SHA256=<sha256-of-that-compiler> \
+  sh test/02_integration/os/cosmos/run_pure_simple_arm32_emit_object_test.shs
+```
+
+The runner requires an exact admission hash, successful nonempty identity,
+rejects Rust/bootstrap/debug identity and ignored-option diagnostics,
+then checks ELF32, ET_REL, EM_ARM, hard-float ABI attributes, the exact exported
+`cosmos_simple_object_link_probe` global function, a real ARM call relocation,
+successful `ld.lld -r` consumption, and absence of
+`__aeabi_unwind_cpp_pr0` before and after combination.
+
+This update is source-only and unverified by explicit instruction. Closing the
+bug still requires binding the compiler hash, fixture blob, command, object
+hash, ELF header/symbol/relocation output, and combined-object result.
 
 ## Unblocked adjacent work
 
