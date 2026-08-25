@@ -3,6 +3,8 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 source_file="$root/src/compiler_rust/compiler/src/interpreter_extern/net_tls_client.rs"
+canonical_facade="$root/src/lib/nogc_sync_mut/io/tls_sffi.spl"
+app_facade="$root/src/app/io/tls_sffi.spl"
 failed=0
 
 if grep -n -E '_ => (RuntimeValue::NIL|0)|unwrap_or\((0|false)\)' "$source_file"; then
@@ -16,6 +18,18 @@ if ! grep -q 'struct RuntimeTextArg' "$source_file" ||
 fi
 if ! grep -q 'foreign text contract returned null' "$source_file"; then
     echo "TLS client SFFI must reject null positive-length output" >&2
+    failed=1
+fi
+if grep -n -E 'extern fn rt_|^[[:space:]]*fn ' "$app_facade"; then
+    echo "application TLS compatibility facade duplicates providers or wrappers" >&2
+    failed=1
+fi
+if ! grep -q '^export use std\.nogc_sync_mut\.io\.tls_sffi\.\*$' "$app_facade"; then
+    echo "application TLS facade must re-export the canonical owner" >&2
+    failed=1
+fi
+if [ "$(grep -c '^[[:space:]]*extern fn rt_tls_' "$canonical_facade")" -ne 35 ]; then
+    echo "canonical TLS declaration inventory changed without contract review" >&2
     failed=1
 fi
 

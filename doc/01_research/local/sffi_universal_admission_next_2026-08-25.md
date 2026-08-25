@@ -568,3 +568,19 @@ ratchet passed. Production execution and signed admission remain unavailable.
 One declaration row is removed: 11,977 rows / 3,156 symbols, 1,189 tagged, 637
 `unsafe_contract_declared`, 10,522 untouched, and zero exact-artifact
 verified-and-signed.
+
+## Application TLS facade consolidation checkpoint
+
+`app.io.tls_sffi` was a second copy of the canonical TLS module: the same 35
+raw declarations and wrappers, differing only because the application copy did
+not export its surface directly. It is now a compatibility re-export of
+`std.nogc_sync_mut.io.tls_sffi`, and `app.io.tls_ffi` continues to select its
+named safe facade from that path.
+
+This is a zero-runtime-cost consolidation: no TLS provider call, branch,
+allocation, copy, lookup, or handshake behavior changes. The focused TLS
+fail-closed/static-owner ratchet passed. Production execution and signed
+admission remain unavailable. Thirty-five duplicate declaration rows are
+removed: 11,942 rows / 3,156 symbols, 1,189 tagged, 637
+`unsafe_contract_declared`, 10,487 untouched, and zero exact-artifact
+verified-and-signed.

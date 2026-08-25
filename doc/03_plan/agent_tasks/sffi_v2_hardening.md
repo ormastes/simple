@@ -404,3 +404,7 @@ passing placeholder.
     call in canonical `crypto_sffi`. Security correlation IDs must fail closed
     rather than degrade to timestamp-only values. Preserve one provider call
     and bounded validation; exact-artifact signature admission remains open.
+77. Keep `app.io.tls_sffi` as a zero-cost compatibility re-export of the
+    canonical library owner; never restore its 35 duplicate declarations or
+    wrappers. Next type the canonical TLS handle/read/write/status contracts
+    and migrate application modules that still import raw TLS symbols directly.
