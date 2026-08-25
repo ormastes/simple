@@ -5,6 +5,7 @@ use std.nogc_sync_mut.io.thread.{thread_sleep_ms}
 use std.scv.core.{scv_rel_path, scv_is_repo_path, scv_status_index_path, scv_object_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe}
 use std.scv.core.{scv_bookmarks_path}
 use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_workspace_parent_error, scv_write_chunk_from_file, scv_write_file_object, scv_write_tree_object, scv_write_commit, scv_write_commit_carry, scv_fault_exit, scv_write_operation, scv_write_text, scv_content_id_for_file, scv_commit_tree, scv_commit_state, scv_commit_change, scv_object_field}
+use std.scv.journal.{scv_wal_recover, scv_wal_begin, scv_wal_commit, scv_wal_abort, scv_journal_record_event}
 
 fn scv_should_skip(root: text, path: text) -> bool:
     val rel = scv_rel_path(root, path)
@@ -50,6 +51,7 @@ fn scv_line_chunk(line: text) -> text:
 fn scv_snapshot(root: text) -> text:
     if not scv_repo_exists(root):
         return "ERROR repository not initialized\n"
+    scv_wal_recover(root)
     val parent_error = scv_workspace_parent_error(root)
     if parent_error != "":
         return parent_error
@@ -75,9 +77,13 @@ fn scv_snapshot(root: text) -> text:
     val parent = scv_read_workspace_commit(root)
     val commit = scv_write_commit_carry(root, parent, tree, scv_state_private())
     scv_fault_exit("commit")
+    scv_wal_begin(root, commit, commit)
     val op = scv_write_operation(root, scv_current_op(root), commit, "snapshot")
     if op.starts_with("ERROR"):
+        scv_wal_abort(root, commit)
         return op
+    scv_wal_commit(root, commit)
+    scv_journal_record_event(root, op, "snapshot", commit, tree)
     scv_write_text(scv_status_index_path(root), index)
     "snapshot {commit} {op}\n"
 

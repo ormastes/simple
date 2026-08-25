@@ -5,9 +5,10 @@ use app.io.mod (file_exists, file_read, file_copy, dir_create, dir_walk, process
 use std.nogc_sync_mut.io.file_ops.{file_rename}
 use std.nogc_sync_mut.io.dir_ops.{dir_list}
 use std.scv.core.{scv_repo_dir, scv_objects_dir, scv_head_path, scv_workspace_path, scv_object_path, scv_chunk_path}
-use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_write_text, scv_hash_text, scv_content_id_for_file, scv_object_field, scv_create_parent_dir}
+use std.scv.store.{scv_repo_exists, scv_repo_format_version, scv_current_op, scv_read_workspace_commit, scv_write_text, scv_hash_text, scv_content_id_for_file, scv_object_field, scv_create_parent_dir}
 use std.scv.integrity.{scv_current_tree_content, scv_validate_deterministic_object_hashes, scv_validate_current_bookmarks, scv_validate_current_head, scv_validate_parser_index}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.scv.journal.{scv_wal_recover, scv_journal_record_event}
 
 fn scv_checkpoints_dir(root: text) -> text:
     "{scv_repo_dir(root)}/checkpoints"
@@ -33,10 +34,11 @@ fn scv_checkpoint(root: text) -> text:
     val rels = scv_checkpoint_rel_sources(root)
     if rels.len() == 0:
         return "ERROR — nothing was checked (no checkpoint sources)\n"
-    var rows = ""
+    var row_list: [text] = []
     for rel in rels:
         val src = "{scv_repo_dir(root)}/{rel}"
-        rows = rows + "{scv_content_id_for_file(src)} {rel}\n"
+        row_list.push("{scv_content_id_for_file(src)} {rel}\n")
+    val rows = row_list.join("")
     val manifest = "format: 1\nhead_op: {scv_current_op(root)}\ncommit: {scv_read_workspace_commit(root)}\nfiles: {rels.len()}\n--\n{rows}"
     val id = scv_hash_text("checkpoint", manifest)
     val final_dir = "{scv_checkpoints_dir(root)}/{id}"
@@ -52,6 +54,7 @@ fn scv_checkpoint(root: text) -> text:
     scv_write_text("{stage}/manifest.sdn", manifest)
     if not file_rename(stage, final_dir):
         return "ERROR checkpoint publish failed: {id}\n"
+    scv_journal_record_event(root, scv_current_op(root), "checkpoint", id, id)
     "checkpoint {id} files={rels.len()}\n"
 
 fn scv_checkpoint_manifest_id_ok(id: text, manifest: text) -> bool:
@@ -149,6 +152,12 @@ fn scv_doctor(root: text) -> text:
     var out = ""
     var checks = 0
     var failed = 0
+    # WAL recovery first: an incomplete trailing transaction is rolled back
+    # (or forward) before any state below is validated. STALE is non-fatal.
+    val wal_result = scv_wal_recover(root)
+    val journal_row = if wal_result == "wal clean\n": "OK" else: "STALE"
+    out = out + "journal  {journal_row}\n"
+    checks = checks + 1
     val objects_ok = scv_validate_deterministic_object_hashes(root) == ""
     val objects_row = if objects_ok: "OK" else: "FAIL"
     out = out + "objects  {objects_row}\n"
@@ -188,6 +197,12 @@ fn scv_doctor(root: text) -> text:
     val parser_row = if scv_validate_parser_index(root) == "": "OK" else: "STALE"
     out = out + "parser index  {parser_row}\n"
     checks = checks + 1
+    val format_version = scv_repo_format_version(root)
+    val format_row = if format_version == 1 or format_version == 2: "OK" else: "FAIL"
+    out = out + "format  v{format_version}  {format_row}\n"
+    checks = checks + 1
+    if format_row == "FAIL":
+        failed = failed + 1
     if failed == 0:
         out + "PASS — {checks} check(s), 0 failed\n"
     else:

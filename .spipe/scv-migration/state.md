@@ -20,7 +20,25 @@ infra / process
 - [x] SCV-MIG-06 critical lint profile + allocation bounds (mci lane) — `PASS — scripts/check/check-scv-mission-critical.shs: PASS — 0 file(s) linted, 4 bound(s) verified (lint sweep skipped; run with --lint)`; cross-lane leftover fixed: `src/lib/scv/store.spl` COLL006 x2 removed (join instead of concat-in-loop), `bin/simple lint --profile=critical src/lib/scv/store.spl` -> `Lint passed: all files clean`
 - [ ] SCV-MIG-07 PQ hash-based signing (trust lane) — mechanism PROVEN end-to-end with the INSECURE fixture key (see 7-verify); direct run FAILs only because step/checker scripts await the HUMAN real-root signature: `FAIL — scripts/check/check-scv-migration-todo.shs not verified: FAIL — 1 invalid: scripts/check/check-scv-migration-todo.shs (rc=1)`
 - [ ] SCV-MIG-08 ledger + hourly checker + timer (this lane) — checker selftest green (`PASS — 5 selftest fixture(s) checked, 0 failed`); timer awaits HUMAN install: `FAIL — checker selftest rc=0 [PASS — 5 selftest fixture(s) checked, 0 failed]; timer rc=1 [FAIL — not installed (no systemd --user timer scv-migration-check.timer, no crontab marker; requested interval 1h)]`
-- [ ] SCV-MIG-09..14 Week 2 — S1→S2 (fsck, journal+WAL, rebuild-db, format versions, ro adapter, S2 drill)
+- [x] SCV-MIG-09..14 Week 2 — S1→S2, closed 2026-08-25. Direct step runs, all real-root
+  signed (leaves 14-19; combined verify `PASS — 17 file(s) verified`):
+  - SCV-MIG-09 `PASS — test/integration/app/scv_fsck_strong_spec.spl: Results: 4 total, 4 passed, 0 failed`
+  - SCV-MIG-10 `PASS — test/integration/app/scv_journal_wal_spec.spl: Results: 4 total, 4 passed, 0 failed`
+  - SCV-MIG-11 `PASS — test/integration/app/scv_rebuild_db_spec.spl: Results: 3 total, 3 passed, 0 failed`
+  - SCV-MIG-12 `PASS — test/integration/app/scv_format_version_spec.spl: Results: 3 total, 3 passed, 0 failed`
+  - SCV-MIG-13 `PASS — backend adapter spec green [Results: 4 total, 4 passed, 0 failed]`
+  - SCV-MIG-14 `PASS — 10 drill step(s) green: .scv deleted and fully recovered; verify-backends + git fsck clean`
+  - Full W2 regression sweep green (12 specs): mvp 11/11, changeid 4/4, checkpoint 4/4,
+    doctor 4/4 (stale-row example updated: journal WAL replay now reconciles the workspace
+    pointer first, so the stale row is `journal STALE`, not `view STALE`), verify_backends 3/3,
+    fault_injection 5/5, allocation_bounds 4/4, journal_wal 4/4, rebuild_db 3/3,
+    fsck_strong 4/4, format_version 3/3, backend_git 4/4, cli_dispatch 1/1.
+  - Checker real run (`--now 2026-09-01T00:00:00Z`): `PASS — 14 step(s) checked, 14 done, 0 active, 0 blocked`;
+    ledger rows MIG-09..14 flipped to done by the signed checker itself.
+  - Checker bug fixed + re-signed (leaf 20): when every due step executed and PASSed in one
+    run, the quiet-hour branch (`n-d==0`) discarded the rewritten ledger (rm not mv), losing
+    the done-flips — proven red (rows stayed `pending` after a green real run), fixed by
+    gating quiet-hour on `executed==0`, selftest still `6 fixture(s) OK`.
 - [ ] SCV-MIG-15..20 Week 3 — S2→S3 (tree agreement, shadow replication, bundles, crash harness, FileBuffer, S3 review)
 - [ ] SCV-MIG-21..25 Week 4 — S3→S4 (quarantine GC, recover levels, restore drills, dual-write compare, S4 review)
 

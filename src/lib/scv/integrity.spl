@@ -4,7 +4,8 @@ use app.io.mod (file_exists, file_read, dir_walk, file_size)
 use std.nogc_sync_mut.database.core.{SdnDatabase}
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
 use std.scv.core.{scv_objects_dir, scv_object_path, scv_chunk_path, scv_head_path, scv_parser_index_path, scv_parser_lock_path, scv_parsers_dir, scv_langmap_path, scv_object_index_path, scv_bookmarks_path, scv_workspace_path, scv_line_set_contains, scv_metadata_path_safe, scv_object_ref_safe, scv_worktree_path_safe}
-use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_commit_tree, scv_object_field, scv_content_id_for_file, scv_hash_text}
+use std.scv.core.{scv_format_path, scv_repo_dir}
+use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_commit_tree, scv_object_field, scv_content_id_for_file, scv_hash_text, scv_repo_format_version}
 
 fn scv_current_tree_content(root: text) -> text:
     val commit = scv_read_workspace_commit(root)
@@ -131,6 +132,20 @@ fn scv_parser_lock_hash(root: text, language: text, grammar: text, version: text
 fn scv_parser_wasm_magic_ok(bytes: [u8]) -> bool:
     bytes.len() >= 4 and (bytes[0] & 0xFF) == 0 and (bytes[1] & 0xFF) == 0x61 and (bytes[2] & 0xFF) == 0x73 and (bytes[3] & 0xFF) == 0x6D
 
+# Legacy (pre-format-2) parser lock: a 3-line `language:/runtime:/version:`
+# header written by old `scv init`. Accepted as STALE, never FAIL.
+fn scv_parser_lock_line_legacy(trimmed: text) -> bool:
+    trimmed.starts_with("language:") or trimmed.starts_with("runtime:") or trimmed.starts_with("version:")
+
+fn scv_parser_lockfile_is_legacy(root: text) -> bool:
+    val lock_path = scv_parser_lock_path(root)
+    if not file_exists(lock_path):
+        return false
+    for line in file_read(lock_path).split("\n"):
+        if scv_parser_lock_line_legacy(line.trim()):
+            return true
+    false
+
 fn scv_validate_parser_lockfile(root: text) -> text:
     val lock_path = scv_parser_lock_path(root)
     if not file_exists(lock_path):
@@ -140,6 +155,8 @@ fn scv_validate_parser_lockfile(root: text) -> text:
     for line in file_read(lock_path).split("\n"):
         val trimmed = line.trim()
         if trimmed == "":
+            continue
+        if scv_parser_lock_line_legacy(trimmed):
             continue
         val parts = trimmed.split("|")
         if parts.len() != 8 or parts[0] != "parser":
@@ -619,6 +636,13 @@ fn scv_validate_change_refs(root: text) -> text:
     for change_path in dir_walk(changes_dir):
         val change_id = scv_object_id_from_path(change_path)
         val content = file_read(change_path)
+        # Format-2 validation; v1 records (no format/state fields) stay valid.
+        val format = scv_object_field(content, "format")
+        if format != "" and format != "1" and format != "2":
+            errors.push("bad change format: {change_id} {format}\n")
+        val state = scv_object_field(content, "state")
+        if state != "" and state != "open" and state != "closed":
+            errors.push("bad change state: {change_id} {state}\n")
         val latest = scv_object_field(content, "latest")
         if latest == "":
             errors.push("missing change latest: {change_id}\n")
@@ -653,6 +677,60 @@ fn scv_validate_commit_change_refs(root: text) -> text:
         elif not file_exists(scv_object_path(root, "changes", change)):
             errors.push("missing commit change object: {commit_id} {change}\n")
     errors.join("")
+
+# Full checkpoint verification (MIG-09): recompute each checkpoint's manifest
+# hash and every payload file hash. Mirrors stabilize.scv_checkpoint_verify
+# without importing stabilize (which imports this module).
+fn scv_validate_checkpoint_manifest(root: text, id: text, dir: text, manifest: text) -> text:
+    var errors: [text] = []
+    if scv_hash_text("checkpoint", manifest) != id:
+        errors.push("checkpoint manifest hash mismatch: {id}\n")
+    var in_rows = false
+    for line in manifest.split("\n"):
+        if not in_rows:
+            if line == "--":
+                in_rows = true
+            continue
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val sep = trimmed.index_of(" ")
+        if sep <= 0:
+            errors.push("bad checkpoint manifest row: {id} {trimmed}\n")
+            continue
+        val sha = trimmed[:sep]
+        val rel = trimmed[sep + 1:]
+        val data = "{dir}/data/{rel}"
+        if not file_exists(data):
+            errors.push("missing checkpoint file: {id} {rel}\n")
+        elif scv_content_id_for_file(data) != sha:
+            errors.push("checkpoint file hash mismatch: {id} {rel}\n")
+    errors.join("")
+
+fn scv_validate_checkpoints(root: text) -> text:
+    val dir = "{scv_repo_dir(root)}/checkpoints"
+    if not file_exists(dir):
+        return ""
+    var errors: [text] = []
+    for path in dir_walk(dir):
+        if not path.ends_with("/manifest.sdn"):
+            continue
+        val checkpoint_dir = path[0:path.len() - "/manifest.sdn".len()]
+        val segments = checkpoint_dir.split("/")
+        val id = segments[segments.len() - 1]
+        if id.starts_with("."):
+            continue
+        errors.push(scv_validate_checkpoint_manifest(root, id, checkpoint_dir, file_read(path)))
+    errors.join("")
+
+# Repo format marker (MIG-12): absent = v1; a present marker must carry a
+# known version. Unknown/newer versions fail closed.
+fn scv_validate_format_marker(root: text) -> text:
+    val version = scv_repo_format_version(root)
+    if version == 1 or version == 2:
+        ""
+    else:
+        "bad repo format version: {version}\n"
 
 fn scv_fsck(root: text) -> text:
     if not scv_repo_exists(root):
@@ -710,7 +788,10 @@ fn scv_fsck(root: text) -> text:
     errors.push(scv_validate_deterministic_object_hashes(root))
     errors.push(scv_validate_tree_objects(root))
     errors.push(scv_validate_object_index(root))
-    if errors.len() == 0:
-        "OK checked={checked}\n"
+    errors.push(scv_validate_checkpoints(root))
+    errors.push(scv_validate_format_marker(root))
+    val stale = if scv_parser_lockfile_is_legacy(root): " stale=parser-lock" else: ""
+    if errors.join("") == "":
+        "OK checked={checked}{stale}\n"
     else:
         "ERROR fsck failed\n{errors.join("")}"

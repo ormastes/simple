@@ -5,6 +5,7 @@ use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (cwd)
 use std.scv.store.{scv_init_repo, scv_restore_op, scv_mark_current_state, scv_new_change, scv_close_change}
 use std.scv.stabilize.{scv_checkpoint, scv_checkpoint_verify, scv_checkpoint_list, scv_doctor, scv_verify_backends_git}
+use std.scv.journal.{scv_rebuild_db}
 use std.scv.working_copy.{scv_snapshot, scv_auto_snapshot, scv_watch, scv_status, scv_log, scv_log_branch, scv_op_log}
 use std.scv.parser.{scv_parse_gate, scv_parse_index}
 use std.scv.parser_registry.{scv_parsers, scv_parser_install, scv_parser_verify, scv_langmap, scv_langmap_set}
@@ -19,12 +20,13 @@ use std.scv.public_remote.{scv_public_export, scv_public_export_verify, scv_publ
 use std.scv.network_remote.{scv_network_push, scv_network_push_chunked, scv_network_push_cas, scv_network_push_verify, scv_network_pull, scv_network_config_set_auth, scv_network_config_set_tls_no_verify, scv_network_pull_simulate_interrupt, scv_network_pull_discard}
 use std.scv.merge.{scv_merge_commits, scv_conflicts, scv_resolve_conflict}
 use std.scv.refs.{scv_bookmarks, scv_bookmark_set, scv_tag_list, scv_tag_set}
+use std.scv.backend_git.{scv_backend_status, scv_backend_map, scv_backend_verify}
 
 extern fn rt_stdout_write(data: [u8]) -> i64
 
 fn scv_help() -> text:
     var lines: [text] = []
-    lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set|new-change|close-change|checkpoint|doctor|verify-backends>")
+    lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set|new-change|close-change|checkpoint|doctor|verify-backends|backend|rebuild-db>")
     lines.push("")
     lines.push("Shared log options:")
     for line in log_options_help():
@@ -431,6 +433,8 @@ fn main() -> i64:
             return scv_cli_result(scv_checkpoint(root))
         case "doctor":
             return scv_cli_verdict(scv_doctor(root))
+        case "rebuild-db":
+            return scv_cli_verdict(scv_rebuild_db(root))
         case "verify-backends":
             var vb_git = ""
             var vb_rev = "HEAD"
@@ -455,6 +459,33 @@ fn main() -> i64:
                 print "ERROR tag-set requires a name and commit"
                 return 1
             return scv_cli_result(scv_tag_set(root, args[1], args[2]))
+        case "backend":
+            if args.len() < 2:
+                print "ERROR backend requires a subcommand: status|map|verify"
+                return 1
+            var be_git = ""
+            var be_rev = "HEAD"
+            var be_i = 2
+            while be_i < args.len():
+                if args[be_i] == "--git" and be_i + 1 < args.len():
+                    be_git = args[be_i + 1]
+                    be_i = be_i + 2
+                elif args[be_i] == "--rev" and be_i + 1 < args.len():
+                    be_rev = args[be_i + 1]
+                    be_i = be_i + 2
+                else:
+                    be_i = be_i + 1
+            if be_git == "":
+                print "ERROR backend {args[1]} requires --git <path>"
+                return 1
+            if args[1] == "status":
+                return scv_cli_verdict(scv_backend_status(root, be_git))
+            if args[1] == "map":
+                return scv_cli_verdict(scv_backend_map(root, be_git, be_rev))
+            if args[1] == "verify":
+                return scv_cli_verdict(scv_backend_verify(root, be_git, be_rev))
+            print "ERROR backend requires a subcommand: status|map|verify"
+            return 1
         case _:
             print scv_help()
             return 1
