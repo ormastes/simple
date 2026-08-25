@@ -6,7 +6,7 @@
 use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
-use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_KEXINIT}
+use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_UNIMPLEMENTED, SSH_MSG_DEBUG, SSH_MSG_KEXINIT, ssh_build_unimplemented}
 use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, ChannelPeerCloseDecisionV1, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
 use os.apps.sshd.ssh_channel_open_request.{ssh_channel_open_request_classify_v1, ssh_channel_open_rejection_payload_v1, ssh_channel_open_transport_must_close_v1}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
@@ -308,6 +308,13 @@ impl SshSession:
 
             self._forward_shell_output()
 
+            # Preserve the inbound wire sequence before recv_packet_payload
+            # advances it. Strict KEX resets the cipher counter at NEWKEYS while
+            # recv_seq remains the lifetime packet count, so encrypted sessions
+            # must report cipher.seq_c2s in RFC 4253 UNIMPLEMENTED replies.
+            val received_sequence =
+                if self.cipher.active: self.cipher.seq_c2s
+                else: self.recv_seq
             val payload = self.recv_packet_payload()
             val payload_len = payload.len()
             if payload_len == 0:
@@ -361,6 +368,10 @@ impl SshSession:
             elif msg_type == SSH_MSG_IGNORE:
                 # RFC 4253 defines IGNORE as intentionally response-free.
                 continue
+            elif msg_type == SSH_MSG_DEBUG or msg_type == SSH_MSG_UNIMPLEMENTED:
+                # Both transport messages are advisory and response-free.  In
+                # particular, never answer UNIMPLEMENTED with UNIMPLEMENTED.
+                continue
             elif msg_type == SSH_MSG_KEXINIT:
                 # The dispatcher already consumed/decrypted KEXINIT with the
                 # old inbound key.  A failed rekey is terminal: continuing with
@@ -369,7 +380,8 @@ impl SshSession:
                     self.transition_closed()
                     return
             else:
-                serial_println("[sshd-session] interactive-inline ignore msg_type=0x{format_hex(msg_type.to_i64())}")
+                serial_println("[sshd-session] interactive-inline unimplemented msg_type=0x{format_hex(msg_type.to_i64())} recv_seq={received_sequence}")
+                self.send_packet(ssh_build_unimplemented(received_sequence))
 
         serial_println("[sshd-session] interactive-inline iteration limit closing")
         self.transition_closed()

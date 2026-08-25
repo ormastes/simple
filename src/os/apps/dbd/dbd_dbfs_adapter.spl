@@ -207,7 +207,23 @@ pub class DbdDbfsAdapter:
         val driver = match self.driver:
             Some(value): value
             nil: return Err("dbfs-root-driver-unavailable")
-        val opened = driver.open_path(Path(raw: path), OpenFlags.read_write().with_create())
+        if not driver.transactional_replace_ready():
+            return Err("dbfs-transactional-replace-unavailable")
+        if self.generation <= 0 or self.generation >= DBD_DBFS_MAX_GENERATION:
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-generation-exhausted"
+            return Err(self.last_error)
+        # Never overwrite the durable journal inode in place. A power loss
+        # during that write could leave neither the old nor the new journal
+        # replayable. DBFS rename publishes a new namespace checkpoint under
+        # the shared transaction owner; syncing the still-open inode after
+        # rename makes that checkpoint durable before success is returned.
+        # Truncation deliberately permits reuse of an unreachable staging
+        # inode left by an interrupted commit after a service restart.
+        val temp_path = dbd_dbfs_temp_path_v1(self.generation)
+        val opened = driver.open_path(
+            Path(raw: temp_path),
+            OpenFlags.read_write().with_create().with_trunc())
         if opened.is_err(): return Err("dbfs-commit-open-failed")
         val handle = opened.unwrap()
         self.open_handles = self.open_handles + 1
@@ -218,6 +234,12 @@ pub class DbdDbfsAdapter:
         elif driver.fsync(handle).is_err():
             self.state = DbdDbfsAdapterState.Quarantined
             self.last_error = "dbfs-commit-sync-failed"
+        elif driver.rename_path(temp_path, path).is_err():
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-transactional-replace-failed"
+        elif driver.fsync(handle).is_err():
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-namespace-sync-failed"
         val closed = driver.close_handle(handle)
         if closed.is_err():
             self.state = DbdDbfsAdapterState.Quarantined
@@ -226,6 +248,7 @@ pub class DbdDbfsAdapter:
         self.open_handles = self.open_handles - 1
         if self.state == DbdDbfsAdapterState.Quarantined:
             return Err(self.last_error)
+        self.generation = self.generation + 1
         Ok(())
 
     pub me quarantine(reason: text) -> bool:
@@ -269,7 +292,8 @@ pub class DbdDbfsAdapter:
 pub fn dbd_dbfs_adapter_from_driver(driver: DriverInstance) -> DbdDbfsAdapter:
     match driver:
         case DriverInstance.DbFs(dbfs):
-            val durable = dbfs.durability_serialization_ready()
+            val durable = dbfs.durability_serialization_ready() and
+                dbfs.transactional_replace_ready()
             val mounted_state = if durable:
                 DbdDbfsAdapterState.MountedDurable
             else:
@@ -277,7 +301,10 @@ pub fn dbd_dbfs_adapter_from_driver(driver: DriverInstance) -> DbdDbfsAdapter:
             val mounted_error = if durable:
                 ""
             else:
-                "dbfs-" + dbfs.durability_serialization_blocker()
+                if not dbfs.durability_serialization_ready():
+                    "dbfs-" + dbfs.durability_serialization_blocker()
+                else:
+                    "dbfs-transactional-replace-unavailable"
             DbdDbfsAdapter(
                 state: mounted_state,
                 driver: Some(dbfs),

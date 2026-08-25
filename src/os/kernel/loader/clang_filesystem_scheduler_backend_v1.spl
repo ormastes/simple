@@ -13,6 +13,7 @@ use std.common.contracts.execution.simpleos_target_v1.{
 use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerExecutionEvidenceTokenV1, SchedulerExecutionEvidenceV1,
+    SchedulerArgvFileRoleV1, SchedulerArgvFileBindingV1,
     scheduler_execution_evidence_consume_once_v2
 }
 use os.kernel.loader.clang_filesystem_pipeline_owner_v1.{
@@ -71,6 +72,22 @@ fn _target_matches_v1(
         evidence.target_arch == arch and
         evidence.target_abi == simpleos_target_v1_abi_for_triple(target_triple)
 
+fn _argv_file_binding_v1(
+    evidence: SchedulerExecutionEvidenceV1,
+    role: SchedulerArgvFileRoleV1,
+    argv_index: i64,
+    path: text
+) -> SchedulerArgvFileBindingV1?:
+    if evidence.argv_file_bindings.len() != 1: return nil
+    val binding = evidence.argv_file_bindings[0]
+    if binding.role != role or binding.argv_index != argv_index or
+       binding.canonical_path != path or binding.content_sha256 == "" or
+       binding.mount_id == 0u64 or binding.mount_generation == 0u64 or
+       binding.namespace_generation == 0u64 or
+       binding.file_generation == 0u64 or binding.size == 0u64:
+        return nil
+    Some(binding)
+
 fn _stage_matches_v1(
     evidence: SchedulerExecutionEvidenceV1,
     path: text,
@@ -126,6 +143,15 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
     val link_result = link_seen.unwrap()
     val execute_result = execute_seen.unwrap()
     val dispatch = plan.command.dispatch
+    val source_binding = _argv_file_binding_v1(
+        compile_result, SchedulerArgvFileRoleV1.SourceInput, 9,
+        dispatch.source_path)
+    val object_binding = _argv_file_binding_v1(
+        link_result, SchedulerArgvFileRoleV1.ArtifactInput, 13,
+        dispatch.object_path)
+    val executable_binding = _argv_file_binding_v1(
+        execute_result, SchedulerArgvFileRoleV1.ArtifactInput, 0,
+        dispatch.executable_path)
     if not _stage_matches_v1(
         compile_result, plan.compile_path, plan.compile_argv,
         dispatch.clang_sha256, dispatch.actor.task_id,
@@ -133,7 +159,8 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
        not _stage_matches_v1(
         link_result, plan.link_path, plan.link_argv,
         dispatch.lld_sha256, dispatch.actor.task_id,
-        dispatch.target_triple):
+        dispatch.target_triple) or not source_binding.? or
+       not object_binding.? or not executable_binding.?:
         val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
         if retired.is_err(): return Err("compiler-evidence-cleanup-indeterminate")
         return Err("compiler-stage-evidence-mismatch")
@@ -147,6 +174,8 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
         if retired.is_err(): return Err("artifact-evidence-cleanup-indeterminate")
         return Err("filesystem-artifact-evidence-missing")
     val executable_sha256 = sha256_u8_hex(executable_bytes)
+    val source_sha256 = sha256_u8_hex(source_bytes)
+    val object_sha256 = sha256_u8_hex(object_bytes)
     if not _stage_matches_v1(
         execute_result, plan.execute_path, plan.execute_argv,
         executable_sha256, dispatch.actor.task_id,
@@ -165,6 +194,12 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
         val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
         if retired.is_err(): return Err("terminal-evidence-cleanup-indeterminate")
         return Err("terminal-execution-evidence-mismatch")
+    if source_binding.unwrap().content_sha256 != source_sha256 or
+       object_binding.unwrap().content_sha256 != object_sha256 or
+       executable_binding.unwrap().content_sha256 != executable_sha256:
+        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        if retired.is_err(): return Err("artifact-binding-cleanup-indeterminate")
+        return Err("artifact-binding-digest-mismatch")
 
     val finish_result = clang_filesystem_pipeline_finish_and_take_v1(
         plan.command,
@@ -173,8 +208,8 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
             compile_exit_code: compile_result.exit_code,
             link_exit_code: link_result.exit_code,
             execute_exit_code: execute_result.exit_code,
-            source_sha256: sha256_u8_hex(source_bytes),
-            object_sha256: sha256_u8_hex(object_bytes),
+            source_sha256: source_sha256,
+            object_sha256: object_sha256,
             executable_sha256: executable_sha256,
             stdout_sha256: sha256_u8_hex(execute_result.stdout_bytes)),
         dispatch.actor)

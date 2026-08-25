@@ -287,14 +287,22 @@ class WebSocketTransportOwner:
             return false
         match socket_recv(self.client, 8192u64):
             Err(_):
-                # A transport error is terminal; retrying it would hot-spin.
-                self._release()
+                # The syscall adapter currently reports nonblocking EAGAIN
+                # through the same Result error channel as hard errors. Keep
+                # that ambiguity bounded by the connection policy instead of
+                # dropping an otherwise healthy WebSocket on its first idle
+                # service-loop turn.
+                self.consecutive_no_progress = self.consecutive_no_progress + 1
+                if self.consecutive_no_progress >= MAX_WEBSOCKET_READS:
+                    self._policy_close()
                 false
             Ok(input):
                 if input.len() == 0u64:
-                    self.consecutive_no_progress = self.consecutive_no_progress + 1
-                    if self.consecutive_no_progress >= MAX_WEBSOCKET_READS:
-                        self._policy_close()
+                    # recv()==0 is an orderly TCP EOF, not temporary
+                    # backpressure. The peer has already ended the transport,
+                    # so do not retain the fd or attempt an RFC 6455 policy
+                    # Close on a connection that cannot carry it.
+                    self._release()
                     return false
                 self.consecutive_no_progress = 0
                 val events = self.protocol.append_tail(input)
