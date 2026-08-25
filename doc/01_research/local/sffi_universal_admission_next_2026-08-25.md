@@ -230,6 +230,26 @@ C bind provider, the ledger is 12,070 rows / 3,171 symbols: 1,163 unsafe-tagged,
 definitions are C 2,377, Rust 2,178, Simple 576, and C++ 219. Verified-and-signed
 remains zero.
 
+## Bootstrap shell raw-contract checkpoint
+
+All 25 filesystem, environment, process, path, search, and directory externs in
+the bootstrap shell module now carry adjacent operation-specific `unsafe(ffi)`
+metadata. Contracts identify ambiguous empty file/path/list values, recursive
+filesystem effects, captured process output and launch failure, target-owned
+path text, and process-environment mutation.
+
+`rt_env_get` is now correctly optional and `env.get` applies its default only
+to `None`, not to a legitimate empty environment value. This preserves the same
+single environment lookup and removes the fabricated equivalence between
+missing and empty. No filesystem scan, process launch, output capture,
+allocation, copy, environment read, branch beyond the existing default choice,
+or generic dispatch was added. A static ratchet fixes all declarations and the
+optional lookup contract.
+
+Estimated declaration totals remain 11,651 / 3,137 symbols. Unsafe-tagged rows
+increase from 2,154 to 2,178, untouched rows decrease from 9,302 to 9,278, and
+exact-artifact verified-and-signed admission remains zero.
+
 ## UDP scalar-option ABI checkpoint
 
 The UDP `connect`, `set_broadcast`, `set_read_timeout`, and `set_nonblocking`

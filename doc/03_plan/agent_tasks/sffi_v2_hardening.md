@@ -619,3 +619,8 @@ passing placeholder.
      booleans, or no-op RwLock unlock shims. Replace CondVar/Once provider stubs
      with real atomic guard/callback contracts without extra steady-state locks,
      allocations, registry lookups, sleeps, spins, or dispatch.
+122. Keep all 25 bootstrap shell filesystem/environment/process/path externs
+     explicitly tagged `unsafe(ffi)`. Preserve missing versus empty environment
+     values with one lookup. Migrate ambiguous file/list/path results to typed
+     errors without extra filesystem scans, process launches, captures,
+     allocations, copies, environment reads, or generic dispatch.
