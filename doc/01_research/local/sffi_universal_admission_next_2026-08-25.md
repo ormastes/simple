@@ -1274,3 +1274,25 @@ Estimated declaration rows decrease from 11,713 to 11,681 while symbols remain
 3,137. Unsafe-tagged rows remain 1,770, untouched rows decrease from 9,687 to
 9,655, and exact-artifact verified-and-signed admission remains zero. The 32
 canonical runtime declarations remain the next contract-tagging target.
+
+## Runtime-value raw-contract ownership checkpoint
+
+All 32 declarations in the canonical runtime SFFI owner now carry adjacent,
+operation-specific `@unsafe(... capabilities: [ffi])` metadata. The contracts
+cover GC initialization/collection/allocation, owned scalar/string/array/dict
+value construction, borrowed string pointer/length input, type discriminants
+and projections, raw string pointer/out-length projection, clone/free ownership,
+arithmetic owned results, comparisons, and value output.
+
+The owner ratchet now requires all 32 canonical declarations to retain their
+tags in addition to forbidding duplicate providers in the compatibility
+facade. It passed with the whitespace check. This pass changes no ABI signature,
+GC operation, allocation, clone/free, arithmetic, comparison, output, branch,
+copy, value layout, or dispatch. Production Simple and optimizer verification
+remain unavailable.
+
+Estimated totals remain 11,681 declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,770 to 1,802, untouched rows decrease from
+9,655 to 9,623, and exact-artifact verified-and-signed admission remains zero.
+Allocation failures, projection validity, raw string out-length, and owned
+result lifetimes still require executable validation and signed admission.

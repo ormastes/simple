@@ -568,3 +568,7 @@ passing placeholder.
      `std.nogc_sync_mut.sffi.runtime`; never restore its 32 duplicate
      declarations. Tag the canonical GC/runtime-value contracts without adding
      allocation, collection, clone/free, or dispatch overhead.
+111. Keep all 32 canonical runtime declarations explicitly tagged
+     `unsafe(ffi)`. Validate allocation/projection failures, string out-length,
+     and owned result lifetimes before safe publication without extra GC work,
+     allocations, clones, frees, arithmetic calls, copies, or dispatch.
