@@ -45,11 +45,22 @@ fn _vector_equal_v1(left: [text], right: [text]) -> bool:
         i = i + 1
     true
 
-fn _filesystem_name_for_path_v1(path: text) -> text:
+fn _filesystem_name_for_explicit_path_v1(path: text) -> text:
     if path.starts_with("/fat32/"): return "fat32"
     if path.starts_with("/dbfs/"): return "dbfs"
     if path.starts_with("/nvfs/"): return "nvfs"
     ""
+
+fn _filesystem_matches_path_v1(filesystem_name: text, path: text) -> bool:
+    """Bind explicit filesystem roots without guessing a `/usr` backend.
+
+    Installed tools may live on a different mounted filesystem from pipeline
+    inputs and outputs.  Scheduler evidence is authoritative for `/usr`; an
+    explicit FAT32/DBFS/NVFS path additionally has to name that exact backend.
+    """
+    if filesystem_name == "": return false
+    val explicit = _filesystem_name_for_explicit_path_v1(path)
+    explicit == "" or filesystem_name == explicit
 
 fn _target_matches_v1(
     evidence: SchedulerExecutionEvidenceV1,
@@ -65,7 +76,6 @@ fn _stage_matches_v1(
     path: text,
     argv: [text],
     image_sha256: text,
-    filesystem_name: text,
     parent_id: u64,
     target_triple: text
 ) -> bool:
@@ -74,7 +84,7 @@ fn _stage_matches_v1(
         evidence.canonical_source_path == path and
         _vector_equal_v1(evidence.argv, argv) and
         evidence.image_hash == image_sha256 and
-        evidence.filesystem_name == filesystem_name and
+        _filesystem_matches_path_v1(evidence.filesystem_name, path) and
         evidence.mount_id != 0u64 and evidence.mount_generation != 0u64 and
         evidence.file_generation != 0u64 and
         not evidence.stdout_truncated and not evidence.stderr_truncated and
@@ -116,14 +126,13 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
     val link_result = link_seen.unwrap()
     val execute_result = execute_seen.unwrap()
     val dispatch = plan.command.dispatch
-    val filesystem_name = _filesystem_name_for_path_v1(dispatch.source_path)
     if not _stage_matches_v1(
         compile_result, plan.compile_path, plan.compile_argv,
-        dispatch.clang_sha256, filesystem_name, dispatch.actor.task_id,
+        dispatch.clang_sha256, dispatch.actor.task_id,
         dispatch.target_triple) or
        not _stage_matches_v1(
         link_result, plan.link_path, plan.link_argv,
-        dispatch.lld_sha256, filesystem_name, dispatch.actor.task_id,
+        dispatch.lld_sha256, dispatch.actor.task_id,
         dispatch.target_triple):
         val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
         if retired.is_err(): return Err("compiler-evidence-cleanup-indeterminate")
@@ -140,12 +149,8 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
     val executable_sha256 = sha256_u8_hex(executable_bytes)
     if not _stage_matches_v1(
         execute_result, plan.execute_path, plan.execute_argv,
-        executable_sha256, filesystem_name, dispatch.actor.task_id,
+        executable_sha256, dispatch.actor.task_id,
         dispatch.target_triple) or
-       compile_result.mount_id != link_result.mount_id or
-       compile_result.mount_id != execute_result.mount_id or
-       compile_result.mount_generation != link_result.mount_generation or
-       compile_result.mount_generation != execute_result.mount_generation or
        compile_result.child_id == link_result.child_id or
        compile_result.child_id == execute_result.child_id or
        link_result.child_id == execute_result.child_id or

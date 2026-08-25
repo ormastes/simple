@@ -10,6 +10,10 @@ terminal observation, which remains owner-retained until consumed as a receipt.
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
 use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE, SIMPLEOS_TARGET_V1_I686_TRIPLE,
+    SIMPLEOS_TARGET_V1_AARCH64_TRIPLE, SIMPLEOS_TARGET_V1_ARMV7_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE,
     simpleos_target_v1_arch_for_triple
 }
 use std.common.contracts.execution.simpleos_vfs_mutation_v1.{TaskExecutionInstanceV1}
@@ -226,6 +230,15 @@ fn _target_v1(triple: text) -> ManifestTarget?:
     val arch = simpleos_target_v1_arch_for_triple(triple)
     if arch == "": return nil
     Some(ManifestTarget(os: "simpleos", arch: arch, abi: "simpleos"))
+
+fn _lld_emulation_v1(triple: text) -> text:
+    if triple == SIMPLEOS_TARGET_V1_X86_64_TRIPLE: return "elf_x86_64"
+    if triple == SIMPLEOS_TARGET_V1_I686_TRIPLE: return "elf_i386"
+    if triple == SIMPLEOS_TARGET_V1_AARCH64_TRIPLE: return "aarch64elf"
+    if triple == SIMPLEOS_TARGET_V1_ARMV7_TRIPLE: return "armelf_linux_eabi"
+    if triple == SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE: return "elf64lriscv"
+    if triple == SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE: return "elf32lriscv"
+    ""
 
 fn _path_valid_v1(path: text) -> bool:
     path.len() > 1 and path.len() <= CLANG_FILESYSTEM_PIPELINE_PATH_MAX_V1 and
@@ -500,12 +513,30 @@ pub(package) fn clang_filesystem_pipeline_begin_current_v1(
         _ = _unlock_v1()
         return Err("invalid-lifecycle-transition")
     _clang_pipeline_owner_v1.slots[index].state = running.unwrap()
+    val lld_emulation = _lld_emulation_v1(dispatch.target_triple)
+    if lld_emulation == "":
+        _clang_pipeline_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("unsupported-linker-emulation")
     val command = ClangFilesystemBackendCommandV1(
         dispatch: dispatch,
-        compile_argv: [dispatch.clang_path, "-c", dispatch.source_path,
-            "-o", dispatch.object_path, "--target=" + dispatch.target_triple],
-        link_argv: [dispatch.lld_path, dispatch.object_path, "-o",
-            dispatch.executable_path],
+        compile_argv: [dispatch.clang_path,
+            "--target=" + dispatch.target_triple,
+            "--sysroot=/usr", "-D__simpleos__=1", "-ffreestanding",
+            "-nostdlib", "-fno-stack-protector", "-I/usr/include",
+            "-c", dispatch.source_path, "-o", dispatch.object_path],
+        # Invoke LLD directly, so spell every target/startup/runtime input that
+        # the Clang driver would otherwise contribute.  In particular, an
+        # object file alone can link while still producing a non-runnable ELF
+        # with the wrong emulation or no `_start` startup path.
+        link_argv: [dispatch.lld_path,
+            "-m", lld_emulation, "-static", "-no-pie", "--gc-sections",
+            "--export-dynamic", "--defsym=__bss_end=_end",
+            "-T", "/usr/share/simpleos/simpleos.ld", "-e", "_start",
+            "/usr/lib/crt0.o", dispatch.object_path,
+            "-L", "/usr/lib", "--start-group", "-lsimpleos_c",
+            "-lsimple_runtime", "-lm", "--end-group",
+            "-o", dispatch.executable_path],
         execute_argv: [dispatch.executable_path])
     if not _unlock_v1(): return Err("committed-unknown")
     Ok(command)
