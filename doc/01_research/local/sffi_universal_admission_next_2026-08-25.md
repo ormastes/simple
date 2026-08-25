@@ -359,6 +359,37 @@ signatures, and proof receipts remain unresolved. AudioManager and the wider
 estate are not globally verified or signed; verified-and-signed admission
 remains 0.
 
+## OCB3 capacity and byte-access authority checkpoint
+
+`src/os/crypto/ocb3.spl` described itself as having no SFFI despite using a
+foreign byte accessor and 30 foreign capacity-reserving allocations. All
+allocation sites now route through one mandatory-inline lexical `unsafe(ffi)`
+owner. The byte accessor itself remains explicitly unsafe because its index
+extent is caller-proven.
+
+Replacing the allocator with empty arrays would remove one foreign dependency
+but discard capacity hints, adding repeated growth allocations and copies for
+large ciphertext/plaintext buffers. This checkpoint preserves every requested
+capacity and therefore the existing allocation/memory behavior. It also
+preserves the constant-time tag-difference accumulator and adds no branch,
+loop, crypto operation, lookup, lock, hash pass, signature operation, or
+runtime call after inlining. It does not return fabricated zero for an invalid
+byte index.
+
+The focused authority/provider/performance ratchet passed. The byte accessor
+appears in both typed registries; the capacity allocator appears in only one.
+Consolidating repeated boundary ownership changed the census as follows:
+
+- raw call sites: 18,812 -> 18,783
+- missing authority: 14,035 -> 14,004
+- lexical unsafe: 3,403 -> 3,404
+- function unsafe: 1,374 -> 1,375
+
+Input/block extent proofs, capacity-provider closure, exact artifact identity,
+trusted signatures, constant-time proof receipts, and semantic verification
+remain unresolved. OCB3 and the wider estate are not globally verified or
+signed; verified-and-signed admission remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
