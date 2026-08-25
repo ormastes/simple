@@ -173,12 +173,12 @@ fields, but it may not change these public operations.
 
 Each `ProviderFrameDecodeStepV1` carries at most one closed event kind:
 `none`, `header`, or `payload`. `header` is emitted exactly once after the
-eighth header byte and before any payload byte is consumed. `payload` carries
-a bounded immutable `ProviderFramePayloadLoanV1` with `bytes`, `offset`,
-`count`, and absolute `frame_payload_offset`. The loan refers to staging owned
-uniquely by the decoder and is valid only until its next mutating call. The
+eighth header byte and before any payload byte is consumed. `payload` owns
+a bounded immutable `ProviderFramePayloadChunkV1` with `bytes`, `offset`,
+`count`, and absolute `frame_payload_offset`. The chunk is a fresh owner-created
+result moved out of the decoder; the decoder retains no payload alias. The
 declared length is absent only on a pre-header `none` event and exact on header
-and payload events; the loan is present only on a payload event. The
+and payload events; the owned chunk is present only on a payload event. The
 decoder's `payload_bytes_read` is the only framing cursor; the session advances
 input only by `consumed_bytes` and never maintains a duplicate payload cursor.
 `take_complete` returns only `ProviderFrameCompletionV1` metadata after all
@@ -197,7 +197,7 @@ Boundary classifications are explicit:
 | Boundary value | Ownership class |
 |---|---|
 | bytes returned by `read_some` | owned move into session/decoder |
-| payload bytes emitted by decoder | bounded immutable loan from decoder-owned staging; expires at next decoder mutation |
+| payload bytes emitted by decoder | bounded owned chunk moved from decoder result; no retained decoder alias |
 | bytes passed to `write_some` | scoped read-only loan from encoder segment |
 | admitted request envelope | owned typed value in bounded FIFO |
 | pinned search snapshot | immutable frozen share |
@@ -236,6 +236,17 @@ reported as `timeout` with a non-authoritative `would_block` detail, stream
 closure is `eof`, and all other failures are `error`. The reactor performs at
 most one retryable I/O attempt per direction per tick; it never busy-loops on a
 short, zero, or would-block result.
+
+The repository's current inherited-stdio surfaces are blocking text/character
+operations. Piped-child helpers are scoped to owned children, conflate empty
+read data with would-block/closure/failure, and accept no absolute deadline.
+They cannot implement this port authoritatively. Raw transport therefore has
+two separately gated lanes: capability plus provider normalization first, then
+a runtime-owner pollable raw-byte primitive and concrete `app.io` adapter. The
+primitive must preserve binary bytes, distinguish all four outcomes, and use
+an absolute monotonic deadline. Until that second lane passes on the admitted
+runtime, raw transport is partial. A clock check after a blocking call is not
+deadline behavior and is forbidden.
 
 A cancel frame remains ordered behind bytes already written by the client on
 the same protocol 1.0 stream. The provider guarantees bounded reaction after

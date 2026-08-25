@@ -66,11 +66,11 @@ Both byte results use the closed four-state status
 would-block is `timeout`, never data. Read and write each receive an absolute
 transport deadline. Each decode step carries exactly one
 `ProviderFrameDecodeEventV1`; its closed `kind` is `none | header | payload`.
-A payload event carries one bounded immutable `ProviderFramePayloadLoanV1`
-with exact `bytes`, `offset`, `count`, and `frame_payload_offset`. The loan is
-backed by uniquely decoder-owned staging and expires at the next mutable
-decoder call. `declared_payload_bytes: i64?` is absent only for pre-header
-`none`, and `payload: ProviderFramePayloadLoanV1?` is present only for
+A payload event carries one bounded immutable `ProviderFramePayloadChunkV1`
+with exact `bytes`, `offset`, `count`, and `frame_payload_offset`. The chunk is
+a fresh owner-created result moved to the caller, with no decoder-retained
+payload alias. `declared_payload_bytes: i64?` is absent only for pre-header
+`none`, and `payload: ProviderFramePayloadChunkV1?` is present only for
 `payload`. Header emits once before payload, payload offsets are contiguous,
 and `take_complete` returns metadata only. The decoder's payload count is the
 sole framing cursor; adapters may not buffer a second whole-frame copy.
@@ -163,6 +163,7 @@ non-overlapping:
 
 | Sublane | Exclusive paths | Required return | Forbidden overlap |
 |---|---|---|---|
+| `W4-RUNTIME-BYTE-POLL` | runtime-owner declarations/implementations plus the concrete `src/app/io` inherited-stdio adapter named by its accepted mini-design | binary-safe pollable partial read/write with absolute monotonic deadline and distinct data/would-block/deadline/EOF/error evidence on every admitted target | provider framing/session code; post-return clock checks around blocking reads; treating piped-child empty-string sentinels as authoritative status |
 | `W4-PROD-STREAM` | `src/app/spipe_knowledge_provider/{byte_stream,frame_decoder,encoder,request_control,work_machine,session_owner,main,wire_dispatch,wire_core,wire_types,protocol,query_clock}.spl` | one-frame incremental ingress/egress, first-byte timing, one-active+16 FIFO, immediate control, exact progress counters | test fixtures/specs; search/scoring internals; durable lifecycle internals except calls through their published ports |
 | `W4-TEST-BYTES` | `test/fixtures/spipe_controlled_work/controlled_work_proof.spl`, `test/01_unit/app/spipe_knowledge_provider/{provider_controlled_work_import_smoke_spec,provider_streaming_limits_spec}.spl`, `examples/05_stdlib/spipe/test/fixture/wave4_search/provider_protocol_vectors.json` | W4-28–31 vectors and standalone/imported-runtime evidence | production provider code; session/fault spec; system spec/manual/checker |
 | `W4-TEST-CONTROL` | `test/01_unit/app/spipe_knowledge_provider/{provider_deadline_control_spec,provider_session_owner_spec}.spl` | W4-32–36 deterministic boundary clocks plus scripted-pipe live cancel/shutdown frames, FIFO, state-digest, commit/fsync races, and partial-write faults | production provider code; byte/stat specs; system spec/manual |
@@ -178,6 +179,13 @@ work around a short grammar/importer failure. Any source fix is a new
 compiler-owner sublane whose plan names its exact files after the reproducer
 identifies them; until then no compiler source path is shared or implicitly
 authorized.
+
+`W4-PROD-STREAM` may land the host capability and fail-closed normalization
+before `W4-RUNTIME-BYTE-POLL`, but that state is explicitly partial. Current
+blocking inherited-stdio calls and nonblocking piped-child helpers do not meet
+the deadline/status contract. Completion requires the runtime primitive and a
+concrete `app.io` adapter on the admitted runtime; provider-local externs and
+blocking deadline emulation are forbidden.
 
 Sublanes return changed paths, exact commands, exit statuses, runtime/binary
 hash and Stage 4 provenance class, matrix rows exercised, and remaining red

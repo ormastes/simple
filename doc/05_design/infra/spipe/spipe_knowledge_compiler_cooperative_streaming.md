@@ -84,6 +84,12 @@ the transport as `internal_error`; the session never busy-retries it.
 
 The port is implemented by the existing `app.io`/host boundary. Provider app
 code may not import runtime externs, `/proc`, Windows APIs, or platform names.
+The current blocking inherited-stdio calls and nonblocking piped-child helpers
+do not satisfy this contract. A prerequisite runtime-owner lane must add a
+binary-safe pollable inherited-stdio primitive with partial progress, distinct
+would-block/deadline/EOF/error outcomes, and absolute monotonic deadlines; a
+concrete `app.io` adapter then binds it. Capability records and normalization
+without that adapter are useful but explicitly partial.
 
 ### 2.2 Frame decoder and encoder
 
@@ -93,7 +99,7 @@ struct ProviderFrameCompletionV1:
     first_header_at_ms: i64
     completed_at_ms: i64
 
-struct ProviderFramePayloadLoanV1:
+struct ProviderFramePayloadChunkV1:
     bytes: [u8]
     offset: i64
     count: i64
@@ -102,7 +108,7 @@ struct ProviderFramePayloadLoanV1:
 struct ProviderFrameDecodeEventV1:
     kind: text                 # none | header | payload
     declared_payload_bytes: i64?
-    payload: ProviderFramePayloadLoanV1?
+    payload: ProviderFramePayloadChunkV1?
 
 struct ProviderFrameDecodeStepV1:
     consumed_bytes: i64
@@ -149,15 +155,15 @@ declared payload bytes. `declared_payload_bytes` is `nil` only for `none`
 before a complete header and is exact for `header`/`payload`; `payload` is
 non-`nil` only for the `payload` kind.
 
-`ProviderFramePayloadLoanV1` is an immutable view of decoder-owned staging.
-Only the decoder owns and advances the framing cursor. The loan is valid until
-the next `push` or `take_complete`; the session must feed it synchronously into
-the iterative UTF-8/JSON/SHA pipeline before either call. No session, parser,
-or envelope layer keeps a second frame-payload cursor or concatenated frame
-copy. `take_complete` is legal only after the declared payload has been emitted
-and consumed; it returns final byte/timestamp metadata, contains no payload
-bytes or segments, and resets decoder state. Thus frame memory is bounded by
-the eight-byte header and one staging chunk rather than `max_frame_bytes`.
+`ProviderFramePayloadChunkV1` is a fresh bounded owner-created result moved to
+the caller. Only the decoder owns and advances the framing cursor, and it keeps
+no alias to an emitted chunk. The session moves each chunk synchronously into
+the iterative UTF-8/JSON/SHA pipeline. No session, parser, or envelope layer
+keeps a second frame-payload cursor or concatenated frame copy. `take_complete`
+is legal only after the declared payload has been emitted and consumed; it
+returns final byte/timestamp metadata, contains no payload bytes or segments,
+and resets decoder state. Thus decoder memory is bounded by the eight-byte
+header and one result chunk rather than `max_frame_bytes`.
 
 The frame encoder prepends the exact eight-byte lowercase hexadecimal length
 without converting payload bytes to text. It traverses header then payload
@@ -731,12 +737,18 @@ These subwaves refine parent Wave 4 and precede any accepted `cancel:true`.
 
 ### Wave 4S-B — Raw byte transport and framing
 
+- Add the `app.io` byte capability and provider fail-closed normalization.
+- In a separate prerequisite runtime-owner lane, add the pollable raw-byte
+  inherited-stdio primitive and bind it through a concrete `app.io` adapter;
+  do not emulate deadlines around blocking reads.
 - Add `ProviderByteStreamPort`, decoder header/payload events, encoder,
   segmented output, and ingress/output deadlines behind the synchronous
-  behavior adapter. The decoder stages at most one bounded payload loan; it
+  behavior adapter. The decoder emits at most one bounded owned payload chunk; it
   never accumulates a complete payload.
 - Exercise short, zero/would-block, timeout, EOF, and error outcomes.
-- **Gate:** every protocol 1.0 golden frame is byte-identical; malformed,
+- **Gate:** capability plus normalization alone is PARTIAL. Completion also
+  requires the concrete adapter on the admitted runtime; every protocol 1.0
+  golden frame is byte-identical; malformed,
   oversize, incomplete, and invalid prebinding input closes silently.
 
 ### Wave 4S-C — Iterative JSON and incremental SHA
@@ -813,7 +825,7 @@ Required evidence includes:
 
 | Concern | Evidence |
 |---|---|
-| raw framing | every header/payload split, coalesced frames, short/zero/would-block read/write, timeout/EOF/error; exactly one header event precedes contiguous nonempty bounded payload loans; concatenated loan bytes equal the declared payload once with no gap/overlap/replay; completion returns metadata only |
+| raw framing | every header/payload split, coalesced frames, short/zero/would-block read/write, timeout/EOF/error; exactly one header event precedes contiguous nonempty bounded owned payload chunks; concatenated chunk bytes equal the declared payload once with no gap/overlap/replay; completion returns metadata only |
 | prebinding safety | oversize, malformed header, invalid UTF-8, noncanonical JSON silently close with no reflected content |
 | iterative JSON | depth/token/member/string limits, duplicate/out-of-order keys, integer/escape canonicality, no recursion |
 | incremental SHA | frozen vectors and all boundary/random chunk splits equal one-shot |
