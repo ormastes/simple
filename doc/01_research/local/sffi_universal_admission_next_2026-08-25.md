@@ -1642,3 +1642,51 @@ dispatch was added.
 Estimated repository totals remain 11,651 declarations / 3,137 symbols.
 Unsafe-tagged rows increase from 2,260 to 2,278, untouched rows decrease from
 9,196 to 9,178, and exact-artifact verified-and-signed admission remains zero.
+
+## Atomic raw-contract and Boolean RMW checkpoint
+
+The canonical no-GC atomic facade had 16 untagged raw declarations and exposed
+four safe-looking Boolean read-modify-write methods implemented as separate
+load/swap/store calls. `compare_exchange` could swap a value and then overwrite
+a concurrent writer while compensating for mismatch; Boolean and/or/not had
+the same non-atomic load/store race. The hosted Rust provider now exports four
+typed Boolean RMW primitives, and interpreter registration plus native ABI
+metadata use the same signatures. The Simple methods each make one direct
+foreign call, so compare-exchange drops from as many as three provider calls
+to one and Boolean bitwise RMW drops from two calls to one.
+
+All 20 raw atomic declarations are explicitly `unsafe(ffi)` and every call is
+lexically scoped. The public Boolean API and true/false types are preserved.
+No allocation, copy, retry loop, extra memory ordering fence, registry lookup,
+lock, or dispatch was added per call; the corrected operations reduce existing
+global-map mutex acquisitions.
+
+Factory wrappers now reject a non-positive allocation handle once, outside the
+operation hot path. Manual `free` methods are explicitly unsafe because the
+legacy class cannot consume itself or invalidate its private handle; callers
+must prevent use-after-free and duplicate release. Ordinary load/store/RMW
+methods remain safe only for live objects produced by the checked factories.
+
+This does not make the atomic provider safe. Hosted operations still acquire a
+global `Mutex<HashMap>` despite the facade's lock-free claim, use `SeqCst`
+regardless of requested ordering, and fabricate zero/false or discard writes
+for stale/invalid handles. The simple-core fallback implements only a partial,
+single-threaded pointer-backed integer subset. Typed generation-checked direct
+slots and ordered thunks remain required before verified admission.
+
+The GC async atomic module was a full duplicate owner with the old multi-call
+Boolean implementation and 16 additional untagged declarations. It is now a
+zero-runtime-cost compatibility facade over the canonical no-GC sync owner,
+matching the existing no-GC async family structure and removing that divergent
+unsafe surface.
+
+Estimated repository totals decrease to 11,639 declarations / 3,141 symbols.
+Unsafe-tagged rows increase from 2,278 to 2,298, untouched rows decrease from
+9,178 to 9,162, and exact-artifact verified-and-signed admission remains zero.
+
+Focused evidence: the direct Boolean RMW truth-table test passed; an eight-
+thread contention test proved exactly one successful false-to-true CAS; and
+`cargo check -p simple-compiler` completed with four pre-existing unrelated
+warnings. The atomic static contract audit passed. These results validate the
+Rust provider and registration edits, but they are not signed exact-artifact or
+cross-engine production-Simple evidence.

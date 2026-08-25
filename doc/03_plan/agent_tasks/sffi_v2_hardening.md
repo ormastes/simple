@@ -657,3 +657,11 @@ passing placeholder.
      destructive directory, hash, clock, and array ambiguity with typed
      contracts. Add no filesystem operation, traversal, launch, allocation,
      copy, lookup, lock, or generic dispatch beyond required status checks.
+128. Keep all 20 canonical atomic declarations explicitly tagged and
+     lexically scoped, and keep GC/no-GC async families as zero-cost facades.
+     Retain one-call Boolean CAS/and/or/not primitives; never
+     restore multi-call load/swap/store compositions. Replace hosted global
+     mutex/hash-map handles with typed generation-checked direct slots and
+     honor requested memory ordering, with a complete pure-Simple bootstrap
+     contract. Add no per-call allocation, copy, retry, lookup, lock, generic
+     dispatch, or stronger fence beyond the selected ordering.

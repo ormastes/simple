@@ -666,6 +666,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_async_ws_read_raw", network::rt_async_ws_read_raw);
     insert_simple!("rt_async_ws_write_raw", network::rt_async_ws_write_raw);
     insert_simple!("rt_atomic_bool_free", atomic::rt_atomic_bool_free);
+    insert_simple!("rt_atomic_bool_compare_exchange", atomic::rt_atomic_bool_compare_exchange);
+    insert_simple!("rt_atomic_bool_fetch_and", atomic::rt_atomic_bool_fetch_and);
+    insert_simple!("rt_atomic_bool_fetch_not", atomic::rt_atomic_bool_fetch_not);
+    insert_simple!("rt_atomic_bool_fetch_or", atomic::rt_atomic_bool_fetch_or);
     insert_simple!("rt_atomic_bool_load", atomic::rt_atomic_bool_load);
     insert_simple!("rt_atomic_bool_new", atomic::rt_atomic_bool_new);
     insert_simple!("rt_atomic_bool_store", atomic::rt_atomic_bool_store);
