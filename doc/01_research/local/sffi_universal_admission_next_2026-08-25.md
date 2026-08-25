@@ -1944,3 +1944,26 @@ rows; exact-artifact verified-and-signed admission remains zero.
 
 Focused Rust provider verification passed: 81 `file_io`-filtered tests, zero
 failures (1.01 seconds; 1,146 unrelated tests filtered out).
+
+## Aspect-pack I/O authority and overflow checkpoint
+
+The compiler aspect-pack loader had four tagged file calls but also four
+untagged mmap, unmap, raw-pointer-read, and file-size declarations. All eight
+declarations and their 14 production call sites now carry minimal lexical FFI
+authority; pointer operations additionally require `raw_ptr`.
+
+Both mapping and positioned-read EOF checks previously formed
+`offset + length` on attacker-controlled geometry before comparing it with the
+file size. They now use subtraction after validating positive bounded length,
+so signed overflow cannot turn an out-of-file range into an admitted one. The
+existing 64 MiB materialization cap, aligned mapping arithmetic, one
+open/map/close sequence, and one open/seek/read/close sequence are unchanged.
+The per-byte mapped copy gains only compile-time authority metadata: no extra
+call, allocation, copy, branch, lookup, lock, hash, or signing operation.
+
+The source census measured repository-wide missing authority decreasing from
+18,290 to 18,276 and production missing authority from 10,120 to 10,106. The
+broader `rt_io` family now has 313 explicit and 27 missing call sites.
+Declaration totals remain 11,627; unsafe-tagged declarations increase from
+2,443 to 2,447 and untouched declarations decrease from 9,005 to 9,001.
+Exact-artifact verified-and-signed admission remains zero.
