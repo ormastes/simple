@@ -8,7 +8,8 @@ path-only facade.
 
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{
-    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    executable_authority_owner_valid
 }
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 use os.kernel.loader.fs_exec_spawn.{FsExecAuthenticatedRunResultV1}
@@ -25,6 +26,137 @@ use os.kernel.loader.authenticated_argv_file_binding_owner_v1.{
     AuthenticatedArgvFileLeaseV1,
     authenticated_argv_file_binding_finish_v1
 }
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_errno,
+    executable_launch_arguments_v1_validate
+}
+use os.kernel.loader.spawn_recipes.{spawn_recipe_launch_contract_valid}
+
+pub(package) const AUTHENTICATED_FS_EXEC_USER_SLOT_LIMIT_V1: i64 = 128
+
+pub(package) enum AuthenticatedFsExecUserSlotStateV1:
+    Armed
+    Consuming
+    Retired
+
+pub(package) struct AuthenticatedFsExecUserSlotV1:
+    generation: u64
+    caller: i64
+    canonical_path: text
+    recipe: i64
+    state: AuthenticatedFsExecUserSlotStateV1
+    submission: AuthenticatedFsExecSubmissionV1
+
+pub(package) class AuthenticatedFsExecUserServiceV1:
+    """Bounded loader-owned one-shot ingress for unprivileged path+argv requests.
+
+    Userland never receives an authority registry, token, load consumer, or
+    entry point.  A privileged loader owner arms an exact caller/path/recipe
+    tuple after catalog admission; the public-facing request can only consume
+    that tuple once.  Slots are not recycled in v1, which makes stale request
+    coordinates harmless and bounds retained authority.  The kernel service
+    loop is the sole mutable owner and must serialize `arm` and `submit`; this
+    value is never shared directly between syscall execution domains.
+
+    `AuthenticatedFsExecSubmissionV1` is a value-semantic bundle of opaque
+    registry coordinates, not the mutable authority itself.  The loader
+    registry remains the single state owner and atomically rejects duplicate
+    token consumption.  This service additionally avoids copying a complete
+    slot during submit and moves its owner-visible lifecycle to `Consuming`
+    before passing those coordinates to the registry-backed handoff.
+
+    This owner currently has no boot initializer or syscall caller.  It is the
+    safe loader-side ingress contract for that later wiring, not a claim that
+    ring-3 path submission is already reachable.
+    """
+    slots: [AuthenticatedFsExecUserSlotV1]
+    next_generation: u64
+
+    static fn new() -> AuthenticatedFsExecUserServiceV1:
+        AuthenticatedFsExecUserServiceV1(slots: [], next_generation: 1u64)
+
+    me arm(
+        caller: i64,
+        canonical_path: text,
+        recipe: i64,
+        submission: AuthenticatedFsExecSubmissionV1
+    ) -> i64:
+        if self.slots.len() >= AUTHENTICATED_FS_EXEC_USER_SLOT_LIMIT_V1 or
+            self.next_generation == 0u64 or
+            self.next_generation == 0xffffffffffffffffu64:
+            return -28
+        # Arming is loader-only, but still reject malformed or policy-mismatched
+        # coordinates before retaining a live one-shot token.
+        val launch = executable_launch_arguments_v1_validate(
+            canonical_path, [canonical_path], [])
+        if launch.is_err():
+            return executable_launch_arguments_v1_errno(launch.unwrap_err())
+        if not executable_authority_owner_valid(submission.authorities) or
+            submission.entry_point == 0u64 or
+            submission.caller != caller or submission.recipe != recipe or
+            not spawn_recipe_launch_contract_valid(
+                recipe, canonical_path, [canonical_path], []):
+            return -13
+        for slot in self.slots:
+            if slot.state != AuthenticatedFsExecUserSlotStateV1.Retired and
+                slot.caller == caller and
+                slot.canonical_path == canonical_path and
+                slot.recipe == recipe:
+                return -17
+        val generation = self.next_generation
+        self.next_generation = self.next_generation + 1u64
+        self.slots.push(AuthenticatedFsExecUserSlotV1(
+            generation: generation,
+            caller: caller,
+            canonical_path: canonical_path,
+            recipe: recipe,
+            state: AuthenticatedFsExecUserSlotStateV1.Armed,
+            submission: submission))
+        generation as i64
+
+    me submit(
+        scheduler: Scheduler,
+        table: MountTable,
+        caller: i64,
+        canonical_path: text,
+        argv: [text],
+        recipe: i64
+    ) -> AuthenticatedFsExecSubmissionResultV1:
+        # Validate and copy all user-controlled launch strings before changing
+        # slot state, so malformed argv cannot burn loader authority.
+        val checked = executable_launch_arguments_v1_validate(
+            canonical_path, argv, [])
+        if checked.is_err():
+            return AuthenticatedFsExecSubmissionResultV1(
+                exit_code: executable_launch_arguments_v1_errno(
+                    checked.unwrap_err()),
+                evidence: nil, cleanup_indeterminate: false)
+        val launch = checked.unwrap()
+        if not spawn_recipe_launch_contract_valid(
+            recipe, launch.path, launch.argv, launch.envp):
+            return AuthenticatedFsExecSubmissionResultV1(
+                exit_code: -13, evidence: nil, cleanup_indeterminate: false)
+        var index: i64 = 0
+        while index < self.slots.len():
+            if self.slots[index].state ==
+                    AuthenticatedFsExecUserSlotStateV1.Armed and
+                self.slots[index].caller == caller and
+                self.slots[index].canonical_path == launch.path and
+                self.slots[index].recipe == recipe:
+                # Retire before crossing into architecture handoff.  A panic,
+                # partial handoff, or indeterminate cleanup can never replay
+                # the retained token through this user ingress.
+                self.slots[index].state =
+                    AuthenticatedFsExecUserSlotStateV1.Consuming
+                val result = authenticated_fs_exec_submit_v1(
+                    scheduler, table, self.slots[index].submission,
+                    launch.path, launch.argv)
+                self.slots[index].state =
+                    AuthenticatedFsExecUserSlotStateV1.Retired
+                return result
+            index = index + 1
+        AuthenticatedFsExecSubmissionResultV1(
+            exit_code: -13, evidence: nil, cleanup_indeterminate: false)
 
 @cfg(x86_64)
 use os.kernel.loader.x86_64_fs_exec_spawn.{

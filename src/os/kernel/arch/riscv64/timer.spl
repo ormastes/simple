@@ -28,6 +28,10 @@ use os.kernel.boot.mmio.{mmio_read64}
 # QEMU virt timer frequency (10 MHz)
 val TIMER_FREQ_HZ: u64 = 10000000
 
+# SBI defines an all-ones deadline as the portable way to leave the timer
+# pending strictly in the future while supervisor timer delivery is disabled.
+val TIMER_DISABLED_DEADLINE: u64 = 0xFFFFFFFFFFFFFFFF
+
 # CLINT memory-mapped timer (readable from S-mode on QEMU)
 val CLINT_BASE: u64 = 0x02000000
 val CLINT_MTIME: u64 = 0x0200BFF8       # 64-bit mtime register
@@ -100,6 +104,16 @@ impl Rv64Timer:
         """
         g_timer_freq = TIMER_FREQ_HZ
 
+        if frequency_hz > g_timer_freq:
+            # Integer division would produce a zero interval.  Programming
+            # `now + 0` leaves STIP continuously pending and traps the kernel
+            # in the timer IRQ path before the scheduler can make progress.
+            # Retire any earlier deadline and keep delivery disabled instead.
+            g_timer_interval = 0
+            csrc_sie(SIE_STIE)
+            _set_timer_deadline(TIMER_DISABLED_DEADLINE)
+            serial_writeln("[TIMER] Disabled: requested tick rate exceeds hardware counter frequency")
+            return
         if frequency_hz > 0:
             g_timer_interval = g_timer_freq / frequency_hz
         else:
@@ -158,9 +172,16 @@ fn rv64_handle_timer_interrupt():
     Called from the trap vector when scause = 0x8000000000000005
     (interrupt bit set, code 5 = S-mode timer interrupt).
     """
-    # Set next timer deadline
-    if g_timer_interval > 0:
-        _set_timer_relative(g_timer_interval)
+    # A zero interval is never a schedulable timer.  Quiesce both supervisor
+    # delivery and the SBI deadline so a stale/invalid initialization cannot
+    # turn one pending timer event into an unbounded interrupt storm.
+    if g_timer_interval == 0:
+        csrc_sie(SIE_STIE)
+        _set_timer_deadline(TIMER_DISABLED_DEADLINE)
+        return
+
+    # Set next timer deadline.
+    _set_timer_relative(g_timer_interval)
 
     # The scheduler hook would be called here
     # scheduler_tick()

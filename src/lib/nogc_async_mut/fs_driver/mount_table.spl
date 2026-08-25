@@ -1453,6 +1453,22 @@ impl MountTable:
                         var i: i32 = 0
                         while i < self.mounts.len() as i32:
                             if self.mounts[i].id == old_pair.mount_id:
+                                # MountTable is the shared policy owner for every
+                                # backend.  Keep rename aligned with ftruncate:
+                                # a read-only mount must never reach a mutating
+                                # FAT32/NVFS/DBFS driver operation.
+                                if self.mounts[i].opts.read_only:
+                                    return Err(FsError.Permission)
+                                # An identity rename is not a namespace mutation,
+                                # but its source must still exist.  Resolve that
+                                # semantic here so backend replace algorithms
+                                # cannot unlink and republish the same entry.
+                                if old_pair.relpath.raw == new_pair.relpath.raw:
+                                    val existing = _driver_stat_path(
+                                        self.mounts[i].driver, old_pair.relpath)
+                                    match existing:
+                                        case Err(e): return Err(e)
+                                        case Ok(_): return Ok(())
                                 self._generation_available_at(i, true)?
                                 val result = _driver_rename_path_text(self.mounts[i].driver, old_pair.relpath.raw, new_pair.relpath.raw)
                                 self._advance_generation_at(i, true)?

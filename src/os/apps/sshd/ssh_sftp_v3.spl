@@ -709,10 +709,21 @@ impl SftpSessionV3:
                             Ok(_):
                                 match vfs_chmod_checked(request.path,
                                     request.directory_mode.to_u16()):
-                                    Err(error): sftp_namespace_status_v3(
-                                        request.request_id,
-                                        _namespace_error_status(error),
-                                        "mkdir mode application failed")
+                                    Err(error):
+                                        # MKDIR is acknowledged only after its
+                                        # requested mode is installed.  Undo
+                                        # the newly-created empty directory on
+                                        # failure so a negative reply does not
+                                        # normally leave a hidden mutation.
+                                        match vfs_rmdir_checked(request.path):
+                                            Err(_): sftp_namespace_status_v3(
+                                                request.request_id,
+                                                SSH_FX_FAILURE,
+                                                "mkdir mode and rollback failed")
+                                            Ok(_): sftp_namespace_status_v3(
+                                                request.request_id,
+                                                _namespace_error_status(error),
+                                                "mkdir mode application failed")
                                     Ok(_): sftp_namespace_status_v3(
                                         request.request_id, SSH_FX_OK, "ok")
                     case SftpNamespaceKindV3.Rmdir:
