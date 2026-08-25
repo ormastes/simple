@@ -556,3 +556,7 @@ passing placeholder.
      Replace ambiguous empty-array and numeric parser/status/equality contracts
      with typed results without extra hashes, HKDF/HMAC operations, record
      parses, transport calls, allocations, or byte-array copies.
+108. Use the refreshed authoritative baseline: 11,713 `rt_*` declaration rows /
+     3,137 symbols, 1,737 unsafe-tagged, 9,720 untouched, and zero signed
+     admissions. Continue with bootstrap `infra/file_io.spl` (33 untouched
+     rows), preserving its filesystem call and buffer-copy counts.

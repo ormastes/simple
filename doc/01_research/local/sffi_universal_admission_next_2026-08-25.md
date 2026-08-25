@@ -1217,3 +1217,19 @@ cryptographic data layout. Production Simple and optimizer verification remain
 unavailable. Estimated totals remain 11,712 declaration rows / 3,137 symbols;
 unsafe-tagged rows increase from 1,762 to 1,810, untouched rows decrease from
 9,692 to 9,644, and exact signed admission remains zero.
+
+## Authoritative inventory refresh after TLS context
+
+The refreshed source-only inventory reports 11,713 `rt_*` declaration rows and
+3,137 `rt_*` symbols. Of those rows, 1,737 are unsafe-tagged, 9,720 remain
+untouched, and zero are exact-artifact verified-and-signed admissions. The
+broader all-extern ledger contains 13,475 rows / 3,936 symbols, with 1,922
+unsafe-tagged and 11,060 untouched. These authoritative classifications replace
+the intervening arithmetic estimates, which cannot account for every
+non-`rt_*`, predeclared-contract, or shared-symbol classification.
+
+The inventory artifacts are retained at
+`/mnt/data/tmp/sffi-inventory.F4tIYb/{contracts,symbols}.tsv`. The largest owned
+production untouched file is now bootstrap `infra/file_io.spl` with 33 rows;
+tests and duplicated test layouts remain separately visible but do not outrank
+production boundary ownership work.
