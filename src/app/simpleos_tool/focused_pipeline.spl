@@ -14,6 +14,7 @@ use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct_co
 use compiler.backend.backend.simpleos_guest_link.{link_simpleos_guest_external_for_target}
 use app.simpleos_tool.guest_target.{SimpleOsGuestTarget, simpleos_guest_target_current, simpleos_guest_target_valid, simpleos_guest_target_configure, simpleos_guest_user_context}
 use app.io.mod.{file_hash_sha256, file_rename, file_size_raw, getpid}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
 
 extern fn rt_file_read_text_rv(path: text) -> text
 use std.io_runtime.{file_write_bytes}
@@ -21,15 +22,29 @@ use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
 
 fn publish_fresh_candidate(candidate: text, output: text, artifact_kind: text) -> bool:
-    """Publish one nonempty, digestable artifact without exposing partial bytes."""
-    if (file_size_raw(candidate) <= 0 or
-            file_hash_sha256(candidate).len() != 64):
+    """Atomically publish and bind success to the final pathname's bytes."""
+    val candidate_size = file_size_raw(candidate)
+    val candidate_sha256 = file_hash_sha256(candidate)
+    if (candidate_size <= 0 or
+            not hash256_hex_valid(candidate_sha256) or
+            hash256_is_zero(candidate_sha256)):
         file_delete(candidate)
         print "error: {artifact_kind} is missing or invalid: {candidate}"
         return false
     if not file_rename(candidate, output):
         file_delete(candidate)
         print "error: cannot publish {artifact_kind}: {output}"
+        return false
+    # Rename success alone is not terminal evidence on every filesystem
+    # backend.  Re-open the published name and require the exact staged
+    # identity so callers cannot report success for a missing, substituted, or
+    # truncated output after publication.
+    val published_size = file_size_raw(output)
+    val published_sha256 = file_hash_sha256(output)
+    if (published_size != candidate_size or
+            published_sha256 != candidate_sha256):
+        file_delete(output)
+        print "error: published {artifact_kind} identity mismatch: {output}"
         return false
     true
 

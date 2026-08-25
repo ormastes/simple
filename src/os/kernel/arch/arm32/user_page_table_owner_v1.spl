@@ -274,6 +274,7 @@ fn _arm32_map_authenticated_ranges(
 
 fn _arm32_map_stack_frame(
     root: u64,
+    stack_bottom: u64,
     initial_sp: u64,
     stack_top: u64,
     bytes: [u8],
@@ -282,7 +283,11 @@ fn _arm32_map_stack_frame(
 ) -> (bool, [Arm32OwnedLeafV1], [Arm32OwnedL2IdentityV1]):
     var owned_leaves = leaves
     var owned_l2 = l2_tables
-    var page = _arm32_page_start(initial_sp)
+    # Map the complete admitted stack reservation, not just the page(s)
+    # occupied by argc/argv/envp.  Compilers and other filesystem-launched
+    # programs grow the stack below the initial frame without a demand-paging
+    # owner in this ARM32 path.
+    var page = _arm32_page_start(stack_bottom)
     while page < stack_top:
         val frame = pmm_alloc_page()
         if not frame.?: return (false, owned_leaves, owned_l2)
@@ -405,6 +410,7 @@ pub(package) fn arm32_user_page_table_prepare_with_launch_v1(
     if lifecycle.state != ExecutableLoadConsumerStateV1.Mapping:
         return _arm32_pt_reject(Arm32UserPageTableErrorV1.LoadLifecycleMismatch)
     val stack_size = compute_stack_size(authenticated_source.len() as u64)
+    val stack_bottom = _arm32_page_start(ARM32_USER_STACK_TOP - stack_size)
     val frame_result = build_initial_stack_checked(
         ARM32_USER_STACK_TOP, stack_size, 4u64, [],
         checked_launch.argv, checked_launch.envp,
@@ -412,6 +418,10 @@ pub(package) fn arm32_user_page_table_prepare_with_launch_v1(
     if frame_result.is_err():
         return _arm32_pt_reject(Arm32UserPageTableErrorV1.StackBuildFailed)
     val stack_frame = frame_result.unwrap()
+    if (stack_frame.sp < stack_bottom or stack_frame.sp > ARM32_USER_STACK_TOP or
+        stack_frame.bytes.len() as u64 != ARM32_USER_STACK_TOP - stack_frame.sp or
+        stack_frame.sp % 8u64 != 0u64):
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.StackBuildFailed)
     if _arm32_user_pt_mutex_v1 <= 0 or not mutex_raw_lock(_arm32_user_pt_mutex_v1):
         return _arm32_pt_reject(Arm32UserPageTableErrorV1.SerializationIndeterminate)
     var reusable = -1
@@ -456,7 +466,7 @@ pub(package) fn arm32_user_page_table_prepare_with_launch_v1(
         _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
         return _arm32_pt_reject(Arm32UserPageTableErrorV1.LoadLifecycleMismatch)
     val (stack_ok, all_leaves, all_l2_tables) = _arm32_map_stack_frame(
-        root, stack_frame.sp, ARM32_USER_STACK_TOP, stack_frame.bytes,
+        root, stack_bottom, stack_frame.sp, ARM32_USER_STACK_TOP, stack_frame.bytes,
         mapped_leaves, mapped_l2_tables)
     if not stack_ok:
         val rollback = _arm32_rollback_resources(root, all_leaves, all_l2_tables)

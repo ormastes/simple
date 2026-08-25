@@ -50,3 +50,26 @@ requests fail before backend read dispatch. Directory and over-limit opens
 close their temporary backend handle. Generation mismatch returns
 `StaleHandle`; close remains valid afterward. Slot generations never wrap:
 terminal slots retire permanently.
+
+## Execute observation and promotion revalidation
+
+`ExecuteFileObservationV1` is the shared filesystem-layer record for the
+object retained behind an executable handle. `MountTable` obtains it from the
+selected `DriverInstance` after open and stat, stores it in the live snapshot
+lease, and asks the same driver to revalidate it before every snapshot read,
+seal, promotion, and later `execute_binding_is_current` decision. The record
+never carries a path or backend handle and is not authority by itself.
+
+FAT32 binds the observation to the generational open-handle slot, starting
+cluster, exact captured size, and the core-owned content mutation generation.
+It does not import the kernel FAT32 identity owner; the dependency remains
+`MountTable -> fs_driver dispatch -> FsFat32Driver -> Fat32Core`. A stale,
+recycled, directory, cluster-less, mutated, or size-changed object fails
+closed. NVFS, NVFS-POSIX, and DBFS reuse their existing inode plus mutation
+generation. RamFS keeps its prior retained-handle inode/size behavior because
+it does not yet publish a content epoch.
+
+Observation and revalidation are O(1), add no file-byte copies, and preserve
+the existing bounded streaming SHA-256 path. The contract assumes all mounted
+backend mutation remains serialized through the owning `MountTable`; raw
+out-of-band block-device writes are outside stable-snapshot authority.

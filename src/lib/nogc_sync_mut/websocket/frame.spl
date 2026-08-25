@@ -9,11 +9,15 @@ use std.nogc_sync_mut.websocket.types.{
     OPCODE_PONG,
     OPCODE_CLOSE,
     FIN_BIT,
+    RSV1_BIT,
+    RSV2_BIT,
+    RSV3_BIT,
     MASK_BIT,
     OPCODE_MASK,
     PAYLOAD_LEN_MASK,
     PAYLOAD_LEN_EXTENDED_16,
-    PAYLOAD_LEN_EXTENDED_64
+    PAYLOAD_LEN_EXTENDED_64,
+    validate_frame_structure
 }
 use std.nogc_sync_mut.websocket.handshake.{ws_handshake_text_to_bytes as text_to_bytes}
 
@@ -57,6 +61,12 @@ fn unmask_payload(payload: List<i64>, mask_key: List<i64>) -> List<i64>:
 
 fn create_frame(is_final: i64, opcode: i64, is_masked: i64, payload: List<i64>, mask_key: List<i64>) -> List<i64>:
     val result = []
+    # The generic constructor is public and is also used by message
+    # fragmentation.  Keep it from emitting reserved opcodes or fragmented /
+    # oversized control frames; RFC 6455 section 5.5 requires every control
+    # frame to be final and no larger than 125 bytes.
+    if validate_frame_structure(is_final, opcode, payload.length()) == 0:
+        return result
     if is_masked == 1 and mask_key.length() < 4:
         return result
 
@@ -167,6 +177,12 @@ fn parse_frame_header(data: List<i64>) -> List<i64>:
     val byte1 = data[0]
     val byte2 = data[1]
 
+    # No WebSocket extensions are negotiated by this frame layer, therefore
+    # every RSV bit is a protocol error.  Reject it here before an extension-
+    # shaped frame can be interpreted as ordinary application data.
+    if (byte1 & (RSV1_BIT | RSV2_BIT | RSV3_BIT)) != 0:
+        return []
+
     val fin = if (byte1 & FIN_BIT) != 0: 1 else: 0
     val opcode = byte1 & OPCODE_MASK
     val masked = if (byte2 & MASK_BIT) != 0: 1 else: 0
@@ -212,6 +228,13 @@ fn parse_frame_header(data: List<i64>) -> List<i64>:
 
     if masked == 1:
         header_size = header_size + 4
+
+    # This single-frame structural gate covers reserved opcodes and the RFC
+    # control-frame invariants.  Message-level continuation sequencing remains
+    # the responsibility of a connection state machine, while valid text /
+    # binary continuation frames continue to pass this parser unchanged.
+    if validate_frame_structure(fin, opcode, payload_length) == 0:
+        return []
 
     [fin, opcode, masked, payload_length, header_size]
 

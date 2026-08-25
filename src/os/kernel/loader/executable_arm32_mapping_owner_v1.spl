@@ -151,7 +151,15 @@ pub(package) fn executable_arm32_mapping_readiness_v1(
     if stack_size == 0u64 or stack_top < stack_size:
         return _arm32_reject(
             ExecutableArm32MappingReadinessErrorV1.StackCollision)
-    val stack_start = stack_top - stack_size
+    # Admission must reserve the same complete, page-rounded stack interval
+    # that the page-table owner will map.  Using the raw byte boundary here
+    # would permit a PT_LOAD in the low partial page and make the later stack
+    # map collide after authority had already been admitted.
+    val stack_start = _arm32_page_start(stack_top - stack_size)
+    val stack_pages = (stack_top - stack_start) / page_size
+    if stack_pages > executable_arm32_mapping_max_pages_v1():
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.PageLimitExceeded)
     var planned_pages = 0u64
     var entry_covered = false
     var i = 0
@@ -191,6 +199,14 @@ pub(package) fn executable_arm32_mapping_readiness_v1(
                 ExecutableArm32MappingReadinessErrorV1.PageLimitExceeded)
         planned_pages = planned_pages + pages
         i = i + 1
+
+    # The mapping owner accounts load pages through the consumer and stack
+    # pages separately, but both consume the same bounded physical/page-table
+    # budget.  Reject the combined image before allocation rather than failing
+    # part-way through stack construction.
+    if planned_pages > executable_arm32_mapping_max_pages_v1() - stack_pages:
+        return _arm32_reject(
+            ExecutableArm32MappingReadinessErrorV1.PageLimitExceeded)
 
     if layout.entry_point == 0u64 or not entry_covered:
         return _arm32_reject(

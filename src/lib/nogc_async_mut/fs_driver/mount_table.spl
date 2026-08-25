@@ -1,5 +1,5 @@
 # MountTable — active mounts resolved by longest path prefix.
-use std.fs_driver.types.{Path, MountOptions, StatInfo, FileHandle, DirHandle, DirEntry, OpenFlags, ExecuteTrust, FileStat}
+use std.fs_driver.types.{Path, MountOptions, StatInfo, FileHandle, DirHandle, DirEntry, OpenFlags, ExecuteTrust, FileStat, ExecuteFileObservationV1}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.capability.{Capability, FsCapabilitySet, FS_CAPABILITY_V1}
@@ -11,7 +11,8 @@ use std.fs_driver.mount_table_support.{PositionedDriverKind, POSITIONED_DRIVER_M
     driver_bounded_positioned_read_bytes, driver_positioned_kind}
 use std.fs_driver.mount_driver_dispatch.{_driver_name, _driver_kind_name, _driver_capabilities, _driver_stat_path,
     _driver_dbfs_server_data_identity, _driver_dbfs_current_server_data_identity,
-    _driver_fstat, _driver_file_generation_v1, _driver_open_path, _driver_opendir_path, _driver_readdir_handle,
+    _driver_fstat, _driver_file_generation_v1, _driver_execute_observation_v1,
+    _driver_execute_observation_current_v1, _driver_open_path, _driver_opendir_path, _driver_readdir_handle,
     _driver_read_handle, _driver_mkdir_path, _driver_write_text_handle,
     _driver_pwrite_text_handle, _driver_pread_text_handle, _driver_close_handle,
     _driver_fsync, _driver_fdatasync, _file_stat_is_directory,
@@ -84,6 +85,7 @@ struct ExecuteOpenBinding:
     mount_generation: u64
     namespace_generation: u64
     content_generation: u64
+    execute_observation: ExecuteFileObservationV1
     size: i64
 
 struct StableFileSnapshotLeaseV1:
@@ -125,6 +127,7 @@ struct StableFileSnapshotBindingV1:
     namespace_generation: u64
     content_generation: u64
     file_generation: u64
+    execute_observation: ExecuteFileObservationV1
     size: u64
     sealed: bool
     content_sha256: text
@@ -409,7 +412,8 @@ impl MountTable:
         mount_id: MountId, file_handle: FileHandle, kind: PositionedDriverKind,
         canonical_source_path: text,
         mount_generation: u64, namespace_generation: u64,
-        content_generation: u64, file_generation: u64, size: u64
+        content_generation: u64, file_generation: u64,
+        execute_observation: ExecuteFileObservationV1, size: u64
     ) -> Result<StableFileSnapshotLeaseV1, FsError>:
         var slot: i32 = 0
         while slot < self.stable_snapshots.len() as i32:
@@ -424,7 +428,8 @@ impl MountTable:
                     kind: kind, mount_generation: mount_generation,
                     namespace_generation: namespace_generation,
                     content_generation: content_generation,
-                    file_generation: file_generation, size: size,
+                    file_generation: file_generation,
+                    execute_observation: execute_observation, size: size,
                     sealed: false, content_sha256: "",
                     hash_stream: prior.hash_stream, hash_tracking: false,
                     hash_next_offset: 0u64, hash_complete: false, hash_invalid: false)
@@ -440,7 +445,8 @@ impl MountTable:
             kind: kind, mount_generation: mount_generation,
             namespace_generation: namespace_generation,
             content_generation: content_generation,
-            file_generation: file_generation, size: size,
+            file_generation: file_generation,
+            execute_observation: execute_observation, size: size,
             sealed: false, content_sha256: "",
             hash_stream: sha256_stream_v1_new(), hash_tracking: false,
             hash_next_offset: 0u64, hash_complete: false, hash_invalid: false))
@@ -473,7 +479,8 @@ impl MountTable:
             mount_generation: binding.mount_generation,
             namespace_generation: binding.namespace_generation,
             content_generation: binding.content_generation,
-            file_generation: binding.file_generation, size: binding.size,
+            file_generation: binding.file_generation,
+            execute_observation: binding.execute_observation, size: binding.size,
             sealed: binding.sealed, content_sha256: binding.content_sha256,
             hash_stream: binding.hash_stream, hash_tracking: binding.hash_tracking,
             hash_next_offset: binding.hash_next_offset,
@@ -524,6 +531,9 @@ impl MountTable:
             case Ok(value): value
         if current_file_generation == 0u64 or
            current_file_generation != snapshot.file_generation:
+            return nil
+        if not _driver_execute_observation_current_v1(
+            entry.driver, file.inner_handle, snapshot.execute_observation):
             return nil
         Some(entry)
 
@@ -776,6 +786,16 @@ impl MountTable:
                 if file_generation != generation_before:
                     val _ = _driver_close_handle(entry.driver, inner)
                     return Err(FsError.StaleHandle)
+                val execute_observation = match _driver_execute_observation_v1(entry.driver, inner):
+                    case Err(error):
+                        val _ = _driver_close_handle(entry.driver, inner)
+                        return Err(error)
+                    case Ok(value): value
+                if execute_observation.size != stat.size or
+                   not _driver_execute_observation_current_v1(
+                       entry.driver, inner, execute_observation):
+                    val _ = _driver_close_handle(entry.driver, inner)
+                    return Err(FsError.StaleHandle)
                 val virtual_result = self._bind_file(i, entry.id, inner)
                 if virtual_result.is_err():
                     val _ = _driver_close_handle(entry.driver, inner)
@@ -787,7 +807,7 @@ impl MountTable:
                 val lease_result = self._bind_stable_snapshot(
                     entry.id, virtual_handle, kind, path, entry.mount_generation,
                     entry.namespace_generation, entry.content_generation,
-                    file_generation, stat.size)
+                    file_generation, execute_observation, stat.size)
                 if lease_result.is_err():
                     val _ = self.close(virtual_handle)
                     return Err(lease_result.unwrap_err())
@@ -962,6 +982,7 @@ impl MountTable:
             mount_generation: snapshot.mount_generation,
             namespace_generation: snapshot.namespace_generation,
             content_generation: snapshot.content_generation,
+            execute_observation: snapshot.execute_observation,
             size: snapshot.size as i64))
 
     me fn close_stable_snapshot(lease: StableFileSnapshotLeaseV1) -> Result<(), FsError>:
@@ -1105,6 +1126,16 @@ impl MountTable:
                 if stat.size < 1u64 or stat.size > MOUNT_TABLE_MAX_EXECUTABLE_BYTES:
                     _driver_close_handle(entry.driver, opened)
                     return Err(FsError.TooLarge)
+                val execute_observation = match _driver_execute_observation_v1(entry.driver, opened):
+                    case Err(error):
+                        _driver_close_handle(entry.driver, opened)
+                        return Err(error)
+                    case Ok(value): value
+                if execute_observation.size != stat.size or
+                   not _driver_execute_observation_current_v1(
+                       entry.driver, opened, execute_observation):
+                    _driver_close_handle(entry.driver, opened)
+                    return Err(FsError.StaleHandle)
                 val bound = self._bind_file(i, entry.id, opened)
                 if bound.is_err():
                     _driver_close_handle(entry.driver, opened)
@@ -1122,6 +1153,7 @@ impl MountTable:
                     mount_generation: entry.mount_generation,
                     namespace_generation: entry.namespace_generation,
                     content_generation: entry.content_generation,
+                    execute_observation: execute_observation,
                     size: stat.size as i64
                 ))
             i = i + 1
@@ -1141,9 +1173,13 @@ impl MountTable:
         val entry = match self._mount_entry_for_file(open_binding.unwrap()):
             case nil: return false
             case Some(value): value
-        _mount_generations_current(
+        if not _mount_generations_current(
             entry, binding.mount_generation, binding.namespace_generation,
-            binding.content_generation)
+            binding.content_generation):
+            return false
+        _driver_execute_observation_current_v1(
+            entry.driver, open_binding.unwrap().inner_handle,
+            binding.execute_observation)
 
     me fn bump_namespace_generation(mount_id: MountId) -> Result<(), FsError>:
         self._advance_generation(mount_id, true)

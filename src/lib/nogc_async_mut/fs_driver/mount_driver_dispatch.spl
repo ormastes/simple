@@ -5,7 +5,7 @@
 # operation selection. Every operation is routed to the recorded instance;
 # unsupported operations fail closed.
 
-use std.fs_driver.types.{Path, StatInfo, FileStat, FileHandle, DirHandle, DirEntry, OpenFlags}
+use std.fs_driver.types.{Path, StatInfo, FileStat, FileHandle, DirHandle, DirEntry, OpenFlags, ExecuteFileObservationV1}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.capability.{FsCapabilitySet}
@@ -84,6 +84,57 @@ fn _driver_file_generation_v1(driver: DriverInstance, handle: FileHandle) -> Res
         case DriverInstance.NvfsPosix(d): d.file_generation_v1(handle)
         case DriverInstance.DbFs(d):      d.file_generation_v1(handle)
         case DriverInstance.RamFs(_):     Err(FsError.Unsupported)
+
+fn _driver_execute_observation_v1(
+    driver: DriverInstance, handle: FileHandle
+) -> Result<ExecuteFileObservationV1, FsError>:
+    """Capture backend-neutral executable identity behind one retained handle."""
+    match driver:
+        case DriverInstance.Fat32(d): d.execute_observation_v1(handle)
+        case DriverInstance.Nvfs(d):
+            val stat = d.fstat(handle)?
+            if _file_stat_is_directory(stat):
+                return Err(FsError.InvalidArg)
+            Ok(ExecuteFileObservationV1(
+                contract_version: 1u32,
+                object_identity: stat.inode,
+                content_generation: d.file_generation_v1(handle)?,
+                size: stat.size))
+        case DriverInstance.NvfsPosix(d):
+            val stat = d.fstat(handle)?
+            if _file_stat_is_directory(stat): return Err(FsError.InvalidArg)
+            Ok(ExecuteFileObservationV1(contract_version: 1u32,
+                object_identity: stat.inode,
+                content_generation: d.file_generation_v1(handle)?, size: stat.size))
+        case DriverInstance.DbFs(d):
+            val stat = d.fstat(handle)?
+            if _file_stat_is_directory(stat): return Err(FsError.InvalidArg)
+            Ok(ExecuteFileObservationV1(contract_version: 1u32,
+                object_identity: stat.inode,
+                content_generation: d.file_generation_v1(handle)?, size: stat.size))
+        case DriverInstance.RamFs(d):
+            # RamFS predates file epochs. Preserve its retained-handle metadata
+            # contract; mutation-epoch enforcement remains unsupported there.
+            val stat = d.fstat(handle)?
+            if _file_stat_is_directory(stat): return Err(FsError.InvalidArg)
+            Ok(ExecuteFileObservationV1(contract_version: 1u32,
+                object_identity: stat.inode, content_generation: 0u64,
+                size: stat.size))
+
+fn _driver_execute_observation_current_v1(
+    driver: DriverInstance, handle: FileHandle, observation: ExecuteFileObservationV1
+) -> bool:
+    if observation.contract_version != 1u32:
+        return false
+    match driver:
+        case DriverInstance.Fat32(d): d.execute_observation_current_v1(handle, observation)
+        case _:
+            val current = match _driver_execute_observation_v1(driver, handle):
+                case Err(_): return false
+                case Ok(value): value
+            current.object_identity == observation.object_identity and
+                current.content_generation == observation.content_generation and
+                current.size == observation.size
 
 fn _driver_open_path(driver: DriverInstance, path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
     match driver:
@@ -251,6 +302,7 @@ fn _driver_link_path_text(driver: DriverInstance, target: text, link_path: text)
 
 export _driver_name, _driver_kind_name, _driver_capabilities, _driver_stat_path, _driver_fstat
 export _driver_file_generation_v1
+export _driver_execute_observation_v1, _driver_execute_observation_current_v1
 export _driver_dbfs_server_data_identity
 export _driver_dbfs_current_server_data_identity
 export _driver_open_path, _driver_opendir_path, _driver_readdir_handle

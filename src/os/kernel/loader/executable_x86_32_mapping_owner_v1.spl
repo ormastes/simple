@@ -22,6 +22,7 @@ pub enum ExecutableX8632MappingReadinessErrorV1:
     DigestMismatch
     ElfRejected
     LayoutMismatch
+    EntryPointInvalid
     AddressOutOfRange
     PageAlignmentInvalid
     PageOverlap
@@ -100,15 +101,24 @@ pub fn executable_x86_32_mapping_readiness_v1(
     val stack_top = 0x00000000BFFFF000u64
     val stack_start = stack_top - 134217728u64
     var planned_pages = 0u64
+    var entry_covered = false
     var i = 0
     while i < layout.load_ranges.len():
         val actual = layout.load_ranges[i]
         if not _x86_32_range_equal(actual, handle.verified_load_ranges[i]):
             return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.LayoutMismatch)
+        # Keep all range arithmetic bounded before forming an end address.  An
+        # authenticated layout is still untrusted at this mapping boundary.
+        if (actual.memory_size == 0u64 or
+            actual.file_size > actual.memory_size or
+            actual.virtual_address > selected.user_address_max or
+            actual.memory_size > selected.user_address_max - actual.virtual_address):
+            return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.AddressOutOfRange)
         if actual.file_offset % page_size != actual.virtual_address % page_size:
             return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.PageAlignmentInvalid)
+        val raw_end = actual.virtual_address + actual.memory_size
         val page_start = _x86_32_page_start(actual.virtual_address)
-        val page_end = _x86_32_page_end(actual.virtual_address + actual.memory_size)
+        val page_end = _x86_32_page_end(raw_end)
         if page_start < page_size or page_end == 0u64 or
             page_end - 1u64 > selected.user_address_max:
             return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.AddressOutOfRange)
@@ -124,7 +134,14 @@ pub fn executable_x86_32_mapping_readiness_v1(
             planned_pages > executable_x86_32_mapping_max_pages_v1() - pages:
             return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.PageLimitExceeded)
         planned_pages = planned_pages + pages
+        # CPL3 must never start in a non-executable mapping (or in an
+        # unmapped hole), even when the ELF header and digest are authentic.
+        if (actual.executable and layout.entry_point >= actual.virtual_address and
+            layout.entry_point < raw_end):
+            entry_covered = true
         i = i + 1
+    if layout.entry_point == 0u64 or not entry_covered:
+        return _x86_32_reject(ExecutableX8632MappingReadinessErrorV1.EntryPointInvalid)
     ExecutableX8632MappingReadinessV1(
         ready: true, error: ExecutableX8632MappingReadinessErrorV1.None,
         entry_point: layout.entry_point, segment_count: layout.load_ranges.len(),

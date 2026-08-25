@@ -1,6 +1,7 @@
 # FAT32 path, handle, and file-operation extensions.
 use std.fs_driver.fat32_core.{
-    Fat32Core, OpenFile, Fat32FileGeneration, FAT32_MAX_OPEN_FILES, FAT32_HANDLE_MAX_GENERATION,
+    Fat32Core, OpenFile, Fat32FileGeneration, Fat32ExecuteObservationV1,
+    FAT32_MAX_OPEN_FILES, FAT32_HANDLE_MAX_GENERATION,
     FAT32_MAX_FILE_GENERATIONS, FAT32_FILE_GENERATION_MAX,
     FAT32_FREE, FAT32_EOC, FAT32_DIR_ENTRY_SIZE, FAT32_ATTR_LONG_NAME,
     _fat32_pack_handle, _fat32_handle_index, _fat32_saved_open_files,
@@ -91,6 +92,20 @@ impl Fat32Core:
         if generation == 0u64:
             return Err("invalid FAT32 file generation")
         Ok(generation)
+
+    fn execute_observation_v1(handle: FileHandle) -> Result<Fat32ExecuteObservationV1, text>:
+        """Observe the exact retained FAT object without reopening its path."""
+        val idx = _fat32_handle_index(self.open_files, handle)
+        if idx < 0 or idx >= self.open_files.len():
+            return Err("invalid file handle")
+        val of = self.open_files[idx]
+        if not of.is_open or of.is_dir or of.start_cluster < 2u32 or of.size < 0:
+            return Err("FAT32 executable observation unavailable")
+        val content_generation = self.file_generation_v1(handle)?
+        Ok(Fat32ExecuteObservationV1(
+            start_cluster: of.start_cluster,
+            content_generation: content_generation,
+            size: of.size.to_u64()))
 
     fn _file_unlink_is_deferred(start_cluster: u32) -> bool:
         for entry in self.file_generations:

@@ -127,6 +127,10 @@ impl SshSession:
                 return false
 
             if _payload_field_is_none(payload, service.next_offset):
+                # "none" is still an authentication request.  Charge it to
+                # the bounded request budget so a peer cannot keep a pre-auth
+                # session alive indefinitely by repeating method discovery.
+                attempts = attempts + 1
                 serial_println("[sshd-session] auth none fail branch")
                 val fail = _publickey_only_auth_failure_payload()
                 self.send_packet(fail)
@@ -149,6 +153,11 @@ impl SshSession:
                         val check = ssh_check_public_key_auth(
                             request, self.session_id, self.user_db)
                         if check.probe_accepted:
+                            # PK_OK discloses that the key is authorized but is
+                            # not authentication success.  Bound probes like
+                            # every other pre-auth request to prevent unlimited
+                            # key enumeration and session pinning.
+                            attempts = attempts + 1
                             self.send_packet(ssh_build_userauth_pk_ok(
                                 check.algorithm, check.key_blob))
                         elif check.valid:

@@ -5,7 +5,7 @@
 # os.services.
 
 use std.fs_driver.error.{FsError}
-use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry, StatInfo}
+use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry, StatInfo, ExecuteFileObservationV1}
 use std.fs_driver.capability.{Capability, FsCapabilitySet}
 use std.fs_driver.extension.{Extension, DirectIoExt}
 use std.fs_driver.direct_io.{DirectIoExtent}
@@ -62,6 +62,32 @@ impl FsFat32Driver:
         match self.inner.file_generation_v1(handle):
             case Ok(generation): Ok(generation)
             case Err(_): Err(FsError.StaleHandle)
+
+    fn execute_observation_v1(handle: FileHandle) -> Result<ExecuteFileObservationV1, FsError>:
+        if not self.mounted:
+            return Err(FsError.StaleHandle)
+        val observed = match self.inner.execute_observation_v1(handle):
+            case Err(_): return Err(FsError.StaleHandle)
+            case Ok(value): value
+        Ok(ExecuteFileObservationV1(
+            contract_version: 1u32,
+            object_identity: observed.start_cluster.to_u64(),
+            content_generation: observed.content_generation,
+            size: observed.size))
+
+    fn execute_observation_current_v1(
+        handle: FileHandle, observation: ExecuteFileObservationV1
+    ) -> bool:
+        if not self.mounted or observation.contract_version != 1u32 or
+           observation.object_identity < 2u64 or
+           observation.content_generation == 0u64:
+            return false
+        val current = match self.inner.execute_observation_v1(handle):
+            case Err(_): return false
+            case Ok(value): value
+        current.start_cluster.to_u64() == observation.object_identity and
+            current.content_generation == observation.content_generation and
+            current.size == observation.size
 
 fn fat32_driver_new(name: text, device: BlockDevice) -> FsFat32Driver:
     FsFat32Driver(
