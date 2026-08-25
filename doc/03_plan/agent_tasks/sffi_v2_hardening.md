@@ -520,3 +520,7 @@ passing placeholder.
     retain `cli_run_ffi_gen` / `cli_ffi_gen` only as aliases to the implemented
     canonical SFFI generator. Keep all 40 canonical CLI declarations explicitly
     tagged; never restore the unimplemented `rt_cli_run_ffi_gen` symbol.
+99. Keep all 40 canonical GLFW declarations explicitly tagged `unsafe(ffi)`.
+    Preserve one presentation call and the existing pixel storage: enforce
+    width/height/count overflow and pointer-lifetime contracts at the boundary
+    without adding frame copies, per-frame lookup, or generic dispatch.

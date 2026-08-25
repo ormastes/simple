@@ -1017,3 +1017,25 @@ allocation, array copy, lookup, or command dispatch; only the two cold legacy
 generator aliases have one ordinary Simple forwarding call. Estimated totals
 are 11,736 `rt_*` declaration rows / 3,137 symbols, 1,493 unsafe-tagged rows,
 9,985 untouched rows, and zero exact-artifact verified-and-signed admissions.
+
+## GLFW raw-contract ownership checkpoint
+
+All 40 declarations in the canonical GLFW-shaped hosted adapter now carry
+adjacent, operation-specific `@unsafe(... capabilities: [ffi])` contracts. The
+metadata identifies borrowed title and clipboard text, window handles and
+status returns, runtime-owned event/clipboard text, stateful current-event
+snapshots, event/window counts, blocking/global operations, and both ARGB
+presentation families. The array form requires dimensions to fit its pixels;
+the raw pointer form requires the supplied count to cover the dimensions.
+
+A static ratchet fixes the reviewed inventory at 40 and requires one adjacent
+FFI tag per declaration. It passed with the whitespace check. This pass changes
+no signature, presentation/event call count, branch, allocation, copy, buffer
+layout, event storage, or lookup, so frame and input hot paths are unchanged.
+Production Simple and optimizer verification remain unavailable.
+
+Estimated totals remain 11,736 `rt_*` declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,493 to 1,533, untouched rows decrease from
+9,985 to 9,945, and exact-artifact verified-and-signed admission remains zero.
+The tags do not prove GLFW pointer lifetimes, extent checks, or provider
+identity; those require executable contracts and exact signed admission.
