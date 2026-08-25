@@ -269,32 +269,40 @@ fn main() -> i64:
     if mem_infra_exit != 0:
         return mem_infra_exit
 
-    # Startup dynload hop: load any custom aspect packs named by
-    # SIMPLE_ASPECT_PACKS before command dispatch. Fail-closed -- a pack the
-    # operator asked for that cannot load aborts startup rather than being
-    # silently skipped. See app/cli/startup_aspect_packs.spl.
+    val filtered_args = filter_internal_flags(args)
+
+    # Help and version cannot execute aspect code. Return before reading
+    # SIMPLE_ASPECT_PACKS so these informational startup paths do no
+    # aspect-pack environment/file IO and allocate no pack loader or bytes.
+    if filtered_args.len() > 0:
+        val informational_first = filtered_args[0]
+        if str_eq(informational_first, "-h") or str_eq(informational_first, "--help"):
+            cli_print_help_with_progress(log_opts.progress)
+            return 0
+        elif str_eq(informational_first, "-v") or str_eq(informational_first, "--version"):
+            if str_eq(log_opts.log_mode, "json"):
+                val v = get_version()
+                print "{\"command\":\"cli\",\"status\":\"ok\",\"version\":\"{v}\"}"
+                return 0
+            print_version()
+            return 0
+
+    # Startup dynload hop for the ordinary post-filter dispatch chain: load any
+    # custom aspect packs named by SIMPLE_ASPECT_PACKS before dispatch.
+    # Fail-closed -- a requested pack that cannot load aborts startup rather
+    # than being silently skipped. See app/cli/startup_aspect_packs.spl.
     val aspect_pack_exit = apply_startup_aspect_packs()
     if aspect_pack_exit != 0:
         return aspect_pack_exit
 
-    val filtered_args = filter_internal_flags(args)
-
+    # A commandless invocation enters the executable REPL and therefore must
+    # retain the same fail-closed aspect startup contract as `simple repl`.
     if filtered_args.len() == 0:
         return cli_run_repl(flags.gc_log, flags.gc_off)
 
     val first = filtered_args[0]
 
-    if str_eq(first, "-h") or str_eq(first, "--help"):
-        cli_print_help_with_progress(log_opts.progress)
-        return 0
-    elif str_eq(first, "-v") or str_eq(first, "--version"):
-        if str_eq(log_opts.log_mode, "json"):
-            val v = get_version()
-            print "{\"command\":\"cli\",\"status\":\"ok\",\"version\":\"{v}\"}"
-            return 0
-        print_version()
-        return 0
-    elif str_eq(first, "-c"):
+    if str_eq(first, "-c"):
         if filtered_args.len() < 2:
             print_error("-c requires a code argument")
             return 1
