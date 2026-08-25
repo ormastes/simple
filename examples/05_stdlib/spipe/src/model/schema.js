@@ -6,6 +6,9 @@ import { createProjectRelationRecord } from "./project_relation.js";
 import { createSectionRecord } from "./section.js";
 import { createSnapshotManifest } from "./snapshot.js";
 import { createViewRecord } from "./view.js";
+import { createRequirementRecord, createSSpecScenarioRecord, createSourceSymbolRecord, createTestRecord } from "./trace.js";
+import { createClassificationRecord } from "./classification.js";
+import { createIdentityMigrationRecord, createEdgeMigrationRecord, createHistoricalEdgeRecord } from "./migration.js";
 
 const VALIDATORS = Object.freeze({
   alias: createAliasRecord,
@@ -14,6 +17,15 @@ const VALIDATORS = Object.freeze({
   project: createProjectRecord,
   project_relation: createProjectRelationRecord,
   section: createSectionRecord,
+  requirement: createRequirementRecord,
+  non_functional_requirement: createRequirementRecord,
+  sspec_scenario: createSSpecScenarioRecord,
+  source_symbol: createSourceSymbolRecord,
+  test: createTestRecord,
+  classification: createClassificationRecord,
+  identity_migration: createIdentityMigrationRecord,
+  edge_migration: createEdgeMigrationRecord,
+  historical_edge: createHistoricalEdgeRecord,
   snapshot_manifest: createSnapshotManifest,
   view: createViewRecord
 });

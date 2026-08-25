@@ -92,7 +92,7 @@ test("a semantic key colliding with another artifact alias is ambiguous", () => 
     { path: "doc/a.md", content: marked },
     { path: "doc/keyed.md", content: keyed }
   ] });
-  assert.ok(inventory.diagnostics.some(({ code, details }) => code === "SPK002" && details.label === "key_or_alias"));
+  assert.ok(inventory.diagnostics.some(({ code, arguments: fields }) => code === "SPK002" && fields.label === "key_or_alias"));
   assert.equal(inventory.identity.resolve("old.search").status, "ambiguous");
 });
 
