@@ -9,6 +9,17 @@
 
 use os.kernel.errno.{ENOENT, ENOSYS, EMFILE}
 use os.kernel.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_activate_task, fd_current_task, fd_release_task, fd_task_context_exists, fd_get_type, fd_get_status_flags, fd_get_backend_handle, fd_get_refcount}
+use os.kernel.fs.fd_table_descriptor_owner_support_v1.{FdTaskLifecycleKeyV1}
+use os.kernel.fs.active_fd_context_owner_v1.{
+    ACTIVE_FD_CONTEXT_LIMIT_V1, ActiveFdOperationV1,
+    ActiveFdContextLeaseV1, ActiveFdCleanupReceiptV1,
+    active_fd_context_begin_v1,
+    active_fd_context_authorize_operation_v1,
+    active_fd_context_reserve_cleanup_receipt_v1,
+    active_fd_context_finish_cleanup_receipt_v1,
+    active_fd_context_resume_cleanup_receipt_v1,
+    active_fd_context_end_v1
+}
 use os.kernel.async_io_rw.{sync_read, sync_write}
 use os.kernel.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
 use os.kernel.socket_compat.{posix_close_socket}
@@ -532,23 +543,130 @@ fn posix_close_all_fds_with_backends() -> u32:
         i = i + 1
     closed
 
-fn posix_close_task_fds_with_backends(owner: u64) -> u32:
-    """Close and release a task fd context through backend-aware close hooks."""
-    if not fd_task_context_exists(owner):
+var _fd_cleanup_retry_initialized_v1 = false
+var _fd_cleanup_retry_task_v1: [u64] = []
+var _fd_cleanup_retry_generation_v1: [u64] = []
+var _fd_cleanup_retry_receipt_v1: [ActiveFdCleanupReceiptV1?] = []
+
+fn _fd_cleanup_retry_initialize_v1():
+    if _fd_cleanup_retry_initialized_v1: return
+    var i = 0
+    while i < ACTIVE_FD_CONTEXT_LIMIT_V1:
+        _fd_cleanup_retry_task_v1.push(0u64)
+        _fd_cleanup_retry_generation_v1.push(0u64)
+        _fd_cleanup_retry_receipt_v1.push(nil)
+        i = i + 1
+    _fd_cleanup_retry_initialized_v1 = true
+
+fn _fd_cleanup_retry_find_v1(owner: u64, lifecycle_generation: u64) -> i32:
+    _fd_cleanup_retry_initialize_v1()
+    var i = 0
+    while i < _fd_cleanup_retry_receipt_v1.len():
+        if (_fd_cleanup_retry_receipt_v1[i] != nil and
+            _fd_cleanup_retry_task_v1[i] == owner and
+            _fd_cleanup_retry_generation_v1[i] == lifecycle_generation):
+            return i
+        i = i + 1
+    -1
+
+fn _fd_cleanup_retry_store_v1(
+    owner: u64, lifecycle_generation: u64, receipt: ActiveFdCleanupReceiptV1
+) -> bool:
+    var index = _fd_cleanup_retry_find_v1(owner, lifecycle_generation)
+    if index < 0:
+        var i = 0
+        while i < _fd_cleanup_retry_receipt_v1.len():
+            if _fd_cleanup_retry_receipt_v1[i] == nil:
+                index = i
+                break
+            i = i + 1
+    if index < 0: return false
+    _fd_cleanup_retry_task_v1[index] = owner
+    _fd_cleanup_retry_generation_v1[index] = lifecycle_generation
+    _fd_cleanup_retry_receipt_v1[index] = Some(receipt)
+    true
+
+fn _fd_cleanup_retry_clear_v1(index: i32):
+    if index < 0 or index >= _fd_cleanup_retry_receipt_v1.len(): return
+    _fd_cleanup_retry_task_v1[index] = 0u64
+    _fd_cleanup_retry_generation_v1[index] = 0u64
+    _fd_cleanup_retry_receipt_v1[index] = nil
+
+fn posix_close_task_fds_with_backends(
+    owner: u64, lifecycle_generation: u64
+) -> u32:
+    """Close a lifecycle's descriptors under the active-context cleanup lease.
+
+    A failed backend close retains the owner-issued retry receipt.  A later
+    exit/reap attempt must consume that receipt; it cannot recreate ambient
+    authority from the numeric task id.
+    """
+    if owner == 0u64 or lifecycle_generation == 0u64:
+        return 0u32
+    val retry_index = _fd_cleanup_retry_find_v1(owner, lifecycle_generation)
+    val context_exists = fd_task_context_exists(owner)
+    if retry_index < 0 and not context_exists:
         return 0u32
     val previous_owner = fd_current_task()
-    fd_activate_task(owner)
-    val closed = posix_close_all_fds_with_backends()
+    var cleanup_receipt: ActiveFdCleanupReceiptV1? = nil
+    var lease_result: Result<ActiveFdContextLeaseV1, text>
+    if retry_index >= 0:
+        val retained = _fd_cleanup_retry_receipt_v1[retry_index]
+        if retained == nil: return 0u32
+        val resumed = active_fd_context_resume_cleanup_receipt_v1(retained.unwrap())
+        if resumed.is_err(): return 0u32
+        val resumed_cleanup = resumed.unwrap()
+        lease_result = Ok(resumed_cleanup.lease)
+        cleanup_receipt = Some(resumed_cleanup.receipt)
+        # Resume rotates the transaction coordinate.  Retain that successor
+        # until terminal completion so an authorization/finish error cannot
+        # strand a cleanup-reserved context without retry authority.
+        _fd_cleanup_retry_receipt_v1[retry_index] = cleanup_receipt
+    else:
+        lease_result = active_fd_context_begin_v1(FdTaskLifecycleKeyV1(
+            task_id: owner, lifecycle_generation: lifecycle_generation))
+    if lease_result.is_err(): return 0u32
+    var lease = lease_result.unwrap()
+    val authorized = active_fd_context_authorize_operation_v1(
+        lease, ActiveFdOperationV1.BackendClose)
+    if authorized.is_err():
+        _ = active_fd_context_end_v1(lease)
+        return 0u32
+    lease = authorized.unwrap()
+    if cleanup_receipt == nil:
+        val reserved = active_fd_context_reserve_cleanup_receipt_v1(lease)
+        if reserved.is_err():
+            _ = active_fd_context_end_v1(lease)
+            return 0u32
+        cleanup_receipt = Some(reserved.unwrap())
+    var closed: u32 = 0u32
+    if context_exists:
+        fd_activate_task(owner)
+        closed = posix_close_all_fds_with_backends()
     # Do not discard a task context that still owns a VFS handle after a
     # terminal close failure; keeping it active makes the failure retryable.
     var has_live_fd = false
-    var i: u64 = 0
-    while i < _FD_IO_MAX_FDS:
-        if fd_is_valid(i as i32):
-            has_live_fd = true
-        i = i + 1
-    if not has_live_fd:
-        fd_release_task(owner)
+    if context_exists:
+        var i: u64 = 0
+        while i < _FD_IO_MAX_FDS:
+            if fd_is_valid(i as i32):
+                has_live_fd = true
+            i = i + 1
+    val outcome = active_fd_context_finish_cleanup_receipt_v1(
+        lease, cleanup_receipt.unwrap(), not has_live_fd)
+    if outcome.is_ok():
+        val completed = outcome.unwrap()
+        if completed.terminal:
+            _fd_cleanup_retry_clear_v1(retry_index)
+            fd_release_task(owner)
+        elif completed.retry != nil:
+            _ = _fd_cleanup_retry_store_v1(
+                owner, lifecycle_generation, completed.retry.unwrap())
+    else:
+        # A non-consuming owner error leaves the submitted transaction
+        # coordinate as the only safe retry authority.
+        _ = _fd_cleanup_retry_store_v1(
+            owner, lifecycle_generation, cleanup_receipt.unwrap())
     if previous_owner != owner:
         fd_activate_task(previous_owner)
     closed

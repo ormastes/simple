@@ -128,12 +128,21 @@ pub fn sched_exit_task_by_id_impl(
     if tcb == nil:
         return (tasks, id)
     var task = tcb
-    posix_close_task_fds_with_backends(id.id)
+    val already_terminal = match task.state:
+        case TaskState.Zombie: true
+        case _: false
+    if already_terminal:
+        return (tasks, id)
+    # Close admission before invoking cleanup owners. PreparingExit is also
+    # accepted here so a caller that published the fence can finish teardown.
+    task.state = TaskState.PreparingExit
+    var new_tasks = tasks
+    new_tasks[slot] = task
+    posix_close_task_fds_with_backends(id.id, task.lifecycle_generation)
     _ = server_data_launch_grant_revoke_task_lifecycle_v1(
         task.id.id, task.lifecycle_generation)
     task.state = TaskState.Zombie
     task.exit_code = 0
-    var new_tasks = tasks
     new_tasks[slot] = task
     (new_tasks, id)
 
@@ -150,12 +159,21 @@ pub fn sched_exit_task_by_id_with_code_impl(
     if tcb == nil:
         return tasks
     var task = tcb
-    posix_close_task_fds_with_backends(id.id)
+    val already_terminal = match task.state:
+        case TaskState.Zombie: true
+        case _: false
+    if already_terminal:
+        return tasks
+    # Preserve the exact lifecycle identity while cleanup runs and prevent
+    # later scheduler mutations from treating this task as runnable work.
+    task.state = TaskState.PreparingExit
+    var new_tasks = tasks
+    new_tasks[slot] = task
+    posix_close_task_fds_with_backends(id.id, task.lifecycle_generation)
     _ = server_data_launch_grant_revoke_task_lifecycle_v1(
         task.id.id, task.lifecycle_generation)
     task.state = TaskState.Zombie
     task.exit_code = code
-    var new_tasks = tasks
     new_tasks[slot] = task
     new_tasks
 
@@ -174,6 +192,14 @@ pub fn sched_block_task_impl(
         return tasks
     val tcb = tasks[slot]
     if tcb == nil:
+        return tasks
+    val admits_block = match tcb.state:
+        case TaskState.Ready: true
+        case TaskState.Running: true
+        case TaskState.Blocked(reason): true
+        case TaskState.PreparingExit: false
+        case TaskState.Zombie: false
+    if not admits_block:
         return tasks
     var task = tcb
     task.state = TaskState.Blocked(reason: reason)
@@ -332,7 +358,8 @@ pub fn sched_wait_for_collect_impl(
                     case TaskState.Zombie:
                         val status = task.exit_code
                         val pid = task.id.id
-                        posix_close_task_fds_with_backends(task.id.id)
+                        posix_close_task_fds_with_backends(
+                            task.id.id, task.lifecycle_generation)
                         sched_release_task_address_space(task)
                         new_tasks[i] = nil
                         return (WaitCollectResult(pid: pid, status: status, error: 0), new_tasks, false)

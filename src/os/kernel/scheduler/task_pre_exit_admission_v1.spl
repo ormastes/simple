@@ -1,0 +1,65 @@
+"""Scheduler-owned admission fence for a task preparing to exit.
+
+The transition is identity exact and deliberately stops before cleanup or
+Zombie publication.  Syscall, FD, and capability owners use the same state
+predicate so no new externally initiated work can race cleanup preparation.
+"""
+
+use os.kernel.types.task_types.{TaskState}
+use os.kernel.scheduler.scheduler_types.{TaskControlBlock}
+
+pub struct SchedulerPrepareExitAdmissionResultV1:
+    tasks: [TaskControlBlock?]
+    transitioned: bool
+
+pub fn scheduler_task_state_is_preparing_exit_v1(state: TaskState) -> bool:
+    match state:
+        case TaskState.PreparingExit: true
+        case _: false
+
+pub fn scheduler_task_state_admits_syscall_v1(state: TaskState) -> bool:
+    match state:
+        case TaskState.Ready: true
+        case TaskState.Running: true
+        case TaskState.Blocked(reason): true
+        case TaskState.PreparingExit: false
+        case TaskState.Zombie: false
+
+pub fn scheduler_task_state_admits_fd_operation_v1(state: TaskState) -> bool:
+    scheduler_task_state_admits_syscall_v1(state)
+
+pub fn scheduler_task_state_admits_capability_use_v1(state: TaskState) -> bool:
+    scheduler_task_state_admits_syscall_v1(state)
+
+pub fn scheduler_prepare_task_exit_admission_v1(
+    tasks: [TaskControlBlock?],
+    task_id: u64,
+    lifecycle_generation: u64
+) -> SchedulerPrepareExitAdmissionResultV1:
+    if task_id == 0u64 or lifecycle_generation == 0u64:
+        return SchedulerPrepareExitAdmissionResultV1(
+            tasks: tasks, transitioned: false)
+    var updated = tasks
+    var index = 0
+    while index < updated.len():
+        val maybe_task = updated[index]
+        if maybe_task != nil:
+            var task = maybe_task.unwrap()
+            if task.id.id == task_id and
+                task.lifecycle_generation == lifecycle_generation:
+                if not scheduler_task_state_admits_syscall_v1(task.state):
+                    return SchedulerPrepareExitAdmissionResultV1(
+                        tasks: tasks, transitioned: false)
+                task.state = TaskState.PreparingExit
+                updated[index] = task
+                return SchedulerPrepareExitAdmissionResultV1(
+                    tasks: updated, transitioned: true)
+        index = index + 1
+    SchedulerPrepareExitAdmissionResultV1(tasks: tasks, transitioned: false)
+
+export SchedulerPrepareExitAdmissionResultV1
+export scheduler_task_state_is_preparing_exit_v1
+export scheduler_task_state_admits_syscall_v1
+export scheduler_task_state_admits_fd_operation_v1
+export scheduler_task_state_admits_capability_use_v1
+export scheduler_prepare_task_exit_admission_v1
