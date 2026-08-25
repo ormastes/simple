@@ -6,9 +6,24 @@
 # remain ffi-unsafe until the loader supplies a verifier-minted receipt.
 
 use std.common.structural.digest.hash256.{hash256_hex_valid}
+use lib.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.string_core.{text_to_bytes}
 
 val SFFI_ADMISSION_MAX_TEXT: i64 = 2097152
 val SFFI_ADMISSION_MAX_SYMBOLS: i64 = 8192
+val SFFI_ADMISSION_MAX_TRUST_ROOTS: i64 = 64
+
+pub struct SffiAdmissionTrustRootV1:
+    key_id: text
+    public_key: [u8]
+
+impl SffiAdmissionTrustRootV1:
+    static fn create(key_id: text, public_key: [u8]) -> Result<SffiAdmissionTrustRootV1, text>:
+        if key_id == "" or key_id.contains("\t") or key_id.contains("\n") or key_id.contains("\r"):
+            return Err("E-SFFI-005: invalid SFFI trust-root key id")
+        if public_key.len() != 32:
+            return Err("E-SFFI-005: Ed25519 SFFI trust root must contain 32 bytes")
+        Ok(SffiAdmissionTrustRootV1(key_id: key_id, public_key: public_key))
 
 pub struct SffiAdmissionReceiptV1:
     provider_id: text
@@ -19,6 +34,27 @@ pub struct SffiAdmissionReceiptV1:
     signed_manifest_sha256: text
     verification_report_sha256: text
     source_signatures: {text: text}
+
+# Signature-verified receipt token. Construction is confined to the verifier
+# below; parsing alone cannot produce this authority.
+pub class SignatureVerifiedSffiAdmissionV1:
+    receipt: SffiAdmissionReceiptV1
+
+impl SignatureVerifiedSffiAdmissionV1:
+    pub fn provider_identity() -> text:
+        self.receipt.provider_identity()
+
+    pub fn target_identity() -> text:
+        self.receipt.target_identity()
+
+    pub fn artifact_digest() -> text:
+        self.receipt.artifact_digest()
+
+    pub fn abi_registry_digest() -> text:
+        self.receipt.abi_registry_digest()
+
+    pub(package) fn verified_receipt() -> SffiAdmissionReceiptV1:
+        self.receipt
 
 impl SffiAdmissionReceiptV1:
     pub fn provider_identity() -> text:
@@ -133,3 +169,40 @@ fn parse_sffi_admission_v1(content: text) -> Result<SffiAdmissionReceiptV1, text
         verification_report_sha256: report_result!,
         source_signatures: signatures,
     ))
+
+# Verify the exact canonical receipt bytes against one caller-authorized trust
+# root. This is admission-time work only; the returned token is retained beside
+# cached slots and never re-verifies on a foreign call.
+fn verify_sffi_admission_v1(
+    content: text,
+    signature: [u8],
+    trust_roots: [SffiAdmissionTrustRootV1],
+) -> Result<SignatureVerifiedSffiAdmissionV1, text>:
+    if signature.len() != 64:
+        return Err("E-SFFI-005: Ed25519 SFFI signature must contain 64 bytes")
+    if trust_roots.len() == 0 or trust_roots.len() > SFFI_ADMISSION_MAX_TRUST_ROOTS:
+        return Err("E-SFFI-005: SFFI trust-root set must contain 1..64 keys")
+    val receipt = match parse_sffi_admission_v1(content):
+        case Ok(value): value
+        case Err(error): return Err(error)
+
+    var trusted_key: [u8] = []
+    var found = false
+    var seen_key_ids: {text: bool} = {}
+    var index = 0
+    while index < trust_roots.len():
+        val root = trust_roots[index]
+        if root.key_id == "" or root.public_key.len() != 32:
+            return Err("E-SFFI-005: malformed SFFI trust root")
+        if seen_key_ids.contains(root.key_id):
+            return Err("E-SFFI-005: duplicate SFFI trust-root key id")
+        seen_key_ids[root.key_id] = true
+        if root.key_id == receipt.signer_key_id:
+            trusted_key = root.public_key
+            found = true
+        index = index + 1
+    if not found:
+        return Err("E-SFFI-005: SFFI signer key is not trusted")
+    if not pure_ed25519_verify(trusted_key, text_to_bytes(content), signature):
+        return Err("E-SFFI-005: SFFI admission signature verification failed")
+    Ok(SignatureVerifiedSffiAdmissionV1(receipt: receipt))

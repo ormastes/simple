@@ -101,6 +101,10 @@ impl DynI64FnSlot:
 
 use std.common.structural.digest.hash256.{hash256_hex_valid}
 use std.io_runtime.{env_get}
+use std.sffi.admission.{
+    SffiAdmissionTrustRootV1, SignatureVerifiedSffiAdmissionV1,
+    verify_sffi_admission_v1,
+}
 
 # ============================================================================
 # DynLib — single loaded shared library handle
@@ -117,6 +121,52 @@ class DynLib:
 pub class ExactArtifactDynLib:
     lib: DynLib
     artifact_sha256: text
+
+# Exact sealed artifact paired with a cryptographically verified admission
+# receipt. Signature verification and hashing occur only during construction.
+pub class SignatureVerifiedExactArtifactDynLib:
+    sealed: ExactArtifactDynLib
+    admission: SignatureVerifiedSffiAdmissionV1
+
+impl SignatureVerifiedExactArtifactDynLib:
+    pub fn artifact_digest() -> text:
+        self.sealed.artifact_digest()
+
+    pub fn provider_identity() -> text:
+        self.admission.provider_identity()
+
+    pub fn target_identity() -> text:
+        self.admission.target_identity()
+
+    pub(package) fn verified_admission() -> SignatureVerifiedSffiAdmissionV1:
+        self.admission
+
+    @unsafe(
+        reason: "signature authenticates a caller-authorized provider but cannot prove arbitrary native code memory-safe",
+        capabilities: [ffi],
+    )
+    static fn load_signed_linux(
+        path: text,
+        admission_content: text,
+        signature: [u8],
+        trust_roots: [SffiAdmissionTrustRootV1],
+    ) -> Result<SignatureVerifiedExactArtifactDynLib, text>:
+        val admission = match verify_sffi_admission_v1(
+            admission_content, signature, trust_roots):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        val sealed = match ExactArtifactDynLib.load_exact_linux(
+            path, admission.artifact_digest()):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        Ok(SignatureVerifiedExactArtifactDynLib(
+            sealed: sealed,
+            admission: admission,
+        ))
+
+    @unsafe(reason: "returns a cached integer-only slot after signed exact-artifact admission", capabilities: [ffi, raw_ptr])
+    pub fn resolve_i64_checked(name: text, arg_count: i64) -> Result<DynI64FnSlot, text>:
+        self.sealed.resolve_i64_checked(name, arg_count)
 
 impl ExactArtifactDynLib:
     pub fn artifact_digest() -> text:
