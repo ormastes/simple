@@ -1746,6 +1746,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Static target: O(B<=r + R) postprocessing and O(1) auxiliary storage beyond
   split lines; no manual execution or timing/RSS measurement was run.
 
+# Completed tranche: canonical diagnostic byte scanning (2026-08-25)
+
+- Replaced per-position one-byte substring construction in diagnostic location
+  and from-offset searches with monotonic byte cursors.
+- Removed private location parsers from query commands and query check; all live
+  diagnostic owners now consume `query_rich_common`.
+- Defined total negative-start, empty-needle, overrun, zero-column, malformed,
+  and multibyte-prefix behavior.
+- Added paired semantic/structural evidence and a complete canonical manual.
+- Static bounds: O(N) location/fixed-separator work, O(N*P) generic search, and
+  O(1) scan state; no manual execution or timing/RSS measurement was run.
+
 # Completed tranche: flat-bridge string construction (2026-08-24)
 
 - Added no-brace and no-doubled-brace identity paths for non-raw literals.

@@ -935,3 +935,12 @@ scans earlier lines only to reconstruct multiline lexical state, finishes the
 target line, and never allocates a per-line result vector. Code-action owners
 directly inspect only that validated target; whole-file diagnostic owners retain
 the vector projection when every line is consumed.
+
+# Diagnostic location/search ownership
+
+`query_rich_common` is the sole owner of diagnostic `line:column:message`
+parsing and from-offset byte search. Query/check/action surfaces import these
+facts rather than carrying private parsers. The search contract uses byte
+coordinates, normalizes a negative start to zero, bounds empty-needle results,
+and returns -1 when no bounded match exists. Renderers consume parsed scalars
+and message slices without rescanning diagnostic prefixes.

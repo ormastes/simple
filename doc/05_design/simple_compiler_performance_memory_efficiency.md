@@ -1262,3 +1262,13 @@ resumption, and returns the first original one-based byte column on exactly the
 target line. `deprecated_new_column_at` binds `.new(`. Both code-action owners
 validate once, derive `sli = line_num - 1`, trim only `source_lines[sli]`, and
 use that scalar for DEPR002 while retaining the same target for DEPR003.
+
+# Diagnostic byte-scan design
+
+`_parse_error_location` advances one byte cursor until the first two ASCII
+colons, then creates only the three proven field slices. Numeric fields use the
+strict nonnegative parser; an invalid/nonpositive line returns `(1, 1, err)`,
+and a nonpositive column clamps to one. `_find_in_line_from` uses nested byte
+cursors, O(1) state, negative-start normalization, and explicit empty-needle
+bounds. `query_commands` and `query_check` import the canonical location parser;
+no local compatibility parser remains.

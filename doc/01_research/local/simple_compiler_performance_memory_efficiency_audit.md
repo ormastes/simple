@@ -3595,6 +3595,22 @@ for prefix bytes through line r and target-line bytes R. The broader request
 still performs compiler/fix collection and is not claimed to be prefix-bounded.
 No execution or timing/RSS measurement was run.
 
+# 2026-08-25 follow-up: canonical diagnostic byte scanning
+
+Three warning/error surfaces carried two private location parsers plus the
+shared parser. Their colon loops created a one-byte substring at every scanned
+position. The shared substring search used by structured `|||RELATED` and
+`|||HELP` recognition similarly created a candidate substring at every offset.
+
+`query_commands` and `query_check` now consume the canonical
+`query_rich_common._parse_error_location`; the two private implementations are
+removed. Location delimiter and generic from-offset matching compare bytes with
+monotonic cursors and O(1) scan state. Negative starts normalize to zero, and
+empty needles return a valid bounded start or -1. Location parsing is O(N);
+generic search remains O(N*P), becoming O(N) for fixed diagnostic separators.
+Final field slices and the higher-level structured split still allocate O(N)
+text. No execution, allocation, timing, or RSS measurement was run.
+
 # 2026-08-24 follow-up: flat-bridge string construction
 
 Every ordinary non-raw string entered the interpolation scanner even when it
