@@ -22,7 +22,7 @@ count is correctly zero.
 | Untouched: no unsafe tag, contract, or evidence | 8,515 | 1,825 |
 | Unsafe but minimized to a narrow owner | 783 | not yet aggregated |
 | Unsafe and not minimized | 10,807 | not yet aggregated |
-| Symbols with multiple source signatures | — | 263 |
+| Symbols with multiple source-signature hashes | — | 263 |
 
 All 11,590 declaration rows remain fail-closed unsafe in the census. An unsafe
 annotation is necessary migration metadata; it does not verify the ABI or the
@@ -60,11 +60,16 @@ largest untouched families are `rt_file` (2,529 rows), `rt_process` (966),
 for another 5,154 untouched rows and must not be allowed to inflate production
 confidence.
 
-The 263 multi-signature symbols are the first ABI-integrity priority: unsafe
-tagging cannot make conflicting source signatures callable safely. After those
-are reconciled, migration should reduce production untouched rows through one
-canonical owner per family, typed `Option`/`Result` contracts, and the smallest
-lexical unsafe block.
+The 263 multi-signature-hash symbols are the first ABI-integrity triage set.
+This scanner hashes normalized source declarations, so parameter spelling,
+nullable surface syntax, and other source-shape differences can create variants
+without proving distinct machine ABIs. Conversely, a matching source hash does
+not prove provider layout or calling convention. Each candidate must therefore
+be reconciled against compiler-resolved canonical types and provider metadata;
+unsafe tagging alone cannot make a real conflict callable safely. After that
+triage, migration should reduce production untouched rows through one canonical
+owner per family, typed `Option`/`Result` contracts, and the smallest lexical
+unsafe block.
 
 ## Performance and memory constraint
 
@@ -78,6 +83,6 @@ and ownership checks required by that signature.
 
 All SFFI is **not** safe and verified. Current exact status is zero
 verified-and-signed symbols, 1,825 untouched distinct symbols, and 263 symbols
-whose declarations disagree on source signature. The remaining declarations
-must stay unsafe until exact provider evidence and executable contracts prove a
-narrow safe wrapper.
+whose declarations have multiple source-signature hashes requiring resolved-
+type triage. The remaining declarations must stay unsafe until exact provider
+evidence and executable contracts prove a narrow safe wrapper.
