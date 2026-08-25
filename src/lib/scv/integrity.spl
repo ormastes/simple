@@ -26,7 +26,7 @@ fn scv_validate_file_chunk_parts(root: text, file_id: text) -> text:
     if not file_exists(path):
         return "missing file object: {file_id}\n"
     val content = file_read(path)
-    var errors = ""
+    var errors: [text] = []
     var in_chunks = false
     for line in content.split("\n"):
         val trimmed = line.trim()
@@ -37,18 +37,18 @@ fn scv_validate_file_chunk_parts(root: text, file_id: text) -> text:
             continue
         val parts = trimmed.split("|")
         if parts.len() < 3:
-            errors = errors + "bad chunk part: {trimmed}\n"
+            errors.push("bad chunk part: {trimmed}\n")
             continue
         val chunk = parts[0]
         if not scv_object_ref_safe(chunk, "sha256_"):
-            errors = errors + "bad chunk part ref: {chunk}\n"
+            errors.push("bad chunk part ref: {chunk}\n")
             continue
         val chunk_path = scv_chunk_path(root, chunk)
         if not file_exists(chunk_path):
-            errors = errors + "missing chunk part: {chunk}\n"
+            errors.push("missing chunk part: {chunk}\n")
         elif scv_content_id_for_file(chunk_path) != chunk:
-            errors = errors + "corrupt chunk part: {chunk}\n"
-    errors
+            errors.push("corrupt chunk part: {chunk}\n")
+    errors.join("")
 
 fn scv_validate_tree_file_link(root: text, rel: text, file_id: text, chunk: text, size_text: text) -> text:
     if not scv_object_ref_safe(file_id, "file_"):
@@ -59,26 +59,26 @@ fn scv_validate_tree_file_link(root: text, rel: text, file_id: text, chunk: text
     if not file_exists(path):
         return "missing file object: {file_id}\n"
     val content = file_read(path)
-    var errors = ""
+    var errors: [text] = []
     val file_path = scv_object_field(content, "path")
     if file_path != rel:
-        errors = errors + "tree file path mismatch: {file_id}\n"
+        errors.push("tree file path mismatch: {file_id}\n")
     val file_chunk = scv_object_field(content, "chunk")
     if file_chunk != chunk:
-        errors = errors + "tree file chunk mismatch: {file_id}\n"
+        errors.push("tree file chunk mismatch: {file_id}\n")
     val file_size = scv_object_field(content, "size")
     if file_size != size_text:
-        errors = errors + "tree file size mismatch: {file_id}\n"
-    errors
+        errors.push("tree file size mismatch: {file_id}\n")
+    errors.join("")
 
 fn scv_validate_tree_row_object_refs(tree_id: text, file_id: text, chunk: text) -> text:
     val label = if tree_id == "": "" else: "{tree_id} "
-    var errors = ""
+    var errors: [text] = []
     if not scv_object_ref_safe(file_id, "file_"):
-        errors = errors + "bad tree file ref: {label}{file_id}\n"
+        errors.push("bad tree file ref: {label}{file_id}\n")
     if not scv_object_ref_safe(chunk, "sha256_"):
-        errors = errors + "bad tree chunk ref: {label}{chunk}\n"
-    errors
+        errors.push("bad tree chunk ref: {label}{chunk}\n")
+    errors.join("")
 
 fn scv_validate_syntax_node(root: text, node_id: text, visited: text) -> (text, text):
     if node_id == "" or scv_line_set_contains(visited, node_id):
@@ -89,15 +89,15 @@ fn scv_validate_syntax_node(root: text, node_id: text, visited: text) -> (text, 
     if not file_exists(path):
         return ("missing syntax node: {node_id}\n", visited + node_id + "\n")
     val content = file_read(path)
-    var errors = ""
+    var errors: [text] = []
     val grammar = scv_object_field(content, "grammar")
     val execution = scv_object_field(content, "execution")
     if execution == "":
-        errors = errors + "missing syntax execution: {node_id}\n"
+        errors.push("missing syntax execution: {node_id}\n")
     elif grammar == "fallback-binary" and execution != "fallback-binary":
-        errors = errors + "syntax execution mismatch: {node_id}\n"
+        errors.push("syntax execution mismatch: {node_id}\n")
     elif grammar != "fallback-binary" and execution != "fallback-line":
-        errors = errors + "syntax execution mismatch: {node_id}\n"
+        errors.push("syntax execution mismatch: {node_id}\n")
     var next_visited = visited + node_id + "\n"
     for line in content.split("\n"):
         val trimmed = line.trim()
@@ -111,9 +111,9 @@ fn scv_validate_syntax_node(root: text, node_id: text, visited: text) -> (text, 
             if child_id == "":
                 continue
             val (child_errors, child_visited) = scv_validate_syntax_node(root, child_id, next_visited)
-            errors = errors + child_errors
+            errors.push(child_errors)
             next_visited = child_visited
-    (errors, next_visited)
+    (errors.join(""), next_visited)
 
 fn scv_parser_lock_hash(root: text, language: text, grammar: text, version: text) -> text:
     val lock_path = scv_parser_lock_path(root)
@@ -135,7 +135,7 @@ fn scv_validate_parser_lockfile(root: text) -> text:
     val lock_path = scv_parser_lock_path(root)
     if not file_exists(lock_path):
         return ""
-    var errors = ""
+    var errors: [text] = []
     var seen = ""
     for line in file_read(lock_path).split("\n"):
         val trimmed = line.trim()
@@ -143,35 +143,35 @@ fn scv_validate_parser_lockfile(root: text) -> text:
             continue
         val parts = trimmed.split("|")
         if parts.len() != 8 or parts[0] != "parser":
-            errors = errors + "bad parser lock entry: {trimmed}\n"
+            errors.push("bad parser lock entry: {trimmed}\n")
             continue
         val key = "{parts[1]}|{parts[2]}"
         if scv_line_set_contains(seen, key):
-            errors = errors + "duplicate parser lock entry: {parts[1]} {parts[2]}\n"
+            errors.push("duplicate parser lock entry: {parts[1]} {parts[2]}\n")
         else:
             seen = seen + key + "\n"
         if parts[4] != "wasm":
-            errors = errors + "unsupported parser runtime: {parts[4]}\n"
+            errors.push("unsupported parser runtime: {parts[4]}\n")
             continue
         if not scv_object_ref_safe(parts[6], "sha256_"):
-            errors = errors + "unsafe parser artifact hash: {parts[1]} {parts[2]}\n"
+            errors.push("unsafe parser artifact hash: {parts[1]} {parts[2]}\n")
             continue
         val expected_path = "{scv_parsers_dir(root)}/{parts[6]}.wasm"
         val artifact_path = parts[7]
         if artifact_path != expected_path:
-            errors = errors + "unsafe parser artifact path: {parts[1]} {parts[2]}\n"
+            errors.push("unsafe parser artifact path: {parts[1]} {parts[2]}\n")
             continue
         if not file_exists(artifact_path):
-            errors = errors + "missing parser artifact: {parts[1]} {parts[2]}\n"
+            errors.push("missing parser artifact: {parts[1]} {parts[2]}\n")
             continue
         val raw = file_read_bytes(artifact_path) ?? []
         if not scv_parser_wasm_magic_ok(raw):
-            errors = errors + "parser artifact is not wasm: {parts[1]} {parts[2]}\n"
+            errors.push("parser artifact is not wasm: {parts[1]} {parts[2]}\n")
             continue
         val actual = scv_content_id_for_file(artifact_path)
         if actual != parts[6]:
-            errors = errors + "parser artifact hash mismatch: {parts[1]} {parts[2]}\n"
-    errors
+            errors.push("parser artifact hash mismatch: {parts[1]} {parts[2]}\n")
+    errors.join("")
 
 fn scv_langmap_field_safe(value: text) -> bool:
     value != "" and not value.contains("|") and not value.contains("\n") and not value.contains("\r")
@@ -180,7 +180,7 @@ fn scv_validate_langmap(root: text) -> text:
     val map_path = scv_langmap_path(root)
     if not file_exists(map_path):
         return ""
-    var errors = ""
+    var errors: [text] = []
     var seen = ""
     for line in file_read(map_path).split("\n"):
         val trimmed = line.trim()
@@ -188,16 +188,16 @@ fn scv_validate_langmap(root: text) -> text:
             continue
         val parts = trimmed.split("|")
         if parts.len() != 4:
-            errors = errors + "bad language mapping entry: {trimmed}\n"
+            errors.push("bad language mapping entry: {trimmed}\n")
             continue
         if not scv_langmap_field_safe(parts[0]) or not scv_langmap_field_safe(parts[1]) or not scv_langmap_field_safe(parts[2]) or not scv_langmap_field_safe(parts[3]):
-            errors = errors + "unsafe language mapping entry: {trimmed}\n"
+            errors.push("unsafe language mapping entry: {trimmed}\n")
             continue
         if scv_line_set_contains(seen, parts[0]):
-            errors = errors + "duplicate language mapping entry: {parts[0]}\n"
+            errors.push("duplicate language mapping entry: {parts[0]}\n")
         else:
             seen = seen + parts[0] + "\n"
-    errors
+    errors.join("")
 
 fn scv_validate_parser_root_identity(root: text, node_id: text) -> text:
     val path = scv_object_path(root, "syntax", node_id)
@@ -227,7 +227,7 @@ fn scv_validate_parser_index_root_fields(root: text, row: text, node_id: text) -
     if parts.len() < 7:
         return "bad parser index entry: {row}\n"
     val content = file_read(path)
-    var errors = ""
+    var errors: [text] = []
     val indexed_path = scv_object_field(content, "path")
     val language = scv_object_field(content, "language")
     val raw = scv_object_field(content, "raw")
@@ -235,24 +235,24 @@ fn scv_validate_parser_index_root_fields(root: text, row: text, node_id: text) -
     val semantic = scv_object_field(content, "semantic")
     val status = scv_object_field(content, "parse_status")
     if indexed_path != "" and parts[0] != indexed_path:
-        errors = errors + "parser index path mismatch: {node_id}\n"
+        errors.push("parser index path mismatch: {node_id}\n")
     if language != "" and parts[1] != language:
-        errors = errors + "parser index language mismatch: {node_id}\n"
+        errors.push("parser index language mismatch: {node_id}\n")
     if raw != "" and parts[2] != raw:
-        errors = errors + "parser index raw mismatch: {node_id}\n"
+        errors.push("parser index raw mismatch: {node_id}\n")
     if syntax != "" and parts[3] != syntax:
-        errors = errors + "parser index syntax mismatch: {node_id}\n"
+        errors.push("parser index syntax mismatch: {node_id}\n")
     if semantic != "" and parts[4] != semantic:
-        errors = errors + "parser index semantic mismatch: {node_id}\n"
+        errors.push("parser index semantic mismatch: {node_id}\n")
     if status != "" and parts[6] != status:
-        errors = errors + "parser index status mismatch: {node_id}\n"
-    errors
+        errors.push("parser index status mismatch: {node_id}\n")
+    errors.join("")
 
 fn scv_validate_parser_index(root: text) -> text:
     val index_path = scv_parser_index_path(root)
     if not file_exists(index_path):
         return ""
-    var errors = ""
+    var errors: [text] = []
     var visited = ""
     for line in file_read(index_path).split("\n"):
         val trimmed = line.trim()
@@ -260,19 +260,19 @@ fn scv_validate_parser_index(root: text) -> text:
             continue
         val marker = "|node="
         if not trimmed.contains(marker):
-            errors = errors + "bad parser index entry: {trimmed}\n"
+            errors.push("bad parser index entry: {trimmed}\n")
             continue
         val pieces = trimmed.split(marker)
         if pieces.len() < 2:
-            errors = errors + "bad parser index entry: {trimmed}\n"
+            errors.push("bad parser index entry: {trimmed}\n")
             continue
         val node_id = pieces[1].trim()
         val (node_errors, next_visited) = scv_validate_syntax_node(root, node_id, visited)
-        errors = errors + node_errors
-        errors = errors + scv_validate_parser_index_root_fields(root, trimmed, node_id)
-        errors = errors + scv_validate_parser_root_identity(root, node_id)
+        errors.push(node_errors)
+        errors.push(scv_validate_parser_index_root_fields(root, trimmed, node_id))
+        errors.push(scv_validate_parser_root_identity(root, node_id))
         visited = next_visited
-    errors
+    errors.join("")
 
 fn scv_validate_view_commit_ref(root: text, commit: text, label: text) -> text:
     if commit == "":
@@ -297,7 +297,7 @@ fn scv_validate_current_head(root: text) -> text:
     ""
 
 fn scv_validate_view_content(root: text, view_content: text) -> text:
-    var errors = ""
+    var errors: [text] = []
     var section = ""
     var seen_bookmarks = ""
     var seen_workspaces = ""
@@ -310,42 +310,42 @@ fn scv_validate_view_content(root: text, view_content: text) -> text:
             continue
         if section == "heads:":
             if trimmed.contains("|") or trimmed.contains(" "):
-                errors = errors + "bad view head row: {trimmed}\n"
+                errors.push("bad view head row: {trimmed}\n")
             else:
-                errors = errors + scv_validate_view_commit_ref(root, trimmed, "head")
+                errors.push(scv_validate_view_commit_ref(root, trimmed, "head"))
         elif section == "bookmarks:":
             val parts = trimmed.split("|")
             if parts.len() != 2:
-                errors = errors + "bad view bookmark row: {trimmed}\n"
+                errors.push("bad view bookmark row: {trimmed}\n")
                 continue
             if not scv_validate_bookmark_name(parts[0]):
-                errors = errors + "invalid view bookmark name: {parts[0]}\n"
+                errors.push("invalid view bookmark name: {parts[0]}\n")
             if scv_line_set_contains(seen_bookmarks, parts[0]):
-                errors = errors + "duplicate view bookmark: {parts[0]}\n"
+                errors.push("duplicate view bookmark: {parts[0]}\n")
             else:
                 seen_bookmarks = seen_bookmarks + parts[0] + "\n"
-            errors = errors + scv_validate_view_commit_ref(root, parts[1].trim(), "bookmark {parts[0]}")
+            errors.push(scv_validate_view_commit_ref(root, parts[1].trim(), "bookmark {parts[0]}"))
         elif section == "workspaces:":
             val parts = trimmed.split(":")
             if parts.len() != 2:
-                errors = errors + "bad view workspace row: {trimmed}\n"
+                errors.push("bad view workspace row: {trimmed}\n")
                 continue
             val workspace = parts[0].trim()
             val commit = parts[1].trim()
             if not scv_validate_bookmark_name(workspace):
-                errors = errors + "invalid view workspace name: {workspace}\n"
+                errors.push("invalid view workspace name: {workspace}\n")
             if scv_line_set_contains(seen_workspaces, workspace):
-                errors = errors + "duplicate view workspace: {workspace}\n"
+                errors.push("duplicate view workspace: {workspace}\n")
             else:
                 seen_workspaces = seen_workspaces + workspace + "\n"
-            errors = errors + scv_validate_view_commit_ref(root, commit, "workspace {workspace}")
-    errors
+            errors.push(scv_validate_view_commit_ref(root, commit, "workspace {workspace}"))
+    errors.join("")
 
 fn scv_validate_current_bookmarks(root: text) -> text:
     val path = scv_bookmarks_path(root)
     if not file_exists(path):
         return ""
-    var errors = ""
+    var errors: [text] = []
     var seen = ""
     for line in file_read(path).split("\n"):
         val trimmed = line.trim()
@@ -353,22 +353,22 @@ fn scv_validate_current_bookmarks(root: text) -> text:
             continue
         val parts = trimmed.split("|")
         if parts.len() != 2:
-            errors = errors + "bad bookmark row: {trimmed}\n"
+            errors.push("bad bookmark row: {trimmed}\n")
             continue
         if not scv_validate_bookmark_name(parts[0]):
-            errors = errors + "invalid bookmark name: {parts[0]}\n"
+            errors.push("invalid bookmark name: {parts[0]}\n")
         if scv_line_set_contains(seen, parts[0]):
-            errors = errors + "duplicate bookmark: {parts[0]}\n"
+            errors.push("duplicate bookmark: {parts[0]}\n")
         else:
             seen = seen + parts[0] + "\n"
-        errors = errors + scv_validate_view_commit_ref(root, parts[1].trim(), "bookmark {parts[0]}")
-    errors
+        errors.push(scv_validate_view_commit_ref(root, parts[1].trim(), "bookmark {parts[0]}"))
+    errors.join("")
 
 fn scv_validate_current_workspaces(root: text) -> text:
     val path = scv_workspace_path(root)
     if not file_exists(path):
         return "missing workspace metadata\n"
-    var errors = ""
+    var errors: [text] = []
     var seen = ""
     for line in file_read(path).split("\n"):
         val trimmed = line.trim()
@@ -376,24 +376,24 @@ fn scv_validate_current_workspaces(root: text) -> text:
             continue
         val parts = trimmed.split(":")
         if parts.len() != 2:
-            errors = errors + "bad workspace row: {trimmed}\n"
+            errors.push("bad workspace row: {trimmed}\n")
             continue
         val workspace = parts[0].trim()
         val commit = parts[1].trim()
         if not scv_validate_bookmark_name(workspace):
-            errors = errors + "invalid workspace name: {workspace}\n"
+            errors.push("invalid workspace name: {workspace}\n")
         if scv_line_set_contains(seen, workspace):
-            errors = errors + "duplicate workspace: {workspace}\n"
+            errors.push("duplicate workspace: {workspace}\n")
         else:
             seen = seen + workspace + "\n"
-        errors = errors + scv_validate_view_commit_ref(root, commit, "workspace {workspace}")
-    errors
+        errors.push(scv_validate_view_commit_ref(root, commit, "workspace {workspace}"))
+    errors.join("")
 
 fn scv_validate_operation_views(root: text) -> text:
     val ops_dir = "{scv_objects_dir(root)}/operations"
     if not file_exists(ops_dir):
         return ""
-    var errors = ""
+    var errors: [text] = []
     for op_path in dir_walk(ops_dir):
         val op_id = scv_object_id_from_path(op_path)
         val content = file_read(op_path)
@@ -403,22 +403,22 @@ fn scv_validate_operation_views(root: text) -> text:
             if parent_op == "":
                 continue
             if not scv_object_ref_safe(parent_op, "op_"):
-                errors = errors + "bad operation parent ref: {op_id} {parent_op}\n"
+                errors.push("bad operation parent ref: {op_id} {parent_op}\n")
                 continue
             if not file_exists(scv_object_path(root, "operations", parent_op)):
-                errors = errors + "missing operation parent: {op_id} {parent_op}\n"
+                errors.push("missing operation parent: {op_id} {parent_op}\n")
         val view = scv_object_field(content, "view")
         if view == "":
             continue
         if not scv_object_ref_safe(view, "view_"):
-            errors = errors + "bad operation view ref: {op_id} {view}\n"
+            errors.push("bad operation view ref: {op_id} {view}\n")
             continue
         val view_path = scv_object_path(root, "operations", view)
         if not file_exists(view_path):
-            errors = errors + "missing operation view: {view}\n"
+            errors.push("missing operation view: {view}\n")
             continue
-        errors = errors + scv_validate_view_content(root, file_read(view_path))
-    errors
+        errors.push(scv_validate_view_content(root, file_read(view_path)))
+    errors.join("")
 
 fn scv_object_id_from_path(path: text) -> text:
     val parts = path.split("/")
@@ -442,14 +442,14 @@ fn scv_object_index_kind_ok(kind: text) -> bool:
     kind == "chunks" or kind == "files" or kind == "trees" or kind == "commits" or kind == "changes" or kind == "operations" or kind == "conflicts" or kind == "syntax" or kind == "packs"
 
 fn scv_object_index_actual_keys(root: text) -> text:
-    var out = ""
+    var rows: [text] = []
     for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax", "packs"]:
         val dir = "{scv_objects_dir(root)}/{kind}"
         if not file_exists(dir):
             continue
         for path in dir_walk(dir):
-            out = out + "{kind}|{scv_object_id_from_path(path)}\n"
-    out
+            rows.push("{kind}|{scv_object_id_from_path(path)}\n")
+    rows.join("")
 
 fn scv_validate_object_index(root: text) -> text:
     val index_path = scv_object_index_path(root)
@@ -464,7 +464,7 @@ fn scv_validate_object_index(root: text) -> text:
     val table_opt = db.get_table("objects")
     val Some(table) = table_opt else:
         return "missing object index table\n"
-    var errors = ""
+    var errors: [text] = []
     var seen = ""
     for row in table.rows:
         val id = row.get("id") ?? ""
@@ -474,26 +474,26 @@ fn scv_validate_object_index(root: text) -> text:
         val valid = row.get("valid") ?? ""
         val key = "{kind}|{id}"
         if id == "" or kind == "" or path == "":
-            errors = errors + "bad object index row\n"
+            errors.push("bad object index row\n")
             continue
         if not scv_object_index_kind_ok(kind):
-            errors = errors + "bad object index kind: {kind}\n"
+            errors.push("bad object index kind: {kind}\n")
             continue
         if valid != "true":
-            errors = errors + "invalid object index row: {kind} {id}\n"
+            errors.push("invalid object index row: {kind} {id}\n")
         if scv_line_set_contains(seen, key):
-            errors = errors + "duplicate object index row: {kind} {id}\n"
+            errors.push("duplicate object index row: {kind} {id}\n")
         else:
             seen = seen + key + "\n"
         val expected_path = scv_object_index_expected_path(root, kind, id, path)
         if kind == "packs" and not path.starts_with("{scv_objects_dir(root)}/packs/"):
-            errors = errors + "unsafe object index path: {kind} {id}\n"
+            errors.push("unsafe object index path: {kind} {id}\n")
         elif path != expected_path:
-            errors = errors + "object index path mismatch: {kind} {id}\n"
+            errors.push("object index path mismatch: {kind} {id}\n")
         if not file_exists(path):
-            errors = errors + "missing indexed object: {kind} {id}\n"
+            errors.push("missing indexed object: {kind} {id}\n")
         elif size != "{file_size(path)}":
-            errors = errors + "object index size mismatch: {kind} {id}\n"
+            errors.push("object index size mismatch: {kind} {id}\n")
     val actual = scv_object_index_actual_keys(root)
     for key in actual.split("\n"):
         val trimmed = key.trim()
@@ -501,8 +501,8 @@ fn scv_validate_object_index(root: text) -> text:
             continue
         if not scv_line_set_contains(seen, trimmed):
             val parts = trimmed.split("|")
-            errors = errors + "missing object index row: {parts[0]} {parts[1]}\n"
-    errors
+            errors.push("missing object index row: {parts[0]} {parts[1]}\n")
+    errors.join("")
 
 fn scv_expected_object_hash(kind: text, id: text, content: text) -> text:
     if kind == "files":
@@ -524,26 +524,26 @@ fn scv_validate_deterministic_object_dir(root: text, kind: text) -> text:
     val object_dir = "{scv_objects_dir(root)}/{kind}"
     if not file_exists(object_dir):
         return ""
-    var errors = ""
+    var errors: [text] = []
     for path in dir_walk(object_dir):
         val id = scv_object_id_from_path(path)
         val expected = scv_expected_object_hash(kind, id, file_read(path))
         if expected != id:
-            errors = errors + "object hash mismatch: {kind} {id}\n"
-    errors
+            errors.push("object hash mismatch: {kind} {id}\n")
+    errors.join("")
 
 fn scv_validate_deterministic_object_hashes(root: text) -> text:
-    var errors = ""
-    errors = errors + scv_validate_deterministic_object_dir(root, "files")
-    errors = errors + scv_validate_deterministic_object_dir(root, "trees")
-    errors = errors + scv_validate_deterministic_object_dir(root, "commits")
-    errors = errors + scv_validate_deterministic_object_dir(root, "conflicts")
-    errors = errors + scv_validate_deterministic_object_dir(root, "syntax")
-    errors = errors + scv_validate_deterministic_object_dir(root, "operations")
-    errors
+    var errors: [text] = []
+    errors.push(scv_validate_deterministic_object_dir(root, "files"))
+    errors.push(scv_validate_deterministic_object_dir(root, "trees"))
+    errors.push(scv_validate_deterministic_object_dir(root, "commits"))
+    errors.push(scv_validate_deterministic_object_dir(root, "conflicts"))
+    errors.push(scv_validate_deterministic_object_dir(root, "syntax"))
+    errors.push(scv_validate_deterministic_object_dir(root, "operations"))
+    errors.join("")
 
 fn scv_validate_tree_object_rows(root: text, tree_id: text, content: text) -> text:
-    var errors = ""
+    var errors: [text] = []
     var seen_paths = ""
     for line in content.split("\n"):
         val trimmed = line.trim()
@@ -551,12 +551,12 @@ fn scv_validate_tree_object_rows(root: text, tree_id: text, content: text) -> te
             continue
         val parts = trimmed.split("|")
         if parts.len() != 5:
-            errors = errors + "bad tree entry: {tree_id} {trimmed}\n"
+            errors.push("bad tree entry: {tree_id} {trimmed}\n")
             continue
         if not scv_worktree_path_safe(parts[0]):
-            errors = errors + "unsafe tree path: {tree_id} {parts[0]}\n"
+            errors.push("unsafe tree path: {tree_id} {parts[0]}\n")
         if scv_line_set_contains(seen_paths, parts[0]):
-            errors = errors + "duplicate tree path: {tree_id} {parts[0]}\n"
+            errors.push("duplicate tree path: {tree_id} {parts[0]}\n")
         else:
             seen_paths = seen_paths + parts[0] + "\n"
         val file_id = parts[1]
@@ -564,39 +564,39 @@ fn scv_validate_tree_object_rows(root: text, tree_id: text, content: text) -> te
         val size_text = parts[3]
         val ref_errors = scv_validate_tree_row_object_refs(tree_id, file_id, chunk)
         if ref_errors != "":
-            errors = errors + ref_errors
+            errors.push(ref_errors)
             continue
         val size = size_text.to_i64() ?? -1
         val chunk_path = scv_chunk_path(root, chunk)
         if not file_exists(scv_object_path(root, "files", file_id)):
-            errors = errors + "missing file object: {file_id}\n"
+            errors.push("missing file object: {file_id}\n")
         else:
-            errors = errors + scv_validate_tree_file_link(root, parts[0], file_id, chunk, size_text)
+            errors.push(scv_validate_tree_file_link(root, parts[0], file_id, chunk, size_text))
         if not file_exists(chunk_path):
-            errors = errors + "missing chunk: {chunk}\n"
+            errors.push("missing chunk: {chunk}\n")
         elif size < 0:
-            errors = errors + "bad tree size: {tree_id} {parts[0]}\n"
+            errors.push("bad tree size: {tree_id} {parts[0]}\n")
         elif file_size(chunk_path) != size:
-            errors = errors + "chunk size mismatch: {tree_id} {chunk}\n"
+            errors.push("chunk size mismatch: {tree_id} {chunk}\n")
         elif scv_content_id_for_file(chunk_path) != chunk:
-            errors = errors + "corrupt chunk: {tree_id} {chunk}\n"
-    errors
+            errors.push("corrupt chunk: {tree_id} {chunk}\n")
+    errors.join("")
 
 fn scv_validate_tree_objects(root: text) -> text:
     val trees_dir = "{scv_objects_dir(root)}/trees"
     if not file_exists(trees_dir):
         return ""
-    var errors = ""
+    var errors: [text] = []
     for tree_path in dir_walk(trees_dir):
         val tree_id = scv_object_id_from_path(tree_path)
-        errors = errors + scv_validate_tree_object_rows(root, tree_id, file_read(tree_path))
-    errors
+        errors.push(scv_validate_tree_object_rows(root, tree_id, file_read(tree_path)))
+    errors.join("")
 
 fn scv_validate_commit_parent_refs(root: text) -> text:
     val commits_dir = "{scv_objects_dir(root)}/commits"
     if not file_exists(commits_dir):
         return ""
-    var errors = ""
+    var errors: [text] = []
     for commit_path in dir_walk(commits_dir):
         val commit_id = scv_object_id_from_path(commit_path)
         val parents = scv_object_field(file_read(commit_path), "parents")
@@ -605,54 +605,54 @@ fn scv_validate_commit_parent_refs(root: text) -> text:
             if parent_commit == "":
                 continue
             if not scv_object_ref_safe(parent_commit, "commit_"):
-                errors = errors + "bad commit parent ref: {commit_id} {parent_commit}\n"
+                errors.push("bad commit parent ref: {commit_id} {parent_commit}\n")
                 continue
             if not file_exists(scv_object_path(root, "commits", parent_commit)):
-                errors = errors + "missing commit parent: {commit_id} {parent_commit}\n"
-    errors
+                errors.push("missing commit parent: {commit_id} {parent_commit}\n")
+    errors.join("")
 
 fn scv_validate_change_refs(root: text) -> text:
     val changes_dir = "{scv_objects_dir(root)}/changes"
     if not file_exists(changes_dir):
         return ""
-    var errors = ""
+    var errors: [text] = []
     for change_path in dir_walk(changes_dir):
         val change_id = scv_object_id_from_path(change_path)
         val content = file_read(change_path)
         val latest = scv_object_field(content, "latest")
         if latest == "":
-            errors = errors + "missing change latest: {change_id}\n"
+            errors.push("missing change latest: {change_id}\n")
         elif not scv_object_ref_safe(latest, "commit_"):
-            errors = errors + "bad change latest ref: {change_id} {latest}\n"
+            errors.push("bad change latest ref: {change_id} {latest}\n")
         elif not file_exists(scv_object_path(root, "commits", latest)):
-            errors = errors + "missing change latest commit: {change_id} {latest}\n"
+            errors.push("missing change latest commit: {change_id} {latest}\n")
         val predecessors = scv_object_field(content, "predecessors")
         for predecessor in predecessors.split(","):
             val commit = predecessor.trim()
             if commit == "":
                 continue
             if not scv_object_ref_safe(commit, "commit_"):
-                errors = errors + "bad change predecessor ref: {change_id} {commit}\n"
+                errors.push("bad change predecessor ref: {change_id} {commit}\n")
                 continue
             if not file_exists(scv_object_path(root, "commits", commit)):
-                errors = errors + "missing change predecessor commit: {change_id} {commit}\n"
-    errors
+                errors.push("missing change predecessor commit: {change_id} {commit}\n")
+    errors.join("")
 
 fn scv_validate_commit_change_refs(root: text) -> text:
     val commits_dir = "{scv_objects_dir(root)}/commits"
     if not file_exists(commits_dir):
         return ""
-    var errors = ""
+    var errors: [text] = []
     for commit_path in dir_walk(commits_dir):
         val commit_id = scv_object_id_from_path(commit_path)
         val change = scv_object_field(file_read(commit_path), "change")
         if change == "":
-            errors = errors + "missing commit change: {commit_id}\n"
+            errors.push("missing commit change: {commit_id}\n")
         elif not scv_object_ref_safe(change, "change_"):
-            errors = errors + "bad commit change ref: {commit_id} {change}\n"
+            errors.push("bad commit change ref: {commit_id} {change}\n")
         elif not file_exists(scv_object_path(root, "changes", change)):
-            errors = errors + "missing commit change object: {commit_id} {change}\n"
-    errors
+            errors.push("missing commit change object: {commit_id} {change}\n")
+    errors.join("")
 
 fn scv_fsck(root: text) -> text:
     if not scv_repo_exists(root):
@@ -660,7 +660,7 @@ fn scv_fsck(root: text) -> text:
     val tree_content = scv_current_tree_content(root)
     if tree_content == "":
         return "ERROR missing current tree\n"
-    var errors = ""
+    var errors: [text] = []
     var checked = 0
     var seen_paths = ""
     for line in tree_content.split("\n"):
@@ -669,12 +669,12 @@ fn scv_fsck(root: text) -> text:
             continue
         val parts = trimmed.split("|")
         if parts.len() != 5:
-            errors = errors + "bad tree entry: {trimmed}\n"
+            errors.push("bad tree entry: {trimmed}\n")
             continue
         if not scv_worktree_path_safe(parts[0]):
-            errors = errors + "unsafe tree path: {parts[0]}\n"
+            errors.push("unsafe tree path: {parts[0]}\n")
         if scv_line_set_contains(seen_paths, parts[0]):
-            errors = errors + "duplicate tree path: {parts[0]}\n"
+            errors.push("duplicate tree path: {parts[0]}\n")
         else:
             seen_paths = seen_paths + parts[0] + "\n"
         val file_id = parts[1]
@@ -682,35 +682,35 @@ fn scv_fsck(root: text) -> text:
         val size_text = parts[3]
         val ref_errors = scv_validate_tree_row_object_refs("", file_id, chunk)
         if ref_errors != "":
-            errors = errors + ref_errors
+            errors.push(ref_errors)
             continue
         val size = parts[3].to_i64() ?? -1
         val chunk_path = scv_chunk_path(root, chunk)
         if not file_exists(chunk_path):
-            errors = errors + "missing chunk: {chunk}\n"
+            errors.push("missing chunk: {chunk}\n")
         elif size < 0:
-            errors = errors + "bad tree size: {parts[0]}\n"
+            errors.push("bad tree size: {parts[0]}\n")
         elif file_size(chunk_path) != size:
-            errors = errors + "chunk size mismatch: {chunk}\n"
+            errors.push("chunk size mismatch: {chunk}\n")
         elif scv_content_id_for_file(chunk_path) != chunk:
-            errors = errors + "corrupt chunk: {chunk}\n"
-        errors = errors + scv_validate_tree_file_link(root, parts[0], file_id, chunk, size_text)
-        errors = errors + scv_validate_file_chunk_parts(root, file_id)
+            errors.push("corrupt chunk: {chunk}\n")
+        errors.push(scv_validate_tree_file_link(root, parts[0], file_id, chunk, size_text))
+        errors.push(scv_validate_file_chunk_parts(root, file_id))
         checked = checked + 1
-    errors = errors + scv_validate_parser_index(root)
-    errors = errors + scv_validate_parser_lockfile(root)
-    errors = errors + scv_validate_langmap(root)
-    errors = errors + scv_validate_current_head(root)
-    errors = errors + scv_validate_current_bookmarks(root)
-    errors = errors + scv_validate_current_workspaces(root)
-    errors = errors + scv_validate_operation_views(root)
-    errors = errors + scv_validate_commit_parent_refs(root)
-    errors = errors + scv_validate_change_refs(root)
-    errors = errors + scv_validate_commit_change_refs(root)
-    errors = errors + scv_validate_deterministic_object_hashes(root)
-    errors = errors + scv_validate_tree_objects(root)
-    errors = errors + scv_validate_object_index(root)
-    if errors == "":
+    errors.push(scv_validate_parser_index(root))
+    errors.push(scv_validate_parser_lockfile(root))
+    errors.push(scv_validate_langmap(root))
+    errors.push(scv_validate_current_head(root))
+    errors.push(scv_validate_current_bookmarks(root))
+    errors.push(scv_validate_current_workspaces(root))
+    errors.push(scv_validate_operation_views(root))
+    errors.push(scv_validate_commit_parent_refs(root))
+    errors.push(scv_validate_change_refs(root))
+    errors.push(scv_validate_commit_change_refs(root))
+    errors.push(scv_validate_deterministic_object_hashes(root))
+    errors.push(scv_validate_tree_objects(root))
+    errors.push(scv_validate_object_index(root))
+    if errors.len() == 0:
         "OK checked={checked}\n"
     else:
-        "ERROR fsck failed\n{errors}"
+        "ERROR fsck failed\n{errors.join("")}"

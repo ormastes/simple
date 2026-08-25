@@ -325,6 +325,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`.claude/skills/lib/spipe_diagrams.md`](lib/spipe_diagrams.md) — diagram & concision rules (≤30 lines + ≥1 SDN diagram)
 - [`.claude/skills/lib/spipe_ui.md`](lib/spipe_ui.md) — **UI skill**: the 3 main GUI check apps + framebuffer capture/verify & backend-parity gates
 - [`.claude/skills/lib/spipe_notebook.md`](lib/spipe_notebook.md) — **Notebook skill**: Jupyter/Codex session testing, SKIP-clean lane gating, magics and lifecycle specs
+- [`.claude/skills/scv_migration.md`](scv_migration.md) — **SCV migration lane**: month plan, signature-gated hourly ledger checker, timer, fail-closed unsigned-step policy
 - [`doc/07_guide/app/spipe/mission_critical_robust_sw.md`](../../doc/07_guide/app/spipe/mission_critical_robust_sw.md) — flight-level / mission-critical robust-software gate contract
 - [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — SSpec scenario manual, capture, inline/previous scenario, and environmental-test guidance
 - [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
@@ -1205,8 +1206,6 @@ duplicate-check outcomes plus the aggregate pass marker. Raw source, a deployed
 wrapper, Rust seed, or stale binary is not evidence. This sanity does not
 replace release `--whole` or repository-wide policy checks, and it must not be
 copied into compiler Stages 2 or 3.
-The bootstrap completion recorder must override ambient `SIMPLE_BINARY`/`SIMPLE_BIN` and
-bind all automated gates to the exact validated Stage 4 candidate.
 
 An explicitly admitted Stage 2 or Stage 3 Simple binary may run focused
 pure-Simple compiler/interpreter/loader work under
@@ -1316,51 +1315,6 @@ was a 4-line probe spec that CALLS the extern: a capable driver validates the
 argument types, an incapable one reports `unknown extern function`.
 
 ## Shared working tree: blob-first landing (2026-08-07)
-
-Linked Git worktrees share one hooks directory. Must-check setup installs the
-stable `scripts/hooks/pre-push-worktree-launcher`, which resolves the active
-worktree before entering its tracked dispatcher. Do not replace it with an
-absolute symlink to one checkout; that makes every sibling fail hook-wiring
-verification. Do not preserve a legacy dispatcher as `pre-push.local`, which
-would recurse.
-
-Check before installing or repairing the shared hook. On Unix-like hosts:
-
-```sh
-sh scripts/setup/install-must-check-hooks.shs --check ||
-  sh scripts/setup/install-must-check-hooks.shs --install
-```
-
-On Windows PowerShell:
-
-```powershell
-& scripts/setup/install-must-check-hooks.ps1 -Check
-if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install }
-```
-
-The canonical tier and hook contract is
-`doc/07_guide/tooling/must_check_tiering.md`.
-External host, device, installed-provider, and performance TODO rows are
-`external-receipt` rows. Promotion must run their registry-owned semantic
-validator against exact committed receipt/artifact blobs; a generic PASS label,
-hash-shaped assertion, or prose report alone is not acceptance evidence. Hashes
-must be recomputed from separate committed evidence blobs and the summary must
-verify against a repository-pinned reviewer public key. This validation stays
-bootstrap-owned and must not be added to the interactive push path.
-Source-decidable external lanes add a narrow registry-owned semantic oracle;
-RISC-V sharing requires an exhaustive disjoint committed-tree inventory with
-bilateral and specialization evidence.
-Performance external gates use narrow numeric validators over retained raw
-artifacts; binary-size parity recomputes committed stripped bytes and derives
-`Simple <= Go` rather than trusting a PASS field. Interpreter-startup parity
-recomputes fixed-width trial-interleaved cold/warm process-launch p50/p95 for
-Simple/Python/Bun/Go, checks every Simple interpreter-mode receipt, and
-requires the live canonical Stage 4 chain.
-Rust/Go benchmark parity requires runtime-fed equal work, rotated
-trial-interleaved samples, recomputed p50/p95, equality-or-better Simple
-latency against both references, and canonical Stage 4 authority.
-When a push guard's default command also runs mutation fixtures, wire its
-scan-only mode into push and retain the self-test as a required bootstrap row.
 
 On this repo's shared working tree, a concurrent session's checkout/reconcile
 can silently WIPE an in-progress file — no `git status` trace, not even
@@ -1976,48 +1930,6 @@ oracle; region screen-capture is flaky). Full launch/capture/parity-gate details
 **[`lib/spipe_ui.md`](lib/spipe_ui.md)** (the UI skill). Reference:
 `doc/04_architecture/ui/simple_gui_stack.md` → "GUI Sanity Apps". The web-layout
 lane is interpreter-bound (~1.5 ms/px) — keep web sanity surfaces ≤ ~900×760.
-
-## `@tag:in-development` — the ONE legitimate way to ship an expected-to-fail spec
-
-Canonical guide: [`doc/07_guide/infra/testing.md`](../../doc/07_guide/infra/testing.md)
-§ "Tags and Filtering" → `@tag:in-development`. Read it before using the tag.
-
-When you write a spec ahead of the implementation it describes, mark it:
-
-```simple
-# @tag:in-development
-# Tracks: <TODO id / bug record / plan row>   <- MANDATORY, no exceptions
-```
-
-Contract: expected to FAIL, SKIPPED in whole-suite runs, **COUNTED** in the
-runner summary, selectable via `simple test --tag in-development`.
-
-**Enforcement status (checked against `origin/main` @ `3ccf808f6f2`, 2026-08-23).**
-`--tag <name>` filtering exists in the seed driver
-(`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at
-`execution.rs:923-925`), and `@tag:qemu` is scanned there for the timeout budget
-(`execution.rs:95`). The pure-Simple runner parses exactly **two** header
-directives — `# @di_test` and `# @exec_limit <N>`
-(`src/app/test_runner_new/test_runner_single.spl:193,209`) — and no `@tag:` at
-all. The skip/count semantics are landing in sibling lanes. Until they land,
-**the tag documents intent and changes nothing at runtime: the spec still runs
-and still fails.** Never report it as skipped without re-verifying at origin.
-
-**Do NOT use it for:**
-
-- a **regression** (used to pass, now fails) — fix or revert; tagging it buries
-  a loud, actionable failure in a debt counter;
-- a failure you have not diagnosed — that is an unfiled bug;
-- **environmental** unavailability (no GPU/board/network) — that is
-  `skip(name, reason)` / `pending(name)`
-  (`src/lib/gc_async_mut/spec/__init__.spl:40-43`) or the host-aware
-  `skip:`/`blocked:` wording;
-- getting a red suite green before a landing;
-- keeping a spec for behaviour nobody intends to build — delete it.
-
-**Promotion:** the moment it passes, delete the tag line and the Tracks line in
-the same commit as the fix, and close the tracked row. A passing spec that is
-still tagged is a stale ratchet: the count stops being a debt figure.
 
 ## Template
 

@@ -243,6 +243,20 @@ fn scv_pair_contains_head(pairs: text, head_id: text) -> bool:
             return true
     false
 
+fn scv_pair_rows_contains_base(rows: [text], base_id: text) -> bool:
+    for row in rows:
+        val parts = row.trim().split(":")
+        if parts.len() >= 2 and parts[0] == base_id:
+            return true
+    false
+
+fn scv_pair_rows_contains_head(rows: [text], head_id: text) -> bool:
+    for row in rows:
+        val parts = row.trim().split(":")
+        if parts.len() >= 2 and parts[1] == head_id:
+            return true
+    false
+
 fn scv_pairs_to_list(pairs: text) -> [(text, text)]:
     var out: [(text, text)] = []
     for line in pairs.split("\n"):
@@ -306,18 +320,18 @@ fn scv_match_bottom_up(root: text, base_root: text, head_root: text, existing: [
         return existing
     val base_nodes = scv_collect_node_ids(root, base_root)
     val head_nodes = scv_collect_node_ids(root, head_root)
-    var pairs = ""
+    var pair_rows: [text] = []
     for pair in existing:
         val (b, h) = pair
-        pairs = pairs + "{b}:{h}\n"
+        pair_rows.push("{b}:{h}\n")
     for base_id in base_nodes:
-        if scv_pair_contains_base(pairs, base_id):
+        if scv_pair_rows_contains_base(pair_rows, base_id):
             continue
         val base_labels = scv_descendant_labels(root, base_id)
         var best_head = ""
         var best_dice: i64 = cfg.min_dice
         for head_id in head_nodes:
-            if scv_pair_contains_head(pairs, head_id):
+            if scv_pair_rows_contains_head(pair_rows, head_id):
                 continue
             val head_labels = scv_descendant_labels(root, head_id)
             val dice = scv_dice_similarity(base_labels, head_labels)
@@ -325,8 +339,8 @@ fn scv_match_bottom_up(root: text, base_root: text, head_root: text, existing: [
                 best_dice = dice
                 best_head = head_id
         if best_head != "":
-            pairs = pairs + "{base_id}:{best_head}\n"
-    scv_pairs_to_list(pairs)
+            pair_rows.push("{base_id}:{best_head}\n")
+    scv_pairs_to_list(pair_rows.join(""))
 
 # ---------------------------------------------------------------------------
 # Edit script
@@ -484,8 +498,7 @@ fn scv_text_block_names(content: text) -> [text]:
 fn scv_text_block_content(content: text, target: text) -> text:
     val lines = content.split("\n")
     var in_block = false
-    var result = ""
-    var first = true
+    var rows: [text] = []
     var i = 0
     while i < lines.len():
         val name = scv_text_def_name(lines[i])
@@ -494,40 +507,33 @@ fn scv_text_block_content(content: text, target: text) -> text:
         elif name != "" and in_block:
             break
         if in_block:
-            if not first:
-                result = result + "\n"
-            result = result + lines[i]
-            first = false
+            rows.push(lines[i])
         i = i + 1
-    result
+    rows.join("\n")
 
 fn scv_text_block_body(content: text, target: text) -> text:
     val full = scv_text_block_content(content, target)
     val lines = full.split("\n")
     if lines.len() <= 1:
         return ""
-    var result = ""
+    var rows: [text] = []
     var i = 1
     while i < lines.len():
-        if i > 1:
-            result = result + "\n"
-        result = result + lines[i]
+        rows.push(lines[i])
         i = i + 1
-    result
+    rows.join("\n")
 
 fn scv_normalize_block(content: text) -> text:
     val lines = content.split("\n")
     var end_idx = lines.len()
     while end_idx > 0 and lines[end_idx - 1].trim() == "":
         end_idx = end_idx - 1
-    var result = ""
+    var rows: [text] = []
     var i = 0
     while i < end_idx:
-        if i > 0:
-            result = result + "\n"
-        result = result + lines[i]
+        rows.push(lines[i])
         i = i + 1
-    result
+    rows.join("\n")
 
 fn scv_text_block_position(content: text, target: text) -> i64:
     var pos = 0
@@ -540,17 +546,13 @@ fn scv_text_block_position(content: text, target: text) -> i64:
     -1
 
 fn scv_text_preamble(content: text) -> text:
-    var result = ""
-    var first = true
+    var rows: [text] = []
     for line in content.split("\n"):
         val name = scv_text_def_name(line)
         if name != "":
             break
-        if not first:
-            result = result + "\n"
-        result = result + line
-        first = false
-    result
+        rows.push(line)
+    rows.join("\n")
 
 fn scv_names_contain(names: [text], target: text) -> bool:
     for n in names:
@@ -638,11 +640,10 @@ fn scv_structural_merge_from_text(base_text: text, left_text: text, right_text: 
             val rc = scv_normalize_block(scv_text_block_content(right_text, bname))
             if lc != bc and rc != bc:
                 return ""
-    var result = ""
-    var first_block = true
-    var used_names = ""
+    var blocks: [text] = []
+    var used_names: [text] = []
     for lname in left_names:
-        used_names = used_names + lname + "\n"
+        used_names.push(lname)
         val lc = scv_normalize_block(scv_text_block_content(left_text, lname))
         val in_base = scv_names_contain(base_names, lname)
         var chosen = lc
@@ -657,12 +658,9 @@ fn scv_structural_merge_from_text(base_text: text, left_text: text, right_text: 
                     chosen = rc
                 elif right_changed and left_changed:
                     return ""
-        if not first_block:
-            result = result + "\n"
-        result = result + chosen
-        first_block = false
+        blocks.push(chosen)
     for rname in right_names:
-        if scv_line_set_contains(used_names, rname):
+        if scv_names_contain(used_names, rname):
             continue
         val in_base = scv_names_contain(base_names, rname)
         if in_base:
@@ -672,10 +670,8 @@ fn scv_structural_merge_from_text(base_text: text, left_text: text, right_text: 
                 return ""
             continue
         val rc = scv_text_block_content(right_text, rname)
-        if not first_block:
-            result = result + "\n"
-        result = result + rc
-        first_block = false
+        blocks.push(rc)
+    val result = blocks.join("\n")
     if result != "":
-        result = result + "\n"
+        return result + "\n"
     result

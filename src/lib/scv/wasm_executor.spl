@@ -50,13 +50,7 @@ fn scv_wasm_executor_available() -> bool:
 # Compute a structural ID for a syntax node, excluding byte positions.
 # Identical subtrees across edits share the same structural ID.
 fn scv_ts_node_structural_id(kind: text, field: text, source_slice: text, child_ids: [text]) -> text:
-    var child_concat = ""
-    var i = 0
-    while i < child_ids.len():
-        if i > 0:
-            child_concat = child_concat + ","
-        child_concat = child_concat + child_ids[i]
-        i = i + 1
+    val child_concat = child_ids.join(",")
     scv_hash_text("syntax_node", "ts:{kind}:{field}:{source_slice}:{child_concat}")
 
 # ---------------------------------------------------------------------------
@@ -79,13 +73,7 @@ fn scv_wasm_inner_node(root: text, kind: text, field: text, byte_start: i64,
                        byte_end: i64, child_ids: [text], language: text,
                        grammar: text, version: text, parser_hash: text) -> text:
     val node_id = scv_ts_node_structural_id(kind, field, "", child_ids)
-    var child_concat = ""
-    var i = 0
-    while i < child_ids.len():
-        if i > 0:
-            child_concat = child_concat + ","
-        child_concat = child_concat + child_ids[i]
-        i = i + 1
+    val child_concat = child_ids.join(",")
     val payload = "grammar: {grammar}\nversion: {version}\nparser_hash: {parser_hash}\nexecution: tree-sitter-wasm\nkind: {kind}\nfield: {field}\nchildren: {child_concat}\nbyte_start: {byte_start}\nbyte_end: {byte_end}\nlanguage: {language}\nsyntax: {node_id}\nparse_status: ok\n"
     val path = scv_object_path(root, "syntax", node_id)
     if not file_exists(path):
@@ -234,9 +222,23 @@ fn _scv_parse_node_blob(root: text, blob: text, source: text, language: text,
 #
 # In interpreter mode or when only DynLib probing is available (no compiled
 # shim), the availability check gates everything and we stay on fallback-line.
+@unsafe(reason: "wasm shim handle from foreign loader; availability-gated before use", capabilities: [ffi])
 extern fn wasm_rt_load(path: text) -> i64
+@unsafe(reason: "frees a foreign wasm shim handle; caller owns handle lifetime", capabilities: [ffi])
 extern fn wasm_rt_free(handle: i64)
+@unsafe(reason: "foreign parse over caller buffer; length passed explicitly", capabilities: [ffi])
 extern fn wasm_rt_parse_all(handle: i64, source: text, source_len: i64) -> text
+
+# Smallest ffi-unsafe boundary around the shim: load, parse, free.
+# Returns "" when the grammar cannot be loaded or parsing yields nothing.
+@unsafe(reason: "wasm shim load/parse/free sequence; handle validity checked, freed on all paths", capabilities: [ffi])
+fn _scv_wasm_parse_blob(grammar_path: text, source: text, source_len: i64) -> text:
+    val handle = wasm_rt_load(grammar_path)
+    if handle <= 0:
+        return ""
+    val blob = wasm_rt_parse_all(handle, source, source_len)
+    wasm_rt_free(handle)
+    blob
 
 fn scv_wasm_parse(root: text, language: text, grammar: text, version: text,
                   parser_hash: text, source: text) -> (text, text):
@@ -246,14 +248,8 @@ fn scv_wasm_parse(root: text, language: text, grammar: text, version: text,
     val grammar_path = "{root}/.scv/parsers/{parser_hash}.wasm"
     if not file_exists(grammar_path):
         return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
-    # Load grammar via shim extern (resolved when libscv_wasm is linked)
-    val handle = wasm_rt_load(grammar_path)
-    if handle <= 0:
-        return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
-    # Parse and get the full node blob
-    val source_len = source.len()
-    val blob = wasm_rt_parse_all(handle, source, source_len)
-    wasm_rt_free(handle)
+    # Load grammar + parse via the ffi-unsafe boundary wrapper
+    val blob = _scv_wasm_parse_blob(grammar_path, source, source.len())
     if blob == "":
         return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
     # Walk the blob and write tree-sitter-wasm nodes

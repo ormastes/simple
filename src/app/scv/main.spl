@@ -3,7 +3,8 @@
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (cwd)
-use std.scv.store.{scv_init_repo, scv_restore_op, scv_mark_current_state}
+use std.scv.store.{scv_init_repo, scv_restore_op, scv_mark_current_state, scv_new_change, scv_close_change}
+use std.scv.stabilize.{scv_checkpoint, scv_checkpoint_verify, scv_checkpoint_list, scv_doctor, scv_verify_backends_git}
 use std.scv.working_copy.{scv_snapshot, scv_auto_snapshot, scv_watch, scv_status, scv_log, scv_log_branch, scv_op_log}
 use std.scv.parser.{scv_parse_gate, scv_parse_index}
 use std.scv.parser_registry.{scv_parsers, scv_parser_install, scv_parser_verify, scv_langmap, scv_langmap_set}
@@ -23,7 +24,7 @@ extern fn rt_stdout_write(data: [u8]) -> i64
 
 fn scv_help() -> text:
     var lines: [text] = []
-    lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set>")
+    lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set|new-change|close-change|checkpoint|doctor|verify-backends>")
     lines.push("")
     lines.push("Shared log options:")
     for line in log_options_help():
@@ -57,6 +58,22 @@ fn scv_cli_result(result: text) -> i64:
         1
     else:
         0
+
+# Three-way verdict mapping for doctor/verify tools: the verdict is the LAST
+# non-empty line — PASS/OK -> 0, FAIL/ERROR-detail -> 1,
+# "ERROR — nothing was checked" -> 2 (fail-closed, never a vacuous pass).
+fn scv_cli_verdict(result: text) -> i64:
+    print result
+    var verdict = ""
+    for line in result.split("\n"):
+        if line.trim() != "":
+            verdict = line.trim()
+    if result.starts_with("ERROR — nothing was checked"):
+        2
+    elif verdict.starts_with("PASS") or verdict.starts_with("OK"):
+        0
+    else:
+        1
 
 fn scv_cli_watch(root: text, args: [text]) -> i64:
     var iterations = 0
@@ -399,6 +416,38 @@ fn main() -> i64:
                 return scv_cli_result(scv_network_config_set_tls_no_verify(base_url_nc))
             print "ERROR network-config unknown subcommand: {args[1]}"
             return 1
+        case "new-change":
+            return scv_cli_result(scv_new_change(root))
+        case "close-change":
+            return scv_cli_result(scv_close_change(root))
+        case "checkpoint":
+            if args.len() >= 2 and args[1] == "verify":
+                if args.len() < 3:
+                    print "ERROR checkpoint verify requires a checkpoint id"
+                    return 1
+                return scv_cli_verdict(scv_checkpoint_verify(root, args[2]))
+            if args.len() >= 2 and args[1] == "list":
+                return scv_cli_result(scv_checkpoint_list(root))
+            return scv_cli_result(scv_checkpoint(root))
+        case "doctor":
+            return scv_cli_verdict(scv_doctor(root))
+        case "verify-backends":
+            var vb_git = ""
+            var vb_rev = "HEAD"
+            var vb_i = 1
+            while vb_i < args.len():
+                if args[vb_i] == "--git" and vb_i + 1 < args.len():
+                    vb_git = args[vb_i + 1]
+                    vb_i = vb_i + 2
+                elif args[vb_i] == "--rev" and vb_i + 1 < args.len():
+                    vb_rev = args[vb_i + 1]
+                    vb_i = vb_i + 2
+                else:
+                    vb_i = vb_i + 1
+            if vb_git == "":
+                print "ERROR verify-backends requires --git <path>"
+                return 1
+            return scv_cli_verdict(scv_verify_backends_git(root, vb_git, vb_rev))
         case "tag-list":
             return scv_cli_result(scv_tag_list(root))
         case "tag-set":

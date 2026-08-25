@@ -478,3 +478,67 @@ Slice 3: gate commands and conflict-as-data merge.
 Slice 4: chunk list, stats, fsck, GC dry-run.
 
 Slice 5: parser registry and Tree-sitter one-language prototype.
+
+## Stabilization Commands (P0, 2026-08-25)
+
+Design sources: `doc/01_research/app/tools/scv/scv_v2_final_report_2026-08-25.md`
+(§3.3.A, §7.7, §14.2) and
+`doc/01_research/app/tools/scv/scv_migration_stabilization_2026-08-25.md`
+(§2–§4, §6). Implementation: `src/lib/scv/stabilize.spl` plus changes in
+`store.spl`/`working_copy.spl`.
+
+### Persistent logical ChangeId
+
+`scv_write_commit_carry` (snapshot path) carries the parent commit's change id
+across successive snapshots while that change is `open`, and allocates a fresh
+repository-unique id (`change_` + sha256 of a `meta/change_seq.sdn` counter +
+timestamp — never the mutable latest revision) otherwise. Change objects are
+format 2: `format/latest/predecessors/state/origin/created_operation`; v1
+objects (no `format`/`state` fields) read as open changes and are upgraded on
+the next write. Derived ids (`root:`/`change-parent:`/`change-merge:`) remain
+for the deterministic fast-import/merge paths.
+
+- `new-change` — writes a same-tree commit under a freshly allocated change id
+  (`new-change <change> <commit> <op>`).
+- `close-change` — marks the current commit's change `closed`
+  (`close-change <change> closed <op>`); the next snapshot then allocates a
+  fresh change.
+
+### `checkpoint` / `checkpoint verify <id>` / `checkpoint list`
+
+`checkpoint` copies the must-back-up state (HEAD_OP, workspaces, bookmarks,
+tags, change counter, `objects/{operations,changes,commits,trees,files,chunks,
+conflicts}`) into `.scv/checkpoints/<id>/data/...` with a `manifest.sdn` listing
+`sha256_<hex> <rel>` per file; `id = checkpoint_<sha256(manifest)>`. The dir is
+staged and published by rename (immutable once published; re-running with
+unchanged state reports `(exists)`). Rebuildable state (parser registry/index,
+syntax cache, packs, status/object indexes) is deliberately excluded. `verify`
+recomputes the manifest hash and every file hash.
+
+### `doctor`
+
+Cheap health check: one `<component>  OK|STALE|FAIL` row for `objects`, `refs`,
+`operation heads`, `view`, `checkpoints`, `parser index`, then a verdict line
+`PASS — <n> check(s), 0 failed` (exit 0) / `FAIL — …` (exit 1) /
+`ERROR — nothing was checked` (exit 2). STALE is non-fatal: a workspace pointer
+that disagrees with the published head view is reconciled from the view (the
+head is the single publication point), and a stale parser index is rebuildable.
+
+### `verify-backends --git <path> [--rev <rev>]`
+
+Backend differential verifier: compares the SCV current tree against a git
+tree path-for-path and byte-for-byte (`git ls-tree -r` + `git hash-object` over
+the SCV chunk, exact for binary content). Verdict:
+`PASS — <n> path(s) compared, 0 mismatches` / `FAIL — <k> mismatch(es)` with
+`bytes differ:`/`missing in git:`/`missing in scv:` rows / `ERROR — nothing was
+checked` when the git side cannot be read.
+
+### Write-new-then-publish fault protocol
+
+Snapshot order: content objects → tree → commit(+change) → operation(+view) →
+HEAD_OP (publication point) → derived workspace pointer. `SCV_FAULT_AFTER=
+<content|tree|commit|operation|head>` exits with code 3 after that step
+(`scv_fault_exit`, store.spl). A crash before `head` leaves the OLD state with
+only unreachable immutable objects; a crash after `head` is the NEW state with
+a derived pointer `doctor` reconciles. Spec:
+`test/integration/app/scv_fault_injection_spec.spl`.

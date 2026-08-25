@@ -1,6 +1,6 @@
 # SCV fallback parser index.
 
-use app.io.mod (file_exists, file_read)
+use app.io.mod (file_exists, file_read, file_size)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
 use std.scv.store.{scv_content_id_for_bytes, scv_write_text, scv_hash_text}
 use std.scv.store.{scv_mark_current_state}
@@ -8,6 +8,7 @@ use std.scv.core.{scv_parser_index_path, scv_object_path, scv_rel_path}
 use std.scv.core.{scv_state_parsed_error, scv_state_parsed_ok}
 use std.scv.parser_registry.{scv_langmap_validate, scv_language_for_path, scv_parser_for_path, scv_locked_parser_hash}
 use std.scv.wasm_executor.{scv_wasm_executor_available, scv_wasm_parse}
+use std.scv.alloc_bounds.{scv_bound_parser_input_bytes}
 
 fn scv_first_line(content: text) -> text:
     val lines = content.split("\n")
@@ -55,20 +56,20 @@ fn scv_trim_trailing_space(line: text) -> text:
     line[0:end]
 
 fn scv_fallback_syntax_view(content: text) -> text:
-    var out = ""
+    var rows: [text] = []
     var line_no = 1
     for line in content.split("\n"):
-        out = out + "line:{line_no}:{line}\n"
+        rows.push("line:{line_no}:{line}\n")
         line_no = line_no + 1
-    out
+    rows.join("")
 
 fn scv_fallback_semantic_view(content: text) -> text:
-    var out = ""
+    var rows: [text] = []
     var line_no = 1
     for line in content.split("\n"):
-        out = out + "line:{line_no}:{scv_trim_trailing_space(line)}\n"
+        rows.push("line:{line_no}:{scv_trim_trailing_space(line)}\n")
         line_no = line_no + 1
-    out
+    rows.join("")
 
 fn scv_fallback_syntax_hash(content: text) -> text:
     scv_hash_text("syntax", scv_fallback_syntax_view(content))
@@ -112,14 +113,7 @@ fn scv_fallback_parse_status(language: text, content: text) -> text:
         "parsed_ok"
 
 fn scv_join_node_ids(ids: [text]) -> text:
-    var out = ""
-    var i = 0
-    while i < ids.len():
-        if i > 0:
-            out = out + ","
-        out = out + ids[i]
-        i = i + 1
-    out
+    ids.join(",")
 
 fn scv_write_syntax_node(root: text, payload: text) -> text:
     val id = scv_hash_text("syntax_node", payload)
@@ -213,6 +207,9 @@ fn scv_parse_file_wasm_or_fallback(root: text, path: text, content: text,
 fn scv_parse_file(root: text, path: text) -> text:
     if not file_exists(path):
         return "ERROR missing file\n"
+    val input_bound = scv_bound_parser_input_bytes(file_size(path))
+    if input_bound != "":
+        return input_bound
     val rel = scv_rel_path(root, path)
     if not scv_metadata_path_safe(rel):
         return "ERROR unsafe path for SCV metadata: {rel}\n"

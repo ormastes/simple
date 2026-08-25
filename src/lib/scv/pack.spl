@@ -2,6 +2,7 @@
 
 use app.io.mod (file_exists, file_read, file_copy, file_size, dir_create, dir_walk)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.scv.alloc_bounds.{scv_bound_object_bytes, scv_bound_tree_entries}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.common.compress.gzip.{gzip_compress, gzip_decompress}
 use std.common.string_core.{char_from_code}
@@ -21,11 +22,11 @@ fn scv_pack_manifest_for_kind(root: text, kind: text) -> text:
     val dir = "{scv_objects_dir(root)}/{kind}"
     if not file_exists(dir):
         return ""
-    var out = ""
+    var rows: [text] = []
     for path in dir_walk(dir):
         val id = scv_object_id_from_path(path)
-        out = out + "{kind}|{id}|{file_size(path)}|{scv_pack_manifest_path_for_entry(kind, id)}\n"
-    out
+        rows.push("{kind}|{id}|{file_size(path)}|{scv_pack_manifest_path_for_entry(kind, id)}\n")
+    rows.join("")
 
 fn scv_append_bytes(target: [u8], source: [u8]) -> [u8]:
     var out = target
@@ -79,9 +80,10 @@ fn scv_pack_write(root: text) -> text:
         return "ERROR repository not initialized\n"
     val pack_dir = "{scv_objects_dir(root)}/packs"
     dir_create(pack_dir, true)
-    var manifest = "format: scv-pack-v1\n"
+    var manifest_rows: [text] = ["format: scv-pack-v1\n"]
     for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax"]:
-        manifest = manifest + scv_pack_manifest_for_kind(root, kind)
+        manifest_rows.push(scv_pack_manifest_for_kind(root, kind))
+    val manifest = manifest_rows.join("")
     val pack_id = scv_hash_text("pack", manifest)
     val manifest_path = "{pack_dir}/{pack_id}.manifest"
     val gzip_path = "{pack_dir}/{pack_id}.pack.gz"
@@ -288,6 +290,9 @@ fn scv_pack_marker_at(payload: [u8], start: i64) -> bool:
     payload[start:start + marker.len()] == marker
 
 fn scv_pack_import_entry(root: text, kind: text, id: text, raw: [u8]) -> text:
+    val object_bound = scv_bound_object_bytes(raw.len())
+    if object_bound != "":
+        return object_bound
     if not scv_pack_kind_valid(kind):
         return "ERROR unsupported pack object kind: {kind}\n"
     if not scv_pack_id_prefix_valid(kind, id):
@@ -297,6 +302,10 @@ fn scv_pack_import_entry(root: text, kind: text, id: text, raw: [u8]) -> text:
     val raw_text = if kind == "chunks": "" else: scv_pack_bytes_to_text(raw)
     if kind == "files" and scv_hash_text("file", raw_text) != id:
         return "ERROR pack object hash mismatch: {id}\n"
+    if kind == "trees":
+        val tree_bound = scv_bound_tree_entries(raw_text.split("\n").len())
+        if tree_bound != "":
+            return tree_bound
     if kind == "trees" and scv_hash_text("tree", raw_text) != id:
         return "ERROR pack object hash mismatch: {id}\n"
     if kind == "commits" and scv_hash_text("commit", raw_text) != id:
