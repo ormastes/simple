@@ -1438,3 +1438,36 @@ owns only `src/lib/common/search/analyzer.spl` and
 is merge-owned. UCD17 tables/manifest are absent on `main` and prerequisite.
 The existing candidate is unbounded and parity-false: static review `FAIL`,
 admissible `[]`. Wave 4 remains `IN PROGRESS`.
+
+#### 13.9.12 Unicode 17 prerequisite evidence closure
+
+The atomic fixture contains exactly 14 files: the Unicode generator and
+license; seven UCD 17.0.0 sources (`UnicodeData`,
+`DerivedCoreProperties`, `PropList`, `SpecialCasing`, `CaseFolding`,
+`CompositionExclusions`, `NormalizationTest`); generated JavaScript and
+Simple tables; the Unicode manifest; the JavaScript unit test; and
+`test/01_unit/lib/common/search/unicode_17_0_0_spec.spl`. Their roots are
+`examples/05_stdlib/spipe/tools/unicode/`,
+`examples/05_stdlib/spipe/src/search/generated/`,
+`src/lib/common/search/generated/`,
+`examples/05_stdlib/spipe/test/fixture/wave4_search/`, and
+`examples/05_stdlib/spipe/test/unit/`. Partial acceptance is forbidden.
+
+Algorithm work now uses stable 256-code-point CCC buckets with bounded-linear
+behavior, O(n) sigma contexts, and 4,096-element bounded JavaScript chunks.
+The JavaScript oracle passed 7/7 over 20,034 normalization records in all five
+forms, every scalar, and 1 MiB.
+
+Bundle status is nevertheless `FAIL`, admissible `[]`. Cycle 2's Rust-seed
+Simple run timed out `124` with no summary. Cycle 3 only repeated the green
+JavaScript check and is not additional evidence; it also violates the process
+plan. Static review still lacks proof for Simple push/value semantics and the
+optimizer bound, finds direct `rt_file_read_text` use in the spec, an orphan
+`REQ-SPK-SEARCH-UNICODE-001`, a wrong generated-JavaScript license path, and
+an insufficient independent lowercase matrix for `Case_Ignorable`
+final-sigma contexts.
+
+The next run is permitted only after those static defects are repaired, and it
+must execute full parity once on a capable pure-Simple runtime. No code is
+accepted; the analyzer prerequisite remains missing and Wave 4 remains
+`IN PROGRESS`.

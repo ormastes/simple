@@ -680,3 +680,33 @@ This batch layer feeds but does not replace `ProviderAnalyzerLimitsV1`,
 `ProviderAnalyzedTokenV1`, `ProviderAnalyzedTokenSinkPort`, or
 `ProviderStreamingAnalyzerV1`; adapter parity is required. Wave 4 remains
 `IN PROGRESS`.
+
+### 13.3 Rejected Unicode 17 prerequisite bundle
+
+The Unicode prerequisite is atomic across 14 files: generator, license, seven
+UCD inputs (`UnicodeData`, `DerivedCoreProperties`, `PropList`,
+`SpecialCasing`, `CaseFolding`, `CompositionExclusions`,
+`NormalizationTest`), generated JavaScript/Simple tables, manifest, and the
+JavaScript/Simple tests. These live under
+`examples/05_stdlib/spipe/tools/unicode/`,
+`examples/05_stdlib/spipe/src/search/generated/`,
+`src/lib/common/search/generated/`,
+`examples/05_stdlib/spipe/test/fixture/wave4_search/`,
+`examples/05_stdlib/spipe/test/unit/unicode_17_tables_test.js`, and
+`test/01_unit/lib/common/search/unicode_17_0_0_spec.spl`.
+
+The 256-CCC bounded-linear normalization repair, O(n) sigma contexts, and
+4,096-element JavaScript chunking are useful but unaccepted. JavaScript passed
+7/7 for 20,034 records in five NFC forms, every scalar, and 1 MiB. Cycle 2's
+Rust-seed Simple attempt timed out `124` without a summary; cycle 3 repeated
+the JavaScript PASS and supplies no additional evidence.
+
+Highest-capability status is `FAIL`, admissible `[]`. Remaining defects are
+unproved Simple push/value semantics and optimizer bounds, direct
+`rt_file_read_text` use rather than the file facade, orphan
+`REQ-SPK-SEARCH-UNICODE-001`, the wrong generated-JavaScript license path,
+and weak independent `Case_Ignorable` final-sigma lowercase coverage.
+
+Accept none of the bundle. Repair the static defects first, then run complete
+parity once on a capable pure-Simple runtime. The analyzer prerequisite is
+still missing and Wave 4 remains `IN PROGRESS`.

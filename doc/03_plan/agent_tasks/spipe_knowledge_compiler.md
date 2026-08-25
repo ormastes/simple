@@ -561,3 +561,34 @@ analyzer status is `FAIL`, admissible `[]`: its parity claim is false and
 bounds are incomplete. Preserve `ProviderAnalyzerLimitsV1`,
 `ProviderAnalyzedTokenV1`, `ProviderAnalyzedTokenSinkPort`, and
 `ProviderStreamingAnalyzerV1` unchanged. Wave 4 remains `IN PROGRESS`.
+
+### 10.6 Unicode 17 prerequisite attempt closure
+
+Treat these exact paths as one indivisible 14-file bundle: generator and
+license at `examples/05_stdlib/spipe/tools/unicode/`; the seven UCD 17.0.0
+inputs `UnicodeData.txt,DerivedCoreProperties.txt,PropList.txt,
+SpecialCasing.txt,CaseFolding.txt,CompositionExclusions.txt,
+NormalizationTest.txt`; generated JavaScript and Simple tables at
+`examples/05_stdlib/spipe/src/search/generated/unicode_17_0_0.js` and
+`src/lib/common/search/generated/unicode_17_0_0.spl`; manifest
+`examples/05_stdlib/spipe/test/fixture/wave4_search/unicode_17_0_0_manifest.json`;
+and tests `examples/05_stdlib/spipe/test/unit/unicode_17_tables_test.js` and
+`test/01_unit/lib/common/search/unicode_17_0_0_spec.spl`.
+
+Preserve as unaccepted work the stable 256-CCC bounded-linear repair, O(n)
+sigma-context repair, and bounded 4,096-element JavaScript chunks. JavaScript
+reported `PASS 7/7` across the 20,034-by-five NFC corpus, every scalar, and
+1 MiB.
+
+Do not accept the bundle. Cycle 2's Rust-seed Simple run timed out
+`124` without a summary; cycle 3 repeated the same green JavaScript check,
+which is neither new evidence nor compliant process. Highest-capability review
+is `FAIL`, admissible `[]`: Simple push/value semantics and optimizer bounds
+are unproved; the spec bypasses the file facade with `rt_file_read_text`;
+`REQ-SPK-SEARCH-UNICODE-001` is orphaned; generated JavaScript names the wrong
+license path; and independent lowercase coverage is weak for
+`Case_Ignorable` final-sigma contexts.
+
+Next session fixes all static defects first and then runs one bounded full
+parity check on a capable pure-Simple runtime. No code is accepted, the
+analyzer prerequisite is still missing, and Wave 4 remains `IN PROGRESS`.

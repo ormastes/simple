@@ -2367,3 +2367,41 @@ UCD 17 bundle and manifest from Section 14.7 are absent on `main`, so they are
 a prerequisite, not analyzer-lane output. The existing candidate is unbounded
 and its parity claim is false; accept none of it. Wave 4 remains
 `IN PROGRESS`.
+
+### 15.3 Unicode 17 prerequisite attempt closure
+
+The Unicode prerequisite is one atomic 14-file bundle:
+
+- `examples/05_stdlib/spipe/tools/unicode/generate_unicode_tables.mjs`;
+- `examples/05_stdlib/spipe/tools/unicode/UNICODE-LICENSE.txt`;
+- the seven files under
+  `examples/05_stdlib/spipe/tools/unicode/ucd/17.0.0/`:
+  `UnicodeData.txt`, `DerivedCoreProperties.txt`, `PropList.txt`,
+  `SpecialCasing.txt`, `CaseFolding.txt`, `CompositionExclusions.txt`,
+  and `NormalizationTest.txt`;
+- `examples/05_stdlib/spipe/src/search/generated/unicode_17_0_0.js`;
+- `src/lib/common/search/generated/unicode_17_0_0.spl`;
+- `examples/05_stdlib/spipe/test/fixture/wave4_search/unicode_17_0_0_manifest.json`;
+- `examples/05_stdlib/spipe/test/unit/unicode_17_tables_test.js`;
+- `test/01_unit/lib/common/search/unicode_17_0_0_spec.spl`.
+
+The attempt repaired its generator toward stable 256-code-point canonical
+combining-class buckets with bounded-linear processing, O(n) final-sigma
+contexts, and bounded 4,096-element JavaScript output chunks. JavaScript passed
+7/7 over all 20,034 normalization vectors in five forms, every scalar, and a
+1-MiB case.
+
+This does not admit the bundle. Cycle 2's Simple invocation timed out with exit
+124 and no summary on the Rust seed. Cycle 3 merely repeated the already-green
+JavaScript check, adding no evidence and violating the bounded process plan.
+Highest-capability review is `FAIL` with admissible files `[]`: Simple
+push/value-semantics and the optimizer bound remain unproved; the Simple spec
+directly calls `rt_file_read_text` instead of the required facade; requirement
+`REQ-SPK-SEARCH-UNICODE-001` is orphaned; the generated JavaScript license
+path is wrong; and the independent lowercase matrix is weak for
+`Case_Ignorable` final-sigma contexts.
+
+Accept no file from the bundle. The analyzer's Unicode prerequisite therefore
+remains absent. The next session must repair every static defect first, then
+run the complete Simple parity suite exactly once on a capable pure-Simple
+runtime. Wave 4 remains `IN PROGRESS`.
