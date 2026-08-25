@@ -29,11 +29,15 @@ runtime adapters.
 - Transactions durably journal plan, original/intended hashes and staged bytes
   before mutation; atomic apply is validated before snapshot publication.
   Startup resumes or rolls back from hashes and never guesses.
-- Only `RefactorService` receives transaction/snapshot/path-bound
-  `SafeFilesystem.Refactor` through `RefactorSafeFilesystemPort`; the distinct
-  materializer receives `SafeFilesystem.Materializer` through
-  `MaterializerSafeFilesystemPort`. Neither least-authority capability implies
-  the other; both APIs are descriptor-relative and no-follow.
+- `AuthorizationPort` alone issues transaction/snapshot/path-bound
+  `SafeFilesystem.Refactor` to `RefactorService` and
+  `SafeFilesystem.Materializer` to the authorized `ProjectionService`
+  materializer adapter; filesystem ports neither issue nor route capabilities.
+  `RefactorService` holds its capability locally while invoking
+  `RefactorSafeFilesystemPort`. The projection adapter derives a sanitized,
+  non-authorizing `MaterializerRootGrant`; only that grant crosses
+  `MaterializerSafeFilesystemPort`. Providers never receive either capability.
+  The capabilities are non-implying; both APIs are descriptor-relative/no-follow.
 - Rebalancing must-links cover generated spec/manual pairs and explicitly
   protected bundles. Trace is normally weighted, avoiding giant collapsed
   clusters; strict policy can co-locate sole verification evidence explicitly.
