@@ -222,6 +222,17 @@ For each row, prefer a pure-Simple owner. Otherwise require either:
 Unverifiable in-process providers remain unsafe or move behind a process/Wasm
 boundary. Mass tagging is prohibited because it would hide unreviewed debt.
 
+Checkpoint: the UDP scalar-option tranche aligns `connect`, broadcast,
+read-timeout, and nonblocking as semantic boolean contracts across C, Rust,
+interpreter, Simple, and native codegen. Optional timeout lowering is performed
+once in the safe wrapper and does not transport an Option object across the ABI.
+Focused C/Rust/compiler/static checks passed, with no per-call allocation,
+lookup, hashing, or generic dispatch added. The refreshed source-only ledger is
+12,038 `rt_*` declaration rows / 3,179 symbols: 1,187 rows unsafe-tagged, 562
+contract-documented and unsafe-minimized, 10,581 untouched, and zero
+exact-artifact verified-and-signed. Full provider-language provenance and
+self-hosted optimizer evidence remain pending the admitted Stage-4 toolchain.
+
 ### 7. Verify once, then stop
 
 - Run sabotage and parity across interpreter, JIT, native, sealed dynload, and

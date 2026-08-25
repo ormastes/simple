@@ -120,7 +120,8 @@ class UdpSocket with Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "socket is closed", source: nil))
-        val ok = rt_io_udp_connect(self.fd, addr)
+        val ok = unsafe(capabilities: [ffi]):
+            rt_io_udp_connect(self.fd, addr)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "udp connect failed: {addr}", source: nil))
         Ok(())
@@ -181,7 +182,8 @@ class UdpSocket with Close:
         Returns:
             Result or error
         """
-        val ok = rt_io_udp_set_broadcast(self.fd, enabled)
+        val ok = unsafe(capabilities: [ffi]):
+            rt_io_udp_set_broadcast(self.fd, enabled)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "set_broadcast failed", source: nil))
         Ok(())
@@ -195,7 +197,9 @@ class UdpSocket with Close:
         Returns:
             Result or error
         """
-        val ok = rt_io_udp_set_read_timeout(self.fd, ms)
+        val raw_ms = if ms.?: ms.unwrap() else: -1
+        val ok = unsafe(capabilities: [ffi]):
+            rt_io_udp_set_read_timeout(self.fd, raw_ms)
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "set_read_timeout failed", source: nil))
         Ok(())
@@ -225,16 +229,18 @@ class UdpSocket with Close:
 extern fn rt_io_udp_bind(addr: text) -> i64
 extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
 extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
+@unsafe(reason: "raw UDP descriptor and foreign address parse; false means connect failed", capabilities: [ffi])
 extern fn rt_io_udp_connect(fd: i64, addr: text) -> bool
 extern fn rt_io_udp_send(fd: i64, data: [u8]) -> i64
 extern fn rt_io_udp_recv(fd: i64, size: i64) -> [u8]
 extern fn rt_io_udp_local_addr(fd: i64) -> text?
+@unsafe(reason: "raw UDP descriptor option mutation; false means broadcast update failed", capabilities: [ffi])
 extern fn rt_io_udp_set_broadcast(fd: i64, enabled: bool) -> bool
-extern fn rt_io_udp_set_read_timeout(fd: i64, ms: i64?) -> bool
+@unsafe(reason: "raw UDP descriptor timeout mutation; negative ms clears timeout and false means update failed", capabilities: [ffi])
+extern fn rt_io_udp_set_read_timeout(fd: i64, ms: i64) -> bool
 @unsafe(reason: "raw UDP descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_udp_close(fd: i64) -> bool
 
 # ============================================================================
 # Exports
 # ============================================================================
-

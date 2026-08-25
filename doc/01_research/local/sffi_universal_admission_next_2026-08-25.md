@@ -229,3 +229,30 @@ C bind provider, the ledger is 12,070 rows / 3,171 symbols: 1,163 unsafe-tagged,
 883 contract-documented, 614 unsafe-minimized, and 10,638 untouched. Provider
 definitions are C 2,377, Rust 2,178, Simple 576, and C++ 219. Verified-and-signed
 remains zero.
+
+## UDP scalar-option ABI checkpoint
+
+The UDP `connect`, `set_broadcast`, `set_read_timeout`, and `set_nonblocking`
+family now uses one Simple-facing contract across the C provider, Rust provider,
+interpreter registry, and native-codegen registry. Status values are semantic
+`bool`; the optional timeout is lowered once by the safe Simple wrapper to an
+`i64` millisecond value with `-1` meaning no timeout. Interpreter entry points
+reject non-boolean/non-scalar bridge values instead of applying truthiness or a
+default. The benchmark caller now stops if nonblocking setup fails rather than
+silently running a blocking workload.
+
+The hot path remains constant-time and allocation-free beyond the provider's
+existing socket-registry lookup: there is no hashing, signature verification,
+symbol/name lookup, generic marshalling, heap allocation, or data copy per
+option call. Focused evidence passed: the C translation-unit syntax check, 3
+Rust runtime contract tests, 8 compiler interpreter/codegen tests, and the
+cross-lane SFFI signature ratchet. The canonical self-hosted optimizer was not
+run because the repository still records the admitted Stage-4 runtime as
+blocked; the Rust seed was not substituted.
+
+A fresh source-only census reports 12,038 `rt_*` declaration rows and 3,179
+distinct `rt_*` symbols. Of the rows, 1,187 are unsafe-tagged, 562 have an
+executable reason contract and minimal unsafe scope, 10,581 remain untouched,
+and zero are exact-artifact verified-and-signed. Source-only mode deliberately
+reports provider language as `none_observed`; the older C/Rust/Simple/C++
+provider counts are not reused as if they described this changed revision.

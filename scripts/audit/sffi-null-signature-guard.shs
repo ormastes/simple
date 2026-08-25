@@ -211,7 +211,10 @@ require_text 'socket_family_contract_rejects_unknown_values' \
     src/compiler_rust/runtime/src/value/net_tcp.rs
 require_text 'family != 0 && family != 1' src/runtime/runtime_native.c
 require_text 'family != 0 && family != 1' src/runtime/runtime_smf_socket_shims.c
-reject_text 'rt_io_tcp_socket_create\(4\)' src test
+if rg -q --glob '*.spl' 'rt_io_tcp_socket_create\(4\)' "$root/src" "$root/test"; then
+    echo 'SFFI lint: Simple caller uses the legacy numeric IPv4 family 4' >&2
+    failed=1
+fi
 reject_text 'rt_io_tcp_bind_fd\(' src/runtime/runtime_smf_socket_shims.c
 require_text 'bool rt_io_udp_close\(int64_t fd\)' src/runtime/runtime_native.c
 require_text 'invalid_udp_close_is_false' src/compiler_rust/runtime/src/value/net_udp.rs
@@ -835,6 +838,40 @@ do
 done
 require_fixed 'tls_aes_gcm_bridges_reject_invalid_shapes_instead_of_empty_payloads' \
     src/compiler_rust/compiler/src/interpreter_extern/simd.rs
+
+# UDP option boundaries use semantic bools and a scalar timeout sentinel in
+# every compiled lane. These checks prevent integer truthiness or Option object
+# transport from reappearing on the hot path.
+for signature in \
+    'bool rt_io_udp_connect(int64_t fd, int64_t addr_val)' \
+    'bool rt_io_udp_set_broadcast(int64_t fd, bool e)' \
+    'bool rt_io_udp_set_read_timeout(int64_t fd, int64_t ms)' \
+    'bool rt_io_udp_set_nonblocking(int64_t fd, bool e)'
+do
+    require_fixed "$signature" src/runtime/runtime_native.c
+done
+for symbol in \
+    rt_io_udp_connect \
+    rt_io_udp_set_broadcast \
+    rt_io_udp_set_read_timeout \
+    rt_io_udp_set_nonblocking
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+    require_fixed "pub extern \"C\" fn $symbol" \
+        src/compiler_rust/runtime/src/value/net_udp.rs
+    require_fixed "\"$symbol\"" \
+        src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+    require_fixed "interpreter_native_net::${symbol}_interp" \
+        src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+    require_raw_symbol_scoped "$symbol"
+done
+require_fixed 'extern fn rt_io_udp_set_broadcast(fd: i64, enabled: bool) -> bool' \
+    src/lib/nogc_sync_mut/io/udp.spl
+require_fixed 'extern fn rt_io_udp_set_read_timeout(fd: i64, ms: i64) -> bool' \
+    src/lib/nogc_sync_mut/io/udp.spl
+require_fixed 'extern fn rt_io_udp_set_nonblocking(fd: i64, enabled: bool) -> bool' \
+    test/05_perf/bench/http_server/bench_udp_echo.spl
 
 if [ "$failed" -ne 0 ]; then
     exit 1

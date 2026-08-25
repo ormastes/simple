@@ -215,6 +215,20 @@ pub extern "C" fn native_udp_set_ttl(handle: i64, ttl: i64) -> i64 {
 impl_timeout_setter!(native_udp_set_read_timeout, UdpSocket, set_read_timeout);
 impl_timeout_setter!(native_udp_set_write_timeout, UdpSocket, set_write_timeout);
 
+#[no_mangle]
+pub extern "C" fn rt_io_udp_set_read_timeout(handle: i64, ms: i64) -> bool {
+    native_udp_set_read_timeout(handle, timeout_nanos_from_ms(ms)) == NetError::Success as i64
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_udp_set_nonblocking(handle: i64, enabled: bool) -> bool {
+    let registry = SOCKET_REGISTRY.lock().unwrap();
+    let Some(SocketEntry::UdpSocket(socket)) = registry.get(&handle) else {
+        return false;
+    };
+    socket.set_nonblocking(enabled).is_ok()
+}
+
 /// Get broadcast option.
 /// Returns (broadcast, error_code)
 #[no_mangle]
@@ -332,6 +346,21 @@ pub extern "C" fn native_udp_close(handle: i64) -> i64 {
     close_socket(handle)
 }
 
+#[no_mangle]
+pub extern "C" fn rt_io_udp_set_broadcast(handle: i64, enabled: bool) -> bool {
+    native_udp_set_broadcast(handle, if enabled { 1 } else { 0 }) == NetError::Success as i64
+}
+
+/// Simple-facing UDP connect contract. Address validation and socket lookup
+/// happen once; the hot path adds no allocation or secondary dispatch.
+#[no_mangle]
+pub extern "C" fn rt_io_udp_connect(handle: i64, addr: crate::value::RuntimeValue) -> bool {
+    let Some((ptr, len)) = runtime_text_ptr_len(addr) else {
+        return false;
+    };
+    unsafe { native_udp_connect(handle, ptr, len) == NetError::Success as i64 }
+}
+
 /// Simple-facing UDP bind contract: a negative value means bind failed.
 #[no_mangle]
 pub extern "C" fn rt_io_udp_bind(addr: crate::value::RuntimeValue) -> i64 {
@@ -349,7 +378,7 @@ pub extern "C" fn rt_io_udp_close(handle: i64) -> bool {
 }
 
 #[cfg(test)]
-mod udp_close_contract_tests {
+mod udp_contract_tests {
     use super::*;
 
     #[test]
@@ -360,5 +389,13 @@ mod udp_close_contract_tests {
     #[test]
     fn invalid_udp_bind_is_negative() {
         assert!(rt_io_udp_bind(crate::value::RuntimeValue::NIL) < 0);
+    }
+
+    #[test]
+    fn invalid_udp_option_inputs_fail_closed() {
+        assert!(!rt_io_udp_connect(-1, crate::value::RuntimeValue::NIL));
+        assert!(!rt_io_udp_set_broadcast(-1, true));
+        assert!(!rt_io_udp_set_read_timeout(-1, 1));
+        assert!(!rt_io_udp_set_nonblocking(-1, true));
     }
 }
