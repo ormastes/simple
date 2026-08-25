@@ -507,3 +507,7 @@ passing placeholder.
     rows / 3,138 symbols, 1,410 unsafe-tagged, 10,151 untouched, and zero signed
     admissions. Continue from the largest owned production untouched owner;
     never infer semantic verification from an unsafe tag alone.
+96. Keep `std.nogc_sync_mut.ffi.debug` a zero-cost re-export of canonical
+    `std.nogc_sync_mut.sffi.debug`; never restore its 43 duplicate declarations.
+    Tag and classify the canonical ptrace/DWARF contracts next, preserving
+    direct debug calls and exact buffer behavior.

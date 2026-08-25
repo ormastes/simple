@@ -952,3 +952,22 @@ declaration rows / 3,138 `rt_*` symbols, 1,410 unsafe-tagged rows, 10,151
 untouched rows, and zero exact-artifact verified-and-signed admissions. The
 inventory artifacts are retained at
 `/mnt/data/tmp/sffi-inventory.pNuueT/{contracts,symbols}.tsv`.
+
+## Debug canonical-owner consolidation checkpoint
+
+`std.nogc_sync_mut.ffi.debug` duplicated all 43 raw declarations and nearly all
+wrapper code from `std.nogc_sync_mut.sffi.debug`. Its differences were naming
+comments, one annotation's wording, and the absence of the canonical explicit
+export list; no direct consumer of the duplicate namespace was found. The FFI
+module is now a two-line compatibility re-export of the canonical SFFI owner.
+
+This removes duplicate declarations and wrapper maintenance without adding a
+runtime call, branch, lookup, allocation, copy, or layout change. A static
+owner ratchet fixes the canonical inventory at 43 and forbids providers or
+wrappers in the compatibility facade; it passed with the whitespace check.
+
+Relative to the refreshed authoritative baseline, estimated `rt_*` declaration
+rows decrease from 11,819 to 11,776 while unique symbols remain 3,138.
+Unsafe-tagged rows remain 1,410, untouched rows decrease from 10,151 to 10,108,
+and exact-artifact verified-and-signed admission remains zero. The 43 canonical
+debug declarations remain the next contract-tagging target.
