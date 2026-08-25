@@ -49,7 +49,7 @@
 # spec-proven; this module therefore adds zero direct runtime call sites.
 
 use std.common.aspect_pack.{apk_loader_new, apk_loader_register_pack,
-    apk_loader_last_error, apk_open_pack_v1}
+    apk_loader_unregister_pack, apk_loader_last_error, apk_open_pack_v1}
 use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size}
 use app.io.env_ops.{env_get}
 
@@ -106,7 +106,10 @@ fn startup_register_aspect_pack(ld: i64, path: text) -> text:
 
 This is the testable core of the startup hop: it takes the spec text as an
 argument rather than reading the environment, so a spec can drive it without
-mutating process state."""
+mutating process state. A later failure unregisters every pack accepted by
+this call in reverse order. The returned loader handle exists for focused
+state assertions and diagnostics; the production startup caller discards it
+and does not provide a persistent loader service."""
 fn startup_load_aspect_packs(spec: text) -> StartupAspectPackLoad:
     val paths = startup_aspect_pack_paths(spec)
     if paths.len() == 0:
@@ -117,8 +120,27 @@ fn startup_load_aspect_packs(spec: text) -> StartupAspectPackLoad:
     for path in paths:
         val err = startup_register_aspect_pack(ld, path)
         if err != "":
+            # Registration is a startup transaction: do not leave a valid
+            # prefix observable after a later path fails. Reuse `paths` and
+            # `loaded`; rollback needs no second path array.
+            var rollback_error = ""
+            var rollback_retained = 0
+            var rollback_index = loaded
+            while rollback_index > 0:
+                rollback_index = rollback_index - 1
+                val rollback_path = paths[rollback_index]
+                if not apk_loader_unregister_pack(ld, rollback_path):
+                    rollback_retained = rollback_retained + 1
+                    val reason = apk_loader_last_error(ld)
+                    if rollback_error == "":
+                        rollback_error = "rollback refused for {rollback_path}: {reason}"
+                    else:
+                        rollback_error = "{rollback_error}; rollback refused for {rollback_path}: {reason}"
+            var reported_error = err
+            if rollback_error != "":
+                reported_error = "{err}; startup rollback failed: {rollback_error}"
             return StartupAspectPackLoad(loader: ld, requested: paths.len(),
-                packs_loaded: loaded, exit_code: 1, error: err)
+                packs_loaded: rollback_retained, exit_code: 1, error: reported_error)
         loaded = loaded + 1
     StartupAspectPackLoad(loader: ld, requested: paths.len(),
         packs_loaded: loaded, exit_code: 0, error: "")

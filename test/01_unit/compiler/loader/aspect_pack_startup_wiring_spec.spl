@@ -50,7 +50,8 @@ use std.common.string_core.{text_to_bytes, bytes_to_text}
 use std.io_runtime.{file_write_bytes, file_read, mkdir_p}
 use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size}
 use app.cli.startup_aspect_packs.{startup_aspect_pack_paths,
-    startup_load_aspect_packs, STARTUP_ASPECT_PACK_ENV}
+    startup_register_aspect_pack, startup_load_aspect_packs,
+    STARTUP_ASPECT_PACK_ENV}
 
 val MAIN_PATH: text = "src/app/cli/_CliMain/main_and_help.spl"
 
@@ -154,6 +155,31 @@ describe "Startup fails closed on a bad pack":
         val r = startup_load_aspect_packs(bad)
         expect(r.exit_code).to_equal(1)
         expect(r.error.contains("not a valid SMFAPK1 container")).to_equal(true)
+
+    it "a missing second pack rolls back the valid first registration":
+        step("Verify: multi-pack startup failure removes its accepted prefix")
+        # @req: REQ-APKS-01
+        val first = _write_pack("rollback_missing", "custom.lib.rollback.missing")
+        val missing = "{_pack_dir()}/aspect_pack_startup_missing_second.apk"
+        val r = startup_load_aspect_packs("{first}:{missing}")
+        expect(r.exit_code).to_equal(1)
+        expect(r.requested).to_equal(2)
+        expect(r.packs_loaded).to_equal(0)
+        expect(r.error.contains("not found or empty")).to_equal(true)
+        # Re-registration on the same diagnostic handle proves the first path
+        # is absent, rather than merely trusting the reported count.
+        expect(startup_register_aspect_pack(r.loader, first)).to_equal("")
+
+    it "a duplicate second path rolls back the first registration":
+        step("Verify: duplicate-path refusal also rolls back the accepted prefix")
+        # @req: REQ-APKS-01
+        val first = _write_pack("rollback_duplicate", "custom.lib.rollback.duplicate")
+        val r = startup_load_aspect_packs("{first}:{first}")
+        expect(r.exit_code).to_equal(1)
+        expect(r.requested).to_equal(2)
+        expect(r.packs_loaded).to_equal(0)
+        expect(r.error.contains("pack already registered")).to_equal(true)
+        expect(startup_register_aspect_pack(r.loader, first)).to_equal("")
 
 describe "The startup wiring exists in CLI main()":
     """
