@@ -254,7 +254,7 @@ requirements, `SS-` for scenarios, `SY-` for source symbols, `WS-` for
 workspaces, and `WT-` for new worktree identities. Schema-v1 `W-` values are
 decoded by record type (`workspace` or `worktree`) and never compared across
 types. Schema v2 writes only `WS-`/`WT-` and records a tracked
-`IdentityMigrationRecord(old_uid, old_record_type, new_uid, migrated_at_revision)`.
+`IdentityMigrationRecord(old_uid, old_record_type, new_uid, migrated_in_snapshot_uid)`.
 The new UID is derived, not randomly allocated: `WS-` or `WT-` plus the first
 26 Crockford characters under the encoding above of SHA-256 over UTF-8
 `spipe-identity-migration-v1\0`, the target record type, a NUL byte, and the
@@ -272,7 +272,7 @@ cannot become canonical graph endpoints or strict evidence.
 ### 4.5 Graph provenance, deltas, and publication
 
 Every stored edge adds immutable provenance `(project_uid, worktree_uid,
-revision_id, input_snapshot_uid, source_uid?, source_span?, decision_uid)` and
+revision_id, input_snapshot_uid, source_uid?, source_location?, decision_uid)` and
 optional verified authority `(explicit_review|trusted_generator, receipt_uid,
 policy_hash, policy_version)`. `receipt_uid` is the `D-` UID of an Ed25519
 authorization receipt verified by the internal `AuthorizationPort`; the receipt

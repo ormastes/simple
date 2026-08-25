@@ -389,13 +389,55 @@ or package smoke gates activated by the actual changed paths.
 
 - **Given** two schema-v1 snapshots with the same workspace/worktree `W-` identities but changed project membership and revision fields
 - **When** both independently migrate to schema v2
-- **Then** record type and legacy UID select identical `WS-`/`WT-` identities, migration records match, and both v1 snapshots remain unchanged.
+- **Then** record type and legacy UID select identical `WS-`/`WT-` mappings, each migration records its own first v2 snapshot UID, and both v1 snapshots remain unchanged.
 
 ### Scenario: Edge authority fails closed
 
 - **Given** forged, revoked, expired, wrong-policy, and wrong-edge receipts
 - **When** strict trace is evaluated
 - **Then** none satisfies an obligation and each produces a stable diagnostic.
+
+### Scenario: Wave 2 edges migrate without gaining authority
+
+- **Given** an immutable schema-v1 snapshot containing accepted edges without provenance or authority
+- **When** Wave 3 loads it through the containing manifest
+- **Then** deterministic v2 wrappers and migration records are produced, original bytes remain unchanged, and the edges satisfy advisory gates only.
+
+### Scenario: Trace records must agree with their source owner
+
+- **Given** scenario, symbol, and test records whose artifact, path, project, revision, or source-location owner disagrees
+- **When** graph extraction validates them
+- **Then** each produces `SPK004`, creates no node or edge, and clean and incremental roots remain equal.
+
+### Scenario: Marker constructors are byte-deterministic
+
+- **Given** CRLF/LF, Unicode titles, aliases, nested SSpec suites, and provider-backed symbol fixtures with exact artifact and section records
+- **When** clean and incremental constructors parse requirement, NFR, scenario, symbol, and test markers
+- **Then** every closed record field, source hash, half-open span, signature hash, and graph root is byte-identical, while malformed or mismatched markers emit `SPK003`/`SPK004` and no node.
+
+### Scenario: One marker block creates scenario and test identities
+
+- **Given** scenario-only, test-only, and ordered scenario-plus-test blocks before `it` declarations
+- **When** the SSpec parser constructs records
+- **Then** the dual block creates both nodes with matching scenario binding, while reversed, duplicated, separated, or mismatched blocks emit `SPK003` and no canonical records.
+
+### Scenario: Source locations use required artifact content hashes
+
+- **Given** artifacts with nullable provenance `source_hash` and required raw-byte `content_hash`
+- **When** scenario, symbol, and test locations are constructed
+- **Then** every location uses `content_hash`, missing raw objects remain candidates, and no nullable provenance hash enters a canonical location.
+
+### Scenario: Deferred Wave 2 edges remain historical
+
+- **Given** schema-v1 generated edges plus `produces`, `promoted_from`, missing-endpoint, and unsupported-kind edges
+- **When** migration maps generator fields and domain-separated hashes
+- **Then** supported edges receive deterministic v2 wrappers, deferred/unsupported edges receive deterministic historical records, and none gains compliance authority.
+
+### Scenario: Legacy W endpoints translate before edge hashing
+
+- **Given** v1 edges and manifests containing workspace/worktree `W-` values
+- **When** typed identity migration precedes edge migration
+- **Then** unique mappings produce `WS-`/`WT-` v2 provenance/endpoints, while missing or ambiguous mappings remain historical with stable reasons.
 
 ### Scenario: Delta replay distinguishes identity and conflict
 
