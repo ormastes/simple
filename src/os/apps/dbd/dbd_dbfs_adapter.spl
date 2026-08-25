@@ -26,6 +26,11 @@ pub val DBD_DBFS_JOURNAL_PATH_V1: text = DBD_DBFS_STORAGE_ROOT_V1 + "/DBD.LOG"
 pub val DBD_DBFS_QUARANTINE_PATH_V1: text =
     DBD_DBFS_STORAGE_ROOT_V1 + "/DBD.LOG.QUARANTINE"
 val DBD_DBFS_MAX_GENERATION: i64 = 9223372036854775807
+val DBD_DBFS_EXCLUSIVE_OPEN_COLLISION_V1: text = "open failed with code -17"
+# A power loss can leave an unreachable exclusive staging name behind.  Probe
+# only a small fixed number of later generation names so restart recovery does
+# not turn that stale inode into a permanent durable-write denial of service.
+val DBD_DBFS_MAX_STAGING_OPEN_ATTEMPTS_V1: i64 = 64
 
 pub fn dbd_dbfs_temp_path_v1(generation: i64) -> text:
     if generation <= 0 or generation >= DBD_DBFS_MAX_GENERATION:
@@ -191,11 +196,27 @@ pub class DbdDbfsAdapter:
                 self.state = DbdDbfsAdapterState.Quarantined
                 self.last_error = "dbfs-commit-generation-exhausted"
                 return Err(self.last_error)
-            # One generation-owned exclusive name prevents two service owners
-            # from truncating or substituting a shared staging file.
-            val temp_path = dbd_dbfs_temp_path_v1(self.generation)
-            val opened = file_open_direct(temp_path, 0xC1u32)
-            if opened.is_err(): return Err("dbfs-commit-open-failed")
+            # An exclusive name prevents concurrent owners from truncating or
+            # substituting the same staging inode.  Publication still relies
+            # on the DBFS transactional-replace owner for serialization.
+            var temp_path = dbd_dbfs_temp_path_v1(self.generation)
+            var opened = file_open_direct(temp_path, 0xC1u32)
+            var open_attempts: i64 = 1
+            while (opened.is_err() and
+                opened.unwrap_err() == DBD_DBFS_EXCLUSIVE_OPEN_COLLISION_V1 and
+                open_attempts < DBD_DBFS_MAX_STAGING_OPEN_ATTEMPTS_V1):
+                if self.generation >= DBD_DBFS_MAX_GENERATION - 1:
+                    self.state = DbdDbfsAdapterState.Quarantined
+                    self.last_error = "dbfs-commit-generation-exhausted"
+                    return Err(self.last_error)
+                self.generation = self.generation + 1
+                temp_path = dbd_dbfs_temp_path_v1(self.generation)
+                opened = file_open_direct(temp_path, 0xC1u32)
+                open_attempts = open_attempts + 1
+            if opened.is_err():
+                if opened.unwrap_err() == DBD_DBFS_EXCLUSIVE_OPEN_COLLISION_V1:
+                    return Err("dbfs-commit-staging-name-unavailable")
+                return Err("dbfs-commit-open-failed")
             val fd = opened.unwrap()
             val written = file_write_direct(fd, bytes)
             if written.is_err() or written.unwrap() != bytes.len().to_u64() or

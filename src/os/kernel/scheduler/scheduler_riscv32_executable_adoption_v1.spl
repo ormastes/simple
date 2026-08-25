@@ -19,7 +19,11 @@ use os.kernel.loader.riscv32_sv32_mapping_owner_v1.{
     riscv32_sv32_mapping_destroy_v1,
     riscv32_sv32_mapping_transfer_to_tcb_v1
 }
-use os.kernel.loader.executable_launch_arguments_v1.{ExecutableLaunchArgumentsV1}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
+}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
 use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
 use os.kernel.types.task_types.{
     TaskId, TaskState, TaskPriority, default_task_schedule,
@@ -81,6 +85,14 @@ impl Scheduler:
         priority: TaskPriority,
         caps: CapabilitySet
     ) -> SchedulerRiscv32AdoptionResultV1:
+        # Launch arguments are transport, not authority. Revalidate them at
+        # the scheduler owner and fail closed if an in-package caller tries to
+        # publish an Sv32 mapping outside the active RV32 kernel.
+        val checked_launch = executable_launch_arguments_v1_validate(
+            launch.path, launch.argv, launch.envp)
+        if checked_launch.is_err() or get_arch() != Architecture.Riscv32:
+            return _riscv32_destroy_failed_adoption_v1(owner, receipt)
+        val owned_launch = checked_launch.unwrap()
         val prepared_owner = scheduler_executable_adoption_transition_v1(
             self.executable_adoption_state,
             SchedulerExecutableAdoptionOwnerEventV1.Prepare)
@@ -105,7 +117,7 @@ impl Scheduler:
             grant.status != ServerDataLaunchGrantInstallStatusV1.Installed):
             return _riscv32_destroy_failed_adoption_v1(owner, receipt)
         val observation = scheduler_execution_observe_adoption_handle_with_launch_v1(
-            id.id, self.current.id, image_handle, launch)
+            id.id, self.current.id, image_handle, owned_launch)
         if observation == nil:
             if grant.handle.?:
                 val grant_handle = grant.handle.unwrap()

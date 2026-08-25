@@ -576,6 +576,21 @@ class Compositor:
             self.pending_wm_text_scancode = 0
             self.pending_wm_text_shift = false
 
+    fn _content_has_surface_owner(
+        content_kind: i32, handle: i64
+    ) -> bool:
+        if handle <= 0:
+            return false
+        var i = 0
+        # cpu-lane-loop-ok: content ownership validation at window teardown;
+        # bound is the compositor's 256-window admission ceiling
+        while i < self.surfaces.len():
+            if (self.surfaces[i].content_kind == content_kind and
+                self.surfaces[i].content_handle == handle):
+                return true
+            i = i + 1
+        false
+
     me _focus_top_visible():
         # Raw HostInputEvent values in input_queue deliberately carry no
         # window handle.  A fallback focus therefore starts a new ownership
@@ -606,16 +621,26 @@ class Compositor:
         var removed = self.surfaces[removed_index]
         removed.state = wm_window_state_begin_close(removed.state)
         self.surfaces[removed_index] = removed
-        self._release_gui_content(removed.content_handle)
-        self._release_pixel_content(removed.content_handle)
+        # Remove the retiring authority before examining survivors. A retained
+        # content identity is the pair (kind, handle), because the GUI and
+        # pixel registries are independent domains. Corrupt or stale state can
+        # duplicate that pair across surfaces; in that case closing either
+        # surface must not retire the resource underneath its live sibling.
+        # The bounded survivor scan therefore releases only the declared kind
+        # after proving that no remaining surface still owns the exact pair.
+        self.surfaces.remove(removed_index)
+        if (removed.content_handle > 0 and
+            not self._content_has_surface_owner(
+                removed.content_kind, removed.content_handle
+            )):
+            if removed.content_kind == WM_CONTENT_KIND_GUI_SESSION:
+                self._release_gui_content(removed.content_handle)
+            elif removed.content_kind == WM_CONTENT_KIND_PIXEL_SURFACE:
+                self._release_pixel_content(removed.content_handle)
         if removed.process_id > 0 and self.owned_surface_scalar_count > 0:
             self.owned_surface_scalar_count = self.owned_surface_scalar_count - 1
         removed.state = wm_window_state_finish_close(removed.state)
         self._cancel_drag_for_window(id)
-        # The owner already resolved the exact identity index. Remove it in
-        # place so close does not allocate and copy a second full surface
-        # vector; Array.remove retains the relative z-order of survivors.
-        self.surfaces.remove(removed_index)
         self.focused_idx = -1
         if prior_focused_id != id:
             val prior_index = self.surface_index(prior_focused_id as u64)

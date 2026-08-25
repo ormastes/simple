@@ -8,7 +8,7 @@
 use std.nogc_sync_mut.websocket.handshake.{compute_websocket_accept}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use os.apps.servers_user.http1_request_frame_owner.{
-    http1_host_authority_is_valid
+    http1_host_authority_is_valid, http1_origin_form_target_is_valid
 }
 
 pub val RFC6455_MAX_MESSAGE_BYTES: u64 = 65536u64
@@ -138,33 +138,6 @@ fn _token_list_valid(value: text, allow_protocol_version: bool) -> bool:
                 return false
     true
 
-fn _request_target_valid(target: text) -> bool:
-    val bytes = target.bytes()
-    if bytes.len() == 0:
-        return false
-    var index: u64 = 0u64
-    while index < bytes.len():
-        val byte = bytes[index]
-        if byte <= 32 or byte >= 127:
-            return false
-        if byte == 35:
-            return false
-        if byte == 37:
-            if index + 2u64 >= bytes.len():
-                return false
-            val first = bytes[index + 1u64]
-            val second = bytes[index + 2u64]
-            val first_hex = (first >= 48 and first <= 57) or
-                (first >= 65 and first <= 70) or (first >= 97 and first <= 102)
-            val second_hex = (second >= 48 and second <= 57) or
-                (second >= 65 and second <= 70) or (second >= 97 and second <= 102)
-            if not first_hex or not second_hex:
-                return false
-            index = index + 3u64
-        else:
-            index = index + 1u64
-    true
-
 fn _field_value_valid(value: text) -> bool:
     # RFC 9110 field-content permits HTAB, SP, visible ASCII and obs-text.
     # Reject every other C0 control plus DEL before trimming or tokenization.
@@ -211,8 +184,12 @@ pub fn validate_rfc6455_server_handshake(request: text) -> Rfc6455HandshakeDecis
     if request_parts.len() != 3 or request_parts[0] != "GET" or
         request_parts[2] != "HTTP/1.1":
         return _handshake_reject("WebSocket upgrade requires GET HTTP/1.1")
-    if not _request_target_valid(request_parts[1]) or
-        not request_parts[1].starts_with("/") or request_parts[1].contains("#"):
+    # The direct/exported handshake seam must not admit a request target that
+    # the production HTTP owner rejects before handoff.  In particular, keep
+    # backslashes, encoded path separators, and encoded controls out of both
+    # paths through the shared bounded origin-form policy while retaining the
+    # query component permitted in a WebSocket resource name.
+    if not http1_origin_form_target_is_valid("GET", request_parts[1]):
         return _handshake_reject("invalid WebSocket request target")
 
     var host = ""

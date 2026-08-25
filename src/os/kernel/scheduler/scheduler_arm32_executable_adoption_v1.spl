@@ -12,7 +12,11 @@ use os.kernel.loader.executable_admission_pipeline.{
     executable_loader_commit, executable_loader_retrieve_once,
     executable_loader_release_retrieved
 }
-use os.kernel.loader.executable_launch_arguments_v1.{ExecutableLaunchArgumentsV1}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
+}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
 use os.kernel.arch.arm32.user_page_table_owner_v1.{
     Arm32UserPageTableReceiptV1, Arm32UserPageTableStateV1,
     Arm32UserPageTableErrorV1,
@@ -130,6 +134,16 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
 ) -> SchedulerArm32AdoptionResultV1:
     """Jointly consume authority, mapping, TCB publication, and observation."""
     var owner = scheduler
+    # Launch arguments are transport, not authority. Revalidate them at the
+    # scheduler owner and refuse to publish an ARM mapping in another active
+    # kernel. This mirrors the i386 adoption boundary instead of relying on a
+    # loader-side check that can be bypassed by an in-package caller.
+    val checked_launch = executable_launch_arguments_v1_validate(
+        launch.path, launch.argv, launch.envp)
+    if checked_launch.is_err() or get_arch() != Architecture.Arm32:
+        val cleaned = _arm32_destroy_reserved_v1(reserved)
+        return _arm32_adoption_result_v1(owner, -13, not cleaned)
+    val owned_launch = checked_launch.unwrap()
     # Bounded opportunistic maintenance prevents an indeterminate cancellation
     # from consuming observation capacity forever; never scan the whole owner
     # on this hot admission path.
@@ -194,7 +208,7 @@ pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
         return _arm32_adoption_result_v1(owner, -13, false)
 
     val observation = scheduler_execution_observe_adoption_handle_with_launch_v1(
-        child.id, owner.current.id, retrieved, launch)
+        child.id, owner.current.id, retrieved, owned_launch)
     if observation == nil:
         if grant_install.handle != nil:
             val grant_handle = grant_install.handle.unwrap()

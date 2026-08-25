@@ -249,24 +249,29 @@ fn _http_origin_form_literal_byte(byte: u8) -> bool:
         byte == 58u8 or byte == 59u8 or byte == 61u8 or byte == 64u8 or
         byte == 95u8 or byte == 126u8 or byte == 63u8
 
-fn _http_origin_form_target_valid(method: text, target: text) -> bool:
+fn http1_origin_form_target_is_valid(method: text, target: text) -> bool:
     # This filesystem service deliberately routes only origin-form. RFC 9112's
     # valid OPTIONS asterisk-form, CONNECT authority-form, and proxy
     # absolute-form are rejected because the downstream route API accepts only
-    # a path and has no authority or asterisk representation. It also does not
-    # split a query from that path, so reject '?' instead of treating query
-    # bytes as a filesystem name. This validation creates one bounded byte
-    # snapshot; no decoded target or second expanded buffer is created. The
-    # retained request is still reparsed later by the existing route owner.
+    # a path and has no authority or asterisk representation. Query syntax is
+    # part of origin-form and is retained for the route/upgrade owner to
+    # interpret; it must not be confused with the filesystem path component.
+    # This validation creates one bounded byte snapshot; no decoded target or
+    # second expanded buffer is created. The retained request is still
+    # reparsed later by the existing route owner.
     val bytes = text_to_bytes_pure(target)
     if method == "CONNECT" or bytes.len() == 0u64 or bytes[0u64] != 47u8:
         return false
     var index: u64 = 0u64
+    var in_query = false
     while index < bytes.len():
         val byte = bytes[index]
-        if (byte == 63u8 or
-            (byte != 37u8 and not _http_origin_form_literal_byte(byte))):
+        if byte != 37u8 and not _http_origin_form_literal_byte(byte):
             return false
+        if byte == 63u8:
+            # The first '?' separates path from query. Subsequent '?' bytes
+            # are valid query data under RFC 3986.
+            in_query = true
         if byte == 37u8:
             if index + 2u64 >= bytes.len() or
                 _http_hex_byte(bytes[index + 1u64]) < 0 or
@@ -274,11 +279,11 @@ fn _http_origin_form_target_valid(method: text, target: text) -> bool:
                 return false
             val decoded = (_http_hex_byte(bytes[index + 1u64]) * 16 +
                 _http_hex_byte(bytes[index + 2u64]))
-            # No current route decodes escapes. Still reject encoded separators
-            # and controls so a later single decode cannot change path shape or
-            # introduce NUL/control data at a filesystem boundary.
-            if (decoded <= 31 or decoded == 127 or decoded == 35 or
-                decoded == 47 or decoded == 63 or decoded == 92):
+            # Controls and backslash stay forbidden in either component. In
+            # the path, encoded '/' or '?' could change component shape after
+            # one decode; inside the query they are ordinary encoded data.
+            if (decoded <= 31 or decoded == 127 or decoded == 92 or
+                (not in_query and (decoded == 47 or decoded == 63))):
                 return false
             index = index + 3u64
         else:
@@ -592,7 +597,7 @@ class Http1RequestFrameOwner:
             if parsed.2 != "HTTP/1.1" and parsed.2 != "HTTP/1.0":
                 self._fail("400 Unsupported HTTP version")
                 return
-            if not _http_origin_form_target_valid(parsed.0, parsed.1):
+            if not http1_origin_form_target_is_valid(parsed.0, parsed.1):
                 self._fail("400 Invalid origin-form request target")
                 return
             self.request_method = parsed.0
@@ -1166,3 +1171,4 @@ export recv_http1_request_owned, recv_http1_request_owned_with_tail
 export frame_http1_fragments_owned_for_test
 export http1_no_progress_terminal_index_for_test
 export http1_host_authority_is_valid
+export http1_origin_form_target_is_valid

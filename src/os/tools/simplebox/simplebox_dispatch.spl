@@ -9,6 +9,7 @@ use os.tools.simplebox.simplebox_inventory_v1.{simplebox_inventory_applet_names_
 extern fn stdout_write(data: text)
 
 val SIMPLEBOX_MAX_OUTPUT_BYTES: i64 = 65536
+val SIMPLEBOX_PRINTF_MAX_ARGUMENTS: u64 = 4096u64
 
 struct SimpleboxEchoPlan:
     parts: [text]
@@ -29,7 +30,11 @@ fn _printf_push_bounded(
         return SimpleboxPrintfPlan(
             parts: [], output_bytes: output_bytes + part_bytes,
             accepted: false, error: "output exceeds 65536-byte limit")
-    parts.push(part)
+    # Empty %s substitutions contribute no output.  Do not retain one array
+    # element per empty operand: output-byte accounting alone would otherwise
+    # permit argv-sized allocation and dispatch work with zero output.
+    if part_bytes > 0:
+        parts.push(part)
     SimpleboxPrintfPlan(
         parts: parts, output_bytes: output_bytes + part_bytes,
         accepted: true, error: "")
@@ -40,6 +45,10 @@ fn simplebox_printf_plan(args: [text]) -> SimpleboxPrintfPlan:
         return SimpleboxPrintfPlan(
             parts: [], output_bytes: 0, accepted: false,
             error: "missing format operand")
+    if args.len() > SIMPLEBOX_PRINTF_MAX_ARGUMENTS:
+        return SimpleboxPrintfPlan(
+            parts: [], output_bytes: 0, accepted: false,
+            error: "too many operands")
     val format = args[0]
     var parts: [text] = []
     var output_bytes: i64 = 0

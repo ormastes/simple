@@ -261,6 +261,12 @@ impl DbFsDriver:
             return Ok([])
 
         val inode = _dbfs_inodes[inode_idx]
+        if self.arena_base < 0 and inode.content_bytes.len() as i64 != inode.size:
+            # Memory-backed DBFS materializes sparse holes, so its byte owner
+            # and advertised size must agree exactly.  Check the whole inode
+            # before the EOF fast path: otherwise a corrupt short payload can
+            # be hidden by reading at an offset in its missing suffix.
+            return Err(FsError.Corrupt)
         if offset >= inode.size:
             return Ok([])
         val available = inode.size - offset
@@ -270,7 +276,7 @@ impl DbFsDriver:
         val prefix = inode.content_bytes
         var out: [u8] = []
         var i: i64 = 0
-        while i < count and offset + i < prefix.len() as i64:
+        while i < count:
             out.push(prefix[(offset + i) as i32])
             i = i + 1
         Ok(out)
