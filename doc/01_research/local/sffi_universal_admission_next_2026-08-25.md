@@ -127,6 +127,37 @@ signatures, and proof receipts remain unresolved. These applets and the wider
 estate are not globally verified or signed; verified-and-signed admission
 remains 0.
 
+## QEMU runner environment/file/process authority checkpoint
+
+`src/os/qemu_runner_part2.spl` now declares all seven local process, file,
+environment, and time ABI families with explicit authority. Repeated
+environment and file operations route through five mandatory-inline lexical
+owners. Five functions that directly consume the process runner's aggregate
+tuple and eight transitive build/cache/selection/run helpers carry `ffi`
+authority.
+
+The process call was deliberately not wrapped: an extra tuple-returning helper
+would risk the native aggregate-return defect recorded elsewhere in the repo.
+Every process launch remains at its original site with its original timeout,
+arguments, output/error handling, and cache logic. Inline env/file owners add
+no frame after optimization and no process, filesystem operation, allocation,
+copy, scan, loop, branch, lookup, lock, hash, signature operation, or polling.
+
+The focused authority/provider/performance ratchet passed. Six declarations
+appear in both typed registries and file deletion appears in one. Consolidating
+the 42 formerly unbounded calls changed the census as follows:
+
+- raw call sites: 18,703 -> 18,671
+- missing authority: 13,906 -> 13,864
+- lexical unsafe: 3,407 -> 3,412
+- function unsafe: 1,390 -> 1,395
+
+Process aggregate ABI proof, environment transaction isolation, file-read
+error semantics, complete provider closure, exact artifact identity, trusted
+signatures, and proof receipts remain unresolved. This runner and the wider
+estate are not globally verified or signed; verified-and-signed admission
+remains 0.
+
 ## Driver source-parsing authority checkpoint
 
 The phase-2 parsing driver now confines its seven raw process, environment,
