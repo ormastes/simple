@@ -91,6 +91,20 @@ spec. Required scenarios include:
   between two worktrees;
 - diagnose an unavailable or revision-mismatched linked project rather than
   resolving a similarly named local artifact.
+- preserve two same-endpoint/type multigraph edges with distinct provenance;
+- reject duplicate canonical `RQ-`, `NFR-`, `SS-`, and `SY-` identities and
+  keep human `REQ-*`/`NFR-*` labels as aliases rather than graph UIDs;
+- prove inferred origins never satisfy strict or mission-critical trace even
+  when maliciously marked accepted with confidence 1000;
+- produce byte-identical graph roots, reverse queries, trace matrices, and
+  diagnostics for clean versus equivalent incremental add/update/delete/move;
+- reject overlapping node/edge delta operations, stale bases, and before-hash
+  mismatches;
+- prove a reader pin observes wholly old or wholly new graph state across a
+  writer-lock-protected `current.sdn` compare-and-swap publication;
+- emit `SPK101`/`SPK102`/`SPK103`, requirement gaps `SPK201`–`SPK204`, and the
+  exact four-state `TRC231`/`TRC232` compatibility projection without local
+  name fallback.
 
 The visible primary step is `Index canonical knowledge artifacts`. Parser
 matrices, unsupported syntax, and individual diagnostic-code cases are folded.
@@ -370,6 +384,36 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 The required result is `0`. Verification must also run the repository-required
 runtime-facade audits and any additional Simple compiler/lib, MCP/LSP, database,
 or package smoke gates activated by the actual changed paths.
+
+### Scenario: Legacy identity migration is deterministic
+
+- **Given** a schema-v1 snapshot containing workspace and worktree `W-` records
+- **When** schema v2 is published
+- **Then** record type selects deterministic `WS-`/`WT-` identities, migration records are emitted, and v1 bytes remain unchanged.
+
+### Scenario: Edge authority fails closed
+
+- **Given** forged, revoked, expired, wrong-policy, and wrong-edge receipts
+- **When** strict trace is evaluated
+- **Then** none satisfies an obligation and each produces a stable diagnostic.
+
+### Scenario: Delta replay distinguishes identity and conflict
+
+- **Given** one published graph delta
+- **When** the identical delta and a different same-base delta are replayed
+- **Then** only the first returns `already_applied`; the second is stale.
+
+### Scenario: Snapshot pins cannot cross lifetime or store
+
+- **Given** released, expired, wrong-store, and wrong-scope pins
+- **When** each performs a graph lookup
+- **Then** lookup fails before reading graph data.
+
+### Scenario: Graph budgets paginate deterministically
+
+- **Given** fixtures exceeding edge, node, work-unit, and trace-row limits
+- **When** reads continue through authenticated cursors
+- **Then** exhaustion reports reason/counters and continuation yields each authorized result exactly once.
 
 ## 11. Manual-quality review gate
 

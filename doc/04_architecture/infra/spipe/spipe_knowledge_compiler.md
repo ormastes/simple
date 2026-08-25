@@ -225,6 +225,104 @@ records old and new parentage. Duplicate section UIDs are fatal.
 Edges use active-verb direction `subject -> object`; inverse labels are query
 views only and are never stored independently.
 
+### 4.4 Wave 3 graph identity and node ownership
+
+The graph is a projection of canonical records, never a second identity owner.
+`GraphNode` contains `uid`, `node_kind`, nullable `project_uid`, `revision_id`,
+`record_type`, `record_hash`, `visibility`, `trust_scope`, and `status`.
+Wave 3 admits `Workspace`, `Worktree`, `Project`, `ProjectRelation`, `Mount`,
+`Alias`, `Artifact`, `Section`,
+`Requirement`, `NonFunctionalRequirement`, `SSpecScenario`, `SourceSymbol`,
+`UnitTest`, `IntegrationTest`, `SystemTest`, `Feature`, `Component`, `Layer`,
+and `Tag`. Alias and mount content remains owned by registry records; graph
+nodes are immutable projections of those records solely so `aliases` and
+`mounted_as` have typed endpoints. Alias projection UIDs use `AL-` plus the
+first 26 lowercase base32 characters of SHA-256 canonical JSON
+`[workspace_uid,project_uid-or-null,kind,alias,canonical_target_uid]`; mount
+projection UIDs use `M-` over
+`[workspace_uid,relation_uid,linkage,mount,canonical_target_uid]`. Workspace
+nodes and workspace-scoped aliases set `project_uid=null`; hash collisions are
+fatal. `Behavior`, `TestRun`, `TestResult`,
+`Claim`, and promotion nodes enter only with their later canonical models.
+
+New canonical namespaces are `RQ-` for requirements, `NFR-` for non-functional
+requirements, `SS-` for scenarios, `SY-` for source symbols, `WS-` for
+workspaces, and `WT-` for new worktree identities. Schema-v1 `W-` values are
+decoded by record type (`workspace` or `worktree`) and never compared across
+types. Schema v2 writes only `WS-`/`WT-` and records a tracked
+`IdentityMigrationRecord(old_uid, old_record_type, new_uid, migrated_at_revision)`;
+old immutable snapshots remain byte-readable and are never rewritten. Snapshot
+and projection validators accept legacy `W-` only when `schema_version=1` and
+emit v2 identities for new publications. `R-` remains exclusively
+`ProjectRelation`. Human labels such as `REQ-SPKC-003` are display aliases;
+their normalized semantic keys are lowercase (`req-spkc-003`), never UIDs.
+Markerless requirement sections, scenarios, or symbols are candidates and
+cannot become canonical graph endpoints or strict evidence.
+
+### 4.5 Graph provenance, deltas, and publication
+
+Every stored edge adds immutable provenance `(project_uid, worktree_uid,
+revision_id, input_snapshot_uid, source_uid?, source_span?, decision_uid)` and
+optional verified authority `(explicit_review|trusted_generator, receipt_uid,
+policy_hash, policy_version)`. `receipt_uid` is the `D-` UID of an Ed25519
+authorization receipt verified by the internal `AuthorizationPort`; the receipt
+binds exact edge UID and acceptance-subject hash, endpoints, origin, status, project/worktree,
+input snapshot, policy, issuer key, expiry, and capability
+`trace.accept.explicit` or `trace.accept.generated`. Revoked/expired/mismatched
+receipts fail closed. `decision_uid` is nullable for non-authoritative edges and
+must equal the verified receipt UID for strict evidence. Strict evidence requires canonical endpoints,
+`accepted` status, and verified explicit-review or deterministic-generator
+authority. Inferred origins remain candidates even if reviewed; they never
+satisfy strict or mission-critical policy.
+
+The acceptance-subject hash excludes `status`, `decision_uid`, and `authority`
+to avoid circular receipt hashing; it includes every immutable identity,
+endpoint, origin, provenance-source, and generator field. The stored edge hash
+includes the completed receipt reference.
+
+`GraphDelta` owns both node and edge changes:
+
+```text
+GraphDelta {
+  base_snapshot_uid, base_graph_root,
+  nodes: {added, updated[{before_hash,node}], removed[{uid,before_hash}]},
+  edges: {added, updated[{before_hash,edge}], removed[{uid,before_hash}]}
+}
+```
+
+The nested `base_snapshot_uid` must equal the enclosing `KnowledgeDelta` base.
+`before_hash` is SHA-256 of the UTF-8 canonical-JSON bytes of the complete
+stored `GraphNode` or `EdgeRecord` wrapper. Each operation set is UID-disjoint and canonically ordered. Edge endpoint,
+type, origin, or provenance changes require a new `EdgeUid`; an update may only
+change status or append verified authority. Apply rejects stale bases and
+before-hash mismatches. The root is SHA-256 of UTF-8 canonical JSON with the
+exact shape `{schema:1,nodes:[...],edges:[...]}`, nodes sorted by UID and edges
+sorted by `(from_uid, edge_type, to_uid, edge_uid)`, with no omitted/additional
+fields. A delta applies only to its base. A byte-identical replay identified by
+delta hash returns `already_applied` and the recorded output root. `delta_hash`
+is SHA-256 over `spipe-graph-delta-v1\0` plus canonical JSON of the complete
+delta. Publication retains
+`{delta_hash,base_snapshot_uid,base_graph_root,output_snapshot_uid,output_graph_root}`
+for the output snapshot retention lifetime; any other
+post-publication replay is a stale-base error.
+
+`GraphStorePort` provides `build`, `apply`, `node`, `edge`, bounded `edges`,
+bounded `traverse`, and paginated `trace_matrix`. Default/hard limits are:
+depth `8/32`, visited nodes `2,000/20,000`, returned edges `10,000/50,000`,
+work units `50,000/500,000`, edge page `100/1,000`, and trace-matrix rows
+`100/1,000`. Exhaustion returns a deterministic partial result with
+`exhausted=true`, `reason`, consumed counters, and a snapshot-bound cursor; it
+never silently truncates. Every read consumes an authorized
+`SnapshotPin`; cursors bind snapshot, filter, page limit, and authorization
+scope. `SnapshotPin` is an unforgeable store-issued branded handle (or an
+authenticated opaque token across a process boundary) binding snapshot UID,
+graph root, authorization-scope digest, policy version, issuance/expiry, and
+liveness generation. Released/expired/wrong-store pins fail before lookup.
+Snapshot storage stages objects and manifest first, then publishes
+`current.sdn` with writer-lock-protected compare-and-swap. Readers acquire and
+release immutable pins. One CAS conflict permits one compiler rebase; a second
+returns `SPK901` without retry loops.
+
 | Stored edge | Direction and meaning |
 |---|---|
 | `contains` | container -> member |
@@ -253,8 +351,8 @@ Authority and acceptance are independent fields.
 
 | Origin | May be accepted automatically? | Advisory gate | Standard gate | Strict/mission-critical gate |
 |---|---:|---:|---:|---:|
-| `explicit` | yes, after schema/target validation | yes | yes | yes |
-| `generated` | yes, from a named deterministic rule | yes | yes | yes |
+| `explicit` | no; validation creates a proposal | candidate or verified accepted | verified accepted | receipt-bound accepted |
+| `generated` | no; deterministic generation creates a proposal | candidate or verified accepted | verified accepted | receipt-bound accepted |
 | `structural` | no; proposal until reviewed | candidate | no | no |
 | `lexical_inference` | no | candidate | no | no |
 | `semantic_inference` | no | candidate | no | no |

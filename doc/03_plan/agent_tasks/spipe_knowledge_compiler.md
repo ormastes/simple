@@ -71,7 +71,13 @@ Shared files are integrated only by `/root`. If a path is already dirty from an 
 
 **Depends on:** Wave 2. **Owners:** F consuming A/B contracts.  
 **Deliverables:** typed graph/query APIs; provenance-bearing link, heading, requirement, SSpec, test, and source edges; broken-link and trace-gap diagnostics; `TRC231`/`TRC232` compatibility; trace matrix.  
-**Exit gates:** every edge records origin/status/confidence/evidence; inferred edges cannot satisfy strict policy; one-file incremental graph equals clean rebuild; snapshots and diagnostics are deterministic.
+Lane A first publishes canonical `GraphNode`, requirement/NFR/scenario/symbol
+records, non-colliding UID mappings, node+edge `GraphDelta`, and snapshot
+stage/CAS/pin APIs. Lane F then owns graph/query/extraction/diagnostics and may
+not redefine those shared records. Alias and mount records remain registry-owned
+but have immutable graph projections as typed endpoints. `Behavior`, run, and
+result nodes remain Wave 7 work.
+**Exit gates:** every edge records origin/status/confidence/evidence/provenance and verified authority where strict evidence is claimed; inferred edges cannot satisfy strict policy; duplicate SS/SY/RQ/NFR UIDs fail; node and edge delta sets are disjoint; wrong base/before hashes fail; one-file incremental graph equals clean rebuild; snapshot CAS conflict and pin isolation pass; snapshots, graph roots, trace matrices, and diagnostics are deterministic.
 
 ### Wave 4 — Canonical BM25 and provider protocol
 
