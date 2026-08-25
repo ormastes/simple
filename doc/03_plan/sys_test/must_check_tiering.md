@@ -82,6 +82,11 @@ execution.
   first, then `-Check` and `sh scripts/check/check-hook-installation.shs` from
   the second. Retain the hook hash and both verdicts; until then
   `windows-hook-installation` remains TODO.
+- Continue the quarantined `simpleos-server-executables` receipt through
+  `doc/03_plan/sys_test/simpleos_server_external_receipt_replay.md`. Its modern
+  acceptance spec is
+  `test/03_system/check/simpleos_server_external_receipt_replay_spec.spl`.
+  Fixture or source-contract results cannot promote the production TODO row.
 
 Focused command: `sh test/01_unit/scripts/must_check_tiering_test.shs`.
 
@@ -94,6 +99,7 @@ Focused command: `sh test/01_unit/scripts/must_check_tiering_test.shs`.
 | REQ-MCT-004, REQ-MCT-006 | `test/03_system/check/must_check_tiering_spec.spl` | producer-to-consumer and installer | Shell fixture PASS; Stage-4 SSpec pending |
 | REQ-MCT-006 Windows | `scripts/setup/install-must-check-hooks.ps1` | linked-worktree install/check | TODO: native Windows host evidence required |
 | REQ-MCT-007, REQ-MCT-008, REQ-MCT-009 | `test/03_system/check/must_check_tiering_spec.spl` | distinct Stage 4/Caret/server evidence rows | Source present; Stage-4 execution pending |
+| REQ-MCT-003, REQ-MCT-005 | `test/03_system/check/simpleos_server_external_receipt_replay_spec.spl` | immutable three-architecture receipt replay and mutation rejection | TODO: explicit failing helpers pin the continuation boundary |
 
 The manual mirror is
 `doc/06_spec/03_system/check/must_check_tiering_spec.md`. Regenerate it with
