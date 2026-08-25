@@ -3,7 +3,7 @@
 # The SshSession instance remains the sole mutable session/channel/SFTP owner.
 # This module contributes only cohesive impl methods and bounded wire helpers.
 
-use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
+use os.apps.sshd.ssh_session.{SshSession, SshSessionState, SshExecTxV1}
 use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_UNIMPLEMENTED, SSH_MSG_DEBUG, SSH_MSG_KEXINIT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_unimplemented}
@@ -32,6 +32,8 @@ extern fn serial_println(msg: text)
 # a peer stops returning send credit. Normal operation retains only one SFTP
 # response (at most 35004 bytes).
 val SSH_SFTP_TX_PENDING_CAP: u64 = DEFAULT_WINDOW_SIZE.to_u64()
+val SSH_EXEC_TX_RECORD_MAX_BYTES: u64 = 4194304u64
+val SSH_EXEC_TX_SESSION_MAX_BYTES: u64 = 8388608u64
 
 # scp_stage is the existing session-owned word. Small values are handshake
 # phases; BODY_CURSOR_BASE + offset retains progress without a second buffer.
@@ -90,6 +92,19 @@ fn _build_channel_data_stable(recipient: u32, data: [u8]) -> [u8]:
         payload.push(ssh_session_u8_at(data, i))
         i = i + 1
     payload
+
+pub fn ssh_channel_send_limit_v1(
+    remaining: u64, remote_window: u32, remote_max_packet: u32
+) -> u64:
+    var limit = remaining
+    if limit > remote_window.to_u64():
+        limit = remote_window.to_u64()
+    if limit > remote_max_packet.to_u64():
+        limit = remote_max_packet.to_u64()
+    # Keep CHANNEL_DATA plus transport framing below the SSH packet ceiling.
+    if limit > DEFAULT_MAX_PACKET.to_u64():
+        limit = DEFAULT_MAX_PACKET.to_u64()
+    limit
 
 fn _payload_field_equals_bytes_stable(payload: [u8], field_offset: u64, expected: [u8]) -> bool:
     if field_offset + 4 > payload.len():
@@ -448,6 +463,12 @@ impl SshSession:
             if self.state == SshSessionState.Closed:
                 serial_println("[sshd-session] interactive-inline break closed")
                 return
+            # Yield the still-live authenticated transport to the shallow
+            # daemon frame that owns filesystem process launch. This is a
+            # suspension, not terminal teardown; channel/window state remains
+            # available for the result pump.
+            if self.pending_ring3_exec:
+                return
 
             self._forward_shell_output()
 
@@ -467,7 +488,7 @@ impl SshSession:
                 # down (a premature close here is what made scp report "closed by
                 # remote host" after a correctly-sent C-record). Bounded by the
                 # 128-iteration budget; the transfer is tiny + local.
-                if self.scp_pending:
+                if self.scp_pending or self.exec_tx.len() > 0u64:
                     rt_thread_sleep(5)
                     continue
                 serial_println("[sshd-session] interactive-inline empty payload closing recv_buf_len={self.recv_buf.len()} seq_c2s={self.cipher.seq_c2s} recv_seq={self.recv_seq}")
@@ -509,6 +530,7 @@ impl SshSession:
                 # SFTP producers on another channel; that creates cross-channel
                 # dispatch amplification without granting them send credit.
                 val adjusted_recipient = _read_u32_stable(payload, 1u64)
+                self._drain_exec_response(adjusted_recipient)
                 if self.scp_pending and self.scp_local_id == adjusted_recipient:
                     self._drain_scp_source()
                 if self.sftp_enabled and self.sftp_local_channel_id == adjusted_recipient:
@@ -584,6 +606,10 @@ impl SshSession:
                 serial_println("[sshd-session] interactive-inline unimplemented msg_type=0x{format_hex(msg_type.to_i64())} recv_seq={received_sequence}")
                 self.send_packet(ssh_build_unimplemented(received_sequence))
 
+        if self.exec_tx.len() > 0u64:
+            # The shallow deferred-output owner may resume another bounded
+            # receive quantum. Do not discard queued bytes at this boundary.
+            return
         serial_println("[sshd-session] interactive-inline iteration limit closing")
         self.transition_closed()
 
@@ -740,6 +766,15 @@ impl SshSession:
         val command = r_command.unwrap().value
         serial_println("[sshd-session] exec command_len={command.len()}")
 
+        if self.pending_ring3_exec or self.exec_tx.len() > 0u64:
+            # One shallow process launch may be outstanding per connection.
+            # Reject a multiplexed sibling rather than overwrite its command
+            # record while still completing this channel deterministically.
+            if want_reply:
+                self.send_packet(_build_channel_failure_stable(remote_id))
+            self._finish_exec_request(local_id, remote_id, 1u32, [])
+            return
+
         if command.trim() == "true":
             if want_reply:
                 self.send_packet(_build_channel_success_stable(remote_id))
@@ -775,7 +810,6 @@ impl SshSession:
             self.pending_ring3_exec = true
             self.pending_ring3_exec_want_reply = want_reply
             self.pending_ring3_exec_command = command
-            self.transition_closed()
             return
 
         # Phase 2e Inc 1/2: a command beginning with 'c' (e.g. `ssh ... clang
@@ -797,7 +831,6 @@ impl SshSession:
             self.pending_ring3_exec = true
             self.pending_ring3_exec_want_reply = want_reply
             self.pending_ring3_exec_command = command
-            self.transition_closed()
             return
 
         # Phase 2e Inc 3 (getfile): `ssh root@host getfile /path` returns the raw
@@ -884,7 +917,6 @@ impl SshSession:
         self.pending_ring3_exec = true
         self.pending_ring3_exec_want_reply = want_reply
         self.pending_ring3_exec_command = command
-        self.transition_closed()
 
     me _handle_channel_data(payload: [u8]):
         if self.sftp_enabled and not ssh_sftp_principal_admitted(
@@ -1043,11 +1075,9 @@ impl SshSession:
             if live == nil or live.state != ChannelState.Open:
                 self._abort_scp_request()
                 return
-            var send_len = self.scp_file_bytes.len() - cursor
-            if send_len > packet_limit:
-                send_len = packet_limit
-            if send_len > live.remote_window.to_u64():
-                send_len = live.remote_window.to_u64()
+            var send_len = ssh_channel_send_limit_v1(
+                self.scp_file_bytes.len() - cursor,
+                live.remote_window, live.remote_max_packet)
             if send_len == 0u64:
                 return
             if not self.channels.consume_remote_window(
@@ -1108,6 +1138,7 @@ impl SshSession:
             # the retained source immediately and let the channel lifecycle
             # below own the sole close acknowledgement.
             self._clear_scp_request_state()
+        self._drop_exec_response(recipient)
         if self.sftp_enabled and recipient == self.sftp_local_channel_id:
             self.sftp.close_all()
             self.sftp = SftpSessionV3.new()
@@ -1162,11 +1193,8 @@ impl SshSession:
             if channel.remote_max_packet == 0u32:
                 return false
             val remaining = self.sftp_tx_pending.len() - self.sftp_tx_head
-            var send_len = remaining
-            if send_len > channel.remote_max_packet.to_u64():
-                send_len = channel.remote_max_packet.to_u64()
-            if send_len > channel.remote_window.to_u64():
-                send_len = channel.remote_window.to_u64()
+            val send_len = ssh_channel_send_limit_v1(
+                remaining, channel.remote_window, channel.remote_max_packet)
             if send_len == 0u64:
                 return true
             if not self.channels.consume_remote_window(
@@ -1220,21 +1248,102 @@ impl SshSession:
             shell.show_prompt()
         self.shell = shell
 
+    me _exec_tx_index(local_id: u32) -> i64:
+        var index: u64 = 0u64
+        while index < self.exec_tx.len():
+            if self.exec_tx[index].local_id == local_id:
+                return index.to_i64()
+            index = index + 1u64
+        -1
+
+    me _exec_tx_retained_bytes() -> u64:
+        var total: u64 = 0u64
+        for record in self.exec_tx:
+            # The cursor advances logically, but the record retains its whole
+            # backing array until completion. Account allocated bytes so a
+            # nearly-drained record cannot hide memory from the session cap.
+            if record.bytes.len() > SSH_EXEC_TX_SESSION_MAX_BYTES - total:
+                return SSH_EXEC_TX_SESSION_MAX_BYTES + 1u64
+            total = total + record.bytes.len()
+        total
+
+    me _queue_exec_response(
+        local_id: u32, remote_id: u32, exit_status: u32, output: [u8]
+    ) -> bool:
+        if output.len() > SSH_EXEC_TX_RECORD_MAX_BYTES or
+            self._exec_tx_index(local_id) >= 0:
+            return false
+        val channel = self.channels.find(local_id)
+        if channel == nil or channel.state != ChannelState.Open or
+            channel.remote_id != remote_id or channel.remote_max_packet == 0u32:
+            return false
+        val retained = self._exec_tx_retained_bytes()
+        if retained > SSH_EXEC_TX_SESSION_MAX_BYTES or
+            output.len() > SSH_EXEC_TX_SESSION_MAX_BYTES - retained:
+            return false
+        self.exec_tx.push(SshExecTxV1(
+            local_id: local_id, remote_id: remote_id, bytes: output,
+            head: 0u64, exit_status: exit_status))
+        true
+
+    me _drop_exec_response(local_id: u32):
+        val index = self._exec_tx_index(local_id)
+        if index >= 0:
+            self.exec_tx.remove(index.to_u64())
+
+    me _drain_exec_response(local_id: u32) -> bool:
+        var index = self._exec_tx_index(local_id)
+        if index < 0:
+            return true
+        while true:
+            val record = self.exec_tx[index.to_u64()]
+            val channel = self.channels.find(local_id)
+            if channel == nil or channel.state != ChannelState.Open or
+                channel.remote_id != record.remote_id or
+                channel.remote_max_packet == 0u32:
+                self.exec_tx.remove(index.to_u64())
+                return false
+            if record.head >= record.bytes.len():
+                val remote_id = record.remote_id
+                val exit_status = record.exit_status
+                self.exec_tx.remove(index.to_u64())
+                self.send_packet(_build_channel_exit_status_stable(
+                    remote_id, exit_status))
+                self.send_packet(_build_channel_eof_stable(remote_id))
+                if self.channels.begin_local_close(local_id):
+                    self.send_packet(_build_channel_close_stable(remote_id))
+                return true
+            val send_len = ssh_channel_send_limit_v1(
+                record.bytes.len() - record.head,
+                channel.remote_window, channel.remote_max_packet)
+            if send_len == 0u64:
+                return true
+            if not self.channels.consume_remote_window(
+                local_id, send_len.to_u32()):
+                return false
+            val fragment = _copy_range_stable(
+                record.bytes, record.head, send_len)
+            # Commit the cursor before the synchronous transport call. If the
+            # send path tears down the session, lifecycle cleanup removes the
+            # record and no post-send indexed write can target a cleared list.
+            self.exec_tx[index.to_u64()].head = record.head + send_len
+            self.send_packet(_build_channel_data_stable(
+                record.remote_id, fragment))
+
     me _finish_exec_request(local_id: u32, remote_id: u32, exit_status: u32, output: [u8]):
-        # Sends the command output as one channel-data packet, then
-        # exit-status/eof/close. The real Inc-3 getfile fix was in
-        # _build_channel_data_stable (in-place `.push` vs an extern-return
-        # reassignment, which dropped BYTE_PACKED for large [u8] and corrupted the
-        # payload). An earlier `output.len().to_u32()`→bound-var change here was
-        # NOT necessary: this chained form is proven to deliver byte-exact (see
-        # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md,
-        # which records that the chained-cast mis-lowering did not reproduce).
-        if output.len() > 0 and self.channels.consume_remote_window(local_id, output.len().to_u32()):
-            self.send_packet(_build_channel_data_stable(remote_id, output))
-        self.send_packet(_build_channel_exit_status_stable(remote_id, exit_status))
-        self.send_packet(_build_channel_eof_stable(remote_id))
-        if self.channels.begin_local_close(local_id):
-            self.send_packet(_build_channel_close_stable(remote_id))
+        # Retain a bounded per-channel suffix until peer window credit permits
+        # packet-sized delivery. Terminal messages are emitted only after all
+        # stdout bytes, preserving RFC 4254 ordering under multiplexing.
+        if not self._queue_exec_response(
+            local_id, remote_id, exit_status, output):
+            self._drop_exec_response(local_id)
+            self.send_packet(_build_channel_exit_status_stable(
+                remote_id, SSH_EXIT_REMOTE_WINDOW_EXHAUSTED))
+            self.send_packet(_build_channel_eof_stable(remote_id))
+            if self.channels.begin_local_close(local_id):
+                self.send_packet(_build_channel_close_stable(remote_id))
+            return
+        _ = self._drain_exec_response(local_id)
 
     me _send_deferred_ring3_exec_response():
         """Send the real exit status for a deferred ring-3 execution after the spawn completes.
@@ -1244,7 +1353,7 @@ impl SshSession:
         if self.pending_ring3_exec:
             val remote_id = self.pending_ring3_exec_remote_id
             val local_id = self.pending_ring3_exec_local_id
-            var exit_code = self.pending_ring3_exec_exit_code.to_u32()
+            val exit_code = self.pending_ring3_exec_exit_code.to_u32()
             val want_reply = self.pending_ring3_exec_want_reply
             val admitted = self.pending_ring3_exec_admitted
             # Consume the bounded deferred record before any packet send can
@@ -1257,22 +1366,37 @@ impl SshSession:
                     self.send_packet(_build_channel_success_stable(remote_id))
                 else:
                     self.send_packet(_build_channel_failure_stable(remote_id))
-            if self.pending_ring3_exec_stdout.len() > 0:
-                if self.channels.consume_remote_window(local_id, self.pending_ring3_exec_stdout.len().to_u32()):
-                    self.send_packet(_build_channel_data_stable(remote_id, self.pending_ring3_exec_stdout))
-                else:
-                    # Do not silently drop a real child result and then report
-                    # success. This bounded one-shot response has no retained
-                    # window-adjust buffer, so fail closed before EOF/CLOSE.
-                    exit_code = SSH_EXIT_REMOTE_WINDOW_EXHAUSTED
-                    serial_println("[sshd] deferred exec stdout blocked by remote window; reporting rc={exit_code} bytes={self.pending_ring3_exec_stdout.len()}")
             if self.pending_ring3_exec_stdout_truncated:
                 serial_println("[sshd] deferred exec stdout truncated bytes={self.pending_ring3_exec_stdout.len()}")
-            serial_println("[sshd] sending deferred exit-status rc={exit_code} remote_id={remote_id}")
-            self.send_packet(_build_channel_exit_status_stable(remote_id, exit_code))
-            self.send_packet(_build_channel_eof_stable(remote_id))
-            if self.channels.begin_local_close(local_id):
-                self.send_packet(_build_channel_close_stable(remote_id))
+            serial_println("[sshd] queueing deferred response rc={exit_code} remote_id={remote_id}")
+            val stdout = self.pending_ring3_exec_stdout
+            self.pending_ring3_exec_stdout = []
+            self._finish_exec_request(local_id, remote_id, exit_code, stdout)
+            # The shallow daemon frame owns this bounded continuation. Re-enter
+            # only when stdout remains queued, so addressed WINDOW_ADJUST can
+            # resume delivery before the daemon closes the transport.
+            if self._exec_tx_index(local_id) >= 0:
+                var pump_rounds: u32 = 0u32
+                while (self._exec_tx_index(local_id) >= 0 and
+                    self.state != SshSessionState.Closed and
+                    pump_rounds < 16u32):
+                    self.do_interactive()
+                    pump_rounds = pump_rounds + 1u32
+                if self._exec_tx_index(local_id) >= 0:
+                    # Window delay is not a connection protocol violation.
+                    # Fail only this exec channel so multiplexed siblings keep
+                    # their independent state and credit.
+                    self._drop_exec_response(local_id)
+                    self.send_packet(_build_channel_exit_status_stable(
+                        remote_id, SSH_EXIT_REMOTE_WINDOW_EXHAUSTED))
+                    self.send_packet(_build_channel_eof_stable(remote_id))
+                    if self.channels.begin_local_close(local_id):
+                        self.send_packet(_build_channel_close_stable(remote_id))
+            # Continue the authenticated connection after this channel's
+            # terminal exchange. This gives multiplexed siblings their normal
+            # bounded service window and may suspend on a later deferred exec.
+            if self.state != SshSessionState.Closed:
+                self.do_interactive()
 
     me _forward_shell_output():
         if self.shell == nil:

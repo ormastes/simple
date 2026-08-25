@@ -11,6 +11,7 @@
 
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
 use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
+use os.apps.sshd.ssh_transport.{SSH_DISCONNECT_PROTOCOL_ERROR}
 use os.apps.sshd.ssh_kex.{ssh_build_kexinit_for_host_keys_and_certs}
 use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, host_key_set_has_any_algorithm}
 use os.apps.sshd.ssh_auth.{SshUserDb}
@@ -664,13 +665,19 @@ impl SshDaemon:
         # rv64 sshd lane gets a no-op variant); the flag check is arch-neutral.
         # Must run BEFORE session.close(): the real exit-status reply for
         # the deferred exec goes out on the still-open session socket.
-        if session.pending_ring3_exec:
+        var deferred_launches: u32 = 0u32
+        while session.pending_ring3_exec and deferred_launches < 16u32:
+            deferred_launches = deferred_launches + 1u32
             val (stdout_bytes, exit_rc, stdout_truncated, admitted) = _sshd_run_pending_exec_result(session.pending_ring3_exec_command)
             session.pending_ring3_exec_exit_code = exit_rc.to_u32()
             session.pending_ring3_exec_stdout = stdout_bytes
             session.pending_ring3_exec_stdout_truncated = stdout_truncated
             session.pending_ring3_exec_admitted = admitted
             session._send_deferred_ring3_exec_response()
+        if session.pending_ring3_exec:
+            session.disconnect(
+                SSH_DISCONNECT_PROTOCOL_ERROR,
+                "deferred exec launch budget exhausted")
         serial_println("[sshd] session close")
         session.close()
         serial_println("[sshd] accept resumed")
