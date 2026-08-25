@@ -5690,3 +5690,32 @@ as an SFFI import; resolved HIR remains required to close that inventory gap.
 
 Typed thunks and signed LLVM admission remain unresolved;
 verified-and-signed admission remains 0.
+
+## Legacy gamepad wrapper authority checkpoint
+
+All 20 gamepad externs lack typed-native and interpreter providers. The 15
+direct operation wrappers and four transitive stick/trigger/rumble helpers now
+carry caller-visible `unsafe(ffi)` authority; the two pure deadzone math helpers
+remain safe. Unknown context/event ownership, event discriminants, tuple and
+floating-point ABI layout, runtime-owned text, rumble mutation, and error
+semantics therefore no longer appear verified.
+
+The focused `gamepad-sffi-authority.shs` audit passed. It pins 20 declarations,
+20 raw call sites, 19 dependent wrappers, two safe pure-math helpers, zero
+registered providers, and the absence of new wrapper or forced-inline layers.
+Existing semantic booleans, floating values, invalid-event structs, and legacy
+sentinels remain unchanged because there is no provider contract from which to
+derive safe `Option` or `Result` semantics.
+
+The authoritative census changed as follows:
+
+- raw call sites: unchanged at 18,501
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,087
+- missing authority: 13,354 -> 13,334
+- lexical unsafe: unchanged at 3,429
+- function unsafe: 1,718 -> 1,738
+
+Annotations add no branch, allocation, copy, lookup, polling, lock, hash,
+signature operation, dispatch, or data-layout change. This adapter remains
+unsafe and critical-ineligible; verified-and-signed admission remains 0.
