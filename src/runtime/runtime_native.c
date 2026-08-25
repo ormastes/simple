@@ -12734,8 +12734,8 @@ bool rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_shutdown(int64_t fd, int64_t how) {
-    return shutdown((int)fd, (int)how) == 0 ? 1 : 0;
+bool rt_io_tcp_shutdown(int64_t fd, int64_t how) {
+    return shutdown((int)fd, (int)how) == 0;
 }
 
 /* ================================================================
@@ -12832,7 +12832,7 @@ bool rt_io_tcp_set_reuseport(int64_t f, bool e) { (void)f; (void)e; return false
 bool rt_io_tcp_set_reuseaddr(int64_t f, bool e) { (void)f; (void)e; return false; }
 bool rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
 bool rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-int64_t rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return 0; }
+bool rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return false; }
 int64_t rt_io_udp_bind(int64_t a) { (void)a; return -1; }
 int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return 0; }
 int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
