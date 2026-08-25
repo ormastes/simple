@@ -81,3 +81,15 @@ fixture, two-pane broadcast with a per-pane marker oracle) and
 `test/03_system/app/llm_caret/caret_suite_tmux_window_system_spec.spl`
 (real suite run inside a tmux window). tmux absent => `pending("BLOCKED: ...")`,
 never a silent pass.
+
+### Workspace dev CLI + recursion protection (2026-08-25)
+
+`bin/simple run src/app/llm_caret/main.spl workspace <id> <cmd> [--repo P] [--root P]`
+(`src/app/llm_caret/workspace_cli.spl`): `status | attach | detach | add |
+remove | list | panes | send | broadcast | capture | wait | suite | kill`.
+Exit 0 ok / 1 failed / 2 usage. Recursion protection: every spawned command
+is prefixed `LLM_CARET_WORKSPACE_DEPTH=<n+1>`; `launch_caret_suite` refuses
+with `recursion_limit` at depth >= 1, and `send_to_each_pane` skips the pane
+the process runs in (`TMUX_PANE`). Evidence:
+`test/03_system/app/llm_caret/workspace_cli_system_spec.spl` (real CLI child
+processes: 3-agent team, worktree isolation, broadcast, nested-suite refusal).
