@@ -374,9 +374,14 @@ provider hot path must never fall back from streaming to one-shot based on
 input size.
 
 Required parity covers lengths 0, 1, 55, 56, 63, 64, 65, 4,095, 4,096,
-4,097, and 1,048,576, multi-block messages, all single split points,
-deterministic randomized chunk partitions, the frozen domain-separated
-receipt/candidate/payload vectors, and the frozen domain-input vectors.
+4,097, and 1,048,576. Lengths through 65 exercise every single split. The
+4,095/4,096/4,097/1-MiB cases exercise exact block/quantum/end boundaries plus
+multiple deterministic fixed-seed irregular partitions that cross SHA block
+boundaries; they do not enumerate every possible split. Frozen
+receipt/replay/candidate/payload and domain-input preimages must be streamed
+from their authoritative exported builders, not reconstructed by the test or
+validated only through a one-shot output comparison. Every partition retains
+exact digest and canonical-byte parity.
 `update` also proves
 fail-closed range validation for negative offset, negative count, and
 `offset > bytes.len`; no rejected range may read, hash, or advance
@@ -798,10 +803,13 @@ These subwaves refine parent Wave 4 and precede any accepted `cancel:true`.
   content. Rejection terminally latches the exact range-error reason; every
   subsequent update/finalize call fails with that recorded reason. No semantic
   bytes are consumed and no digest is published by the rejected call.
-- Exercise SHA at 0, 1, 55, 56, 63, 64, 65, 4,095, 4,096, 4,097, and
-  1,048,576 bytes with single-split and randomized partitions, frozen
-  domain-separated receipt/candidate/payload vectors, frozen domain-input
-  vectors, and charge/checkpoint failures that leave no published digest.
+- Exercise SHA at 0, 1, 55, 56, 63, 64, and 65 bytes at every single split.
+  Exercise 4,095, 4,096, 4,097, and 1,048,576 bytes at exact
+  block/quantum/end boundaries plus multiple deterministic fixed-seed
+  irregular partitions crossing SHA block boundaries. Stream frozen
+  receipt/replay/candidate/payload and domain-input preimages through their
+  authoritative exported builders, with exact digest/canonical-byte parity
+  and charge/checkpoint failures that leave no published digest.
 - **Gate:** canonical/error/digest parity for every required partition and
   vector; bounded depth/tokens/bytes prove before allocation; the post-fix
   focused tests execute and PASS. Static correction or review alone cannot
@@ -880,7 +888,7 @@ Required evidence includes:
 | raw framing | every header/payload split, coalesced frames, short/zero/would-block read/write, timeout/EOF/error; exactly one header event precedes contiguous nonempty bounded owned payload chunks; concatenated chunk bytes equal the declared payload once with no gap/overlap/replay; completion returns metadata only |
 | prebinding safety | oversize, malformed header, invalid UTF-8, noncanonical JSON silently close with no reflected content |
 | iterative JSON | depth/token/member/string limits, duplicate/out-of-order keys, integer/escape canonicality, no recursion |
-| incremental SHA | lengths 0/1/55/56/63/64/65/4095/4096/4097/1 MiB, frozen domain-separated receipt/candidate/payload vectors, frozen domain-input vectors, and all single-split/random chunk partitions equal one-shot; negative offset/count and `offset > len` reject before reading/charging bytes, output, or buffered/compressed-content mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed or digest published by rejection; charge failure prevents its compression, while checkpoint failure terminalizes the stream without digest publication and need not roll back prior compressed state; acceptance records an executed post-fix PASS rather than a static correction |
+| incremental SHA | lengths 0/1/55/56/63/64/65 exercise every single split; 4095/4096/4097/1 MiB exercise exact block/quantum/end boundaries plus multiple deterministic fixed-seed irregular partitions crossing SHA block boundaries; frozen receipt/replay/candidate/payload and domain-input preimages flow through their authoritative exported builders, and every partition preserves exact digest/canonical-byte parity rather than merely comparing a one-shot output; negative offset/count and `offset > len` reject before reading/charging bytes, output, or buffered/compressed-content mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed or digest published by rejection; charge failure prevents its compression, while checkpoint failure terminalizes the stream without digest publication and need not roll back prior compressed state; acceptance records an executed post-fix PASS rather than a static correction |
 | incremental UTF-8 | every single split plus deterministic mixed/random partition sequences preserve valid decoded bytes; negative offset/count and `offset > len` reject before reading/charging bytes, output, or carry mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed; malformed/truncated input fails identically in an executed post-fix PASS |
 | Unicode | NFC split sequences, Hangul, combining reorder/compose, U+0130 expansion, Final_Sigma lookahead across chunks, long carry failure |
 | analyzer/search | token/position/length/TF/corpus-stat/score/order/explanation parity and targeted invalidation |
@@ -913,3 +921,12 @@ arbitration is release-blocking.
 | NFR-SPKC-019 | one app/host capability ports and protocol/client compatibility |
 | NFR-SPKC-021–022 | reproducible evidence and least-authority module boundaries |
 | NFR-SPKC-025 | bounded verify/fix cycles plus independent highest-capability acceptance |
+
+## 14. Streaming-SHA performance status
+
+The Wave 4S-C SHA gate is `FAIL`. Interpreter verification cycle 2 produced no
+result and was terminated at about 3:09 after the 180-second ceiling. Remove
+scale-sensitive value-array copies through an owner-local fixed block and
+bounded immutable byte-loan path; profile fixture, reference, update, and
+compression separately. Do not shrink the required 1 MiB oracle. See
+`doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.

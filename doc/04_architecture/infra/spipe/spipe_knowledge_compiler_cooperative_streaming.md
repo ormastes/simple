@@ -459,8 +459,13 @@ is permitted.
    deterministic mixed and randomized partition sequences across valid
    multi-byte scalars and combining sequences. Every byte-slice entry point
    rejects negative offset, negative count, and `offset > bytes.len` before
-   reading. SHA qualification covers boundary and randomized partitions and
-   the frozen receipt, candidate, payload, and domain vectors. A source review
+   reading. SHA qualification is exhaustive at every single split through 65
+   bytes. For 4,095/4,096/4,097/1-MiB inputs it covers exact
+   block/quantum/end-boundary partitions plus multiple deterministic fixed-seed
+   irregular partitions crossing SHA block boundaries, rather than every
+   possible large-input split. Frozen receipt/replay/candidate/payload and
+   domain-input preimages flow through their authoritative exported builders;
+   exact digest and canonical-byte parity remains mandatory. A source review
    or static correction without a post-fix executed PASS is not acceptance
    evidence.
 4. **Streaming analyzer:** land split-invariant NFC/lowercase/NFC/token states
@@ -507,3 +512,11 @@ and chunk-partition parity testing. Protocol 1.0 cancel is still cooperative,
 not preemptive: it is bounded only after the cancel frame traverses the ordered
 transport and after the current work slice returns. That limitation is exposed
 in negotiated limits and is accepted.
+
+## 12. Active streaming-SHA performance blocker
+
+`W4-SRCH-31` remains `FAIL`: fresh interpreter verification cycle 2 was
+terminated at approximately 3:09 with zero output against a 180-second ceiling.
+The repair direction is an owner-local fixed 64-byte block and bounded
+immutable byte loans, guided by allocation/copy profiling. The 1 MiB oracle is
+mandatory. See `doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.

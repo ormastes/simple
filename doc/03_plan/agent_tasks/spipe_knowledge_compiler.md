@@ -208,10 +208,13 @@ offset/count/`offset > len` results. An invalid UTF-8 or SHA slice range must
 be rejected before reading or charging bytes, producing output, or mutating
 UTF-8 carry/SHA buffered or compressed content; rejection terminally latches
 the exact recorded reason, and every later update/finalize call fails with
-that reason. SHA lanes must return boundary and randomized partitions at
-0/1/55/56/63/64/65/4095/4096/4097/1 MiB, frozen
-domain-separated receipt/candidate/payload vectors, frozen domain-input
-vectors, and injected charge/checkpoint failure with no digest publication.
+that reason. SHA lanes must return every single split for
+0/1/55/56/63/64/65 bytes; 4,095/4,096/4,097/1-MiB lanes return exact
+block/quantum/end-boundary partitions plus multiple deterministic fixed-seed
+irregular partitions crossing SHA block boundaries. Frozen
+receipt/replay/candidate/payload and domain-input preimages must flow through
+their authoritative exported builders with exact digest/canonical-byte parity,
+alongside injected charge/checkpoint failure with no digest publication.
 Both must show an executed post-fix PASS; static correction or source review
 is insufficient. Current status is: work-control accepted and pushed;
 request-control has a fresh focused PASS 9/9; UTF-8 has a fresh focused PASS
@@ -318,3 +321,11 @@ Final sequence:
 3. `/root` fixes accepted findings within the three-cycle cap.
 4. Verify emits `STATUS: PASS`; documentation and guides are already current.
 5. Merge owner performs the final linear rebase, tracked-file-count check, and GitHub `main` push. Release/versioning is a separate authorized step.
+
+## 8. Active Wave 4S-C SHA blocker
+
+`W4-SRCH-31` remains `FAIL`: cycle 2 was terminated at approximately 3:09 with
+zero output after the 180-second ceiling. Profile and remove value-semantic
+payload-copy amplification without weakening the 1 MiB oracle. Two cycles are
+consumed and no third run is authorized in this session. See
+`doc/08_tracking/bug/spipe_streaming_sha_interpreter_value_array_copy_timeout_2026-08-25.md`.
