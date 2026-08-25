@@ -2,7 +2,7 @@
 # SFFI universal admission: next local research checkpoint
 
 **Date:** 2026-08-25  
-**Tree:** `4d11699bc5b`  
+**Tree:** `fbde06072d5`
 **Scope:** owned `src/compiler`, `src/compiler_rust`, `src/lib`, `src/os`, and
 SFFI audit tooling; vendor trees excluded.
 
@@ -18,10 +18,31 @@ totals are also historical checkpoints with different units. The source call
 census remains a lower bound until resolved-HIR inventory covers aliases,
 re-exports, generated calls, methods, and indirect callables.
 
+## Fresh source-ledger census
+
+The repository-owned census tools were run once on this tree. These are
+source-ledger measurements, not resolved-HIR ABI proof:
+
+| Unit | Total | Unsafe tagged | Signed/admitted | Untouched |
+| --- | ---: | ---: | ---: | ---: |
+| `rt_*` declaration rows | 12,128 | 951 | 0 | 10,907 |
+| distinct `rt_*` symbols | 3,173 | 695 | 0 | 2,246 |
+
+Distinct `rt_*` provider-language provenance is 1,321 linked-native symbols
+whose implementation language is unknown, 1,012 with no provider observed,
+591 Rust symbols, and 249 C/C++ symbols.
+
+The separate raw-call authority census found 21,757 call sites across 3,131
+caller files and 3,297 called symbols. Only 1,754 sites were inside lexical
+`unsafe(ffi)` and 509 inside function-level FFI authority; 19,494 lacked
+explicit authority. Its ratchet failed (`19,494 > 19,412`). This scanner is a
+bounded source heuristic and explicitly does not resolve aliases, re-exports,
+or generated declarations; resolved HIR remains the required final authority.
+
 ## Current enforcement boundary
 
-- The normal MIR lowerer rejects non-unit fallthrough with `E-SFFI-016`, but
-  bootstrap module lowering still synthesizes zero for non-unit missing returns.
+- Normal and bootstrap MIR lowering now reject non-unit fallthrough with
+  `E-SFFI-016`; the bootstrap change remains behaviorally unverified.
 - Typed HIR identifies direct named extern calls and the safety checker finds
   calls outside lexical `unsafe(ffi)`. Default driver severity remains advisory;
   only Critical/Verified deny.
@@ -92,7 +113,7 @@ passes, and immutable snapshots are not “verified” or “signed.”
 
 Read-only sidecars covered compiler enforcement, library/dynload ownership, and
 documentation/evidence consistency. `/root` merged and reviewed the findings.
-No full census was rerun in this checkpoint. The canonical release path
+The source-ledger censuses above were run once. The canonical release path
 identified itself as the Rust bootstrap seed and the focused baseline spec
 failed before execution with the already-recorded `function unsafe not found`
 defect (`0.79 s`, `190,448 KiB` peak RSS). Repository policy forbids treating

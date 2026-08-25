@@ -40,6 +40,12 @@ blocked by the unavailable admitted current-source runtime.
 
 ### 3. Complete resolved-HIR inventory
 
+Checkpoint: the bounded source ledgers now report 12,128 `rt_*` declaration
+rows, 3,173 distinct `rt_*` symbols, 951 unsafe-tagged declaration rows, 10,907
+untouched declaration rows, and zero signed/admitted symbols. The call-authority
+ratchet fails with 19,494 missing-authority sites. These measurements prioritize
+the migration but do not satisfy this step's resolved-HIR exit criterion.
+
 - Extend compiler-owned extern identity through aliases, re-exports, methods,
   generated declarations, and indirect callable values.
 - Require `hir_complete == true` before workspace totals are authoritative.
