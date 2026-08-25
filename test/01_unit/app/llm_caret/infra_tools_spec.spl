@@ -20,7 +20,7 @@ use app.llm_caret.tools.{
     tool_schemas, default_policy, allow_all_policy, policy_with_allow, new_tool_call,
     _json_get_str
 }
-use app.llm_caret.infra_mail.{mail_tool_schemas, mail_send, mail_read, mail_list}
+use app.llm_caret.infra_mail.{mail_tool_schemas, mail_send, mail_read, mail_list, mail_build_message}
 use app.llm_caret.infra_storage.{storage_tool_schemas, storage_get, storage_put, storage_ls, storage_get_max_bytes}
 use app.llm_caret.config.{parse_config_text, reset_config}
 
@@ -207,6 +207,16 @@ describe "infra tool argument validation (before any config or network step)":
         expect(err).to_contain("587")
         expect(err).to_contain("STARTTLS")
         reset_config()
+
+    it "mail_build_message emits RFC 5322 headers and exactly ONE DATA terminator (live-server defect 2026-08-25)":
+        # Before the fix mail_send used smtp.send.message_build_simple, whose
+        # mime_type_text_plain() call hit a bodyless forward declaration and
+        # aborted the whole tool with "missing return in non-unit function"
+        # against a real greenmail SMTP; it also appended message_terminate()
+        # on top of smtp_dot_stuff's own terminator (a stray "." command).
+        val msg = mail_build_message("caret@localhost", "to@example.test", "hello", "line one\n.starts with dot\nline three")
+        expect(msg).to_equal("From: caret@localhost\r\nTo: to@example.test\r\nSubject: hello\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nline one\r\n..starts with dot\r\nline three\r\n.\r\n")
+        expect(msg.split("\r\n.\r\n").len()).to_equal(2)
 
     it "mail_read rejects a missing or non-numeric uid":
         reset_config()

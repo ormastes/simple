@@ -37,7 +37,7 @@ use std.nogc_sync_mut.smtp.connect.{
     smtp_command_data, smtp_command_quit, smtp_command_auth_plain
 }
 use std.nogc_sync_mut.smtp.auth.{auth_plain_encode}
-use std.nogc_sync_mut.smtp.send.{message_build_simple, smtp_dot_stuff, message_terminate}
+use std.nogc_sync_mut.smtp.send.{header_from, header_to, header_subject, header_content_type, smtp_dot_stuff}
 use std.nogc_sync_mut.io.tcp.{
     TcpStream, tcp_fd_write_text, tcp_fd_read_line_or_empty, tcp_fd_close,
     tcp_fd_set_read_timeout
@@ -467,7 +467,7 @@ fn mail_send(to: text, subject: text, body: text) -> (bool, text):
     if err == "":
         err = _smtp_step(link, smtp_command_data(), 354)
     if err == "":
-        val msg = message_build_simple(sender, to, subject, smtp_dot_stuff(body)) + message_terminate()
+        val msg = mail_build_message(sender, to, subject, body)
         err = _smtp_step(link, msg, 250)
     if err == "":
         _send(link, smtp_command_quit())
@@ -475,3 +475,21 @@ fn mail_send(to: text, subject: text, body: text) -> (bool, text):
     if err != "":
         return (false, err)
     (true, "sent to " + to + " via " + config_mail_smtp_host() + ":" + port.to_text())
+
+# RFC 5322 headers + blank line + dot-stuffed body. smtp_dot_stuff already
+# appends the single DATA terminator <CRLF>.<CRLF>; nothing may follow it.
+#
+# Why not std.nogc_sync_mut.smtp.send.message_build_simple: it calls
+# mime_type_text_plain() through a bodyless "forward declaration" in send.spl
+# (`fn mime_type_text_plain() -> text`, no body) that shadows the real one in
+# smtp/mime.spl (importing ANY name from send.spl brings the bodyless decl
+# into scope, so even smtp.mime.mime_type_text_plain resolves to it — isolated
+# with a 2-spec scratch fixture: header_from + mime import fails, mime-only
+# import passes; same block in nogc_async_mut/ and gc_async_mut/ send.spl), so the
+# first live SMTP send aborted with "semantic: missing
+# return in non-unit function 'mime_type_text_plain'" (measured 2026-08-25
+# against greenmail/standalone). It also terminated the DATA section twice
+# (message_build_simple + message_terminate), sending a stray "." command.
+fn mail_build_message(sender: text, to: text, subject: text, body: text) -> text:
+    header_from(sender) + header_to(to) + header_subject(subject) +
+        header_content_type("text/plain; charset=utf-8") + "\r\n" + smtp_dot_stuff(body)
