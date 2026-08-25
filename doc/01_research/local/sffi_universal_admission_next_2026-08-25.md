@@ -2415,6 +2415,29 @@ Production timing/RSS and exact-artifact proof remain unavailable; the file
 still has lower-volume unbounded calls and verified-and-signed admission
 remains 0.
 
+## simple-core filesystem open/seek authority checkpoint
+
+The next 40 `core_fs.spl` operations—heap allocation, FILE/path opening,
+tagged-string data/length projection, and descriptor seek—now route through
+six mandatory-inline minimal owners.  Pointer-bearing allocation, path, FILE,
+and borrowed string-data operations require `ffi, raw_ptr`; string length and
+integer descriptor seek retain only `ffi`.  Zero/negative provider sentinels
+remain signed and are not converted to booleans.
+
+The extended filesystem authority ratchet passed.  The authoritative census
+changed exactly as expected:
+
+- raw call sites: 20,036 -> 20,002
+- missing authority: 16,059 -> 16,019
+- lexical unsafe: 3,058 -> 3,064
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Mandatory inlining preserves one allocator/open/projection/seek operation at
+each original site.  No new allocation, copy, scan, lookup, lock, hash,
+signature check, or generic dispatch was added.  Lower-volume filesystem calls
+and artifact proof remain outstanding; verified-and-signed admission stays 0.
+
 ## Pure Simple SSH cipher boundary checkpoint
 
 The general SSH cipher no longer declares or calls `serial_println` or

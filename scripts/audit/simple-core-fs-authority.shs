@@ -8,19 +8,26 @@ llvm="$root/src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs"
 llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
 selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
 
-for raw in free fclose close rt_string_new spl_load_u8 spl_store_u8; do
+for raw in free fclose close rt_string_new spl_load_u8 spl_store_u8 \
+    malloc fopen open rt_string_data rt_string_len lseek; do
     if [ "$(grep -Ec "(^|[^A-Za-z0-9_])${raw}\\(" "$module")" -ne 2 ]; then
         echo "simple-core filesystem call escaped its mandatory-inline owner: $raw" >&2
         exit 1
     fi
 done
 
-[ "$(grep -c '^@always_inline$' "$module")" -eq 6 ]
-[ "$(grep -c 'unsafe(capabilities: \[ffi, raw_ptr\]):' "$module")" -eq 5 ]
-[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 1 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 12 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi, raw_ptr\]):' "$module")" -eq 9 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 3 ]
 
 for expected in _sffi_free:52 _sffi_fclose:12 _sffi_close:12 \
     _sffi_rt_string_new:17 _sffi_load_u8:15 _sffi_store_u8:20; do
+    owner=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
+done
+for expected in _sffi_malloc:10 _sffi_fopen:8 _sffi_open:6 \
+    _sffi_rt_string_data:8 _sffi_rt_string_len:7 _sffi_lseek:7; do
     owner=${expected%%:*}
     count=${expected##*:}
     [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
@@ -33,4 +40,4 @@ done
 grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
 grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
 
-echo "simple-core filesystem authority audit: PASS (122 release/close/string/byte operations have six mandatory-inline minimal owners)"
+echo "simple-core filesystem authority audit: PASS (high-volume pointer, handle, and descriptor operations have mandatory-inline minimal owners)"
