@@ -2456,6 +2456,40 @@ generic dispatch, or long-lived allocation.  Ptrace/DWARF and 15 debugger
 operations are still unavailable, so the module is not verified or signed;
 verified-and-signed admission remains 0.
 
+## SimpleOS Ed25519 Pure-Simple boundary checkpoint
+
+`src/os/crypto/ed25519.spl` previously claimed to be Pure Simple while still
+containing 45 raw calls: 41 unconditional `serial_println` diagnostics, three
+runtime crypto-helper calls with no non-vendored C or Rust provider, and a
+runtime byte-index helper.  The focused `ed25519-pure-boundary.shs` audit now
+requires zero raw extern declarations and calls in this module.
+
+The public Ed25519 implementation remains Pure Simple.  Native Simple array
+indexing replaces the raw byte-index helper.  The phantom SHA-512/scalar helper
+backend was removed; the canonical checked signature facade is compared
+directly with the existing Pure Simple signature.  Exact 32-byte key and
+64-byte signature contracts are enforced, provider disagreement returns an
+error, and the `runtime_only` API no longer silently succeeds through a Pure
+Simple fallback after provider failure.
+
+All production tracing, signature hex formatting, and the 32-byte scalar probe
+copy were removed.  Dual-run metadata is now constructed only after the normal
+mode returns, eliminating its common-path empty-array allocation.  This removes
+I/O and allocation from signing rather than adding checks to its inner scalar
+or hash loops.
+
+The authoritative census changed by removing all 45 former call sites:
+
+- missing authority: 17,304 -> 17,259
+- lexical unsafe: unchanged at 2,953
+- function unsafe: unchanged at 919
+
+This establishes the local Pure-Simple boundary and fail-closed result shape;
+the production self-hosted binary was unavailable for an RFC 8032 executable
+vector or optimizer run.  The checkpoint therefore does not prove the
+Ed25519 arithmetic, compiler, loader, or exact artifact.  Repository
+verified-and-signed admission remains 0.
+
 ## TLS 1.3 handshake SFFI checkpoint
 
 All 49 raw calls in the TLS 1.3 handshake driver now have minimal lexical
