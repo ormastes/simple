@@ -613,3 +613,9 @@ passing placeholder.
      tagged `unsafe(ffi)` with `raw_ptr` where applicable. Retain allocation-
      failure cleanup and constant-time capacity/concatenation overflow guards;
      add no array traversal, copy, allocation, registry lookup, or dispatch.
+121. Keep the 26 bootstrap synchronization declarations ABI-aligned and
+     explicitly tagged `unsafe(ffi)`. Do not restore value-less mutex/RwLock
+     constructors, one-argument mutex unlock, integer TLS values, numeric Once
+     booleans, or no-op RwLock unlock shims. Replace CondVar/Once provider stubs
+     with real atomic guard/callback contracts without extra steady-state locks,
+     allocations, registry lookups, sleeps, spins, or dispatch.

@@ -1397,6 +1397,35 @@ Estimated declaration totals remain 11,652 / 3,137 symbols. Unsafe-tagged rows
 increase from 1,920 to 2,001, untouched rows decrease from 9,534 to 9,453, and
 exact-artifact verified-and-signed admission remains zero.
 
+## Bootstrap synchronization ABI checkpoint
+
+The bootstrap synchronization module's declarations did not match the Rust
+runtime: mutex and RwLock constructors omitted their initial `RuntimeValue`,
+mutex unlock omitted the replacement value, Once declared an integer return
+where the provider returns void/bool, TLS treated `RuntimeValue` as `i64`, and
+the wrapper called provider RwLock unlock shims that are explicit no-ops.
+
+The 26 remaining declarations now match those provider shapes and carry
+adjacent `unsafe(ffi)` metadata. Mutex callbacks use the value returned while
+the provider lock is held and return the retained/updated value on unlock.
+RwLock wrappers consume provider snapshots and use `rt_rwlock_set` for updates
+instead of pretending a no-op unlock preserves a guard. TLS stores/loads `Any`
+directly. `Once.call` invokes its initializer locally rather than passing it to
+the provider's non-executing callback stub and silently marking it done.
+
+This does not make the module verified: the RwLock provider drops its guard
+before the Simple callback, CondVar wait/timeout are stubs, and local Once state
+is not an atomic cross-thread once-cell. Those contracts remain explicitly
+unsafe pending a real guard/token design. The changes add no steady-state
+allocation, registry lookup, lock, sleep, spin, copy, or generic dispatch; they
+remove two no-op calls and one non-executing callback-provider call.
+
+A static ABI/contract ratchet fixes these signatures and forbids restoration of
+the no-op unlock surface. Estimated declarations decrease from 11,652 to 11,651
+while symbols remain 3,137. Unsafe-tagged rows increase from 2,128 to 2,154,
+untouched rows decrease from 9,326 to 9,302, and exact-artifact signed admission
+remains zero.
+
 ## Simple-core array raw-contract checkpoint
 
 All 24 allocator, memory, archive-level array, registry, and runtime-array
