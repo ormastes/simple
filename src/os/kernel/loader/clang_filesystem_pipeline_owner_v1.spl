@@ -282,12 +282,6 @@ fn _actor_valid_v1(actor: TaskExecutionInstanceV1) -> bool:
     actor.task_id != 0u64 and actor.lifecycle_generation != 0u64 and
         actor.exec_generation != 0u64
 
-fn _exact_kind_count_v1(caps: CapabilitySet, expected: CapabilityKind) -> i64:
-    var count: i64 = 0
-    for token in caps.caps:
-        if token.kind == expected: count = count + 1
-    count
-
 pub fn clang_filesystem_pipeline_request_valid_v1(
     request: ClangFilesystemPipelineRequestV1,
     caps: CapabilitySet
@@ -312,6 +306,17 @@ pub fn clang_filesystem_pipeline_request_valid_v1(
        caps.caps.len() != 8 + CLANG_SYSROOT_READ_GRANT_COUNT_V1 or
        not clang_sysroot_caps_exact_v1(caps):
         return false
+    # Count every request-local kind while performing the mandatory token
+    # ownership/uniqueness walk.  Keeping these counts in the same pass avoids
+    # eight additional full pouch scans on every pipeline admission.
+    var clang_exec_count: i64 = 0
+    var lld_exec_count: i64 = 0
+    var source_read_count: i64 = 0
+    var working_directory_read_count: i64 = 0
+    var object_write_count: i64 = 0
+    var object_create_count: i64 = 0
+    var executable_write_count: i64 = 0
+    var executable_create_count: i64 = 0
     var token_index: i64 = 0
     while token_index < caps.caps.len():
         val token = caps.caps[token_index]
@@ -322,23 +327,34 @@ pub fn clang_filesystem_pipeline_request_valid_v1(
         while prior < token_index:
             if caps.caps[prior].token_id == token.token_id: return false
             prior = prior + 1
+        match token.kind:
+            case CapabilityKind.FileExec(prefix):
+                if prefix == "/usr/bin/clang":
+                    clang_exec_count = clang_exec_count + 1
+                if prefix == "/usr/bin/ld.lld":
+                    lld_exec_count = lld_exec_count + 1
+            case CapabilityKind.FileRead(prefix):
+                if prefix == request.source_path:
+                    source_read_count = source_read_count + 1
+                if prefix == request.working_directory:
+                    working_directory_read_count = working_directory_read_count + 1
+            case CapabilityKind.FileWrite(prefix):
+                if prefix == request.object_path:
+                    object_write_count = object_write_count + 1
+                if prefix == request.executable_path:
+                    executable_write_count = executable_write_count + 1
+            case CapabilityKind.FileCreate(prefix):
+                if prefix == request.object_path:
+                    object_create_count = object_create_count + 1
+                if prefix == request.executable_path:
+                    executable_create_count = executable_create_count + 1
+            case _:
+                pass_dn("unrelated sysroot capability kind")
         token_index = token_index + 1
-    _exact_kind_count_v1(caps,
-        CapabilityKind.FileExec(path_prefix: "/usr/bin/clang")) == 1 and
-    _exact_kind_count_v1(caps,
-        CapabilityKind.FileExec(path_prefix: "/usr/bin/ld.lld")) == 1 and
-    _exact_kind_count_v1(caps,
-        CapabilityKind.FileRead(path_prefix: request.source_path)) == 1 and
-    _exact_kind_count_v1(caps,
-        CapabilityKind.FileRead(path_prefix: request.working_directory)) == 1 and
-    _exact_kind_count_v1(caps,
-        CapabilityKind.FileWrite(path_prefix: request.object_path)) == 1 and
-    _exact_kind_count_v1(caps,
-        CapabilityKind.FileCreate(path_prefix: request.object_path)) == 1 and
-    _exact_kind_count_v1(caps,
-        CapabilityKind.FileWrite(path_prefix: request.executable_path)) == 1 and
-    _exact_kind_count_v1(caps,
-        CapabilityKind.FileCreate(path_prefix: request.executable_path)) == 1
+    clang_exec_count == 1 and lld_exec_count == 1 and
+        source_read_count == 1 and working_directory_read_count == 1 and
+        object_write_count == 1 and object_create_count == 1 and
+        executable_write_count == 1 and executable_create_count == 1
 
 fn _reservation_index_locked_v1(
     reservation: ClangFilesystemPipelineReservationV1,
