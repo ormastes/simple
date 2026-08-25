@@ -1,0 +1,188 @@
+# codex-impl
+# Observe-only parser/checker for the unified protected-ref policy.
+
+use std.common.crypto.sha256.{sha256_text}
+
+struct ProtectedRefPolicy:
+    ref_pattern: text
+    mutator: text
+    update: text
+    force: text
+    gate_profile: text
+    server_enforcement_required: bool
+
+struct LifecycleVcsPolicy:
+    schema: text
+    digest: text
+    refs: [ProtectedRefPolicy]
+    valid: bool
+    error: text
+
+fn _policy_value(line: text) -> text:
+    val idx = line.index_of(":")
+    if idx < 0:
+        return ""
+    line[idx + 1:].trim().replace("\"", "")
+
+fn _policy_indent(line: text) -> i64:
+    var count = 0
+    while count < line.len() and line.char_code_at(count) == 32:
+        count = count + 1
+    count
+
+fn _canonical_clause_error(payload: text) -> text:
+    var section = ""
+    var subsection = ""
+    var jj_workspace = false
+    var remote_branch = false
+    var direct_update = false
+    var raw_default = false
+    var authority = false
+    var reason = false
+    var audit = false
+    var expiry = false
+    for raw in payload.split("\n"):
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        val indent = _policy_indent(raw)
+        if indent == 2:
+            section = ""
+            subsection = ""
+            if line == "authoring:": section = "authoring"
+            elif line == "raw_mutation:": section = "raw_mutation"
+        elif indent == 4:
+            subsection = ""
+            if section == "authoring" and line == "ordinary_change:": subsection = "ordinary_change"
+            elif section == "raw_mutation" and line == "break_glass:": subsection = "break_glass"
+            elif section == "raw_mutation" and line == "default: deny": raw_default = true
+        elif indent == 6 and section == "authoring" and subsection == "ordinary_change":
+            if line == "jj_workspace: preferred": jj_workspace = true
+            elif line == "remote_branch: not_required": remote_branch = true
+            elif line == "direct_protected_ref_update: deny": direct_update = true
+        elif indent == 6 and section == "raw_mutation" and subsection == "break_glass":
+            if line == "authority: maintainer": authority = true
+            elif line == "reason: required": reason = true
+            elif line == "audit: required": audit = true
+            elif line == "expiry: required": expiry = true
+    if not jj_workspace: return "required authoring clause is missing: jj_workspace: preferred"
+    if not remote_branch: return "required authoring clause is missing: remote_branch: not_required"
+    if not direct_update: return "required authoring clause is missing: direct_protected_ref_update: deny"
+    if not raw_default: return "required raw-mutation clause is missing: default: deny"
+    if not authority: return "required break-glass clause is missing: authority: maintainer"
+    if not reason: return "required break-glass clause is missing: reason: required"
+    if not audit: return "required break-glass clause is missing: audit: required"
+    if not expiry: return "required break-glass clause is missing: expiry: required"
+    ""
+
+fn parse_lifecycle_vcs_policy(payload: text) -> LifecycleVcsPolicy:
+    val digest = sha256_text(payload)
+    var schema = ""
+    var refs: [ProtectedRefPolicy] = []
+    var ref_pattern = ""
+    var mutator = ""
+    var update = ""
+    var force = ""
+    var gate_profile = ""
+    var server_enforcement_required = false
+    for raw in payload.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("schema:"):
+            schema = _policy_value(line)
+        elif line.starts_with("- ref:") or line.starts_with("- ref_pattern:"):
+            if ref_pattern != "":
+                refs.push(ProtectedRefPolicy(ref_pattern: ref_pattern, mutator: mutator, update: update, force: force, gate_profile: gate_profile, server_enforcement_required: server_enforcement_required))
+            ref_pattern = _policy_value(line)
+            mutator = ""
+            update = ""
+            force = ""
+            gate_profile = ""
+            server_enforcement_required = false
+        elif line.starts_with("mutator:"):
+            mutator = _policy_value(line)
+        elif line.starts_with("update:"):
+            update = _policy_value(line)
+        elif line.starts_with("force:"):
+            force = _policy_value(line)
+        elif line.starts_with("required_profile:"):
+            gate_profile = _policy_value(line)
+        elif line.starts_with("server_enforcement_required:"):
+            server_enforcement_required = _policy_value(line) == "true"
+    if ref_pattern != "":
+        refs.push(ProtectedRefPolicy(ref_pattern: ref_pattern, mutator: mutator, update: update, force: force, gate_profile: gate_profile, server_enforcement_required: server_enforcement_required))
+    if schema != "spipe-vcs/2":
+        return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "unsupported or missing schema")
+    if refs.len() == 0:
+        return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "no protected refs declared")
+    var seen: [text] = []
+    for ref_policy in refs:
+        if ref_policy.ref_pattern == "" or ref_policy.mutator == "" or ref_policy.update == "" or ref_policy.force == "" or ref_policy.gate_profile == "":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref policy is incomplete")
+        if seen.contains(ref_policy.ref_pattern):
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref policy is contradictory or duplicated")
+        seen.push(ref_policy.ref_pattern)
+        if not ref_policy.mutator.starts_with("sj."):
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref mutator is not owned by SJ")
+        if ref_policy.force != "deny" and not (ref_policy.ref_pattern == "review/*" and ref_policy.force == "lease_only"):
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref force policy must deny")
+        if ref_policy.ref_pattern == "integration/main" and ref_policy.update != "compare_and_swap":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "local integration ref must use compare-and-swap")
+        if ref_policy.ref_pattern.starts_with("refs/tags/") and ref_policy.update != "immutable_annotated_signed":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "release tags must be immutable, annotated, and signed")
+        if (ref_policy.ref_pattern == "review/*" or ref_policy.ref_pattern == "candidate/*") and ref_policy.update != "compare_and_swap":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "ephemeral review and candidate refs must use compare-and-swap")
+        if ref_policy.ref_pattern == "recovery/*" and ref_policy.update != "append_only":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "recovery refs must be append-only")
+        if not ref_policy.server_enforcement_required:
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "protected ref does not require independent server enforcement")
+    LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: true, error: "")
+
+fn lifecycle_policy_ref(policy: LifecycleVcsPolicy, target_ref: text) -> ProtectedRefPolicy?:
+    for ref_policy in policy.refs:
+        if ref_policy.ref_pattern == target_ref:
+            return ref_policy
+        if ref_policy.ref_pattern.ends_with("/*") and target_ref.starts_with(ref_policy.ref_pattern[0:ref_policy.ref_pattern.len() - 1]):
+            return ref_policy
+        if ref_policy.ref_pattern.ends_with("*") and target_ref.starts_with(ref_policy.ref_pattern[0:ref_policy.ref_pattern.len() - 1]):
+            return ref_policy
+    nil
+
+fn parse_canonical_lifecycle_vcs_policy(payload: text) -> LifecycleVcsPolicy:
+    val policy = parse_lifecycle_vcs_policy(payload)
+    if not policy.valid:
+        return policy
+    val required_refs = ["main", "integration/main", "release/*", "refs/tags/v*", "review/*", "candidate/*", "recovery/*"]
+    for required_ref in required_refs:
+        var found = false
+        for ref_policy in policy.refs:
+            if ref_policy.ref_pattern == required_ref:
+                found = true
+        if not found:
+            return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "required protected ref class is missing: " + required_ref)
+    val main = lifecycle_policy_ref(policy, "main").?
+    val integration = lifecycle_policy_ref(policy, "integration/main").?
+    val release = lifecycle_policy_ref(policy, "release/1.0").?
+    val tag = lifecycle_policy_ref(policy, "refs/tags/v1.0.0").?
+    val review = lifecycle_policy_ref(policy, "review/CHG-1").?
+    val candidate = lifecycle_policy_ref(policy, "candidate/1.0.0/RC-1").?
+    val recovery = lifecycle_policy_ref(policy, "recovery/INC-1/20260825").?
+    if main.mutator != "sj.integrate" or main.update != "fast_forward_or_merge_queue" or main.force != "deny" or main.gate_profile != "standard":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "public main policy does not match the canonical protected contract")
+    if integration.mutator != "sj.integrate" or integration.update != "compare_and_swap" or integration.force != "deny" or integration.gate_profile != "standard":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "local integration policy does not match the canonical protected contract")
+    if release.mutator != "sj.integrate_release" or release.update != "fast_forward" or release.force != "deny" or release.gate_profile != "release_line":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "release-line policy does not match the canonical protected contract")
+    if tag.mutator != "sj.create_release_tag" or tag.update != "immutable_annotated_signed" or tag.force != "deny" or tag.gate_profile != "release":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "release-tag policy does not match the canonical protected contract")
+    if review.mutator != "sj.publish_review_ref" or review.update != "compare_and_swap" or review.force != "lease_only" or review.gate_profile != "review_projection":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "review-ref policy does not match the canonical protected contract")
+    if candidate.mutator != "sj.stage_release_candidate" or candidate.update != "compare_and_swap" or candidate.force != "deny" or candidate.gate_profile != "release":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "candidate-ref policy does not match the canonical protected contract")
+    if recovery.mutator != "sj.recover" or recovery.update != "append_only" or recovery.force != "deny" or recovery.gate_profile != "recovery":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "recovery-ref policy does not match the canonical protected contract")
+    val clause_error = _canonical_clause_error(payload)
+    if clause_error != "":
+        return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: clause_error)
+    policy
+
+export ProtectedRefPolicy, LifecycleVcsPolicy, parse_lifecycle_vcs_policy, parse_canonical_lifecycle_vcs_policy, lifecycle_policy_ref

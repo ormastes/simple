@@ -1,0 +1,116 @@
+# codex-impl
+# Canonical release/version manifest validation. Rendering stays a later explicit mutation.
+
+struct VersionManifest:
+    schema: text
+    product: text
+    semver: text
+    line: text
+    channel: text
+    projections: [text]
+    valid: bool
+    error: text
+
+fn _version_value(line: text) -> text:
+    val idx = line.index_of(":")
+    if idx < 0:
+        return ""
+    line[idx + 1:].trim().replace("\"", "")
+
+fn _semver_core_valid(version: text) -> bool:
+    val core = version.split("-")[0]
+    val parts = core.split(".")
+    if parts.len() != 3:
+        return false
+    for part in parts:
+        if part == "" or (part.len() > 1 and part.starts_with("0")) or (part.to_int() ?? -1) < 0:
+            return false
+    true
+
+fn _prerelease_valid(version: text) -> bool:
+    if not version.contains("-"):
+        return true
+    val split = version.split("-")
+    if split.len() != 2 or split[1] == "" or split[1].starts_with(".") or split[1].ends_with(".") or split[1].contains(".."):
+        return false
+    val prerelease = split[1]
+    for identifier in prerelease.split("."):
+        if identifier.len() > 1 and identifier.starts_with("0") and (identifier.to_int() ?? -1) >= 0:
+            return false
+    var i = 0
+    while i < prerelease.len():
+        val code = prerelease.char_code_at(i)
+        val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        if not alpha and not digit and code != 45 and code != 46:
+            return false
+        i = i + 1
+    true
+
+fn parse_version_manifest(payload: text) -> VersionManifest:
+    var schema = ""
+    var product = ""
+    var semver = ""
+    var line = ""
+    var channel = ""
+    var projections: [text] = []
+    var in_projections = false
+    for raw in payload.split("\n"):
+        val item = raw.trim()
+        if item.starts_with("schema:"):
+            schema = _version_value(item)
+        elif item.starts_with("product:"):
+            product = _version_value(item)
+        elif item.starts_with("semver:"):
+            semver = _version_value(item)
+        elif item.starts_with("line:"):
+            line = _version_value(item)
+        elif item.starts_with("channel:"):
+            channel = _version_value(item)
+        elif item == "projections:":
+            in_projections = true
+        elif in_projections and item.starts_with("-"):
+            projections.push(item[1:].trim())
+    if schema != "simple-release-version/1":
+        return VersionManifest(schema: schema, product: product, semver: semver, line: line, channel: channel, projections: projections, valid: false, error: "unsupported or missing version schema")
+    if product == "" or line == "" or channel == "" or not _semver_core_valid(semver) or not _prerelease_valid(semver):
+        return VersionManifest(schema: schema, product: product, semver: semver, line: line, channel: channel, projections: projections, valid: false, error: "product, semver, line, or channel is invalid")
+    val core = semver.split("-")[0].split(".")
+    if line != core[0] + "." + core[1]:
+        return VersionManifest(schema: schema, product: product, semver: semver, line: line, channel: channel, projections: projections, valid: false, error: "release line does not match semantic version")
+    if projections.len() == 0:
+        return VersionManifest(schema: schema, product: product, semver: semver, line: line, channel: channel, projections: projections, valid: false, error: "no declared version projections")
+    VersionManifest(schema: schema, product: product, semver: semver, line: line, channel: channel, projections: projections, valid: true, error: "")
+
+fn version_projection_drift(manifest: VersionManifest, projection_versions: [text]) -> [text]:
+    var drift: [text] = []
+    if projection_versions.len() != manifest.projections.len():
+        drift.push("projection-count")
+        return drift
+    var i = 0
+    while i < projection_versions.len():
+        if projection_versions[i] != manifest.semver:
+            drift.push(manifest.projections[i])
+        i = i + 1
+    drift
+
+fn version_undeclared_consumers(manifest: VersionManifest, discovered_consumers: [text]) -> [text]:
+    var undeclared: [text] = []
+    for consumer in discovered_consumers:
+        if not manifest.projections.contains(consumer):
+            undeclared.push(consumer)
+    undeclared
+
+fn version_render_plan(manifest: VersionManifest) -> [text]:
+    var plan: [text] = []
+    for projection in manifest.projections:
+        plan.push(projection + "=" + manifest.semver)
+    plan
+
+fn version_explain(manifest: VersionManifest) -> text:
+    if not manifest.valid:
+        return "invalid: " + manifest.error
+    manifest.product + " " + manifest.semver + " on release/" + manifest.line + " (" + manifest.channel + "), " + manifest.projections.len().to_text() + " declared projections"
+
+export VersionManifest, parse_version_manifest, version_projection_drift
+export version_undeclared_consumers, version_render_plan, version_explain
