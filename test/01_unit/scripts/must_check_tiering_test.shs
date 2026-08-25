@@ -148,6 +148,51 @@ MUST_CHECK_ARTIFACT_FILE="$external_artifact" \
 MUST_CHECK_EXPECTED_GATE=web-server-request-port \
 MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     sh "$external_validator" | grep -q '^STATUS: PASS '
+
+# A trusted signature cannot promote generic Caret PASS labels. Exercise all
+# five production Caret rows, and make the first attachment path hostile to
+# prove quarantine happens after signature authentication but before loading
+# generic evidence attachments.
+for caret_case in \
+    'caret-local-llm-launch|slang-provider,readiness,generation,response,timeout,stop,no-leak' \
+    'caret-installed-provider-launches|claude,codex,gemini,kimi,caret-routing,bounded-stop,no-leak' \
+    'caret-agent-runtime-primitives|launch,status,cancel,stop,no-leak' \
+    'caret-production-multi-manager-launch|multi-launch,parent-supervision,poll,stop,exit,no-leak' \
+    'caret-smux-multi-launch|smux-pty,multi-launch,capture,resize,cancel,stop,no-leak'; do
+    caret_gate=${caret_case%%|*}
+    caret_ids=${caret_case#*|}
+    sed \
+        -e "s/^gate_id=web-server-request-port$/gate_id=$caret_gate/" \
+        -e "s|^command_receipt_path=.*$|command_receipt_path=../../hostile|" \
+        -e "s|^acceptance_contract=.*$|acceptance_contract=$caret_gate/v1|" \
+        -e "s|^acceptance_ids=.*$|acceptance_ids=$caret_ids|" \
+        "$external_artifact" > "$external_fixture/caret.artifact"
+    openssl dgst -sha256 -sign "$external_fixture/reviewer-private.pem" \
+        -out "$external_fixture/evidence/reviewer.sig" "$external_fixture/caret.artifact"
+    caret_signature_sha=$(sha256sum "$external_fixture/evidence/reviewer.sig" | awk '{print $1}')
+    printf '%s\n' \
+        'reviewer_signature_path=evidence/reviewer.sig' \
+        "reviewer_signature_sha256=$caret_signature_sha" > "$external_fixture/caret.receipt"
+    git -C "$external_fixture" add evidence/reviewer.sig
+    git -C "$external_fixture" commit -qm "signed-quarantined-$caret_gate"
+    if MUST_CHECK_ROOT="$external_fixture" \
+        MUST_CHECK_RECEIPT_FILE="$external_fixture/caret.receipt" \
+        MUST_CHECK_ARTIFACT_FILE="$external_fixture/caret.artifact" \
+        MUST_CHECK_EXPECTED_GATE="$caret_gate" \
+        MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        sh "$external_validator" > "$external_fixture/caret.out" 2>&1; then
+        echo "FAIL: generic signed Caret receipt was admitted: $caret_gate"
+        exit 1
+    fi
+    grep -Fq "caret-semantic-validator-not-implemented-$caret_gate" "$external_fixture/caret.out" || {
+        echo "FAIL: Caret receipt did not fail at semantic quarantine: $caret_gate"
+        exit 1
+    }
+done
+git -C "$external_fixture" show "$external_signed_commit:evidence/reviewer.sig" > "$external_fixture/evidence/reviewer.sig"
+git -C "$external_fixture" add evidence/reviewer.sig
+git -C "$external_fixture" commit -qm restore-web-reviewer-signature
+
 for mutation in \
     's/producer_id=server-producer/producer_id=fixture-reviewer/' \
     's/reviewer_key_id=fixture-reviewer/reviewer_key_id=other-reviewer/' \
