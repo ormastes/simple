@@ -1,6 +1,6 @@
 use std.sffi.admission.{
     SFFI_ADMISSION_MAX_SYMBOLS, SffiAdmissionTrustRootV1,
-    parse_sffi_admission_v1, verify_sffi_admission_v1,
+    parse_sffi_admission_v1, verify_sffi_evidence_v2,
 }
 use std.io_runtime.{file_read}
 use lib.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
@@ -25,13 +25,27 @@ fn admission_fixture() -> text:
     "symbol_count\t1\n" +
     "symbol\trt_test\t{DIGEST_A}\ttrue\ttrue\n"
 
-describe "SFFI admission receipt v1":
-    it "verifies exact receipt bytes against an authorized Ed25519 root":
+fn evidence_fixture() -> text:
+    "schema\tsimple.sffi-evidence.v2\n" +
+    "provider_id\ttest.provider\n" +
+    "target\tx86_64-linux\n" +
+    "signer_key_id\ttest-key\n" +
+    "artifact_sha256\t{DIGEST_A}\n" +
+    "canonical_source_tree_sha256\t{DIGEST_B}\n" +
+    "exact_build_input_sha256\t{DIGEST_A}\n" +
+    "compiler_artifact_sha256\t{DIGEST_B}\n" +
+    "abi_registry_sha256\t{DIGEST_B}\n" +
+    "verification_report_sha256\t{DIGEST_A}\n" +
+    "symbol_count\t1\n" +
+    "symbol\trt_test\t{DIGEST_A}\n"
+
+describe "SFFI evidence admission":
+    it "verifies exact evidence bytes against an authorized Ed25519 root":
         val seed: [u8] = [7u8; 32]
         val keypair = pure_ed25519_keypair_from_seed(seed)
-        val signature = pure_ed25519_sign(seed, keypair.1, text_to_bytes(admission_fixture()))
+        val signature = pure_ed25519_sign(seed, keypair.1, text_to_bytes(evidence_fixture()))
         val root = SffiAdmissionTrustRootV1.create("test-key", keypair.1).unwrap()
-        match verify_sffi_admission_v1(admission_fixture(), signature, [root]):
+        match verify_sffi_evidence_v2(evidence_fixture(), signature, [root]):
             case Ok(verified):
                 expect(verified.provider_identity()).to_equal("test.provider")
                 expect(verified.artifact_digest()).to_equal(DIGEST_A)
@@ -41,10 +55,10 @@ describe "SFFI admission receipt v1":
     it "rejects a signed receipt after any byte changes":
         val seed: [u8] = [9u8; 32]
         val keypair = pure_ed25519_keypair_from_seed(seed)
-        val signature = pure_ed25519_sign(seed, keypair.1, text_to_bytes(admission_fixture()))
+        val signature = pure_ed25519_sign(seed, keypair.1, text_to_bytes(evidence_fixture()))
         val root = SffiAdmissionTrustRootV1.create("test-key", keypair.1).unwrap()
-        val modified = admission_fixture().replace("test.provider", "other.provider")
-        match verify_sffi_admission_v1(modified, signature, [root]):
+        val modified = evidence_fixture().replace("test.provider", "other.provider")
+        match verify_sffi_evidence_v2(modified, signature, [root]):
             case Err(error): expect(error).to_contain("E-SFFI-005")
             case Ok(_): expect("modified signed receipt was accepted").to_equal("")
 

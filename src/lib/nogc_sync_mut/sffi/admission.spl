@@ -7,6 +7,7 @@
 
 use std.common.structural.digest.hash256.{hash256_hex_valid}
 use lib.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.string_core.{text_to_bytes}
 
 val SFFI_ADMISSION_MAX_TEXT: i64 = 2097152
@@ -170,10 +171,71 @@ fn parse_sffi_admission_v1(content: text) -> Result<SffiAdmissionReceiptV1, text
         source_signatures: signatures,
     ))
 
-# Verify the exact canonical receipt bytes against one caller-authorized trust
-# root. This is admission-time work only; the returned token is retained beside
-# cached slots and never re-verifies on a foreign call.
-fn verify_sffi_admission_v1(
+fn parse_sffi_evidence_v2(content: text) -> Result<SffiAdmissionReceiptV1, text>:
+    if content.len() > SFFI_ADMISSION_MAX_TEXT:
+        return Err("E-SFFI-005: evidence manifest exceeds 2 MiB limit")
+    if content == "" or not content.ends_with("\n") or content.contains("\r"):
+        return Err("E-SFFI-005: evidence manifest must be canonical LF text")
+    val lines = content.split("\n")
+    if lines.len() < 13 or lines[lines.len() - 1] != "" or
+       lines[0] != "schema\tsimple.sffi-evidence.v2":
+        return Err("E-SFFI-005: unsupported or truncated SFFI evidence manifest")
+
+    val provider_result = _admission_pair(lines[1], "provider_id")
+    val target_result = _admission_pair(lines[2], "target")
+    val signer_result = _admission_pair(lines[3], "signer_key_id")
+    val artifact_result = _admission_digest(lines[4], "artifact_sha256")
+    val source_result = _admission_digest(lines[5], "canonical_source_tree_sha256")
+    val build_result = _admission_digest(lines[6], "exact_build_input_sha256")
+    val compiler_result = _admission_digest(lines[7], "compiler_artifact_sha256")
+    val abi_result = _admission_digest(lines[8], "abi_registry_sha256")
+    val report_result = _admission_digest(lines[9], "verification_report_sha256")
+    val count_result = _admission_pair(lines[10], "symbol_count")
+    for result in [provider_result, target_result, signer_result, artifact_result,
+                   source_result, build_result, compiler_result, abi_result,
+                   report_result, count_result]:
+        match result:
+            case Err(error): return Err(error)
+            case Ok(_): pass
+
+    val parsed_count = count_result!.parse_int()
+    if parsed_count == nil or parsed_count! <= 0 or parsed_count! > SFFI_ADMISSION_MAX_SYMBOLS:
+        return Err("E-SFFI-005: invalid evidence symbol_count")
+    val symbol_count = parsed_count!
+    if lines.len() != symbol_count + 12:
+        return Err("E-SFFI-005: evidence symbol_count does not match rows")
+
+    var signatures: {text: text} = {}
+    var previous = ""
+    var index = 0
+    while index < symbol_count:
+        val fields = lines[index + 11].split("\t")
+        if fields.len() != 3 or fields[0] != "symbol" or
+           not fields[1].starts_with("rt_") or
+           not hash256_hex_valid(fields[2]):
+            return Err("E-SFFI-005: malformed evidence symbol row")
+        val canonical_row = fields[1] + "\t" + fields[2]
+        if signatures.contains(fields[1]) or (previous != "" and canonical_row <= previous):
+            return Err("E-SFFI-019: evidence symbols must be sorted and unique")
+        signatures[fields[1]] = fields[2]
+        previous = canonical_row
+        index = index + 1
+
+    Ok(SffiAdmissionReceiptV1(
+        provider_id: provider_result!,
+        target: target_result!,
+        signer_key_id: signer_result!,
+        artifact_sha256: artifact_result!,
+        abi_registry_sha256: abi_result!,
+        signed_manifest_sha256: sha256_u8_hex(text_to_bytes(content)),
+        verification_report_sha256: report_result!,
+        source_signatures: signatures,
+    ))
+
+# Verify the exact canonical evidence-v2 bytes against one caller-authorized
+# trust root. This is admission-time work only; the returned token is retained
+# beside cached slots and never re-verifies on a foreign call.
+fn verify_sffi_evidence_v2(
     content: text,
     signature: [u8],
     trust_roots: [SffiAdmissionTrustRootV1],
@@ -182,7 +244,7 @@ fn verify_sffi_admission_v1(
         return Err("E-SFFI-005: Ed25519 SFFI signature must contain 64 bytes")
     if trust_roots.len() == 0 or trust_roots.len() > SFFI_ADMISSION_MAX_TRUST_ROOTS:
         return Err("E-SFFI-005: SFFI trust-root set must contain 1..64 keys")
-    val receipt = match parse_sffi_admission_v1(content):
+    val receipt = match parse_sffi_evidence_v2(content):
         case Ok(value): value
         case Err(error): return Err(error)
 
