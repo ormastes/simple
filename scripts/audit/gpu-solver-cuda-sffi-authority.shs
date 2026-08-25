@@ -3,6 +3,8 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 owner="$root/src/lib/nogc_async_mut/engine/physics/backend_gpu/gpu_solver.spl"
+runtime="$root/src/compiler_rust/runtime/src/cuda_runtime.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern"
 
 if [ "$(grep -c '^extern fn rt_cuda_' "$owner")" -ne 12 ] ||
    [ "$(grep -c '^[[:space:]]*@unsafe(.*capabilities: \[.*ffi' "$owner")" -ne 22 ]; then
@@ -40,4 +42,22 @@ awk '
 
 grep -q '@unsafe(reason: "orchestrates unverified raw CUDA solver operations"' "$owner"
 
-echo "GPU solver CUDA SFFI authority audit: PASS (12 declarations, 9 raw methods, and the delegating solve method explicitly unsafe)"
+for symbol in \
+    rt_cuda_memcpy_h2d \
+    rt_cuda_memcpy_d2h \
+    rt_cuda_compile_ptx \
+    rt_cuda_get_function \
+    rt_cuda_synchronize \
+    rt_cuda_stream_create \
+    rt_cuda_stream_destroy
+do
+    if grep -R -q -- "$symbol" "$runtime" "$interpreter"; then
+        echo "$symbol gained a provider; review the quarantined solver ABI before changing its status" >&2
+        exit 1
+    fi
+done
+grep -q 'pub extern "C" fn rt_cuda_launch_kernel(' "$runtime"
+grep -q 'func_name_ptr: \*const u8' "$runtime"
+grep -q 'extern fn rt_cuda_launch_kernel(func: i64' "$owner"
+
+echo "GPU solver CUDA SFFI authority audit: PASS (12 declarations, 9 raw methods, and solve explicitly unsafe; 7 symbols absent and launch ABI mismatch quarantined)"

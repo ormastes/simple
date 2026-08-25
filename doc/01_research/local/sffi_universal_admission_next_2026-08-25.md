@@ -2151,6 +2151,18 @@ does not clear every buffer handle. Those are retained as explicit unsafe
 obligations rather than being mislabeled verified; they require a separate
 fail-closed state-machine patch with measured hot-path evidence.
 
+Provider identity review then found that seven declared names have no runtime
+or interpreter implementation: `rt_cuda_memcpy_h2d`, `rt_cuda_memcpy_d2h`,
+`rt_cuda_compile_ptx`, `rt_cuda_get_function`, `rt_cuda_synchronize`,
+`rt_cuda_stream_create`, and `rt_cuda_stream_destroy`. The declared
+`rt_cuda_launch_kernel` ABI is also incompatible with the canonical runtime:
+the solver supplies a function handle plus a Simple array and expects `bool`,
+whereas the runtime takes a module, length-tracked function name, raw argument
+pointer, and returns an integer status. Boolean cleanup cannot repair this ABI
+mismatch. The solver must remain unavailable/unsafe until it is regenerated
+against the canonical typed CUDA registry; no generic compatibility dispatcher
+or numeric coercion should be introduced.
+
 The source census measured missing authority decreasing by exactly 55: 17,971
 to 17,916 repository-wide and 9,802 to 9,747 in production. All 55 became
 function-scoped authorities. The broader `rt_cuda` family now has 109 explicit
