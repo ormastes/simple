@@ -76,6 +76,14 @@ fn listener_requires_setup_failure_close(
 ) -> bool:
     socket_created and (not bind_ready or not listen_ready)
 
+fn _websocket_route_is_ws(request: text) -> bool:
+    # The RFC 6455 resource name may include a query, but the path component
+    # must remain exactly /ws. Handshake validation already constrains the
+    # origin-form target. Prefix checks avoid copying the whole request in
+    # this hot handoff path.
+    request.starts_with("GET /ws HTTP/1.1\r\n") or
+        request.starts_with("GET /ws?")
+
 fn send_all(sock: Socket, bytes: [u8]) -> bool:
     var sent: u64 = 0
     var attempts: i32 = 0
@@ -369,7 +377,7 @@ class WebSocketTransportOwner:
                     if frame.websocket_upgrade_candidate:
                         val decision = validate_rfc6455_server_handshake(frame.request)
                         if (decision.accepted and
-                            frame.request.starts_with("GET /ws HTTP/1.1\r\n") and
+                            _websocket_route_is_ws(frame.request) and
                             self.can_adopt()):
                             if send_all(client, text_to_bytes_pure(decision.response)):
                                 client_transferred = self.adopt(client, frame.upgrade_tail)
