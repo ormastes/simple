@@ -924,6 +924,12 @@ impl<'a> Parser<'a> {
         })
     }
 
+    // TODO: (gpu) accept `stream:` and `shared:` slots -- `k<<<grid: g, block: b, stream: s,
+    // shared: n>>>(args)`. The runtime already supports both via rt_cuda_launch_kernel_ex,
+    // and std.io `cuda_launch_on` is the interim spelling. Deferred because the pure-Simple
+    // AST variant KernelLaunch(Expr, Expr, Expr, [CallArg]) is positional and every
+    // construction/match site ripples. See
+    // doc/08_tracking/bug/kernel_launch_grammar_no_stream_slot_2026-08-25.md
     /// Parse CUDA kernel launch: kernel<<<grid: expr, block: expr>>>(args)
     /// The `<<<` token has already been seen as the current token.
     fn parse_kernel_launch(&mut self, kernel: Expr) -> Result<Expr, ParseError> {
@@ -1317,7 +1323,10 @@ impl<'a> Parser<'a> {
             // like a type arg so the list can still reach its closing `>`; the
             // recorded span turns into a precise diagnostic below once the shape
             // is confirmed to be a generic argument list and not a comparison.
-            if matches!(self.current.kind, TokenKind::Integer(_) | TokenKind::TypedInteger(_, _)) {
+            if matches!(
+                self.current.kind,
+                TokenKind::Integer(_) | TokenKind::TypedInteger(_, _)
+            ) {
                 if need_comma {
                     break;
                 }
@@ -1460,8 +1469,8 @@ mod tuple_index_split_tests {
     #[test]
     fn refuses_anything_that_is_not_digits_dot_digits() {
         for bad in [
-            "1e3", "1.5e3", "0.1f32", "1_0.5", "0.5_0", ".5", "1.", "1.2.3", "-1.2", "+1.2", "0x1.8", "", ".", "a.b",
-            "1.2i64",
+            "1e3", "1.5e3", "0.1f32", "1_0.5", "0.5_0", ".5", "1.", "1.2.3", "-1.2", "+1.2",
+            "0x1.8", "", ".", "a.b", "1.2i64",
         ] {
             assert_eq!(split_tuple_index_pair(bad), None, "must refuse {bad:?}");
         }

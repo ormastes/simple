@@ -33,7 +33,8 @@ fn main():
         print "{d}: {cuda_get_device_name(d)} cc={cuda_device_compute_capability(d)}"
 ```
 
-Measured on the 2-GPU dev host: `0: NVIDIA RTX A6000 cc=(8, 6)`, `1: NVIDIA TITAN RTX cc=(7, 5)`.
+Measured on the 2-GPU dev host: `0: NVIDIA RTX A6000 cc=86`, `1: NVIDIA TITAN RTX cc=75` —
+`cuda_device_compute_capability` returns the capability **packed** as one i64 (86 = sm_86).
 
 ## 2. Memory round-trip (typed helpers)
 
