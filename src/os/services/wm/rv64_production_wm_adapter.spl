@@ -6,6 +6,7 @@
 
 use os.userlib.process.{get_task_info}
 use os.compositor.rv64_wm_present_receipt.{Rv64WmPresentReceipt}
+use os.kernel.scheduler.scheduler_types.{TASK_STATE_CODE_PREPARING_EXIT_V1}
 
 pub struct Rv64WmProcessLiveness:
     process_id: u64
@@ -20,6 +21,11 @@ pub struct Rv64ProductionWmVerdict:
     first_present_revision: i64
     reason: text
 
+pub fn rv64_wm_task_state_alive(state: u8) -> bool:
+    # Only the stable Runnable/Blocked/Sleeping states own live surfaces.
+    # Fail closed for Zombie, PreparingExit, and future terminal states.
+    state == 0u8 or state == 1u8 or state == 2u8
+
 pub fn rv64_wm_process_liveness(process_id: u64) -> Rv64WmProcessLiveness:
     if process_id == 0u64:
         return Rv64WmProcessLiveness(process_id: process_id, queried: false, alive: false, reason: "process-id-zero")
@@ -27,8 +33,9 @@ pub fn rv64_wm_process_liveness(process_id: u64) -> Rv64WmProcessLiveness:
         case Ok(entry):
             if entry.pid != process_id:
                 return Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: false, reason: "process-identity-mismatch")
-            if entry.state == 3:
-                return Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: false, reason: "process-zombie")
+            if not rv64_wm_task_state_alive(entry.state):
+                val reason = if entry.state == TASK_STATE_CODE_PREPARING_EXIT_V1: "process-preparing-exit" else: "process-zombie"
+                return Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: false, reason: reason)
             Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: true, reason: "live")
         case Err(_):
             Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: false, reason: "process-query-failed")
@@ -51,7 +58,7 @@ pub class Rv64ProductionWmAdapter:
         self.ready = false
 
     pub me observe_process(observation: Rv64WmProcessLiveness):
-        if self.failed or self.ready:
+        if self.failed:
             return
         if self.process_id == 0u64:
             self.mark_failed("process-id-zero")
