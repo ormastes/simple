@@ -1,0 +1,117 @@
+use std.spec
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestResourceLimits, ManifestTarget, SimpleArtifactManifest
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    encode_simple_artifact_manifest_v1_signing_bytes
+}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SimpleboxSignedCatalogExternalCandidateV1,
+    simplebox_signed_catalog_record_encode_v1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootRecordV1
+}
+use os.kernel.loader.signed_catalog_scr1_decoder_v1.{
+    signed_catalog_scr1_decode_v1,
+    signed_catalog_scr1_bind_digest_v1,
+    signed_catalog_scr1_bind_payload_v1
+}
+
+fn generic_target() -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos")
+
+fn generic_candidate(payload: [u8]) -> SimpleboxSignedCatalogExternalCandidateV1:
+    val digest = sha256_u8_hex(payload)
+    val signature = "ed25519:catalog-key:" + "35" * 64
+    val manifest = SimpleArtifactManifest(
+        format_version: 1, artifact_kind: "native-executable",
+        target: generic_target(), entrypoint: "/usr/bin/catalog-tool",
+        required_abi_features: [], required_services: [],
+        required_capabilities: 0u32,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: 2097152, max_open_handles: 8,
+            max_threads: 1, cpu_budget_us: 0),
+        namespace_template: "catalog-tool", native_libraries: [],
+        smf_libraries: [], interpreter: "", argument_schema: [],
+        startup_preloads: [], content_hashes: [digest],
+        signature: signature, debug_identity: "catalog-tool")
+    val sam1 = encode_simple_artifact_manifest_v1_signing_bytes(manifest, digest)
+    SimpleboxSignedCatalogExternalCandidateV1(
+        sam1_identity_sha256: sha256_u8_hex(sam1.bytes),
+        record: InstalledArtifactBootRecordV1(
+            canonical_path: "/usr/bin/catalog-tool",
+            aliases: ["/bin/catalog-tool"], content_sha256: digest,
+            detached_signature: signature,
+            expected_trust_root_sha256: "46" * 32,
+            manifest: manifest))
+
+fn generic_scr1(payload: [u8]) -> [u8]:
+    simplebox_signed_catalog_record_encode_v1(generic_candidate(payload)).unwrap()
+
+describe "generic signed catalog SCR1 decoder":
+    it "derives SAM1 signature material and preserves canonical re-encoding":
+        val payload = [3u8, 1u8, 4u8, 1u8, 5u8]
+        val scr1 = generic_scr1(payload)
+        val decoded = signed_catalog_scr1_decode_v1(scr1).unwrap()
+        expect(decoded.record.manifest.signature).to_equal(
+            decoded.record.detached_signature)
+        expect(sha256_u8_hex(decoded.sam1_bytes)).to_equal(
+            decoded.sam1_identity_sha256)
+        expect(decoded.scr1_sha256).to_equal(sha256_u8_hex(scr1))
+        expect(simplebox_signed_catalog_record_encode_v1(
+            SimpleboxSignedCatalogExternalCandidateV1(
+                sam1_identity_sha256: decoded.sam1_identity_sha256,
+                record: decoded.record)).unwrap()).to_equal(scr1)
+
+    it "binds a non-Simplebox row to payload hash, target, and path":
+        val payload = [3u8, 1u8, 4u8, 1u8, 5u8]
+        val decoded = signed_catalog_scr1_decode_v1(generic_scr1(payload)).unwrap()
+        val digest_bound = signed_catalog_scr1_bind_digest_v1(
+            decoded, sha256_u8_hex(payload), payload.len() as i64,
+            generic_target(), "/usr/bin/catalog-tool")
+        val bound = signed_catalog_scr1_bind_payload_v1(
+            decoded, payload, generic_target(), "/usr/bin/catalog-tool")
+        expect(digest_bound.?).to_be(true)
+        expect(bound.?).to_be(true)
+        expect(bound.unwrap().payload_sha256).to_equal(sha256_u8_hex(payload))
+        expect(bound.unwrap().payload_byte_count).to_equal(payload.len())
+
+    it "rejects payload, target, path, SAM1 identity, and noncanonical SCR1 changes":
+        val payload = [3u8, 1u8, 4u8, 1u8, 5u8]
+        val scr1 = generic_scr1(payload)
+        val decoded = signed_catalog_scr1_decode_v1(scr1).unwrap()
+        expect(signed_catalog_scr1_bind_payload_v1(
+            decoded, [9u8], generic_target(), "/usr/bin/catalog-tool").?).to_be(false)
+        expect(signed_catalog_scr1_bind_payload_v1(
+            decoded, payload,
+            ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+            "/usr/bin/catalog-tool").?).to_be(false)
+        expect(signed_catalog_scr1_bind_payload_v1(
+            decoded, payload, generic_target(), "/usr/bin/other").?).to_be(false)
+        expect(signed_catalog_scr1_bind_digest_v1(
+            decoded, "A" * 64, payload.len() as i64,
+            generic_target(), "/usr/bin/catalog-tool").?).to_be(false)
+        expect(signed_catalog_scr1_bind_digest_v1(
+            decoded, sha256_u8_hex(payload), 0,
+            generic_target(), "/usr/bin/catalog-tool").?).to_be(false)
+        var trailing = scr1
+        trailing.push(0u8)
+        expect(signed_catalog_scr1_decode_v1(trailing).?).to_be(false)
+        var changed_sam1_hash = scr1
+        # Locate the fixed-width SAM1 identity by scanning its known digest.
+        val identity = generic_candidate(payload).sam1_identity_sha256.bytes()
+        var offset: i64 = 0
+        while offset + identity.len() <= changed_sam1_hash.len():
+            var matches = true
+            var index: i64 = 0
+            while index < identity.len():
+                if changed_sam1_hash[offset + index] != identity[index]: matches = false
+                index = index + 1
+            if matches:
+                changed_sam1_hash[offset] = if changed_sam1_hash[offset] == 48u8: 49u8 else: 48u8
+                offset = changed_sam1_hash.len()
+            else:
+                offset = offset + 1
+        expect(signed_catalog_scr1_decode_v1(changed_sam1_hash).?).to_be(false)

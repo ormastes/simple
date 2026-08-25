@@ -87,6 +87,8 @@ pub(package) struct SignedCatalogEncodedRecordV1:
 
 pub(package) struct SignedCatalogEncodedBatch3V1:
     records: [[u8]]
+pub(package) struct SignedCatalogEncodedBatchNV1:
+    records: [[u8]]
 
 fn _field(document: text, name: text) -> text:
     val prefix = name + "="
@@ -313,15 +315,33 @@ pub(package) fn signed_catalog_encode_authenticated_batch3_v1(
     if manifests.len() != 3 or receipts.len() != 3 or aliases.len() != 3 or
         outputs.len() != 3 or canonical_paths.len() != 3 or seed.len() != 32:
         return Err("authenticated-batch3-shape")
+    val encoded = signed_catalog_encode_authenticated_batch_n_v1(
+        manifests, receipts, seed, trust, aliases, outputs, canonical_paths,
+        expected_target_arch)?
+    Ok(SignedCatalogEncodedBatch3V1(records: encoded.records))
+
+pub(package) fn signed_catalog_encode_authenticated_batch_n_v1(
+    manifests: [[u8]], receipts: [text], seed: [u8], trust: [u8],
+    aliases: [[u8]], outputs: [text], canonical_paths: [text],
+    expected_target_arch: text,
+) -> Result<SignedCatalogEncodedBatchNV1, text>:
+    """Encode one through sixteen records from pre-snapshotted controls."""
+    # Keep this batch bounded so all caller-provided vectors are validated
+    # before signing work begins and one malformed shape cannot partially run.
+    val count = manifests.len()
+    if count <= 0 or count > 16 or receipts.len() != count or
+        aliases.len() != count or outputs.len() != count or
+        canonical_paths.len() != count or seed.len() != 32:
+        return Err("authenticated-batch-n-shape")
     var records: [[u8]] = []
     var index: i64 = 0
-    while index < 3:
+    while index < count:
         val encoded = _signed_catalog_encode_authenticated_material_v1(
             manifests[index], receipts[index], seed, trust, aliases[index],
             outputs[index], canonical_paths[index], expected_target_arch)?
         records.push(encoded.bytes)
         index = index + 1
-    Ok(SignedCatalogEncodedBatch3V1(records: records))
+    Ok(SignedCatalogEncodedBatchNV1(records: records))
 
 pub fn signed_catalog_record_produce_v1(
     request: SignedCatalogRecordProduceRequestV1,
