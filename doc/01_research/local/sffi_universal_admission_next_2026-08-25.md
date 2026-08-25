@@ -2521,6 +2521,34 @@ lock, hash, or signature check.  One `free` is added only on an allocation
 failure that previously leaked.  Provider semantics and exact-artifact proof
 remain incomplete; verified-and-signed admission remains 0.
 
+## simple-core array-query authority and load-hoisting checkpoint
+
+`core_array_query.spl` had ten untagged raw declarations and 92 recognized
+missing-authority calls.  Every declaration is now contract/capability tagged
+and every used operation has a mandatory-inline minimal owner.  Pointer loads,
+stores, and borrowed item projection require `ffi, raw_ptr`; array handles,
+copy/reverse/push, and string join use `ffi`.
+
+The index-of, last-index-of, and count loops previously loaded the same array
+slot twice per iteration for their range-style equality test.  Each now loads
+once into a local and reuses it.  This preserves the existing comparison
+semantics while halving slot-load traffic in those three O(n) hot loops.
+
+`simple-core-array-query-authority.shs` passed, pinning declarations, owners,
+provider definitions, both memory-intrinsic lowerings, inline policy, and the
+single-load loop shape.  Census results:
+
+- raw call sites: 19,836 -> 19,754
+- missing authority: 15,784 -> 15,692
+- lexical unsafe: 3,133 -> 3,143
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+No allocation, copy, scan pass, lookup, lock, hash, signature check, or generic
+dispatch was added.  The three loops retain O(n) complexity with fewer loads.
+Provider semantics and artifact proof remain incomplete; verified-and-signed
+admission remains 0.
+
 ## simple-core filesystem open/seek authority checkpoint
 
 The next 40 `core_fs.spl` operations—heap allocation, FILE/path opening,
