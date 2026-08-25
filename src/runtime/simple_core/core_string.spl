@@ -12,17 +12,17 @@ extern fn free(ptr: i64)
 extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
 @unsafe(reason: "raw memory pointer/extent comparison ABI", capabilities: [ffi, raw_ptr])
 extern fn memcmp(left: i64, right: i64, n: i64) -> i64
-@unsafe(reason: "raw NUL-terminated integer parse and end-pointer output ABI", capabilities: [ffi])
+@unsafe(reason: "raw NUL-terminated integer parse and end-pointer output ABI", capabilities: [ffi, raw_ptr])
 extern fn strtoll(ptr: i64, endptr: i64, base: i64) -> i64
-@unsafe(reason: "raw NUL-terminated float parse and end-pointer output ABI", capabilities: [ffi])
+@unsafe(reason: "raw NUL-terminated float parse and end-pointer output ABI", capabilities: [ffi, raw_ptr])
 extern fn strtod(ptr: i64, endptr: i64) -> f64
-@unsafe(reason: "raw NUL-terminated string pointer length ABI", capabilities: [ffi])
+@unsafe(reason: "raw NUL-terminated string pointer length ABI", capabilities: [ffi, raw_ptr])
 extern fn strlen(ptr: i64) -> i64
 @unsafe(reason: "raw f64 bit-representation ABI", capabilities: [ffi])
 extern fn spl_f64_to_bits(value: f64) -> i64
-@unsafe(reason: "raw file-descriptor pointer/count write ABI", capabilities: [ffi])
+@unsafe(reason: "raw file-descriptor pointer/count write ABI", capabilities: [ffi, raw_ptr])
 extern fn write(fd: i64, ptr: i64, count: i64) -> i64
-@unsafe(reason: "raw file-descriptor mutable pointer/count read ABI", capabilities: [ffi])
+@unsafe(reason: "raw file-descriptor mutable pointer/count read ABI", capabilities: [ffi, raw_ptr])
 extern fn read(fd: i64, ptr: i64, count: i64) -> i64
 @unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
@@ -123,6 +123,31 @@ fn _sffi_memcpy(dst: i64, src: i64, n: i64) -> i64:
 fn _sffi_memcmp(left: i64, right: i64, n: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]):
         memcmp(left, right, n)
+
+@always_inline
+fn _sffi_strtoll(ptr: i64, endptr: i64, base: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        strtoll(ptr, endptr, base)
+
+@always_inline
+fn _sffi_strtod(ptr: i64, endptr: i64) -> f64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        strtod(ptr, endptr)
+
+@always_inline
+fn _sffi_strlen(ptr: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        strlen(ptr)
+
+@always_inline
+fn _sffi_write(fd: i64, ptr: i64, count: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        write(fd, ptr, count)
+
+@always_inline
+fn _sffi_read(fd: i64, ptr: i64, count: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        read(fd, ptr, count)
 # UTF-8 slice-boundary audit, stage 1 (COUNTING ONLY). Level-gated by
 # SIMPLE_UTF8_SLICE_AUDIT and DEFAULT OFF; defined in
 # src/runtime/runtime_simd_utf8.c, which owns the validator this tier has no
@@ -183,7 +208,7 @@ fn write_string_to_fd(fd: i64, value: i64) -> i64:
     val len = string_len_ptr(ptr)
     if len < 1:
         return 0
-    return write(fd, string_data_ptr_value(ptr), len)
+    return _sffi_write(fd, string_data_ptr_value(ptr), len)
 
 pub fn rt_string_new_literal(bytes: i64, len: i64) -> i64:
     rt_string_new(bytes, len)
@@ -228,7 +253,7 @@ pub fn rt_string_len(value: i64) -> i64:
     if ptr > 0:
         return string_len_ptr(ptr)
     if value > 65535:
-        return strlen(value)
+        return _sffi_strlen(value)
     return -1
 
 pub fn rt_string_data(value: i64) -> i64:
@@ -922,10 +947,10 @@ pub fn rt_string_to_int(value: i64) -> i64:
     val ptr = string_ptr(value)
     if ptr < 1:
         return 0
-    return strtoll(string_data_ptr_value(ptr), 0, 10)
+    return _sffi_strtoll(string_data_ptr_value(ptr), 0, 10)
 
 # Task #118: sibling of rt_string_to_int() with the canonical `int(text)`
-# semantics — a total, leading-numeric-prefix parse. strtoll() already IS
+# semantics — a total, leading-numeric-prefix parse. _sffi_strtoll() already IS
 # this (skips whitespace/sign, parses leading digits, stops at the first
 # non-digit, returns 0 if none), so this is byte-for-byte identical to
 # rt_string_to_int() above. Named distinctly so the Rust-native
@@ -935,7 +960,7 @@ pub fn rt_string_to_int_lenient(value: i64) -> i64:
     val ptr = string_ptr(value)
     if ptr < 1:
         return 0
-    return strtoll(string_data_ptr_value(ptr), 0, 10)
+    return _sffi_strtoll(string_data_ptr_value(ptr), 0, 10)
 
 pub fn rt_to_string(value: i64) -> i64:
     val ptr = string_ptr(value)
@@ -1197,7 +1222,7 @@ fn write_null_page_diag(fd: i64) -> i64:
     _sffi_store_u8(buf, 42, 101)
     _sffi_store_u8(buf, 43, 100)
     _sffi_store_u8(buf, 44, 10)
-    write(fd, buf, 45)
+    _sffi_write(fd, buf, 45)
     return 0
 
 pub fn rt_print_str(ptr: i64, len: i64) -> i64:
@@ -1205,7 +1230,7 @@ pub fn rt_print_str(ptr: i64, len: i64) -> i64:
         write_null_page_diag(2)
         return 0
     if ptr > 0 and len > 0:
-        write(1, ptr, len)
+        _sffi_write(1, ptr, len)
     return 0
 
 pub fn rt_println_value(value: i64) -> i64:
@@ -1213,7 +1238,7 @@ pub fn rt_println_value(value: i64) -> i64:
     val nl = _sffi_malloc(1)
     if nl > 0:
         _sffi_store_u8(nl, 0, 10)
-        write(1, nl, 1)
+        _sffi_write(1, nl, 1)
     return 0
 
 pub fn rt_println_str(ptr: i64, len: i64) -> i64:
@@ -1221,7 +1246,7 @@ pub fn rt_println_str(ptr: i64, len: i64) -> i64:
     val nl = _sffi_malloc(1)
     if nl > 0:
         _sffi_store_u8(nl, 0, 10)
-        write(1, nl, 1)
+        _sffi_write(1, nl, 1)
     return 0
 
 pub fn rt_eprint_value(value: i64) -> i64:
@@ -1233,7 +1258,7 @@ pub fn rt_eprint_str(ptr: i64, len: i64) -> i64:
         write_null_page_diag(2)
         return 0
     if ptr > 0 and len > 0:
-        write(2, ptr, len)
+        _sffi_write(2, ptr, len)
     return 0
 
 pub fn rt_eprintln_value(value: i64) -> i64:
@@ -1241,7 +1266,7 @@ pub fn rt_eprintln_value(value: i64) -> i64:
     val nl = _sffi_malloc(1)
     if nl > 0:
         _sffi_store_u8(nl, 0, 10)
-        write(2, nl, 1)
+        _sffi_write(2, nl, 1)
     return 0
 
 pub fn rt_eprintln_str(ptr: i64, len: i64) -> i64:
@@ -1249,14 +1274,14 @@ pub fn rt_eprintln_str(ptr: i64, len: i64) -> i64:
     val nl = _sffi_malloc(1)
     if nl > 0:
         _sffi_store_u8(nl, 0, 10)
-        write(2, nl, 1)
+        _sffi_write(2, nl, 1)
     return 0
 
 pub fn stdin_read_char() -> i64:
     val byte = _sffi_malloc(1)
     if byte < 1:
         return rt_string_new(0, 0)
-    val count = read(0, byte, 1)
+    val count = _sffi_read(0, byte, 1)
     if count < 1:
         return rt_string_new(0, 0)
     return rt_string_new(byte, 1)
@@ -1574,7 +1599,7 @@ pub fn rt_string_to_float(value: i64) -> i64:
     val end_slot = _sffi_malloc(8)
     if end_slot < 1:
         return 3
-    val parsed = strtod(data, end_slot)
+    val parsed = _sffi_strtod(data, end_slot)
     val end_ptr = _sffi_load_i64(end_slot, 0)
     _sffi_free(end_slot)
     if end_ptr <= data:

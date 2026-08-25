@@ -2311,6 +2311,30 @@ worktree has no production self-hosted binary.  The static shape evidence is
 therefore useful but not performance verification.  Verified-and-signed SFFI
 admission remains 0.
 
+## simple-core string parser/I/O authority checkpoint
+
+Raw NUL-terminated parsing (`strtoll`, `strtod`, `strlen`) and descriptor I/O
+(`read`, `write`) in `core_string.spl` now declare both `ffi` and `raw_ptr`
+authority and are confined to five `@always_inline` capability owners.  The
+legacy unregistered-pointer `strlen` fallback remains explicitly unsafe rather
+than being mislabeled verified; its provenance cannot be established from an
+integer address alone.
+
+The extended memory-authority ratchet passed.  The authoritative census moved
+the thirteen retained operations behind five lexical owners:
+
+- raw call sites: 20,427 -> 20,419
+- missing authority: 16,503 -> 16,490
+- lexical unsafe: 3,005 -> 3,010
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Mandatory inlining preserves the direct parser/syscall operations and adds no
+allocation, copy, scan, lookup, lock, hash, signature verification, or generic
+dispatch.  Existing signed length/status returns are preserved rather than
+converted to booleans.  Production timing/RSS and exact-artifact evidence are
+still unavailable; verified-and-signed admission remains 0.
+
 ## Pure Simple SSH cipher boundary checkpoint
 
 The general SSH cipher no longer declares or calls `serial_println` or
