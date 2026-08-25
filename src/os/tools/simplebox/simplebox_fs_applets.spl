@@ -15,6 +15,7 @@ pub const SIMPLEBOX_FILE_LIMIT: i64 = 128
 pub const SIMPLEBOX_FILE_BYTES_LIMIT: u64 = 67108864u64
 pub const SIMPLEBOX_READ_CHUNK_BYTES: u64 = 65536u64
 pub const SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT: u64 = 4096u64
+pub const SIMPLEBOX_TAIL_LINE_LIMIT: i64 = 1000000
 
 pub fn simplebox_readlink(args: [text]) -> i32:
     """Print one bounded symbolic-link target through canonical VFS IPC."""
@@ -194,6 +195,102 @@ pub fn simplebox_head(args: [text]) -> i32:
                             return 1
             0
 
+fn _parse_tail_args(args: [text]) -> Result<(i64, [text]), text>:
+    var line_limit: i64 = 10
+    var start: u64 = 0u64
+    if args.len() >= 2u64 and args[0] == "-n":
+        val parsed = args[1].parse_i64()
+        if parsed == nil or parsed.unwrap() < 0 or parsed.unwrap() > SIMPLEBOX_TAIL_LINE_LIMIT:
+            return Err("tail: invalid line count")
+        line_limit = parsed.unwrap()
+        start = 2u64
+    val checked = _file_args_with_limit("tail", args.slice(start, args.len()))
+    match checked:
+        case Err(reason): Err(reason)
+        case Ok(paths): Ok((line_limit, paths))
+
+fn _tail_start_offset(chunks: [[u8]], total_bytes: u64, line_limit: i64) -> u64:
+    if line_limit == 0 or total_bytes == 0u64:
+        return total_bytes
+    var remaining = line_limit
+    var global_end = total_bytes
+    var chunk_index = chunks.len()
+    # A terminal LF closes the final requested line; do not treat the empty
+    # position after it as an extra line.
+    var skip_terminal_lf = true
+    while chunk_index > 0u64:
+        chunk_index = chunk_index - 1u64
+        val chunk = chunks[chunk_index]
+        var index = chunk.len()
+        while index > 0u64:
+            index = index - 1u64
+            val byte = chunk[index]
+            if skip_terminal_lf and byte == 10u8:
+                skip_terminal_lf = false
+            else:
+                skip_terminal_lf = false
+                if byte == 10u8:
+                    remaining = remaining - 1
+                    if remaining == 0:
+                        return global_end - chunk.len() + index + 1u64
+        global_end = global_end - chunk.len()
+    0u64
+
+fn _write_tail_chunks(chunks: [[u8]], start_offset: u64) -> Result<bool, text>:
+    var base: u64 = 0u64
+    for chunk in chunks:
+        val chunk_end = base + chunk.len()
+        if chunk_end > start_offset:
+            val local_start = if start_offset > base: start_offset - base else: 0u64
+            val write = _write_stdout_bytes(chunk.slice(local_start, chunk.len()))
+            match write:
+                case Err(reason): return Err(reason)
+                case Ok(_): ()
+        base = chunk_end
+    Ok(true)
+
+pub fn simplebox_tail(args: [text]) -> i32:
+    """Print the last ten lines by default, bounded through canonical VFS IPC."""
+    val parsed = _parse_tail_args(args)
+    match parsed:
+        case Err(reason):
+            stdout_write(reason + "\n")
+            1
+        case Ok((line_limit, paths)):
+            for path in paths:
+                val opened = file_open_direct(path, 0u32)
+                match opened:
+                    case Err(reason):
+                        stdout_write("tail: " + path + ": " + reason + "\n")
+                        return 1
+                    case Ok(fd):
+                        var chunks: [[u8]] = []
+                        var consumed: u64 = 0u64
+                        var failure = ""
+                        var complete = false
+                        while not complete and failure == "":
+                            val read = file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES)
+                            match read:
+                                case Err(reason): failure = reason
+                                case Ok(chunk):
+                                    if chunk.len() == 0u64:
+                                        complete = true
+                                    elif consumed + chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT:
+                                        failure = "file exceeds simplebox byte limit"
+                                    else:
+                                        consumed = consumed + chunk.len()
+                                        chunks.push(chunk)
+                        failure = _close_result(fd, failure)
+                        if failure == "":
+                            val start_offset = _tail_start_offset(chunks, consumed, line_limit)
+                            match _write_tail_chunks(chunks, start_offset):
+                                case Err(reason): failure = "stdout: " + reason
+                                case Ok(_): ()
+                        if failure != "":
+                            stdout_write("tail: " + path + ": " + failure + "\n")
+                            return 1
+            0
+
 fn _wc_line(count: SimpleboxWordCount, path: text) -> text:
     "{count.lines} {count.words} {count.bytes} {path}\n"
 
@@ -366,8 +463,11 @@ pub fn simplebox_cp(args: [text]) -> i32:
                                         else:
                                             var write_offset: u64 = 0u64
                                             while write_offset < chunk.len() and failure == "":
-                                                val remaining = chunk.slice(
-                                                    write_offset as i64, chunk.len() as i64)
+                                                # Keep the driver's freshly returned chunk on the
+                                                # common full-write path.  Materialize a suffix only
+                                                # when a short write actually requires a retry.
+                                                val remaining = if write_offset == 0u64 then chunk else:
+                                                    chunk.slice(write_offset as i64, chunk.len() as i64)
                                                 match file_write_direct(destination_fd, remaining):
                                                     case Err(reason): failure = "write: " + reason
                                                     case Ok(count):

@@ -3,7 +3,8 @@
 # mutation authorities; this client additionally owns bounded wire validation.
 
 use os.userlib.fs.{vfs_ipc_request_bytes}
-use os.userlib.ipc_protocol.{VFS_MKDIR, VFS_REMOVE, VFS_RENAME, VFS_RMDIR, VFS_CHMOD, VFS_SYMLINK}
+use os.userlib.ipc_protocol.{VFS_MKDIR, VFS_REMOVE, VFS_RENAME, VFS_RMDIR, VFS_CHMOD, VFS_SYMLINK, VFS_READLINK}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
 
 pub const VFS_MUTATION_PATH_MAX_BYTES: u64 = 4096u64
 
@@ -113,3 +114,16 @@ pub fn vfs_symlink_checked(target: text, link_path: text) -> Result<bool, text>:
     if _read_u64_le(response) != 1u64:
         return Err("VFS symbolic-link mutation was not acknowledged")
     Ok(true)
+
+pub fn vfs_readlink_checked(path: text) -> Result<text, text>:
+    """Read one bounded symbolic-link target through the canonical VFS owner."""
+    val payload = _mutation_path_bytes(path)?
+    val response = vfs_ipc_request_bytes(VFS_READLINK, payload)?
+    if response.len() == 0u64:
+        return Err("VFS symbolic-link target is empty")
+    if response.len() > VFS_MUTATION_PATH_MAX_BYTES:
+        return Err("VFS symbolic-link target exceeds 4096-byte limit")
+    for byte in response:
+        if byte == 0u8:
+            return Err("VFS symbolic-link target contains NUL")
+    Ok(bytes_to_string(response))

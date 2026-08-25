@@ -2,9 +2,12 @@
 
 use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_put_u32, ssh_put_string, ssh_put_text}
 use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_open, g_vfs_positioned_close, g_vfs_positioned_read_at, g_vfs_positioned_write_at}
+use os.services.vfs.vfs_write_ops.{g_vfs_readdir}
+use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.types.{OpenFlags}
-use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear, text_to_bytes_linear}
+use std.common.path_pure.{path_basename, path_dirname}
 
 val SSH_FXP_INIT: u8 = 1
 val SSH_FXP_VERSION: u8 = 2
@@ -12,9 +15,12 @@ val SSH_FXP_OPEN: u8 = 3
 val SSH_FXP_CLOSE: u8 = 4
 val SSH_FXP_READ: u8 = 5
 val SSH_FXP_WRITE: u8 = 6
+val SSH_FXP_OPENDIR: u8 = 11
+val SSH_FXP_READDIR: u8 = 12
 val SSH_FXP_STATUS: u8 = 101
 val SSH_FXP_HANDLE: u8 = 102
 val SSH_FXP_DATA: u8 = 103
+val SSH_FXP_NAME: u8 = 104
 val SSH_FX_OK: u32 = 0
 val SSH_FX_EOF: u32 = 1
 val SSH_FX_NO_SUCH_FILE: u32 = 2
@@ -34,6 +40,8 @@ val SFTP_MAX_PACKET: u32 = 35000
 val SFTP_MAX_PATH: u64 = 4096
 val SFTP_MAX_IO: u64 = 32768
 val SFTP_MAX_HANDLES: u64 = 32
+val SFTP_MAX_DIR_ENTRIES: u64 = 1024
+val SFTP_MAX_READDIR_BATCH: u64 = 32
 val SFTP_HANDLE_MAGIC: u32 = 0x53465450u32
 val SFTP_ACCUMULATOR_CAP: u64 = (SFTP_MAX_PACKET.to_u64() + 4u64) * 2u64
 val SFTP_COUNTER_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
@@ -63,8 +71,16 @@ class SftpSessionV3:
     handle_active: [bool]
     handle_readable: [bool]
     handle_writable: [bool]
+    handle_directory: [bool]
+    directory_entries: [[DirEntry]]
+    directory_offsets: [u64]
 
     pub static fn new() -> SftpSessionV3:
+        var directory_entries: [[DirEntry]] = []
+        var slot: u64 = 0
+        while slot < SFTP_MAX_HANDLES:
+            directory_entries.push([])
+            slot = slot + 1u64
         SftpSessionV3(
             initialized: false,
             client_version: 0,
@@ -81,7 +97,10 @@ class SftpSessionV3:
             handle_generations: [1u32; SFTP_MAX_HANDLES],
             handle_active: [false; SFTP_MAX_HANDLES],
             handle_readable: [false; SFTP_MAX_HANDLES],
-            handle_writable: [false; SFTP_MAX_HANDLES]
+            handle_writable: [false; SFTP_MAX_HANDLES],
+            handle_directory: [false; SFTP_MAX_HANDLES],
+            directory_entries: directory_entries,
+            directory_offsets: [0u64; SFTP_MAX_HANDLES]
         )
 
 fn _record_work(current: u64, added: u64) -> (u64, bool):
@@ -102,6 +121,32 @@ fn _frame(body: [u8]) -> [u8]:
     for byte in body:
         out.push(byte)
     out
+
+fn _put_u64(out: [u8], value: u64) -> [u8]:
+    var encoded = out
+    var shift: u64 = 56
+    while true:
+        encoded.push(((value >> shift) & 255u64).to_u8())
+        if shift == 0u64: return encoded
+        shift = shift - 8u64
+
+fn _node_mode(node: FsNode) -> u32:
+    val kind = match node.kind:
+        case FsNodeKind.Directory: 0o040000u32
+        case FsNodeKind.Symlink: 0o120000u32
+        case FsNodeKind.Device: 0o060000u32
+        case FsNodeKind.Pipe: 0o010000u32
+        case _: 0o100000u32
+    kind | node.permissions.to_u32()
+
+fn _put_attrs(out: [u8], node: FsNode) -> [u8]:
+    # v3 SIZE | UIDGID | PERMISSIONS. FsNode does not carry access time, so
+    # ACMODTIME is deliberately omitted rather than substituting creation time.
+    var encoded = ssh_put_u32(out, 0x00000007u32)
+    encoded = _put_u64(encoded, node.size)
+    encoded = ssh_put_u32(encoded, node.owner)
+    encoded = ssh_put_u32(encoded, node.group)
+    ssh_put_u32(encoded, _node_mode(node))
 
 fn _status(request_id: u32, code: u32, message: text) -> [u8]:
     var body: [u8] = [SSH_FXP_STATUS]
@@ -172,7 +217,8 @@ impl SftpSessionV3:
         var slot: u64 = 0
         while slot < SFTP_MAX_HANDLES:
             if self.handle_active[slot]:
-                val _closed = g_vfs_positioned_close(self.file_objects[slot])
+                if not self.handle_directory[slot]:
+                    val _closed = g_vfs_positioned_close(self.file_objects[slot])
                 self._retire_handle(slot)
             slot = slot + 1u64
         self.initialized = false
@@ -184,6 +230,9 @@ impl SftpSessionV3:
         self.handle_active[slot] = false
         self.handle_readable[slot] = false
         self.handle_writable[slot] = false
+        self.handle_directory[slot] = false
+        self.directory_entries[slot] = []
+        self.directory_offsets[slot] = 0u64
         var generation = self.handle_generations[slot] + 1u32
         if generation == 0u32: generation = 1u32
         self.handle_generations[slot] = generation
@@ -216,9 +265,112 @@ impl SftpSessionV3:
                 self.handle_active[slot] = true
                 self.handle_readable[slot] = readable
                 self.handle_writable[slot] = writable
+                self.handle_directory[slot] = false
                 return slot.to_i64()
             slot = slot + 1u64
         -1
+
+    fn _alloc_directory(entries: [DirEntry]) -> i64:
+        var slot: u64 = 0
+        while slot < SFTP_MAX_HANDLES:
+            if not self.handle_active[slot]:
+                self.file_objects[slot] = 0u64
+                self.handle_active[slot] = true
+                self.handle_readable[slot] = false
+                self.handle_writable[slot] = false
+                self.handle_directory[slot] = true
+                self.directory_entries[slot] = entries
+                self.directory_offsets[slot] = 0u64
+                return slot.to_i64()
+            slot = slot + 1u64
+        -1
+
+    fn _lookup_node(path: text) -> Option<FsNode>:
+        if path == "/": return nil
+        var parent = path_dirname(path)
+        if parent == "": parent = "/"
+        val base = path_basename(path)
+        if base == "": return nil
+        val entries = g_vfs_readdir(parent)
+        for entry in entries:
+            if entry.name == base: return Some(entry.node)
+        nil
+
+    me _handle_opendir(frame: [u8], request_id: u32) -> [u8]:
+        if frame.len() < 13u64:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "truncated opendir request")
+        val path_len = ssh_get_u32(frame, 9u64).to_u64()
+        if path_len == 0u64 or path_len > SFTP_MAX_PATH or 13u64 + path_len != frame.len():
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid opendir framing")
+        var path_bytes: [u8] = []
+        var i: u64 = 0
+        while i < path_len:
+            path_bytes.push(frame[13u64 + i])
+            i = i + 1u64
+        if not _path_is_admitted(path_bytes):
+            return _status(request_id, SSH_FX_PERMISSION_DENIED, "path denied")
+        match validated_utf8_bytes_to_text_linear(path_bytes):
+            Err(_): _status(request_id, SSH_FX_BAD_MESSAGE, "path is not valid UTF-8")
+            Ok(path):
+                if path != "/":
+                    if val node = self._lookup_node(path):
+                        if node.kind != FsNodeKind.Directory:
+                            return _status(request_id, SSH_FX_FAILURE, "path is not a directory")
+                    else:
+                        return _status(request_id, SSH_FX_NO_SUCH_FILE, "directory not found")
+                val entries = g_vfs_readdir(path)
+                # The canonical compatibility API maps both an empty directory
+                # and a backend error to []. Refuse the ambiguous case so an
+                # I/O failure is never reported as a successful empty listing.
+                if entries.len() == 0u64:
+                    return _status(request_id, SSH_FX_FAILURE, "empty or unavailable directory unsupported")
+                if entries.len() > SFTP_MAX_DIR_ENTRIES:
+                    return _status(request_id, SSH_FX_FAILURE, "directory snapshot limit reached")
+                for entry in entries:
+                    if text_to_bytes_linear(entry.name).len() > SFTP_MAX_PATH:
+                        return _status(request_id, SSH_FX_FAILURE, "directory entry name too long")
+                val slot = self._alloc_directory(entries)
+                if slot < 0:
+                    return _status(request_id, SSH_FX_FAILURE, "handle limit reached")
+                var body: [u8] = [SSH_FXP_HANDLE]
+                body = ssh_put_u32(body, request_id)
+                body = ssh_put_string(body, self._handle_token(slot.to_u64()))
+                _frame(body)
+
+    me _handle_readdir(frame: [u8], request_id: u32) -> [u8]:
+        val slot = self._decode_handle(frame, 9u64)
+        if slot < 0:
+            return _status(request_id, SSH_FX_FAILURE, "invalid handle")
+        val index = slot.to_u64()
+        if not self.handle_directory[index]:
+            return _status(request_id, SSH_FX_FAILURE, "handle is not a directory")
+        val entries = self.directory_entries[index]
+        var cursor = self.directory_offsets[index]
+        if cursor >= entries.len():
+            return _status(request_id, SSH_FX_EOF, "eof")
+        var encoded_entries: [u8] = []
+        var count: u32 = 0u32
+        while cursor < entries.len() and count.to_u64() < SFTP_MAX_READDIR_BATCH:
+            val entry = entries[cursor]
+            val name = text_to_bytes_linear(entry.name)
+            var encoded: [u8] = []
+            encoded = ssh_put_string(encoded, name)
+            encoded = ssh_put_string(encoded, name)
+            encoded = _put_attrs(encoded, entry.node)
+            # type + id + count + entry payload must fit the negotiated cap.
+            if 13u64 + encoded_entries.len() + encoded.len() > SFTP_MAX_PACKET.to_u64():
+                if count == 0u32:
+                    return _status(request_id, SSH_FX_FAILURE, "directory entry exceeds packet limit")
+                break
+            for byte in encoded: encoded_entries.push(byte)
+            cursor = cursor + 1u64
+            count = count + 1u32
+        var body: [u8] = [SSH_FXP_NAME]
+        body = ssh_put_u32(body, request_id)
+        body = ssh_put_u32(body, count)
+        for byte in encoded_entries: body.push(byte)
+        self.directory_offsets[index] = cursor
+        _frame(body)
 
     me _handle_open(frame: [u8], request_id: u32) -> [u8]:
         if frame.len() < 21u64:
@@ -271,6 +423,9 @@ impl SftpSessionV3:
         if slot < 0:
             return _status(request_id, SSH_FX_FAILURE, "invalid handle")
         val index = slot.to_u64()
+        if self.handle_directory[index]:
+            self._retire_handle(index)
+            return _status(request_id, SSH_FX_OK, "ok")
         val closed = g_vfs_positioned_close(self.file_objects[index])
         self._retire_handle(index)
         match closed:
@@ -442,6 +597,10 @@ impl SftpSessionV3:
             return self._handle_read(frame, request_id)
         if kind == SSH_FXP_WRITE:
             return self._handle_write(frame, request_id)
+        if kind == SSH_FXP_OPENDIR:
+            return self._handle_opendir(frame, request_id)
+        if kind == SSH_FXP_READDIR:
+            return self._handle_readdir(frame, request_id)
         _status(request_id, SSH_FX_OP_UNSUPPORTED,
             "sftp operation unsupported")
 
