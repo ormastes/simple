@@ -4000,3 +4000,33 @@ this checkpoint.  No production self-hosted optimizer or benchmark was
 available.  GLFW lifetime, callback, and artifact-evidence obligations remain
 unsafe, so this module is not globally verified or signed; verified-and-signed
 admission remains 0.
+
+## MIR-to-LLVM core codegen authority checkpoint
+
+The core textual LLVM lowering now confines its seven used foreign ABI
+families to mandatory-inline lexical `unsafe(ffi)` owners.  The environment
+read contract is truthfully nullable, and the unused `rt_string_len`
+declaration was removed instead of granting unused authority.
+
+This is a hot compiler path: enum discriminant/payload and tuple projection
+run during instruction lowering, while string-builder appends run during IR
+emission.  The focused static ratchet therefore pins every owner as
+`@always_inline` and preserves the exact existing primitive-call counts.  No
+validation scan, table dispatch, lookup, allocation, copy, hash, lock, or new
+loop was added.
+
+The authoritative census changed exactly by routing 41 former direct calls
+through seven owners:
+
+- raw call sites: 19,119 -> 19,085
+- missing authority: 14,930 -> 14,889
+- lexical unsafe: 3,270 -> 3,277
+- function unsafe: unchanged at 919
+
+The focused audit also confirms all seven symbols are present in both the
+typed native registry and interpreter registration.  That is provider
+coverage, not proof: tagged-value layout, handle validity, exact artifact
+identity, signature trust, and evidence admission remain unresolved.  No
+production self-hosted optimizer or benchmark was available, so this module
+and the wider SFFI estate are not globally verified or signed;
+verified-and-signed admission remains 0.

@@ -32,7 +32,9 @@ use compiler.mir.mir_coverage_probe_admission.{
 }
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
+@unsafe(reason: "raw string-builder length ABI", capabilities: [ffi])
 extern fn rt_string_builder_len(handle: i64) -> i64
+@unsafe(reason: "raw string-builder append ABI", capabilities: [ffi])
 extern fn rt_string_builder_push(handle: i64, value: text)
 
 fn llvm_static_linkage(visibility: Visibility) -> text:
@@ -47,6 +49,16 @@ fn bootstrap_llvm_static_linkage(visibility_tag: i64) -> text:
     if visibility_tag == 0: return ""
     if visibility_tag == 5: return "internal "
     "hidden "
+
+@always_inline
+fn _sffi_string_builder_len(handle: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_string_builder_len(handle)
+
+@always_inline
+fn _sffi_string_builder_push(handle: i64, value: text):
+    unsafe(capabilities: [ffi]):
+        rt_string_builder_push(handle, value)
 
 # DS3 debug-info path split: NOT std.nogc_sync_mut.path.{basename, dirname} --
 # empirically, that dirname()'s rfind()-based fast path throws ("match
@@ -71,12 +83,41 @@ fn debug_info_split_path(path: text) -> (text, text):
         directory = "/"
     (filename, directory)
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw tagged-value discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
+@unsafe(reason: "raw tagged-value payload ABI", capabilities: [ffi])
 extern fn rt_enum_payload(value: Any) -> i64
+@unsafe(reason: "raw tuple projection ABI", capabilities: [ffi])
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
+@unsafe(reason: "raw runtime-value integer projection ABI", capabilities: [ffi])
 extern fn rt_value_as_int(value: i64) -> i64
-extern fn rt_string_len(value: text) -> i64
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_enum_discriminant(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+@always_inline
+fn _sffi_enum_payload(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_payload(value)
+
+@always_inline
+fn _sffi_tuple_get(tuple: i64, index: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_tuple_get(tuple, index)
+
+@always_inline
+fn _sffi_value_as_int(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_value_as_int(value)
 
 fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
     # A single-block function is NOT skippable: a straight-line reassignment
@@ -111,7 +152,7 @@ fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
     val alloca_rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
     if alloca_rewritten.applied:
         return MirFunction.with_blocks(fn_, alloca_rewritten.blocks)
-    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+    if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         return fn_
     val rewritten = ssa_var_transform_blocks(fn_.blocks)
     if rewritten.applied:
@@ -135,7 +176,7 @@ fn llvm_module_name_from_entry_path(path: text) -> text:
     module_logical_name_from_path(path)
 
 fn llvm_module_is_native_entry(module_name: text) -> bool:
-    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val native_entry = _sffi_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
     if native_entry == "":
         return true
     module_name == llvm_module_name_from_entry_path(native_entry)
@@ -160,9 +201,9 @@ impl MirTextCodegen for MirToLlvm:
         if coverage_probe_diagnostic != "":
             panic("compile error: {coverage_probe_diagnostic}")
         self.entry_main_symbol = llvm_module_is_native_entry(module.name)
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             llvm_bootstrap_string_globals_reset()
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        val bootstrap_debug = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[llvm-translate] header"
         self.builder.emit_module_header()
@@ -254,7 +295,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[llvm-translate] loop"
         if bootstrap_debug:
-            val real_bootstrap = (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1"
+            val real_bootstrap = (_sffi_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1"
             val bootstrap_function_count = bootstrap_mir_function_count()
             if real_bootstrap:
                 var bootstrap_return_i = 0
@@ -320,7 +361,7 @@ impl MirTextCodegen for MirToLlvm:
                 if not self.defined_func_names.has(unknown_name):
                     self.builder.emit("declare i64 @{unknown_name}(...)")
 
-        val bootstrap_string_globals = if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        val bootstrap_string_globals = if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             llvm_bootstrap_string_globals_text()
         else:
             ""
@@ -385,8 +426,8 @@ impl MirTextCodegen for MirToLlvm:
                     bootstrap_mir_static_visibility_at(index))
                 val line = "{g_name} = {g_linkage}global {g_ty} {g_init}, align {g_alignment}"
                 val newline = "\n"
-                rt_string_builder_push(ir_handle, newline)
-                rt_string_builder_push(ir_handle, line)
+                _sffi_string_builder_push(ir_handle, newline)
+                _sffi_string_builder_push(ir_handle, line)
                 emitted_names[g_name] = true
             index = index + 1
 
@@ -423,7 +464,7 @@ impl MirTextCodegen for MirToLlvm:
         separate MIR-span-propagation fix (DS5); this is line-table-level
         (function granularity) debug info, not full DWARF.
         """
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        val bootstrap_debug = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] function:start {name}"
         self.begin_function_translation(name)
@@ -584,10 +625,10 @@ impl MirTextCodegen for MirToLlvm:
                 Some(id): dbg_suffix = " !dbg !{id}"
                 nil: ()
             val opening = "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{"
-            if rt_string_builder_len(ir_handle) > 0:
+            if _sffi_string_builder_len(ir_handle) > 0:
                 val newline = "\n"
-                rt_string_builder_push(ir_handle, newline)
-            rt_string_builder_push(ir_handle, opening)
+                _sffi_string_builder_push(ir_handle, newline)
+            _sffi_string_builder_push(ir_handle, opening)
         else:
             self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small, dbg_id)
         if bootstrap_debug:
@@ -601,7 +642,7 @@ impl MirTextCodegen for MirToLlvm:
 
         if ir_handle >= 0:
             val closing = "\n}\n"
-            rt_string_builder_push(ir_handle, closing)
+            _sffi_string_builder_push(ir_handle, closing)
         else:
             self.builder.end_function()
         if bootstrap_debug:
@@ -610,7 +651,7 @@ impl MirTextCodegen for MirToLlvm:
     me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64, module_index: i64, ir_handle: i64):
         """Translate a MIR basic block."""
         val block = blocks[block_index]
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        val bootstrap_debug = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] block:label-before"
         val bootstrap_block_id = block.bootstrap_block_id_value()
@@ -633,21 +674,21 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] block:terminator-after bb{bootstrap_block_id}"
 
     me translate_instruction_at(instructions: [MirInst], index: i64, module_index: i64, ir_handle: i64):
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        val bootstrap_debug = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:entry index={index}"
         val inst: MirInst = instructions[index]
         val inst_kind = inst.kind
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:kind index={index}"
-        val const_disc = rt_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
+        val const_disc = _sffi_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:const-discriminant index={index}"
-        if rt_enum_discriminant(inst_kind) == const_disc:
-            val payload = rt_enum_payload(inst_kind)
-            val dest: LocalId = rt_tuple_get(payload, 0)
-            val value: MirConstValue = rt_tuple_get(payload, 1)
-            val ty: MirType = rt_tuple_get(payload, 2)
+        if _sffi_enum_discriminant(inst_kind) == const_disc:
+            val payload = _sffi_enum_payload(inst_kind)
+            val dest: LocalId = _sffi_tuple_get(payload, 0)
+            val value: MirConstValue = _sffi_tuple_get(payload, 1)
+            val ty: MirType = _sffi_tuple_get(payload, 2)
             self.translate_const(dest, value, ty)
             # Fast paths must perform the SAME trailing bookkeeping the
             # fall-through dispatch does. Skipping this call is exactly how the
@@ -658,30 +699,30 @@ impl MirTextCodegen for MirToLlvm:
             self.mark_instruction_dest_defined_at(instructions, index)
             return
 
-        val copy_disc = rt_enum_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
+        val copy_disc = _sffi_enum_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:copy-discriminant index={index}"
-        if rt_enum_discriminant(inst_kind) == copy_disc:
-            val payload = rt_enum_payload(inst_kind)
-            val dest: LocalId = rt_tuple_get(payload, 0)
-            val src: LocalId = rt_tuple_get(payload, 1)
+        if _sffi_enum_discriminant(inst_kind) == copy_disc:
+            val payload = _sffi_enum_payload(inst_kind)
+            val dest: LocalId = _sffi_tuple_get(payload, 0)
+            val src: LocalId = _sffi_tuple_get(payload, 1)
             self.translate_copy_move(dest, src, false)
             # Same invariant as the Const fast path above: mirror the trailing
             # bookkeeping of the fall-through dispatch before returning.
             self.mark_instruction_dest_defined_at(instructions, index)
             return
 
-        val store_global_disc = rt_enum_discriminant(MirInstKind.StoreGlobal(SymbolId(id: 0), mir_operand_const_int(0)))
+        val store_global_disc = _sffi_enum_discriminant(MirInstKind.StoreGlobal(SymbolId(id: 0), mir_operand_const_int(0)))
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:store-global-discriminant index={index}"
-        if rt_enum_discriminant(inst_kind) == store_global_disc:
+        if _sffi_enum_discriminant(inst_kind) == store_global_disc:
             self.translate_store_global_at(instructions, index, module_index, ir_handle)
             return
 
-        val load_global_disc = rt_enum_discriminant(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 0)))
+        val load_global_disc = _sffi_enum_discriminant(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 0)))
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:load-global-discriminant index={index}"
-        if rt_enum_discriminant(inst_kind) == load_global_disc:
+        if _sffi_enum_discriminant(inst_kind) == load_global_disc:
             # Read both payload slots through the typed MirInst accessors, the
             # same shape translate_store_global_at has always used for
             # StoreGlobal. The previous raw decode here
@@ -910,7 +951,7 @@ impl MirTextCodegen for MirToLlvm:
                 # Not a variant: every MirInstKind now has an arm above, so this
                 # is reachable only by a NEW upstream variant with no arm here,
                 # or by a mis-decoded enum handle. It used to be a silent `()`.
-                val unknown_llvm_inst_disc = rt_enum_discriminant(inst_kind)
+                val unknown_llvm_inst_disc = _sffi_enum_discriminant(inst_kind)
                 eprint("[mir-to-llvm] E-BACKEND-LLVM-INST-Unknown disc={unknown_llvm_inst_disc} at={llvm_format_span(inst.span)}")
                 self.emit_unsupported_panic("E-BACKEND-LLVM-INST-Unknown: no LLVM backend arm for MIR instruction kind (discriminant {unknown_llvm_inst_disc}) at {llvm_format_span(inst.span)}")
         self.mark_instruction_dest_defined_at(instructions, index)
@@ -1109,7 +1150,7 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_terminator_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64):
         """Translate a block terminator through its indexed MirBlock owner."""
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        val bootstrap_debug = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] terminator:entry index={block_index}"
         val block = blocks[block_index]
@@ -1133,7 +1174,7 @@ impl MirTextCodegen for MirToLlvm:
                 elif ret_kind == 1 or ret_kind == 2:
                     val packed_return_local = blocks[block_index].bootstrap_ret_local_id()
                     val return_local_id = if packed_return_local > 0xFFFFFFFF:
-                        rt_value_as_int(packed_return_local & 0xFFFFFFFF)
+                        _sffi_value_as_int(packed_return_local & 0xFFFFFFFF)
                     else:
                         packed_return_local
                     if bootstrap_debug:
@@ -1848,7 +1889,7 @@ impl MirTextCodegen for MirToLlvm:
                 self.emit_unsupported_panic("LLVM backend does not support Transpose lowering")
 
     me translate_call_at(instructions: [MirInst], index: i64, ir_handle: i64):
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        val bootstrap_debug = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] call:entry index={index}"
         val inst: MirInst = instructions[index]
@@ -1956,7 +1997,7 @@ impl MirTextCodegen for MirToLlvm:
                 val name = dest_name
                 var ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
                 var known_ret_ty = self.lookup_function_return_type(call_func_name)
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val bare_func_name = if call_func_name.starts_with("@"): call_func_name[1:] else: call_func_name
                     if bare_func_name == "get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
                         known_ret_ty = "ptr"
@@ -1986,14 +2027,14 @@ impl MirTextCodegen for MirToLlvm:
                 val call_line = "  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})"
                 if ir_handle >= 0:
                     val emitted_call = "\n{call_line}"
-                    rt_string_builder_push(ir_handle, emitted_call)
+                    _sffi_string_builder_push(ir_handle, emitted_call)
                 else:
                     self.builder.emit(call_line)
         else:
             val call_line = "  call void {call_sig}{call_func_name}({args_str})"
             if ir_handle >= 0:
                 val emitted_call = "\n{call_line}"
-                rt_string_builder_push(ir_handle, emitted_call)
+                _sffi_string_builder_push(ir_handle, emitted_call)
             else:
                 self.builder.emit(call_line)
         if bootstrap_debug:
@@ -2416,7 +2457,7 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit_load(dest_name, g_ty, g_name)
 
     me translate_load_global_ids(dest_id: i64, symbol_id: i64, module_index: i64, ir_handle: i64):
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        val bootstrap_debug = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] load-global:scalar dest={dest_id} symbol={symbol_id}"
         var g_name = "@g_undeclared_{symbol_id}"
@@ -2443,7 +2484,7 @@ impl MirTextCodegen for MirToLlvm:
             self.ptr_locals[dest_id] = true
         if ir_handle >= 0:
             val load_line = "\n  {dest_name} = load {g_ty}, ptr {g_name}, align 8"
-            rt_string_builder_push(ir_handle, load_line)
+            _sffi_string_builder_push(ir_handle, load_line)
         else:
             self.builder.emit_load(dest_name, g_ty, g_name)
         if bootstrap_debug:
@@ -2484,12 +2525,12 @@ impl MirTextCodegen for MirToLlvm:
         val nit = self.native_int_type
         val line = "  {dest_name} = getelementptr i8, ptr {g_name}, {nit} 0  ; GlobalAddr"
         if ir_handle >= 0:
-            rt_string_builder_push(ir_handle, "\n{line}")
+            _sffi_string_builder_push(ir_handle, "\n{line}")
         else:
             self.builder.emit(line)
 
     me translate_store_global_at(instructions: [MirInst], index: i64, module_index: i64, ir_handle: i64):
-        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        val bootstrap_debug = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:entry index={index}"
         val inst = instructions[index]
@@ -2530,7 +2571,7 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] store-global:value index={index} type={g_ty} value={value_text}"
         if ir_handle >= 0:
             val store_line = "\n  store {g_ty} {value_text}, ptr {g_name}, align 8"
-            rt_string_builder_push(ir_handle, store_line)
+            _sffi_string_builder_push(ir_handle, store_line)
         else:
             self.builder.emit_store(g_ty, value_text, g_name)
         if bootstrap_debug:
