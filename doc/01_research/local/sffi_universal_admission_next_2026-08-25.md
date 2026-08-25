@@ -5604,3 +5604,40 @@ The authoritative census changed as follows:
 Annotations add no runtime branch, allocation, copy, lookup, lock, hash,
 signature operation, dispatch, or data-layout change. This adapter remains
 unsafe and critical-ineligible; verified-and-signed admission remains 0.
+
+## SOCKS5 Pure Simple boundary checkpoint
+
+The SOCKS5 framing module described itself as Pure Simple but performed 20 raw
+byte-index calls and two raw text-to-byte calls in addition to one byte-to-text
+lift. Guarded native array indexing now replaces the byte accessor, and the
+canonical pure-Simple `text_to_bytes` owner replaces the encoding calls. The
+only remaining foreign call is the domain byte-to-text lift; it is explicitly
+unsafe, lexically scoped, and rejects non-empty bytes becoming empty text.
+
+Two wire correctness defects were fixed without changing result booleans.
+Domain names must contain 1..255 encoded bytes, and username/password fields
+must fit the protocol's one-octet length. Oversized builders now fail closed
+instead of truncating the length modulo 256; a zero-length parsed domain is
+rejected. Existing parser extent checks continue to dominate native indexing.
+
+The focused `socks5-pure-simple-sffi-authority.shs` audit passed. It pins the
+single remaining raw declaration/call, pure-Simple owners, one-octet bounds,
+guarded port reads, and the remaining lift's presence in both typed registries.
+Both maintained SOCKS5 specs now cover zero-length domain rejection.
+Registration does not authenticate either provider artifact.
+
+The authoritative census changed as follows:
+
+- raw call sites: 18,519 -> 18,497
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,087
+- missing authority: 13,421 -> 13,398
+- lexical unsafe: 3,428 -> 3,429
+- function unsafe: unchanged at 1,670
+
+Native indexing removes foreign call dispatch from the parser loops. Encoding
+retains the same single byte-array construction per field, and the required
+length checks are constant branches; no additional copy, allocation, lookup,
+lock, hash, signature operation, or generic dispatch was added. The one text
+lift and exact artifacts remain unverified/unsigned, so verified-and-signed
+admission remains 0.
