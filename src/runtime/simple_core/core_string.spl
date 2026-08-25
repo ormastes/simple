@@ -1,16 +1,16 @@
 # Pure-Simple `simple-core` string and string-backed stdio ABI.
 
-@unsafe(reason: "raw libc heap allocation ABI; zero means failure", capabilities: [ffi])
+@unsafe(reason: "raw libc heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
 extern fn malloc(size: i64) -> i64
-@unsafe(reason: "raw libc zeroed heap allocation ABI; count-size product must not overflow", capabilities: [ffi])
+@unsafe(reason: "raw libc zeroed heap allocation ABI; count-size product must not overflow", capabilities: [ffi, raw_ptr])
 extern fn calloc(count: i64, size: i64) -> i64
-@unsafe(reason: "raw libc owned heap reallocation ABI; zero means failure", capabilities: [ffi])
+@unsafe(reason: "raw libc owned heap reallocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
 extern fn realloc(ptr: i64, size: i64) -> i64
-@unsafe(reason: "raw libc owned heap-pointer release ABI", capabilities: [ffi])
+@unsafe(reason: "raw libc owned heap-pointer release ABI", capabilities: [ffi, raw_ptr])
 extern fn free(ptr: i64)
-@unsafe(reason: "raw memory pointer/extent copy ABI; regions must be valid and non-overlapping", capabilities: [ffi])
+@unsafe(reason: "raw memory pointer/extent copy ABI; regions must be valid and non-overlapping", capabilities: [ffi, raw_ptr])
 extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
-@unsafe(reason: "raw memory pointer/extent comparison ABI", capabilities: [ffi])
+@unsafe(reason: "raw memory pointer/extent comparison ABI", capabilities: [ffi, raw_ptr])
 extern fn memcmp(left: i64, right: i64, n: i64) -> i64
 @unsafe(reason: "raw NUL-terminated integer parse and end-pointer output ABI", capabilities: [ffi])
 extern fn strtoll(ptr: i64, endptr: i64, base: i64) -> i64
@@ -93,6 +93,36 @@ fn _sffi_load_u8(ptr: i64, offset: i64) -> i64:
 fn _sffi_store_u8(ptr: i64, offset: i64, value: i64):
     unsafe(capabilities: [ffi, raw_ptr]):
         spl_store_u8(ptr, offset, value)
+
+@always_inline
+fn _sffi_malloc(size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        malloc(size)
+
+@always_inline
+fn _sffi_calloc(count: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        calloc(count, size)
+
+@always_inline
+fn _sffi_realloc(ptr: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        realloc(ptr, size)
+
+@always_inline
+fn _sffi_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
+fn _sffi_memcpy(dst: i64, src: i64, n: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        memcpy(dst, src, n)
+
+@always_inline
+fn _sffi_memcmp(left: i64, right: i64, n: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        memcmp(left, right, n)
 # UTF-8 slice-boundary audit, stage 1 (COUNTING ONLY). Level-gated by
 # SIMPLE_UTF8_SLICE_AUDIT and DEFAULT OFF; defined in
 # src/runtime/runtime_simd_utf8.c, which owns the validator this tier has no
@@ -109,7 +139,7 @@ var string_registry_cap: i64 = 0
 fn register_string_ptr(ptr: i64) -> i64:
     if string_registry_len >= string_registry_cap:
         val next_cap = if string_registry_cap < 1: 64 else: string_registry_cap * 2
-        val next_items = realloc(string_registry_items, next_cap * 8)
+        val next_items = _sffi_realloc(string_registry_items, next_cap * 8)
         if next_items < 1:
             return 0
         string_registry_items = next_items
@@ -171,11 +201,11 @@ fn is_space_byte(ch: i64) -> i64:
     return 0
 
 fn alloc_string(len: i64) -> i64:
-    val ptr = malloc(17 + len)
+    val ptr = _sffi_malloc(17 + len)
     if ptr < 1:
         return 3
     if register_string_ptr(ptr) < 1:
-        free(ptr)
+        _sffi_free(ptr)
         return 3
     _sffi_store_i64(ptr, 0, 1398034993)
     _sffi_store_i64(ptr, 8, len)
@@ -190,7 +220,7 @@ pub fn rt_string_new(bytes: i64, len: i64) -> i64:
     if ptr < 1:
         return 3
     if len > 0:
-        memcpy(ptr + 16, bytes, len)
+        _sffi_memcpy(ptr + 16, bytes, len)
     return out
 
 pub fn rt_string_len(value: i64) -> i64:
@@ -209,12 +239,12 @@ pub fn rt_string_data(value: i64) -> i64:
 
 # Raw builder handle layout: len @0, cap @8, byte buffer @16.
 pub fn rt_string_builder_new() -> i64:
-    val handle = malloc(24)
+    val handle = _sffi_malloc(24)
     if handle < 1:
         return 0
-    val data = malloc(64)
+    val data = _sffi_malloc(64)
     if data < 1:
-        free(handle)
+        _sffi_free(handle)
         return 0
     _sffi_store_i64(handle, 0, 0)
     _sffi_store_i64(handle, 8, 64)
@@ -238,7 +268,7 @@ pub fn rt_string_builder_push(handle: i64, value: i64) -> i64:
         var new_cap = cap * 2
         while new_cap < needed:
             new_cap = new_cap * 2
-        val grown = realloc(data, new_cap)
+        val grown = _sffi_realloc(data, new_cap)
         if grown < 1:
             return 0
         data = grown
@@ -246,7 +276,7 @@ pub fn rt_string_builder_push(handle: i64, value: i64) -> i64:
         _sffi_store_i64(handle, 8, cap)
         _sffi_store_i64(handle, 16, data)
     if add_len > 0:
-        memcpy(data + len, src, add_len)
+        _sffi_memcpy(data + len, src, add_len)
     _sffi_store_i64(handle, 0, needed)
     1
 
@@ -258,8 +288,8 @@ pub fn rt_string_builder_finish(handle: i64) -> i64:
     if len < 0 or data < 1:
         return 3
     val out = rt_string_new(data, len)
-    free(data)
-    free(handle)
+    _sffi_free(data)
+    _sffi_free(handle)
     out
 
 pub fn rt_string_builder_len(handle: i64) -> i64:
@@ -272,8 +302,8 @@ pub fn rt_string_builder_free(handle: i64):
         return
     val data = _sffi_load_i64(handle, 16)
     if data > 0:
-        free(data)
-    free(handle)
+        _sffi_free(data)
+    _sffi_free(handle)
 
 pub fn rt_string_bytes(value: i64) -> i64:
     val ptr = string_ptr(value)
@@ -318,7 +348,7 @@ pub fn rt_string_chars(value: i64) -> i64:
     # handle within this conversion so lexer `source.chars()` does not retain
     # one heap string per source byte. Multibyte codepoints keep the existing
     # exact UTF-8 slice path.
-    val ascii_cache = calloc(256, 8)
+    val ascii_cache = _sffi_calloc(256, 8)
     var byte_index = 0
     while byte_index < len:
         val b0 = _sffi_load_u8(data, byte_index) & 255
@@ -342,7 +372,7 @@ pub fn rt_string_chars(value: i64) -> i64:
         rt_array_push(out, char_value)
         byte_index = byte_index + width
     if ascii_cache > 0:
-        free(ascii_cache)
+        _sffi_free(ascii_cache)
     return out
 
 # Return the Unicode code point at CHARACTER index `index`.
@@ -437,7 +467,7 @@ pub fn __simple_rt_string_byte_at(value: i64, index: i64) -> i64:
 pub fn text_dot_from_char_code(code: i64) -> i64:
     if code < 0 or code > 1114111 or (code >= 55296 and code <= 57343):
         return 3
-    val data = malloc(4)
+    val data = _sffi_malloc(4)
     if data < 1:
         return 3
     var len = 1
@@ -459,7 +489,7 @@ pub fn text_dot_from_char_code(code: i64) -> i64:
         _sffi_store_u8(data, 2, 128 | ((code >> 6) & 63))
         _sffi_store_u8(data, 3, 128 | (code & 63))
     val out = rt_string_new(data, len)
-    free(data)
+    _sffi_free(data)
     out
 
 # Canonical raw-i64 compiler/runtime ABI for integer `.chr()`/`.to_char()`.
@@ -536,9 +566,9 @@ pub fn rt_string_concat(left: i64, right: i64) -> i64:
     if out_ptr < 1:
         return 3
     if left_len > 0:
-        memcpy(string_data_ptr_value(out_ptr), string_data_ptr_value(left_ptr), left_len)
+        _sffi_memcpy(string_data_ptr_value(out_ptr), string_data_ptr_value(left_ptr), left_len)
     if right_len > 0:
-        memcpy(string_data_ptr_value(out_ptr) + left_len, string_data_ptr_value(right_ptr), right_len)
+        _sffi_memcpy(string_data_ptr_value(out_ptr) + left_len, string_data_ptr_value(right_ptr), right_len)
     return out
 
 # Concat-drop fix: pure-Simple mirror of the native rt_strcat_tagged
@@ -608,7 +638,7 @@ fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:
             return 0
         if len < 1:
             return 1
-        val cmp = memcmp(left_ptr + 16, right_ptr + 16, len)
+        val cmp = _sffi_memcmp(left_ptr + 16, right_ptr + 16, len)
         if cmp < 0 or cmp > 0:
             return 0
         return 1
@@ -691,7 +721,7 @@ pub fn rt_native_cmp(left: i64, right: i64) -> i64:
         val left_len = string_len_ptr(left_ptr)
         val right_len = string_len_ptr(right_ptr)
         val common_len = if left_len < right_len: left_len else: right_len
-        val ordered = memcmp(string_data_ptr_value(left_ptr), string_data_ptr_value(right_ptr), common_len)
+        val ordered = _sffi_memcmp(string_data_ptr_value(left_ptr), string_data_ptr_value(right_ptr), common_len)
         if ordered < 0: return -1
         if ordered > 0: return 1
         if left_len < right_len: return -1
@@ -836,7 +866,7 @@ pub fn rt_string_starts_with(value: i64, prefix: i64) -> i64:
         return 0
     if prefix_len < 1:
         return 1
-    val cmp = memcmp(string_data_ptr_value(ptr), string_data_ptr_value(prefix_ptr), prefix_len)
+    val cmp = _sffi_memcmp(string_data_ptr_value(ptr), string_data_ptr_value(prefix_ptr), prefix_len)
     if cmp < 0 or cmp > 0:
         return 0
     return 1
@@ -852,7 +882,7 @@ pub fn rt_string_ends_with(value: i64, suffix: i64) -> i64:
         return 0
     if suffix_len < 1:
         return 1
-    val cmp = memcmp(string_data_ptr_value(ptr) + len - suffix_len, string_data_ptr_value(suffix_ptr), suffix_len)
+    val cmp = _sffi_memcmp(string_data_ptr_value(ptr) + len - suffix_len, string_data_ptr_value(suffix_ptr), suffix_len)
     if cmp < 0 or cmp > 0:
         return 0
     return 1
@@ -938,7 +968,7 @@ pub fn rt_to_string(value: i64) -> i64:
         return rt_string_new(0, 0)
 
     var n = value >> 3
-    val buf = malloc(32)
+    val buf = _sffi_malloc(32)
     if buf < 1:
         return 3
     if n < 1 and n > -1:
@@ -977,7 +1007,7 @@ pub fn rt_value_to_string(value: i64) -> i64:
 
 pub fn rt_raw_u64_to_string(raw: i64) -> i64:
     var n = raw
-    val buf = malloc(32)
+    val buf = _sffi_malloc(32)
     if buf < 1:
         return 3
     if n < 1:
@@ -1007,7 +1037,7 @@ pub fn rt_raw_i64_to_string(raw: i64) -> i64:
     # Signed sibling of rt_raw_u64_to_string. Digits are extracted on the
     # negative side (digit = 0 - (n % 10)) so INT64_MIN never overflows.
     if raw == 0:
-        val zbuf = malloc(32)
+        val zbuf = _sffi_malloc(32)
         if zbuf < 1:
             return 3
         _sffi_store_u8(zbuf, 0, 48)
@@ -1018,7 +1048,7 @@ pub fn rt_raw_i64_to_string(raw: i64) -> i64:
     if not neg:
         n = 0 - n
 
-    val buf = malloc(32)
+    val buf = _sffi_malloc(32)
     if buf < 1:
         return 3
     var len = 0
@@ -1058,7 +1088,7 @@ pub fn rt_string_replace(value: i64, old_value: i64, new_value: i64) -> i64:
     var count = 0
     var i = 0
     while i + old_len <= len:
-        val cmp = memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(old_ptr), old_len)
+        val cmp = _sffi_memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(old_ptr), old_len)
         if cmp > -1 and cmp < 1:
             count = count + 1
             i = i + old_len
@@ -1082,12 +1112,12 @@ pub fn rt_string_replace(value: i64, old_value: i64, new_value: i64) -> i64:
     while in_i < len:
         var matched = 0
         if in_i + old_len <= len:
-            val cmp = memcmp(string_data_ptr_value(ptr) + in_i, string_data_ptr_value(old_ptr), old_len)
+            val cmp = _sffi_memcmp(string_data_ptr_value(ptr) + in_i, string_data_ptr_value(old_ptr), old_len)
             if cmp > -1 and cmp < 1:
                 matched = 1
         if matched > 0:
             if new_len > 0:
-                memcpy(string_data_ptr_value(out_ptr) + out_i, string_data_ptr_value(new_ptr), new_len)
+                _sffi_memcpy(string_data_ptr_value(out_ptr) + out_i, string_data_ptr_value(new_ptr), new_len)
             out_i = out_i + new_len
             in_i = in_i + old_len
         else:
@@ -1119,7 +1149,7 @@ pub fn rt_print_value(value: i64) -> i64:
 # rather than a string literal, since this file predates/implements the
 # String type itself.
 fn write_null_page_diag(fd: i64) -> i64:
-    val buf = malloc(45)
+    val buf = _sffi_malloc(45)
     if buf < 1:
         return 0
     _sffi_store_u8(buf, 0, 105)
@@ -1180,7 +1210,7 @@ pub fn rt_print_str(ptr: i64, len: i64) -> i64:
 
 pub fn rt_println_value(value: i64) -> i64:
     write_string_to_fd(1, value)
-    val nl = malloc(1)
+    val nl = _sffi_malloc(1)
     if nl > 0:
         _sffi_store_u8(nl, 0, 10)
         write(1, nl, 1)
@@ -1188,7 +1218,7 @@ pub fn rt_println_value(value: i64) -> i64:
 
 pub fn rt_println_str(ptr: i64, len: i64) -> i64:
     rt_print_str(ptr, len)
-    val nl = malloc(1)
+    val nl = _sffi_malloc(1)
     if nl > 0:
         _sffi_store_u8(nl, 0, 10)
         write(1, nl, 1)
@@ -1208,7 +1238,7 @@ pub fn rt_eprint_str(ptr: i64, len: i64) -> i64:
 
 pub fn rt_eprintln_value(value: i64) -> i64:
     write_string_to_fd(2, value)
-    val nl = malloc(1)
+    val nl = _sffi_malloc(1)
     if nl > 0:
         _sffi_store_u8(nl, 0, 10)
         write(2, nl, 1)
@@ -1216,14 +1246,14 @@ pub fn rt_eprintln_value(value: i64) -> i64:
 
 pub fn rt_eprintln_str(ptr: i64, len: i64) -> i64:
     rt_eprint_str(ptr, len)
-    val nl = malloc(1)
+    val nl = _sffi_malloc(1)
     if nl > 0:
         _sffi_store_u8(nl, 0, 10)
         write(2, nl, 1)
     return 0
 
 pub fn stdin_read_char() -> i64:
-    val byte = malloc(1)
+    val byte = _sffi_malloc(1)
     if byte < 1:
         return rt_string_new(0, 0)
     val count = read(0, byte, 1)
@@ -1253,7 +1283,7 @@ pub fn rt_string_eq(left: i64, right: i64) -> i64:
         return 0
     if left_len < 1:
         return 1
-    val cmp = memcmp(left_ptr + 16, right_ptr + 16, left_len)
+    val cmp = _sffi_memcmp(left_ptr + 16, right_ptr + 16, left_len)
     if cmp < 0 or cmp > 0:
         return 0
     return 1
@@ -1290,7 +1320,7 @@ pub fn rt_string_find(value: i64, needle: i64) -> i64:
         return -1
     var i = 0
     while i + needle_len <= len:
-        val cmp = memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
+        val cmp = _sffi_memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
         if cmp > -1 and cmp < 1:
             return i
         i = i + 1
@@ -1319,7 +1349,7 @@ pub fn rt_text_find(value: i64, needle: i64, start: i64) -> i64:
         return -1
     var i = s_start
     while i + needle_len <= len:
-        val cmp = memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
+        val cmp = _sffi_memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
         if cmp > -1 and cmp < 1:
             return i
         i = i + 1
@@ -1339,7 +1369,7 @@ pub fn rt_string_rfind(value: i64, needle: i64) -> i64:
         return -1
     var i = len - needle_len
     while i >= 0:
-        val cmp = memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
+        val cmp = _sffi_memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(needle_ptr), needle_len)
         if cmp > -1 and cmp < 1:
             return i
         i = i - 1
@@ -1377,7 +1407,7 @@ pub fn rt_string_split(value: i64, delimiter: i64) -> i64:
         if start + del_len <= len:
             var j = start
             while j + del_len <= len:
-                val cmp = memcmp(string_data_ptr_value(ptr) + j, string_data_ptr_value(del_ptr), del_len)
+                val cmp = _sffi_memcmp(string_data_ptr_value(ptr) + j, string_data_ptr_value(del_ptr), del_len)
                 if cmp > -1 and cmp < 1:
                     found = j
                     j = len + 1
@@ -1422,7 +1452,7 @@ pub fn rt_string_split_limit(value: i64, delimiter: i64, limit: i64) -> i64:
         var found = -1
         var j = start
         while j + del_len <= len and found < 0:
-            if memcmp(string_data_ptr_value(ptr) + j, string_data_ptr_value(del_ptr), del_len) == 0:
+            if _sffi_memcmp(string_data_ptr_value(ptr) + j, string_data_ptr_value(del_ptr), del_len) == 0:
                 found = j
             else:
                 j = j + 1
@@ -1477,14 +1507,14 @@ pub fn rt_string_join(array: i64, separator: i64) -> i64:
     i = 0
     while i < arr_len:
         if i > 0 and sep_len > 0:
-            memcpy(string_data_ptr_value(out_ptr) + offset, string_data_ptr_value(sep_ptr), sep_len)
+            _sffi_memcpy(string_data_ptr_value(out_ptr) + offset, string_data_ptr_value(sep_ptr), sep_len)
             offset = offset + sep_len
         val elem = rt_array_get(array, i)
         val elem_ptr = string_ptr(elem)
         if elem_ptr > 0:
             val elem_len = string_len_ptr(elem_ptr)
             if elem_len > 0:
-                memcpy(string_data_ptr_value(out_ptr) + offset, string_data_ptr_value(elem_ptr), elem_len)
+                _sffi_memcpy(string_data_ptr_value(out_ptr) + offset, string_data_ptr_value(elem_ptr), elem_len)
                 offset = offset + elem_len
         i = i + 1
     return out
@@ -1541,12 +1571,12 @@ pub fn rt_string_to_float(value: i64) -> i64:
     if len < 1:
         return 3
     val data = string_data_ptr_value(ptr)
-    val end_slot = malloc(8)
+    val end_slot = _sffi_malloc(8)
     if end_slot < 1:
         return 3
     val parsed = strtod(data, end_slot)
     val end_ptr = _sffi_load_i64(end_slot, 0)
-    free(end_slot)
+    _sffi_free(end_slot)
     if end_ptr <= data:
         return 3
     val finish = data + len
@@ -1570,14 +1600,14 @@ var g_lexer_source_len: i64 = 0
 pub fn rt_lexer_source_set(source_ptr: i64, source_len: i64) -> i8:
     if source_ptr < 1 and source_len > 0:
         return 0
-    val replacement = malloc(source_len + 1)
+    val replacement = _sffi_malloc(source_len + 1)
     if replacement < 1:
         return 0
     if source_len > 0:
-        memcpy(replacement, source_ptr, source_len)
+        _sffi_memcpy(replacement, source_ptr, source_len)
     _sffi_store_u8(replacement, source_len, 0)
     if g_lexer_source_ptr > 0:
-        free(g_lexer_source_ptr)
+        _sffi_free(g_lexer_source_ptr)
     g_lexer_source_ptr = replacement
     g_lexer_source_len = source_len
     return 1

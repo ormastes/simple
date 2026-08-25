@@ -2463,6 +2463,34 @@ was not available, so this is static code-shape evidence rather than measured
 performance verification.  Pointer provenance and artifact evidence remain
 unproved; verified-and-signed admission remains 0.
 
+## simple-core string heap/copy authority checkpoint
+
+The six raw libc heap/copy operations used by `core_string.spl` (`malloc`,
+`calloc`, `realloc`, `free`, `memcpy`, and `memcmp`) now declare both `ffi`
+and `raw_ptr` authority and are reachable only through six minimal
+`@always_inline` capability owners.  Existing allocation-failure, pointer,
+length, and object-layout checks remain at their semantic call sites; the
+change does not invent a success value or broaden whole runtime functions to
+unsafe.
+
+The extended `simple-core-string-memory-authority.shs` ratchet passed and
+guards exact raw-call confinement, mandatory inlining, and the existing call
+inventory.  The authoritative census changed exactly as expected:
+
+- raw call sites: 20,470 -> 20,427
+- missing authority: 16,552 -> 16,503
+- lexical unsafe: 2,999 -> 3,005
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+The transformation preserves the exact number and placement of libc
+allocations, releases, copies, and comparisons.  Mandatory inlining prevents
+wrapper dispatch; no validation scan, allocation, copy, lookup, lock, hash, or
+signature operation was added.  Production timing/RSS remains unavailable,
+so performance evidence is static.  Pointer provenance, allocator ownership,
+and signed exact-artifact receipts are still unproved; verified-and-signed
+admission remains 0.
+
 ## SSH KEX call-authority and hot-path checkpoint
 
 The SSH session KEX owner no longer dispatches its 113 constant packet-byte
