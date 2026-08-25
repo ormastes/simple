@@ -536,3 +536,7 @@ passing placeholder.
      tagged `unsafe(ffi)`. Replace dynamic `Any` and untyped pop/get/lookup
      sentinels with canonical typed ABI contracts without adding allocations,
      collection scans, string copies, or generic hot-path dispatch.
+103. Keep all 36 simple-core process/time/panic declarations explicitly tagged
+     `unsafe(ffi)`. Enforce pointer extents, signal-handler validity, post-fork
+     restrictions, and owned argument-value transfer without extra allocation,
+     process calls, or copies; bind exact libc/runtime identity before admission.

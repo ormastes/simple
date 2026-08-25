@@ -1106,3 +1106,24 @@ Unsafe-tagged rows increase from 1,611 to 1,648, untouched rows decrease from
 9,867 to 9,830, and exact-artifact verified-and-signed admission remains zero.
 The dynamic-key ABI and untyped collection absence/error returns must be
 replaced by canonical typed contracts before safe publication.
+
+## Simple-core process/time/panic raw-contract checkpoint
+
+All 36 raw libc/runtime declarations in `simple-core` process support now carry
+adjacent, operation-specific `@unsafe(... capabilities: [ffi])` metadata. The
+contracts cover process termination, fork/exec/wait and process groups, signal
+handlers and signal-set pointers, time output structures, heap allocation,
+unchecked pointer/offset loads and stores, NUL-terminated string pointers,
+tagged string/array/tuple values, and owned argument-array value transfer.
+
+A static ratchet fixes the inventory at 36 and requires every declaration to
+retain its tag. It passed with the whitespace check. This pass changes no ABI
+signature, fork/exec/signal/time call, allocation/free, pointer access,
+argument construction, collection operation, branch, copy, or layout.
+Production Simple and optimizer verification remain unavailable.
+
+Estimated totals remain 11,736 `rt_*` declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,648 to 1,684, untouched rows decrease from
+9,830 to 9,794, and exact-artifact verified-and-signed admission remains zero.
+Signal-handler validity, pointer extents, post-fork restrictions, and exact
+libc/runtime identity still require executable policy and admission evidence.
