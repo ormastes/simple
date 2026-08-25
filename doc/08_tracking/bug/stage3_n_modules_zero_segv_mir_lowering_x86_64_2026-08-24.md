@@ -1635,3 +1635,39 @@ hello world native-build:  NATIVE_BUILD_RC=0
 So the regression is **absent at `4d11699bc5b`**. Note also that this commit
 does **not** contain `37d046a71b1`, the suspected lead. Citable as a known-good
 point.
+
+---
+
+## 2026-08-25 — both `Poll.unwrap` bind sites are now fixed; the rc=139 that remains is a DIFFERENT defect
+
+Stated narrowly, because this record has twice been rewritten for claiming more
+than was measured. **No self-hosted end-to-end claim is made here, and Stage 3
+was deliberately not attempted.**
+
+What is measured, on a Stage 2 built from `c6041e04d4e` + the second-site fix by
+the sanctioned bootstrap invocation (757 compiled, 0 failed), by symbol-aware
+disassembly:
+
+- `lower_and_check_impl`: `Poll_dot_unwrap` **4 → 0**; observed replacement callee
+  `rt_enum_payload` ×6.
+- whole binary: `Poll_dot_unwrap` **272 → 0** (the symbol is no longer defined).
+- `E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED` occurrences: **0**.
+
+So the malformed-surfaces mechanism described in this record — `Poll.unwrap`
+returning 0 for a non-`Poll` receiver, 0 being `< 4096`, the formation guard
+rejecting a payload that is really a live enum — **is fixed**. The second site
+was the cross-module resolution ladder in `compile_method_call_static`, whose
+first three steps lacked the Option/Result-family exclusion that its fourth step
+had. Detail:
+`poll_unwrap_second_bind_site_lower_and_check_impl_2026-08-25.md`.
+
+**What is NOT resolved.** Hello world on that Stage 2 still SEGVs (rc=139), now
+in `native_compile` (step 5/6), after HIR lowering, borrow-check, async
+processing, MIR optimisation, AOP weaving and the native cache have all
+completed. No pre-fix build ever reached that phase, so this is **newly exposed,
+not newly introduced** — and it is not evidence that the unwrap fix failed.
+Filed separately as `stage2_native_compile_segv_after_unwrap_fix_2026-08-25.md`.
+
+Whether that downstream crash shares a root cause with this record's Stage-3
+`aot:lower_to_mir` death is **unknown**: same rc, different phase, no evidence
+either way. It is deliberately not asserted.
