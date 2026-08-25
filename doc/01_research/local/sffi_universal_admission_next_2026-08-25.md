@@ -1690,3 +1690,34 @@ thread contention test proved exactly one successful false-to-true CAS; and
 warnings. The atomic static contract audit passed. These results validate the
 Rust provider and registration edits, but they are not signed exact-artifact or
 cross-engine production-Simple evidence.
+
+## Fast in-memory database raw-contract checkpoint
+
+The specialized `FastTable` accelerator owns 21 `rt_db_*` declarations backed
+by native C and a separate Rust interpreter implementation. It is not the
+general embedded-database default; ordinary Simple code should continue to use
+PureDatabase. All 21 declarations now carry explicit `unsafe(ffi)` contracts,
+all calls are lexically scoped, creation rejects a negative provider handle,
+manual destruction is explicitly unsafe, and the nullable managed-text result
+is represented as `text?`. Legacy methods remain explicitly unsafe
+because zero, empty, default, and `-1` still conflate valid data, absence,
+invalid handles, allocation failure, and provider failure.
+
+The C provider no longer casts the three integer batch values to pointers when
+a legacy text-mask bit is set; nonzero masks fail closed. Allocation and growth
+paths now check overflow/failure and publish replacements only after success.
+Text-to-integer updates release retained text storage, and integer primary keys
+use `PRId64` so Windows does not truncate them through 32-bit `long`.
+
+The integer hot path remains O(1) average indexed access. It gains no per-call
+hash/signature verification, dynamic symbol lookup, lock, generic dispatch, or
+copy; the three-value loop loses its text-mask branch. Allocation checks occur
+only on existing allocation/growth paths. Native syntax checking and the static
+contract audit cover these edits, but they are not proof, cross-engine evidence,
+or signed exact-artifact admission. The generationless 64-slot global registry
+is unsynchronized and the Rust interpreter contract remains independently
+implemented, so this family is not safe or verified.
+
+Estimated repository totals remain 11,639 declarations / 3,141 symbols.
+Unsafe-tagged rows increase from 2,298 to 2,319, untouched rows decrease from
+9,162 to 9,141, and exact-artifact verified-and-signed admission remains zero.

@@ -665,3 +665,12 @@ passing placeholder.
      honor requested memory ordering, with a complete pure-Simple bootstrap
      contract. Add no per-call allocation, copy, retry, lookup, lock, generic
      dispatch, or stronger fence beyond the selected ordering.
+129. Keep all 21 fast in-memory database declarations explicitly tagged and
+     lexically scoped. Retain PureDatabase as the default general embedded
+     database; this specialized C accelerator remains unsafe until its global
+     registry is synchronized, handles are generation checked, and every
+     sentinel/status is typed. Never reinterpret integer batch values as text
+     pointers. Preserve O(1) indexed operations and add no per-call hash,
+     signature check, registry lookup beyond the existing table/index access,
+     allocation, copy, lock, or generic dispatch. Exact signed admission and
+     cross-lane contract equivalence remain required before safe publication.
