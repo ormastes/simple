@@ -1,0 +1,56 @@
+"""
+Source contract for scalar HIR statement routing.
+
+Ordinary 1:1 statements must not cross the temporary `[HirStmt]` expansion
+boundary. Only parser-encoded tuple Val/Var statements use multi lowering;
+value tails retain the fresh scalar extraction introduced for bootstrap.
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+
+val STATEMENTS = "src/compiler/20.hir/hir_lowering/statements.spl"
+val BLOCKS = "src/compiler/20.hir/hir_lowering/_Expressions/block_and_asm_lowering.spl"
+
+describe "HIR scalar statement routing source contract":
+    it "classifies only the existing tuple Val and Var marker":
+        step("Inspect the shared multi-lowering predicate")
+        val statements = read_file_text(STATEMENTS)
+
+        expect(statements).to_contain("me hir_stmt_requires_multi_lowering(s: Stmt) -> bool:")
+        expect(statements).to_contain("return v_name.len() > 1 and v_name[0:1] == \"(\"")
+        expect(statements).to_contain("return vr_name.len() > 1 and vr_name[0:1] == \"(\"")
+        expect(statements.contains("v_name.ends_with")).to_be(false)
+        expect(statements.contains("vr_name.ends_with")).to_be(false)
+
+    it "classifies every final scalar statement by its lowered HIR kind":
+        step("Inspect value-block scalar and lowered-HIR tail routing")
+        val blocks = read_file_text(BLOCKS)
+        val classify = blocks.index_of("val requires_multi = self.hir_stmt_requires_multi_lowering(src_stmt)")
+        val scalar = blocks.index_of("val lowered_scalar = self.lower_hir_stmt(src_stmt)")
+        val tail = blocks.index_of("if stmt_idx == stmt_count - 1:")
+        val hir_kind = blocks.index_of("if rt_enum_discriminant(lowered_scalar.kind) == expr_stmt_disc:")
+        val multi = blocks.index_of("val lowered_list = self.lower_hir_stmt_multi(src_stmt)")
+
+        expect(classify).to_be_greater_than(-1)
+        expect(scalar).to_be_greater_than(classify)
+        expect(tail).to_be_greater_than(scalar)
+        expect(hir_kind).to_be_greater_than(tail)
+        expect(multi).to_be_greater_than(hir_kind)
+        expect(blocks.contains("source_expr_disc")).to_be(false)
+        expect(blocks.contains("val source_kind: StmtKind = src_stmt.kind")).to_be(false)
+        expect(blocks.contains("stmts = stmts.push(self.lower_hir_stmt(src_stmt))")).to_be(false)
+        expect(blocks).to_contain("if rt_enum_discriminant(expr.kind) == return_expr_disc:")
+        expect(blocks).to_contain("stmts = stmts.push(lowered_scalar)")
+        expect(blocks.contains("val lowered_tail = lowered_scalar")).to_be(false)
+
+    it "uses the same split in bootstrap and ordinary unit blocks":
+        step("Inspect both unit-block lowering loops")
+        val blocks = read_file_text(BLOCKS)
+
+        expect(blocks).to_contain("if self.hir_stmt_requires_multi_lowering(boot_stmt):")
+        expect(blocks).to_contain("boot_stmts = boot_stmts.push(self.lower_hir_stmt(boot_stmt))")
+        expect(blocks).to_contain("if self.hir_stmt_requires_multi_lowering(unit_stmt):")
+        expect(blocks).to_contain("stmts = stmts.push(self.lower_hir_stmt(unit_stmt))")
+        expect(blocks).to_contain("self.lower_hir_stmt_multi(boot_stmt)")
+        expect(blocks).to_contain("self.lower_hir_stmt_multi(unit_stmt)")

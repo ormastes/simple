@@ -64,8 +64,6 @@ impl HirLowering:
         val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(block_value_expr))
         val return_expr_disc = rt_enum_discriminant(HirExprKind.Return(nil))
         val stmt_count = b.stmts.len()
-        val source_expr_disc = rt_enum_discriminant(StmtKind.Expr(
-            Expr(kind: ExprKind.NilLit, span: b.span)))
         var stmt_idx = 0
         while stmt_idx < stmt_count:
             # A single source statement may desugar into several HIR statements
@@ -82,20 +80,22 @@ impl HirLowering:
             # element erases the enum payload to ANY in the Stage-3 compiler,
             # so the Expr payload match below can fail even though its
             # discriminator is Expr.  Tuple destructuring still needs the
-            # multi-result path, but an expression statement never expands.
-            # Keeping it scalar also removes one hot-path array allocation.
-            if stmt_idx == stmt_count - 1:
-                # Read/copy the source enum only for the possible tail. Doing
-                # this for every statement would add a redundant aggregate
-                # copy before lower_hir_stmt_multi performs its own dispatch.
-                val source_kind: StmtKind = src_stmt.kind
-                if rt_enum_discriminant(source_kind) == source_expr_disc:
-                    val lowered_tail = self.lower_hir_stmt(src_stmt)
-                    if rt_enum_discriminant(lowered_tail.kind) == expr_stmt_disc:
-                        match lowered_tail.kind:
+            # multi-result path. Every other source statement stays scalar,
+            # including statement variants such as For/While/With that lower
+            # to a value-carrying HirStmtKind.Expr. Keeping the classification
+            # on the fresh HIR return also removes one hot-path array allocation.
+            val requires_multi = self.hir_stmt_requires_multi_lowering(src_stmt)
+            if not requires_multi:
+                # Lower exactly once. A final statement is classified by its
+                # lowered HIR kind, not its source kind: multiple source
+                # statement variants legitimately lower to HirStmtKind.Expr.
+                val lowered_scalar = self.lower_hir_stmt(src_stmt)
+                if stmt_idx == stmt_count - 1:
+                    if rt_enum_discriminant(lowered_scalar.kind) == expr_stmt_disc:
+                        match lowered_scalar.kind:
                             case HirStmtKind.Expr(expr):
                                 if rt_enum_discriminant(expr.kind) == return_expr_disc:
-                                    stmts = stmts.push(lowered_tail)
+                                    stmts = stmts.push(lowered_scalar)
                                 else:
                                     block_has_value = true
                                     val type_ok = expr.has_type_ and hir_heap_ref_wellformed(expr.type_)
@@ -120,9 +120,11 @@ impl HirLowering:
                         # Assignment expressions intentionally lower to Assign and
                         # remain statements; any other future non-Expr lowering is
                         # likewise preserved rather than promoted as a value.
-                        stmts = stmts.push(lowered_tail)
-                    stmt_idx = stmt_idx + 1
-                    continue
+                        stmts = stmts.push(lowered_scalar)
+                else:
+                    stmts = stmts.push(lowered_scalar)
+                stmt_idx = stmt_idx + 1
+                continue
 
             val lowered_list = self.lower_hir_stmt_multi(src_stmt)
             val lowered_count = lowered_list.len()
@@ -266,11 +268,15 @@ impl HirLowering:
             var boot_stmts: [HirStmt] = []
             var boot_idx = 0
             while boot_idx < b.stmts.len():
-                val boot_lowered_list = self.lower_hir_stmt_multi(b.stmts[boot_idx])
-                var boot_li = 0
-                while boot_li < boot_lowered_list.len():
-                    boot_stmts = boot_stmts.push(boot_lowered_list[boot_li])
-                    boot_li = boot_li + 1
+                val boot_stmt = b.stmts[boot_idx]
+                if self.hir_stmt_requires_multi_lowering(boot_stmt):
+                    val boot_lowered_list = self.lower_hir_stmt_multi(boot_stmt)
+                    var boot_li = 0
+                    while boot_li < boot_lowered_list.len():
+                        boot_stmts = boot_stmts.push(boot_lowered_list[boot_li])
+                        boot_li = boot_li + 1
+                else:
+                    boot_stmts = boot_stmts.push(self.lower_hir_stmt(boot_stmt))
                 boot_idx = boot_idx + 1
             self.symbols.pop_scope()
             return HirBlock(stmts: boot_stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
@@ -283,11 +289,15 @@ impl HirLowering:
             # Unit block: EVERY statement's value is discarded, so a bare
             # string statement at ANY position is a docstring — strip its
             # interpolations (see strip_discarded_string_interps).
-            val lowered_list: [HirStmt] = self.lower_hir_stmt_multi(self.strip_discarded_string_interps(b.stmts[stmt_idx]))
-            var li = 0
-            while li < lowered_list.len():
-                stmts = stmts.push(lowered_list[li])
-                li = li + 1
+            val unit_stmt = self.strip_discarded_string_interps(b.stmts[stmt_idx])
+            if self.hir_stmt_requires_multi_lowering(unit_stmt):
+                val lowered_list: [HirStmt] = self.lower_hir_stmt_multi(unit_stmt)
+                var li = 0
+                while li < lowered_list.len():
+                    stmts = stmts.push(lowered_list[li])
+                    li = li + 1
+            else:
+                stmts = stmts.push(self.lower_hir_stmt(unit_stmt))
             stmt_idx = stmt_idx + 1
         self.symbols.pop_scope()
 
