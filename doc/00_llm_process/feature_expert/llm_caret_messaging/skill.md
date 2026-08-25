@@ -93,3 +93,23 @@ with `recursion_limit` at depth >= 1, and `send_to_each_pane` skips the pane
 the process runs in (`TMUX_PANE`). Evidence:
 `test/03_system/app/llm_caret/workspace_cli_system_spec.spl` (real CLI child
 processes: 3-agent team, worktree isolation, broadcast, nested-suite refusal).
+
+### Infra tools + suite health (2026-08-25)
+
+Tools `mail_list/mail_read/mail_send` (std imap/smtp over io.tcp/tls_sffi)
+and `storage_ls/get/put` (pure-Simple SigV4 MinIO adapter; ftp refuses —
+`rt_ftp_*` unbacked) live in `infra_mail.spl`/`infra_storage.spl`, gated by
+the tools.spl permission policy (send/put are mutating). Live proof:
+`sh scripts/check/check-llm-caret-infra-live.shs` (Docker MinIO + greenmail,
+~10 s, `PASS — 2 live row(s)`), reproduced by two independent runs.
+
+The deployed 2026-08-23 seed cannot parse origin's stdlib (value-bound
+`unsafe(...)`); caret evidence on origin content comes from a clean worktree
+with a seed built from origin's `src/compiler_rust`. Defects fixed from that
+census: json accessor return contracts, json_serialize `42.0`, utf8
+`char_from_code` stub shadowing string_core, tui input cursor bytes vs
+codepoints, pure_sql SELECT cache not invalidated by INSERT, smtp bodyless
+forward declarations, json_helpers shadowed by std.mcp.helpers, `}}`
+fixtures in claude_cli_spec. Still environment-blocked: cli_cached,
+cli_hidden_cached, native_closure, tui_pty, messaging_phase_cli (need a
+cached self-hosted artifact / stage binaries).
