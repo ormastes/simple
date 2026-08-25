@@ -1502,12 +1502,12 @@ var _fc_refs: [i64] = []
 # retaining payloads or full tombstone rows. One row per loader/key.
 var _fc_unloaded: Dict<text, bool> = {}
 
-var _pk_ld: [i64] = []
-var _pk_path: [text] = []
-# Keep each pack as one value. Arrays are reference-backed values, so this
-# avoids copying every byte into a second flat pool at registration and again
-# out of that pool on every first facet load.
-var _pk_data: [[u8]] = []
+# One path-indexed registry per loader. Keeping the registry with its loader
+# makes duplicate detection and routed lookup independent of the number of
+# packs registered by this or any other loader. Dict values retain the same
+# reference-backed byte arrays that the former parallel `_pk_data` array did;
+# registration and lookup therefore do not copy payload bytes.
+var _ld_packs: [Dict<text, [u8]>] = []
 
 # design §14.6 / §21 E-APACK007 activation cycle guard: a flat per-process
 # stack of (loader, facet_key) pairs CURRENTLY being activated. This module
@@ -1549,6 +1549,7 @@ fn apk_loader_new() -> i64:
     _ld_unloads = _ld_unloads.push(0)
     _ld_catalog_invalidations = _ld_catalog_invalidations.push(0)
     _ld_operational_sealed = _ld_operational_sealed.push(false)
+    _ld_packs = _ld_packs.push({})
     id
 
 fn apk_loader_seal_operational_state(ld: i64):
@@ -1635,16 +1636,12 @@ fn apk_loader_register_pack(ld: i64, path: text, data: [u8]) -> bool:
     """Register pack bytes under a catalog-relative path. Duplicate path in
     the same loader fails closed. Registration does NOT open or validate the
     pack — that happens (and is counted) only on load."""
-    var i = 0
-    val n = _pk_ld.len()
-    while i < n:
-        if _pk_ld[i] == ld and _pk_path[i] == path:
-            _ld_last_error[ld] = "pack already registered: {path}"
-            return false
-        i = i + 1
-    _pk_ld = _pk_ld.push(ld)
-    _pk_path = _pk_path.push(path)
-    _pk_data = _pk_data.push(data)
+    var packs = _ld_packs[ld]
+    if packs.contains_key(path):
+        _ld_last_error[ld] = "pack already registered: {path}"
+        return false
+    packs[path] = data
+    _ld_packs[ld] = packs
     _ld_last_error[ld] = ""
     true
 
@@ -1669,25 +1666,13 @@ fn apk_loader_unregister_pack(ld: i64, path: text) -> bool:
                 return false
         i = i + 1
     _apk_release_pack_bindings(ld, path)
-    var next_ld: [i64] = []
-    var next_path: [text] = []
-    var next_data: [[u8]] = []
-    var found = false
-    i = 0
-    while i < _pk_ld.len():
-        if _pk_ld[i] == ld and _pk_path[i] == path:
-            found = true
-        else:
-            next_ld.push(_pk_ld[i])
-            next_path.push(_pk_path[i])
-            next_data.push(_pk_data[i])
-        i = i + 1
+    var packs = _ld_packs[ld]
+    val found = packs.contains_key(path)
     if not found:
         _ld_last_error[ld] = "pack is not registered: {path}"
         return false
-    _pk_ld = next_ld
-    _pk_path = next_path
-    _pk_data = next_data
+    packs = packs.remove(path)
+    _ld_packs[ld] = packs
     _ld_last_error[ld] = ""
     true
 
@@ -1870,18 +1855,13 @@ fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bo
         _ld_last_error[ld] = "manual aspect requires an explicit load: {facet_key}"
         return _apk_facet_error("APK_ASPECT_MANUAL", "manual aspect requires an explicit load: {facet_key}")
 
-    # locate the routed pack's registered bytes (exact path, no scanning)
-    var pidx = -1
-    var i = 0
-    val n = _pk_ld.len()
-    while i < n:
-        if _pk_ld[i] == ld and _pk_path[i] == route.pack_path:
-            pidx = i
-        i = i + 1
-    if pidx < 0:
+    # Locate the routed pack by exact path. The per-loader Dict avoids a scan
+    # across this loader's packs and every other loader's packs.
+    val packs = _ld_packs[ld]
+    if not packs.contains_key(route.pack_path):
         _ld_last_error[ld] = "routed pack is not deployed: {route.pack_path}"
         return _apk_facet_error("APK_PACK_MISSING", "routed pack is not deployed: {route.pack_path}")
-    val pack = _pk_data[pidx]
+    val pack = packs[route.pack_path]
 
     _ld_packs_opened[ld] = _ld_packs_opened[ld] + 1
     val handle = apk_open_pack_v1(pack)
