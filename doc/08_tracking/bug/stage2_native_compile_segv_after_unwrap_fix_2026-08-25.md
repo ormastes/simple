@@ -61,8 +61,12 @@ this is newly *exposed*: the code was always there, nothing could reach it.
 
 ## Reproduce
 
+The Stage-2 binary measured here is **preserved** (the lane worktree is gone):
+`/mnt/data/evidence-bind2/stage2-bind2-simple.rejected`, sha256 `4475ccb2e80e07ca…`,
+alongside `hw_pos.log` (the hand-reproduced smoke) and `gate-unwrap.log`.
+
 ```sh
-S2=build/bootstrap-bind2/stage2/x86_64-unknown-linux-gnu/simple.rejected
+S2=/mnt/data/evidence-bind2/stage2-bind2-simple.rejected
 printf 'fn main():\n    print "hello"\n' > /tmp/hw.spl
 "./$S2" native-build /tmp/hw.spl --backend=cranelift -o /tmp/hw.bin; echo "rc=$?"
 # expect rc=139, and ZERO E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED lines
