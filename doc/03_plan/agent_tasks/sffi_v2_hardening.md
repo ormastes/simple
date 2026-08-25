@@ -572,3 +572,7 @@ passing placeholder.
      `unsafe(ffi)`. Validate allocation/projection failures, string out-length,
      and owned result lifetimes before safe publication without extra GC work,
      allocations, clones, frees, arithmetic calls, copies, or dispatch.
+112. Keep all 39 canonical system declarations explicitly tagged `unsafe(ffi)`.
+     Preserve nullable environment lookup and direct process/clock operations;
+     migrate ambiguous empty text and timestamp/host sentinels to typed results
+     without extra lookups, processes, captures, clock calls, parses, or sleeps.

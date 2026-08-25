@@ -1296,3 +1296,26 @@ Unsafe-tagged rows increase from 1,770 to 1,802, untouched rows decrease from
 9,655 to 9,623, and exact-artifact verified-and-signed admission remains zero.
 Allocation failures, projection validity, raw string out-length, and owned
 result lifetimes still require executable validation and signed admission.
+
+## System environment/process/time raw-contract checkpoint
+
+All 39 declarations in the canonical system owner now carry adjacent,
+operation-specific `@unsafe(... capabilities: [ffi])` metadata. Eight process
+contracts were already tagged, and nullable environment lookup already had
+recognized contract state; the pass closes the remaining 30 untouched rows.
+The contracts cover home/hostname/UUID text, optional environment lookup and
+mutation/snapshots, process arguments and IDs, captured execution/spawn/wait/
+kill, shell commands, host capability values, wall/monotonic/local time,
+timestamp formatting/parsing/differences, and blocking sleep.
+
+A static ratchet fixes the inventory at 39 and requires every declaration to
+retain its tag. It passed with the whitespace check. This pass changes no ABI
+signature, environment lookup, process/shell operation, capture allocation,
+clock query, timestamp parse/format, sleep, branch, copy, or dispatch.
+Production Simple and optimizer verification remain unavailable.
+
+Estimated totals remain 11,681 declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,802 to 1,832, untouched rows decrease from
+9,623 to 9,593, and exact-artifact verified-and-signed admission remains zero.
+Ambiguous empty text and timestamp/host discriminant sentinels still require
+typed results and exact provider admission.
