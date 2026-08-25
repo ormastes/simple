@@ -445,3 +445,9 @@ passing placeholder.
     contracts before registry admission. The current removal adds no memory or
     dispatch overhead. Next remove or implement the fabricated certificate and
     connection-info providers; signed exact-artifact admission remains zero.
+84. Do not restore the ten fabricated TLS certificate/peer/self-sign/hash
+    symbols or their atomic fake-handle generator. Peer certificate metadata
+    remains explicitly optional until a real owned certificate representation,
+    parser, validation policy, and destructor are implemented. Next make
+    protocol/cipher/ALPN/handshake connection info truthful and typed; signed
+    exact-artifact admission remains zero.

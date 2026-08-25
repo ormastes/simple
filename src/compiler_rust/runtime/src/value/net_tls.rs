@@ -20,7 +20,6 @@
 // Handles live in a separate table from the TCP-native handles;
 // `is_valid_handle(h)` only checks `h != 0` so the two namespaces coexist.
 
-static NEXT_TLS_FAKE_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 const TLS_CLIENT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const TLS_CLIENT_WRITE_MAX: usize = 50 * 1024 * 1024;
 
@@ -29,10 +28,6 @@ fn tls_client_timeout_from_ms(timeout_ms: i64) -> Option<std::time::Duration> {
         return None;
     }
     Some(std::time::Duration::from_millis(timeout_ms as u64))
-}
-
-fn next_tls_fake_handle() -> i64 {
-    NEXT_TLS_FAKE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn apply_socket_timeout(
@@ -740,46 +735,6 @@ pub extern "C" fn rt_tls_server_shutdown(server: i64) -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_load_cert(_cert_path: crate::value::RuntimeValue) -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_load_key(_key_path: crate::value::RuntimeValue) -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_verify_cert(_cert: i64) -> bool {
-    false
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_get_cert_subject(_cert: i64) -> crate::value::RuntimeValue {
-    empty_text()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_get_cert_issuer(_cert: i64) -> crate::value::RuntimeValue {
-    empty_text()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_get_cert_expiry(_cert: i64) -> crate::value::RuntimeValue {
-    empty_text()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_free_cert(_cert: i64) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_get_peer_cert(_conn: i64) -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
 pub extern "C" fn rt_tls_get_protocol_version(conn: i64) -> crate::value::RuntimeValue {
     // Check server connections first, then client connections
     if let Some(arc) = TLS_CONNS.lock().unwrap().get(&conn).cloned() {
@@ -820,21 +775,6 @@ pub extern "C" fn rt_tls_get_negotiated_alpn(_conn: i64) -> crate::value::Runtim
 #[no_mangle]
 pub extern "C" fn rt_tls_is_handshake_complete(_conn: i64) -> bool {
     true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_generate_self_signed_cert(
-    _common_name: crate::value::RuntimeValue,
-    _days_valid: i64,
-    _cert_out: crate::value::RuntimeValue,
-    _key_out: crate::value::RuntimeValue,
-) -> bool {
-    false
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_hash_cert(_cert_path: crate::value::RuntimeValue) -> crate::value::RuntimeValue {
-    empty_text()
 }
 
 #[cfg(test)]

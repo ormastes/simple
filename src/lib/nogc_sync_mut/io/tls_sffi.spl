@@ -47,28 +47,12 @@ extern fn rt_tls_server_close_connection(conn: i64) -> bool
 @unsafe(reason: "raw rustls listener shutdown status ABI; false means invalid, stale, or already closed handle", capabilities: [ffi])
 extern fn rt_tls_server_shutdown(server: i64) -> bool
 
-# --- Certificate Management ---
-
-extern fn rt_tls_load_cert(cert_path: text) -> i64
-extern fn rt_tls_load_key(key_path: text) -> i64
-extern fn rt_tls_verify_cert(cert: i64) -> bool
-extern fn rt_tls_get_cert_subject(cert: i64) -> text
-extern fn rt_tls_get_cert_issuer(cert: i64) -> text
-extern fn rt_tls_get_cert_expiry(cert: i64) -> text
-extern fn rt_tls_free_cert(cert: i64) -> bool
-
 # --- Connection Info ---
 
-extern fn rt_tls_get_peer_cert(conn: i64) -> i64
 extern fn rt_tls_get_protocol_version(conn: i64) -> text
 extern fn rt_tls_get_cipher_suite(conn: i64) -> text
 extern fn rt_tls_get_negotiated_alpn(conn: i64) -> text
 extern fn rt_tls_is_handshake_complete(conn: i64) -> bool
-
-# --- Utilities ---
-
-extern fn rt_tls_generate_self_signed_cert(common_name: text, days_valid: i64, cert_out: text, key_out: text) -> bool
-extern fn rt_tls_hash_cert(cert_path: text) -> text  # SHA-256 fingerprint
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -91,15 +75,11 @@ struct TlsServer:
     port: i64
     is_valid: bool
 
-struct TlsCertificate:
-    handle: i64
-    is_valid: bool
-
 struct TlsConnectionInfo:
     protocol_version: text
     cipher_suite: text
     alpn_protocol: text
-    peer_cert_subject: text
+    peer_cert_subject: text?
 
 # --- TLS Client ---
 
@@ -266,60 +246,6 @@ fn tls_server_shutdown(server: TlsServer) -> Result<(), text>:
         return Err("TLS shutdown failed")
     Ok(())
 
-# --- Certificate Management ---
-
-fn tls_load_cert(cert_path: text) -> TlsCertificate:
-    """Load certificate from file
-
-    Args:
-        cert_path: Path to certificate (PEM format)
-
-    Returns: TlsCertificate (check is_valid)
-    """
-    val handle = rt_tls_load_cert(cert_path)
-    TlsCertificate(handle: handle, is_valid: is_valid_handle(handle))
-
-fn tls_verify_cert(cert: TlsCertificate) -> bool:
-    """Verify certificate is valid
-
-    Returns: true if certificate is valid and not expired
-    """
-    if is_invalid_handle(cert.handle):
-        return false
-
-    rt_tls_verify_cert(cert.handle)
-
-fn tls_get_cert_subject(cert: TlsCertificate) -> text:
-    """Get certificate subject (e.g., CN=example.com)"""
-    if is_invalid_handle(cert.handle):
-        return ""
-
-    rt_tls_get_cert_subject(cert.handle)
-
-fn tls_get_cert_issuer(cert: TlsCertificate) -> text:
-    """Get certificate issuer"""
-    if is_invalid_handle(cert.handle):
-        return ""
-
-    rt_tls_get_cert_issuer(cert.handle)
-
-fn tls_get_cert_expiry(cert: TlsCertificate) -> text:
-    """Get certificate expiration date
-
-    Returns: ISO 8601 timestamp
-    """
-    if is_invalid_handle(cert.handle):
-        return ""
-
-    rt_tls_get_cert_expiry(cert.handle)
-
-fn tls_free_cert(cert: TlsCertificate) -> bool:
-    """Free certificate resources"""
-    if is_invalid_handle(cert.handle):
-        return false
-
-    rt_tls_free_cert(cert.handle)
-
 # --- Connection Info ---
 
 fn tls_get_connection_info(conn: TlsClientConnection) -> TlsConnectionInfo:
@@ -337,23 +263,18 @@ fn tls_get_connection_info(conn: TlsClientConnection) -> TlsConnectionInfo:
             protocol_version: "",
             cipher_suite: "",
             alpn_protocol: "",
-            peer_cert_subject: ""
+            peer_cert_subject: nil
         )
 
     val protocol = rt_tls_get_protocol_version(conn.handle)
     val cipher = rt_tls_get_cipher_suite(conn.handle)
     val alpn = rt_tls_get_negotiated_alpn(conn.handle)
 
-    val peer_cert_handle = rt_tls_get_peer_cert(conn.handle)
-    var peer_subject = ""
-    if is_valid_handle(peer_cert_handle):
-        peer_subject = rt_tls_get_cert_subject(peer_cert_handle)
-
     TlsConnectionInfo(
         protocol_version: protocol,
         cipher_suite: cipher,
         alpn_protocol: alpn,
-        peer_cert_subject: peer_subject
+        peer_cert_subject: nil
     )
 
 fn tls_is_handshake_complete(conn: TlsClientConnection) -> bool:
@@ -363,51 +284,16 @@ fn tls_is_handshake_complete(conn: TlsClientConnection) -> bool:
 
     rt_tls_is_handshake_complete(conn.handle)
 
-# --- Utilities ---
-
-fn tls_generate_self_signed_cert(common_name: text, days_valid: i64, cert_out: text, key_out: text) -> bool:
-    """Generate self-signed certificate
-
-    Args:
-        common_name: Certificate CN (e.g., "localhost")
-        days_valid: Number of days certificate is valid
-        cert_out: Output path for certificate
-        key_out: Output path for private key
-
-    Returns: true if successful
-
-    Example:
-        if tls_generate_self_signed_cert("localhost", 365, "cert.pem", "key.pem"):
-            print "Self-signed certificate generated"
-    """
-    rt_tls_generate_self_signed_cert(common_name, days_valid, cert_out, key_out)
-
-fn tls_cert_fingerprint(cert_path: text) -> text:
-    """Get SHA-256 fingerprint of certificate
-
-    Args:
-        cert_path: Path to certificate file
-
-    Returns: Hex-encoded SHA-256 hash
-
-    Example:
-        fingerprint = tls_cert_fingerprint("cert.pem")
-        print "Fingerprint: {fingerprint}"
-    """
-    rt_tls_hash_cert(cert_path)
-
 # ============================================================================
 # Export Functions
 # ============================================================================
 
-export TlsClientConnection, TlsServerConnection, TlsServer, TlsCertificate
+export TlsClientConnection, TlsServerConnection, TlsServer
 export TlsConnectionInfo
 export tls_connect, tls_connect_with_sni, tls_write, tls_read, tls_close
 export tls_server_create, tls_server_accept, tls_server_write, tls_server_read
 export tls_server_close_connection, tls_server_shutdown
-export tls_load_cert, tls_verify_cert, tls_get_cert_subject, tls_get_cert_issuer
-export tls_get_cert_expiry, tls_free_cert, tls_get_connection_info
-export tls_is_handshake_complete, tls_generate_self_signed_cert, tls_cert_fingerprint
+export tls_get_connection_info, tls_is_handshake_complete
 export rt_tls_client_connect, rt_tls_client_connect_with_sni
 export rt_tls_client_write, rt_tls_client_read, rt_tls_client_close
 export rt_tls_server_create, rt_tls_server_accept, rt_tls_server_write

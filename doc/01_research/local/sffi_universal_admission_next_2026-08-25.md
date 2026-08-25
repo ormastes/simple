@@ -713,3 +713,22 @@ and TLS-enabled runtime compile checks passed once.
 The estimate falls to 11,934 declaration rows / 3,148 symbols, with 1,203
 tagged declarations, 651 `unsafe_contract_declared`, 10,465 untouched, and
 zero exact-artifact verified-and-signed.
+
+## Fabricated TLS certificate provider removal checkpoint
+
+Ten unused certificate/peer/self-sign/hash symbols were advertised without an
+implementation: hosted code returned synthetic handles, empty metadata,
+unconditional release success, or guaranteed failure, while SimpleOS exported
+equivalent unavailable stubs. They are removed from the canonical facade,
+hosted exports, compiler runtime registry, and SimpleOS. The now-unused atomic
+fake-handle generator is also removed.
+
+Connection info no longer calls a fabricated peer-certificate handle path;
+`peer_cert_subject` is explicitly optional and currently `nil`. Removing these
+paths reduces code and static state and introduces no provider call, allocation,
+lock, lookup, branch, or dispatch. The static absence ratchet and both runtime
+feature compile configurations passed once.
+
+The estimate falls to 11,924 declaration rows / 3,138 symbols, with 1,203
+tagged declarations, 651 `unsafe_contract_declared`, 10,455 untouched, and
+zero exact-artifact verified-and-signed.
