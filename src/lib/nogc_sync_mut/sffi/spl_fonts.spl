@@ -61,12 +61,18 @@ use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, v
 extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64
 @unsafe(reason: "status/out font symbol resolver ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_dlsym_checked(handle: i64, name: text, out_symbol: *mut i64) -> i64
+@unsafe(reason: "raw dynamic-library handle lifetime remains caller-owned", capabilities: [ffi, raw_ptr])
 extern fn spl_dlclose(handle: i64) -> i64
+@unsafe(reason: "raw function address and dynamic argument ABI remain caller-owned", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+@unsafe(reason: "foreign pointer length and copied-byte validity remain caller-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 use std.common.string_core.{text_to_bytes}
+@unsafe(reason: "raw font initializer address and byte ownership remain caller-owned", capabilities: [ffi, raw_ptr])
 extern fn spl_fonts_call_init_blob(fptr: i64, blob: [u8], digest: [u8]) -> i64
+@unsafe(reason: "raw font initializer address and path-byte lifetime remain caller-owned", capabilities: [ffi, raw_ptr])
 extern fn spl_fonts_call_init_path(fptr: i64, path: [u8]) -> i64
+@unsafe(reason: "raw layout address and output-slot lifetime remain caller-owned", capabilities: [ffi, raw_ptr])
 extern fn spl_fonts_call_layout_text(fptr: i64, text_bytes: [u8], size_px: i64, max_width: i64) -> i64
 
 fn _font_resolve_optional(handle: i64, name: text) -> i64:
@@ -244,6 +250,7 @@ impl FontRasterizer:
     #
     # Selected assets initialize from this owned blob; unmanaged font paths are
     # marshalled as UTF-8 bytes for the legacy native initializer.
+    @unsafe(reason: "loads a foreign provider and retains its raw handle and typed symbol addresses", capabilities: [ffi, raw_ptr])
     static fn load(dylib_path: text, ttf_path: text) -> FontRasterizer:
         # Reject a missing provider before reading a potentially multi-megabyte
         # font. In the interpreter each byte is boxed; probing four absent
@@ -341,17 +348,20 @@ impl FontRasterizer:
         )
 
     # Internal: read a single metric field for the active glyph handle.
+    @unsafe(reason: "invokes a cached foreign metric address with a raw glyph handle", capabilities: [ffi, raw_ptr])
     fn _metric(handle: i64, field: i64) -> i64:
         var args: [i64] = []
         args = args.push(handle)
         args = args.push(field)
         spl_wffi_call_i64(self.metric_fp, args, 2)
 
+    @unsafe(reason: "releases a raw foreign glyph handle through a cached address", capabilities: [ffi, raw_ptr])
     fn _free_glyph(handle: i64):
         var args: [i64] = []
         args = args.push(handle)
         spl_wffi_call_i64(self.glyph_free_fp, args, 1)
 
+    @unsafe(reason: "validates selected-font output against the current foreign provider generation", capabilities: [ffi, raw_ptr])
     fn _rasterize_selected_outline(selector_kind: i64, selector_value: i64, size_px: i64) -> SffiGlyphBitmap?:
         if self.selected_blob.len() == 0 or size_px <= 0:
             return nil
@@ -386,6 +396,7 @@ impl FontRasterizer:
     # slot but leave previously returned SffiGlyphBitmaps untouched, so callers
     # can safely interleave rasterize/read. A 0x0 glyph (whitespace) still
     # yields a valid SffiGlyphBitmap with an empty `pixels` array.
+    @unsafe(reason: "invokes cached font addresses and copies a validated foreign pixel span", capabilities: [ffi, raw_ptr])
     fn rasterize(codepoint: i64, size_px: i64) -> SffiGlyphBitmap?:
         if not self.is_current():
             return nil
@@ -432,12 +443,14 @@ impl FontRasterizer:
 
     # Rasterize a producer-shaped glyph ID from this exact selected face.
     # The result owns its pixels and never exposes the selected face handle.
+    @unsafe(reason: "validates selected-font output against the current foreign provider generation", capabilities: [ffi, raw_ptr])
     fn rasterize_glyph_index(glyph_index: i64, size_px: i64) -> SffiGlyphBitmap?:
         if (not self.is_current() or self.selected_blob.len() == 0 or
             glyph_index <= 0 or glyph_index > 4294967295 or size_px <= 0 or size_px > 512):
             return nil
         self._rasterize_selected_outline(SFNT_GLYPH_SELECTOR_INDEX, glyph_index, size_px)
 
+    @unsafe(reason: "invokes a cached foreign glyph-query address", capabilities: [ffi, raw_ptr])
     fn has_glyph(codepoint: i64) -> bool:
         if not self.is_current():
             return false
@@ -449,6 +462,7 @@ impl FontRasterizer:
         val present = spl_wffi_call_i64(self.has_glyph_fp, args, 1) == 1
         present and self.is_current()
 
+    @unsafe(reason: "invokes a cached foreign generation address", capabilities: [ffi, raw_ptr])
     fn generation() -> i64:
         if self.lib_handle == 0:
             return self.loaded_generation
@@ -466,6 +480,7 @@ impl FontRasterizer:
     # stale or reloading rasterizer yields 0 / "" exactly as the tuple did;
     # callers that need pairing guarantees re-read the generation afterwards
     # (the atlas producer already does).
+    @unsafe(reason: "queries and compares the cached foreign provider generation", capabilities: [ffi, raw_ptr])
     fn cache_identity_generation() -> i64:
         if self.loaded_generation <= 0:
             return 0
@@ -483,14 +498,17 @@ impl FontRasterizer:
             return 0
         generation_after
 
+    @unsafe(reason: "depends on the cached foreign provider generation", capabilities: [ffi, raw_ptr])
     fn is_current() -> bool:
         self.cache_identity_generation() > 0
 
+    @unsafe(reason: "returns identity only while the foreign provider generation is current", capabilities: [ffi, raw_ptr])
     fn cache_identity() -> text:
         if self.cache_identity_generation() <= 0:
             return ""
         self.font_cache_identity
 
+    @unsafe(reason: "invokes cached font addresses with a raw glyph handle", capabilities: [ffi, raw_ptr])
     fn rasterize_subpixel(codepoint: i64, size_px: i64) -> SubpixelGlyphBitmap?:
         if not self.is_current() or self.subpixel_raster_fp == 0 or self.subpixel_pixel_fp == 0:
             return nil
@@ -534,6 +552,7 @@ impl FontRasterizer:
             pixels: pixels,
         )
 
+    @unsafe(reason: "invokes a cached foreign kerning address", capabilities: [ffi, raw_ptr])
     fn horizontal_kern(left_codepoint: i64, right_codepoint: i64, size_px: i64) -> i64:
         if not self.is_current() or self.kern_fp == 0:
             return 0
@@ -544,6 +563,7 @@ impl FontRasterizer:
         val result = spl_wffi_call_i64(self.kern_fp, args, 3)
         if self.is_current(): result else: 0
 
+    @unsafe(reason: "invokes a cached foreign line-metric address", capabilities: [ffi, raw_ptr])
     fn horizontal_line_metric(size_px: i64, field: i64) -> i64:
         if not self.is_current() or self.line_metric_fp == 0:
             return 0
@@ -553,6 +573,7 @@ impl FontRasterizer:
         val result = spl_wffi_call_i64(self.line_metric_fp, args, 2)
         if self.is_current(): result else: 0
 
+    @unsafe(reason: "invokes cached layout addresses and reads provider-owned layout slots", capabilities: [ffi, raw_ptr])
     fn layout_text(text_val: text, size_px: i64, max_width: i64) -> [LayoutGlyph]:
         if not self.is_current() or self.layout_fp == 0 or self.layout_glyph_metric_fp == 0:
             return []
@@ -575,6 +596,7 @@ impl FontRasterizer:
             idx = idx + 1
         if self.is_current(): glyphs else: []
 
+    @unsafe(reason: "reads a provider-owned layout slot through a cached address", capabilities: [ffi, raw_ptr])
     fn _layout_metric(index: i64, field: i64) -> i64:
         var args: [i64] = []
         args = args.push(index)
@@ -583,6 +605,7 @@ impl FontRasterizer:
 
     # Release the dynamic library handle. The typed wrapper becomes unusable
     # after this call. Returns 0 on success (matching libc dlclose).
+    @unsafe(reason: "closes and invalidates a raw dynamic-library handle", capabilities: [ffi, raw_ptr])
     me close() -> i64:
         val rc = if self.lib_handle == 0: 0 else: spl_dlclose(self.lib_handle)
         self.lib_handle = 0

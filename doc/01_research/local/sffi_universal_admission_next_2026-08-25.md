@@ -102,6 +102,38 @@ No production self-hosted optimizer or benchmark was available.  Exact
 artifact identity, signatures, and evidence admission remain absent;
 verified-and-signed admission remains 0.
 
+## Font provider authority checkpoint
+
+`src/lib/nogc_sync_mut/sffi/spl_fonts.spl` now declares all eight raw dynamic
+loader, function-address, byte-span, initializer, and layout ABI families with
+explicit `ffi, raw_ptr` authority. Seventeen narrowly selected methods retain,
+invoke, or transitively validate against those raw handles and therefore carry
+the same caller-visible authority; provider-independent parsing remains safe.
+
+The existing contract behavior is preserved: glyph presence remains `bool`,
+foreign glyph pixels are validated then copied before the handle is freed, and
+invalid provider state remains distinct from a valid empty glyph. No numeric
+boolean workaround was introduced. No function was forced inline: the large
+raster and layout loops keep their existing code-size and dispatch decisions,
+and the annotation-only change adds no scan, hash, signature operation, lookup,
+lock, allocation, copy, branch, or per-call work.
+
+The focused static authority/provider/performance ratchet passed. Seven of the
+eight symbols appear in both typed-native and interpreter registries; the
+layout helper appears in only one. The census changed exactly by the 24
+previously unbounded calls:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,324 -> 14,300
+- lexical unsafe: 3,402 -> 3,401 (the containing unsafe owner supersedes one
+  nested lexical classification)
+- function unsafe: 1,120 -> 1,145
+
+This is authority accounting, not verification. Generic function-address ABI,
+provider-global layout lifetime, typed resource ownership, exact artifact
+identity, trusted signature admission, and proof receipts remain unresolved;
+verified-and-signed admission remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
