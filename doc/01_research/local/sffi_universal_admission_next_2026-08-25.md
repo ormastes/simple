@@ -12,6 +12,36 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Simple-core authority-coverage checkpoint
+
+The final two simple-core gaps were `core_stdio.spl` and `core_math.spl`.
+Their three ambient calls are now represented by two mandatory-inline `ffi`
+owners.  The focused `simple-core-stdio-math-authority.shs` ratchet passed and
+pins one-call hot paths plus both compilers' mandatory-inline recognition.
+
+The stdio wrappers previously discarded the signed `fflush(NULL)` result and
+always returned zero, fabricating success on flush failure.  They now return
+the actual status with the same single foreign call.  Both functions still
+flush all open output streams because this pure-core lane has no portable
+stdout/stderr stream-pointer owner; it does not falsely claim stream-specific
+behavior.  The square-root wrapper retains exactly one platform `sqrt` call
+and unchanged IEEE/libm behavior.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,635 -> 19,634
+- lexical unsafe: 3,213 -> 3,215
+- function unsafe: unchanged at 919
+- missing authority: 15,503 -> 15,500
+
+The same census now reports all 19 `src/runtime/simple_core/*.spl` files at
+zero missing-authority sites across 244 raw-call rows.  This is an authority
+coverage result, not a universal safety result: raw future-handle lifetime,
+linear handle registries, single-threaded atomic fallbacks, stream identity,
+provider proofs, and exact signed artifacts remain unresolved.  Production
+execution and exact artifact evidence remain unavailable, so
+verified-and-signed admission remains 0.
+
 ## Simple-core atomic-fallback authority checkpoint
 
 The pure-Simple bootstrap atomic fallback retains six explicitly tagged raw
