@@ -992,3 +992,28 @@ Unsafe-tagged rows increase from 1,410 to 1,453, untouched rows decrease from
 10,108 to 10,065, and exact-artifact verified-and-signed admission remains
 zero. Raw ptrace and DWARF APIs remain unsafe until their status, absence,
 ownership, platform policy, and exact provider evidence are fully admitted.
+
+## CLI canonical-owner and raw-contract checkpoint
+
+`std.nogc_sync_mut.ffi.cli` duplicated all 40 declarations and wrappers from
+canonical `std.nogc_sync_mut.sffi.cli`, except that it renamed the generator
+surface to `rt_cli_run_ffi_gen`. Repository-wide provider inspection found no
+runtime, interpreter, or codegen implementation for that symbol; only
+`rt_cli_run_sffi_gen` is implemented and registered. The FFI namespace is now a
+canonical re-export with two legacy source-level aliases that call the real
+SFFI generator. This eliminates unresolved foreign dispatch while retaining
+the legacy function names.
+
+All 40 canonical declarations now carry adjacent, operation-specific
+`@unsafe(... capabilities: [ffi])` contracts covering process arguments and
+termination, filesystem reads/watches, compiler tagged tuples, command text
+and argument arrays, and command exit-status families. The static ratchet
+requires all 40 tags, forbids provider declarations in the compatibility
+facade, and rejects reintroduction of `rt_cli_run_ffi_gen`; it passed with the
+whitespace check.
+
+This removes 40 duplicate foreign declarations. It adds no foreign call,
+allocation, array copy, lookup, or command dispatch; only the two cold legacy
+generator aliases have one ordinary Simple forwarding call. Estimated totals
+are 11,736 `rt_*` declaration rows / 3,137 symbols, 1,493 unsafe-tagged rows,
+9,985 untouched rows, and zero exact-artifact verified-and-signed admissions.

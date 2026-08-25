@@ -516,3 +516,7 @@ passing placeholder.
     prove returned collection ownership, enforce platform/debug capability
     policy, and bind the exact provider artifact without adding debug syscalls
     or process-memory copies.
+98. Keep `std.nogc_sync_mut.ffi.cli` a provider-free compatibility facade and
+    retain `cli_run_ffi_gen` / `cli_ffi_gen` only as aliases to the implemented
+    canonical SFFI generator. Keep all 40 canonical CLI declarations explicitly
+    tagged; never restore the unimplemented `rt_cli_run_ffi_gen` symbol.
