@@ -3336,11 +3336,56 @@ impl MirLowering:
                     # `map`/`filter` above already do when their lambda arg
                     # doesn't match the liftable shape.
                     if method == "first" and args.len() == 0:
-                        if val first_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false):
+                        if val first_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, nil):
                             return first_result
                     if method == "last" and args.len() == 0:
-                        if val last_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, true):
+                        if val last_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, true, nil):
                             return last_result
+
+                    # `.get(i)` is the same builtin-Array gap as
+                    # `first`/`last`/`push`/`map` above (no MethodResolver
+                    # entry), so it also reaches this Unresolved arm and used
+                    # to hit the loud "unresolved method call: get" below --
+                    # measured on the native lane while BOTH seed lanes
+                    # (interpret and jit) answered it correctly via
+                    # `handle_array_methods`' `"get"` arm in the Rust seed's
+                    # interpreter_method/collections.rs. That one-lane gap is
+                    # exactly what test/fixtures/engine_differential/
+                    # list_index_and_get.spl exists to catch.
+                    #
+                    # Shares `lower_array_first_or_last`'s body rather than
+                    # duplicating its ~90 lines of Option-handle construction:
+                    # `first()` is `get(0)` and `last()` is `get(len - 1)`,
+                    # the only differences being which index is computed and
+                    # that an explicit index also needs a LOWER bound test.
+                    #
+                    # Deliberate, documented engine difference (NOT a
+                    # divergence this fixture can see): the seed returns the
+                    # RAW element and a bare `Value::Nil` out of bounds, while
+                    # this lowering returns a real `Option<T>`, matching the
+                    # pure-Simple compiler's own `first`/`last` convention.
+                    # Both spellings agree through `??` and on any in-bounds
+                    # index, which is all the fixture exercises; an
+                    # out-of-bounds `get` printed WITHOUT `??` would still
+                    # differ (`nil` vs `None`). Left alone deliberately --
+                    # changing `first`/`last` to match the seed is a separate,
+                    # wider change than clearing this lane error.
+                    if method == "get" and args.len() == 1:
+                        val get_index_local = self.lower_expr(args[0].value)
+                        if val get_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, Some(get_index_local)):
+                            return get_result
+
+                    # `.find(\x: pred)` -- same Unresolved-arm gap, same
+                    # native-lane-only symptom, measured against
+                    # closure_runtime_facing.spl. Mirrors `filter`'s
+                    # `lower_lambda_value` guard: a non-liftable lambda arg
+                    # yields nil and falls through to the loud fail below
+                    # rather than mis-lowering.
+                    if method == "find" and args.len() == 1:
+                        val find_lambda_operand = self.lower_lambda_value(args[0].value)
+                        if val find_lam_op = find_lambda_operand:
+                            if val find_result = self.lower_array_find(receiver, unresolved_receiver_local, find_lam_op):
+                                return find_result
 
                 # Bug #149: `x.push(item)` never resolves via MethodResolver
                 # (try_instance_method/try_trait_method/try_ufcs in
@@ -4320,8 +4365,8 @@ impl MirLowering:
         self.builder = b_exit
         acc
 
-    me lower_array_first_or_last(receiver: HirExpr, arr: LocalId, want_last: bool) -> LocalId?:
-        """Real MIR lowering for `Array.first()`/`.last()` on a runtime
+    me lower_array_first_or_last(receiver: HirExpr, arr: LocalId, want_last: bool, explicit_index: LocalId?) -> LocalId?:
+        """Real MIR lowering for `Array.first()`/`.last()`/`.get(i)` on a runtime
         array, returning a genuine `Option<T>` handle -- mirrors
         `Option.map`'s some/none/merge shape immediately above (the
         `option_method_receiver` `"map"` arm), which is the established
@@ -4411,7 +4456,7 @@ impl MirLowering:
         # mirrors why `Option.map` above only calls `ensure_option_handle`
         # when `map_value_type != nil` at all.
         val option_type = HirType(kind: HirTypeKind.Optional(elem_hir_type), span: receiver.span)
-        val name_prefix = if want_last: "last" else: "first"
+        val name_prefix = if explicit_index != nil: "get" else: (if want_last: "last" else: "first")
 
         var b_len = self.builder
         val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
@@ -4420,12 +4465,36 @@ impl MirLowering:
 
         var b_split = self.builder
         val zero = b_split.emit_const_int(0)
-        val nonempty = b_split.emit_binop(MirBinOp.Gt, mir_operand_copy(len_local), mir_operand_copy(zero), MirType.bool())
         val some_block = b_split.new_block(Some("{name_prefix}_some"))
         val none_block = b_split.new_block(Some("{name_prefix}_none"))
         val merge_block = b_split.new_block(Some("{name_prefix}_merge"))
         val result_local = b_split.new_temp(MirType.i64())
-        b_split.terminate_if(mir_operand_copy(nonempty), some_block, none_block)
+        if val bounds_index = explicit_index:
+            # `.get(i)` needs BOTH bounds tested, where `first`/`last` only
+            # ever need `len > 0` (their index is derived from `len` and so is
+            # in range by construction). MirBinOp has no logical `And`
+            # (mir_instruction_support.spl:212-229 offers only `BitAnd`, whose
+            # behaviour on an i1 the backends do not promise), so `0 <= i` and
+            # `i < len` are spelled as a short-circuit chain of `terminate_if`s
+            # -- only primitives this function already relies on. Both failing
+            # edges land on the SAME `none_block`, so the None arm and the
+            # merge bookkeeping below are untouched.
+            #
+            # Testing the lower bound matters as much as the upper one: a
+            # negative index is not rejected by `rt_array_get`, which
+            # normalizes `-1` to `len - 1` (see the `rt_array_last` note in
+            # this docstring). Letting that through would make `get(-1)`
+            # silently answer `last()` on the native lane while the seed
+            # answers `nil`.
+            val upper_block = b_split.new_block(Some("{name_prefix}_upper"))
+            val lower_ok = b_split.emit_binop(MirBinOp.Ge, mir_operand_copy(bounds_index), mir_operand_copy(zero), MirType.bool())
+            b_split.terminate_if(mir_operand_copy(lower_ok), upper_block, none_block)
+            b_split.switch_to_block(upper_block)
+            val upper_ok = b_split.emit_binop(MirBinOp.Lt, mir_operand_copy(bounds_index), mir_operand_copy(len_local), MirType.bool())
+            b_split.terminate_if(mir_operand_copy(upper_ok), some_block, none_block)
+        else:
+            val nonempty = b_split.emit_binop(MirBinOp.Gt, mir_operand_copy(len_local), mir_operand_copy(zero), MirType.bool())
+            b_split.terminate_if(mir_operand_copy(nonempty), some_block, none_block)
         self.builder = b_split
 
         var b_some = self.builder
@@ -4433,9 +4502,14 @@ impl MirLowering:
         self.builder = b_some
         var b_idx = self.builder
         var idx_local = b_idx.emit_const_int(0)
-        if want_last:
-            val one = b_idx.emit_const_int(1)
-            idx_local = b_idx.emit_binop(MirBinOp.Sub, mir_operand_copy(len_local), mir_operand_copy(one), MirType.i64())
+        if val given_index = explicit_index:
+            # Already proven in `[0, len)` by the two-block chain above, so it
+            # can be handed to `rt_array_get` as-is.
+            idx_local = given_index
+        else:
+            if want_last:
+                val one = b_idx.emit_const_int(1)
+                idx_local = b_idx.emit_binop(MirBinOp.Sub, mir_operand_copy(len_local), mir_operand_copy(one), MirType.i64())
         self.builder = b_idx
         var b_get = self.builder
         val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(idx_local)], MirType.i64())
@@ -4467,6 +4541,164 @@ impl MirLowering:
         self.option_value_locals[result_local.id] = true
         self.remember_local_hir_type(result_local.id, option_type, 2, 0)
         Some(result_local)
+
+    me lower_array_find(receiver: HirExpr, arr: LocalId, lam_op: MirOperand) -> LocalId?:
+        """Real MIR lowering for `arr.find(\\x: predicate)` on a runtime array:
+        the FIRST element satisfying the predicate, or nil when none does.
+
+        Loop shape is `lower_array_filter`'s counted loop verbatim (same
+        `rt_array_len` bound, same `rt_array_get` + `decode_runtime_value`
+        pair to produce the raw i64 the lifted lambda expects, same
+        `!= 0` truthiness test on the lambda's i64 result). The only
+        structural difference is the exit: `filter` pushes into a result
+        array and always runs to completion, while `find` stores into a
+        result Var and jumps straight to the exit block on the first hit --
+        which is also what makes it a `find` and not an `any`.
+
+        RESULT CONVENTION -- deliberately the seed's, not `first`/`last`'s.
+        `first`/`last` above build a real `Option<T>` handle. `find` must
+        NOT, because the seed answers `find` with the bare element and a
+        bare `Value::Nil` on a miss (interpreter_helpers/collections.rs
+        `eval_array_find` returns `item.clone()` / `Ok(Value::Nil)`), so an
+        Option here would print `Some(3)` against the seed lanes' `3` and
+        convert this fixture's LANE_ERROR into a DIVERGENCE -- strictly
+        worse for scripts/check/check-engine-differential.shs, which
+        compares whitespace-stripped stdout across lanes.
+
+        The hit therefore stores `elem_raw`, the DECODED element, which is
+        the plain i64/text the rest of the program expects from an
+        element-typed expression. Storing the still-tagged `elem_tagged`
+        was tried first and MEASURED wrong: nothing downstream re-decodes a
+        plain element-typed local, so `print(xs.find(\\x: x > 2))` on
+        [1,2,3,4] emitted `24` -- the tagged form of 3 -- against both seed
+        lanes' `3`. `mark_runtime_value_local` did not rescue it, which is
+        the evidence that this local lives in the decoded domain.
+
+        KNOWN GAP, deliberately not papered over: the miss arm seeds the
+        result with the tagged nil bit pattern 3 (`rt_core_nil()` in
+        runtime_native.c), and in the decoded domain that prints as `3`
+        where both seed lanes print `nil`. The decoded domain has no nil
+        representation to use instead, and inventing one (or switching the
+        whole result to Option) would break the HIT path, which is the one
+        every current caller and fixture exercises. Closing it properly
+        means giving array `find` an Option-or-runtime-value result on ALL
+        engines at once, not just this lane -- a wider change than clearing
+        this lane error. No fixture covers a missing `find` today; if one is
+        added, expect it to diverge here and fix it at that seam.
+
+        Element type is resolved the same fail-closed way
+        `lower_array_first_or_last` resolves it, and for the same reason:
+        an unknown element type returns nil here and falls through to the
+        loud `unresolved method call` placeholder rather than guessing
+        `i64` and silently shifting a tagged text handle into garbage.
+        """
+        var elem_hir_type = HirType(kind: HirTypeKind.Error, span: receiver.span)
+        var have_elem_hir = false
+        if val arr_hir_type = self.find_local_hir_type(arr.id):
+            match arr_hir_type.kind:
+                case HirTypeKind.Array(found_elem_hir, _):
+                    elem_hir_type = found_elem_hir
+                    have_elem_hir = true
+                case HirTypeKind.Slice(found_elem_hir):
+                    elem_hir_type = found_elem_hir
+                    have_elem_hir = true
+                case _: ()
+        if not have_elem_hir:
+            if val recv_hir_type = self.receiver_declared_type(receiver):
+                match recv_hir_type.kind:
+                    case HirTypeKind.Array(found_elem_hir2, _):
+                        elem_hir_type = found_elem_hir2
+                        have_elem_hir = true
+                    case HirTypeKind.Slice(found_elem_hir2):
+                        elem_hir_type = found_elem_hir2
+                        have_elem_hir = true
+                    case _: ()
+        if not have_elem_hir:
+            return nil
+
+        val loop_ty = MirType.i64()
+
+        var b_len = self.builder
+        val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
+        val len_local = len_call ?? b_len.new_temp(MirType.i64())
+        self.builder = b_len
+
+        var b_init = self.builder
+        val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
+        val zero = b_init.new_temp(loop_ty)
+        b_init.emit_const(zero, MirConstValue.Int(0), loop_ty)
+        b_init.emit_copy(counter, zero)
+        val one = b_init.new_temp(loop_ty)
+        b_init.emit_const(one, MirConstValue.Int(1), loop_ty)
+        # Seeded with the tagged nil sentinel so an array that never
+        # satisfies the predicate -- including an EMPTY one, where the body
+        # block never runs at all -- leaves a well-formed `nil` behind
+        # rather than an uninitialized local.
+        val found = b_init.new_local(nil, loop_ty, LocalKind.Var)
+        val nil_seed = b_init.new_temp(loop_ty)
+        b_init.emit_const(nil_seed, MirConstValue.Int(3), loop_ty)
+        b_init.emit_copy(found, nil_seed)
+        self.builder = b_init
+
+        var b_blocks = self.builder
+        val cond_block = b_blocks.new_block(Some("find_cond"))
+        val body_block = b_blocks.new_block(Some("find_body"))
+        val hit_block = b_blocks.new_block(Some("find_hit"))
+        val inc_block = b_blocks.new_block(Some("find_inc"))
+        val exit_block = b_blocks.new_block(Some("find_exit"))
+        self.builder = b_blocks
+
+        var b_goto = self.builder
+        b_goto.terminate_goto(cond_block)
+        b_goto.switch_to_block(cond_block)
+        self.builder = b_goto
+
+        var b_cond = self.builder
+        val cond_result = b_cond.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
+        b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
+        b_cond.switch_to_block(body_block)
+        self.builder = b_cond
+
+        var b_get = self.builder
+        val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(counter)], MirType.i64())
+        val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
+        self.builder = b_get
+        val elem_raw = self.decode_runtime_value(elem_tagged, MirType.i64())
+
+        var b_call = self.builder
+        val call_result = b_call.emit_call(lam_op, [mir_operand_copy(elem_raw)], MirType.i64())
+        val pred_raw = call_result ?? b_call.new_temp(MirType.i64())
+        val zero_pred = b_call.emit_const_int(0)
+        val keep = b_call.emit_binop(MirBinOp.Ne, mir_operand_copy(pred_raw), mir_operand_copy(zero_pred), MirType.bool())
+        b_call.terminate_if(mir_operand_copy(keep), hit_block, inc_block)
+        b_call.switch_to_block(hit_block)
+        self.builder = b_call
+
+        # First hit wins: store the tagged element and leave the loop, so a
+        # later matching element cannot overwrite it.
+        var b_hit = self.builder
+        b_hit.emit_copy(found, elem_raw)
+        b_hit.terminate_goto(exit_block)
+        self.builder = b_hit
+
+        var b_inc = self.builder
+        b_inc.switch_to_block(inc_block)
+        val incremented = b_inc.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), loop_ty)
+        b_inc.emit_copy(counter, incremented)
+        self.builder = b_inc
+        var b_back = self.builder
+        b_back.terminate_goto(cond_block)
+        self.builder = b_back
+
+        var b_exit = self.builder
+        b_exit.switch_to_block(exit_block)
+        self.builder = b_exit
+        # No `mark_runtime_value_local` here, unlike `first`/`last`: that
+        # marker declares the local still TAGGED and awaiting decode, and
+        # this one already holds the decoded element (see the docstring's
+        # measured `24` vs `3`).
+        self.remember_local_hir_type(found.id, elem_hir_type, 2, 0)
+        Some(found)
 
     me lower_tuple_lit(elements: [HirExpr]) -> LocalId:
         """Lower tuple literal.
