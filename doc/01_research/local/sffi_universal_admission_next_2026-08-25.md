@@ -2311,6 +2311,36 @@ worktree has no production self-hosted binary.  The static shape evidence is
 therefore useful but not performance verification.  Verified-and-signed SFFI
 admission remains 0.
 
+## simple-core environment null-contract checkpoint
+
+`core_env.spl` had nine untagged raw declarations and 22 missing-authority
+calls.  All declarations now require `ffi, raw_ptr`, and every operation is
+confined to a mandatory-inline owner.
+
+Provider comparison found a semantic mismatch: native C and Rust return the
+tagged nil sentinel when an environment key is absent or CWD retrieval fails,
+but Pure Simple manufactured an empty string.  Pure Simple now returns tagged
+nil for absent/invalid keys, allocation/provider failure, and CWD failure.  A
+present environment variable whose value is genuinely empty still reaches
+`rt_string_new(result, 0)` and remains valid empty text.  Empty keys and
+embedded NUL bytes are rejected; the latter check reuses the existing copy
+loop and hoists its byte load.
+
+`simple-core-env-authority.shs` passed, pinning call confinement, owner counts,
+native/Rust nil behavior, embedded-NUL rejection, inline policy, and byte
+intrinsic lowerings.  Census results:
+
+- raw call sites: 19,711 -> 19,698
+- missing authority: 15,641 -> 15,619
+- lexical unsafe: 3,151 -> 3,160
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Valid paths retain one O(n) C-string copy, one provider call, and existing
+allocations.  The added NUL comparison is within that loop; no extra scan,
+copy, allocation, lookup, lock, hash, signature check, or dispatch is added.
+Exact-artifact proof remains absent; verified-and-signed admission remains 0.
+
 ## simple-core network authority and status checkpoint
 
 `core_net.spl` had eight untagged declarations and 51 missing-authority calls.
