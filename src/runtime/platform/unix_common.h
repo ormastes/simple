@@ -368,40 +368,49 @@ bool rt_msync(int64_t addr, int64_t size) {
  * ---------------------------------------------------------------- */
 
 int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags, int64_t fd, int64_t offset) {
+    if (length <= 0 || offset < 0) return -1;
     void* result = mmap((void*)(uintptr_t)addr, (size_t)length, (int)prot, (int)flags, (int)fd, (off_t)offset);
     if (result == MAP_FAILED) return -1;
     return (int64_t)(uintptr_t)result;
 }
 
 int64_t rt_munmap_raw(int64_t addr, int64_t length) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)munmap((void*)(uintptr_t)addr, (size_t)length);
 }
 
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot);
 }
 
 int64_t rt_madvise_raw(int64_t addr, int64_t length, int64_t advice) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)madvise((void*)(uintptr_t)addr, (size_t)length, (int)advice);
 }
 
 int64_t rt_msync_flags(int64_t addr, int64_t length, int64_t flags) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)msync((void*)(uintptr_t)addr, (size_t)length, (int)flags);
 }
 
 int64_t rt_mlock(int64_t addr, int64_t length) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)mlock((void*)(uintptr_t)addr, (size_t)length);
 }
 
 int64_t rt_munlock(int64_t addr, int64_t length) {
+    if (!addr || length <= 0) return -1;
     return (int64_t)munlock((void*)(uintptr_t)addr, (size_t)length);
 }
 
 int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
+    if (!path) return -1;
     return (int64_t)open(path, (int)flags, (mode_t)mode);
 }
 
 int64_t rt_close_fd(int64_t fd) {
+    if (fd < 0) return -1;
     return (int64_t)close((int)fd);
 }
 

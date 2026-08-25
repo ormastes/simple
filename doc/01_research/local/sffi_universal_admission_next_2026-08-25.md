@@ -305,6 +305,32 @@ local cleanup that would leave earlier mappings leaked. The focused static
 authority/bounds/single-pass ratchet passed; production RSS and allocation
 evidence remain unavailable.
 
+## mmap provider-contract and registration checkpoint
+
+All nine raw mmap/file-descriptor ABI families now have typed native signature
+entries and interpreter registrations. The six previously missing interpreter
+providers (`madvise`, `msync`, `mlock`, `munlock`, descriptor open, and close)
+now call the corresponding Unix APIs with exact arity and fail closed on
+unsupported hosts. Descriptor paths reject interior NUL rather than truncating.
+
+The C providers now reject null addresses, nonpositive lengths, negative mmap
+offsets, null paths, and negative descriptors before signed values can wrap to
+large platform sizes. Windows `madvise`, which has no implementation, now
+returns failure instead of fabricated success. The loader-copy allocator was
+also changed from RWX to RW, retaining its existing explicit RX transition.
+
+These checks add one predictable boundary branch and no lookup, lock, heap
+allocation, copy, or generic dispatch to memory syscalls. Interpreter path-to-C
+conversion retains the one required `CString` allocation per descriptor open;
+no allocation was added to mapping/status hot paths. The focused provider,
+null/length, W^X, and registration audit passed. `cargo check` for the Rust
+compiler completed successfully in 46.26 seconds with four pre-existing
+warnings outside the changed provider logic.
+
+This establishes provider presence and compile correctness, not artifact
+identity, proof, sanitizer coverage, or signatures. The nine providers remain
+unsafe boundary code and verified-and-signed admission remains 0.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used

@@ -503,6 +503,7 @@ bool rt_msync(void* addr, int64_t size) {
 
 int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags, int64_t fd, int64_t offset) {
     (void)addr; (void)prot; (void)flags; (void)fd; (void)offset;
+    if (length <= 0 || offset < 0) return -1;
     /* Windows doesn't have mmap — use VirtualAlloc for anonymous mappings */
     if (fd == -1) {
         DWORD alloc_type = MEM_COMMIT | MEM_RESERVE;
@@ -517,11 +518,12 @@ int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags, i
 
 int64_t rt_munmap_raw(int64_t addr, int64_t length) {
     (void)length;
-    if (!addr) return -1;
+    if (!addr || length <= 0) return -1;
     return VirtualFree((void*)(uintptr_t)addr, 0, MEM_RELEASE) ? 0 : -1;
 }
 
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
+    if (!addr || length <= 0) return -1;
     DWORD protect = PAGE_READWRITE;
     if (prot == 0x1) protect = PAGE_READONLY;           /* PROT_READ */
     else if (prot == 0x5) protect = PAGE_EXECUTE_READ;  /* PROT_READ|PROT_EXEC */
@@ -533,7 +535,7 @@ int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
 
 int64_t rt_madvise_raw(int64_t addr, int64_t length, int64_t advice) {
     (void)addr; (void)length; (void)advice;
-    return 0;  /* No equivalent on Windows — silently succeed */
+    return -1;  /* No equivalent on Windows; never fabricate success. */
 }
 
 int64_t rt_msync_flags(int64_t addr, int64_t length, int64_t flags) {
@@ -543,20 +545,24 @@ int64_t rt_msync_flags(int64_t addr, int64_t length, int64_t flags) {
 }
 
 int64_t rt_mlock(int64_t addr, int64_t length) {
+    if (!addr || length <= 0) return -1;
     return VirtualLock((void*)(uintptr_t)addr, (SIZE_T)length) ? 0 : -1;
 }
 
 int64_t rt_munlock(int64_t addr, int64_t length) {
+    if (!addr || length <= 0) return -1;
     return VirtualUnlock((void*)(uintptr_t)addr, (SIZE_T)length) ? 0 : -1;
 }
 
 int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
     (void)mode;
+    if (!path) return -1;
     int fd = _open(path, (int)flags);
     return (int64_t)fd;
 }
 
 int64_t rt_close_fd(int64_t fd) {
+    if (fd < 0) return -1;
     return (int64_t)_close((int)fd);
 }
 

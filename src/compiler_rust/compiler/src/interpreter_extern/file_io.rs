@@ -315,6 +315,48 @@ pub fn rt_file_size(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Open a raw Unix file descriptor for the loader's mmap path.
+#[cfg(unix)]
+pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_open_fd requires 3 arguments"));
+    }
+    let path = match &args[0] {
+        Value::Str(path) => CString::new(path.as_bytes()).map_err(|_| {
+            CompileError::runtime("rt_open_fd path contains an interior NUL byte")
+        })?,
+        _ => return Err(CompileError::runtime("rt_open_fd path must be text")),
+    };
+    let flags = args[1].as_int()? as libc::c_int;
+    let mode = args[2].as_int()? as libc::mode_t;
+    let fd = unsafe { libc::open(path.as_ptr(), flags, mode) };
+    Ok(Value::Int(i64::from(fd)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_open_fd(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_open_fd is unavailable on this host"))
+}
+
+/// Close a raw Unix file descriptor. Invalid descriptors fail closed.
+#[cfg(unix)]
+pub fn rt_close_fd(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_close_fd requires 1 argument"));
+    }
+    let fd = args[0].as_int()?;
+    if fd < 0 || fd > i64::from(i32::MAX) {
+        return Ok(Value::Int(-1));
+    }
+    let status = unsafe { libc::close(fd as libc::c_int) };
+    Ok(Value::Int(i64::from(status)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_close_fd(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_close_fd is unavailable on this host"))
+}
+
 /// Compute SHA256 hash of file (simplified - uses basic hash for MVP)
 pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;

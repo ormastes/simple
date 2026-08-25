@@ -776,12 +776,13 @@ pub fn rt_ptr_read_u8(args: &[Value]) -> Result<Value, CompileError> {
 /// Hosted interpreter bridge for the loader's raw mmap contract.
 #[cfg(unix)]
 pub fn rt_mmap_raw(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 6 {
+    if args.len() != 6 {
         return Err(CompileError::runtime("rt_mmap_raw requires 6 arguments"));
     }
     let addr = args[0].as_int()? as usize as *mut libc::c_void;
     let length = args[1].as_int()?;
-    if length <= 0 {
+    let offset = args[5].as_int()?;
+    if length <= 0 || offset < 0 {
         return Ok(Value::Int(-1));
     }
     let mapped = unsafe {
@@ -791,7 +792,7 @@ pub fn rt_mmap_raw(args: &[Value]) -> Result<Value, CompileError> {
             args[2].as_int()? as i32,
             args[3].as_int()? as i32,
             args[4].as_int()? as i32,
-            args[5].as_int()? as libc::off_t,
+            offset as libc::off_t,
         )
     };
     if mapped == libc::MAP_FAILED {
@@ -808,13 +809,18 @@ pub fn rt_mmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(unix)]
 pub fn rt_munmap_raw(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CompileError::runtime("rt_munmap_raw requires 2 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
     }
     let result = unsafe {
         libc::munmap(
-            args[0].as_int()? as usize as *mut libc::c_void,
-            args[1].as_int()? as usize,
+            addr as usize as *mut libc::c_void,
+            length as usize,
         )
     };
     Ok(Value::Int(i64::from(result)))
@@ -827,13 +833,18 @@ pub fn rt_munmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(unix)]
 pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
+    if args.len() != 3 {
         return Err(CompileError::runtime("rt_mprotect requires 3 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
     }
     let result = unsafe {
         libc::mprotect(
-            args[0].as_int()? as usize as *mut libc::c_void,
-            args[1].as_int()? as usize,
+            addr as usize as *mut libc::c_void,
+            length as usize,
             args[2].as_int()? as i32,
         )
     };
@@ -843,6 +854,92 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(not(unix))]
 pub fn rt_mprotect(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_mprotect is unavailable on this host"))
+}
+
+macro_rules! unix_address_length_status {
+    ($name:literal, $args:expr, $call:path) => {{
+        let args = $args;
+        if args.len() != 2 {
+            return Err(CompileError::runtime(concat!($name, " requires 2 arguments")));
+        }
+        let addr = args[0].as_int()?;
+        let length = args[1].as_int()?;
+        if addr <= 0 || length <= 0 {
+            return Ok(Value::Int(-1));
+        }
+        let result = unsafe { $call(addr as usize as *mut libc::c_void, length as usize) };
+        Ok(Value::Int(i64::from(result)))
+    }};
+}
+
+#[cfg(unix)]
+pub fn rt_mlock(args: &[Value]) -> Result<Value, CompileError> {
+    unix_address_length_status!("rt_mlock", args, libc::mlock)
+}
+
+#[cfg(not(unix))]
+pub fn rt_mlock(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_mlock is unavailable on this host"))
+}
+
+#[cfg(unix)]
+pub fn rt_munlock(args: &[Value]) -> Result<Value, CompileError> {
+    unix_address_length_status!("rt_munlock", args, libc::munlock)
+}
+
+#[cfg(not(unix))]
+pub fn rt_munlock(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_munlock is unavailable on this host"))
+}
+
+#[cfg(unix)]
+pub fn rt_madvise_raw(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_madvise_raw requires 3 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let result = unsafe {
+        libc::madvise(
+            addr as usize as *mut libc::c_void,
+            length as usize,
+            args[2].as_int()? as i32,
+        )
+    };
+    Ok(Value::Int(i64::from(result)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_madvise_raw(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_madvise_raw is unavailable on this host"))
+}
+
+#[cfg(unix)]
+pub fn rt_msync_flags(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_msync_flags requires 3 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let result = unsafe {
+        libc::msync(
+            addr as usize as *mut libc::c_void,
+            length as usize,
+            args[2].as_int()? as i32,
+        )
+    };
+    Ok(Value::Int(i64::from(result)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_msync_flags(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_msync_flags is unavailable on this host"))
 }
 
 #[cfg(test)]
