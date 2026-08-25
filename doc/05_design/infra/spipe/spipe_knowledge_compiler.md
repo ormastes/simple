@@ -218,7 +218,7 @@ ClassificationRecord = {type:"classification", uid:ClassificationUid,
  project_uid:ProjectUid|null, source_hash:Sha256, status:"active"}
 IdentityMigrationRecord = {type:"identity_migration", old_uid:LegacyWUid,
  old_record_type:"workspace"|"worktree", new_uid:WorkspaceUid|WorktreeUid,
- migrated_at_revision:NonEmptyString}
+ migrated_in_snapshot_uid:SnapshotUid}
 ```
 
 All fields are required unless `|null` is shown; arrays default to `[]` and no
@@ -245,7 +245,21 @@ provider schema version.
 For requirements, `type=requirement` requires `kind=requirement` and `RQ-`,
 while `type=non_functional_requirement` requires `kind=nfr` and `NFR-`.
 For migrations, `old_record_type=workspace` requires `WS-`; `worktree`
-requires `WT-`. `DisplayId` matches `(?:REQ|NFR)-[A-Z0-9]+(?:-[A-Z0-9]+)+`.
+requires `WT-`. `migrated_in_snapshot_uid` is the first published schema-v2
+snapshot containing the mapping; it is audit metadata and not part of UID
+derivation. Re-publication copies the retained first value. Two independent
+migrations need identical UID mappings, not identical publication snapshot
+IDs. `DisplayId` matches
+`(?:REQ|NFR)-[A-Z0-9]+(?:-[A-Z0-9]+)+`.
+
+Owner validation is an equality chain, not projection guidance. Requirement/NFR
+`artifact_uid` resolves to an artifact with the same project/revision, and
+`section_uid` resolves to a section whose `artifact_uid` is that artifact.
+Scenario and Test `artifact_uid` equals `source_location.source_artifact_uid`,
+and their project/revision equals that artifact. For SourceSymbol, resolving
+`source_location.source_artifact_uid` yields an artifact with equal
+project/revision and `canonical_path`. Any mismatch is `SPK004
+source_owner_mismatch`; the record and all outgoing edges are excluded.
 
 `Visibility={public,project,restricted,private}` and
 `TrustScope={untrusted_data,reviewed_reference,executable_policy}` exactly match
@@ -261,7 +275,9 @@ Section,Requirement,NonFunctionalRequirement,SSpecScenario,SourceSymbol,
 UnitTest,IntegrationTest,SystemTest,Feature,Component,Layer,Tag}`.
 `RecordType={workspace,worktree,project,project_relation,mount_projection,
 alias_projection,artifact,section,requirement,non_functional_requirement,
-sspec_scenario,source_symbol,test,feature,component,layer,tag}`.
+sspec_scenario,source_symbol,test,classification}`. A classification record
+always projects with `record_type=classification`; its `classification_kind`
+selects the Feature/Component/Layer/Tag `node_kind`.
 
 Registry projections use this closed mapping:
 
@@ -292,26 +308,71 @@ readable uppercase label. Markdown uses this exact grammar:
 ```markdown
 ## REQ-SPKC-003 — Typed graph snapshots
 <!-- spipe:section uid=S-... key=req-spkc-003 -->
-<!-- spipe:requirement uid=RQ-... key=req-spkc-003 display_id=REQ-SPKC-003 status=accepted -->
+<!-- spipe:requirement uid=RQ-... key=req-spkc-003 display_id=REQ-SPKC-003 status=accepted aliases=none -->
 
 ## NFR-SPKC-002 — Deterministic rebuilds
 <!-- spipe:section uid=S-... key=nfr-spkc-002 -->
-<!-- spipe:nfr uid=NFR-... key=nfr-spkc-002 display_id=NFR-SPKC-002 status=accepted -->
+<!-- spipe:nfr uid=NFR-... key=nfr-spkc-002 display_id=NFR-SPKC-002 status=accepted aliases=none -->
 ```
 
-An SSpec marker is `# spipe:scenario uid=SS-... key=<lowercase-key>
-requires=RQ-...,NFR-...` immediately before its declaration. A source marker is
-`# spipe:symbol uid=SY-... implements=RQ-...,SS-...` immediately before its
-declaration. A test marker is `# spipe:test uid=T-... kind=unit|integration|system
-verifies=RQ-...,NFR-...,SS-...,SY-...` immediately before the test declaration;
+An SSpec declaration has one adjacent marker block: optional `# spipe:scenario
+uid=SS-... key=<lowercase-key> status=candidate|proposed|accepted
+requires=RQ-...,NFR-...` first, optional `# spipe:test ...` second, then the
+`it` declaration with no blank/comment lines. At least one marker is present;
+each kind appears at most once. A source marker is `# spipe:symbol uid=SY-...
+status=candidate|accepted|deprecated implements=RQ-...,SS-...` immediately
+before its declaration. The test marker is `# spipe:test uid=T-...
+kind=unit|integration|system status=candidate|accepted|deprecated
+scenario=SS-...|none verifies=RQ-...,NFR-...,SS-...,SY-...`. In a dual block,
+its scenario UID must equal the preceding scenario marker; in a test-only block
+`scenario=none` is required;
 test UIDs are author-assigned canonical identities and never path-derived.
 Unmarked tests are candidates without graph identity until dry-run marker
-injection is approved. Parsers bind exactly the next declaration, reject unknown or
+injection is approved. Scenario/test `title` is the exact UTF-8 NFC-normalized
+display string parsed from that next declaration; scenario `ordinal` is its
+zero-based position among declarations in the containing artifact. The test
+`scenario_uid` is the explicit marker value (`none` becomes null) and, when
+present, must name the immediately enclosing marked scenario. Parsers bind
+exactly the next declaration, reject unknown or
 duplicate attributes and UIDs, and resolve aliases before storing targets.
 Markerless or ambiguous records remain candidates, never strict evidence.
 
+Record construction is exact:
+
+- A requirement heading must be ATX level 2 with decoded text exactly
+  `<DISPLAY_ID> — <non-empty title>` (one space, Unicode em dash, one space).
+  The section marker is the next line and the requirement/NFR marker the line
+  after it; the marker also carries `aliases=none|<comma-separated sorted
+  SemanticKey list>`. Project, revision, and artifact come from the containing
+  `ArtifactRecord`; section UID and normalized section-body `content_hash` come
+  from its accepted `SectionRecord`; title is the NFC title substring after the
+  delimiter. No heading-label stripping beyond this grammar is permitted.
+- Scenario and Test markers bind only the next parsed SSpec `it "<title>":`
+  declaration. Their `SourceLocation.span` is the half-open original-byte range
+  from the `i` in `it` through the declaration suite, excluding the next
+  sibling declaration; `content_hash` is SHA-256 of exactly that slice.
+  Project/revision/artifact come from the containing artifact.
+  `SourceLocation.source_hash` is always the containing ArtifactRecord's
+  required `content_hash` (the exact parser input bytes), never its nullable
+  provenance `source_hash`. A missing/unreadable raw object makes the record a
+  candidate diagnostic and cannot produce a canonical node.
+- A symbol marker binds only a `SourceSymbolProvider` result whose definition
+  begins at the next non-comment token. The provider supplies versioned
+  `symbol_kind`, NFC `name`, fully qualified NFC `qualified_name`, and the
+  half-open definition span. `signature_hash` is SHA-256 of UTF-8
+  `spipe-symbol-signature-v1\0` plus the provider's canonical signature string,
+  or null only for module symbols. `canonical_path`, project, revision,
+  artifact come from the containing source artifact, and source hash is that
+  artifact's required `content_hash`. Text-only
+  fallback may emit a candidate diagnostic but never a canonical symbol.
+
+All marker attribute lists use ASCII comma with no whitespace, `none` for an
+empty list, and bytewise ascending canonical values. Invalid grammar emits
+`SPK003 marker_invalid` and no canonical record. Clean and incremental parsers
+invoke this same constructor over the same artifact bytes and SectionRecords.
+
 ```text
-EdgeRecord = {type:"edge", uid:EdgeUid, edge_type:EdgeType,
+EdgeRecord = {schema_version:2, type:"edge", uid:EdgeUid, edge_type:EdgeType,
  from_uid:Uid, to_uid:Uid, origin:EdgeOrigin, status:EdgeStatus,
  confidence_milli:u16, created_by:PrincipalId,
  created_at_revision:NonEmptyString, evidence_uids:list<Uid>,
@@ -357,6 +418,45 @@ admitted Wave 3 kind):
 `produces` and `promoted_from` reject in Wave 3 because their canonical run,
 result, and promotion node schemas arrive in later waves. Invalid pairs fail
 before hashing.
+
+Wave 2 edge records are schema v1 (absence of `schema_version` is accepted only
+inside a manifest whose schema is 1). Loading them constructs a v2 wrapper
+without mutating the v1 snapshot. Scalar/list fields and UID are copied;
+v1 generator `{id,version,rule,input_snapshot}` maps exactly to v2
+`{generator_id:id,version,rule,input_snapshot_uid:input_snapshot}`;
+`provenance.project_uid`, `worktree_uid`, `revision_id`, and
+`input_snapshot_uid` come from the containing immutable manifest;
+`source_uid` is the first bytewise-sorted evidence UID or null;
+`source_location`, `decision_uid`, and `authority` are null. The migrated
+wrapper hashes under schema v2 and is recorded in
+`EdgeMigrationRecord={type:"edge_migration",edge_uid,source_snapshot_uid,
+source_edge_hash,target_edge_hash}`. `source_edge_hash` is SHA-256 over UTF-8
+`spipe-edge-v1\0` plus canonical JSON of the complete v1 wrapper;
+`target_edge_hash` uses `spipe-edge-v2\0` plus the complete v2 wrapper.
+
+Before constructing or hashing the v2 wrapper, the manifest's legacy
+`worktree_uid:W-...` resolves through the unique retained
+`IdentityMigrationRecord(old_record_type=worktree)` to `WT-...`. Each endpoint
+with prefix `W-` resolves by its canonical v1 endpoint record type: workspace
+maps through the workspace record and worktree through the worktree record.
+The translated `WS-`/`WT-` value replaces the endpoint in v2; the original
+remains only inside `source_edge_hash`/`original_edge`. Missing or multiple
+typed mappings produce a historical record with reason
+`identity_mapping_missing` or `identity_mapping_ambiguous`, never a guessed
+graph edge.
+
+Migration is total: after endpoint resolution, a v1 edge whose type/kinds are
+enabled by the Wave 3 table enters the graph. `produces`, `promoted_from`, or an
+edge with absent/unsupported endpoints becomes an immutable
+`HistoricalEdgeRecord={schema_version:2,type:"historical_edge",source_snapshot_uid,
+source_edge_hash,reason,original_edge}` in the migration segment, is queryable
+only through advisory history, and is excluded from `graph_root`. Reasons are
+the closed enum `{deferred_edge_type,missing_endpoint,unsupported_endpoint_kind,
+identity_mapping_missing,identity_mapping_ambiguous}`.
+A v1 accepted edge without authority is
+advisory historical evidence only and cannot satisfy Standard, Strict, or
+mission-critical gates until a new receipt-bound v2 acceptance is published.
+Missing/ambiguous manifest bindings reject migration with `SPK005`.
 
 ```sdn
 edge:
