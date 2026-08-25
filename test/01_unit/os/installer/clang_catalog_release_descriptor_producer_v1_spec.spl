@@ -1,0 +1,104 @@
+use std.spec.{describe, it, expect}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1}
+use os.kernel.loader.clang_catalog_release_descriptor_v1.{
+    clang_catalog_release_descriptor_verify_v1}
+use os.kernel.loader.clang_catalog_release_descriptor_codec_v1.{
+    decode_clang_catalog_release_descriptor_v1}
+use os.installer.clang_catalog_release_descriptor_producer_v1.{
+    produce_clang_catalog_release_descriptor_v1}
+
+fn _producer_seed_v1() -> [u8]:
+    [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+    ]
+
+fn _producer_expected_public_key_v1() -> [u8]:
+    [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
+        0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
+        0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
+        0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a
+    ]
+
+fn _producer_hashes_v1(prefix: text) -> [text]:
+    var values: [text] = []
+    var index: i64 = 0
+    while index < 9:
+        values.push(sha256_u8_hex([
+            prefix.char_code_at(0).to_u8(), index.to_u8()]))
+        index = index + 1
+    values
+
+fn _produce_valid_v1():
+    produce_clang_catalog_release_descriptor_v1(
+        ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos"),
+        "release-2026-08-25", "clang-release-root",
+        _producer_hashes_v1("p"), _producer_hashes_v1("s"),
+        _producer_seed_v1())
+
+fn _contains_bytes_v1(haystack: [u8], needle: [u8]) -> bool:
+    if needle.len() == 0 or needle.len() > haystack.len(): return false
+    var start: i64 = 0
+    while start <= haystack.len() - needle.len():
+        var equal = true
+        var index: i64 = 0
+        while index < needle.len():
+            if haystack[start + index] != needle[index]: equal = false
+            index = index + 1
+        if equal: return true
+        start = start + 1
+    false
+
+describe "Clang catalog release descriptor producer v1":
+    it "produces canonical bytes that verify under its sole returned root":
+        val produced = _produce_valid_v1()
+        expect(produced.ok).to_equal(true)
+        expect(produced.reason).to_equal("")
+        expect(produced.public_key.len()).to_equal(32)
+        expect(produced.public_key).to_equal(_producer_expected_public_key_v1())
+        expect(produced.public_key_sha256).to_equal(
+            sha256_u8_hex(produced.public_key))
+        val decoded = decode_clang_catalog_release_descriptor_v1(
+            produced.descriptor_bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(clang_catalog_release_descriptor_verify_v1(
+            decoded.value, [ExecutableManifestTrustedSignerV1(
+                key_id: "clang-release-root",
+                public_key: produced.public_key)]).ok).to_equal(true)
+
+    it "rejects non-nine digest vectors and malformed signing inputs":
+        val target = ManifestTarget(
+            os: "simpleos", arch: "aarch64", abi: "simpleos")
+        expect(produce_clang_catalog_release_descriptor_v1(
+            target, "release-1", "clang-release-root",
+            ["a" * 64], _producer_hashes_v1("s"),
+            _producer_seed_v1()).ok).to_equal(false)
+        expect(produce_clang_catalog_release_descriptor_v1(
+            target, "release-1", "clang-release-root",
+            _producer_hashes_v1("p"), _producer_hashes_v1("s"),
+            [1u8]).ok).to_equal(false)
+        expect(produce_clang_catalog_release_descriptor_v1(
+            target, "release id", "clang-release-root",
+            _producer_hashes_v1("p"), _producer_hashes_v1("s"),
+            _producer_seed_v1()).ok).to_equal(false)
+
+    it "does not expose caller seed material in result or failure reason":
+        val seed = _producer_seed_v1()
+        val produced = produce_clang_catalog_release_descriptor_v1(
+            ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos"),
+            "release-2026-08-25", "clang-release-root",
+            _producer_hashes_v1("p"), _producer_hashes_v1("s"), seed)
+        expect(produced.public_key == seed).to_equal(false)
+        expect(_contains_bytes_v1(
+            produced.descriptor_bytes, seed)).to_equal(false)
+        val rejected = produce_clang_catalog_release_descriptor_v1(
+            ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+            "release-1", "clang-release-root", ["bad"], ["bad"], seed)
+        expect(rejected.reason.contains("9d61b19d")).to_equal(false)
+        expect(seed).to_equal(_producer_seed_v1())
