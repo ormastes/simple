@@ -1,0 +1,196 @@
+# SCV evidence-based file matcher (report §7.9 stage A/B, file level only).
+#
+# Classifies the delta between two tree payloads (store.spl tree-object
+# format: "rel|file_obj_id|chunk|size|mtime" per line, where `chunk` is the
+# whole-content chunk id readable at scv_chunk_path) and feeds identity.spl:
+#   unchanged / edited (same path, new content) /
+#   move (exact-content rename, unique on BOTH sides -> accepted, 1000) /
+#   move_edit (line overlap > 70% -> suggested edge, score recorded) /
+#   new / deleted.
+#
+# Bounded: at most SCV_ENTITY_MAX_PAIRS deleted x added similarity
+# comparisons; beyond the cap files fail open to new+deleted (reported,
+# never guessed). Symbol-level EntityId matching (parser-driven) is out of
+# scope here — see doc/05_design/app/tools/scv.md.
+
+use app.io.mod (file_exists, file_read)
+use std.scv.core.{scv_chunk_path}
+use std.scv.identity.{scv_identity_allocate, scv_identity_lookup_by_path, scv_identity_record_move, scv_identity_record_delete}
+
+val SCV_ENTITY_MAX_PAIRS = 512
+val SCV_ENTITY_MOVE_EDIT_MIN_MILLI = 700
+
+fn scv_entity_line_field(line: text, index: i64) -> text:
+    val parts = line.trim().split("|")
+    if index < parts.len():
+        parts[index]
+    else:
+        ""
+
+fn scv_entity_tree_lines(tree_payload: text) -> [text]:
+    var out: [text] = []
+    for line in tree_payload.split("\n"):
+        if line.trim() != "" and line.contains("|"):
+            out.push(line.trim())
+    out
+
+fn scv_entity_chunk_for(lines: [text], rel: text) -> text:
+    for line in lines:
+        if scv_entity_line_field(line, 0) == rel:
+            return scv_entity_line_field(line, 2)
+    ""
+
+fn scv_entity_has_path(lines: [text], rel: text) -> bool:
+    for line in lines:
+        if scv_entity_line_field(line, 0) == rel:
+            return true
+    false
+
+fn scv_entity_count_chunk(lines: [text], chunk: text) -> i64:
+    var n = 0
+    for line in lines:
+        if scv_entity_line_field(line, 2) == chunk:
+            n = n + 1
+    n
+
+fn scv_entity_read_content(root: text, chunk: text) -> text:
+    val path = scv_chunk_path(root, chunk)
+    if file_exists(path):
+        file_read(path)
+    else:
+        ""
+
+# Line-overlap similarity in milli (0..1000): shared lines / max line count.
+# The CDC chunk-hash overlap variant is deferred (see design doc).
+fn scv_entity_line_overlap_milli(a: text, b: text) -> i64:
+    var a_lines: [text] = []
+    for line in a.split("\n"):
+        if line.trim() != "":
+            a_lines.push(line)
+    var b_lines: [text] = []
+    for line in b.split("\n"):
+        if line.trim() != "":
+            b_lines.push(line)
+    if a_lines.len() == 0 or b_lines.len() == 0:
+        return 0
+    var used: [bool] = []
+    for _ in b_lines:
+        used.push(false)
+    var shared = 0
+    for la in a_lines:
+        var j = 0
+        while j < b_lines.len():
+            if not used[j] and b_lines[j] == la:
+                used[j] = true
+                shared = shared + 1
+                break
+            j = j + 1
+    val denom = if a_lines.len() > b_lines.len(): a_lines.len() else: b_lines.len()
+    (shared * 1000) / denom
+
+# Classify prev->new tree delta. Returns rows "class|path|other_path|score_milli".
+fn scv_entity_list_has(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+fn scv_entity_classify(root: text, prev_payload: text, new_payload: text) -> [text]:
+    val prev_lines = scv_entity_tree_lines(prev_payload)
+    val new_lines = scv_entity_tree_lines(new_payload)
+    var out: [text] = []
+    var deleted: [text] = []
+    var added: [text] = []
+    for line in prev_lines:
+        val rel = scv_entity_line_field(line, 0)
+        if scv_entity_has_path(new_lines, rel):
+            if scv_entity_chunk_for(new_lines, rel) == scv_entity_line_field(line, 2):
+                out.push("unchanged|{rel}||1000")
+            else:
+                out.push("edited|{rel}||1000")
+        else:
+            deleted.push(rel)
+    for line in new_lines:
+        val rel = scv_entity_line_field(line, 0)
+        if not scv_entity_has_path(prev_lines, rel):
+            added.push(rel)
+    var matched_del: [text] = []
+    var matched_add: [text] = []
+    # Stage A: exact-content rename, unique on both sides -> accepted move.
+    for del in deleted:
+        val chunk = scv_entity_chunk_for(prev_lines, del)
+        if scv_entity_count_chunk(prev_lines, chunk) != 1:
+            continue
+        var hits: [text] = []
+        for add in added:
+            if scv_entity_chunk_for(new_lines, add) == chunk:
+                hits.push(add)
+        if hits.len() == 1 and scv_entity_count_chunk(new_lines, chunk) == 1:
+            out.push("move|{del}|{hits[0]}|1000")
+            matched_del.push(del)
+            matched_add.push(hits[0])
+        elif hits.len() > 1:
+            # Ambiguous identical content: suggested only, never accepted.
+            out.push("move_ambiguous|{del}|{hits[0]}|1000")
+            matched_del.push(del)
+    # Stage B: bounded rename+edit candidates -> suggested move_edit.
+    var pairs = 0
+    for del in deleted:
+        if scv_entity_list_has(matched_del, del):
+            continue
+        var best_add = ""
+        var best_score = 0
+        val del_content = scv_entity_read_content(root, scv_entity_chunk_for(prev_lines, del))
+        for add in added:
+            if scv_entity_list_has(matched_add, add):
+                continue
+            if pairs >= SCV_ENTITY_MAX_PAIRS:
+                break
+            pairs = pairs + 1
+            val score = scv_entity_line_overlap_milli(del_content, scv_entity_read_content(root, scv_entity_chunk_for(new_lines, add)))
+            if score > best_score:
+                best_score = score
+                best_add = add
+        if best_add != "" and best_score > SCV_ENTITY_MOVE_EDIT_MIN_MILLI:
+            out.push("move_edit|{del}|{best_add}|{best_score}")
+            matched_del.push(del)
+            matched_add.push(best_add)
+    for del in deleted:
+        if not scv_entity_list_has(matched_del, del):
+            out.push("deleted|{del}||0")
+    for add in added:
+        if not scv_entity_list_has(matched_add, add):
+            out.push("new|{add}||0")
+    out
+
+# Apply a classification to the identity store for `commit`.
+# Returns the classification rows actually applied.
+fn scv_entity_apply(root: text, prev_payload: text, new_payload: text, commit: text) -> [text]:
+    val rows = scv_entity_classify(root, prev_payload, new_payload)
+    for row in rows:
+        val parts = row.split("|")
+        val kind = parts[0]
+        val a = parts[1]
+        val b = parts[2]
+        val score = parts[3].to_int() ?? 0
+        if kind == "unchanged" or kind == "edited":
+            if scv_identity_lookup_by_path(root, a) == "":
+                scv_identity_allocate(root, a, commit)
+        elif kind == "move":
+            scv_identity_record_move(root, a, b, commit, "exact_content,unique_pair", 1000, "accepted")
+        elif kind == "move_edit":
+            # Suggested only: id is NOT moved; the added path gets its own id
+            # until a human or later evidence accepts the edge.
+            scv_identity_record_move(root, a, b, commit, "line_overlap", score, "suggested")
+            scv_identity_allocate(root, b, commit)
+        elif kind == "move_ambiguous":
+            scv_identity_record_move(root, a, b, commit, "exact_content,ambiguous", score, "suggested")
+            scv_identity_allocate(root, b, commit)
+        elif kind == "deleted":
+            scv_identity_record_delete(root, a, commit)
+        elif kind == "new":
+            scv_identity_allocate(root, a, commit)
+    rows
+
+export SCV_ENTITY_MAX_PAIRS, SCV_ENTITY_MOVE_EDIT_MIN_MILLI
+export scv_entity_classify, scv_entity_apply, scv_entity_line_overlap_milli, scv_entity_read_content

@@ -8,6 +8,20 @@
 ## Task Type
 infra / process
 
+## Complete-impl replan — 2026-08-25
+
+The complete SCV v2 implementation plan now lives BESIDE this month plan:
+`doc/03_plan/app/tools/scv_complete_impl_plan.md` (+ `_tldr.md`). It unions the
+three v2 report variants (final / wrapper / sj-integration) into 6 tracks x 44
+items (`SCV-IMPL-<track>-NN`): E events, P parser, I identity, D diff/merge,
+G gates, B backend/native. Wave 1 (8 items: E-01..03, P-02, P-03, I-02, D-02,
+G-01) is appended to `todo.sdn` as week=5, due 2026-09-29; step scripts
+`scripts/scv-migration/steps/SCV-IMPL-*.shs` are authored (and human-signed) at
+wave start, so the checker reporting them missing/blocked before then is the
+intended fail-closed state. B-01 (sj-capsule) is blocked on sj repair (sj
+segfaults on this host); S5/S6 items (B-07/B-08) are gated with no dates —
+the month plan's S4 ceiling stands.
+
 ## Refined Goal
 > Drive the SCV stabilization migration from `doc/01_research/app/tools/scv/scv_migration_stabilization_2026-08-25.md` through stages S0→S4 over 2026-08-25..2026-09-25 with a ledger (`.spipe/scv-migration/todo.sdn`), an hourly fail-closed checker that only executes PQ-signed step scripts, and a timer. SCV stays non-authoritative for the whole month.
 
@@ -90,6 +104,33 @@ infra / process
 3. Checker real run 2026-08-25: `PASS — 8 step(s) checked, 8 done, 0 active, 0 blocked`
    (SCV-MIG-01..08 all PASS; specs green).
 - [ ] 8-ship (Release Mgr) — S4 review (SCV-MIG-25)
+
+## Week 3 (W3) — IN PROGRESS 2026-08-25 — gate S2 → S3
+
+Lanes (parallel sessions):
+- Lane A: SCV-MIG-15 (tree agreement), SCV-MIG-16 (shadow replication) — pending
+- Lane B: SCV-MIG-18 (crash harness), SCV-MIG-19 (FileBuffer/status) — pending
+- Lane C (this session): SCV-MIG-17 (bundles+backup hardening), SCV-MIG-20 (S3 review), state scaffold
+
+Lane C W3 log 2026-08-25:
+- push-both.shs GitHub leg rewritten: land.shs (sj/jj — both broken on this host,
+  sj segfaults) replaced by a guarded plain `git push` from a CLEAN detached temp
+  worktree (`git worktree add --detach` on the commit to push) so the full pre-push
+  hook fan-out runs against committed content; NO --no-verify; hook failure = FAIL.
+  New env override PB_GH_REMOTE; selftest 3 → 5 fixtures (clean worktree-push PASS,
+  failing pre-push hook must FAIL the leg). NOTE: this edit invalidates
+  push-both.shs.sig — needs re-signing by a human (scv-migration-root).
+- `--selftest`: `PASS — 5 selftest fixture(s) checked, 0 failures`
+- `--dry-run`: `FAIL — 3 check(s) run, failing legs: backup-sha-mismatch` — honest:
+  shared-tree local `main` (8ff2e9a32a9) has DIVERGED from origin/main (93bf30d1b7d);
+  backup mirror already holds origin/main. Not a script defect; do not move another
+  session's main.
+- `--skip-github --bundle`: `FAIL — 3 check(s) run, failing legs: backup backup-sha-mismatch`
+  (same divergence; bundle itself OK: /mnt/data/scv-backup/bundles/git-2026-08-25.bundle)
+- S3 review written: doc/03_plan/app/tools/scv_s3_review.md
+- SCV-MIG-20.shs written (UNSIGNED); honest run:
+  `FAIL — 7 check(s) run, failing: SCV-MIG-15 SCV-MIG-16 SCV-MIG-17 SCV-MIG-18 SCV-MIG-19`
+  — expected ordering: gate FAILs until W3 siblings are done.
 
 ## Phase Outputs
 

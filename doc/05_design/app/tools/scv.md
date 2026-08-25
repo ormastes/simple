@@ -542,3 +542,115 @@ HEAD_OP (publication point) → derived workspace pointer. `SCV_FAULT_AFTER=
 only unreachable immutable objects; a crash after `head` is the NEW state with
 a derived pointer `doctor` reconciles. Spec:
 `test/integration/app/scv_fault_injection_spec.spl`.
+
+## Parser provenance and hash family (2026-08-25)
+
+**Provenance (Gap 5).** Every parse result reports `execution=` from the closed
+vocabulary `native-tree-sitter | wasm-tree-sitter | simple-parser | fallback-line
+| fallback-binary`, derived from the path that actually ran — never from the
+registry's grammar kind. Previously `scv_parse_file` mapped the grammar-kind
+string to the execution label, so a locked grammar literally named
+`tree-sitter-wasm` reported `execution=tree-sitter-wasm` while the fallback line
+walk ran. Now `scv_parse_file_wasm_or_fallback` returns `(node, execution)` with
+`wasm-tree-sitter` only on an actual successful WASM parse; binary content is
+`fallback-binary`; everything else is `fallback-line`. The cached `parse-gate`
+branch derives execution from the stored syntax node's `execution:` field
+(legacy `tree-sitter-wasm` normalized to `wasm-tree-sitter`; unknown/missing
+defaults to `fallback-line` — never a tree-sitter claim without evidence).
+WASM node writers now emit `execution: wasm-tree-sitter`. Spec:
+`test/integration/app/scv_parser_provenance_spec.spl`.
+
+**Hash family (Gap E / §8).** The old `semantic:` value is a whitespace
+(trailing-space)-normalization policy hash, not semantic equivalence, and is no
+longer overclaimed. Parse summaries report the family:
+
+- `raw_hash:` — exact bytes; identical to the legacy `raw:` content id (alias,
+  no behavior change).
+- `text_policy_hash:` — the formatting-normalized value formerly reported only
+  as `semantic:`. Same hash bytes; `semantic:` remains as a readable legacy
+  alias, and the internal `scv_hash_text("semantic", ...)` label is unchanged
+  so stored object identities do not move.
+- `syntax_hash:` — emitted only when a real parse tree exists (successful WASM
+  parse); derived from the structural node tree. Absent for fallback parses —
+  a fallback never claims structural knowledge.
+
+The 9-field parse-index line format is unchanged (cache parsing pins it).
+
+**Pending (out of scope, P2+):** interface/HIR/effect-level hashes
+(`cst_id`, `declaration_graph_id`, `interface_id`, `semantic_policy_id`) are
+deliberately NOT invented here. Known limitation: `integrity_parser.spl` fsck
+currently accepts only `fallback-*` executions on non-binary grammars; when the
+hardened WASM lane lands, fsck must learn `wasm-tree-sitter` (tracked as
+pending — the rename is fsck-neutral today since the WASM path is unreachable
+without the runtime shim).
+
+## Persistent file identity (FileEntityId, v1 — 2026-08-25)
+
+Implements report §7.6/§7.8/§7.9 P1 items 1+3 at FILE level.
+
+- `src/lib/scv/identity.spl` — repo-unique logical `file_<n>` ids
+  (`FileEntityId`), persisted in `.scv/meta/file_identity.sdn`
+  (`file_id|current_path|created_commit|origin|state`) with an append-only
+  edge log `.scv/meta/identity_edges.sdn`
+  (`from_id|to_id|relation|commit|confidence_milli|evidence|matcher_version|status`).
+  NOTE: this `file_id` is NOT the content-derived second field of a store.spl
+  tree line — that id changes on every edit; the identity id never does.
+  Invariants: copy = new id + `copied_from` edge; delete terminal (monotonic
+  seq, ids never reused); only `accepted` edges move `current_path` —
+  `suggested` edges are evidence only; edges are immutable (corrections
+  append superseding edges).
+- `src/lib/scv/entity_graph.spl` — evidence-based file matcher over two tree
+  payloads: unchanged / edited / exact-content unique rename (accepted move,
+  confidence 1000) / rename+edit via >70% line overlap (`suggested`
+  move_edit with recorded score) / ambiguous identical content (`suggested`
+  only) / new / deleted. Bounded by `SCV_ENTITY_MAX_PAIRS = 512` deleted×added
+  comparisons; beyond the cap files fail open to new+deleted.
+- Spec: `test/integration/app/scv_file_identity_spec.spl` (8 examples).
+
+Deferred (out of scope for v1):
+- `scv file-history <path|id>` CLI wiring — follow-up for the `main.spl`
+  owner (main.spl is contested; the library API is ready:
+  `scv_identity_history`, `scv_identity_lookup_by_path`).
+- Snapshot-path integration (calling `scv_entity_apply` from the snapshot
+  flow) — same owner, same reason.
+- CDC chunk-hash overlap similarity variant (line overlap only in v1).
+- Symbol-level EntityId (functions/types) — needs parser entity extraction
+  (report §7.9 stages A/B at symbol granularity).
+
+## Structural diff over stored parse roots
+
+`diff --structural` (Gap D, `scv_v2_wrapper_architecture_report_2026-08-25`)
+now routes through the real GumTree-style matcher whenever the object store
+holds a parse root for BOTH sides of a modified file, and labels every
+per-file result with its provenance so callers and specs can discriminate:
+
+- `structural_source=syntax-roots <rel>` — both content ids resolved to
+  stored file/binary roots. Resolution (`scv_syntax_root_for_content`,
+  `structural_match.spl`): fast path is the parser-index row matched on BOTH
+  `rel` and `raw`; slow path is a bounded scan of `objects/syntax` (cap
+  `scv_syntax_root_scan_cap()` = 4096 objects) for a `kind: file|binary` node
+  whose `path`/`raw` fields match — old roots persist content-addressed after
+  a re-parse repoints the index row. Diff stays read-only: it never parses or
+  writes syntax objects; roots exist only where `parse-gate` stored them.
+- `structural_source=text-blocks <rel>` — either root missing (or the matcher
+  bailed on the size guard): the pre-existing top-level text-block path runs
+  unchanged as the explicit fallback.
+
+Matching over roots (`scv_structural_diff_from_roots`) is bounded per the v2
+reports: subtree hashes and (kind, size-bucket) keys are precomputed once per
+node; top-down exact-subtree-hash anchoring and bottom-up Dice matching both
+restrict candidates to the same bucket, capped at
+`scv_match_candidate_cap()` = 64 per base node; trees larger than
+`StructuralMatchConfig.max_size` bail to the text path. Bottom-up skips nodes
+with empty descendant-label sets — `dice([],[]) == 1000` would otherwise pair
+arbitrary fallback-line nodes and emit garbage ops.
+
+Delivered variant (honest scope): wire + label + activation/agreement spec
+(`test/integration/app/scv_structural_roots_diff_spec.spl`). The fallback-line
+parser bakes the line number into each line node's syntax hash
+(`"line:{line_no}:{line}"`) and its nodes carry no names, so these roots are
+too coarse for move/rename discrimination beyond what text blocks already
+give; the syntax-roots rendering is therefore an op-count summary line
+(`syntax-ops <rel>: insert=.. delete=.. update=.. move=..`). Real
+discrimination (named moves reported from the matcher) waits on the WS-A
+tree-sitter parse roots.

@@ -2,12 +2,17 @@
 # push-both.shs — SCV migration dual-push: GitHub (canonical, remote #1) then the
 # secondary local backup server (shadow, remote #2, /mnt/data/scv-backup/simple.git).
 # Order per doc/01_research/app/tools/scv/scv_migration_stabilization_2026-08-25.md §1:
-# GitHub FIRST via the sanctioned guarded path (scripts/check/land.shs — never a raw
-# push; if land.shs is absent or fails, the GitHub leg is FAIL, no fallback), then the
-# SAME commit to the backup remote, then verify the pushed legs agree on main's SHA.
+# GitHub FIRST via a guarded plain `git push` run from a CLEAN detached temp
+# worktree (`git worktree add --detach` on the commit being pushed), so the full
+# pre-push hook fan-out runs against COMMITTED content, never the dirty shared
+# tree. NO --no-verify on this leg, ever — if the hooks fail in the clean
+# worktree, that is a genuine FAIL, no fallback. (Formerly this leg called
+# scripts/check/land.shs, which depends on sj/jj — both broken on this host;
+# see .spipe/scv-migration/state.md W3.) Then the SAME commit goes to the
+# backup remote, then the pushed legs must agree on main's SHA.
 #
 # The backup leg uses `git push --no-verify`: the pre-push guards run on the GitHub
-# leg via land.shs; the backup leg only mirrors commits that are already guarded
+# leg (hooks in the clean worktree); the backup leg only mirrors commits that are already guarded
 # (and the guards' outgoing-range logic is meaningless against the local mirror).
 # Note: the working clone is SHALLOW, so the mirror is a shallow mirror
 # (receive.shallowUpdate=true on the bare repo); GitHub stays the only
@@ -38,7 +43,7 @@ set -u
 REPO="${PB_REPO:-$(pwd)}"
 BACKUP_REMOTE="${PB_BACKUP_REMOTE:-scvbackup}"
 BACKUP_ROOT="${PB_BACKUP_ROOT:-/mnt/data/scv-backup}"
-LAND="${PB_LAND:-scripts/check/land.shs}"
+GH_REMOTE="${PB_GH_REMOTE:-origin}"
 BRANCH="${PB_BRANCH:-main}"
 
 DRY=0; SKIP_GH=0; SKIP_BK=0; BUNDLE=0; SELFTEST_ONLY=0; NO_SELFTEST=0
@@ -86,12 +91,34 @@ selftest() {
         sh "$SELF" --no-selftest --skip-github 2>&1); rc=$?
   V=$(printf '%s\n' "$OUT" | tail -n 1)
   { [ "$rc" -eq 2 ] && [ "${V#ERROR}" != "$V" ]; } || fail "no-remote expected ERROR, got rc=$rc [$V]"
+  # 4) GitHub leg via clean-worktree push to a fixture "origin" -> PASS
+  git init -q --bare -b main "$ST/gh/fix.git" || fail "gh bare init"
+  git init -q -b main "$ST/src2" && \
+    git -C "$ST/src2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m seed || fail "src2 init"
+  git -C "$ST/src2" remote add fixorigin "$ST/gh/fix.git" || fail "gh remote add"
+  git init -q --bare -b main "$ST/gh/bk.git" || fail "gh bk bare init"
+  git -C "$ST/src2" remote add fixbackup "$ST/gh/bk.git" || fail "gh bk remote add"
+  OUT=$(cd "$ST/src2" && PB_REPO="$ST/src2" PB_GH_REMOTE=fixorigin PB_BACKUP_REMOTE=fixbackup PB_BACKUP_ROOT="$ST/backup" \
+        sh "$SELF" --no-selftest 2>&1); rc=$?
+  V=$(printf '%s\n' "$OUT" | tail -n 1)
+  { [ "$rc" -eq 0 ] && [ "${V#PASS}" != "$V" ]; } || fail "gh clean-worktree push expected PASS, got rc=$rc [$V]"
+  GOT=$(git -C "$ST/gh/fix.git" rev-parse main 2>/dev/null)
+  WANT=$(git -C "$ST/src2" rev-parse main)
+  [ "$GOT" = "$WANT" ] || fail "gh push landed wrong sha"
+  # 5) failing pre-push hook in the source repo must FAIL the GitHub leg
+  #    (proves hooks actually run on the clean-worktree path — the point of it)
+  printf '#!/bin/sh\nexit 1\n' > "$ST/src2/.git/hooks/pre-push" && chmod +x "$ST/src2/.git/hooks/pre-push" || fail "hook install"
+  git -C "$ST/src2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m next || fail "src2 commit2"
+  OUT=$(cd "$ST/src2" && PB_REPO="$ST/src2" PB_GH_REMOTE=fixorigin PB_BACKUP_REMOTE=fixbackup PB_BACKUP_ROOT="$ST/backup" \
+        sh "$SELF" --no-selftest 2>&1); rc=$?
+  V=$(printf '%s\n' "$OUT" | tail -n 1)
+  { [ "$rc" -eq 1 ] && [ "${V#FAIL}" != "$V" ] && [ "${OUT#*github leg: FAIL}" != "$OUT" ]; } || fail "gh hook-reject expected github-leg FAIL, got rc=$rc [$V]"
   rm -rf "$ST"
-  echo "selftest: 3 fixtures OK"
+  echo "selftest: 5 fixtures OK"
 }
 
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-  selftest; echo "PASS — 3 selftest fixture(s) checked, 0 failures"; exit 0
+  selftest; echo "PASS — 5 selftest fixture(s) checked, 0 failures"; exit 0
 fi
 [ "$NO_SELFTEST" -eq 1 ] || selftest
 
@@ -116,18 +143,28 @@ fi
 GH_STATE="SKIPPED"
 if [ "$SKIP_GH" -eq 0 ]; then
   if [ "$DRY" -eq 1 ]; then
-    if git remote get-url origin >/dev/null 2>&1; then
-      GH_STATE="DRY (origin configured)"; CHECKED=$((CHECKED+1))
+    if git remote get-url "$GH_REMOTE" >/dev/null 2>&1; then
+      GH_STATE="DRY ($GH_REMOTE configured)"; CHECKED=$((CHECKED+1))
     else
-      GH_STATE="FAIL (origin not configured)"; FAILS="$FAILS github"
+      GH_STATE="FAIL ($GH_REMOTE not configured)"; FAILS="$FAILS github"
     fi
-  elif [ ! -f "$LAND" ]; then
-    GH_STATE="FAIL (sanctioned path $LAND absent — no raw-push fallback)"; FAILS="$FAILS github"
+  elif ! git remote get-url "$GH_REMOTE" >/dev/null 2>&1; then
+    GH_STATE="FAIL ($GH_REMOTE not configured)"; FAILS="$FAILS github"
   else
-    sh "$LAND"; ghrc=$?
-    CHECKED=$((CHECKED+1))
-    if [ "$ghrc" -eq 0 ]; then GH_STATE="OK (land.shs rc=0)"; else
-      GH_STATE="FAIL (land.shs rc=$ghrc — no raw-push fallback)"; FAILS="$FAILS github"
+    # Push from a CLEAN detached temp worktree so the pre-push hooks examine
+    # committed content only. NEVER --no-verify here: a hook failure in the
+    # clean worktree is a genuine FAIL, no fallback.
+    WT="${TMPDIR:-/tmp}/pb-gh-wt.$$"
+    if git worktree add --detach "$WT" "$LOCAL_SHA" >/dev/null 2>&1; then
+      git -C "$WT" push "$GH_REMOTE" "$LOCAL_SHA:refs/heads/$BRANCH"; ghrc=$?
+      git worktree remove --force "$WT" >/dev/null 2>&1
+      git worktree prune >/dev/null 2>&1
+      CHECKED=$((CHECKED+1))
+      if [ "$ghrc" -eq 0 ]; then GH_STATE="OK (guarded push from clean worktree rc=0)"; else
+        GH_STATE="FAIL (guarded push rc=$ghrc — hooks ran in clean worktree, no fallback)"; FAILS="$FAILS github"
+      fi
+    else
+      GH_STATE="FAIL (git worktree add failed for $LOCAL_SHA)"; FAILS="$FAILS github"
     fi
   fi
 fi
@@ -166,7 +203,7 @@ if [ "$HAVE_BK" -eq 1 ]; then
   fi
 fi
 if [ "$SKIP_GH" -eq 0 ] && [ "$DRY" -eq 0 ]; then
-  GH_SHA=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | cut -f1)
+  GH_SHA=$(git ls-remote "$GH_REMOTE" "refs/heads/$BRANCH" 2>/dev/null | cut -f1)
   echo "github $BRANCH: ${GH_SHA:-<none>}"
   CHECKED=$((CHECKED+1))
   [ -n "$GH_SHA" ] && [ -n "$BK_SHA" ] && [ "$SKIP_BK" -eq 0 ] && [ "$GH_SHA" != "$BK_SHA" ] && FAILS="$FAILS github/backup-disagree"

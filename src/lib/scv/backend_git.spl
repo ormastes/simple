@@ -114,3 +114,41 @@ fn scv_backend_map(root: text, git_dir: text, rev: text) -> text:
 # `scv backend verify` — re-run the byte-for-byte differential comparison.
 fn scv_backend_verify(root: text, git_dir: text, rev: text) -> text:
     scv_verify_backends_git(root, git_dir, rev)
+
+# --- promote-verify (MIG-15, scv_v2_final_report §16.2 exact tree agreement) --
+
+fn scv_promotion_path(root: text) -> text:
+    "{scv_meta_dir(root)}/promotion.sdn"
+
+fn scv_result_verdict_pass(result: text) -> bool:
+    var verdict = ""
+    for line in result.split("\n"):
+        if line.trim() != "":
+            verdict = line.trim()
+    verdict.starts_with("PASS")
+
+# `scv promote-verify --git <path> [--rev REV]` — exact-tree agreement guard
+# around promotion: the SCV tree must byte-agree with the git tree BEFORE the
+# promotion is recorded and AFTER the mapping row is written. Any disagreement
+# at any step is a FAIL and nothing is marked published (fail-closed: the
+# promotion record is written only after both comparisons pass).
+fn scv_promote_verify(root: text, git_dir: text, rev: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR — nothing was checked (repository not initialized)\n"
+    val pre = scv_verify_backends_git(root, git_dir, rev)
+    if pre.starts_with("ERROR — nothing was checked"):
+        return pre
+    if not scv_result_verdict_pass(pre):
+        return "{pre}FAIL — promotion blocked: pre-promotion tree disagreement; nothing marked published\n"
+    val map_result = scv_backend_map(root, git_dir, rev)
+    if not scv_result_verdict_pass(map_result):
+        return "{map_result}FAIL — promotion blocked: backend mapping failed; nothing marked published\n"
+    val post = scv_verify_backends_git(root, git_dir, rev)
+    if not scv_result_verdict_pass(post):
+        return "{post}FAIL — promotion blocked: post-mapping tree disagreement; nothing marked published\n"
+    val scv_commit = scv_read_workspace_commit(root)
+    val git_commit = scv_git_head_sha(git_dir)
+    val record = "promotion:\n  scv_commit: {scv_commit}\n  git_commit: {git_commit}\n  rev: {rev}\n  published: true\n"
+    if not scv_write_text(scv_promotion_path(root), record):
+        return "FAIL — promotion record write failed; nothing marked published\n"
+    "pre: {pre.trim()}\npost: {post.trim()}\nPASS — exact tree agreement verified before and after promotion; published -> {scv_promotion_path(root)}\n"

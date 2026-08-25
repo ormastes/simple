@@ -4,8 +4,9 @@ use app.io.mod (file_exists, file_read, file_size, file_modified_time, dir_walk)
 use std.nogc_sync_mut.io.thread.{thread_sleep_ms}
 use std.scv.core.{scv_rel_path, scv_is_repo_path, scv_status_index_path, scv_object_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe}
 use std.scv.core.{scv_bookmarks_path}
-use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_workspace_parent_error, scv_write_chunk_from_file, scv_write_file_object, scv_write_tree_object, scv_write_commit, scv_write_commit_carry, scv_fault_exit, scv_write_operation, scv_write_text, scv_content_id_for_file, scv_commit_tree, scv_commit_state, scv_commit_change, scv_object_field}
+use std.scv.store.{scv_repo_exists, scv_current_op, scv_read_workspace_commit, scv_workspace_parent_error, scv_write_tree_object, scv_write_commit, scv_write_commit_carry, scv_fault_exit, scv_write_operation, scv_write_text, scv_content_id_for_file, scv_commit_tree, scv_commit_state, scv_commit_change, scv_object_field}
 use std.scv.journal.{scv_wal_recover, scv_wal_begin, scv_wal_commit, scv_wal_abort, scv_journal_record_event}
+use std.scv.file_buffer.{scv_file_buffer_read, scv_file_buffer_write_objects}
 
 fn scv_should_skip(root: text, path: text) -> bool:
     val rel = scv_rel_path(root, path)
@@ -62,11 +63,14 @@ fn scv_snapshot(root: text) -> text:
         val rel = scv_rel_path(root, path)
         if not scv_worktree_path_safe(rel):
             return "ERROR unsafe path for SCV metadata: {rel}\n"
-        val size = file_size(path)
         val mtime = file_modified_time(path)
-        val chunk = scv_write_chunk_from_file(root, path)
-        val file_id = scv_write_file_object(root, rel, chunk, size, mtime)
-        entries.push("{rel}|{file_id}|{chunk}|{size}|{mtime}")
+        # One-read FileBuffer (MIG-19): content id, chunk write, and CDC chunk
+        # map all derive from a single read of the file's bytes.
+        val buffer = scv_file_buffer_read(path)
+        if buffer.error != "":
+            return buffer.error
+        val (file_id, chunk) = scv_file_buffer_write_objects(root, rel, buffer, mtime)
+        entries.push("{rel}|{file_id}|{chunk}|{buffer.size}|{mtime}")
     scv_fault_exit("content")
     val sorted = scv_sort_entries(entries)
     var index = ""

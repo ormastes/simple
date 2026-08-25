@@ -9,6 +9,7 @@ signatures.
 | Piece | Path |
 |---|---|
 | Month plan (weeks, steps, gates, rollback) | `doc/03_plan/app/tools/scv_migration_month_plan.md` (+ `_tldr.md`) |
+| Complete v2 impl plan (tracks SCV-IMPL-*, waves, S5/S6 gates) | `doc/03_plan/app/tools/scv_complete_impl_plan.md` (+ `_tldr.md`) |
 | Ledger (owned by the checker, NOT todo-scan) | `.spipe/scv-migration/todo.sdn` |
 | Lane state | `.spipe/scv-migration/state.md` |
 | Hourly checker | `scripts/check/check-scv-migration-todo.shs` |
