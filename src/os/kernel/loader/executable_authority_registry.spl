@@ -94,6 +94,11 @@ pub(package) struct ExecutableAuthorityArmedIdentityV1:
     has_entry_identity: bool
     entry_point: u64
 
+pub(package) struct ExecutableAuthorityArmedPreparationV1:
+    """Atomic, non-authorizing input for an architecture mapping owner."""
+    identity: ExecutableAuthorityArmedIdentityV1
+    image_handle: ExecutableImageHandleV1
+
 pub(package) struct ExecutableAuthorityCloseLeaseV1:
     token: ExecutableAuthorityTokenV1
     close_attempt: u64
@@ -1146,7 +1151,8 @@ pub(package) fn executable_authority_mapping_release_indeterminate_v1(
 pub(package) fn executable_authority_complete_riscv32_mapping_release_v1(
     owner: ExecutableAuthorityRegistryV1,
     coordinate: ExecutableRiscv32MappingReleaseCoordinateV1,
-    unreachable: Riscv32Sv32RootUnreachableReceiptV1
+    unreachable: Riscv32Sv32RootUnreachableReceiptV1,
+    terminal: bool
 ) -> Result<(), ExecutableAuthorityErrorV1>:
     """Clear a mapping pin only for the architecture owner's exact detached root."""
     if not riscv32_sv32_root_unreachable_claim_v1(
@@ -1177,9 +1183,12 @@ pub(package) fn executable_authority_complete_riscv32_mapping_release_v1(
                             coordinate._root_generation):
                         error = ExecutableAuthorityErrorV1.InvalidMappingReleaseCoordinate
                     else:
-                        # The root is already architecture-proven unreachable.
-                        # Reopen the armed image only before its frames are freed.
-                        slot.state = ExecutableAuthorityStateV1.Armed
+                        # A task-bound root remains consumed; rollback-only
+                        # roots may reopen Armed after becoming unreachable.
+                        slot.state = if terminal:
+                            ExecutableAuthorityStateV1.Committed
+                        else:
+                            ExecutableAuthorityStateV1.Armed
                         slot.joint_nonce = 0u64
                         slot.rv32_entry_nonce = 0u64
                         slot.rv32_entry_point = 0u32
@@ -1607,6 +1616,49 @@ pub(package) fn executable_authority_snapshot_armed_identity(
     if error != ExecutableAuthorityErrorV1.None:
         return Err(error)
     match identity:
+        case Some(value): Ok(value)
+        case nil: Err(ExecutableAuthorityErrorV1.InvalidRegistry)
+
+pub(package) fn executable_authority_snapshot_armed_preparation_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1
+) -> Result<ExecutableAuthorityArmedPreparationV1, ExecutableAuthorityErrorV1>:
+    """Copy one exact Armed identity and its immutable preparation handle.
+
+    The returned handle may be re-read and mapped while authority is still
+    Armed, but cannot commit/retrieve the slot or authorize execution.
+    """
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    var preparation: ExecutableAuthorityArmedPreparationV1? = nil
+    match _authority_registry_state:
+        case nil:
+            error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(state):
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_token_index(state, token)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidToken
+                else:
+                    val slot = state.slots[index]
+                    if slot.state != ExecutableAuthorityStateV1.Armed:
+                        error = ExecutableAuthorityErrorV1.NotArmed
+                    else:
+                        val copied = _authority_copy_armed_identity(slot, token)
+                        match copied:
+                            case Err(copy_error): error = copy_error
+                            case Ok(identity):
+                                preparation = Some(ExecutableAuthorityArmedPreparationV1(
+                                    identity: identity,
+                                    image_handle: slot.image_handle))
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error != ExecutableAuthorityErrorV1.None:
+        return Err(error)
+    match preparation:
         case Some(value): Ok(value)
         case nil: Err(ExecutableAuthorityErrorV1.InvalidRegistry)
 

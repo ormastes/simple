@@ -356,9 +356,15 @@ fn _build_user_process_image_from_elf(
 ) -> Result<UserProcessImage, text>:
     match arch:
         case Architecture.X86_64: ()
+        case Architecture.X86: ()
         case Architecture.Arm64: ()
         case Architecture.Riscv64: ()
-        case _: return Err("ELF64 initial stack builder does not support 32-bit targets")
+        case Architecture.Riscv32: ()
+        case _: return Err("initial stack builder does not support target")
+    val abi_word_size: u64 = match arch:
+        case Architecture.X86: 4u64
+        case Architecture.Riscv32: 4u64
+        case _: 8u64
     val stack_top = _native_default_stack_top(arch)
     var stack_size = compute_stack_size(source_len)
     if stack_size == 0:
@@ -369,7 +375,7 @@ fn _build_user_process_image_from_elf(
         effective_argv = [path]
 
     var source_segments = elf_segments
-    if source_segments.len() == 0:
+    if source_segments.len() == 0 and abi_word_size == 8u64:
         source_segments = _arm64_fallback_user_segments(native_data)
 
     var segments: [UserLoadSegment] = []
@@ -384,17 +390,19 @@ fn _build_user_process_image_from_elf(
             align: elf_segment_align(seg),
             data: _pi_slice_bytes(native_data, file_offset, file_size)
         ))
-    if segments.len() == 0:
+    if segments.len() == 0 and abi_word_size == 8u64:
         segments = _arm64_fallback_user_segments(native_data)
+    if segments.len() == 0:
+        return Err("executable has no loadable segments")
 
     val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, value: elf_entry)]  # AT_ENTRY
     # No kernel CSPRNG owner is wired here yet. Omit AT_RANDOM explicitly;
     # never publish predictable bytes under an entropy-bearing auxv tag.
     val stack_frame_result = build_initial_stack_checked(
-        stack_top, stack_size, 8, [], effective_argv, envp, extra_aux)
+        stack_top, stack_size, abi_word_size, [], effective_argv, envp, extra_aux)
     val stack_frame = match stack_frame_result:
         case Ok(frame): frame
-        case Err(_): return Err("ELF64 initial stack construction failed")
+        case Err(_): return Err("initial stack construction failed")
     # Project the one accepted frame directly.  Calling two by-value accessors
     # here could copy its near-64 KiB byte payload twice.
     val initial_sp = stack_frame.sp

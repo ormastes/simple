@@ -39,7 +39,8 @@ use os.kernel.types.arm32_mapping_handle_v1.{
     scheduler_arm32_mapping_handle_absent_v1
 }
 use os.kernel.types.riscv32_mapping_handle_v1.{
-    scheduler_riscv32_mapping_handle_absent_v1
+    scheduler_riscv32_mapping_handle_absent_v1,
+    scheduler_riscv32_mapping_handle_present_v1
 }
 use os.kernel.types.x86_32_mapping_handle_v1.{
     scheduler_x86_32_mapping_handle_absent_v1
@@ -47,6 +48,67 @@ use os.kernel.types.x86_32_mapping_handle_v1.{
 use os.kernel.scheduler.server_data_launch_grant_registry.{
     server_data_launch_grant_revoke_task_lifecycle_v1
 }
+
+@cfg(arm32)
+fn _sched_arm32_mark_terminal_v1(task: TaskControlBlock) -> bool:
+    use os.kernel.types.arm32_mapping_handle_v1.{
+        scheduler_arm32_mapping_handle_present_v1
+    }
+    use os.kernel.scheduler.scheduler_arm32_mapping_move_v1.{
+        scheduler_arm32_mapping_handle_mark_terminal_v1
+    }
+    if not scheduler_arm32_mapping_handle_present_v1(task.arm32_mapping_handle):
+        return true
+    scheduler_arm32_mapping_handle_mark_terminal_v1(
+        task.arm32_mapping_handle, task.id.id, task.lifecycle_generation)
+
+@cfg(not(arm32))
+fn _sched_arm32_mark_terminal_v1(_task: TaskControlBlock) -> bool: true
+
+@cfg(arm32)
+fn _sched_arm32_reap_mapping_v1(task: TaskControlBlock) -> i32:
+    use os.kernel.types.arm32_mapping_handle_v1.{
+        scheduler_arm32_mapping_handle_present_v1
+    }
+    use os.kernel.scheduler.scheduler_arm32_mapping_move_v1.{
+        scheduler_arm32_mapping_handle_reap_v1
+    }
+    if not scheduler_arm32_mapping_handle_present_v1(task.arm32_mapping_handle):
+        return 0
+    if scheduler_arm32_mapping_handle_reap_v1(
+        task.arm32_mapping_handle, task.id.id, task.lifecycle_generation):
+        return 1
+    -1
+
+@cfg(not(arm32))
+fn _sched_arm32_reap_mapping_v1(_task: TaskControlBlock) -> i32: 0
+
+@cfg(arm32)
+fn _sched_has_arm32_mapping_v1(task: TaskControlBlock) -> bool:
+    use os.kernel.types.arm32_mapping_handle_v1.{
+        scheduler_arm32_mapping_handle_present_v1
+    }
+    scheduler_arm32_mapping_handle_present_v1(task.arm32_mapping_handle)
+
+@cfg(not(arm32))
+fn _sched_has_arm32_mapping_v1(_task: TaskControlBlock) -> bool: false
+
+@cfg(riscv32)
+fn _sched_riscv32_reap_mapping_v1(task: TaskControlBlock) -> i32:
+    use os.kernel.loader.riscv32_sv32_mapping_owner_v1.{
+        riscv32_sv32_mapping_destroy_scheduler_handle_v1
+    }
+    if not scheduler_riscv32_mapping_handle_present_v1(
+        task.riscv32_mapping_handle):
+        return 0
+    if riscv32_sv32_mapping_destroy_scheduler_handle_v1(
+        task.riscv32_mapping_handle, task.id.id,
+        task.lifecycle_generation):
+        return 1
+    -1
+
+@cfg(not(riscv32))
+fn _sched_riscv32_reap_mapping_v1(_task: TaskControlBlock) -> i32: 0
 
 # ============================================================================
 # Task Creation
@@ -141,6 +203,9 @@ pub fn sched_exit_task_by_id_impl(
     posix_close_task_fds_with_backends(id.id, task.lifecycle_generation)
     _ = server_data_launch_grant_revoke_task_lifecycle_v1(
         task.id.id, task.lifecycle_generation)
+    if not _sched_arm32_mark_terminal_v1(task):
+        new_tasks[slot] = task
+        return (new_tasks, id)
     task.state = TaskState.Zombie
     task.exit_code = 0
     new_tasks[slot] = task
@@ -200,9 +265,12 @@ pub fn sched_finalize_exit_task_by_id_with_code_impl(
     posix_close_task_fds_with_backends(id.id, task.lifecycle_generation)
     _ = server_data_launch_grant_revoke_task_lifecycle_v1(
         task.id.id, task.lifecycle_generation)
+    var new_tasks = tasks
+    if not _sched_arm32_mark_terminal_v1(task):
+        new_tasks[slot] = task
+        return new_tasks
     task.state = TaskState.Zombie
     task.exit_code = code
-    var new_tasks = tasks
     new_tasks[slot] = task
     new_tasks
 
@@ -387,9 +455,18 @@ pub fn sched_wait_for_collect_impl(
                     case TaskState.Zombie:
                         val status = task.exit_code
                         val pid = task.id.id
+                        val arm32_reap = _sched_arm32_reap_mapping_v1(task)
+                        if arm32_reap < 0:
+                            return (WaitCollectResult(
+                                pid: 0, status: 0, error: -5), new_tasks, false)
+                        val riscv32_reap = _sched_riscv32_reap_mapping_v1(task)
+                        if riscv32_reap < 0:
+                            return (WaitCollectResult(
+                                pid: 0, status: 0, error: -5), new_tasks, false)
                         posix_close_task_fds_with_backends(
                             task.id.id, task.lifecycle_generation)
-                        sched_release_task_address_space(task)
+                        if arm32_reap == 0 and riscv32_reap == 0:
+                            sched_release_task_address_space(task)
                         new_tasks[i] = nil
                         return (WaitCollectResult(pid: pid, status: status, error: 0), new_tasks, false)
                     case _:
@@ -404,6 +481,29 @@ pub fn sched_wait_for_collect_impl(
 # Release address space
 # ============================================================================
 
+@cfg(riscv32)
+fn _release_riscv32_task_mapping_v1(task: TaskControlBlock) -> bool:
+    use os.kernel.loader.riscv32_sv32_mapping_owner_v1.{
+        riscv32_sv32_mapping_destroy_scheduler_handle_v1
+    }
+    if not scheduler_riscv32_mapping_handle_present_v1(
+        task.riscv32_mapping_handle):
+        return false
+    riscv32_sv32_mapping_destroy_scheduler_handle_v1(
+        task.riscv32_mapping_handle, task.id.id,
+        task.lifecycle_generation)
+
+@cfg(arm64)
+fn _release_riscv32_task_mapping_v1(_task: TaskControlBlock) -> bool: false
+@cfg(arm32)
+fn _release_riscv32_task_mapping_v1(_task: TaskControlBlock) -> bool: false
+@cfg(riscv64)
+fn _release_riscv32_task_mapping_v1(_task: TaskControlBlock) -> bool: false
+@cfg(x86_64)
+fn _release_riscv32_task_mapping_v1(_task: TaskControlBlock) -> bool: false
+@cfg(x86)
+fn _release_riscv32_task_mapping_v1(_task: TaskControlBlock) -> bool: false
+
 pub fn sched_release_task_address_space(task: TaskControlBlock):
     """Release the user address space held by a task.
 
@@ -413,7 +513,15 @@ pub fn sched_release_task_address_space(task: TaskControlBlock):
     validates that flat value as a heap receiver and traps after a successful
     child exit.
     """
-    if task.is_user:
+    # ARM32 mapping capsules are destroyed only by their terminal lifecycle
+    # handle.  A raw AddressSpace reconstruction would double-own the root.
+    if task.is_user and not _sched_has_arm32_mapping_v1(task):
+        if scheduler_riscv32_mapping_handle_present_v1(
+            task.riscv32_mapping_handle):
+            if not _release_riscv32_task_mapping_v1(task):
+                log_raw_println(
+                    "[scheduler] RV32 mapping release quarantined pid={task.id.id}")
+            return
         destroy_user_address_space(AddressSpace(
             phys_root: task.address_space,
             id: 0

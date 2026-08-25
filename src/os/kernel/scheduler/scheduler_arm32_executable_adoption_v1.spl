@@ -1,0 +1,234 @@
+# ARM32 scheduler-owned authenticated mapping publication.
+
+use std.fs_driver.mount_table.{MountTable}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    ExecutableAuthorityArmedPreparationV1
+}
+use os.kernel.loader.executable_admission_pipeline.{
+    executable_loader_commit, executable_loader_retrieve_once,
+    executable_loader_release_retrieved
+}
+use os.kernel.loader.executable_launch_arguments_v1.{ExecutableLaunchArgumentsV1}
+use os.kernel.arch.arm32.user_page_table_owner_v1.{
+    Arm32UserPageTableReceiptV1, Arm32UserPageTableStateV1,
+    Arm32UserPageTableErrorV1,
+    arm32_user_page_table_rollback_adoption_v1,
+    arm32_user_page_table_destroy_v1
+}
+use os.kernel.scheduler.scheduler_arm32_mapping_move_v1.{
+    scheduler_arm32_mapping_handle_admit_v1,
+    scheduler_arm32_mapping_handle_rollback_v1,
+    scheduler_arm32_mapping_handle_publish_v1
+}
+use os.kernel.scheduler.scheduler_types.{
+    Scheduler, TaskControlBlock, TIME_SLICE_TICKS,
+    _initial_user_task_context, scheduler_next_task_lifecycle_identity_take_v1
+}
+use os.kernel.scheduler.scheduler_task_mgmt.{_find_empty_slot_in}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionObservationHandleV1,
+    scheduler_execution_observe_adoption_handle_with_launch_v1,
+    scheduler_execution_cancel_adoption_handle_v1
+}
+use os.kernel.scheduler.server_data_launch_grant_registry.{
+    ServerDataLaunchGrantInstallStatusV1,
+    server_data_launch_grant_install_before_publication_v1,
+    server_data_launch_grant_rollback_before_publication_v1,
+    server_data_launch_grant_quarantine_before_publication_v1
+}
+use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
+use os.kernel.ipc.capability.{register_task_vmspace}
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority,
+    default_task_schedule, default_task_isolation
+}
+use os.kernel.types.capability_types.{CapabilitySet, capability_set_bind_owner}
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+use os.kernel.types.riscv32_mapping_handle_v1.{scheduler_riscv32_mapping_handle_absent_v1}
+use os.kernel.types.x86_32_mapping_handle_v1.{scheduler_x86_32_mapping_handle_absent_v1}
+use os.kernel.types.arm32_mapping_handle_v1.{SchedulerArm32MappingHandleV1}
+
+pub(package) struct SchedulerArm32AdoptionResultV1:
+    scheduler: Scheduler
+    pid: i64
+
+fn _arm32_range_same_v1(a: ExecutableLoadRangeV1, b: ExecutableLoadRangeV1) -> bool:
+    a.file_offset == b.file_offset and a.file_size == b.file_size and
+        a.virtual_address == b.virtual_address and a.memory_size == b.memory_size and
+        a.writable == b.writable and a.executable == b.executable
+
+fn _arm32_handle_same_v1(a: ExecutableImageHandleV1, b: ExecutableImageHandleV1) -> bool:
+    if (a.canonical_source_path != b.canonical_source_path or
+        a.image_hash != b.image_hash or a.admission_id != b.admission_id or
+        a.schema_version != b.schema_version or a.role != b.role or
+        a.filesystem_name != b.filesystem_name or a.size_bytes != b.size_bytes or
+        a.mount_id != b.mount_id or a.mount_generation != b.mount_generation or
+        a.open_handle_id != b.open_handle_id or a.file_id != b.file_id or
+        a.file_generation != b.file_generation or
+        a.trust_epoch != b.trust_epoch or a.read_count != b.read_count or
+        a.read_bytes != b.read_bytes or a.consumed != b.consumed or
+        a.target.os != b.target.os or a.target.arch != b.target.arch or
+        a.target.abi != b.target.abi or
+        a.verified_load_ranges.len() != b.verified_load_ranges.len()):
+        return false
+    var index = 0
+    while index < a.verified_load_ranges.len():
+        if not _arm32_range_same_v1(
+            a.verified_load_ranges[index], b.verified_load_ranges[index]):
+            return false
+        index = index + 1
+    true
+
+fn _arm32_destroy_reserved_v1(receipt: Arm32UserPageTableReceiptV1) -> bool:
+    val mapped = arm32_user_page_table_rollback_adoption_v1(receipt)
+    if mapped.state != Arm32UserPageTableStateV1.MappedBlocked or
+        mapped.error != Arm32UserPageTableErrorV1.None:
+        return false
+    val destroyed = arm32_user_page_table_destroy_v1(mapped)
+    destroyed.state == Arm32UserPageTableStateV1.Destroyed and
+        destroyed.error == Arm32UserPageTableErrorV1.None
+
+fn _arm32_rollback_moved_v1(
+    handle: SchedulerArm32MappingHandleV1,
+    task_id: u64,
+    lifecycle_generation: u64,
+    reserved: Arm32UserPageTableReceiptV1
+) -> bool:
+    if not scheduler_arm32_mapping_handle_rollback_v1(
+        handle, task_id, lifecycle_generation):
+        return false
+    _arm32_destroy_reserved_v1(reserved)
+
+pub(package) fn scheduler_arm32_adopt_reserved_authenticated_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    preparation: ExecutableAuthorityArmedPreparationV1,
+    reserved: Arm32UserPageTableReceiptV1,
+    launch: ExecutableLaunchArgumentsV1,
+    caps: CapabilitySet
+) -> SchedulerArm32AdoptionResultV1:
+    """Jointly consume authority, mapping, TCB publication, and observation."""
+    var owner = scheduler
+    if (reserved.state != Arm32UserPageTableStateV1.AdoptionReserved or
+        reserved.error != Arm32UserPageTableErrorV1.None or
+        reserved.execution_authorized or reserved.root_phys == 0u64 or
+        reserved.entry_point == 0u64 or reserved.initial_sp == 0u64):
+        _ = _arm32_destroy_reserved_v1(reserved)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+
+    var slot = _find_empty_slot_in(owner.tasks)
+    if slot < 0 and owner.current.id == 0u64: slot = 0
+    val maybe_identity = if slot >= 0:
+        scheduler_next_task_lifecycle_identity_take_v1()
+    else:
+        nil
+    if slot < 0 or maybe_identity == nil:
+        _ = _arm32_destroy_reserved_v1(reserved)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -11)
+    val identity = maybe_identity.unwrap()
+    if identity.task_id == 0u64 or identity.task_id > 0xFFFFFFFFu64 or
+        identity.lifecycle_generation == 0u64 or
+        identity.lifecycle_generation > 0xFFFFFFFFu64:
+        _ = _arm32_destroy_reserved_v1(reserved)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -75)
+
+    val committed = executable_loader_commit(authorities, token)
+    if committed.is_err():
+        _ = _arm32_destroy_reserved_v1(reserved)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+    val retrieved_result = executable_loader_retrieve_once(authorities, token)
+    if retrieved_result.is_err():
+        _ = _arm32_destroy_reserved_v1(reserved)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+    val retrieved = retrieved_result.unwrap().image_handle
+    if not _arm32_handle_same_v1(retrieved, preparation.image_handle):
+        _ = _arm32_destroy_reserved_v1(reserved)
+        _ = executable_loader_release_retrieved(table, authorities, token)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+
+    val child = TaskId(id: identity.task_id)
+    var exec_token = (token.nonce ^ child.id ^ identity.lifecycle_generation ^
+        0x41333245u64) & 0xFFFFFFFFu64
+    if exec_token == 0u64: exec_token = 0x41333245u64
+    val mapping = scheduler_arm32_mapping_handle_admit_v1(
+        reserved, child.id, identity.lifecycle_generation,
+        exec_token, identity.lifecycle_generation)
+    if mapping == nil:
+        _ = _arm32_destroy_reserved_v1(reserved)
+        _ = executable_loader_release_retrieved(table, authorities, token)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+    val mapping_handle = mapping.unwrap()
+
+    val grant_install = server_data_launch_grant_install_before_publication_v1(
+        child.id, identity.lifecycle_generation, retrieved)
+    if (grant_install.status != ServerDataLaunchGrantInstallStatusV1.NotApplicable and
+        grant_install.status != ServerDataLaunchGrantInstallStatusV1.Installed):
+        _ = _arm32_rollback_moved_v1(
+            mapping_handle, child.id, identity.lifecycle_generation, reserved)
+        _ = executable_loader_release_retrieved(table, authorities, token)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -13)
+
+    val observation = scheduler_execution_observe_adoption_handle_with_launch_v1(
+        child.id, owner.current.id, retrieved, launch)
+    if observation == nil:
+        if grant_install.handle != nil:
+            val grant_handle = grant_install.handle.unwrap()
+            if not server_data_launch_grant_rollback_before_publication_v1(grant_handle):
+                _ = server_data_launch_grant_quarantine_before_publication_v1(grant_handle)
+        _ = _arm32_rollback_moved_v1(
+            mapping_handle, child.id, identity.lifecycle_generation, reserved)
+        _ = executable_loader_release_retrieved(table, authorities, token)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -11)
+    val observation_handle: SchedulerExecutionObservationHandleV1 = observation.unwrap()
+
+    val user_context = _initial_user_task_context(
+        reserved.entry_point, reserved.initial_sp)
+    val task_caps = capability_set_bind_owner(caps, child.id)
+    val tcb = TaskControlBlock(
+        id: child, lifecycle_generation: identity.lifecycle_generation,
+        name: "authenticated-arm32-user-{child.id}",
+        state: TaskState.Ready, priority: TaskPriority.Normal, is_user: true,
+        entry_point: reserved.entry_point, context: user_context,
+        user_context: Some(user_context), address_space: reserved.root_phys,
+        kernel_stack: 0u64, user_stack: reserved.initial_sp,
+        capabilities: task_caps, parent: Some(owner.current),
+        schedule: default_task_schedule(TaskPriority.Normal),
+        isolation: default_task_isolation(identity.lifecycle_generation),
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
+        arm32_mapping_handle: mapping_handle,
+        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
+        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1())
+    owner.tasks[slot] = tcb
+    if not scheduler_arm32_mapping_handle_publish_v1(
+        mapping_handle, child.id, identity.lifecycle_generation):
+        owner.tasks[slot] = nil
+        _ = scheduler_execution_cancel_adoption_handle_v1(observation_handle)
+        if grant_install.handle != nil:
+            val grant_handle = grant_install.handle.unwrap()
+            if not server_data_launch_grant_rollback_before_publication_v1(grant_handle):
+                _ = server_data_launch_grant_quarantine_before_publication_v1(grant_handle)
+        _ = _arm32_rollback_moved_v1(
+            mapping_handle, child.id, identity.lifecycle_generation, reserved)
+        _ = executable_loader_release_retrieved(table, authorities, token)
+        return SchedulerArm32AdoptionResultV1(scheduler: owner, pid: -5)
+
+    register_task_vmspace(
+        child.id.to_u32(),
+        ProcessVmSpace(pml4: reserved.root_phys,
+            id: identity.lifecycle_generation,
+            vma_count: 0, areas: []))
+    cap_init_task_record(child, true)
+    owner._enqueue_ready_at_slot(child, slot)
+    # A close failure is retryable source cleanup after scheduler publication;
+    # it cannot revoke or roll back the now-runnable mapping.
+    _ = executable_loader_release_retrieved(table, authorities, token)
+    SchedulerArm32AdoptionResultV1(scheduler: owner, pid: child.id as i64)
+
+export SchedulerArm32AdoptionResultV1
+export scheduler_arm32_adopt_reserved_authenticated_v1
