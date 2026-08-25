@@ -486,3 +486,32 @@ attempt failed before a lint result at unresolved `Array.sort_by` runtime/codege
 dispatch. Treat that bootstrap-seed result as a tooling blocker, not scorer
 evidence or scorer failure; do not claim a duplicate-check run. Overall Wave 4
 remains `IN PROGRESS`.
+
+### 10.4 DBFS facade attempt closure
+
+The clean-clone candidate owned exactly the four FTS sources
+`src/lib/nogc_sync_mut/db/dbfs_engine/fts/{__init__,bm25,inverted_index,search}.spl`
+and the new focused
+`test/02_integration/storage/dbfs/fts_canonical_facade_spec.spl`.
+
+The three permitted cycles reached zero owned-code execution. Stage 3 Simple
+hash
+`9ce412a1d102de421de6d7042d8dc5c65201cc514b463b9b6a5bc5de2f66970c`
+lacks `check`/`test`; Rust seed hash
+`c9c783b8568cf9a199945fe1ee98d08615b728387e6c89cbdc9b50e600f3e091`
+failed first on unrelated `nogc_async_mut/path.spl` `E1002 unsafe` and
+`plan_sdn.spl` `Dedent`.
+
+Static highest-capability review is `FAIL`; admissible files are `[]`.
+Nested index/engine collection and struct mutations lack complete trial-copy
+plus single owner reassignment, and lexical state commits before trigram/content
+state. Correct the frozen `contains_document` `me fn` ABI. Expand the spec
+to assert intermediate statistics and averages, full independently rebuilt
+clean statistics, contains/absent behavior, exact order equality, legacy
+success, and checked-upsert failure/no-change.
+
+Keep the facade direction and focused fixture as unaccepted salvage only. The
+next bounded Lane E task is value-semantic child-copy/writeback, one atomic
+engine transaction, ABI repair, and the complete oracle, followed by fresh
+bounded execution on a capable pure-Simple runtime. Wave 4 remains
+`IN PROGRESS`.

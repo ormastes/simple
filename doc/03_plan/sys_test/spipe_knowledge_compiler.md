@@ -1362,3 +1362,33 @@ before any lint verdict because runtime/codegen dispatch could not resolve
 `Array.sort_by`; its bootstrap-seed provenance makes this a tooling blocker,
 not a scorer failure or pass. Duplicate check was not run. Wave 4 remains
 `IN PROGRESS`.
+
+#### 13.9.10 DBFS facade zero-execution closure
+
+The exact clean-clone candidate set was:
+
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/__init__.spl`;
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/bm25.spl`;
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/inverted_index.spl`;
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/search.spl`;
+- `test/02_integration/storage/dbfs/fts_canonical_facade_spec.spl`.
+
+Cycles 1, 2, and 3 each executed zero owned-code assertions. Stage 3 Simple
+`9ce412a1d102de421de6d7042d8dc5c65201cc514b463b9b6a5bc5de2f66970c`
+has no `check`/`test` command. Rust seed
+`c9c783b8568cf9a199945fe1ee98d08615b728387e6c89cbdc9b50e600f3e091`
+instead failed on unrelated `nogc_async_mut/path.spl` `E1002 unsafe` and
+`plan_sdn.spl` `Dedent`. These are not DBFS pass receipts.
+
+Static highest-capability review is `FAIL` with admissible set `[]`:
+value-semantic nested collection/struct writeback is incomplete; there is no
+single atomic lexical+trigram+content commit; `contains_document` violates the
+frozen `me fn` ABI; and the spec does not cover intermediate
+statistics/averages, complete independent clean statistics, contains/absent,
+exact ordering, legacy success, or checked-upsert failure/no-change.
+
+The facade/canonical-scorer direction and focused fixture are retained only as
+unaccepted positive design input. The next evidence must come from rebuilt
+child copies with one owner writeback, an atomic engine transaction, corrected
+ABI, the complete oracle, and a fresh bounded run on a capable pure-Simple
+runtime. Wave 4 remains `IN PROGRESS`.

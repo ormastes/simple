@@ -605,3 +605,29 @@ The clean post-push lint attempt stopped before a lint verdict because the
 bootstrap runtime/codegen path could not resolve `Array.sort_by`. Record that
 as a tooling blocker, not a scorer failure or pass. No duplicate-check receipt
 exists for this slice.
+
+### 13.1 Rejected DBFS facade attempt
+
+Do not consume the current clean-clone DBFS candidate. Its exact scope was the
+four files
+`src/lib/nogc_sync_mut/db/dbfs_engine/fts/{__init__,bm25,inverted_index,search}.spl`
+plus
+`test/02_integration/storage/dbfs/fts_canonical_facade_spec.spl`.
+All three bounded cycles executed zero owned-code assertions. Stage 3 Simple
+`9ce412a1d102de421de6d7042d8dc5c65201cc514b463b9b6a5bc5de2f66970c`
+lacks `check`/`test`; Rust seed
+`c9c783b8568cf9a199945fe1ee98d08615b728387e6c89cbdc9b50e600f3e091`
+stopped on unrelated `nogc_async_mut/path.spl` `E1002 unsafe` and
+`plan_sdn.spl` `Dedent`.
+
+Highest-capability static review is `FAIL`, admissible files `[]`. The
+candidate mutates nested value-semantic state without complete copy/writeback,
+commits lexical state before trigram/content state, mismatches the frozen
+`contains_document` `me fn` ABI, and lacks the full statistics, clean-rebuild,
+contains/absent, ordering, legacy-success, and checked-upsert failure oracle.
+
+The facade direction and focused fixture are useful design input, not accepted
+implementation. Rebuild child state and write it back once, make the whole
+engine update atomic, correct the ABI, complete the oracle, and use a capable
+pure-Simple runtime for the next fresh bounded run. Wave 4 remains
+`IN PROGRESS`.

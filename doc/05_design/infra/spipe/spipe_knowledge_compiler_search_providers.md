@@ -2241,3 +2241,37 @@ lint result because runtime/codegen dispatch could not resolve
 `Array.sort_by`. The command also had bootstrap-seed provenance. No duplicate
 check was run because the lint owner tool is unresolved and the same seed path
 is not qualified.
+
+### 15.1 DBFS facade attempt closure
+
+The clean-clone candidate consisted of exactly:
+
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/__init__.spl`;
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/bm25.spl`;
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/inverted_index.spl`;
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/search.spl`;
+- `test/02_integration/storage/dbfs/fts_canonical_facade_spec.spl`.
+
+All three permitted execution cycles produced zero owned-code execution. The
+Stage 3 Simple runtime,
+`9ce412a1d102de421de6d7042d8dc5c65201cc514b463b9b6a5bc5de2f66970c`,
+does not provide the required `check` or `test` command. The Rust seed,
+`c9c783b8568cf9a199945fe1ee98d08615b728387e6c89cbdc9b50e600f3e091`,
+stopped first on unrelated `nogc_async_mut/path.spl` `E1002 unsafe` and
+`plan_sdn.spl` `Dedent` failures.
+
+Static highest-capability review is `FAIL` with admissible files `[]`.
+`inverted_index` and the engine mutate nested collection/struct fields without
+building complete child copies and performing one owner reassignment. The
+lexical index commits before trigram/content state, so replacement is not
+atomic. The frozen `contains_document` ABI has a `me fn` mismatch. The
+focused spec omits intermediate statistics/averages, complete independent
+clean-corpus statistics, contains/absent behavior, exact result-order equality,
+legacy success, and checked-upsert failure/no-change assertions.
+
+Preserve the canonical-scorer facade direction, checked-operation/capability
+intent, and focused regression-fixture shape as design input only. No candidate
+file is accepted. The next slice must rebuild and write back value-semantic
+child copies, commit the complete engine transaction atomically, correct the
+frozen ABI, complete the oracle, and then run a fresh bounded execution on a
+capable pure-Simple runtime. Wave 4 remains `IN PROGRESS`.
