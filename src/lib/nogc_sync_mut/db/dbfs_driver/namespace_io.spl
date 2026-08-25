@@ -41,6 +41,21 @@ fn _namespace_finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:
 impl DbFsDriver:
     # --- stat ---
 
+    fn _file_generation_v1_locked(handle: FileHandle) -> Result<u64, FsError>:
+        """Return the exact live inode version under DBFS's transaction owner."""
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.StaleHandle)
+        val generation = _dbfs_inodes[inode_idx].content_generation
+        if generation == 0u64:
+            return Err(FsError.Corrupt)
+        Ok(generation)
+
     fn _stat_path_locked(path: Path) -> Result<StatInfo, FsError>:
         """Stat path: look up inode by name in module store."""
         val raw = path.raw
@@ -79,6 +94,7 @@ impl DbFsDriver:
             _dbfs_inodes.push(DbFsInode(
                 inst_id:  self.inst_id,
                 id:       inode_id,
+                content_generation: 1u64,
                 kind:     DbFsKind.File,
                 name:     raw,
                 content:  "",
@@ -272,9 +288,12 @@ impl DbFsDriver:
         if inode_idx < 0:
             return Err(FsError.NotFound)
         val old = _dbfs_inodes[inode_idx]
+        if old.content_generation == 0x7FFFFFFFFFFFFFFFu64:
+            return Err(FsError.TooLarge)
         val new_inode = DbFsInode(
             inst_id:  old.inst_id,
             id:       old.id,
+            content_generation: old.content_generation + 1u64,
             kind:     old.kind,
             name:     old.name,
             content:  content,
@@ -302,9 +321,12 @@ impl DbFsDriver:
         if inode_idx < 0:
             return Err(FsError.NotFound)
         val old = _dbfs_inodes[inode_idx]
+        if old.content_generation == 0x7FFFFFFFFFFFFFFFu64:
+            return Err(FsError.TooLarge)
         val new_inode = DbFsInode(
             inst_id:  old.inst_id,
             id:       old.id,
+            content_generation: old.content_generation + 1u64,
             kind:     old.kind,
             name:     old.name,
             content:  dbfs_bytes_to_text(content, content.len() as i64),
@@ -331,6 +353,8 @@ impl DbFsDriver:
         if inode_idx < 0:
             return Err(FsError.NotFound)
         val old = _dbfs_inodes[inode_idx]
+        if old.content_generation == 0x7FFFFFFFFFFFFFFFu64:
+            return Err(FsError.TooLarge)
         val old_content = old.content
         var new_content: text = ""
         var i: i64 = 0
@@ -352,6 +376,7 @@ impl DbFsDriver:
         val new_inode = DbFsInode(
             inst_id:  old.inst_id,
             id:       old.id,
+            content_generation: old.content_generation + 1u64,
             kind:     old.kind,
             name:     old.name,
             content:  new_content,
@@ -391,6 +416,8 @@ impl DbFsDriver:
         if inode_idx < 0:
             return Err(FsError.NotFound)
         val old = _dbfs_inodes[inode_idx]
+        if old.content_generation == 0x7FFFFFFFFFFFFFFFu64:
+            return Err(FsError.TooLarge)
         val old_bytes = old.content_bytes
         val old_len = old_bytes.len() as i64
         var new_bytes: [u8] = []
@@ -414,6 +441,7 @@ impl DbFsDriver:
         val new_inode = DbFsInode(
             inst_id:  old.inst_id,
             id:       old.id,
+            content_generation: old.content_generation + 1u64,
             kind:     old.kind,
             name:     old.name,
             content:  dbfs_bytes_to_text(new_bytes, new_len),
@@ -471,6 +499,7 @@ impl DbFsDriver:
         val new_inode = DbFsInode(
             inst_id:  old.inst_id,
             id:       old.id,
+            content_generation: old.content_generation,
             kind:     old.kind,
             name:     old.name,
             content:  old.content,
@@ -511,6 +540,7 @@ impl DbFsDriver:
         val new_inode = DbFsInode(
             inst_id:  old.inst_id,
             id:       old.id,
+            content_generation: old.content_generation,
             kind:     old.kind,
             name:     new_path,
             content:  old.content,
@@ -540,6 +570,8 @@ impl DbFsDriver:
         if inode_idx < 0:
             return Err(FsError.NotFound)
         val old = _dbfs_inodes[inode_idx]
+        if old.content_generation == 0x7FFFFFFFFFFFFFFFu64:
+            return Err(FsError.TooLarge)
         val old_content = old.content
         var new_content: text = ""
         var i: i64 = 0
@@ -552,6 +584,7 @@ impl DbFsDriver:
         val new_inode = DbFsInode(
             inst_id:  old.inst_id,
             id:       old.id,
+            content_generation: old.content_generation + 1u64,
             kind:     old.kind,
             name:     old.name,
             content:  new_content,
@@ -578,6 +611,7 @@ impl DbFsDriver:
         _dbfs_inodes.push(DbFsInode(
             inst_id:  self.inst_id,
             id:       iid,
+            content_generation: 1u64,
             kind:     DbFsKind.Dir,
             name:     path,
             content:  "",
@@ -605,6 +639,10 @@ impl DbFsDriver:
     fn stat(path: text) -> Result<StatInfo, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._stat_locked(path))
+
+    fn file_generation_v1(handle: FileHandle) -> Result<u64, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._file_generation_v1_locked(handle))
 
     fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)

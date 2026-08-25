@@ -31,6 +31,7 @@ fn dbfs_device_serialization_blocker() -> text:
 
 struct DbfsNamespaceEntry:
     inode_id: u64
+    content_generation: u64
     is_dir: bool
     size: i64
     blob_offset: i64
@@ -387,7 +388,8 @@ fn _namespace_lba(base_block: i64, block_count: i64, slot: i32) -> u64:
     (base_block + block_count - 2 + slot as i64) as u64
 
 fn _valid_entry_shape(entry: DbfsNamespaceEntry, data_capacity: i64) -> bool:
-    if entry.inode_id <= 1u64 or entry.path.len() <= 0 or entry.path.len() > DBFS_NAMESPACE_MAX_PATH_BYTES:
+    if entry.inode_id <= 1u64 or entry.content_generation == 0u64 or
+            entry.path.len() <= 0 or entry.path.len() > DBFS_NAMESPACE_MAX_PATH_BYTES:
         return false
     if not entry.path.starts_with("/") or entry.path.contains("|") or entry.path.contains("\n") or entry.path.contains("\0"):
         return false
@@ -410,7 +412,10 @@ fn _entries_unique(entries: [DbfsNamespaceEntry]) -> bool:
 
 fn _entry_line(entry: DbfsNamespaceEntry) -> text:
     val kind = if entry.is_dir: "D" else: "F"
-    kind + "|" + entry.inode_id.to_text() + "|" + entry.size.to_text() + "|" + entry.blob_offset.to_text() + "|" + entry.blob_length.to_text() + "|" + entry.blob_checksum.to_text() + "|" + entry.path + "\n"
+    kind + "|" + entry.inode_id.to_text() + "|" +
+        entry.content_generation.to_text() + "|" + entry.size.to_text() + "|" +
+        entry.blob_offset.to_text() + "|" + entry.blob_length.to_text() + "|" +
+        entry.blob_checksum.to_text() + "|" + entry.path + "\n"
 
 fn _encode_snapshot(generation: i64, entries: [DbfsNamespaceEntry], sector_size: i64, data_capacity: i64) -> Result<[u8], FsError>:
     if generation <= 0 or entries.len() as i64 > DBFS_NAMESPACE_MAX_ENTRIES or not _entries_unique(entries):
@@ -422,7 +427,7 @@ fn _encode_snapshot(generation: i64, entries: [DbfsNamespaceEntry], sector_size:
         body_lines.push(_entry_line(entry))
     val body = body_lines.join("")
     val checksum = adler32(dbfs_text_to_bytes(body))
-    val encoded = "DBFSNS2|" + generation.to_text() + "|" + checksum.to_text() + "\n" + body + "DBFSEND\n"
+    val encoded = "DBFSNS3|" + generation.to_text() + "|" + checksum.to_text() + "\n" + body + "DBFSEND\n"
     val bytes = dbfs_text_to_bytes(encoded)
     if bytes.len() as i64 > sector_size:
         return Err(FsError.TooLarge)
@@ -437,8 +442,10 @@ fn _sector_nonzero(bytes: [u8]) -> bool:
 fn _decode_snapshot(inst_id: i64, base_block: i64, block_count: i64, bytes: [u8]) -> Option<DbfsNamespaceSnapshot>:
     val text_data = dbfs_bytes_to_text(bytes, bytes.len() as i64)
     val lines: [text] = text_data.split("\n")
-    if lines.len() < 2 or not lines[0].starts_with("DBFSNS2|"):
+    if lines.len() < 2 or (not lines[0].starts_with("DBFSNS2|") and
+            not lines[0].starts_with("DBFSNS3|")):
         return None
+    val has_file_generations = lines[0].starts_with("DBFSNS3|")
     val header: [text] = lines[0].split("|")
     if header.len() != 3:
         return None
@@ -458,19 +465,28 @@ fn _decode_snapshot(inst_id: i64, base_block: i64, block_count: i64, bytes: [u8]
         if line.len() <= 0:
             return None
         val parts: [text] = line.split("|")
-        if parts.len() != 7:
+        val expected_parts: i64 = if has_file_generations: 8 else: 7
+        if parts.len() != expected_parts:
             return None
         val inode_value = parts[1].to_i64() ?? -1
+        val file_generation_value = if has_file_generations:
+            parts[2].to_i64() ?? -1
+        else:
+            1
+        val value_offset: i32 = if has_file_generations: 1 else: 0
         val entry = DbfsNamespaceEntry(
             inode_id: inode_value as u64,
+            content_generation: file_generation_value as u64,
             is_dir: parts[0] == "D",
-            size: parts[2].to_i64() ?? -1,
-            blob_offset: parts[3].to_i64() ?? -1,
-            blob_length: parts[4].to_i64() ?? -1,
-            blob_checksum: parts[5].to_i64() ?? -1,
-            path: parts[6]
+            size: parts[2 + value_offset].to_i64() ?? -1,
+            blob_offset: parts[3 + value_offset].to_i64() ?? -1,
+            blob_length: parts[4 + value_offset].to_i64() ?? -1,
+            blob_checksum: parts[5 + value_offset].to_i64() ?? -1,
+            path: parts[6 + value_offset]
         )
-        if (parts[0] != "D" and parts[0] != "F") or inode_value <= 1 or not _valid_entry_shape(entry, _device_data_capacity_locked(inst_id, block_count)):
+        if (parts[0] != "D" and parts[0] != "F") or inode_value <= 1 or
+                file_generation_value <= 0 or
+                not _valid_entry_shape(entry, _device_data_capacity_locked(inst_id, block_count)):
             return None
         entries.push(entry)
         body_lines.push(line)
