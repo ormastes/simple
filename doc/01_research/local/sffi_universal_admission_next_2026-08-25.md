@@ -421,6 +421,29 @@ count is 12,019 `rt_*` declaration rows / 3,172 symbols: 1,190 tagged, 638
 `unsafe_contract_declared`, 10,563 untouched, and zero exact-artifact
 verified-and-signed.
 
+## Ed25519 seed-signing canonical-owner checkpoint
+
+The optional `rt_ed25519_sign_seed` ABI now has one canonical declaration and
+a checked wrapper in `signature_sffi`. The wrapper rejects invalid seed/public
+key lengths before dispatch, requires a present 64-byte signature afterward,
+and returns typed provider/contract errors. `os.crypto.ed25519` no longer owns
+or calls the raw symbol, and its previously inconsistent `ed25519_sign_live`
+API now returns `Result` throughout instead of treating a runtime `Result` as
+an array or falling back to an empty public result.
+
+The live runtime path retains its existing diagnostic schedule: one direct
+seed-sign provider call plus its component-runtime comparison. Normal
+Pure-Simple-first and runtime-first selection retain their previous ordering;
+no lookup, payload copy, hash beyond Ed25519 itself, generic dispatch, or
+success-path error allocation was added. The focused static ratchet passed.
+The policy-accepted production runtime remains unavailable, so executable
+verification and signed admission remain open.
+
+This change relocates rather than adds/removes the one declaration, so the
+ledger remains 12,019 rows / 3,172 symbols, 1,190 tagged, 638
+`unsafe_contract_declared`, 10,563 untouched, and zero exact-artifact
+verified-and-signed.
+
 ## Common P-256 canonical-owner checkpoint
 
 `std.common.crypto.ecdsa_p256` now imports the canonical checked signature

@@ -367,3 +367,9 @@ passing placeholder.
     SPKI and fixed-width validation but must not redeclare the providers; the
     shared verifier must reject statuses outside `-1/0/1`. Ledger: 12,017
     declarations, 1,188 tagged, 10,563 untouched, and zero signed/admitted.
+70. Retain the canonical Ed25519 seed-signing owner and exact 32/32/64-byte
+    validation. `os.crypto.ed25519` must expose typed live-signing failure and
+    must not redeclare/call `rt_ed25519_sign_seed`. Preserve the existing
+    direct-plus-component diagnostic schedule; do not add provider calls,
+    copies, lookups, or success-path allocations. Exact-artifact admission is
+    still required before this boundary can be called verified or signed.

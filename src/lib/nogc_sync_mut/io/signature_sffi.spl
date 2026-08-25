@@ -71,6 +71,12 @@ extern fn rt_rsa_sha512_sign_checked(pkcs8: [u8], message: [u8]) -> [Any]
 @unsafe(reason: "checked Ed25519 signing ABI", capabilities: [ffi])
 extern fn rt_ed25519_sign_checked(pkcs8: [u8], message: [u8]) -> [Any]
 
+# Sign from the RFC 8032 seed/public-key representation used by SimpleOS.
+# The legacy provider returns an optional byte array, so the safe wrapper below
+# validates both presence and the exact 64-byte signature contract.
+@unsafe(reason: "Ed25519 seed signing ABI", capabilities: [ffi])
+extern fn rt_ed25519_sign_seed(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]?
+
 # Sign `message` with ECDSA P-256 SHA-256 using a PKCS#8-v1 DER private
 # key. Returns 64-byte fixed-width r||s, or an empty array on error.
 @unsafe(reason: "checked ECDSA P-256 signing ABI", capabilities: [ffi])
@@ -186,6 +192,22 @@ fn rsa_sha512_sign_checked(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
 
 fn ed25519_sign_pkcs8_checked(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
     _checked_sign_result(_ed25519_sign_raw_checked(pkcs8, message), "Ed25519")
+
+fn ed25519_sign_seed_checked(
+    private_seed: [u8], public_key: [u8], message: [u8]
+) -> Result<[u8], text>:
+    if private_seed.len() != 32:
+        return Err("E-SFFI-010: invalid Ed25519 private seed length")
+    if public_key.len() != 32:
+        return Err("E-SFFI-010: invalid Ed25519 public key length")
+    var raw: [u8]? = nil
+    unsafe(capabilities: [ffi]):
+        raw = rt_ed25519_sign_seed(private_seed, public_key, message)
+    if val signature = raw:
+        if signature.len() != 64:
+            return Err("E-SFFI-017: Ed25519 seed provider returned a non-64-byte signature")
+        return Ok(signature)
+    Err("E-SFFI-017: Ed25519 seed provider did not return a signature")
 
 fn ecdsa_p256_sign_checked(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
     _checked_sign_result(_ecdsa_p256_sign_raw_checked(pkcs8, message), "ECDSA P-256")
