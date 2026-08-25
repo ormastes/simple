@@ -1319,3 +1319,27 @@ Unsafe-tagged rows increase from 1,802 to 1,832, untouched rows decrease from
 9,623 to 9,593, and exact-artifact verified-and-signed admission remains zero.
 Ambiguous empty text and timestamp/host discriminant sentinels still require
 typed results and exact provider admission.
+
+## Canonical I/O raw-contract checkpoint
+
+All 34 declarations in the canonical I/O owner now carry adjacent,
+operation-specific `@unsafe(... capabilities: [ffi])` metadata. Four nullable
+line/mmap/lock contracts already had recognized state; this pass closes the
+remaining 30 untouched rows. The contracts cover file metadata, text/byte
+reads and writes, atomic/append/copy/move/delete, legacy and SHA-256 hashes,
+file locks, mmap text/bytes, directory list/walk/recursive search/mutation, and
+path joining/normalization/decomposition.
+
+The metadata identifies ambiguous non-optional empty text/array/hash results
+instead of calling them verified success. A static ratchet fixes the inventory
+at 34 and requires every declaration to retain its tag; it passed with the
+whitespace check. This pass adds no existence check, filesystem operation,
+hash pass, lock attempt, mmap operation, recursive scan, path transformation,
+allocation, buffer copy, branch, or dispatch. Production Simple and optimizer
+verification remain unavailable.
+
+Estimated totals remain 11,681 declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,832 to 1,862, untouched rows decrease from
+9,593 to 9,563, and exact-artifact verified-and-signed admission remains zero.
+Ambiguous non-optional empty results and lock/mmap sentinels still require typed
+contracts and exact provider admission.

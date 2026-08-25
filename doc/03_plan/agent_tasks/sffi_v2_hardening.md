@@ -576,3 +576,7 @@ passing placeholder.
      Preserve nullable environment lookup and direct process/clock operations;
      migrate ambiguous empty text and timestamp/host sentinels to typed results
      without extra lookups, processes, captures, clock calls, parses, or sleeps.
+113. Keep all 34 canonical I/O declarations explicitly tagged `unsafe(ffi)`.
+     Migrate ambiguous empty text/array/hash and lock/mmap sentinels to typed
+     results without extra filesystem calls, hash passes, lock attempts, mmap
+     operations, recursive scans, path transforms, allocations, or copies.
