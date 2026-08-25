@@ -371,6 +371,12 @@ pub fn _map_user_process_image(
     if not _address_space_can_map(space):
         log_raw_println("[scheduler] map_user_process_image: synthetic address space root={space.phys_root} id={space.id}")
         return 0
+    if stack_top == 0 or stack_size == 0:
+        log_raw_println("[scheduler] map_user_process_image: invalid stack shape")
+        return -22
+    if (initial_stack_bytes.len() as u64) > stack_size:
+        log_raw_println("[scheduler] map_user_process_image: initial stack too large")
+        return -22
     if _scheduler_uses_direct_load_arena():
         var staged = stage_elf64_load_image(space, file_bytes)
         if staged <= 0:
@@ -378,14 +384,17 @@ pub fn _map_user_process_image(
         if staged <= 0:
             log_raw_println("[scheduler] map_user_process_image: arm64 direct-load stage failed root={space.phys_root}")
             return -12
+        # The direct-load runtime owns AArch64 PT_LOAD placement, but it does
+        # not own the ABI stack.  Map the authenticated argv/envp/auxv frame
+        # through the canonical page-table owner before publishing the task;
+        # otherwise EL0 receives a valid SP that names an unmapped page.
+        val stack_result = map_stack(
+            space, stack_top, stack_size, initial_stack_bytes)
+        if stack_result.is_err():
+            log_raw_println("[scheduler] map_user_process_image: arm64 initial stack map failed")
+            return -12
         log_raw_println("[scheduler] map_user_process_image: arm64 direct-load ok root={space.phys_root} staged={staged} id={space.id}")
         return 0
-    if stack_top == 0 or stack_size == 0:
-        log_raw_println("[scheduler] map_user_process_image: invalid stack shape")
-        return -22
-    if (initial_stack_bytes.len() as u64) > stack_size:
-        log_raw_println("[scheduler] map_user_process_image: initial stack too large")
-        return -22
 
     val seg_result = map_all(space, segments, file_bytes)
     if seg_result.is_err():

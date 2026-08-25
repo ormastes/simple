@@ -2244,7 +2244,24 @@ class HostCompositor:
         self.apply_wm_action(wm_destroy_action(window_id))
 
     me focus_window(window_id: i64):
+        var prior_focused_id: i64 = 0
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].focused:
+                prior_focused_id = self.windows[i].id
+                i = self.windows.len()
+            else:
+                i = i + 1
         self.apply_wm_action(wm_focus_action(window_id))
+        # Keep focus and pointer ownership as one lifecycle transition.  The
+        # shared action may be driven by taskbar, keyboard, or a remote WM
+        # request while the prior window owns drag/resize/GUI capture.  Once
+        # the requested window actually holds focus, revoke the prior owner's
+        # interaction so a later move/release cannot reach the old window.
+        val focused_index = self._find_window_index(window_id)
+        if (prior_focused_id > 0 and prior_focused_id != window_id and
+            focused_index >= 0 and self.windows[focused_index].focused):
+            self._cancel_window_interaction(prior_focused_id)
 
     fn _hit_shared_taskbar(x: i32, y: i32) -> i64:
         val model = self.taskbar_model()

@@ -10,7 +10,6 @@ use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.contracts.execution.simpleos_target_v1.{
     simpleos_target_v1_abi_for_triple, simpleos_target_v1_arch_for_triple
 }
-use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerExecutionEvidenceTokenV1, SchedulerExecutionEvidenceV1,
     SchedulerArgvFileRoleV1, SchedulerArgvFileBindingV1,
@@ -165,17 +164,15 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
         if retired.is_err(): return Err("compiler-evidence-cleanup-indeterminate")
         return Err("compiler-stage-evidence-mismatch")
 
-    val source_bytes = g_vfs_read_file_bytes(dispatch.source_path)
-    val object_bytes = g_vfs_read_file_bytes(dispatch.object_path)
-    val executable_bytes = g_vfs_read_file_bytes(dispatch.executable_path)
-    if source_bytes.len() == 0 or object_bytes.len() == 0 or
-       executable_bytes.len() == 0:
-        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
-        if retired.is_err(): return Err("artifact-evidence-cleanup-indeterminate")
-        return Err("filesystem-artifact-evidence-missing")
-    val executable_sha256 = sha256_u8_hex(executable_bytes)
-    val source_sha256 = sha256_u8_hex(source_bytes)
-    val object_sha256 = sha256_u8_hex(object_bytes)
+    # The authenticated execution service held each argv file under a stable
+    # snapshot lease for its complete stage and finalized the binding only
+    # after the child terminated.  Those seals are the artifact authority.
+    # Reopening the three paths here would instead hash whatever object names
+    # resolve to later, admitting a replacement race across FAT32/DBFS/NVFS
+    # and allocating a second whole-file copy of every artifact.
+    val source_sha256 = source_binding.unwrap().content_sha256
+    val object_sha256 = object_binding.unwrap().content_sha256
+    val executable_sha256 = executable_binding.unwrap().content_sha256
     if not _stage_matches_v1(
         execute_result, plan.execute_path, plan.execute_argv,
         executable_sha256, dispatch.actor.task_id,
@@ -194,13 +191,6 @@ pub(package) fn clang_filesystem_scheduler_finish_success_v1(
         val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
         if retired.is_err(): return Err("terminal-evidence-cleanup-indeterminate")
         return Err("terminal-execution-evidence-mismatch")
-    if source_binding.unwrap().content_sha256 != source_sha256 or
-       object_binding.unwrap().content_sha256 != object_sha256 or
-       executable_binding.unwrap().content_sha256 != executable_sha256:
-        val retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
-        if retired.is_err(): return Err("artifact-binding-cleanup-indeterminate")
-        return Err("artifact-binding-digest-mismatch")
-
     val finish_result = clang_filesystem_pipeline_finish_and_take_v1(
         plan.command,
         ClangFilesystemBackendOutcomeV1(

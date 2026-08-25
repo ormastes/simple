@@ -716,6 +716,12 @@ impl SshSession:
             return
         val parsed = ssh_parse_channel_data(payload)
         if parsed.is_err():
+            # CHANNEL_DATA is a connection-layer message with exact framing.
+            # Silently discarding a malformed frame advances the encrypted
+            # packet sequence while leaving channel and subsystem state
+            # unchanged.  Fail closed through the lifecycle owner so any
+            # retained SFTP response bytes and handles are released too.
+            self.transition_closed()
             return
         val channel_data = parsed.unwrap()
         val recipient = channel_data.0
@@ -723,6 +729,12 @@ impl SshSession:
         val admission = self.channels.admit_local_data(
             recipient, data.len().to_u32())
         if not admission.admitted:
+            # Unknown/closed channels, peer EOF, oversized packets, and receive
+            # window exhaustion are protocol violations, not flow-control
+            # backpressure.  The peer must wait for our WINDOW_ADJUST before
+            # sending; dropping these bytes would desynchronize application
+            # state and could strand an ordered SFTP response indefinitely.
+            self.transition_closed()
             return
 
         # Replenish receive credit at one canonical boundary for every channel

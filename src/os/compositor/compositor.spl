@@ -542,6 +542,9 @@ class Compositor:
         val found = self.surface_index(id as u64)
         if found < 0:
             return
+        var prior_focused_id = 0
+        if self.focused_idx >= 0 and self.focused_idx < self.surfaces.len():
+            prior_focused_id = self.surfaces[self.focused_idx].id
         var chosen = self.surfaces[found]
         # Shared WM focus is activation: selecting a minimized taskbar item
         # restores its pre-minimize state and raises it in one owner mutation.
@@ -557,6 +560,13 @@ class Compositor:
         if (not chosen.visible or
             not wm_window_state_accepts_input(chosen.state)):
             return
+        # Focus is also an input-ownership transition.  Alt-Tab and remote
+        # focus can arrive while the old surface owns a drag, resize, GUI
+        # pointer capture, or queued key/text delivery.  Cancel that ownership
+        # before publishing the new focus; otherwise the next pointer step can
+        # still mutate or dispatch into an unfocused surface.
+        if prior_focused_id > 0 and prior_focused_id != id:
+            self._cancel_drag_for_window(prior_focused_id)
         var out: [WindowSurface] = []
         var i = 0
         while i < self.surfaces.len():

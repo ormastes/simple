@@ -89,7 +89,12 @@ fn _dbfs_fsops_cursor_idx(inst_id: i64, handle_id: u64) -> i32:
 fn _dbfs_fsops_cursor_open(inst_id: i64, handle_id: u64, append: bool):
     val idx = _dbfs_fsops_cursor_idx(inst_id, handle_id)
     if idx >= 0:
-        _dbfs_fsops_cursors.remove(idx)
+        # Reused handle ids keep their existing slot.  Replacing in place
+        # avoids shifting every later cursor and avoids a remove/push capacity
+        # churn on reopen while still resetting the complete cursor state.
+        _dbfs_fsops_cursors[idx] = _DbfsFsOpsCursor(
+            inst_id: inst_id, handle_id: handle_id, offset: 0, append: append)
+        return
     _dbfs_fsops_cursors.push(_DbfsFsOpsCursor(
         inst_id: inst_id, handle_id: handle_id, offset: 0, append: append))
 
@@ -98,10 +103,12 @@ fn _dbfs_fsops_cursor_set(inst_id: i64, handle_id: u64, offset: i64):
     if idx < 0:
         return
     val c = _dbfs_fsops_cursors[idx]
-    _dbfs_fsops_cursors.remove(idx)
-    _dbfs_fsops_cursors.push(_DbfsFsOpsCursor(
+    # Cursor advancement is the read/write/seek hot path.  Replace the value
+    # in place so updating one handle is O(1) after lookup rather than shifting
+    # O(n) array entries and appending a fresh element on every operation.
+    _dbfs_fsops_cursors[idx] = _DbfsFsOpsCursor(
         inst_id: c.inst_id, handle_id: c.handle_id,
-        offset: offset, append: c.append))
+        offset: offset, append: c.append)
 
 fn _dbfs_fsops_cursor_close(inst_id: i64, handle_id: u64):
     val idx = _dbfs_fsops_cursor_idx(inst_id, handle_id)

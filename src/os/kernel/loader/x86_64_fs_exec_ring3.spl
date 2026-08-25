@@ -174,6 +174,128 @@ fn _build_sysv_stack_frame(stack_phys: u64, stack_top: u64, binary_path: text, a
     _wr64(stack_phys + frame_off + ((slot + 5) * 8), 0)
     user_rsp
 
+# Validate the raw ELF layout before allocating or mapping any process pages.
+# This direct freestanding path cannot use elf_loader's aggregate Result ABI,
+# so it must reproduce the security-relevant admission invariants locally.
+# In particular, never let a file manufacture W+X/overlapping mappings, point
+# RIP into BSS, collide with the fixed stack/heap, or turn the mapper's dense
+# lo..hi walk into an unbounded sparse-image allocation.
+fn _admit_raw_elf64(blob: u64, hdr_len: u64, file_len: u64, map_heap: bool) -> i64:
+    val ELF64_EHDR_SIZE: u64 = 64
+    val ELF64_PHDR_SIZE: u64 = 56
+    val ET_EXEC: u64 = 2
+    val EM_X86_64: u64 = 62
+    val EV_CURRENT: u64 = 1
+    val PT_LOAD: u64 = 1
+    val PF_X: u64 = 1
+    val PF_W: u64 = 2
+    val PAGE: u64 = 4096
+    val USER_MIN: u64 = 0x1000
+    val USER_LIMIT: u64 = 0x0000800000000000
+    val STACK_BOTTOM: u64 = 0x8000000000
+    val STACK_TOP: u64 = 0x8000200000
+    val HEAP_BOTTOM: u64 = 0x9000000000
+    val HEAP_TOP: u64 = 0x9020000000
+    val MAX_IMAGE_SPAN: u64 = 0x40000000
+    val MAX_LOAD_SEGMENTS: u64 = 64
+    val U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
+
+    if hdr_len < ELF64_EHDR_SIZE or file_len < ELF64_EHDR_SIZE:
+        return 0
+    if (_rd32(blob, 0) != 0x464C457F or _rd8(blob, 4) != 2 or
+        _rd8(blob, 5) != 1 or _rd8(blob, 6) != EV_CURRENT):
+        return 0
+    if (_rd16(blob, 16) != ET_EXEC or _rd16(blob, 18) != EM_X86_64 or
+        _rd32(blob, 20) != EV_CURRENT or _rd16(blob, 52) != ELF64_EHDR_SIZE):
+        return 0
+
+    val phoff = _rd64(blob, 32)
+    val phentsize = _rd16(blob, 54)
+    val phnum = _rd16(blob, 56)
+    if phentsize != ELF64_PHDR_SIZE or phnum == 0:
+        return 0
+    if phoff < ELF64_EHDR_SIZE or phoff > hdr_len or phnum > (hdr_len - phoff) / phentsize:
+        return 0
+
+    val entry = _rd64(blob, 24)
+    var entry_is_file_backed_executable = false
+    var load_count: u64 = 0
+    var image_lo: u64 = U64_MAX
+    var image_hi: u64 = 0
+    var i: u64 = 0
+    while i < phnum:
+        val ph = phoff + i * phentsize
+        if _rd32(blob, ph) == PT_LOAD:
+            load_count = load_count + 1
+            if load_count > MAX_LOAD_SEGMENTS:
+                return 0
+            val flags = _rd32(blob, ph + 4)
+            val file_offset = _rd64(blob, ph + 8)
+            val virt_addr = _rd64(blob, ph + 16)
+            val file_size = _rd64(blob, ph + 32)
+            val mem_size = _rd64(blob, ph + 40)
+            val align = _rd64(blob, ph + 48)
+            if ((flags & 0xFFFFFFFFFFFFFFF8) != 0 or
+                (flags & (PF_W | PF_X)) == (PF_W | PF_X)):
+                return 0
+            if file_size > mem_size or file_offset > file_len or file_size > file_len - file_offset:
+                return 0
+            if mem_size == 0:
+                i = i + 1
+                continue
+            if virt_addr < USER_MIN or virt_addr >= USER_LIMIT or mem_size > USER_LIMIT - virt_addr:
+                return 0
+            if align > 1 and ((align & (align - 1)) != 0 or
+                file_offset % align != virt_addr % align):
+                return 0
+            val memory_end = virt_addr + mem_size
+            if ((virt_addr < STACK_TOP and STACK_BOTTOM < memory_end) or
+                (map_heap and virt_addr < HEAP_TOP and HEAP_BOTTOM < memory_end)):
+                return 0
+            if virt_addr < image_lo: image_lo = virt_addr
+            if memory_end > image_hi: image_hi = memory_end
+            if ((flags & PF_X) != 0 and file_size > 0 and
+                entry >= virt_addr and entry - virt_addr < file_size):
+                entry_is_file_backed_executable = true
+
+            var earlier: u64 = 0
+            while earlier < i:
+                val earlier_ph = phoff + earlier * phentsize
+                if _rd32(blob, earlier_ph) == PT_LOAD:
+                    val earlier_flags = _rd32(blob, earlier_ph + 4)
+                    val earlier_va = _rd64(blob, earlier_ph + 16)
+                    val earlier_size = _rd64(blob, earlier_ph + 40)
+                    if earlier_size > 0:
+                        if earlier_va >= USER_LIMIT or earlier_size > USER_LIMIT - earlier_va:
+                            return 0
+                        val earlier_end = earlier_va + earlier_size
+                        if virt_addr < earlier_end and earlier_va < memory_end:
+                            return 0
+                        # The mapper unions permissions for segments sharing a
+                        # physical page.  Even disjoint byte ranges must not
+                        # combine an executable segment with a writable one,
+                        # or the resulting PTE would silently become W+X.
+                        val page_start = virt_addr - virt_addr % PAGE
+                        val page_end = (memory_end + PAGE - 1) / PAGE * PAGE
+                        val earlier_page_start = earlier_va - earlier_va % PAGE
+                        val earlier_page_end = (
+                            earlier_end + PAGE - 1) / PAGE * PAGE
+                        if (page_start < earlier_page_end and
+                            earlier_page_start < page_end and
+                            (((flags | earlier_flags) & (PF_W | PF_X)) ==
+                                (PF_W | PF_X))):
+                            return 0
+                earlier = earlier + 1
+        i = i + 1
+    if load_count == 0 or not entry_is_file_backed_executable:
+        return 0
+    if image_hi < image_lo or image_hi - image_lo > MAX_IMAGE_SPAN:
+        return 0
+    # The dense page walker rounds the high end up; reject wrap before it does.
+    if image_hi > U64_MAX - (PAGE - 1):
+        return 0
+    1
+
 # Map every PT_LOAD of the ELF described by the header+phdr table resident at
 # `blob` into `space` at its p_vaddr, page by page (one frame per page, so
 # segments sharing a page are mapped once with the UNION of their perms). Each
@@ -315,6 +437,9 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
         return -5
     if _rd8(blob, 4) != 2:
         serial_println("[spawn] FAIL not ELFCLASS64 class={_rd8(blob, 4)}")
+        return -5
+    if _admit_raw_elf64(blob, hdr_len, file_len, map_heap) == 0:
+        serial_println("[spawn] FAIL raw ELF admission rejected")
         return -5
 
     # Trustworthy entry: ELF e_entry @ offset 24, read straight from the raw buffer.

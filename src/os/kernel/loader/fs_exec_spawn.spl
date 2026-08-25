@@ -36,7 +36,8 @@ use os.kernel.loader.spawn_authority.{
     spawn_authority_spawn_caps
 }
 use os.kernel.loader.spawn_recipes.{
-    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps,
+    spawn_recipe_launch_contract_valid
 }
 use os.kernel.types.task_types.{TaskId, TaskPriority, scheduler_flat_topology}
 use os.kernel.types.capability_types.{CapabilitySet}
@@ -209,6 +210,14 @@ pub fn fs_exec_adopt_authenticated_with_launch_v1(
             pid: executable_launch_arguments_v1_errno(launch_result.unwrap_err()),
             entry: 0)
     val launch = launch_result.unwrap()
+    # A recipe can carry materially more authority than an executable path.
+    # Bind privilege-bearing recipe identity to the loader-owned launch copy
+    # before consuming its one-shot executable authority.  In particular, the
+    # authenticated server's credential and listener grants must never be
+    # inherited by a sibling artifact or through injected argv/environment.
+    if not spawn_recipe_launch_contract_valid(
+        recipe, launch.path, launch.argv, launch.envp):
+        return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
     val gate = exec_cap_check(caller, launch.path)
     if gate != 0:
         return FsExecPrepareResult(scheduler: scheduler, pid: gate as i64, entry: 0)
