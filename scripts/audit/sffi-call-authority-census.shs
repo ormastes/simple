@@ -24,12 +24,14 @@ if [ "$summary_only" -eq 1 ]; then
     symbols_out=${2:-$work/symbols.tsv}
     families_out=${3:-$work/families.tsv}
     scopes_out=${4:-$work/scopes.tsv}
+    files_out=${5:-$work/files.tsv}
 else
     out=${1:-/dev/stdout}
     summary_out=${2:-${TMPDIR:-/tmp}/sffi-call-authority-summary.tsv}
     symbols_out=${3:-${TMPDIR:-/tmp}/sffi-call-authority-symbols.tsv}
     families_out=${4:-${TMPDIR:-/tmp}/sffi-call-authority-families.tsv}
     scopes_out=${5:-${TMPDIR:-/tmp}/sffi-call-authority-scopes.tsv}
+    files_out=${6:-${TMPDIR:-/tmp}/sffi-call-authority-files.tsv}
 fi
 
 export SFFI_ROOT=$root
@@ -272,6 +274,28 @@ awk -F '\t' 'BEGIN { OFS="\t" }
                   authority_count[scope SUBSEP "missing"] + 0
     }
 ' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort; } >"$scopes_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR > 1 {
+        rows[$1]++
+        symbol_key=$1 SUBSEP $3
+        if (!(symbol_key in seen_symbol)) { seen_symbol[symbol_key]=1; symbols[$1]++ }
+        authority_count[$1 SUBSEP $4]++
+    }
+    END {
+        print "file", "call_sites", "distinct_symbols", \
+              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls"
+        for (file in rows)
+            print file, rows[file], symbols[file], \
+                  authority_count[file SUBSEP "lexical_unsafe"] + 0, \
+                  authority_count[file SUBSEP "function_unsafe"] + 0, \
+                  authority_count[file SUBSEP "missing"] + 0
+    }
+' "$out" | {
+    IFS= read -r header
+    printf '%s\n' "$header"
+    sort -t "$(printf '\t')" -k6,6nr -k2,2nr -k1,1
+} >"$files_out"
 
 awk -F '\t' 'NR > 1 { count[$4]++ } END { for (state in count) print count[state], state }' "$out" \
     | sort -nr >&2

@@ -2223,3 +2223,52 @@ The source census measured missing authority decreasing by exactly 64: 17,854
 to 17,790 repository-wide and 9,685 to 9,621 in production. All 64 became
 lexically scoped. The broader `rt_vulkan` family now has 270 explicit and 198
 missing call sites. Exact-artifact verified-and-signed admission remains zero.
+
+## Authoritative RT safety census checkpoint
+
+After the VulkanBackend3D checkpoint, the fail-closed
+`rt-safety-census.shs` evidence pipeline and its schema/total consistency
+contract passed. Unlike textual estimates, this census joins declaration
+source-signature hashes with the contract inventory and admits a row as
+verified-and-signed only after all nine evidence inputs and the configured
+Ed25519 trust policy verify.
+
+Current exact declaration results are 11,627 rows / 3,139 distinct `rt_*`
+symbols. All 11,627 remain classified unsafe. Of those, 2,441 declarations are
+unsafe-tagged, 999 have documented contracts, 752 are unsafe-minimized, 10,875
+remain unsafe-unminimized, and 8,939 are completely untouched. Evidence-
+verified, signature-verified, and verified-and-signed rows are all zero.
+
+Owned implementation definitions span four languages: Simple has 685
+definitions / 644 symbols in 64 files; Rust has 2,132 / 2,110 in 173 files; C
+has 2,396 / 1,894 in 89 files; and C++ has 219 / 219 in one file. These are
+implementation-definition counts, not declarations or proof claims.
+
+The call-authority census now also emits a per-file prioritization table from
+the same captured call rows. It does not rescan source: aggregation remains
+linear in the already-collected call-site count, and the table reports total,
+distinct-symbol, lexical, function-level, and missing counts per owner. This
+separates high-density owners from family-wide totals without adding a second
+tree traversal.
+
+## No-GC async CUDA facade checkpoint
+
+The no-GC async CUDA API imports the canonical tagged CUDA declarations but
+had 51 raw calls without local authority. Thirty-eight functions now use
+leading lexical blocks: ordinary CUDA calls receive only `ffi`, while the
+seven host-allocation, pointer-access, and bit-bridge methods also receive
+`raw_ptr`. Class APIs and the canonical one-call wrapper functions retain
+their existing signatures.
+
+This checkpoint is compile-time metadata only. It changes no algorithm,
+allocation, copy, provider call, loop, lookup, lock, hash, signing operation,
+or dispatch. Review found multiple unchecked element-count products before
+`count * 8` allocation/copy geometry; those functions remain unsafe and are
+queued for a separate overflow-safe extent patch rather than being described
+as verified.
+
+The source census measured missing authority decreasing by exactly 51: 17,790
+to 17,739 repository-wide and 9,621 to 9,570 in production. All 51 became
+lexically scoped. The per-file table now reports this owner as 51 calls / 35
+symbols / zero missing. The broader `rt_cuda` family has 138 explicit and 308
+missing call sites. Exact-artifact verified-and-signed admission remains zero.
