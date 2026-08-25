@@ -41,8 +41,13 @@ extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
 # =cdylib). These externs ARE registered on the deployed self-hosted binary
 # (verified 2026-07-06); the one-call upload extern rt_write_u32s_to_raw is NOT,
 # which is why draw_image degrades to one FFI round-trip per pixel by default.
-extern fn spl_dlopen(path: text) -> i64
-extern fn spl_dlsym(handle: i64, name: text) -> i64
+@unsafe(reason: "status/out GPU transfer provider loader ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64
+@unsafe(reason: "status/out GPU transfer symbol resolver ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_dlsym_checked(handle: i64, name: text, out_symbol: *mut i64) -> i64
+@unsafe(reason: "raw GPU transfer provider release ABI", capabilities: [ffi])
+extern fn spl_dlclose(handle: i64) -> i64
+@unsafe(reason: "untyped integer-only GPU transfer call ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 
 # Lazy process-global cache for the spl_gpu_transfer cdylib. -2 = not yet
@@ -75,15 +80,27 @@ fn _bulk_ensure_loaded() -> bool:
     val paths = _bulk_candidate_paths()
     var pi = 0
     while pi < paths.len() and h == 0:
-        h = spl_dlopen(paths[pi])
+        var candidate_handle: i64 = 0
+        val load_status = unsafe(capabilities: [ffi, raw_ptr]):
+            spl_dlopen_checked(paths[pi], &mut candidate_handle)
+        if load_status == 0 and candidate_handle > 0:
+            h = candidate_handle
         pi = pi + 1
     if h == 0:
         _bulk_handle = -1
         return false
-    val fb = spl_dlsym(h, "spl_gpu_stage_begin")
-    val fw8 = spl_dlsym(h, "spl_gpu_stage_write8")
-    val fw1 = spl_dlsym(h, "spl_gpu_stage_write1")
-    if fb == 0 or fw8 == 0 or fw1 == 0:
+    var fb: i64 = 0
+    var fw8: i64 = 0
+    var fw1: i64 = 0
+    val fb_status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_dlsym_checked(h, "spl_gpu_stage_begin", &mut fb)
+    val fw8_status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_dlsym_checked(h, "spl_gpu_stage_write8", &mut fw8)
+    val fw1_status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_dlsym_checked(h, "spl_gpu_stage_write1", &mut fw1)
+    if fb_status != 0 or fw8_status != 0 or fw1_status != 0 or fb <= 0 or fw8 <= 0 or fw1 <= 0:
+        unsafe(capabilities: [ffi]):
+            spl_dlclose(h)
         _bulk_handle = -1
         return false
     _bulk_handle = h
@@ -101,7 +118,8 @@ fn _bulk_ensure_loaded() -> bool:
 fn bulk_upload_u32s(host: i64, pixels: [u32], count: i64) -> bool:
     if not _bulk_ensure_loaded():
         return false
-    spl_wffi_call_i64(_bulk_begin, [host], 1)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64(_bulk_begin, [host], 1)
     val n = count.to_i32()
     val n16 = (n / 16) * 16
     var j = 0
@@ -114,12 +132,14 @@ fn bulk_upload_u32s(host: i64, pixels: [u32], count: i64) -> bool:
         val f = pixels[j + 10].to_i64() | (pixels[j + 11].to_i64() << 32)
         val g = pixels[j + 12].to_i64() | (pixels[j + 13].to_i64() << 32)
         val hh = pixels[j + 14].to_i64() | (pixels[j + 15].to_i64() << 32)
-        spl_wffi_call_i64(_bulk_write8, [a, b, c, d, e, f, g, hh], 8)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            spl_wffi_call_i64(_bulk_write8, [a, b, c, d, e, f, g, hh], 8)
         j = j + 16
     while j < n:
         if j + 1 < n:
             val v = pixels[j].to_i64() | (pixels[j + 1].to_i64() << 32)
-            spl_wffi_call_i64(_bulk_write1, [(j * 4).to_i64(), v], 2)
+            unsafe(capabilities: [ffi, raw_ptr]):
+                spl_wffi_call_i64(_bulk_write1, [(j * 4).to_i64(), v], 2)
         else:
             # Lone trailing pixel (odd total_pixels): spl_gpu_stage_write1
             # always performs an 8-byte store, which would write 4 bytes past
