@@ -182,3 +182,18 @@ failed before execution with the already-recorded `function unsafe not found`
 defect (`0.79 s`, `190,448 KiB` peak RSS). Repository policy forbids treating
 that seed as self-hosted correctness or optimizer evidence, so the criterion was
 not rerun and the implementation slice remains unverified.
+
+## TCP listener checkpoint
+
+Raw `rt_io_tcp_bind`, `rt_io_tcp_accept`, and `rt_io_tcp_accept_timeout`
+declarations now state their descriptor/sentinel contracts and their direct
+owned callers use one-expression `unsafe(ffi)` scopes. The timeout ABI still
+conflates timeout and provider failure, so it remains explicitly unsafe rather
+than being promoted to a safe typed contract. The change preserves one direct
+call, the existing sentinel branch, and the existing allocation shape per site.
+
+The post-TCP census reports 12,070 declaration rows and 3,171 distinct declared
+symbols. Of those rows, 1,057 are unsafe-tagged, 754 have documented contracts,
+485 are unsafe-minimized, and 10,744 remain untouched. Provider definitions are
+2,378 C, 2,178 Rust, 576 Simple, and 219 C++. Cryptographically verified,
+signed, and admitted rows remain zero; annotations are not admission evidence.

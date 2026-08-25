@@ -189,6 +189,15 @@ connection termination. The source ledger advanced to 1,005 unsafe-tagged
 Focused Rust tests and the C compile gate passed once. Successful read call
 count, allocation shape, and algorithmic complexity are unchanged.
 
+Checkpoint: raw TCP bind, accept, and accept-timeout declarations and their
+owned call sites now have explicit narrow FFI authority. No wrapper, lookup,
+allocation, or additional runtime branch was introduced. Accept-timeout is not
+yet safe because its negative sentinel cannot distinguish timeout from provider
+failure. The refreshed row ledger is 12,070 total, 1,057 unsafe-tagged, 754
+contract-documented, 485 unsafe-minimized, and 10,744 untouched. The provider
+definition census is C 2,378, Rust 2,178, Simple 576, and C++ 219. Exact-artifact
+verified-and-signed admission remains zero.
+
 For each row, prefer a pure-Simple owner. Otherwise require either:
 
 1. admitted exact evidence plus a typed safe wrapper; or
