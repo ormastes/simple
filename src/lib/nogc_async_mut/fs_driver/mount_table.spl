@@ -6,7 +6,8 @@ use std.fs_driver.capability.{Capability, FsCapabilitySet, FS_CAPABILITY_V1}
 use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
 use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_reset, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
 use std.fs_driver.mount_table_support.{PositionedDriverKind, POSITIONED_DRIVER_MAX_BYTES, mount_handle_encode,
-    mount_handle_slot, mount_handle_generation, mount_path_canonical, text_has_mount_prefix,
+    mount_handle_slot, mount_handle_generation, MOUNT_TABLE_MAX_PATH_BYTES,
+    mount_path_canonical, text_has_mount_prefix,
     driver_positioned_read_bytes, driver_positioned_write_bytes,
     driver_bounded_positioned_read_bytes, driver_positioned_kind}
 use std.fs_driver.mount_driver_dispatch.{_driver_name, _driver_kind_name, _driver_capabilities, _driver_stat_path,
@@ -30,6 +31,7 @@ val STABLE_SNAPSHOT_MAX_LEASES: i64 = 1024
 val STABLE_SNAPSHOT_MAX_READ_BYTES: u64 = 65536u64
 val STABLE_SNAPSHOT_MAX_FILE_BYTES: u64 = 1073741824u64
 val DBFS_ROOT_MOUNT_SEAL_MAX_LEASES: i64 = 64
+val EXECUTE_PATH_MAX_SEARCH_DIRS: i64 = 64
 
 struct MountId:
     """Opaque mount table index. Assigned sequentially; not reused after unmount."""
@@ -74,6 +76,7 @@ struct OpenFileBinding:
     mount_slot: i32
     inner_handle: FileHandle
     canonical_source_path: text
+    execute_trust: ExecuteTrust?
 
 struct ExecuteOpenBinding:
     """Owned, backend-neutral executable-open identity and generation snapshot."""
@@ -86,7 +89,14 @@ struct ExecuteOpenBinding:
     namespace_generation: u64
     content_generation: u64
     execute_observation: ExecuteFileObservationV1
+    # Descriptive receipt only. Authority is the private generational row.
+    execute_trust: ExecuteTrust
     size: i64
+
+struct ExecutePathOpenV1:
+    """One resolved executable pathname and its retained open authority."""
+    canonical_path: text
+    binding: ExecuteOpenBinding
 
 struct StableFileSnapshotLeaseV1:
     """Opaque, generational authority for one MountTable-owned file snapshot."""
@@ -181,7 +191,8 @@ fn _retired_file_binding(binding: OpenFileBinding) -> OpenFileBinding:
         virtual_handle: 0u64, mount_id: binding.mount_id,
         mount_slot: binding.mount_slot,
         inner_handle: binding.inner_handle,
-        canonical_source_path: binding.canonical_source_path)
+        canonical_source_path: binding.canonical_source_path,
+        execute_trust: nil)
 
 fn _retired_dir_binding(binding: OpenDirBinding) -> OpenDirBinding:
     val terminal = binding.generation == MOUNT_HANDLE_GENERATION_MAX
@@ -359,7 +370,7 @@ impl MountTable:
                     active: true, retired: false, generation: prior.generation,
                     virtual_handle: handle, mount_id: mount_id, mount_slot: mount_slot,
                     inner_handle: inner,
-                    canonical_source_path: "")
+                    canonical_source_path: "", execute_trust: nil)
                 return Ok(FileHandle(id: handle))
             slot = slot + 1
         if self.open_files.len() >= MOUNT_TABLE_MAX_OPEN_FILES:
@@ -369,7 +380,7 @@ impl MountTable:
             active: true, retired: false, generation: 1u32,
             virtual_handle: handle, mount_id: mount_id, mount_slot: mount_slot,
             inner_handle: inner,
-            canonical_source_path: ""))
+            canonical_source_path: "", execute_trust: nil))
         Ok(FileHandle(id: handle))
 
     me fn _seal_file_source_path(handle: FileHandle, path: text) -> bool:
@@ -381,6 +392,16 @@ impl MountTable:
            (binding.canonical_source_path != "" and binding.canonical_source_path != path):
             return false
         self.open_files[slot].canonical_source_path = path
+        true
+
+    me fn _seal_file_execute_trust(handle: FileHandle, trust: ExecuteTrust) -> bool:
+        val slot = mount_handle_slot(handle.id)
+        if slot < 0 or slot >= self.open_files.len() as i32: return false
+        val binding = self.open_files[slot]
+        if not binding.active or binding.generation != mount_handle_generation(handle.id) or
+           binding.execute_trust.is_some():
+            return false
+        self.open_files[slot].execute_trust = Some(trust)
         true
 
     me fn _bind_dir(mount_id: MountId, inner: DirHandle) -> Result<DirHandle, FsError>:
@@ -989,6 +1010,9 @@ impl MountTable:
             return Err(FsError.TooLarge)
         if not self._retire_stable_snapshot(lease):
             return Err(FsError.StaleHandle)
+        if not self._seal_file_execute_trust(snapshot.file_handle, trust):
+            val _ = self.close(snapshot.file_handle)
+            return Err(FsError.StaleHandle)
         return Ok(ExecuteOpenBinding(
             mount_id: entry.id,
             backend_name: backend_name,
@@ -999,6 +1023,7 @@ impl MountTable:
             namespace_generation: snapshot.namespace_generation,
             content_generation: snapshot.content_generation,
             execute_observation: snapshot.execute_observation,
+            execute_trust: trust,
             size: snapshot.size as i64))
 
     me fn close_stable_snapshot(lease: StableFileSnapshotLeaseV1) -> Result<(), FsError>:
@@ -1175,6 +1200,9 @@ impl MountTable:
                 if not self._seal_file_source_path(FileHandle(id: virtual_handle), path):
                     val _ = self.close(FileHandle(id: virtual_handle))
                     return Err(FsError.StaleHandle)
+                if not self._seal_file_execute_trust(FileHandle(id: virtual_handle), trust):
+                    val _ = self.close(FileHandle(id: virtual_handle))
+                    return Err(FsError.StaleHandle)
                 return Ok(ExecuteOpenBinding(
                     mount_id: entry.id,
                     backend_name: _driver_name(entry.driver),
@@ -1189,10 +1217,83 @@ impl MountTable:
                     # invalidate this retained executable inode.
                     content_generation: binding_content_generation,
                     execute_observation: execute_observation,
+                    execute_trust: trust,
                     size: stat.size as i64
                 ))
             i = i + 1
         Err(FsError.NotFound)
+
+    me fn resolve_and_open_for_execute(
+        command: text, search_dirs: [text], trust: ExecuteTrust
+    ) -> Result<ExecutePathOpenV1, FsError>:
+        """Resolve PATH-like input while retaining the exact execute binding.
+
+        A command containing ``/`` is an exact canonical VFS pathname and is
+        never searched. Bare commands are tried in caller order. Only
+        ``NotFound`` advances to the next directory; policy, integrity, and
+        resource failures are terminal. No resolution result is cached.
+        """
+        if command.len() == 0:
+            return Err(FsError.InvalidArg)
+        if command.contains("/"):
+            val binding = self.open_for_execute(command, trust)?
+            return Ok(ExecutePathOpenV1(
+                canonical_path: command, binding: binding))
+        if command == "." or command == ".." or command.contains("\\") or
+           command.contains("\0") or command.contains("\n") or command.contains("\r"):
+            return Err(FsError.InvalidArg)
+        if command.len() + 1 > MOUNT_TABLE_MAX_PATH_BYTES:
+            return Err(FsError.TooLarge)
+        if search_dirs.len() as i64 > EXECUTE_PATH_MAX_SEARCH_DIRS:
+            return Err(FsError.TooLarge)
+        var i: i32 = 0
+        while i < search_dirs.len():
+            val directory = search_dirs[i]
+            if not mount_path_canonical(directory):
+                return Err(FsError.InvalidArg)
+            val candidate_length = if directory == "/":
+                1 + command.len()
+            else:
+                directory.len() + 1 + command.len()
+            if candidate_length > MOUNT_TABLE_MAX_PATH_BYTES:
+                return Err(FsError.TooLarge)
+            val candidate = if directory == "/":
+                "/" + command
+            else:
+                directory + "/" + command
+            val opened = self.open_for_execute(candidate, trust)
+            match opened:
+                case Ok(binding):
+                    return Ok(ExecutePathOpenV1(
+                        canonical_path: candidate, binding: binding))
+                case Err(error):
+                    match error:
+                        case FsError.NotFound: ()
+                        case _: return Err(error)
+            i = i + 1
+        Err(FsError.NotFound)
+
+    fn validate_execute_open_binding_trust(
+        binding: ExecuteOpenBinding, required: ExecuteTrust
+    ) -> bool:
+        """Validate trust from the live handle row, never caller-owned fields."""
+        if not self.execute_binding_is_current(binding):
+            return false
+        val row = match self._file_binding(binding.file_handle):
+            case nil: return false
+            case Some(value): value
+        match row.execute_trust:
+            case nil: false
+            case Some(actual):
+                match actual:
+                    case ExecuteTrust.Trusted:
+                        match required:
+                            case ExecuteTrust.Trusted: true
+                            case ExecuteTrust.Untrusted: false
+                    case ExecuteTrust.Untrusted:
+                        match required:
+                            case ExecuteTrust.Trusted: false
+                            case ExecuteTrust.Untrusted: true
 
     fn execute_binding_is_current(binding: ExecuteOpenBinding) -> bool:
         val open_binding = self._file_binding(binding.file_handle)

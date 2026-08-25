@@ -62,9 +62,10 @@ pub val SPAWN_RECIPE_CLANG_HELLO_DBFS: i64 = 7
 pub val SPAWN_RECIPE_CLANG_COMPILE_NVFS: i64 = 8
 pub val SPAWN_RECIPE_LLD_LINK_NVFS: i64 = 9
 pub val SPAWN_RECIPE_CLANG_HELLO_NVFS: i64 = 10
+pub val SPAWN_RECIPE_SSH_REMOTE_COMMAND: i64 = 11
 
 pub val SPAWN_RECIPE_FIRST: i64 = 1
-pub val SPAWN_RECIPE_LAST: i64 = 10
+pub val SPAWN_RECIPE_LAST: i64 = 11
 
 fn _clang_compile_recipe(recipe: i64) -> bool:
     recipe == SPAWN_RECIPE_CLANG_COMPILE_DBFS or
@@ -114,6 +115,7 @@ pub fn spawn_recipe_name(recipe: i64) -> text:
     if recipe == SPAWN_RECIPE_CLANG_COMPILE_NVFS: return "clang-compile-nvfs"
     if recipe == SPAWN_RECIPE_LLD_LINK_NVFS: return "lld-link-nvfs"
     if recipe == SPAWN_RECIPE_CLANG_HELLO_NVFS: return "clang-hello-nvfs"
+    if recipe == SPAWN_RECIPE_SSH_REMOTE_COMMAND: return "ssh-remote-command"
     "none"
 
 # ============================================================================
@@ -137,6 +139,7 @@ pub fn spawn_recipe_exec_prefix(recipe: i64) -> text:
     if _clang_compile_recipe(recipe): return "/usr/bin/clang"
     if _clang_link_recipe(recipe): return "/usr/bin/ld.lld"
     if _clang_execute_recipe(recipe): return _clang_recipe_root(recipe) + "/hello.elf"
+    if recipe == SPAWN_RECIPE_SSH_REMOTE_COMMAND: return "/bin/"
     ""
 
 pub fn spawn_recipe_read_prefix(recipe: i64) -> text:
@@ -153,6 +156,7 @@ pub fn spawn_recipe_read_prefix(recipe: i64) -> text:
     if _clang_compile_recipe(recipe): return _clang_recipe_root(recipe) + "/hello.c"
     if _clang_link_recipe(recipe): return _clang_recipe_root(recipe) + "/hello.o"
     if _clang_execute_recipe(recipe): return _clang_recipe_root(recipe) + "/hello.elf"
+    if recipe == SPAWN_RECIPE_SSH_REMOTE_COMMAND: return "/bin/"
     ""
 
 pub fn spawn_recipe_rights_mask(recipe: i64) -> u32:
@@ -242,6 +246,9 @@ pub fn spawn_recipe_launch_contract_valid(
         val executable = _clang_recipe_root(recipe) + "/hello.elf"
         return envp.len() == 0 and path == executable and
             argv.len() == 1 and argv[0] == executable
+    if recipe == SPAWN_RECIPE_SSH_REMOTE_COMMAND:
+        return envp.len() == 0 and path.starts_with("/bin/") and
+            argv.len() > 0 and argv[0] == path
     true
 
 # ============================================================================
@@ -329,6 +336,18 @@ pub fn spawn_recipe_grants(recipe: i64) -> [CapGrant]:
             label: "hello.read",
             requested: CapabilityKind.FileRead(path_prefix: executable),
             atten: _atten_leaf_rights(CAP_RIGHT_READ)))
+        return grants
+    if recipe == SPAWN_RECIPE_SSH_REMOTE_COMMAND:
+        grants.push(CapGrant(
+            label: "ssh-remote.exec",
+            requested: CapabilityKind.FileExec(path_prefix: "/bin/"),
+            atten: _atten_leaf_rights(CAP_RIGHT_EXEC)))
+        grants.push(CapGrant(
+            label: "ssh-remote.image.read",
+            requested: CapabilityKind.FileRead(path_prefix: "/bin/"),
+            atten: _atten_leaf_rights(CAP_RIGHT_READ)))
+        # Submission already binds the retained canonical image and argv[0].
+        # Direct architecture adoption needs no ambient process-creation grant.
         return grants
     val exec_prefix = spawn_recipe_exec_prefix(recipe)
     val read_prefix = spawn_recipe_read_prefix(recipe)

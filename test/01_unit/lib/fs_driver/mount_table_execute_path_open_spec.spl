@@ -1,0 +1,133 @@
+"""Retained PATH execute resolution across FAT32, DBFS, and NVFS."""
+
+use std.spec.*
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust}
+
+fn executable_opts() -> MountOptions:
+    var opts = MountOptions.default()
+    opts.allow_untrusted_exec = true
+    opts
+
+fn dbfs_with_tool() -> MountTable:
+    var table = MountTable.new()
+    table.mount("/", DriverInstance.DbFs(DbFsDriver.new_hosted()), executable_opts()).unwrap()
+    table.mkdir("/usr", 0o755).unwrap()
+    table.mkdir("/usr/bin", 0o755).unwrap()
+    val file = table.open("/usr/bin/tool", OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(file.id, PositionedDriverKind.Dbfs, 0u64, [1u8]).unwrap()
+    table.close(file).unwrap()
+    table
+
+fn nvfs_with_tool() -> MountTable:
+    var table = MountTable.new()
+    table.mount("/", DriverInstance.Nvfs(NvfsDriver.new("execute-path")), executable_opts()).unwrap()
+    table.mkdir("/usr", 0o755).unwrap()
+    table.mkdir("/usr/bin", 0o755).unwrap()
+    val file = table.open("/usr/bin/tool", OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(file.id, PositionedDriverKind.Nvfs, 0u64, [2u8]).unwrap()
+    table.close(file).unwrap()
+    table
+
+describe "MountTable retained execute path resolution":
+    it "searches FAT32, DBFS, and NVFS without reopening the selected file":
+        var fat = MountTable.new()
+        fat.mount("/", DriverInstance.Fat32(
+            FsFat32Driver.new_ram_backed_with_file("TOOL", "x")), executable_opts()).unwrap()
+        val fat_open = fat.resolve_and_open_for_execute(
+            "TOOL", ["/missing", "/"], ExecuteTrust.Untrusted).unwrap()
+        expect(fat_open.canonical_path).to_equal("/TOOL")
+        expect(fat_open.binding.backend_kind).to_equal("fat32")
+        expect(fat_open.binding.execute_trust).to_equal(ExecuteTrust.Untrusted)
+        expect(fat.execute_binding_is_current(fat_open.binding)).to_be(true)
+        var forged_trust = fat_open.binding
+        forged_trust.execute_trust = ExecuteTrust.Trusted
+        expect(fat.validate_execute_open_binding_trust(
+            forged_trust, ExecuteTrust.Untrusted)).to_be(true)
+        expect(fat.validate_execute_open_binding_trust(
+            forged_trust, ExecuteTrust.Trusted)).to_be(false)
+        fat.close(fat_open.binding.file_handle).unwrap()
+        expect(fat.validate_execute_open_binding_trust(
+            forged_trust, ExecuteTrust.Untrusted)).to_be(false)
+
+        var dbfs = dbfs_with_tool()
+        val db_open = dbfs.resolve_and_open_for_execute(
+            "tool", ["/missing", "/usr/bin"], ExecuteTrust.Untrusted).unwrap()
+        expect(db_open.binding.backend_kind).to_equal("dbfs")
+        expect(dbfs.execute_binding_is_current(db_open.binding)).to_be(true)
+        dbfs.close(db_open.binding.file_handle).unwrap()
+
+        var nvfs = nvfs_with_tool()
+        val nv_open = nvfs.resolve_and_open_for_execute(
+            "tool", ["/usr/bin"], ExecuteTrust.Untrusted).unwrap()
+        expect(nv_open.binding.backend_kind).to_equal("nvfs")
+        expect(nvfs.execute_binding_is_current(nv_open.binding)).to_be(true)
+        nvfs.close(nv_open.binding.file_handle).unwrap()
+
+    it "uses slash input exactly and stops on the first non-NotFound error":
+        var table = dbfs_with_tool()
+        val exact = table.resolve_and_open_for_execute(
+            "/usr/bin/tool", ["/ignored"], ExecuteTrust.Untrusted).unwrap()
+        expect(exact.canonical_path).to_equal("/usr/bin/tool")
+        table.close(exact.binding.file_handle).unwrap()
+
+        var denied = MountTable.new()
+        denied.mount("/", DriverInstance.DbFs(DbFsDriver.new_hosted()), MountOptions.default()).unwrap()
+        denied.mkdir("/blocked", 0o755).unwrap()
+        val file = denied.open("/blocked/tool", OpenFlags.create_write()).unwrap()
+        denied.write(file, "x").unwrap()
+        denied.close(file).unwrap()
+        val result = denied.resolve_and_open_for_execute(
+            "tool", ["/blocked", "/usr/bin"], ExecuteTrust.Untrusted)
+        expect(result.is_err()).to_be(true)
+        match result.unwrap_err():
+            case FsError.Permission: expect(true).to_be(true)
+            case _: fail("resolver continued after terminal execute denial")
+
+    it "rejects invalid components and bounded search input before allocation":
+        var table = dbfs_with_tool()
+        expect(table.resolve_and_open_for_execute(
+            "..", ["/usr/bin"], ExecuteTrust.Untrusted).is_err()).to_be(true)
+        expect(table.resolve_and_open_for_execute(
+            "bad\\name", ["/usr/bin"], ExecuteTrust.Untrusted).is_err()).to_be(true)
+
+        var excessive_dirs: [text] = []
+        var i: i32 = 0
+        while i < 65:
+            excessive_dirs = excessive_dirs.push("/usr/bin")
+            i = i + 1
+        val excessive = table.resolve_and_open_for_execute(
+            "tool", excessive_dirs, ExecuteTrust.Untrusted)
+        expect(excessive.is_err()).to_be(true)
+        match excessive.unwrap_err():
+            case FsError.TooLarge: expect(true).to_be(true)
+            case _: fail("resolver accepted an excessive PATH directory count")
+
+        var long_dir = "/"
+        var j: i32 = 0
+        while j < 4095:
+            long_dir = long_dir + "a"
+            j = j + 1
+        val oversized = table.resolve_and_open_for_execute(
+            "tool", [long_dir], ExecuteTrust.Untrusted)
+        expect(oversized.is_err()).to_be(true)
+        match oversized.unwrap_err():
+            case FsError.TooLarge: expect(true).to_be(true)
+            case _: fail("resolver allocated an oversized combined pathname")
+
+        var root_max_command = ""
+        var k: i32 = 0
+        while k < 4095:
+            root_max_command = root_max_command + "x"
+            k = k + 1
+        val root_boundary = table.resolve_and_open_for_execute(
+            root_max_command, ["/"], ExecuteTrust.Untrusted)
+        expect(root_boundary.is_err()).to_be(true)
+        match root_boundary.unwrap_err():
+            case FsError.NotFound: expect(true).to_be(true)
+            case _: fail("resolver rejected a valid maximum-length root candidate")
