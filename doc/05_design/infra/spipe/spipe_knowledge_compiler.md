@@ -229,11 +229,14 @@ Wave 3 adds `AL`, `M`, `RQ`, `NFR`, `SS`, `SY`, `WS`, `WT`, `F`, `C`, `L`,
 `TG`, and `T` to the
 identity prefix registry. `SourceSpan={start_byte:u64,end_byte:u64}` and
 `SourceLocation={source_artifact_uid:ArtifactUid,source_hash:Sha256,
-span:SourceSpan}`. A span indexes the exact unmodified containing-file bytes
-identified by `source_hash`, independently of the record's normalized-content
-hash; offsets are zero-based
-and half-open, CRLF is not rewritten, and boundaries lie on UTF-8 code-point
-boundaries. `start_byte <= end_byte`; `ordinal` is `0..4294967295`. Semantic keys match
+span:SourceSpan}`. Wave 3 retains the Wave 2 parser-byte contract: without
+character normalization, replace every CRLF byte pair with LF and then every
+remaining CR byte with LF. `source_hash` is the containing ArtifactRecord
+`content_hash`, SHA-256 of that normalized UTF-8 byte stream. Spans index those
+normalized bytes, not checkout/raw-object bytes; offsets are zero-based and
+half-open and boundaries lie on UTF-8 code-point boundaries. Raw-to-normalized
+offset maps are derived display data and never enter graph hashes.
+`start_byte <= end_byte`; `ordinal` is `0..4294967295`. Semantic keys match
 `[a-z0-9]+(?:[._-][a-z0-9]+)*`; lists are duplicate-free and bytewise sorted.
 `RequirementStatus={proposed,accepted,designed,specified,implemented,verified,
 superseded,stale,deprecated}`,
@@ -348,18 +351,25 @@ Record construction is exact:
   from its accepted `SectionRecord`; title is the NFC title substring after the
   delimiter. No heading-label stripping beyond this grammar is permitted.
 - Scenario and Test markers bind only the next parsed SSpec `it "<title>":`
-  declaration. Their `SourceLocation.span` is the half-open original-byte range
+  declaration. Their `SourceLocation.span` is the half-open normalized-byte range
   from the `i` in `it` through the declaration suite, excluding the next
   sibling declaration; `content_hash` is SHA-256 of exactly that slice.
   Project/revision/artifact come from the containing artifact.
   `SourceLocation.source_hash` is always the containing ArtifactRecord's
-  required `content_hash` (the exact parser input bytes), never its nullable
-  provenance `source_hash`. A missing/unreadable raw object makes the record a
+  required normalized `content_hash`, never its nullable provenance
+  `source_hash`. Missing normalized bytes or a hash mismatch makes the record a
   candidate diagnostic and cannot produce a canonical node.
 - A symbol marker binds only a `SourceSymbolProvider` result whose definition
   begins at the next non-comment token. The provider supplies versioned
   `symbol_kind`, NFC `name`, fully qualified NFC `qualified_name`, and the
-  half-open definition span. `signature_hash` is SHA-256 of UTF-8
+  half-open normalized-parser-byte definition span. The provider request carries
+  `coordinate_system="spipe-normalized-utf8-bytes-v1"`, the exact normalized
+  UTF-8 bytes, and their ArtifactRecord `content_hash`; the response repeats the
+  coordinate system and hash. Only zero-based half-open UTF-8 byte offsets are
+  supported. Raw-file bytes, UTF-16 units, Unicode scalar/code-point indexes,
+  line/column pairs, or a mismatched hash/version fail with `SPK406
+  provider_coordinate_contract` before record construction; adapters never
+  guess or translate. `signature_hash` is SHA-256 of UTF-8
   `spipe-symbol-signature-v1\0` plus the provider's canonical signature string,
   or null only for module symbols. `canonical_path`, project, revision,
   artifact come from the containing source artifact, and source hash is that

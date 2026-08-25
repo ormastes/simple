@@ -411,7 +411,7 @@ or package smoke gates activated by the actual changed paths.
 
 ### Scenario: Marker constructors are byte-deterministic
 
-- **Given** CRLF/LF, Unicode titles, aliases, nested SSpec suites, and provider-backed symbol fixtures with exact artifact and section records
+- **Given** CRLF/LF-equivalent normalized parser bytes, non-BMP Unicode titles/symbols, aliases, nested SSpec suites, and provider-backed symbol fixtures with exact artifact and section records
 - **When** clean and incremental constructors parse requirement, NFR, scenario, symbol, and test markers
 - **Then** every closed record field, source hash, half-open span, signature hash, and graph root is byte-identical, while malformed or mismatched markers emit `SPK003`/`SPK004` and no node.
 
@@ -423,9 +423,9 @@ or package smoke gates activated by the actual changed paths.
 
 ### Scenario: Source locations use required artifact content hashes
 
-- **Given** artifacts with nullable provenance `source_hash` and required raw-byte `content_hash`
+- **Given** artifacts with nullable provenance `source_hash` and required newline-normalized parser-byte `content_hash`
 - **When** scenario, symbol, and test locations are constructed
-- **Then** every location uses `content_hash`, missing raw objects remain candidates, and no nullable provenance hash enters a canonical location.
+- **Then** every location and span uses normalized UTF-8 parser bytes and `content_hash`, CRLF/LF forms produce equal identities, and raw-byte, UTF-16, code-point, line/column, version-mismatched, or hash-mismatched provider coordinates fail with `SPK406` rather than being translated.
 
 ### Scenario: Deferred Wave 2 edges remain historical
 
