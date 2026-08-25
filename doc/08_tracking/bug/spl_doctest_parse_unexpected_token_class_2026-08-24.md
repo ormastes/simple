@@ -1,7 +1,7 @@
 # SPL-doctest `parse: Unexpected token` class — 13 real doc defects, 1 harness artifact
 
 - **Filed:** 2026-08-24
-- **Status:** FIXED 2026-08-25 — all 13 real defects repaired and the entire `Unexpected token` class is gone from the 8 touched files. 3 blocks go fully GREEN; the other 10 now fail on two SEPARATE, independently-filed defects (see "Measured result").
+- **Status:** FIXED 2026-08-25 — all 13 real defects repaired. Verified suite-wide: `Unexpected token` now occurs exactly ONCE in a full 158-file run, and that one is the category-G harness artifact, deliberately untouched.
 - **Engine for every measurement below:** the Rust seed, `bin/simple`
   (`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
   60650360 bytes, 2026-08-23 04:47), run from a worktree at base `d2d0bec2e40`.
@@ -431,18 +431,38 @@ AFTER   Line 18/35/45/125/133/143: --> modes.spl:6:1   (all six, no parse errors
    `variable X not found` class (33 occurrences suite-wide), which is a different
    class from this one and is not re-litigated here.
 
-## Whole-suite verdict: UNKNOWN, not a pass
+## Whole-suite verdict — CONFIRMED
 
-A whole-suite `--spl-doctest` run on the rebuilt seed **aborts** and emits no
-verdict line, so per `.claude/rules/testing.md` its counts are UNKNOWN:
+A whole-suite run initially aborted with no verdict line, three separate times.
+All three aborts were root-caused and cleared (none was a doctest defect):
+
+1. deployed seed predated the value-bound `unsafe` parser support -> rebuilt.
+2. `easy_fix/accessor_rewrite.spl` used the reserved word `unsafe` as a local
+   variable, so the file had never parsed. Renamed.
+3. `90.tools/lint/_LintMain/entry_and_fixes.spl` used the reserved word
+   `generic` the same way. Renamed.
+
+With those cleared the suite reaches a verdict:
 
 ```
-error: compile failed: parse: in ".../src/lib/nogc_sync_mut/tooling/easy_fix/accessor_rewrite.spl": Unexpected token: expected Colon, found If
+SPL Doctest: Running doctests from 158 source file(s)...
+SPL Doctest: 295 passed, 186 failed, 0 skipped
 ```
 
-This is a THIRD, unrelated abort in a stdlib file nobody in this change touched;
-the simple value-bound `if` form is not the cause (a fixture of it exits 0 on
-both the old and the rebuilt seed). The `267 passed, 215 failed` figure quoted as
-a baseline for this work was taken on the old binary that now aborts, so it is
-not comparable to anything measured here and is not used. The per-file table
-above is the honest measurement of this change's delta.
+(exit 1, as expected while 186 doctests still fail.)
+
+**The class this record tracks is gone.** `Unexpected token` occurs exactly
+**once** in that whole-suite output, down from the 14 the triage counted:
+
+```
+spl_doctest_src_lib_nogc_async_mut_async_host___init___spl_92.spl":
+Unexpected token: expected expression, found Dedent
+```
+
+That is category G — the harness artifact, deliberately not edited. All 13 real
+defects are fixed and verified absent suite-wide.
+
+The `267 passed, 215 failed` figure quoted as a baseline for this work was taken
+on the old binary that aborts, so it is NOT comparable to the number above and
+is not claimed as a before/after pair. The per-file table is the controlled
+measurement of this change.
