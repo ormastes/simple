@@ -14,9 +14,27 @@
 # 2. SIMPLE_LIB environment variable path
 # 3. Fallback to src/lib/ (standard library)
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw platform path-join ABI", capabilities: [ffi])
 extern fn rt_path_join(base: text, rel: text) -> text
+@unsafe(reason: "raw platform dirname ABI", capabilities: [ffi])
 extern fn rt_path_dirname(path: text) -> text
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_path_join(base: text, rel: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_path_join(base, rel)
+
+@always_inline
+fn _sffi_path_dirname(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_path_dirname(path)
 
 use std.io_runtime.{dir_list, file_exists, dir_exists}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -78,7 +96,7 @@ fn _interp_path_parent(path: text) -> text:
 fn _resolve_project_relative_path(current_dir: text, relative_path: text) -> text:
     var probe_dir = current_dir
     for _unused in 0..10:
-        val candidate = rt_path_join(probe_dir, relative_path)
+        val candidate = _sffi_path_join(probe_dir, relative_path)
         if file_exists(candidate):
             return candidate
 
@@ -92,14 +110,14 @@ fn _normalize_type_relative_path(module_name: text) -> text:
     if module_name.contains("/"):
         val explicit = module_name.split("/")
         if explicit.len() >= 2 and explicit[0].contains("-"):
-            return rt_path_join(
-                rt_path_join("type", _domain_to_dir(explicit[0])),
+            return _sffi_path_join(
+                _sffi_path_join("type", _domain_to_dir(explicit[0])),
                 explicit[1..].join("/")
             ) + ".spl"
 
     if not module_name.contains("."):
-        return rt_path_join(
-            rt_path_join("type", _domain_to_dir("simple-lang")),
+        return _sffi_path_join(
+            _sffi_path_join("type", _domain_to_dir("simple-lang")),
             module_name
         ) + ".spl"
 
@@ -125,8 +143,8 @@ fn resolve_unit_path(tail: [text]) -> text:
         org = "simple-lang"
         rest = tail[1..]
     else:
-        val direct_dir = rt_path_join(rt_path_join("src", "unit"), first)
-        val com_dir = rt_path_join(rt_path_join("src", "unit"), first + ".com")
+        val direct_dir = _sffi_path_join(_sffi_path_join("src", "unit"), first)
+        val com_dir = _sffi_path_join(_sffi_path_join("src", "unit"), first + ".com")
         if file_exists(direct_dir) or file_exists(com_dir):
             org = first
             rest = tail[1..]
@@ -134,9 +152,9 @@ fn resolve_unit_path(tail: [text]) -> text:
     if rest.len() >= 1 and rest[0] == "com":
         rest = rest[1..]
 
-    val unit_root = rt_path_join("src", "unit")
-    val org_bare = rt_path_join(unit_root, org)
-    val org_com = rt_path_join(unit_root, org + ".com")
+    val unit_root = _sffi_path_join("src", "unit")
+    val org_bare = _sffi_path_join(unit_root, org)
+    val org_com = _sffi_path_join(unit_root, org + ".com")
     val joined = rest.join("/")
 
     val cand1 = org_bare + "/" + joined + ".spl"
@@ -160,7 +178,7 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     # compiler.frontend.X → compiler/10.frontend/X.spl (numbered dir support)
     # unit.length.km → src/unit/simple-lang/length/km.spl (unit-system-consolidation)
 
-    val current_dir = rt_path_dirname(current_file)
+    val current_dir = _sffi_path_dirname(current_file)
     val type_relative_path = _normalize_type_relative_path(module_name)
     if type_relative_path != "":
         val type_path = _resolve_project_relative_path(current_dir, type_relative_path)
@@ -192,22 +210,19 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     # Try resolution strategies:
 
     # 1. Local directory (relative to current file)
-    val local_path = rt_path_join(current_dir, relative_path)
+    val local_path = _sffi_path_join(current_dir, relative_path)
     if file_exists(local_path):
         return local_path
 
     # 2. SIMPLE_LIB environment variable
-    val simple_lib = rt_env_get("SIMPLE_LIB")
-    val has_simple_lib = simple_lib != ""
-    val lib_not_nil = simple_lib != nil
-    val should_check_lib = has_simple_lib and lib_not_nil
-    if should_check_lib:
-        val lib_path = rt_path_join(simple_lib, relative_path)
+    val simple_lib = _sffi_env_get("SIMPLE_LIB") ?? ""
+    if simple_lib != "":
+        val lib_path = _sffi_path_join(simple_lib, relative_path)
         if file_exists(lib_path):
             return lib_path
 
     # 3. Fallback to src/ directory
-    val src_path = rt_path_join("src", relative_path)
+    val src_path = _sffi_path_join("src", relative_path)
     if file_exists(src_path):
         return src_path
 
@@ -219,35 +234,35 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     #    > nogc_async_mut_noalloc
     if relative_path.starts_with("lib/"):
         val lib_subpath = relative_path.substring(4)
-        val lib_dir = rt_path_join("src", "lib")
-        val nam = rt_path_join(lib_dir, rt_path_join("nogc_async_mut", lib_subpath))
+        val lib_dir = _sffi_path_join("src", "lib")
+        val nam = _sffi_path_join(lib_dir, _sffi_path_join("nogc_async_mut", lib_subpath))
         if file_exists(nam):
             return nam
-        val naim = rt_path_join(lib_dir, rt_path_join("nogc_async_immut", lib_subpath))
+        val naim = _sffi_path_join(lib_dir, _sffi_path_join("nogc_async_immut", lib_subpath))
         if file_exists(naim):
             return naim
-        val nsim = rt_path_join(lib_dir, rt_path_join("nogc_sync_immut", lib_subpath))
+        val nsim = _sffi_path_join(lib_dir, _sffi_path_join("nogc_sync_immut", lib_subpath))
         if file_exists(nsim):
             return nsim
-        val nsm = rt_path_join(lib_dir, rt_path_join("nogc_sync_mut", lib_subpath))
+        val nsm = _sffi_path_join(lib_dir, _sffi_path_join("nogc_sync_mut", lib_subpath))
         if file_exists(nsm):
             return nsm
-        val cm = rt_path_join(lib_dir, rt_path_join("common", lib_subpath))
+        val cm = _sffi_path_join(lib_dir, _sffi_path_join("common", lib_subpath))
         if file_exists(cm):
             return cm
-        val gam = rt_path_join(lib_dir, rt_path_join("gc_async_mut", lib_subpath))
+        val gam = _sffi_path_join(lib_dir, _sffi_path_join("gc_async_mut", lib_subpath))
         if file_exists(gam):
             return gam
-        val gaim = rt_path_join(lib_dir, rt_path_join("gc_async_immut", lib_subpath))
+        val gaim = _sffi_path_join(lib_dir, _sffi_path_join("gc_async_immut", lib_subpath))
         if file_exists(gaim):
             return gaim
-        val gsm = rt_path_join(lib_dir, rt_path_join("gc_sync_mut", lib_subpath))
+        val gsm = _sffi_path_join(lib_dir, _sffi_path_join("gc_sync_mut", lib_subpath))
         if file_exists(gsm):
             return gsm
-        val gsim = rt_path_join(lib_dir, rt_path_join("gc_sync_immut", lib_subpath))
+        val gsim = _sffi_path_join(lib_dir, _sffi_path_join("gc_sync_immut", lib_subpath))
         if file_exists(gsim):
             return gsim
-        val nanm = rt_path_join(lib_dir, rt_path_join("nogc_async_mut_noalloc", lib_subpath))
+        val nanm = _sffi_path_join(lib_dir, _sffi_path_join("nogc_async_mut_noalloc", lib_subpath))
         if file_exists(nanm):
             return nanm
 
@@ -311,7 +326,7 @@ fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
     for part in parts:
         if pi < last_idx:
             # Intermediate segment — must be a directory
-            val direct = rt_path_join(current_dir, part)
+            val direct = _sffi_path_join(current_dir, part)
             if dir_exists(direct):
                 current_dir = direct
             else:
@@ -323,7 +338,7 @@ fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
                     return ""
         else:
             # Last segment — try as .spl file
-            val file_path = rt_path_join(current_dir, part + ".spl")
+            val file_path = _sffi_path_join(current_dir, part + ".spl")
             return file_path
         pi = pi + 1
     ""
@@ -354,7 +369,7 @@ fn find_numbered_dir_interp(parent: text, segment: text) -> text:
             if all_digits:
                 val name = entry.substring(dot_pos + 1)
                 if name == segment:
-                    val full_path = rt_path_join(parent, entry)
+                    val full_path = _sffi_path_join(parent, entry)
                     if dir_exists(full_path):
                         return full_path
     ""
@@ -368,9 +383,9 @@ fn _find_transparent_file(dir: text, name: text) -> text:
     val entries = dir_list(dir)
     for entry in entries:
         if entry.starts_with("_"):
-            val tdir = rt_path_join(dir, entry)
+            val tdir = _sffi_path_join(dir, entry)
             if dir_exists(tdir):
-                val cand = rt_path_join(tdir, name + ".spl")
+                val cand = _sffi_path_join(tdir, name + ".spl")
                 if file_exists(cand):
                     return cand
                 val deeper = _find_transparent_file(tdir, name)
@@ -383,7 +398,7 @@ fn _walk_dir_chain(base: text, parts: [text]) -> text:
     numbered child). Returns concrete dir path, or "" if a segment is missing."""
     var cur = base
     for part in parts:
-        val direct = rt_path_join(cur, part)
+        val direct = _sffi_path_join(cur, part)
         if dir_exists(direct):
             cur = direct
         else:

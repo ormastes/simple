@@ -137,6 +137,34 @@ No production self-hosted optimizer or benchmark was available.  Exact
 artifact identity, ABI proof, signatures, and evidence admission remain
 absent, so verified-and-signed admission remains 0.
 
+## Interpreter module-resolution authority checkpoint
+
+The module path resolver now confines environment lookup, path joining, and
+dirname to three mandatory-inline lexical `unsafe(ffi)` owners.  `SIMPLE_LIB`
+is declared nullable and decoded to the existing empty/unset configuration
+before comparison or path construction, removing the former comparison of an
+unvalidated optional result with both text and `nil`.
+
+Resolution already caches module-only and caller-relative outcomes and keeps
+underscore-transparent recursion on the miss path.  The change preserves those
+algorithms and every existing filesystem probe.  Mandatory inlining adds no
+path allocation, lookup, foreign dispatch, hash, lock, copy, branch, loop, or
+tree scan to the hot resolution path.
+
+The focused static ratchet passed and confirms all three symbols are registered
+for typed native and interpreter lanes.  The authoritative census changed:
+
+- raw call sites: 19,048 -> 19,019
+- missing authority: 14,810 -> 14,778
+- lexical unsafe: 3,281 -> 3,284
+- function unsafe: unchanged at 957
+
+Registration does not prove platform path semantics, filesystem race freedom,
+artifact identity, signatures, or provenance.  No production self-hosted
+optimizer or benchmark was available, so module resolution and the wider SFFI
+estate are not globally verified or signed; verified-and-signed admission
+remains 0.
+
 ## LLVM-library expression translation authority checkpoint
 
 `llvm_lib_translate_expr.spl` had six local declarations; unused
