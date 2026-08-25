@@ -251,14 +251,32 @@ fn _lld_emulation_v1(triple: text) -> text:
     if triple == SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE: return "elf32lriscv"
     ""
 
+fn _path_byte_domain_valid_v1(path: text) -> bool:
+    # These paths become authenticated argv fields.  Reject the complete ASCII
+    # control range (including HTAB and DEL), rather than only NUL/CR/LF, so a
+    # path has one unambiguous byte representation at the VFS, audit, and exec
+    # boundaries.  The request path limit keeps this scan strictly bounded.
+    # Bound before materializing the byte view so an oversized request cannot
+    # force an unbounded temporary allocation merely to be rejected.  Retain
+    # the byte-length check because UTF-8 paths can contain multiple bytes per
+    # text element.
+    if path.len() > CLANG_FILESYSTEM_PIPELINE_PATH_MAX_V1: return false
+    val bytes = path.bytes()
+    val byte_count = bytes.len()
+    if byte_count > CLANG_FILESYSTEM_PIPELINE_PATH_MAX_V1: return false
+    var index: i64 = 0
+    while index < byte_count:
+        val byte = bytes[index]
+        if byte < 32u8 or byte == 127u8: return false
+        index = index + 1
+    true
+
 fn _path_valid_v1(path: text) -> bool:
-    path.len() > 1 and path.len() <= CLANG_FILESYSTEM_PIPELINE_PATH_MAX_V1 and
+    path.len() > 1 and _path_byte_domain_valid_v1(path) and
         path.starts_with("/") and not path.ends_with("/") and
         not path.contains("//") and not path.contains("/./") and
         not path.contains("/../") and not path.ends_with("/.") and
-        not path.ends_with("/..") and not path.contains("\\") and
-        not path.contains("\0") and not path.contains("\n") and
-        not path.contains("\r")
+        not path.ends_with("/..") and not path.contains("\\")
 
 fn _filesystem_root_v1(filesystem: ClangFilesystemPipelineFilesystemV1) -> text:
     match filesystem:

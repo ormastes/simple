@@ -12,6 +12,21 @@ use common.string_core.{char_from_code}
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
 
+# Whole-file reads feed both ordinary VFS consumers and the filesystem-backed
+# executable loader. Keep every DriverInstance behind a finite allocation
+# ceiling so corrupt metadata cannot request an unbounded kernel heap
+# allocation before the loader has inspected the artifact. This ceiling must
+# still admit the filesystem toolchain contract: shipped LLVM/Clang images are
+# documented at 150--280 MiB and GUEST_FILESYSTEM_HELLO_MAX_TOOL_BYTES admits
+# up to 512 MiB.
+val VFS_DISPATCH_MAX_FILE_BYTES: i64 = 536870912
+
+fn _vfs_dispatch_file_size_is_bounded(size: i64) -> bool:
+    size > 0 and size <= VFS_DISPATCH_MAX_FILE_BYTES
+
+fn _vfs_dispatch_read_count_is_bounded(count: i64, capacity: i64) -> bool:
+    count > 0 and count <= capacity and capacity <= VFS_DISPATCH_MAX_FILE_BYTES
+
 fn _vfs_text_to_bytes(text_value: text) -> [u8]:
     rt_text_to_bytes(text_value)
 
@@ -27,14 +42,6 @@ fn _vfs_bytes_to_text(buf: [u8], count: i64) -> text:
     result
 
 export _vfs_bytes_to_text
-
-fn _clone_bytes(buf: [u8]) -> [u8]:
-    var out: [u8] = []
-    var i: i64 = 0
-    while i < buf.len():
-        out.push(buf[i])
-        i = i + 1
-    out
 
 pub fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> text:
     """Dispatch read-whole-file-as-text to the correct concrete driver.
@@ -59,7 +66,7 @@ pub fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> t
             if read_r.is_err():
                 return ""
             val n = read_r.unwrap()
-            if n <= 0:
+            if not _vfs_dispatch_read_count_is_bounded(n, buf.len() as i64):
                 return ""
             # Build text from byte array (UTF-8 assumption, ASCII path in FAT32)
             _vfs_bytes_to_text(buf, n)
@@ -74,7 +81,7 @@ pub fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> t
                 d.close(handle)
                 return ""
             val size = stat_r.unwrap().size.to_i64()
-            if size <= 0:
+            if not _vfs_dispatch_file_size_is_bounded(size):
                 d.close(handle)
                 return ""
             var buf: [u8] = []
@@ -87,6 +94,8 @@ pub fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> t
             if read_r.is_err():
                 return ""
             val n = read_r.unwrap()
+            if not _vfs_dispatch_read_count_is_bounded(n, buf.len() as i64):
+                return ""
             _vfs_bytes_to_text(buf, n)
         case NvfsPosix(d):
             val flags = OpenFlags.read_only()
@@ -99,7 +108,7 @@ pub fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> t
                 d.close(handle)
                 return ""
             val size = stat_r.unwrap().size.to_i64()
-            if size <= 0:
+            if not _vfs_dispatch_file_size_is_bounded(size):
                 d.close(handle)
                 return ""
             var buf: [u8] = []
@@ -111,7 +120,10 @@ pub fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> t
             d.close(handle)
             if read_r.is_err():
                 return ""
-            _vfs_bytes_to_text(buf, read_r.unwrap())
+            val n = read_r.unwrap()
+            if not _vfs_dispatch_read_count_is_bounded(n, buf.len() as i64):
+                return ""
+            _vfs_bytes_to_text(buf, n)
         case RamFs(d):
             val flags = OpenFlags.read_only()
             val open_r = d.open(relpath, flags)
@@ -127,7 +139,10 @@ pub fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> t
             d.close(handle)
             if read_r.is_err():
                 return ""
-            _vfs_bytes_to_text(buf, read_r.unwrap())
+            val n = read_r.unwrap()
+            if not _vfs_dispatch_read_count_is_bounded(n, buf.len() as i64):
+                return ""
+            _vfs_bytes_to_text(buf, n)
         case DbFs(d):
             val open_r = d.open_path(relpath, OpenFlags.read_only())
             if open_r.is_err():
@@ -139,7 +154,7 @@ pub fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> t
                 return ""
             val stat: StatInfo = stat_r.unwrap()
             val size: i64 = stat.size
-            if size <= 0:
+            if not _vfs_dispatch_file_size_is_bounded(size):
                 d.close_handle(handle)
                 return ""
             val read_r = d.read_handle(handle, size)
@@ -161,7 +176,7 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
             if stat_r.is_err():
                 return []
             val size = stat_r.unwrap().size.to_i64()
-            if size <= 0:
+            if not _vfs_dispatch_file_size_is_bounded(size):
                 return []
             val flags = OpenFlags.read_only()
             val open_r = d.open(relpath, flags)
@@ -178,7 +193,7 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
             if read_r.is_err():
                 return []
             val n = read_r.unwrap()
-            if n <= 0:
+            if not _vfs_dispatch_read_count_is_bounded(n, buf.len() as i64):
                 return []
             if n.to_i32() == buf.len():
                 return buf
@@ -193,7 +208,7 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
             if stat_r.is_err():
                 return []
             val size = stat_r.unwrap().size.to_i64()
-            if size <= 0:
+            if not _vfs_dispatch_file_size_is_bounded(size):
                 return []
             val flags = OpenFlags.read_only()
             val open_r = d.open(relpath, flags)
@@ -210,10 +225,10 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
             if read_r.is_err():
                 return []
             val n = read_r.unwrap()
-            if n <= 0:
+            if not _vfs_dispatch_read_count_is_bounded(n, buf.len() as i64):
                 return []
             if n.to_i32() == buf.len():
-                return _clone_bytes(buf)
+                return buf
             var out: [u8] = []
             var j: i32 = 0
             while j < n.to_i32():
@@ -225,7 +240,7 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
             if stat_r.is_err():
                 return []
             val size = stat_r.unwrap().size.to_i64()
-            if size <= 0:
+            if not _vfs_dispatch_file_size_is_bounded(size):
                 return []
             val open_r = d.open(relpath, OpenFlags.read_only())
             if open_r.is_err():
@@ -241,8 +256,10 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
             if read_r.is_err():
                 return []
             val n = read_r.unwrap()
+            if not _vfs_dispatch_read_count_is_bounded(n, buf.len() as i64):
+                return []
             if n.to_i32() == buf.len():
-                return _clone_bytes(buf)
+                return buf
             var out: [u8] = []
             var j: i32 = 0
             while j < n.to_i32():
@@ -254,7 +271,7 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
             if stat_r.is_err():
                 return []
             val size = stat_r.unwrap().size.to_i64()
-            if size <= 0:
+            if not _vfs_dispatch_file_size_is_bounded(size):
                 return []
             val open_r = d.open(relpath, OpenFlags.read_only())
             if open_r.is_err():
@@ -270,8 +287,10 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
             if read_r.is_err():
                 return []
             val n = read_r.unwrap()
+            if not _vfs_dispatch_read_count_is_bounded(n, buf.len() as i64):
+                return []
             if n.to_i32() == buf.len():
-                return _clone_bytes(buf)
+                return buf
             var out: [u8] = []
             var j: i32 = 0
             while j < n.to_i32():
@@ -284,7 +303,7 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
                 return []
             val stat: StatInfo = stat_r.unwrap()
             val size: i64 = stat.size
-            if size <= 0:
+            if not _vfs_dispatch_file_size_is_bounded(size):
                 return []
             val open_r = d.open_path(relpath, OpenFlags.read_only())
             if open_r.is_err():
@@ -294,7 +313,10 @@ pub fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> 
             d.close_handle(handle)
             if read_r.is_err():
                 return []
-            read_r.unwrap()
+            val out = read_r.unwrap()
+            if not _vfs_dispatch_read_count_is_bounded(out.len() as i64, size):
+                return []
+            out
 
 pub fn g_vfs_dispatch_file_size(driver: DriverInstance, relpath: Path) -> i64:
     """Dispatch stat → size to the concrete driver. Returns -1 on error."""

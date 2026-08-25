@@ -37,6 +37,37 @@ val SCP_STAGE_BODY_CURSOR_BASE: u32 = 3u32
 val SCP_STAGE_END_MARKER_PENDING: u32 = 4294967294u32
 val SCP_STAGE_AWAIT_FINAL_ACK: u32 = 4294967295u32
 
+fn _ssh_advisory_string_end_valid(payload: [u8], offset: u64) -> u64:
+    """Return the end of one exact bounded SSH string, or zero when invalid."""
+    if offset > payload.len() or payload.len() - offset < 4u64:
+        return 0u64
+    val length = _read_u32_stable(payload, offset).to_u64()
+    val start = offset + 4u64
+    if length > payload.len() - start:
+        return 0u64
+    start + length
+
+fn _ssh_advisory_payload_valid(payload: [u8], msg_type: u8) -> bool:
+    """Validate response-free RFC 4253 transport messages without allocation."""
+    if payload.len() == 0u64 or ssh_session_u8_at(payload, 0u64) != msg_type:
+        return false
+    if msg_type == SSH_MSG_IGNORE:
+        val ignored_end = _ssh_advisory_string_end_valid(payload, 1u64)
+        return ignored_end != 0u64 and ignored_end == payload.len()
+    if msg_type == SSH_MSG_UNIMPLEMENTED:
+        # The sole field is the uint32 sequence number of the rejected packet.
+        return payload.len() == 5u64
+    if msg_type == SSH_MSG_DEBUG:
+        # byte type, boolean always-display, string message, string language.
+        if payload.len() < 10u64:
+            return false
+        val message_end = _ssh_advisory_string_end_valid(payload, 2u64)
+        if message_end == 0u64:
+            return false
+        val language_end = _ssh_advisory_string_end_valid(payload, message_end)
+        return language_end != 0u64 and language_end == payload.len()
+    false
+
 fn _build_channel_data_stable(recipient: u32, data: [u8]) -> [u8]:
     var payload: [u8] = []
     payload = rt_push_byte(payload, 94)
@@ -430,10 +461,20 @@ impl SshSession:
                 return
             elif msg_type == SSH_MSG_IGNORE:
                 # RFC 4253 defines IGNORE as intentionally response-free.
+                # It still carries one exact SSH string.  Accepting malformed
+                # framing as a no-op silently advances the encrypted sequence
+                # while discarding attacker-selected trailing or truncated
+                # bytes, so validate at the canonical transport dispatcher.
+                if not _ssh_advisory_payload_valid(payload, msg_type):
+                    self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid SSH_MSG_IGNORE")
+                    return
                 continue
             elif msg_type == SSH_MSG_DEBUG or msg_type == SSH_MSG_UNIMPLEMENTED:
                 # Both transport messages are advisory and response-free.  In
                 # particular, never answer UNIMPLEMENTED with UNIMPLEMENTED.
+                if not _ssh_advisory_payload_valid(payload, msg_type):
+                    self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid advisory transport message")
+                    return
                 continue
             elif msg_type == SSH_MSG_KEXINIT:
                 # The dispatcher already consumed/decrypted KEXINIT with the

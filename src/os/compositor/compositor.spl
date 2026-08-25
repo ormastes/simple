@@ -650,9 +650,36 @@ class Compositor:
     me move_window(id: i32, x: i32, y: i32):
         val i = self.surface_index(id as u64)
         if i >= 0:
+            if self.screen_width <= 0 or self.screen_height <= 0:
+                return
             var surface = self.surfaces[i]
-            surface.x = x
-            surface.y = y
+            # Pointer drags and remote WM actions share this owner mutation.
+            # Bound both here so an untrusted coordinate cannot make the
+            # entire window unreachable or survive until later resize/restore
+            # happens to sanitize it. Use subtraction rather than `x + width`
+            # so extreme i32 inputs cannot overflow the containment check.
+            val bounded_width = wm_lifecycle_bounded_window_width(
+                surface.width, self.screen_width
+            )
+            val bounded_height = wm_lifecycle_bounded_window_height(
+                surface.height, self.screen_height
+            )
+            val max_x = self.screen_width - bounded_width
+            val max_y = self.screen_height - bounded_height
+            var bounded_x = x
+            var bounded_y = y
+            if bounded_x < 0:
+                bounded_x = 0
+            elif bounded_x > max_x:
+                bounded_x = max_x
+            if bounded_y < 0:
+                bounded_y = 0
+            elif bounded_y > max_y:
+                bounded_y = max_y
+            if surface.x == bounded_x and surface.y == bounded_y:
+                return
+            surface.x = bounded_x
+            surface.y = bounded_y
             surface.dirty = true
             self.surfaces[i] = surface
 
