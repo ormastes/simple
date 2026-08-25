@@ -474,3 +474,8 @@ passing placeholder.
     `handle != 0` semantics. Next type/tag the canonical Lyon contracts and
     replace dummy resource/zero/empty wrapper failures with Results where the
     API is fallible; exact signed artifact admission remains zero.
+89. Keep all 49 canonical Lyon declarations explicitly tagged `unsafe(ffi)`;
+    the tags document raw ownership but do not promote the wrappers to safe or
+    verified. Migrate resource construction, tuple/count access, and array
+    extraction to typed failure without extra provider calls or copies, then
+    bind the exact provider artifact to signed admission evidence.

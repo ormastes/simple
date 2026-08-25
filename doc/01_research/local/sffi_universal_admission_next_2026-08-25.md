@@ -812,3 +812,24 @@ facade; it passed.
 Based on the authoritative inventory immediately before this consolidation,
 the estimate is 11,870 `rt_*` declaration rows / 3,135 symbols, 1,210 tagged,
 10,402 untouched, and zero exact-artifact verified-and-signed.
+
+## Graphics2D raw-contract ownership checkpoint
+
+All 49 declarations in the canonical Lyon owner now carry an adjacent,
+operation-specific `@unsafe(... capabilities: [ffi])` contract. The annotations
+identify handle, tuple, array, text, count, and failure-sentinel ABI families;
+they do not claim semantic verification or signed-artifact admission. The owner
+ratchet now requires all 49 declarations to remain explicitly tagged.
+
+This is compile-time metadata only. It changes no foreign signature, wrapper,
+branch, lookup, allocation, copy, data layout, or provider call. The owner
+ratchet and diff whitespace check passed. The unavailable production
+self-hosted runtime means no new Simple compiler or optimizer claim is made.
+
+Relative to the preceding authoritative inventory, totals remain 11,870
+`rt_*` declaration rows / 3,135 symbols. Unsafe-tagged rows increase from 1,210
+to 1,259, untouched rows decrease from 10,402 to 10,353, and exact-artifact
+verified-and-signed admission remains zero. The existing wrappers still encode
+some invalid-handle failures as dummy resources, zeros, empty arrays, or
+booleans; those APIs require typed failure migration before they can be called
+safe.
