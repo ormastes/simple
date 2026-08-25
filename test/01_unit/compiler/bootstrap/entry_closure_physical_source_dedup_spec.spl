@@ -111,13 +111,24 @@ describe "entry-closure physical source deduplication":
         expect(loading).to_not_contain("bucket.starts_with(marker)")
         expect(loading).to_not_contain("for existing in bucket.split(\"\\n\")")
 
-    it "hashes every UTF-8 byte without indexed text ord lowering":
+    it "hashes exact UTF-8 bytes without allocating a byte array or slice":
         val hashmap = rt_file_read_text("src/compiler/10.frontend/core/interpreter/hashmap.spl") ?? ""
 
-        expect(hm_hash_text("a") == hm_hash_text("g")).to_be(false)
-        expect(hashmap).to_contain("val bytes = s.bytes()")
-        expect(hashmap).to_contain("h = h xor (bytes[i] as i64)")
+        expect(hm_hash_text("")).to_equal(0)
+        expect(hm_hash_text("a")).to_equal(5808556873153909620)
+        expect(hm_hash_text("hello")).to_equal(6615550055289275125)
+        expect(hm_hash_text("café")).to_equal(5253592154431032713)
+        expect(hashmap).to_contain("val slen = s.len()")
+        expect(hashmap).to_contain("if slen == 0: return 0")
+        expect(hashmap).to_contain("while i < slen:")
+        expect(hashmap).to_contain("h = h xor (s.byte_at(i) as i64)")
+        expect(hashmap).to_contain("i = i + 1")
+        expect(hashmap.split("s.byte_at(i)").len() - 1).to_equal(1)
+        expect(hashmap).to_not_contain("s.bytes()")
+        expect(hashmap).to_not_contain("s.substring(")
+        expect(hashmap).to_not_contain("s.slice(")
         expect(hashmap).to_not_contain("s[i].ord()")
+        expect(hashmap).to_contain("if h < 0: return 0 - h")
 
     it "registers every logical alias from one cached module result":
         val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_parsing.spl") ?? ""
