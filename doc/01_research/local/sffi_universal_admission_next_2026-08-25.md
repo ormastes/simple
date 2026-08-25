@@ -721,7 +721,8 @@ implementation: hosted code returned synthetic handles, empty metadata,
 unconditional release success, or guaranteed failure, while SimpleOS exported
 equivalent unavailable stubs. They are removed from the canonical facade,
 hosted exports, compiler runtime registry, and SimpleOS. The now-unused atomic
-fake-handle generator is also removed.
+fake-handle generator is also removed. Application, async, and library-root
+compatibility facades no longer re-export the removed types or functions.
 
 Connection info no longer calls a fabricated peer-certificate handle path;
 `peer_cert_subject` is explicitly optional and currently `nil`. Removing these
