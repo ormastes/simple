@@ -150,7 +150,7 @@ impl DynLib:
     static fn open(path: text) -> DynLib:
         val h = spl_dlopen(path)
         if h <= 0:
-            return DynLib(handle: 0, path: path)
+            panic("E-SFFI-001: failed to load provider: {path}")
         DynLib(handle: h, path: path)
 
     # Look up a symbol by name. Returns 0 if not found.
@@ -306,12 +306,13 @@ impl DynLoader:
         if self.libs.contains(path):
             true
         else:
-            val lib = DynLib.open(path)
-            if lib.handle <= 0:
-                return false
-            self.libs[path] = lib
-            _dyn_loader_libs[path] = lib
-            true
+            match DynLib.load(path):
+                case Some(lib):
+                    self.libs[path] = lib
+                    _dyn_loader_libs[path] = lib
+                    true
+                case nil:
+                    false
 
     # Fail-closed load path for callers migrating away from boolean/sentinel
     # results. This caches exactly the same DynLib value as ensure_loaded and
@@ -339,42 +340,42 @@ impl DynLoader:
             nil
 
     # Call with 0 arguments, loading the library if needed.
-    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
+    @unsafe(reason: "legacy untyped dispatch is fail-closed but cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
     me call0(path: text, func: text) -> i64:
         if not self.ensure_loaded(path):
-            return 0
+            panic("E-SFFI-001: failed to load provider: {path}")
         val lib = self.libs[path]
         lib.call0(func)
 
     # Call with 1 argument.
-    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
+    @unsafe(reason: "legacy untyped dispatch is fail-closed but cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
     me call1(path: text, func: text, a0: i64) -> i64:
         if not self.ensure_loaded(path):
-            return 0
+            panic("E-SFFI-001: failed to load provider: {path}")
         val lib = self.libs[path]
         lib.call1(func, a0)
 
     # Call with 2 arguments.
-    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
+    @unsafe(reason: "legacy untyped dispatch is fail-closed but cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
     me call2(path: text, func: text, a0: i64, a1: i64) -> i64:
         if not self.ensure_loaded(path):
-            return 0
+            panic("E-SFFI-001: failed to load provider: {path}")
         val lib = self.libs[path]
         lib.call2(func, a0, a1)
 
     # Call with 3 arguments.
-    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
+    @unsafe(reason: "legacy untyped dispatch is fail-closed but cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
     me call3(path: text, func: text, a0: i64, a1: i64, a2: i64) -> i64:
         if not self.ensure_loaded(path):
-            return 0
+            panic("E-SFFI-001: failed to load provider: {path}")
         val lib = self.libs[path]
         lib.call3(func, a0, a1, a2)
 
     # General dispatch with pre-built args array.
-    @unsafe(reason: "legacy untyped dispatch fabricates zero on load or symbol failure", capabilities: [ffi, raw_ptr])
+    @unsafe(reason: "legacy untyped dispatch is fail-closed but cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
     me call(path: text, func: text, args: [i64]) -> i64:
         if not self.ensure_loaded(path):
-            return 0
+            panic("E-SFFI-001: failed to load provider: {path}")
         val lib = self.libs[path]
         lib.call_n(func, args)
 
@@ -438,14 +439,14 @@ fn sffi_lib_path(prefix: text) -> text:
 #
 # Example:
 #   sffi_call("rt_torch_available", [])
-@unsafe(reason: "legacy convention dispatch fabricates zero on malformed names or provider failure", capabilities: [ffi, raw_ptr])
+@unsafe(reason: "legacy convention dispatch is fail-closed but cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
 fn sffi_call(func_name: text, args: [i64]) -> i64:
     val parts = func_name.split("_")
     if parts.len() < 2:
-        return 0
+        panic("E-SFFI-003: malformed foreign symbol name: {func_name}")
     val prefix = parts[1]
     if prefix == "":
-        return 0
+        panic("E-SFFI-003: malformed foreign symbol name: {func_name}")
     val lib_path = sffi_lib_path(prefix)
     var loader = DynLoader.instance()
     loader.call(lib_path, func_name, args)

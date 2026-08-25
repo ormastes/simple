@@ -38,6 +38,14 @@ validator runs only on fallthrough, so valid function return paths gain no
 branch, allocation, or dispatch. Self-hosted behavioral verification remains
 blocked by the unavailable admitted current-source runtime.
 
+Checkpoint: the canonical dynamic loader no longer returns an invalid
+`DynLib(handle: 0)` from `open`, and legacy singleton dispatch no longer turns
+provider or malformed-name failures into integer zero. Optional load remains
+the explicit ordinary-unavailability API, so boolean availability callers keep
+their semantics without conflating a valid foreign zero with bridge failure.
+Candidate probing still performs one load attempt per candidate and admitted
+hot calls gain no additional lookup or allocation.
+
 ### 3. Complete resolved-HIR inventory
 
 Checkpoint: the bounded source ledgers now report 12,128 `rt_*` declaration
