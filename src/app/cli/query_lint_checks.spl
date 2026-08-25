@@ -508,25 +508,68 @@ fn _is_any_assign_ret(trimmed: text) -> bool:
 struct QueryIndentSuccessorIndex:
     last_statement: [bool]
     next_same_or_shallower: [i64]
+    is_return_statement: [bool]
+    first_executable_column: [i64]
+    first_token_end_column: [i64]
+
+fn _query_first_token_end_column(line: text, first_code_column: i64) -> i64:
+    if first_code_column <= 0:
+        return 0
+    var i = first_code_column - 1
+    val n = line.len()
+    while i < n:
+        val byte = line.byte_at(i)
+        val is_ident = ((byte >= 48 and byte <= 57) or
+            (byte >= 65 and byte <= 90) or byte == 95 or
+            (byte >= 97 and byte <= 122))
+        if not is_ident:
+            break
+        i = i + 1
+    if i == first_code_column - 1:
+        return first_code_column + 1
+    i + 1
+
+fn _query_is_return_code_line(
+    line: text, first_code_column: i64, return_column: i64
+) -> bool:
+    if first_code_column <= 0 or return_column != first_code_column:
+        return false
+    val after = first_code_column - 1 + 6
+    if after >= line.len():
+        return true
+    val byte = line.byte_at(after)
+    byte == 32
 
 fn _query_indent_successor_index(lines: [text]) -> QueryIndentSuccessorIndex:
-    """Index block successors for each non-empty source line.
+    """Index block successors for each executable source line.
 
-    A reverse monotonic stack exposes the first later non-empty line at the
-    same or a shallower indent. Both RET001 and UNREACH001 can consume these
-    facts without scanning the suffix once per candidate.
+    One stateful lexical projection excludes comments and string payload while
+    retaining executable string openers and original columns. A reverse stack then
+    exposes the first later executable line at the same or a shallower indent.
+    RET001 and UNREACH001 share these facts without suffix rescans.
     """
+    val lexical = code_pattern_line_facts(lines, ["return"])
     var last_statement: [bool] = []
     var next_same_or_shallower: [i64] = []
+    var is_return_statement: [bool] = []
+    var first_executable_column: [i64] = []
+    var first_token_end_column: [i64] = []
     var fill = 0
     while fill < lines.len():
         last_statement.push(true)
         next_same_or_shallower.push(-1)
+        val executable_column = lexical[fill].first_executable_column
+        first_executable_column.push(executable_column)
+        first_token_end_column.push(
+            _query_first_token_end_column(lines[fill], executable_column))
+        is_return_statement.push(_query_is_return_code_line(
+            lines[fill], lexical[fill].first_code_column,
+            lexical[fill].pattern_columns[0]))
         fill = fill + 1
     var stack: [i64] = []
     var line_index = lines.len() - 1
     while line_index >= 0:
-        if lines[line_index].trim() == "":
+        if first_executable_column[line_index] <= 0:
             line_index = line_index - 1
             continue
         val indent = _count_indent(lines[line_index])
@@ -539,7 +582,9 @@ fn _query_indent_successor_index(lines: [text]) -> QueryIndentSuccessorIndex:
             last_statement[line_index] = _count_indent(lines[successor]) < indent
         stack.push(line_index)
         line_index = line_index - 1
-    QueryIndentSuccessorIndex(last_statement, next_same_or_shallower)
+    QueryIndentSuccessorIndex(
+        last_statement, next_same_or_shallower, is_return_statement,
+        first_executable_column, first_token_end_column)
 
 fn _query_last_statement_flags(lines: [text]) -> [bool]:
     _query_indent_successor_index(lines).last_statement

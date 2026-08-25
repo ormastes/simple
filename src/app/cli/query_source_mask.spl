@@ -98,17 +98,24 @@ fn first_code_pattern_columns(lines: [text], pattern: text) -> [i64]:
     columns
 
 struct CodePatternLineFacts:
+    first_executable_column: i64
     first_code_column: i64
     pattern_columns: [i64]
 
 fn code_pattern_line_facts(lines: [text], patterns: [text]) -> [CodePatternLineFacts]:
-    """Collect first code-only columns for bounded patterns in one source scan."""
+    """Collect executable-token and code-only pattern columns in one scan.
+
+    String openers are executable tokens, but their payload is excluded from
+    first_code_column and pattern matching. Triple-string interior and a
+    closing-only delimiter line have no executable token.
+    """
     var result: [CodePatternLineFacts] = []
     var in_triple_string = false
     for line in lines:
         var columns: [i64] = []
         for _pattern in patterns:
             columns.push(0)
+        var first_executable_column = 0
         var first_code_column = 0
         var i = 0
         val n = line.len()
@@ -125,6 +132,11 @@ fn code_pattern_line_facts(lines: [text], patterns: [text]) -> [CodePatternLineF
             val byte = line.byte_at(i)
             if byte == 35:
                 break
+            # A string's payload is not searchable code, but its opening quote
+            # is still an executable expression token. Triple-string interior
+            # and a delimiter that only closes an earlier line stay non-code.
+            if first_executable_column == 0 and byte != 32 and byte != 9:
+                first_executable_column = i + 1
             if i + 2 < n and byte == 34 and
                 line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
                 in_triple_string = true
@@ -150,5 +162,6 @@ fn code_pattern_line_facts(lines: [text], patterns: [text]) -> [CodePatternLineF
                         columns[pattern_i] = i + 1
                 pattern_i = pattern_i + 1
             i = i + 1
-        result.push(CodePatternLineFacts(first_code_column, columns))
+        result.push(CodePatternLineFacts(
+            first_executable_column, first_code_column, columns))
     result

@@ -3598,6 +3598,24 @@ fragment storage proportional to escape runs or interpolation payload. Raw
 strings, invalid-fragment fallback, expression ordering, and MIR interpolation
 ownership are unchanged. No execution or runtime/RSS measurement was run.
 
+# 2026-08-24 follow-up: UNREACH001 executable successors
+
+The indexed UNREACH001/RET001 successor pass skipped only blank physical lines.
+Comments and triple-string payload remained on its indentation stack, while the
+UNREACH001 producer recognized `return` from trimmed raw text. A comment could
+therefore become the reported unreachable statement, and docstring examples
+could originate false warnings. JSON always used column 1 point spans even for
+indented code.
+
+The successor owner now consumes one stateful code-only projection that tracks
+ordinary strings, escapes, comments, and triple strings while preserving source
+columns. Only executable lines enter the reverse monotonic stack. Return facts
+require the lexical `return` match to equal the first code column and preserve
+the former end-or-space boundary. Both live lint and collected query-check JSON
+use the same successor index and exact first-token span. Work remains O(N+L)
+with O(L) scalar arrays/stack and no masked source copy or suffix rescans. No
+execution or runtime/RSS measurement was run.
+
 # 2026-08-24 follow-up: doc-coverage repeated traversal removal
 
 The live self-hosted doc-coverage path ran three recursive grep pipelines for

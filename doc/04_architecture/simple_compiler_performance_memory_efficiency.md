@@ -908,3 +908,12 @@ brace return the same value; brace-bearing strings enter interpolation parsing;
 and only a plain result containing doubled braces enters decoding. Decoder and
 interpolation-body builders own ordered fragments and publish text through one
 final join. MIR remains the owner of decoding when real interpolation exists.
+
+# Query executable-successor ownership
+
+`QueryIndentSuccessorIndex` owns executable-line identity, lexical return flags,
+first-executable/token-end columns, last-statement flags, and the next same-or-shallower
+executable line. Its sole lexical input is `code_pattern_line_facts`; consumers
+must not reinterpret trimmed raw text. Live lint and collected query-check JSON
+share the immutable index. RET001 may consume last-statement facts, while
+UNREACH001 additionally consumes return, successor, and span facts.

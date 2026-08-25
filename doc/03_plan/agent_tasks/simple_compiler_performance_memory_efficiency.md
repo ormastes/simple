@@ -1746,6 +1746,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Static target: remove O(S²) and O(K²) copied bytes; no execution or
   performance/RSS measurement was run under the user override.
 
+# Completed tranche: UNREACH001 lexical successors (2026-08-24)
+
+- Extended the shared successor index with executable-line, lexical-return, and
+  exact token-span facts.
+- Excluded comments, strings, and triple-string payload from return origins and
+  successor selection.
+- Routed live query lint and collected query-check JSON through identical facts.
+- Preserved the linear reverse-stack algorithm and RET001 fact reuse.
+- Added paired false-positive, successor, exact-span, index, and routing evidence
+  plus a canonical manual.
+- No manual execution or timing/RSS measurement was run under the user override.
+
 # Completed tranche: MIR local binding index (2026-08-24)
 
 - Retained the staged-native-safe parallel binding arrays as authority.

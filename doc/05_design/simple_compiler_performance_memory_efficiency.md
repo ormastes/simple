@@ -1227,3 +1227,17 @@ single-brace escape fragments, advances by two for a matched escape, appends the
 final suffix, and joins once. `flat_bridge_build_string_interps` replaces its
 growing `inner` prefix with fragments joined only when a top-level placeholder
 closes. Parse failure still returns an empty interpolation list.
+
+# UNREACH001 lexical-successor design
+
+`_query_indent_successor_index` requests the bounded `return` pattern during one
+stateful lexical scan. It derives a return only when that match begins at the
+first executable column and is followed by end-of-line or the historically
+accepted ASCII space. String payload remains non-searchable, but an opening
+ordinary/triple quote is separately recorded as an executable expression token;
+triple-string interior and closing-only lines remain non-code. Non-code lines
+keep default last-statement/miss values and never enter the reverse indentation
+stack. Executable lines record the first
+ASCII identifier/number token's exclusive end column; punctuation receives a
+one-byte span. Both diagnostic routes report the selected successor's original
+line and token columns.
