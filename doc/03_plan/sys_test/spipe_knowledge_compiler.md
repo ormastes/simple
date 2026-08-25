@@ -1098,6 +1098,50 @@ and its own closed-schema vectors; this slice does not define one.
 | `W4-SRCH-38` Stage 4 evidence separation | system evidence binds the exact current pure-Simple Stage 4 executable, SHA-256, source revision, provenance receipt, fixture, and checker; Rust seed, bootstrap-only, stale full CLI, source-only, missing extern, or provenance mismatch is `NOT EVIDENCE`, even when a narrow unit test is green | REQ-SPKC-013–014; NFR-SPKC-003, 020–021, 025 |
 | `W4-SRCH-39` Production controlled-work closure | the import-safe proof corpus and production interfaces agree on canonical SHA/JSON bytes and stop schedules, but only production `ProviderByteStreamPort -> ProviderSessionOwnerV1 -> ProviderWorkMachineV1 -> ProviderFrameEncoderV1` execution under the admitted Stage 4 runtime can PASS; standalone fixture success with an importing-spec/compiler failure remains FAIL | REQ-SPKC-011, 013–014; NFR-SPKC-001, 011–012, 020–022, 025 |
 
+Focused `W4-SRCH-30` canonical-decoder acceptance cases are frozen as follows:
+
+1. A coalesced nested payload makes each `push` report an exact consumed prefix
+   and at most one event; an unconsumed suffix is resubmitted. A pending event
+   blocks further progress with `consumed_bytes = 0`, and moving it permits the
+   next event. Concatenated consumed prefixes cover the payload once. In
+   particular, a primitive immediately followed by `]` or `}` produces the
+   primitive event and closing-container event from separate consumed prefixes,
+   without `event_queue_full`, double emission, replay, or consuming the closer
+   behind the first event.
+2. Every closed kind (`start_object`, `end_object`, `start_array`, `end_array`,
+   `key`, `string`, `integer`, `boolean`, `null`) has its exact half-open span.
+   Empty string, integer zero, and boolean false prove nullable field validity
+   cannot be inferred from sentinel values.
+3. Container roots prove depth one, sixteen, and rejection before seventeen;
+   primitive string/integer/boolean/null roots prove depth zero and canonical
+   decoder success followed by envelope-schema rejection. Nested object/array
+   fixtures prove object pairs and array elements charge once only after their
+   value completes, including container-valued members.
+4. The escape golden covers `\"`, `\\`, `\b`, `\t`, `\n`, `\f`, `\r`, and
+   lowercase `\u00xx` for every remaining control. `\/`, uppercase hex,
+   unnecessary scalar escapes, surrogate escapes, whitespace, and non-shortest
+   UTF-8 reject as `noncanonical_json`/`invalid_utf8` at the proper boundary.
+   `[1,]` and `{"a":1,}` reject the trailing comma, while
+   `{"":1,"":2}` rejects the duplicate empty key; an empty prior key may
+   not be mistaken for an uninitialized key-order sentinel.
+5. Pinned UCD-17 NFC vectors cover composed/decomposed and combining-boundary
+   splits. Non-NFC strings reject; normalized-equal keys are duplicates; key
+   order uses unsigned UTF-8 bytes, including bytes at/above `0x80`, independent
+   of host collation.
+6. A scripted split matrix proves exactly one raw cursor and one SHA owner:
+   each accepted prefix changes both once, pending-event calls change neither,
+   and final `payload_sha256` equals the exact raw canonical bytes. The result
+   has only `payload_sha256`, `raw_bytes`, `token_count`,
+   `aggregate_members`, and `maximum_depth` with exact values.
+7. Incomplete input, limit/range/checkpoint/SHA failure, and successful finish
+   each terminalize the decoder. Every later `push`, `next_event`, or `finish`
+   returns the original latched failure or `decoder_complete`, consumes zero,
+   emits nothing, and never publishes a second digest.
+
+Canonical JSON implementation and these focused cases are **in progress**;
+none is marked PASS by this design update. Existing request-control and UTF-8
+PASS evidence and the qualified SHA `W4-SRCH-31` FAIL/status below are unchanged.
+
 #### 13.9.3 Planned artifacts and scenario allocation
 
 Current acceptance status: the work-control prerequisite is accepted and

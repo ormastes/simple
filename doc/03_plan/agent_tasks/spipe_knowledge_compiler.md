@@ -93,6 +93,27 @@ each completed object name/value pair and each completed array element counts
 once. Implementations may configure stricter per-operation limits, never wider
 ones. These and the queue/checkpoint limits remain host-local under protocol
 1.0 as stated above.
+
+The Wave 4S-C JSON interface is also frozen before implementation fan-out.
+`ProviderCanonicalJsonDecoderV1.push` consumes a reported prefix and creates at
+most one owned pending event; the caller must move it through `next_event`
+before more bytes can be consumed. Events use only `start_object`,
+`end_object`, `start_array`, `end_array`, `key`, `string`, `integer`,
+`boolean`, and `null`, with exact half-open payload spans and nullable fields
+whose validity is kind-specific. Container depth counts open containers (root
+container one; primitive root zero), while aggregate membership counts a
+completed object pair or array element exactly once and excludes the root.
+The canonical decoder accepts a primitive root, but the envelope builder
+requires the protocol object. Strings/keys must already be UCD-17.0.0 NFC;
+keys are strictly increasing by unsigned UTF-8 bytes. The exact escape table,
+single raw-byte/SHA cursor, terminal failure/finish rules, and five result
+fields are normative in the focused architecture/detail design and cannot be
+replaced by a queued-event or whole-tree decoder.
+The focused oracle must include primitive-plus-closer two-prefix behavior,
+trailing-comma rejection for `[1,]` and `{"a":1,}`, and duplicate-empty-key
+rejection for `{"":1,"":2}`; none may be hidden by an empty-string sentinel,
+queued double emission, or `event_queue_full`.
+
 - Mutations: `RefactorPlan`, `TransactionReceipt`, `RebalanceProposal`, `PromotionCandidate`. `RefactorPlan` is the only mutation-plan contract name.
 - Protocol operations: `spipe_list`, `spipe_read`, `spipe_search`, `spipe_resolve`, `spipe_trace`, `spipe_diagnostics`.
 - Phase exchange: the task/research/architecture/spec/implement/refactor/verify/ship UID input/output records used by Wave 7. Their contracts freeze in Wave 0; harness generation remains a separate Wave 9 deliverable.
@@ -226,6 +247,13 @@ full-versus-bounded parity plus a bounded cycle-3 guard-probe PASS at 1.26 s/
 43,852 KiB. The full qualified 1-MiB `W4-SRCH-31` oracle remains `FAIL`; the
 merge owner therefore keeps Wave 4S-C open pending SHA and integrated
 production evidence.
+
+Canonical JSON implementation is **in progress**. Existing source is not a
+PASS claim until it matches the frozen single-pending-event contract, nullable
+field validity, exact spans/NFC/key ordering/escape rules, primitive-root and
+member/depth accounting, one SHA/cursor, and terminal API behavior, and the
+focused cases execute post-fix. This status does not change or supersede the
+SHA evidence paragraph above.
 
 Budget admission in this wave uses the exact
 `ProviderBudgetPort.charge_all(charges: [ProviderBudgetChargeV1])` owner

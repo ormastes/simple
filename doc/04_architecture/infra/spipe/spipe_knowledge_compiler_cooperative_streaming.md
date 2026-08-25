@@ -324,6 +324,48 @@ schemas, maximum depth, token/member/element/string/decoded-byte limits, and
 the declared frame length while consuming chunks. It emits typed request
 records rather than an authority-bearing `any` tree.
 
+The streaming contract is deliberately single-event. Each decoder `push`
+consumes a prefix of the offered half-open byte slice and returns its exact
+`consumed_bytes` plus at most one pending event. The decoder owns that pending
+event until `next_event` moves it to the caller; while an event is pending, a
+later `push` consumes zero bytes and cannot advance UTF-8, JSON, SHA, budget, or
+checkpoint state. The closed event kinds are `start_object`, `end_object`,
+`start_array`, `end_array`, `key`, `string`, `integer`, `boolean`, and `null`.
+Every event span is `[byte_start, byte_end)` in canonical payload bytes. Only
+`key` populates `key`; only `string` populates `text_value`; only
+`integer` populates `integer_value`; and only `boolean` populates
+`boolean_value`. All other value fields are absent, not sentinel-filled.
+
+Container depth counts simultaneously open objects/arrays: a root container
+opens depth one, its nested container opens depth two, and a primitive root has
+depth zero. Aggregate membership counts each object pair only after its value
+completes and each array element only after its value completes; containers do
+not add a second member charge and a root value is not a member. The canonical
+decoder accepts exactly one object, array, string, integer, boolean, or null as
+its JSON root; `ProviderEnvelopeDecoderV1` separately requires the protocol
+root object. This separation keeps JSON recognition deterministic without
+letting a primitive become a trusted request.
+
+Strings and keys must already be NFC according to the pinned UCD 17.0.0 tables;
+the decoder never delegates normalization or comparison to the host runtime.
+Object-key order is strict lexicographic order over the unsigned UTF-8 bytes of
+the NFC key, and normalized equality is a duplicate. The exact escape profile
+is: `\"`, `\\`, `\b`, `\t`, `\n`, `\f`, and `\r`; the remaining controls use
+lowercase `\u00xx`; U+0020 and above are literal shortest-form UTF-8 except
+quotation mark and reverse solidus; surrogate escapes and escaping any other
+scalar are noncanonical.
+
+One authoritative raw-byte cursor feeds one owned `Sha256StreamV1`; a byte
+prefix is consumed, budgeted, parsed, and hashed exactly once. There is no
+parallel JSON cursor, reconstructed-text hash, or second canonical payload
+copy. `finish` succeeds only after the declared final byte, one complete root,
+an empty container stack, no pending event, and successful SHA finalization.
+Success and the first failure are terminal: every later `push`, `next_event`,
+or `finish` returns the latched `decoder_complete` or original failure and can
+publish neither another event nor a digest. The successful result is exactly
+`payload_sha256`, `raw_bytes`, `token_count`, `aggregate_members`, and
+`maximum_depth`.
+
 The protocol-1.0 provider ceiling is exactly 16 simultaneously open object or
 array containers, 262,144 lexical JSON tokens, and 65,536 aggregate members.
 Each completed object name/value pair and each completed array element consumes

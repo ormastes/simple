@@ -230,12 +230,24 @@ protocol minor and new closed-schema vectors.
 ```simple
 struct ProviderJsonEventV1:
     kind: text
-    key: text
-    text_value: text
-    integer_value: i64
-    boolean_value: bool
+    key: text?
+    text_value: text?
+    integer_value: i64?
+    boolean_value: bool?
     byte_start: i64
     byte_end: i64
+
+struct ProviderDecodeStateV1:
+    kind: text
+    consumed_bytes: i64
+    event_pending: bool
+
+struct ProviderCanonicalJsonResultV1:
+    payload_sha256: text
+    raw_bytes: i64
+    token_count: i64
+    aggregate_members: i64
+    maximum_depth: i64
 
 class ProviderUtf8DecoderV1:
     static fn configured() -> ProviderUtf8DecoderV1
@@ -252,7 +264,7 @@ class ProviderCanonicalJsonDecoderV1:
             budget: ProviderBudgetPort,
             checkpoint: ProviderCheckpointPort) \
         -> Result<ProviderDecodeStateV1, text>
-    me next_event() -> ProviderJsonEventV1?
+    me next_event() -> Result<ProviderJsonEventV1?, text>
     me finish() -> Result<ProviderCanonicalJsonResultV1, text>
 
 class ProviderEnvelopeDecoderV1:
@@ -277,6 +289,63 @@ key bytes, and schema cursor. It rejects:
 - duplicate or non-increasing object keys;
 - extra/missing keys, excess depth/tokens/members/elements/decoded bytes;
 - bytes after the single root value or before the declared frame end.
+
+`push` consumes only a prefix of `[offset, offset + count)` and reports that
+prefix in `consumed_bytes`; it emits at most one event. The closed state kinds
+are `need_input`, `progressed`, `event`, and `complete`. When the result is
+`event`, the decoder owns exactly one pending event. `next_event` moves and
+clears it. Until that move, `push` returns `consumed_bytes = 0` without touching
+the raw cursor, SHA, UTF-8 carry, budget, or checkpoint. A caller resubmits the
+unconsumed suffix; `final_chunk` applies only after the whole offered final
+slice has been consumed.
+
+A completed primitive adjacent to `]` or `}` is an explicit two-step boundary:
+the first `push` prefix ends with the primitive event, and after that event is
+moved the resubmitted suffix produces the closing-container event. The decoder
+must not consume the closer speculatively, queue both events, report
+`event_queue_full`, or emit either event twice. Likewise, container grammar
+rejects `[1,]` and `{"a":1,}`. Key-order state represents absence separately
+from key bytes, so `{"":1,"":2}` is a duplicate-key error rather than two
+unconditionally admitted empty keys.
+
+The event-kind set is closed to `start_object`, `end_object`, `start_array`,
+`end_array`, `key`, `string`, `integer`, `boolean`, and `null`. Spans are exact
+half-open canonical-payload offsets `[byte_start, byte_end)`: container spans
+cover their one punctuation byte, and key/string spans include their opening
+and closing quotes. Field validity is closed: `key` is present only for a
+`key` event; `text_value` is present only for `string`;
+`integer_value` only for `integer`; and `boolean_value` only for `boolean`.
+Every non-applicable field is `nil`; empty string, zero, and `false` remain
+valid values and are never field-absence sentinels.
+
+Depth is the number of simultaneously open object/array containers. A root
+container has depth one, nested containers increment it, and any primitive root
+has depth zero. One object member is charged only when its complete value
+finishes; one array member is charged only when its complete element finishes.
+Opening/closing a container does not add another member, and the root is not a
+member. The JSON decoder accepts exactly one root of any closed JSON kind,
+including a primitive. The envelope builder alone rejects a non-object root as
+an invalid protocol schema after canonical decoding.
+
+String acceptance uses only pinned UCD 17.0.0 NFC data. The decoded scalar
+sequence must already be NFC; the decoder rejects rather than silently rewrites
+it, and host Unicode tables are not consulted. Keys compare in strict unsigned
+UTF-8 byte order after that NFC check; equality is a duplicate. The canonical
+escape table is exact: quotation mark `\"`, reverse solidus `\\`, U+0008
+`\b`, U+0009 `\t`, U+000A `\n`, U+000C `\f`, and U+000D `\r`. Other
+U+0000–U+001F controls use lowercase `\u00xx`. All remaining scalars are raw
+shortest-form UTF-8; `\/`, uppercase hex, unnecessary `\u` escapes, and
+surrogate escapes are rejected.
+
+The decoder owns one raw-byte cursor and one `Sha256StreamV1`. It hashes exactly
+the consumed canonical prefix once and never hashes reconstructed text or
+maintains a parallel canonical cursor. `finish` is legal only after final input,
+a complete single root, an empty stack, and no pending event. It returns exactly
+`payload_sha256`, `raw_bytes`, `token_count`, `aggregate_members`, and
+`maximum_depth`. Successful finish latches `decoder_complete`; any failure
+latches its first exact reason. All later `push`, `next_event`, and `finish`
+calls return that terminal reason and cannot consume bytes, emit events, or
+publish a digest.
 
 Typed operation builders consume events and hold only bounded fields. They do
 not retain a generic `any` graph. Object schemas provide canonical field order,
