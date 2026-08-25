@@ -1893,3 +1893,23 @@ global and remains unsafe. Estimated repository totals remain 11,627
 declarations / 3,141 symbols. Unsafe-tagged rows increase from 2,421 to 2,443,
 untouched rows decrease from 9,027 to 9,005, and exact-artifact
 verified-and-signed admission remains zero.
+
+## SDL2 event-consumer authority checkpoint
+
+The canonical SDL2 facade already tagged its 65 raw declarations, but two
+production consumers bypassed its lexical boundary for 29 cached-event reads:
+the web UI translator and hosted compositor input backend. Each read is now
+inside a minimal `unsafe(ffi)` scope. Safe state updates, event construction,
+button interpretation, and key translation remain outside those scopes.
+
+The event-family audit now covers both consumers as well as the provider. It
+pins the cached detail accessors as O(1), allocation-free, lock-free, and free
+of an extra poll. No event gains a provider call, allocation, ownership copy,
+lookup, lock, hash, signature operation, or dispatch layer.
+
+The same source census before and after the edit measured the SDL2 family
+moving from 107 explicit / 29 missing authority call sites to 136 explicit /
+zero missing. Repository-wide missing authority fell from 18,339 to 18,310;
+production missing authority fell from 10,169 to 10,140. Declaration totals
+remain 11,627, with 2,443 unsafe-tagged and 9,005 untouched declaration rows.
+Exact-artifact verified-and-signed admission remains zero.
