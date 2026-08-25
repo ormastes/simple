@@ -1,0 +1,109 @@
+"""
+## Purpose and audience
+Purpose: Pin that `compiler.backend.linker.smf_writer` never re-declares a
+top-level `val` that `compiler.backend.linker.smf_header` (which it imports)
+already declares. Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-COMPILER-LINKER-001
+doc/01_research/local/REQ-COMPILER-LINKER-001.md
+doc/03_plan/sys_test/REQ-COMPILER-LINKER-001.md
+doc/04_architecture/REQ-COMPILER-LINKER-001.md
+doc/05_design/REQ-COMPILER-LINKER-001.md
+"""
+# @req: REQ-COMPILER-LINKER-001
+
+# Bug: native_build_broken_at_tip_cannot_convert_array_to_int_2026-08-25
+#
+# `compiler.backend.linker.smf_writer` declared `val SMF_MAGIC: i64 = 0x534D4600`
+# while `compiler.backend.linker.smf_header` -- which that same file imports --
+# declares `val SMF_MAGIC: [u8] = [83, 77, 70, 0]`. Two same-named top-level
+# `val`s in ONE compile closure resolve by last-definition-wins, so an i64
+# consumer could receive the ARRAY and die in the seed interpreter's `as_int()`
+# with `type mismatch: cannot convert array to int` (value_impl.rs:152).
+#
+# Both duplicated copies in smf_writer.spl were DEAD -- declared, never
+# referenced -- so they cost nothing and broke everything.
+#
+# Consequence: 37d046a71b1 imported this module into the driver's default
+# compile closure for the first time, and from that commit until the fix EVERY
+# `native-build` in the repo failed, including a three-line hello world with no
+# arrays in it. The commit did not introduce the defect; it EXPOSED a latent one.
+#
+# This is a source-fact spec on purpose: the failure is a property of which
+# declarations coexist in a closure, which is exactly what the text pins. The
+# end-to-end behaviour is fenced separately by
+# scripts/check/check-native-build-full-closure-hello-world.shs.
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+use std.spec.step
+
+val WRITER_PATH: text = "src/compiler/70.backend/linker/smf_writer.spl"
+val HEADER_PATH: text = "src/compiler/70.backend/linker/smf_header.spl"
+
+"""Collect the names of every top-level `val` declared in a source text."""
+fn toplevel_val_names(source: text) -> [text]:
+    var names: [text] = []
+    for raw_line in source.split("\n"):
+        var line = raw_line
+        if line.starts_with("pub val "):
+            line = line.substring(4, line.len())
+        if not line.starts_with("val "):
+            continue
+        val rest = line.substring(4, line.len())
+        var name = rest
+        val colon = rest.index_of(":")
+        val equals = rest.index_of("=")
+        var cut = -1
+        if colon >= 0:
+            cut = colon
+        if equals >= 0 and (cut < 0 or equals < cut):
+            cut = equals
+        if cut >= 0:
+            name = rest.substring(0, cut)
+        name = name.trim()
+        if name != "":
+            names = names.push(name)
+    names
+
+describe "linker smf_writer top-level val declarations":
+    it "does not re-declare SMF_MAGIC, which smf_header already owns as [u8]":
+        # @req: REQ-COMPILER-LINKER-001
+        step("Verify: smf_header owns SMF_MAGIC and declares it as a byte array")
+        val header = read_source(HEADER_PATH)
+        expect(header.contains("val SMF_MAGIC: [u8]")).to_equal(true)
+
+        step("Verify: smf_writer does not declare SMF_MAGIC at all")
+        val writer = read_source(WRITER_PATH)
+        # Pre-fix this line was present as `val SMF_MAGIC: i64 = 0x534D4600`.
+        expect(writer.contains("val SMF_MAGIC")).to_equal(false)
+
+    it "shares no top-level val name with the smf_header module it imports":
+        # @req: REQ-COMPILER-LINKER-001
+        step("Verify: smf_writer imports smf_header, so both share one closure")
+        val writer = read_source(WRITER_PATH)
+        expect(writer.contains("use compiler.backend.linker.smf_header")).to_equal(true)
+
+        step("Verify: the two modules declare disjoint top-level val names")
+        val header_names = toplevel_val_names(read_source(HEADER_PATH))
+        val writer_names = toplevel_val_names(writer)
+        expect(header_names.len()).to_be_greater_than(0)
+        expect(writer_names.len()).to_be_greater_than(0)
+
+        var collisions: [text] = []
+        for w in writer_names:
+            for h in header_names:
+                if w == h:
+                    collisions = collisions.push(w)
+        # Pre-fix this list was ["SMF_MAGIC", "SMF_FLAG_EXECUTABLE"].
+        expect(collisions.len()).to_equal(0)
