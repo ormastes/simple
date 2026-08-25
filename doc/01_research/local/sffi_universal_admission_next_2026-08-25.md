@@ -552,3 +552,19 @@ execution and exact-artifact admission remain unavailable.
 Three declaration rows are removed: 11,978 rows / 3,156 symbols, 1,189 tagged,
 637 `unsafe_contract_declared`, 10,523 untouched, and zero exact-artifact
 verified-and-signed.
+
+## Security correlation-ID entropy checkpoint
+
+`security.types` no longer redeclares `rt_random_hex` or converts missing
+entropy to an empty suffix. Correlation IDs use the canonical checked owner and
+fail closed on nil/malformed/all-zero entropy, preserving the existing `text`
+constructor API without fabricating a timestamp-only identifier. Across the
+repository, `rt_random_hex` now has exactly one declaration and one lexical
+call, both in the canonical crypto facade.
+
+The success path remains one provider call plus a bounded 16-character scan,
+with no copy, retry, lookup, generic dispatch, or allocation added. The static
+ratchet passed. Production execution and signed admission remain unavailable.
+One declaration row is removed: 11,977 rows / 3,156 symbols, 1,189 tagged, 637
+`unsafe_contract_declared`, 10,522 untouched, and zero exact-artifact
+verified-and-signed.

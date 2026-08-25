@@ -400,3 +400,7 @@ passing placeholder.
     per character with immediate failure and no retries. The next duplicate is
     security correlation-ID generation, which must not degrade to timestamp
     only when entropy fails.
+76. Keep `rt_random_hex` single-owned: one tagged declaration and one lexical
+    call in canonical `crypto_sffi`. Security correlation IDs must fail closed
+    rather than degrade to timestamp-only values. Preserve one provider call
+    and bounded validation; exact-artifact signature admission remains open.
