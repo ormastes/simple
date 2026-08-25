@@ -564,3 +564,7 @@ passing placeholder.
      `unsafe(ffi)`. Preserve optional reads and migrate ambiguous non-optional
      empty text/list returns to typed errors without extra preflight calls,
      recursive scans, path normalization, allocations, or buffer copies.
+110. Keep `std.nogc_sync_mut.ffi.runtime` a zero-cost re-export of canonical
+     `std.nogc_sync_mut.sffi.runtime`; never restore its 32 duplicate
+     declarations. Tag the canonical GC/runtime-value contracts without adding
+     allocation, collection, clone/free, or dispatch overhead.

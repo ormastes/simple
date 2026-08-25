@@ -1255,3 +1255,22 @@ Relative to the refreshed authoritative baseline, declaration rows and symbols
 remain 11,713 / 3,137. Unsafe-tagged rows increase from 1,737 to 1,770,
 untouched rows decrease from 9,720 to 9,687, and exact signed admission remains
 zero. Non-optional empty results still require typed `Result` migration.
+
+## Runtime canonical-owner consolidation checkpoint
+
+`std.nogc_sync_mut.ffi.runtime` duplicated the canonical
+`std.nogc_sync_mut.sffi.runtime` module's 32 raw declarations and wrappers; the
+only differences were the heading comments. No direct consumer of the duplicate
+namespace was found. The FFI module is now a two-line compatibility re-export
+of the canonical SFFI owner.
+
+This removes duplicate boundary declarations and wrapper maintenance without a
+runtime call, branch, allocation, GC operation, value clone/free, copy, lookup,
+or layout change. A static owner ratchet fixes the canonical inventory at 32
+and forbids declarations or wrappers in the compatibility facade; it passed
+with the whitespace check.
+
+Estimated declaration rows decrease from 11,713 to 11,681 while symbols remain
+3,137. Unsafe-tagged rows remain 1,770, untouched rows decrease from 9,687 to
+9,655, and exact-artifact verified-and-signed admission remains zero. The 32
+canonical runtime declarations remain the next contract-tagging target.
