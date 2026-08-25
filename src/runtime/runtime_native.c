@@ -12668,7 +12668,7 @@ int64_t rt_io_tcp_write_bytes(int64_t fd, int64_t data_val) {
     return rt_io_tcp_write(fd, data_val);
 }
 
-int64_t rt_io_tcp_flush(int64_t fd) {
+bool rt_io_tcp_flush(int64_t fd) {
     int flag = 1;
     setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     flag = 0;
@@ -12820,7 +12820,7 @@ int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
 int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-int64_t rt_io_tcp_flush(int64_t f) { (void)f; return 0; }
+bool rt_io_tcp_flush(int64_t f) { (void)f; return false; }
 bool rt_io_tcp_close(int64_t f) { (void)f; return false; }
 int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
 int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
