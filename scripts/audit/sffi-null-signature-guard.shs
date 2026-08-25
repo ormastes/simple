@@ -53,6 +53,27 @@ if rg -q --glob '*.spl' --glob '!**/vendor/**' \
     failed=1
 fi
 
+# The hosted cwd provider is nullable. Outside the bootstrap-library mirror,
+# only io_runtime may declare it, and that declaration must remain optional.
+cwd_declarations=$(rg -l --glob '*.spl' --glob '!**/vendor/**' \
+    --glob '!**/compiler_rust/**' '^\s*extern fn rt_env_cwd\(' \
+    "$root/src" "$root/test" || true)
+if [ "$cwd_declarations" != "$root/src/lib/nogc_sync_mut/io_runtime.spl" ]; then
+    echo 'SFFI lint: rt_env_cwd must have one canonical Simple owner' >&2
+    failed=1
+fi
+require_text '^extern fn rt_env_cwd\(\) -> text\?$' \
+    src/lib/nogc_sync_mut/io_runtime.spl
+for owner in \
+    src/compiler_rust/lib/std/src/shell.spl \
+    src/compiler_rust/lib/std/src/sys/env.spl \
+    src/compiler_rust/lib/std/src/sys/sffi/env.spl \
+    src/compiler_rust/lib/std/src/tooling/config_env.spl
+do
+    require_text '^extern fn rt_env_cwd\(\) -> text\?$' "$owner"
+    require_text 'raw nullable current-directory lookup' "$owner"
+done
+
 for owner in \
     src/compiler_rust/runtime/src/value/wsffi_native.rs \
     src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs \
