@@ -277,3 +277,37 @@ sh scripts/check/check-cache-scope-ownership.shs --selftest
 
 Design: `doc/05_design/compiler/incremental_build/per_lane_private_caches.md`.
 Specs: `test/01_unit/compiler/cache/per_lane_cache_scope{,_prevention}_spec.spl`.
+
+## Recursion guard for `.shs` check scripts (2026-08-25)
+
+`scripts/lib/recursion_guard.shs` is a sourced POSIX-sh snippet that refuses
+to run a script once a chain of guarded scripts is deeper than a bound. It
+mirrors the env-depth mechanism in `src/app/llm_caret/agent_workspace.spl`
+(`LLM_CARET_WORKSPACE_DEPTH`, refuse at `MAX_DEPTH`), so a script that ends up
+re-invoking itself — directly or through `land.shs` → guard → guard — cannot
+fork-bomb the shared box.
+
+```sh
+# first non-comment statement of a script:
+case "$0" in */*) . "${0%/*}/../lib/recursion_guard.shs" ;; *) . ./scripts/lib/recursion_guard.shs ;; esac
+```
+
+| env var | meaning |
+|---|---|
+| `SIMPLE_SHS_DEPTH` | current depth (default 0); each guarded script exports depth+1 to its children |
+| `SIMPLE_SHS_MAX_DEPTH` | refuse when depth >= this (default 3) |
+| `SIMPLE_SHS_GUARD_CHAIN` | optional; when set (even empty) each script appends its name, so the FAIL line shows `a.shs > b.shs > a.shs` |
+
+On refusal the script prints exactly one line to stderr and exits **3**
+(distinct from the guards' 0/1/2 verdict codes):
+`recursion-guard: FAIL — <script> refused at depth N (max M); set SIMPLE_SHS_MAX_DEPTH to raise`.
+
+Wired into `scripts/check/land.shs`, `check-seed-builds-push.shs`,
+`check-stage-binaries-runnable.shs` and `lint-cached.shs`. Overhead is shell
+builtins only (no subprocess, no file I/O): measured 2026-08-25 at **~56 µs per
+source** (selftest, 200 iterations) and 1000 sourced iterations in 60 ms wall
+including `sh` startup. `sh scripts/lib/recursion_guard.shs --selftest` runs 4
+fixtures (depth-0 runs; self-invoking fixture stopped with exit 3 after exactly
+MAX_DEPTH invocations; `SIMPLE_SHS_MAX_DEPTH` override honoured; overhead
+< 1 ms) and ends with `recursion-guard selftest: PASS — 4 fixture(s)`. Spec:
+`test/01_unit/scripts/recursion_guard_spec.spl`.
