@@ -12568,7 +12568,8 @@ static int64_t rt_make_addr_string(struct sockaddr_in* sa) {
 }
 
 int64_t rt_io_tcp_socket_create(int64_t family) {
-    int af = (family == 6) ? AF_INET6 : AF_INET;
+    if (family != 0 && family != 1) return -1;
+    int af = family == 1 ? AF_INET6 : AF_INET;
     return (int64_t)socket(af, SOCK_STREAM, 0);
 }
 

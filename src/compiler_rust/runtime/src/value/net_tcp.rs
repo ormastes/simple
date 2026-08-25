@@ -5,7 +5,11 @@
 /// Simple-facing raw TCP socket creation for pre-bind socket options.
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_socket_create(family: i64) -> i64 {
-    let domain = if family == 1 { Domain::IPV6 } else { Domain::IPV4 };
+    let domain = match family {
+        0 => Domain::IPV4,
+        1 => Domain::IPV6,
+        _ => return -(NetError::InvalidInput as i64),
+    };
     match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
         Ok(socket) => register_tcp_socket(socket),
         Err(e) => -(NetError::from(e) as i64),
@@ -698,6 +702,14 @@ pub extern "C" fn rt_io_tcp_shutdown(handle: i64, how: i64) -> bool {
 #[cfg(test)]
 mod tcp_read_contract_tests {
     use super::*;
+
+    #[test]
+    fn socket_family_contract_rejects_unknown_values() {
+        assert_eq!(
+            rt_io_tcp_socket_create(4),
+            -(NetError::InvalidInput as i64)
+        );
+    }
 
     #[test]
     fn scalar_timeout_sentinel_maps_without_runtime_value() {

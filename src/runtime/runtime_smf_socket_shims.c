@@ -45,7 +45,8 @@ static void _ws_init(void) {
 
 int64_t rt_io_tcp_socket_create(int64_t family) {
     _ws_init();
-    int af = (family == 6) ? AF_INET6 : AF_INET;
+    if (family != 0 && family != 1) return -1;
+    int af = family == 1 ? AF_INET6 : AF_INET;
     SOCKET s = socket(af, SOCK_STREAM, IPPROTO_TCP);
     return (s == INVALID_SOCKET) ? -1 : (int64_t)s;
 }
@@ -77,7 +78,8 @@ bool rt_io_tcp_set_reuseport(int64_t fd, bool enabled) {
 #include <netinet/in.h>
 
 int64_t rt_io_tcp_socket_create(int64_t family) {
-    int af = (family == 6) ? AF_INET6 : AF_INET;
+    if (family != 0 && family != 1) return -1;
+    int af = family == 1 ? AF_INET6 : AF_INET;
     return (int64_t)socket(af, SOCK_STREAM, 0);
 }
 
