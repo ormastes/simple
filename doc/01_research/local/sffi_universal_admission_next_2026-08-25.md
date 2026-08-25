@@ -2376,6 +2376,36 @@ network facade and providers still lack exact-artifact ABI/proof/signature
 admission, so SSH and the broader SFFI surface remain not globally safe,
 verified, or signed; exact-artifact verified-and-signed admission remains 0.
 
+## Boot network facade contract and diagnostic checkpoint
+
+The Pure Simple boot-network facade removed 27 serial diagnostic calls, its raw
+runtime byte accessor, and one unreachable duplicate version-text provider
+call; bounded Simple indexing now decodes already-sized SSH headers.  Normal
+socket and identification reads now call the descriptor-aware provider with
+the resolved owner instead of consulting the process-global receive stream.
+This removes raw calls and formatting work without adding a lookup, allocation,
+or copy.
+
+The facade's `rt_thread_sleep` declaration now matches the C and Rust `void`
+providers.  Write wrappers accept only the exact reported byte count (including
+the fixed 22-byte SSH banner); reads reject results larger than their requested
+extent; version text/bytes and plaintext SSH payloads have protocol bounds; and
+foreign descriptors are range-checked before narrowing to `i32`.  A redundant
+text conversion implementation and unused foreign declarations were removed.
+
+The focused static contract ratchet passed.  The authoritative census changed:
+
+- raw call sites: 20,825 -> 20,796
+- missing authority: unchanged at 16,941
+- lexical unsafe: 2,965 -> 2,936
+- function unsafe: unchanged at 919
+
+The valid path is cheaper: 29 raw calls disappeared and the new validation is
+constant-time scalar/length comparison.  Exact provider ABI identity, artifact
+signature verification, ownership evidence, and proof receipts remain absent,
+so this facade and the broader SFFI surface are not globally safe, verified, or
+signed; exact-artifact verified-and-signed admission remains 0.
+
 ## Synchronous SIMD SFFI facade checkpoint
 
 `src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
