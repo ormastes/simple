@@ -2,6 +2,17 @@
 
 Source: `test/03_system/os/x86_64/up_squared_apl_simpleos_spec.spl`
 
+The source spec also exercises every decision outcome of the Pure-Simple UP2
+readline seam: CR/LF completion, DEL/backspace with empty and non-empty input,
+printable append below the 255-byte cap, full-buffer rejection, and ignored
+control input. A separate capacity seam proves that 255 bytes returns without
+polling or appending CRLF. The production loop uses one bounded dynamic byte
+array plus the returned text allocation. It polls canonical x86 port-I/O
+owners, while `serial_println` iterates raw UTF-8 bytes in O(n) with no
+intermediate allocation. COM1 initialization is guarded and idempotent. The
+freestanding C capsule retains only the standard `write(fd, buffer, count)` ABI
+for descriptors 1 and 2; the final image contract requires that symbol.
+
 First run the contract and negative policy checks. These do not claim a board
 boot:
 
