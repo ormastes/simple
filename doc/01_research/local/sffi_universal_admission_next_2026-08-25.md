@@ -2311,6 +2311,36 @@ worktree has no production self-hosted binary.  The static shape evidence is
 therefore useful but not performance verification.  Verified-and-signed SFFI
 admission remains 0.
 
+## simple-core network authority and status checkpoint
+
+`core_net.spl` had eight untagged declarations and 51 missing-authority calls.
+All declarations now state pointer versus descriptor authority, and every used
+operation is confined to a mandatory-inline owner.  Allocation, sockaddr,
+buffer, and byte-store operations require `ffi, raw_ptr`; socket allocation and
+descriptor close require `ffi`.
+
+Review found fabricated success in all three probes: TCP connect status was
+discarded, UDP send status was discarded, and the HTTP probe returned zero
+after connect/write failure or request allocation failure.  Negative provider
+errors now propagate unchanged.  Short UDP sends and HTTP writes return
+distinct negative errors, and successful work reports a close failure instead
+of silently returning zero.  No error is mapped to a boolean.
+
+`simple-core-net-authority.shs` passed, pinning declarations, exact call/owner
+inventories, mandatory-inline policy, byte-store intrinsic lowering, and signed
+status checks.  Census results:
+
+- raw call sites: 19,754 -> 19,711
+- missing authority: 15,692 -> 15,641
+- lexical unsafe: 3,143 -> 3,151
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Normal paths retain the same syscall, allocation, copy, and loop counts.  Extra
+descriptor closes occur only on newly fail-closed paths.  No lookup, lock,
+hash, signature check, or generic dispatch was added.  Provider semantics and
+artifact proof remain incomplete; verified-and-signed admission remains 0.
+
 ## simple-core string parser/I/O authority checkpoint
 
 Raw NUL-terminated parsing (`strtoll`, `strtod`, `strlen`) and descriptor I/O
