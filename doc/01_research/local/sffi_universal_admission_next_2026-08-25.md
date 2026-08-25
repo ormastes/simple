@@ -2498,6 +2498,33 @@ evidence remain unresolved, so the channel family and wider SFFI surface are
 not globally verified or signed; exact-artifact verified-and-signed admission
 remains 0.
 
+## SSH authentication Pure Simple checkpoint
+
+The split SSH service-request/authentication owner no longer declares or calls
+the raw serial provider.  Thirteen packet/authentication diagnostic calls were
+removed, including full pre-auth packet hex formatting.  The module now has no
+foreign declaration or call.
+
+Authentication semantics are unchanged: booleans remain booleans, malformed
+text fields fail through the hardened helper `Result`, password fields are not
+copied to immutable text, request attempts remain bounded, and equal-length
+credential comparisons still visit every byte with an accumulated XOR.
+
+The focused Pure Simple boundary ratchet passed.  The authoritative census
+changed:
+
+- raw call sites: 20,725 -> 20,712
+- caller files: 3,094 -> 3,093
+- missing authority: 16,828 -> 16,815
+- lexical unsafe: unchanged at 2,978
+- function unsafe: unchanged at 919
+
+This removes formatting, allocation, and foreign dispatch from pre-auth paths;
+it adds no work to successful or rejected authentication.  Providers used by
+lower transport/crypto owners remain without exact-artifact proof/signature
+admission, so the wider SSH/SFFI surface is not globally verified or signed;
+exact-artifact verified-and-signed admission remains 0.
+
 ## Synchronous SIMD SFFI facade checkpoint
 
 `src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
