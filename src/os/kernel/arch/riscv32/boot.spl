@@ -14,6 +14,7 @@ use os.kernel.boot.os_main.{os_main}
 use os.kernel.arch.riscv32.console.{serial_shell_main}
 use os.kernel.arch.riscv32.smp_provider.{hal_rv32_smp_wait}
 use os.kernel.arch.riscv32.optional_firmware_provider.{hal_rv32_boot_optional_nvme_fw_selftest}
+use os.kernel.arch.riscv_topology_identity.{riscv_publish_boot_hart_identity_v1}
 
 extern fn rt_riscv_uart_put(byte: u64)
 extern fn rt_riscv_qemu_heap_start() -> u64
@@ -26,9 +27,6 @@ fn _start():
     asm volatile:
         "mv      s0, a0"
         "mv      s1, a1"
-        # Preserve a stable hart identity for kernel execution owners.  V1
-        # does not repurpose tp as a per-CPU base after this handoff.
-        "mv      tp, a0"
         # Every hart atomically checks in (rv32imac has the A extension). The
         # counter lives outside [_sbss,_ebss] so hart 0's BSS clear cannot wipe it.
         "la      t2, _smp_online_count"
@@ -37,7 +35,12 @@ fn _start():
         # Only hart 0 runs the primary boot; secondary harts park in WFI so they
         # do not race the BSS clear / heap init.
         "csrr    t0, mhartid"
+        # Preserve the identity actually observed from mhartid. V1 does not
+        # repurpose tp as a per-CPU base after this handoff.
+        "mv      tp, t0"
         "bnez    t0, .Lrv32_secondary_park"
+        # The direct M-mode ABI does not guarantee a0.
+        "mv      s0, t0"
         "la      sp, _stack_top"
         "la      t0, _sbss"
         "la      t1, _ebss"
@@ -253,6 +256,9 @@ fn boot_main(_hart_id: u32, _dtb_addr: u32):
     riscv_noalloc_handoff(_hart_id as u64, _dtb_addr as u64)
     rt_riscv_noalloc_pmm_init_default()
     riscv_noalloc_heap_init(rt_riscv_qemu_heap_start(), rt_riscv_qemu_heap_size())
+    if not riscv_publish_boot_hart_identity_v1(_hart_id as u64):
+        riscv_noalloc_boot_idle()
+        return
     riscv_noalloc_services_init(true)
     riscv_noalloc_log_boot_ok()
     if os_main():

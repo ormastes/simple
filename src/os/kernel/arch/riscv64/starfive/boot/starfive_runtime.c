@@ -7,6 +7,7 @@ __asm__(
     "_start:\n"
     "mv s0, a0\n"
     "mv s1, a1\n"
+    "mv tp, a0\n"
     "la sp, _stack_top\n"
     "la t0, _sbss\n"
     "la t1, _ebss\n"

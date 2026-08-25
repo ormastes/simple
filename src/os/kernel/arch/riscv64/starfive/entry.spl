@@ -9,6 +9,7 @@ use os.kernel.arch.riscv64.starfive_root.{starfive_mount_packaged_root}
 use os.kernel.arch.riscv64.starfive.nvme_probe.{starfive_find_nvme_read_only, starfive_pcie1_link_up}
 use os.kernel.arch.riscv64.starfive.nvme_storage.{starfive_nvme_identify, starfive_nvme_remember}
 use os.kernel.arch.riscv64.starfive.pcie_init.{starfive_jh7110_pcie1_initialize}
+use os.kernel.arch.riscv_topology_identity.{riscv_publish_boot_hart_identity_v1}
 
 extern fn log_raw_println(msg: text)
 extern fn __simple_call_module_inits()
@@ -52,21 +53,23 @@ fn _starfive_dtb_valid(dtb_addr: u64) -> bool:
 @no_mangle
 fn starfive_boot_main(hart_id: u64, dtb_addr: u64):
     _put_text_entry()
-    var active_hart = hart_id
     val active_dtb = rt_starfive_resolve_dtb(dtb_addr)
     if active_dtb == 0:
         riscv_noalloc_boot_idle()
         return
     val used_uboot_fallback = active_dtb != dtb_addr
-    if used_uboot_fallback:
-        active_hart = 1
     riscv_noalloc_log_init()
     if used_uboot_fallback:
         log_raw_println("STARFIVE uboot-dtb-fallback")
-    riscv_noalloc_handoff(active_hart, active_dtb)
+    # DTB source selection cannot alter the exact hart identity supplied by
+    # the firmware entry ABI.
+    riscv_noalloc_handoff(hart_id, active_dtb)
     rt_riscv_noalloc_pmm_init(STARFIVE_RAM_BASE, STARFIVE_RAM_SIZE_MIN, STARFIVE_RESERVED_END, STARFIVE_HEAP_START)
     riscv_noalloc_heap_init(STARFIVE_HEAP_START, STARFIVE_HEAP_SIZE)
     __simple_call_module_inits()
+    if not riscv_publish_boot_hart_identity_v1(hart_id):
+        riscv_noalloc_boot_idle()
+        return
     riscv_noalloc_services_init(true)
     log_raw_println("STARFIVE console-ready")
     val pcie_init = starfive_jh7110_pcie1_initialize()
