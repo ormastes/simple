@@ -47,7 +47,7 @@ Implement the selected SPipe Knowledge Compiler direction end to end as a portab
 - Generated-manual review owner: primary Codex, after an independent sidecar checks operator readability and trace coverage.
 
 ## Phase
-design-done
+implementation-wave1-done
 
 ## Log
 - dev: Created state file with 18 acceptance criteria (type: feature); recorded parallel ownership, shared interfaces, manual steps, checker helpers, and highest-capability review.
@@ -62,3 +62,10 @@ design-done
 - resumed-review-cycle-3: `STATUS: FAIL`; stopped at the fresh three-cycle cap. Remaining blockers: filesystem port signature/provider visibility must not expose `SafeFilesystem.Materializer`; TLDR must route issuance from `AuthorizationPort`; `RevisionId` dirty-overlay wording must be singular; Wave 10 must exclude completed DBFS migration; ADR-SPKC-013 must require registry-authorized `executable_policy`, not generic reviewed status.
 - final-review-cycle-1: Closed provider isolation, RevisionId, Wave-10 DBFS, and ADR trust contradictions; failed only on TLDR capability-issuer wording.
 - final-review-cycle-2: `STATUS: PASS`; independent highest-capability review found no implementation blockers. Design phase accepted.
+- implementation-wave1-cycle-1: Extracted thin CLI/MCP entrypoints, cohesive command/protocol/transport modules, deterministic result/serialization helpers, and dependency-free compatibility fixtures. Integrated gate found legacy MCP error-ID regression; fixed.
+- implementation-wave1-cycle-2: Expanded review found executable-mode loss, incomplete command splits, narrow compatibility evidence, no-ID dispatch drift, and startup regression; fixes applied. Retained P95 gates pass (`version=73.051ms`, `help=73.327ms`, `doctor=102.562ms`, each within 110% baseline).
+- implementation-wave1-cycle-3: Compatibility and MCP security pass, but `fine-tune-create-retry a1 a2 retry goal fixture-app` fails because `commandFineTuneRecordRetune` is undefined in `src/cli/fine_tune_status.js:39`. Stopped at mandatory three-cycle cap; Wave 1 remains unaccepted and product changes are not pushed.
+- implementation-wave1-resumed-cycle-1: Fixed `commandFineTuneRecordRetune`; integrated workflow exposed adjacent missing `commandFineTuneRecordRequirements`; fixed.
+- implementation-wave1-resumed-cycle-2: Syntax, MCP unit, compatibility, and MCP security passed; workflow fixture incorrectly expected `fine-tune-status` exit 0 despite its blocker/WARN contract; corrected to exit 1.
+- implementation-wave1-resumed-cycle-3: Syntax, eight MCP unit cases, compatibility, and MCP security passed; workflow fixture still incorrectly expects `fine-tune-next` exit 0 although output is `STATUS: WARN` with `readiness_blocker=model-artifact` and legacy exit is 1. Stopped at mandatory three-cycle cap; update the oracle before rerunning. Wave 1 remains unaccepted/unpushed.
+- implementation-wave1-final-cycle: Corrected the `fine-tune-next` oracle, then highest-capability review found and guided fixes for retry-loop dispatch, registry-root preservation, authoritative package build paths, and deterministic transport/SDN serialization. Restored legacy registry formatting/stdout, added regression coverage, and obtained `STATUS: PASS`; build, 9 MCP/serializer unit cases, and expanded legacy workflow pass.
