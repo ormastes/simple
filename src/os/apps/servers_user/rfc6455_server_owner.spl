@@ -76,11 +76,12 @@ fn _strict_crlf(request: text) -> bool:
             index = index + 1u64
     true
 
-fn _token_list_has(value: text, expected: text) -> bool:
+fn _token_list_count(value: text, expected: text) -> i32:
+    var count = 0
     for part in value.split(","):
         if part.trim().lower() == expected:
-            return true
-    false
+            count = count + 1
+    count
 
 fn _token_list_valid(value: text, allow_protocol_version: bool) -> bool:
     for raw_part in value.split(","):
@@ -177,8 +178,8 @@ pub fn validate_rfc6455_server_handshake(request: text) -> Rfc6455HandshakeDecis
     var host = ""
     var version = ""
     var key = ""
-    var upgrade_has_websocket = false
-    var connection_has_upgrade = false
+    var websocket_upgrade_token_count = 0
+    var connection_upgrade_token_count = 0
     var host_count = 0
     var upgrade_count = 0
     var connection_count = 0
@@ -211,14 +212,14 @@ pub fn validate_rfc6455_server_handshake(request: text) -> Rfc6455HandshakeDecis
             if not _token_list_valid(value, true):
                 return _handshake_reject("invalid Upgrade protocol list")
             upgrade_count = upgrade_count + 1
-            if _token_list_has(value, "websocket"):
-                upgrade_has_websocket = true
+            websocket_upgrade_token_count = websocket_upgrade_token_count +
+                _token_list_count(value, "websocket")
         elif lower == "connection":
             if not _token_list_valid(value, false):
                 return _handshake_reject("invalid Connection token list")
             connection_count = connection_count + 1
-            if _token_list_has(value, "upgrade"):
-                connection_has_upgrade = true
+            connection_upgrade_token_count = connection_upgrade_token_count +
+                _token_list_count(value, "upgrade")
         elif lower == "sec-websocket-version":
             version_count = version_count + 1
             version = value
@@ -246,10 +247,10 @@ pub fn validate_rfc6455_server_handshake(request: text) -> Rfc6455HandshakeDecis
         # reaches this after framing, but the exported handshake function must
         # not become a weaker second protocol path.
         return _handshake_reject("handshake requires exactly one valid Host authority")
-    if upgrade_count < 1 or not upgrade_has_websocket:
-        return _handshake_reject("handshake requires a WebSocket Upgrade field")
-    if connection_count < 1 or not connection_has_upgrade:
-        return _handshake_reject("handshake requires a Connection upgrade token")
+    if upgrade_count != 1 or websocket_upgrade_token_count != 1:
+        return _handshake_reject("handshake requires one unambiguous WebSocket Upgrade field")
+    if connection_count != 1 or connection_upgrade_token_count != 1:
+        return _handshake_reject("handshake requires one unambiguous Connection upgrade token")
     if version_count != 1 or version != "13":
         return _handshake_reject("handshake requires Sec-WebSocket-Version 13")
     if key_count != 1 or not _websocket_key_is_canonical_16_bytes(key):

@@ -40,9 +40,6 @@ extern fn rt_arm_array_clone_bytes(arr: [u8]) -> [u8]
 extern fn rt_arm_array_slice_bytes(arr: [u8], offset: u64, size: u64) -> [u8]
 
 @cfg(arm64)
-extern fn rt_arm_array_empty_exact() -> [u8]
-
-@cfg(arm64)
 extern fn rt_arm64_set_exec_image(bytes: [u8]) -> ()
 
 @cfg(arm64)
@@ -574,7 +571,7 @@ fn _build_arm64_user_process_image_from_native(
     envp: [text],
     elf_entry: u64,
     source_len: u64
-) -> UserProcessImage:
+) -> Result<UserProcessImage, text>:
     val stack_top = ARM64_USER_STACK_TOP
     var stack_size = compute_stack_size(source_len)
     if stack_size == 0:
@@ -586,10 +583,14 @@ fn _build_arm64_user_process_image_from_native(
 
     val segments = _arm64_fallback_user_segments(native_data)
 
-    val initial_sp = stack_top
-    val initial_stack_bytes = rt_arm_array_empty_exact()
+    val frame_result = build_initial_stack_checked(
+        stack_top, stack_size, 8u64, [], effective_argv, envp,
+        [AuxEntry(aux_type: 9u64, value: elf_entry)])
+    val stack_frame = match frame_result:
+        case Ok(frame): frame
+        case Err(_): return Err("ARM64 initial stack construction failed")
 
-    UserProcessImage(
+    Ok(UserProcessImage(
         binary_path: path,
         entry: elf_entry,
         stack_top: stack_top,
@@ -599,9 +600,9 @@ fn _build_arm64_user_process_image_from_native(
         segments: segments,
         segment_count: 1,
         file_bytes: native_data,
-        initial_sp: initial_sp,
-        initial_stack_bytes: initial_stack_bytes
-    )
+        initial_sp: stack_frame.sp,
+        initial_stack_bytes: stack_frame.bytes
+    ))
 
 @cfg(arm64)
 fn _build_user_process_image_unchecked_from_native(
@@ -614,9 +615,9 @@ fn _build_user_process_image_unchecked_from_native(
 ) -> Result<UserProcessImage, text>:
     rt_arm64_set_exec_image(native_data)
     val arm_entry = rt_arm_elf64_entry(native_data)
-    Ok(_build_arm64_user_process_image_from_native(
+    _build_arm64_user_process_image_from_native(
         path, native_data, arch, argv, envp, arm_entry, source_len
-    ))
+    )
 
 @cfg(arm32)
 fn _build_user_process_image_unchecked_from_native(

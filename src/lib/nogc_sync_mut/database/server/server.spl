@@ -290,18 +290,42 @@ class DbServerCapsule:
         val ids = ids_text.split(",")
         if ids_text == "" or ids.len() > bounds.max_items:
             return err_response(ERR_LIMIT, "BATCH_PUT requires 1..{bounds.max_items} ids")
+        val table = request.arg("tbl") ?? ""
+        if table == "":
+            return err_response(ERR_MISSING_ARG, "BATCH_PUT requires tbl=<table>")
+        if not self.store.get_table(table).?:
+            return err_response(ERR_NO_TABLE, "no such table: {table}")
+        if not self.registry.has_open_txn(session_id):
+            return err_response(ERR_NO_TXN, "BATCH_PUT requires an open transaction")
         for id in ids:
             if id == "":
                 return err_response(ERR_MALFORMED, "empty batch id")
+
+        # A batch is one protocol command, so it must be atomic with respect to
+        # the session overlay.  Stage every write in a local TxnState value and
+        # publish it only after the whole batch passes validation.  Calling
+        # sys_write item-by-item here used to leave an unacknowledged prefix in
+        # the live transaction when a later item hit MAX_TXN_WRITES.
+        var fields: Dict<text, text> = {}
+        for (key, value) in request.args:
+            if key != "tbl" and key != "ids" and key != "session":
+                fields[key] = value
+        var staged: TxnState = self.registry.txn_of(session_id)
         for id in ids:
-            var args: Dict<text, text> = {}
-            for (key, value) in request.args:
-                if key != "ids":
-                    args[key] = value
-            args["id"] = id
-            val result = self.sys_write(session_id, DbRequest(op: "PUT", args: args), WRITE_PUT)
-            if not result.ok:
-                return result
+            val write = TxnWrite(
+                table: table,
+                key: id,
+                kind: WRITE_PUT,
+                fields: fields,
+                base_version: store_version(self.store, table, id)
+            )
+            val next = txn_record(staged, write)
+            if txn_write_count(next) > MAX_TXN_WRITES:
+                return err_response(ERR_LIMIT, "transaction write bound {MAX_TXN_WRITES} reached")
+            staged = next
+        var registry = self.registry
+        registry.set_txn(session_id, staged)
+        self.registry = registry
         ok_with("queued", "{ids.len()}")
 
     fn sys_batch_get(session_id: i64, request: DbRequest) -> DbResponse:

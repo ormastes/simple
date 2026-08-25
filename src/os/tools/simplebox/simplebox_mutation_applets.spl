@@ -2,7 +2,7 @@
 
 use os.userlib.fs_mutation.{
     VFS_MUTATION_PATH_MAX_BYTES, vfs_mkdir_checked, vfs_unlink_checked,
-    vfs_rmdir_checked
+    vfs_rmdir_checked, vfs_chmod_checked
 }
 
 extern fn stdout_write(data: text)
@@ -72,3 +72,46 @@ pub fn simplebox_rm(args: [text]) -> i32:
 pub fn simplebox_rmdir(args: [text]) -> i32:
     """Remove empty directories only through the VFS rmdir operation."""
     _run_mutations("rmdir", args, SimpleboxMutationKind.Rmdir)
+
+fn _chmod_mode(mode_text: text) -> Result<u16, text>:
+    if mode_text.len() == 0u64 or mode_text.len() > 4u64:
+        return Err("chmod: mode must be 0 through 7777")
+    var mode: u16 = 0u16
+    for byte in mode_text.bytes():
+        if byte < 48u8 or byte > 55u8:
+            return Err("chmod: mode must be octal")
+        mode = mode * 8u16 + (byte - 48u8).to_u16()
+    Ok(mode)
+
+pub fn simplebox_chmod(args: [text]) -> i32:
+    """Apply one bounded octal mode to each named path."""
+    if args.len() < 2u64:
+        stdout_write("chmod: missing mode or operand\n")
+        return 1
+    if args.len() - 1u64 > SIMPLEBOX_MUTATION_OPERAND_LIMIT:
+        stdout_write("chmod: too many operands\n")
+        return 1
+    val parsed_mode = _chmod_mode(args[0])
+    match parsed_mode:
+        case Err(reason):
+            stdout_write(reason + "\n")
+            1
+        case Ok(mode):
+            var total_bytes: u64 = 0u64
+            var index: u64 = 1u64
+            while index < args.len():
+                val path = args[index]
+                if path.len() == 0u64 or path.len() > VFS_MUTATION_PATH_MAX_BYTES:
+                    stdout_write("chmod: invalid path length\n")
+                    return 1
+                if path.len() > SIMPLEBOX_MUTATION_TOTAL_PATH_BYTES_LIMIT - total_bytes:
+                    stdout_write("chmod: operand bytes exceed 65536-byte limit\n")
+                    return 1
+                total_bytes = total_bytes + path.len()
+                match vfs_chmod_checked(path, mode):
+                    case Err(reason):
+                        stdout_write("chmod: {path}: {reason}\n")
+                        return 1
+                    case Ok(_): pass
+                index = index + 1u64
+            0
