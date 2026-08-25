@@ -3579,6 +3579,23 @@ tier checker. Each source is scanned once in O(N) time with one integer result
 per physical line and no masked text construction for DEPR002. No timing,
 allocation, or RSS measurement was run under the no-verification override.
 
+# 2026-08-25 follow-up: streaming structured-error metadata
+
+`query_check` and `query_diagnostics` independently parsed `|||RELATED:` and
+`|||HELP:` metadata by slicing the entire suffix, splitting every segment, then
+trimming and slicing recognized payloads. This retained the full suffix and
+segment array alongside the final result and allowed semantics to drift.
+
+`query_rich_common.query_split_structured_error` now owns one monotonic segment
+cursor. It preserves exact core bytes, ordered RELATED payloads, ignored unknown
+segments, empty payloads, and last-HELP-wins behavior. `query_check` calls it
+directly; `query_diagnostics` retains only a compatibility wrapper. For N bytes
+and the fixed three-byte delimiter, traversal is O(N); retained result is
+O(C + R + K) for copied core bytes C, retained metadata bytes R, and K RELATED
+handles. Peak parser storage is O(C + R + K + max segment), hence O(N), instead
+of overlapping a full suffix and all-segments array. It is not zero-copy. No
+execution, allocation, timing, or RSS measurement was run.
+
 # 2026-08-25 follow-up: requested-line DEPR002 projection
 
 Both duplicated code-action owners built DEPR002 columns and trimmed every

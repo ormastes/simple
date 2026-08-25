@@ -1272,3 +1272,12 @@ and a nonpositive column clamps to one. `_find_in_line_from` uses nested byte
 cursors, O(1) state, negative-start normalization, and explicit empty-needle
 bounds. `query_commands` and `query_check` import the canonical location parser;
 no local compatibility parser remains.
+
+# Structured-error streaming design
+
+The canonical parser locates the first fixed separator, slices the exact core,
+and advances `segment_start` to each next separator. One bounded segment is
+sliced and trimmed at a time. RELATED payloads append in order; HELP overwrites
+the previous help value; empty and unknown segments do not alter control flow.
+The final no-match terminates the loop, including trailing and consecutive
+separators. The compatibility wrapper contains no parser loop, search, or slice.

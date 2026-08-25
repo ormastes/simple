@@ -1734,6 +1734,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No manual execution was run under the user override; static semantic,
   performance, and fixture review is required before sync.
 
+# Completed tranche: structured-error streaming (2026-08-25)
+
+- Moved RELATED/HELP metadata semantics into one shared parser.
+- Replaced full-suffix plus split-array retention with one segment cursor.
+- Routed all query-check error paths directly through the canonical owner and
+  reduced query-diagnostics to a compatibility delegate.
+- Preserved ordered RELATED, unknown/empty segment handling, and last HELP.
+- Added paired semantic/structural evidence and a complete canonical manual.
+- Static bound: O(N) for fixed separators, O(C + R + K) retained results, and
+  O(C + R + K + max segment) peak parser storage; no manual execution or
+  timing/RSS measurement was run.
+
 # Completed tranche: requested-line DEPR002 projection (2026-08-25)
 
 - Added a bounds-safe scalar lexical projection that scans only through the

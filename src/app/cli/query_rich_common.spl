@@ -40,6 +40,7 @@ var _DIAG_SEVERITY_OVERRIDE_COUNT: i64 = 0
 export _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE, _DIAG_SEVERITY_OVERRIDE_COUNT
 export _diag_emit_or_collect, query_file_read_rich
 export _find_in_line, _find_in_line_from, _parse_error_location, _extract_decl_name
+export query_split_structured_error
 export query_mcp_diagnostics_wrapper_json, query_emit_mcp_diagnostics_wrapper
 
 fn query_mcp_diagnostics_wrapper_json(diagnostics: [text]) -> text:
@@ -212,6 +213,30 @@ fn _parse_error_location(err: text) -> (i64, i64, text):
         if line > 0:
             return (line, if col > 0: col else: 1, msg)
     (1, 1, err)
+
+fn query_split_structured_error(err: text) -> (text, [text], text):
+    """Parse `|||RELATED:` and `|||HELP:` metadata without a split array."""
+    val separator = "|||"
+    val first_separator = _find_in_line_from(err, separator, 0)
+    if first_separator < 0:
+        return (err, [], "")
+
+    val core = err.substring(0, first_separator)
+    var related: [text] = []
+    var help = ""
+    var segment_start = first_separator + separator.len()
+    while segment_start <= err.len():
+        val next_separator = _find_in_line_from(err, separator, segment_start)
+        val segment_end = if next_separator < 0: err.len() else: next_separator
+        val segment = err.substring(segment_start, segment_end).trim()
+        if segment.starts_with("RELATED:"):
+            related.push(segment.substring(8))
+        elif segment.starts_with("HELP:"):
+            help = segment.substring(5)
+        if next_separator < 0:
+            break
+        segment_start = next_separator + separator.len()
+    (core, related, help)
 
 fn _extract_decl_name(after_kw: text) -> text:
     """Extract the variable name from text after val/var keyword."""

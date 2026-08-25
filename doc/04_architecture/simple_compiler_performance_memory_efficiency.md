@@ -944,3 +944,11 @@ facts rather than carrying private parsers. The search contract uses byte
 coordinates, normalizes a negative start to zero, bounds empty-needle results,
 and returns -1 when no bounded match exists. Renderers consume parsed scalars
 and message slices without rescanning diagnostic prefixes.
+
+# Structured diagnostic metadata ownership
+
+`query_rich_common.query_split_structured_error` is the sole semantic owner of
+`|||RELATED:` and `|||HELP:` framing. It publishes exact core text, ordered
+related payloads, and the last help payload. Query check consumes it directly;
+query diagnostics may expose only a delegation wrapper for compatibility.
+Consumers must not retain a copied metadata suffix or construct a split array.
