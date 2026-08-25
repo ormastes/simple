@@ -29,7 +29,7 @@ use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by
 use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
 use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_resource_set_label, device_grant_is_isolated}
-use os.kernel.boot.boot_nvme_production_handoff.{boot_nvme_production_handoff_provision}
+use os.kernel.boot.boot_nvme_production_handoff.{boot_nvme_production_handoff_provision_bound}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
 use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc}
@@ -401,7 +401,11 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
         log_raw_println("[vfs-init] pure-Simple NVMe bounce buffer failed: {bounce_init.unwrap_err()}")
         serial_println("[vfs-init] pure-nvme bounce failed")
         return false
-    boot_nvme_production_handoff_provision(adapter, transfer_evidence, lease)
+    val backend_binding = nvme_boot_runtime_backend_binding(lease.base_lba, lease.lba_count)
+    if backend_binding.is_err():
+        log_raw_println("[vfs-init] pure-Simple NVMe backend identity unavailable: {backend_binding.unwrap_err()}")
+        serial_println("[vfs-init] pure-nvme backend identity unavailable")
+        return false
     val boot_dma = _vfs_boot_nvme_shared_dma(4096u32)
     if boot_dma.is_err():
         serial_println("[vfs-init] boot sector dma alloc failed")
@@ -459,6 +463,10 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     app_registry_cache_bytes("/sys/apps/clang", clang_bytes)
     app_registry_cache_boot_app_id(3u64, hello_bytes)
     app_registry_cache_boot_app_id(12u64, clang_bytes)
+    # Publish only after every boot prerequisite has committed. A failed
+    # bootstrap path must not leave an apparently ready storage handoff.
+    boot_nvme_production_handoff_provision_bound(
+        adapter, transfer_evidence, lease, backend_binding.unwrap())
     serial_println("[vfs-init] required desktop app payloads cached")
     log_raw_println("[vfs-init] version file read ok path=/sys/version.txt bytes={version_probe.len()}")
     log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo.smf bytes={exec_probe.len()}")

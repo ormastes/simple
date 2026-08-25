@@ -29,7 +29,8 @@ use os.kernel.boot.boot_nvme_production_handoff.{
     boot_nvme_production_handoff_ready,
     boot_nvme_production_handoff_device,
     boot_nvme_production_handoff_evidence,
-    boot_nvme_production_handoff_lease
+    boot_nvme_production_handoff_lease,
+    boot_nvme_production_handoff_binding
 }
 use os.drivers.nvme.nvme_storage_model.{
     NvmeTransferEvidence, NvmeFilesystemLease, NvmeFilesystemConsumer,
@@ -43,7 +44,8 @@ use std.fs_driver.nvfs_superblock.{
 use std.db.dbfs_engine.superblock.{
     dbfs_superblock_set_device, dbfs_superblock_probe_disk, dbfs_superblock_read_from_disk
 }
-use os.kernel.fs.fat32.{parse_bpb, Fat32Filesystem, fat32_mount_publish}
+use os.kernel.fs.fat32.{parse_bpb, Fat32Filesystem, fat32_mount_publish, fat32_mount_clear}
+use os.kernel.fs.fat32_boot_capsule_binding_owner_v1.{fat32_boot_bind_capsule_device_v1}
 
 # ============================================================================
 # Mount-result enum — no spawn, no PID, no hosted state
@@ -206,7 +208,16 @@ fn boot_fs_mount_fat32_from_lease_device(dev: BlockDevice, lease: NvmeFilesystem
     val reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)
     if reason != "ready":
         return Err("boot-fs-mount: fat32-lease-not-ready:" + reason)
-    boot_fs_mount_fat32_from_device(dev, freestanding_nvme_adapter_provider(), true)
+    val mounted = boot_fs_mount_fat32_from_device(dev, freestanding_nvme_adapter_provider(), true)
+    if not mounted.?: return mounted
+    val capsule = fat32_boot_bind_capsule_device_v1(
+        dev, boot_nvme_production_handoff_binding())
+    if not capsule.?:
+        fat32_mount_clear()
+        _fs_mount_done = false
+        _fs_mount_type = FsMountType.None_
+        return Err("boot-fs-mount: " + capsule.unwrap_err())
+    mounted
 
 fn boot_fs_mount_nvfs_from_device(dev: BlockDevice, provider: text, pure_simple: bool) -> Result<FsMountResult, text>:
     """Probe NVFS using a caller-provided freestanding-safe BlockDevice."""
