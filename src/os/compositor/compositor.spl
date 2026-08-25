@@ -146,6 +146,12 @@ val WM_WINDOW_SHADOW_DY: i32 = 6
 # only costs a missed cull, never a dropped pixel.
 val WM_TITLE_TEXT_X: i32 = 66
 val WM_TITLE_MAX_GLYPH_ADVANCE: i32 = 16
+# Titles cross filesystem-launch, shared-scene, and remote WM boundaries.  The
+# renderer walks every retained UTF-8 byte and the occlusion pre-pass derives
+# a pixel extent from the retained length, so admitting an arbitrary string
+# turns both paths into unbounded work.  Reject instead of truncating: slicing
+# would allocate/copy and could split a multibyte character.
+val WM_WINDOW_TITLE_MAX_BYTES: u64 = 256u64
 
 # Test/diagnostic switch. Production always leaves this ON; the
 # whole-framebuffer equivalence spec turns it OFF to render the full-redraw
@@ -389,7 +395,8 @@ class Compositor:
         # focus/input epoch; move/resize use the same unavailable-display
         # contract.  Window id zero is already the compositor's invalid-id
         # sentinel, so wrappers can safely retain their existing no-op flow.
-        if self.screen_width <= 0 or self.screen_height <= 0:
+        if (self.screen_width <= 0 or self.screen_height <= 0 or
+            title.len() > WM_WINDOW_TITLE_MAX_BYTES):
             return 0
         if (self.surfaces.len() >= WM_COMPOSITOR_MAX_WINDOWS or
             self.next_id <= 0 or self.next_id == 2147483647):
@@ -793,9 +800,16 @@ class Compositor:
             self.surfaces[i] = surface
 
     me set_window_title(id: u64, title: text):
+        # Keep update admission identical to creation.  A producer must not be
+        # able to bypass the retained/render-cost bound after a safe window is
+        # already live.
+        if title.len() > WM_WINDOW_TITLE_MAX_BYTES:
+            return
         val i = self.surface_index(id)
         if i >= 0:
             var surface = self.surfaces[i]
+            if surface.title == title:
+                return
             surface.title = title
             surface.dirty = true
             self.surfaces[i] = surface

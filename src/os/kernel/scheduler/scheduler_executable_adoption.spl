@@ -291,6 +291,22 @@ impl Scheduler:
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.ConsumerExhausted)
         val identity = maybe_identity.unwrap()
+        # The capability and VM-space registries use a u32 task coordinate.
+        # Reject an invalid or non-representable task ID before installing a
+        # launch grant or observation; narrowing here would otherwise let a
+        # later 64-bit PID alias an existing process owner.  Lifecycle
+        # generations remain u64 end-to-end in the TCB, grant, observation,
+        # and cleanup owners, so do not prematurely exhaust that identity
+        # domain on the shared x86-64/ARM64/RV64 path.
+        if (identity.task_id == 0u64 or
+            identity.task_id > 0xFFFFFFFFu64 or
+            identity.lifecycle_generation == 0u64):
+            destroy_user_address_space(space)
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.ConsumerExhausted)
         val id = TaskId(id: identity.task_id)
         val lifecycle_generation = identity.lifecycle_generation
         val server_data_install =

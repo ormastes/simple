@@ -53,6 +53,11 @@ val HS_SERVER_HELLO: u8         = 2
 val HS_ENCRYPTED_EXTENSIONS: u8 = 8
 val TLS_CONTENT_HANDSHAKE: u8   = 0x16
 val TLS_MAX_RECORD_PAYLOAD: u64 = 18432
+val TLS_SERVER_SEND_RETRY_WINDOW: u64 = 4096u64
+val TLS_SERVER_SEND_MAX_ZERO_WRITES: u64 = 16u64
+# RFC 8446 section 5.2: TLSCiphertext.length is at most 2^14 + 256;
+# add the five-byte record header at this wire-facing send boundary.
+val TLS13_SERVER_MAX_WIRE_RECORD: u64 = 16645u64
 
 # ServerHello extension type bytes (RFC 8446 §4.2)
 val EXT_SUPPORTED_VERSIONS: u16 = 43
@@ -122,26 +127,31 @@ fn _validate_server_config(server_config: Tls13ServerConfig) -> text:
     ""
 
 fn _send_all_record(socket_fd: i64, record: [u8]) -> bool:
-    if record.len() == 0u64:
+    if record.len() == 0u64 or record.len() > TLS13_SERVER_MAX_WIRE_RECORD:
         return false
     var sent: u64 = 0
     var zero_writes: u64 = 0
     while sent < record.len():
-        val remaining = _slice(record, sent, record.len() - sent)
+        # Preserve the zero-copy common case by passing the original record on
+        # the first write.  After a short write, copy at most one fixed window
+        # rather than the complete remainder on every retry: the latter turns
+        # adversarial transport progress into quadratic transient allocation.
+        val remaining = if sent == 0u64:
+            record
+        else:
+            _slice(record, sent, TLS_SERVER_SEND_RETRY_WINDOW)
         val wrote_i = rt_net_send_bytes(socket_fd, remaining)
         if wrote_i < 0:
             return false
         val wrote = wrote_i.to_u64()
+        if wrote > remaining.len():
+            return false
         if wrote == 0u64:
             zero_writes = zero_writes + 1u64
-            if zero_writes > 1024u64:
+            if zero_writes > TLS_SERVER_SEND_MAX_ZERO_WRITES:
                 return false
         else:
-            zero_writes = 0u64
-            if wrote > remaining.len():
-                sent = record.len()
-            else:
-                sent = sent + wrote
+            sent = sent + wrote
     true
 
 fn _send_server_flight(socket_fd: i64, material: Tls13ServerHandshakeMaterial) -> text:
