@@ -2,7 +2,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 ## Scenarios
 
@@ -29,6 +29,21 @@
 - Expected: ordinary statements call `lower_hir_stmt` directly.
 - Expected: only classified tuple statements call `lower_hir_stmt_multi` and splice their results.
 
+#### keeps the exact bootstrap compile-source selector scalar through HIR and MIR
+
+- Read the live `bootstrap_compile_option_takes_value` and
+  `bootstrap_compile_source_from_args` definitions from
+  `src/app/cli/bootstrap_main.spl` and lower them in bootstrap mode.
+- Expected: bootstrap-mode environment setup and exact restoration both
+  succeed through the non-raw environment facade, including unset restoration.
+- Expected: HIR lowering reports zero errors and the direct option helper exists
+  with a `Bool` return.
+- Expected: `bootstrap_compile_source_from_args` exists with a `Str` return.
+- Expected: HIR retains the `While`, the loop-local `Let` initialized by
+  `Index(args, i)`, and the terminal empty-string scalar block value.
+- Expected: MIR reports zero errors (therefore neither `E-MIR-TYPE-Unknown` nor
+  `E-SFFI-016`) and its authoritative `type_transport_receipts` count is zero.
+
 ## At a Glance
 
 | Field | Value |
@@ -45,3 +60,7 @@ The common statement path remains linear in source statements and emitted HIR
 statements. It removes the temporary singleton `[HirStmt]`, its indexed reload,
 and its one-element splice loop. Tuple destructuring retains its existing
 linear expansion, left-to-right evaluation, error behavior, and output order.
+The live fixture extraction and lowering are linear in the selected source;
+the production selector itself remains O(n) in argument count with O(1)
+auxiliary state. The test necessarily owns an O(n) source string and compiler
+IR, so it makes no constant-memory claim for the fixture harness.
