@@ -12,6 +12,39 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Simple-core async authority checkpoint
+
+The pure-Simple async/future provider now tags nine raw interfaces and routes
+all 11 former ambient calls through mandatory-inline owners.  Allocation,
+release, and pointer loads/stores require `ffi, raw_ptr`; array operations and
+termination require only `ffi`.  The focused
+`simple-core-async-authority.shs` ratchet passed and pins array providers,
+pointer intrinsics, and both compilers' mandatory-inline recognition.
+
+Future allocation previously fabricated tagged `nil` on fixed-size allocation
+failure.  `future_all` also ignored result-array allocation and append failure,
+allowing an invalid or partial array to appear successful.  These paths now
+terminate through the existing abort boundary.  Successful future construction
+retains one 48-byte zeroed allocation and the same field stores.  The valid
+`future_all` loop adds one unlikely append-status comparison per element; it
+adds no allocation, copy, lookup, lock, hash, signature operation, or generic
+dispatch.
+
+Future handles are still accepted through a raw pointer-shape heuristic rather
+than an allocation/liveness registry, and the pure-core lane deliberately does
+not execute arbitrary body function pointers.  This provider therefore remains
+unsafe and is not claimed as semantically complete or verified.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,647 -> 19,645
+- lexical unsafe: 3,193 -> 3,202
+- function unsafe: unchanged at 919
+- missing authority: 15,535 -> 15,524
+
+Production execution and exact artifact evidence remain unavailable, so
+verified-and-signed admission remains 0.
+
 ## Simple-core enum authority checkpoint
 
 The pure-Simple enum provider retains six explicitly tagged raw interfaces.
