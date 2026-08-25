@@ -524,15 +524,19 @@ impl MountTable:
     fn _current_snapshot_mount(
         snapshot: StableFileSnapshotBindingV1, file: OpenFileBinding
     ) -> MountEntry?:
-        """Central generation validation for every snapshot hot-path operation."""
+        """Validate the retained file without coupling it to unrelated paths.
+
+        A snapshot owns an already-open inode. Namespace renames and writes to
+        other files therefore cannot revoke it. The mount lifetime plus the
+        backend's exact file generation/observation are the authorities after
+        open; mount-wide namespace/content counters remain audit metadata.
+        """
         if file.mount_id != snapshot.mount_id:
             return nil
         val entry = match self._mount_entry_for_file(file):
             case nil: return nil
             case Some(value): value
-        if not _mount_generations_current(
-            entry, snapshot.mount_generation, snapshot.namespace_generation,
-            snapshot.content_generation):
+        if entry.mount_generation != snapshot.mount_generation:
             return nil
         val current_file_generation = match _driver_file_generation_v1(
             entry.driver, file.inner_handle):
@@ -1147,6 +1151,20 @@ impl MountTable:
                        entry.driver, opened, execute_observation):
                     _driver_close_handle(entry.driver, opened)
                     return Err(FsError.StaleHandle)
+                val backend_kind = _driver_kind_name(entry.driver)
+                if execute_observation.content_generation == 0u64 and
+                   backend_kind != "ramfs":
+                    _driver_close_handle(entry.driver, opened)
+                    return Err(FsError.Corrupt)
+                # RamFS has no per-file epoch yet. Preserve its prior,
+                # conservative mount-wide invalidation rather than exporting
+                # zero as a loader file generation. Generation-aware backends
+                # must never fall back to this weaker contract.
+                val binding_content_generation =
+                    if execute_observation.content_generation == 0u64:
+                        entry.content_generation
+                    else:
+                        execute_observation.content_generation
                 val bound = self._bind_file(i, entry.id, opened)
                 if bound.is_err():
                     _driver_close_handle(entry.driver, opened)
@@ -1158,12 +1176,16 @@ impl MountTable:
                 return Ok(ExecuteOpenBinding(
                     mount_id: entry.id,
                     backend_name: _driver_name(entry.driver),
-                    backend_kind: _driver_kind_name(entry.driver),
+                    backend_kind: backend_kind,
                     canonical_source_path: path,
                     file_handle: FileHandle(id: virtual_handle),
                     mount_generation: entry.mount_generation,
                     namespace_generation: entry.namespace_generation,
-                    content_generation: entry.content_generation,
+                    # Compatibility field consumed by admission callers as the
+                    # executable's file generation. Never publish the mount's
+                    # global mutation counter here: an unrelated write must not
+                    # invalidate this retained executable inode.
+                    content_generation: binding_content_generation,
                     execute_observation: execute_observation,
                     size: stat.size as i64
                 ))
@@ -1184,9 +1206,21 @@ impl MountTable:
         val entry = match self._mount_entry_for_file(open_binding.unwrap()):
             case nil: return false
             case Some(value): value
-        if not _mount_generations_current(
-            entry, binding.mount_generation, binding.namespace_generation,
-            binding.content_generation):
+        # Once opened, identity follows the retained inode rather than its
+        # namespace spelling. Only unmount/remount revokes that authority;
+        # the backend observation below detects same-inode mutation/replace.
+        if entry.mount_generation != binding.mount_generation:
+            return false
+        if binding.execute_observation.content_generation == 0u64:
+            # Only legacy RamFS may use the mount-wide fallback. Namespace and
+            # content mutations both revoke its observation because it cannot
+            # distinguish retained-inode mutation from path replacement.
+            if binding.backend_kind != "ramfs" or
+               entry.namespace_generation != binding.namespace_generation or
+               entry.content_generation != binding.content_generation:
+                return false
+        elif binding.content_generation !=
+             binding.execute_observation.content_generation:
             return false
         _driver_execute_observation_current_v1(
             entry.driver, open_binding.unwrap().inner_handle,

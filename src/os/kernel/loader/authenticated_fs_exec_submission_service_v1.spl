@@ -244,59 +244,14 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
         loader-private signer binds those exact coordinates, after which the
         ordinary admission pipeline independently checks them and owns close.
         """
-        if caller < 0 or not executable_authority_owner_valid(authorities):
-            return -13
-        val target = installed_artifact_active_target_v1()
-        if not target.?: return -8
-        val record = installed_artifact_catalog_lookup_target_v1(
-            canonical_path, target.unwrap())
-        if not record.?: return -13
-        val installed = record.unwrap()
-        val opened = table.open_for_execute(canonical_path, ExecuteTrust.Trusted)
-        if opened.is_err(): return -13
-        val binding = opened.unwrap()
-        val attested = executable_online_reattest_open_binding_v1(
-            binding, installed.manifest, installed.content_sha256)
-        if attested.is_err():
-            if table.close(binding.file_handle).is_err(): return -5
-            return -13
-        val signed = attested.unwrap()
-        if installed.content_sha256 != signed.admission.image_hash or
-            installed.expected_trust_root_sha256 != signed.admission.trust_root_hash or
-            installed.signer_identity != signed.proof.signer_key_id or
-            installed.target.os != signed.admission.target.os or
-            installed.target.arch != signed.admission.target.arch or
-            installed.target.abi != signed.admission.target.abi:
-            if table.close(binding.file_handle).is_err(): return -5
-            return -13
-        val inputs = ExecutableLoaderVerificationInputsV1(
-            manifest: installed.manifest,
-            manifest_hash: signed.admission.manifest_hash,
-            image_hash: installed.content_sha256,
-            trust_root_hash: installed.expected_trust_root_sha256,
-            target: installed.target,
-            format: installed.manifest.artifact_kind,
-            role: "installed-main-image",
-            verified_load_ranges: [],
-            manifest_verified: true, signature_verified: true,
-            trust_root_verified: true, target_verified: true,
-            format_verified: true, ranges_verified: true,
-            image_digest_verified: true)
-        val admitted = executable_loader_admit_installed_artifact_open_binding_v1(
-            table, authorities, binding, inputs, signed.admission, signed.proof)
-        if admitted.is_err(): return -13
-        val prepared = admitted.unwrap()
-        val submission = AuthenticatedFsExecSubmissionV1(
-            authorities: authorities,
-            token: prepared.admission.authority_token,
-            consumer: prepared.consumer,
-            entry_point: prepared.admission.entry_point,
-            caller: caller,
-            recipe: recipe)
+        val prepared = authenticated_fs_exec_prepare_installed_artifact_online_v1(
+            table, authorities, caller, canonical_path, recipe)
+        if prepared.is_err(): return prepared.unwrap_err()
+        val submission = prepared.unwrap()
         val armed = self.arm(caller, canonical_path, recipe, submission)
         if armed < 0:
             if executable_loader_revoke(
-                table, authorities, prepared.admission.authority_token).is_err():
+                table, authorities, submission.token).is_err():
                 return -5
         armed
 
@@ -669,6 +624,74 @@ pub(package) struct AuthenticatedFsExecSubmissionResultV1:
     exit_code: i64
     evidence: SchedulerExecutionEvidenceTokenV1?
     cleanup_indeterminate: bool
+
+pub(package) fn authenticated_fs_exec_prepare_installed_artifact_online_v1(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    caller: i64,
+    canonical_path: text,
+    recipe: i64
+) -> Result<AuthenticatedFsExecSubmissionV1, i64>:
+    """Create one fresh catalog- and execute-open-bound submission.
+
+    This is loader-package authority, not a user entrypoint. It never reads a
+    resident image or accepts caller-authored verification booleans. Every
+    successful call owns a distinct live execute handle and one-shot token.
+    """
+    val exec_prefix = spawn_recipe_exec_prefix(recipe)
+    if caller < 0 or not spawn_recipe_is_migrated(recipe) or
+        exec_prefix == "" or not canonical_path.starts_with(exec_prefix) or
+        not spawn_recipe_launch_contract_valid(
+            recipe, canonical_path, [canonical_path], []) or
+        not executable_authority_owner_valid(authorities):
+        return Err(-13)
+    val target = installed_artifact_active_target_v1()
+    if not target.?: return Err(-8)
+    val record = installed_artifact_catalog_lookup_target_v1(
+        canonical_path, target.unwrap())
+    if not record.?: return Err(-13)
+    val installed = record.unwrap()
+    val opened = table.open_for_execute(canonical_path, ExecuteTrust.Trusted)
+    if opened.is_err(): return Err(-13)
+    val binding = opened.unwrap()
+    val attested = executable_online_reattest_open_binding_v1(
+        binding, installed.manifest, installed.content_sha256)
+    if attested.is_err():
+        if table.close(binding.file_handle).is_err(): return Err(-5)
+        return Err(-13)
+    val signed = attested.unwrap()
+    if installed.content_sha256 != signed.admission.image_hash or
+        installed.expected_trust_root_sha256 != signed.admission.trust_root_hash or
+        installed.signer_identity != signed.proof.signer_key_id or
+        installed.target.os != signed.admission.target.os or
+        installed.target.arch != signed.admission.target.arch or
+        installed.target.abi != signed.admission.target.abi:
+        if table.close(binding.file_handle).is_err(): return Err(-5)
+        return Err(-13)
+    val inputs = ExecutableLoaderVerificationInputsV1(
+        manifest: installed.manifest,
+        manifest_hash: signed.admission.manifest_hash,
+        image_hash: installed.content_sha256,
+        trust_root_hash: installed.expected_trust_root_sha256,
+        target: installed.target,
+        format: installed.manifest.artifact_kind,
+        role: "installed-main-image",
+        verified_load_ranges: [],
+        manifest_verified: true, signature_verified: true,
+        trust_root_verified: true, target_verified: true,
+        format_verified: true, ranges_verified: true,
+        image_digest_verified: true)
+    val admitted = executable_loader_admit_installed_artifact_open_binding_v1(
+        table, authorities, binding, inputs, signed.admission, signed.proof)
+    if admitted.is_err(): return Err(-13)
+    val prepared = admitted.unwrap()
+    Ok(AuthenticatedFsExecSubmissionV1(
+        authorities: authorities,
+        token: prepared.admission.authority_token,
+        consumer: prepared.consumer,
+        entry_point: prepared.admission.entry_point,
+        caller: caller,
+        recipe: recipe))
 
 pub(package) fn authenticated_fs_exec_submit_with_argv_file_v1(
     scheduler: Scheduler,

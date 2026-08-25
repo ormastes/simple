@@ -481,6 +481,18 @@ page is worse than none.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
 
+## Signed-catalog launch boundary (2026-08-25)
+
+`simple_toolchain_signed_catalog_boot_v1.spl` is a dormant loader-private
+foundation for the Simple interpreter/compiler/loader sequence; it is not a
+boot connection until the online signer and privileged caller are wired. Treat its
+`catalog_present=false` result as an optional ordinary-boot absence only. An
+authenticated toolchain request requires three sealed target-bound rows and a
+fresh execute-open re-attestation for every stage; never substitute the app
+registry cache, resident payload bytes, or the legacy path-only spawn APIs.
+The open media, signer, and boot-caller blockers are recorded in
+`doc/08_tracking/bug/simple_toolchain_signed_catalog_media_gap_2026-08-25.md`.
+
 ## Guest target authority update (2026-08-22)
 
 `src/app/simpleos_tool/guest_target.spl` is the immutable architecture/triple,

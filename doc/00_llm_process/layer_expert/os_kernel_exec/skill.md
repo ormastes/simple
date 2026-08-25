@@ -400,3 +400,15 @@ runtime boundary is fixed. Preserve 16-byte SP alignment, eight-byte words,
 existing error precedence, one argv/envp terminator each, terminal `AT_NULL`,
 and exact `AT_RANDOM` ownership. `PERF-SIMPLEOS-003` remains open until
 allocation/COW plus timing/RSS are measured with an admitted Stage-4 runtime.
+
+## Toolchain catalog submission owner (2026-08-25)
+
+`authenticated_fs_exec_prepare_installed_artifact_online_v1` is a dormant
+loader-package foundation to use only while holding the canonical VFS lease
+after a boot-owned signer has been initialized. It joins the sealed
+catalog row to a fresh execute-open, loader-owned online signature, full
+admission pipeline, and one-shot token. The Simple toolchain boot bridge
+can prepare three independent submissions and delegate cleanup and terminal
+evidence to the existing sequencer, but no production caller currently reaches
+that path. Catalog absence may leave ordinary boot running, but no authenticated
+launch may fall back to resident bytes.

@@ -6,8 +6,8 @@
 use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
-use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_UNIMPLEMENTED, SSH_MSG_DEBUG, SSH_MSG_KEXINIT, ssh_build_unimplemented}
-use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, ChannelPeerCloseDecisionV1, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, SSH_OPEN_ADMINISTRATIVELY_PROHIBITED, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_open_failure}
+use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_UNIMPLEMENTED, SSH_MSG_DEBUG, SSH_MSG_KEXINIT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_unimplemented}
+use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, ChannelPeerCloseDecisionV1, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, SSH_OPEN_ADMINISTRATIVELY_PROHIBITED, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_open_failure}
 use os.apps.sshd.ssh_channel_open_request.{ssh_channel_open_request_classify_v1, ssh_channel_open_rejection_payload_v1, ssh_channel_open_transport_must_close_v1}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
@@ -27,6 +27,15 @@ extern fn serial_println(msg: text)
 # a peer stops returning send credit. Normal operation retains only one SFTP
 # response (at most 35004 bytes).
 val SSH_SFTP_TX_PENDING_CAP: u64 = DEFAULT_WINDOW_SIZE.to_u64()
+
+# scp_stage is the existing session-owned word. Small values are handshake
+# phases; BODY_CURSOR_BASE + offset retains progress without a second buffer.
+val SCP_STAGE_AWAIT_READY_ACK: u32 = 0u32
+val SCP_STAGE_CONTROL_PENDING: u32 = 1u32
+val SCP_STAGE_AWAIT_CONTROL_ACK: u32 = 2u32
+val SCP_STAGE_BODY_CURSOR_BASE: u32 = 3u32
+val SCP_STAGE_END_MARKER_PENDING: u32 = 4294967294u32
+val SCP_STAGE_AWAIT_FINAL_ACK: u32 = 4294967295u32
 
 fn _build_channel_data_stable(recipient: u32, data: [u8]) -> [u8]:
     var payload: [u8] = []
@@ -330,7 +339,7 @@ impl SshSession:
                 # down (a premature close here is what made scp report "closed by
                 # remote host" after a correctly-sent C-record). Bounded by the
                 # 128-iteration budget; the transfer is tiny + local.
-                if self.scp_pending and self.scp_stage < 2u32:
+                if self.scp_pending:
                     rt_thread_sleep(5)
                     continue
                 serial_println("[sshd-session] interactive-inline empty payload closing recv_buf_len={self.recv_buf.len()} seq_c2s={self.cipher.seq_c2s} recv_seq={self.recv_seq}")
@@ -357,8 +366,18 @@ impl SshSession:
                 self._handle_channel_data(payload)
             elif msg_type == 93:
                 if not self.channels.apply_remote_window_adjust(payload):
-                    self.transition_closed()
+                    # RFC 4254 section 5.2 requires a positive increment and
+                    # forbids uint32 window overflow. Unknown/closed channels
+                    # and malformed framing are protocol errors as well. Send
+                    # the connection-level reason before terminal teardown;
+                    # there is no valid per-channel failure reply for
+                    # SSH_MSG_CHANNEL_WINDOW_ADJUST.
+                    self.disconnect(
+                        SSH_DISCONNECT_PROTOCOL_ERROR,
+                        "invalid channel window adjustment")
                     return
+                if self.scp_pending:
+                    self._drain_scp_source()
                 self._pump_sftp_output([])
                 continue
             elif msg_type == 96:
@@ -772,46 +791,143 @@ impl SshSession:
         Inc 3). Reads the client's single-byte ack directly via the raw [u8]
         accessor (never text) — the SSH_MSG_CHANNEL_DATA wire format is
         byte-type(1) + recipient(4) + string-len(4) + raw bytes, so the ack
-        byte sits at payload offset 9. Stages:
-          0: got the initial ready-ack -> send `C0644 <size> <name>\\n`
-          1: got the ack for the control line -> send the file bytes + 0x00
-          2: got the final ack -> send exit-status 0 / eof / close
+        byte sits at payload offset 9. The stage word owns both handshake
+        phase and the bounded body cursor; WINDOW_ADJUST resumes transmission.
         """
         if payload.len() < 10:
             return
         val data_len = _read_u32_stable(payload, 5).to_u64()
-        if data_len < 1:
+        # The source-side readiness record is exactly one zero byte.  SCP
+        # warning/fatal replies begin with 1/2 and carry diagnostic text;
+        # treating either those records or an arbitrary multi-byte data frame
+        # as readiness can make the server allocate and packetize the complete
+        # retained file after the peer has already rejected the transfer.
+        # CHANNEL_DATA framing was validated by the caller, so this constant-
+        # time exact-shape check needs no slice or temporary payload copy.
+        if data_len != 1u64:
+            self._abort_scp_request()
             return
         val ack = ssh_session_u8_at(payload, 9)
+        if ack != 0u8:
+            self._abort_scp_request()
+            return
         serial_println("[sshd-session] scp step stage={self.scp_stage} ack=0x{format_hex(ack.to_i64())}")
-        # One-shot the whole scp-source response on the client's first ready-ack:
-        # C-record + file bytes + trailing 0x00, then exit-status/eof/close.
-        # OpenSSH's scp sink buffers pipelined data, so it need not receive the
-        # intermediate ack before the body, and one-shotting avoids depending on
-        # a persistent multi-stage cursor across reconnects (each new TCP
-        # connection is a fresh SshSession with scp_stage=0). Re-entry after this
-        # is harmless: _finish closes the channel, so any later ack's
-        # window-consume fails and sends nothing.
-        # (ctrl_len/body_len are bound before the sends only for readability; a
-        # chained `.len().to_u32()` here would work too — the earlier
-        # "chained-cast mis-lowering" theory did not reproduce; see
-        # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md.)
-        val size = self.scp_file_bytes.len().to_i64()
-        val name_bytes = text_to_bytes(self.scp_file_name)
-        val ctrl = _scp_ctrl_line(size, name_bytes)
-        val ctrl_len = ctrl.len()
-        serial_println("[sshd-session] scp one-shot size={size} ctrl_len={ctrl_len}")
-        if self.channels.consume_remote_window(self.scp_local_id, ctrl_len.to_u32()):
-            self.send_packet(_build_channel_data_stable(self.scp_remote_id, ctrl))
-        val body = self.scp_file_bytes
-        val body_len = body.len()
-        if self.channels.consume_remote_window(self.scp_local_id, body_len.to_u32()):
-            self.send_packet(_build_channel_data_stable(self.scp_remote_id, body))
-        val zero: [u8] = _copy_bytes_stable([0])
-        if self.channels.consume_remote_window(self.scp_local_id, 1u32):
-            self.send_packet(_build_channel_data_stable(self.scp_remote_id, zero))
+        if self.scp_stage == SCP_STAGE_AWAIT_READY_ACK:
+            self.scp_stage = SCP_STAGE_CONTROL_PENDING
+            self._drain_scp_source()
+            return
+        if self.scp_stage == SCP_STAGE_AWAIT_CONTROL_ACK:
+            self.scp_stage = SCP_STAGE_BODY_CURSOR_BASE
+            self._drain_scp_source()
+            return
+        if self.scp_stage != SCP_STAGE_AWAIT_FINAL_ACK:
+            # An acknowledgement cannot precede the complete record it
+            # acknowledges. Preserve multiplexed siblings while failing this
+            # exact exec channel and releasing its retained file.
+            self._abort_scp_request()
+            return
+        val completed_local_id = self.scp_local_id
+        val completed_remote_id = self.scp_remote_id
+        self._clear_scp_request_state()
+        self._finish_exec_request(
+            completed_local_id, completed_remote_id, 0u32, [])
+
+    me _drain_scp_source():
+        """Send only peer-window and peer-packet-sized SCP source records.
+
+        `scp_stage` owns the bounded body cursor while the original file array
+        remains stable. WINDOW_ADJUST resumes here, so no unsent suffix is
+        copied and no success is published before the peer's final ACK.
+        """
+        if not self.scp_pending:
+            return
+        val channel = self.channels.find(self.scp_local_id)
+        if channel == nil or channel.state != ChannelState.Open or
+            channel.remote_max_packet == 0u32:
+            self._abort_scp_request()
+            return
+        var packet_limit = channel.remote_max_packet.to_u64()
+        if packet_limit > DEFAULT_MAX_PACKET.to_u64():
+            packet_limit = DEFAULT_MAX_PACKET.to_u64()
+
+        if self.scp_stage == SCP_STAGE_CONTROL_PENDING:
+            val ctrl = _scp_ctrl_line(
+                self.scp_file_bytes.len().to_i64(),
+                text_to_bytes(self.scp_file_name))
+            if ctrl.len() > packet_limit:
+                self._abort_scp_request()
+                return
+            if ctrl.len() > channel.remote_window.to_u64():
+                return
+            if not self.channels.consume_remote_window(
+                self.scp_local_id, ctrl.len().to_u32()):
+                return
+            self.send_packet(_build_channel_data_stable(
+                self.scp_remote_id, ctrl))
+            self.scp_stage = SCP_STAGE_AWAIT_CONTROL_ACK
+            return
+
+        while (self.scp_stage >= SCP_STAGE_BODY_CURSOR_BASE and
+            self.scp_stage < SCP_STAGE_END_MARKER_PENDING):
+            val cursor = self.scp_stage.to_u64() -
+                SCP_STAGE_BODY_CURSOR_BASE.to_u64()
+            if cursor >= self.scp_file_bytes.len():
+                self.scp_stage = SCP_STAGE_END_MARKER_PENDING
+                break
+            val live = self.channels.find(self.scp_local_id)
+            if live == nil or live.state != ChannelState.Open:
+                self._abort_scp_request()
+                return
+            var send_len = self.scp_file_bytes.len() - cursor
+            if send_len > packet_limit:
+                send_len = packet_limit
+            if send_len > live.remote_window.to_u64():
+                send_len = live.remote_window.to_u64()
+            if send_len == 0u64:
+                return
+            if not self.channels.consume_remote_window(
+                self.scp_local_id, send_len.to_u32()):
+                return
+            val fragment = _copy_range_stable(
+                self.scp_file_bytes, cursor, send_len)
+            self.send_packet(_build_channel_data_stable(
+                self.scp_remote_id, fragment))
+            self.scp_stage = (SCP_STAGE_BODY_CURSOR_BASE.to_u64() +
+                cursor + send_len).to_u32()
+
+        if self.scp_stage == SCP_STAGE_END_MARKER_PENDING:
+            val live = self.channels.find(self.scp_local_id)
+            if live == nil or live.state != ChannelState.Open:
+                self._abort_scp_request()
+                return
+            if live.remote_window == 0u32:
+                return
+            if not self.channels.consume_remote_window(self.scp_local_id, 1u32):
+                return
+            self.send_packet(_build_channel_data_stable(
+                self.scp_remote_id, _copy_bytes_stable([0])))
+            self.scp_stage = SCP_STAGE_AWAIT_FINAL_ACK
+
+    me _abort_scp_request():
+        """Release retained source bytes and fail only the SCP exec channel."""
+        val local_id = self.scp_local_id
+        val remote_id = self.scp_remote_id
+        val channel = self.channels.find(local_id)
+        self._clear_scp_request_state()
+        # Peer close or concurrent channel teardown owns its own terminal
+        # exchange. Never emit exit/eof/close against a missing/non-open row.
+        if channel == nil or channel.state != ChannelState.Open:
+            return
+        self._finish_exec_request(local_id, remote_id, 1u32, [])
+
+    me _clear_scp_request_state():
+        """Drop all SCP-owned state without emitting protocol messages."""
         self.scp_pending = false
-        self._finish_exec_request(self.scp_local_id, self.scp_remote_id, 0, [])
+        self.scp_stage = 0u32
+        self.scp_local_id = 0u32
+        self.scp_remote_id = 0u32
+        self.scp_file_bytes = []
+        self.scp_file_name = ""
 
     me _handle_channel_close(payload: [u8]):
         if payload.len() != 5:
@@ -822,6 +938,11 @@ impl SshSession:
         if channel == nil:
             self.transition_closed()
             return
+        if self.scp_pending and recipient == self.scp_local_id:
+            # CHANNEL_CLOSE terminates the application byte stream. Release
+            # the retained source immediately and let the channel lifecycle
+            # below own the sole close acknowledgement.
+            self._clear_scp_request_state()
         if self.sftp_enabled and recipient == self.sftp_local_channel_id:
             self.sftp.close_all()
             self.sftp = SftpSessionV3.new()

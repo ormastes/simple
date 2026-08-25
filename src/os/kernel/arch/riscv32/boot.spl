@@ -9,17 +9,20 @@
 use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff, riscv_noalloc_boot_idle}
 use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
 use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_boot_ok}
-use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
+use os.kernel.boot.riscv_noalloc_services.{
+    riscv_noalloc_services_init, riscv_noalloc_services_set_storage_ready}
 use os.kernel.boot.os_main.{os_main}
 use os.kernel.arch.riscv32.console.{serial_shell_main}
 use os.kernel.arch.riscv32.smp_provider.{hal_rv32_smp_wait}
 use os.kernel.arch.riscv32.optional_firmware_provider.{hal_rv32_boot_optional_nvme_fw_selftest}
 use os.kernel.arch.riscv_topology_identity.{riscv_publish_boot_hart_identity_v1}
+use os.kernel.arch.riscv32.virtio_blk_owner.{riscv32_vfs_boot_mount_fat32_owner_v1}
 
 extern fn rt_riscv_uart_put(byte: u64)
 extern fn rt_riscv_qemu_heap_start() -> u64
 extern fn rt_riscv_qemu_heap_size() -> u64
 extern fn rt_riscv_noalloc_pmm_init_default() -> bool
+extern fn __simple_call_module_inits()
 
 @section(".text.entry")
 @naked
@@ -256,10 +259,19 @@ fn boot_main(_hart_id: u32, _dtb_addr: u32):
     riscv_noalloc_handoff(_hart_id as u64, _dtb_addr as u64)
     rt_riscv_noalloc_pmm_init_default()
     riscv_noalloc_heap_init(rt_riscv_qemu_heap_start(), rt_riscv_qemu_heap_size())
+    # Freestanding entry bypasses the hosted main stub. Heap-backed VFS state,
+    # mutexes, option values, and driver registries must be initialized before
+    # the canonical root owner is touched.
+    __simple_call_module_inits()
     if not riscv_publish_boot_hart_identity_v1(_hart_id as u64):
         riscv_noalloc_boot_idle()
         return
+    # The owner publishes readiness only after one real VirtIO queue, FAT32
+    # driver, canonical root mount, and filesystem-exec owner all succeed.
+    # Failure is intentionally non-fatal so diskless UART management remains.
+    val storage_ready = riscv32_vfs_boot_mount_fat32_owner_v1()
     riscv_noalloc_services_init(true)
+    riscv_noalloc_services_set_storage_ready(storage_ready)
     riscv_noalloc_log_boot_ok()
     if os_main():
         serial_shell_main(0)
