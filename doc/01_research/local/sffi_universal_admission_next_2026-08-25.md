@@ -70,6 +70,37 @@ No production self-hosted optimizer or benchmark was available.  Exact
 artifact identity, signatures, and evidence admission remain absent;
 verified-and-signed admission remains 0.
 
+## Flat AST module-assembly authority checkpoint
+
+Flat AST module assembly now confines its seven environment, timing, and
+transient-lifetime ABIs to mandatory-inline lexical `unsafe(ffi)` owners.
+Environment reads are truthfully nullable and mutation preserves the provider
+boolean.  All seven symbols have typed-native and interpreter registration.
+
+Review fixed ignored lifetime results that could previously publish a
+`ParserModule` after failed transient scope begin, pause, graph promotion, or
+end.  Those paths now fail loudly.  Cache-hit environment restoration failure
+returns a miss (`nil`) so the caller reparses; the ordinary parse path rejects
+failed restoration instead of continuing with contaminated lexer state.
+
+The checks consume status values the foreign calls already returned.  Timing
+calls remain behind the existing cached profile flag, and no AST/decl loop
+gains a call, allocation, copy, lookup, hash, lock, branch, or scan.
+
+The focused static authority/performance ratchet passed.  The authoritative
+census changed:
+
+- raw call sites: 18,996 -> 18,974
+- missing authority: 14,748 -> 14,719
+- lexical unsafe: 3,291 -> 3,298
+- function unsafe: unchanged at 957
+
+Registration and source checks do not prove transient-heap implementation,
+artifact identity, signatures, or provenance.  No production self-hosted
+optimizer or benchmark was available.  Flat AST assembly and the wider SFFI
+estate remain neither globally verified nor signed; verified-and-signed
+admission remains 0.
+
 ## RISC-V boot-services authority checkpoint
 
 `riscv_services.spl` had twelve PCI/network/storage/log interfaces and 63

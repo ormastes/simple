@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+raws="env_get time_now_unix_micros env_set transient_array_scope_begin transient_array_scope_pause transient_array_scope_end transient_heap_promote"
+for suffix in $raws; do
+    raw="rt_$suffix"
+    owner="_sffi_$suffix"
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^fn ${owner}\\(" "$module")" -eq 1 ]
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+    grep -q "insert_simple!(\"$raw\"" "$interpreter"
+done
+
+grep -q '^extern fn rt_env_get(key: text) -> text?$' "$module"
+grep -q '^extern fn rt_env_set(key: text, value: text) -> bool$' "$module"
+[ "$(grep -c '^@unsafe(' "$module")" -eq 7 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 7 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 7 ]
+
+for expected in env_get:8 time_now_unix_micros:13 env_set:7 \
+    transient_array_scope_begin:2 transient_array_scope_pause:2 \
+    transient_array_scope_end:2 transient_heap_promote:2; do
+    suffix=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "_sffi_${suffix}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+grep -q 'transient parser scope unavailable' "$module"
+grep -q 'transient parser scope pause failed' "$module"
+grep -q 'transient parser graph promotion failed' "$module"
+grep -q 'transient parser scope end failed' "$module"
+grep -q 'failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE' "$module"
+grep -q 'failed to restore SIMPLE_BOOTSTRAP_LEX_PATH' "$module"
+
+# Timing calls remain gated and lifetime checks consume existing status values;
+# owner metadata must not add work to the AST assembly loops.
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "Flat AST module-assembly SFFI authority audit: PASS (7 raw ABIs confined; nullable env truthful; scope/promotion/restoration failures fail closed; hot loops unchanged)"

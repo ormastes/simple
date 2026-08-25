@@ -56,7 +56,9 @@ use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore}
 use compiler.core.parser.{flat_parser_state_dump, flat_parser_state_restore}
 use compiler.core.parser_decls.{flat_extend_pools_dump, flat_extend_pools_restore}
 use compiler.core.parser_decls.{flat_pending_pools_dump, flat_pending_pools_restore}
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw wall-clock timestamp ABI", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
 
 # Level-gated parse phase profile (DEFAULT OFF; SIMPLE_PARSE_PHASE_PROFILE=1).
@@ -65,16 +67,56 @@ extern fn rt_time_now_unix_micros() -> i64
 var _fab_phase_prof_cached: i64 = -1
 fn fab_phase_prof_enabled() -> bool:
     if _fab_phase_prof_cached < 0:
-        _fab_phase_prof_cached = if (rt_env_get("SIMPLE_PARSE_PHASE_PROFILE") ?? "") == "1": 1 else: 0
+        _fab_phase_prof_cached = if (_sffi_env_get("SIMPLE_PARSE_PHASE_PROFILE") ?? "") == "1": 1 else: 0
     _fab_phase_prof_cached == 1
-extern fn rt_env_set(key: text, value: text)
+@unsafe(reason: "raw environment mutation ABI", capabilities: [ffi])
+extern fn rt_env_set(key: text, value: text) -> bool
+@unsafe(reason: "raw transient-array scope begin ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_pause() -> bool
+@unsafe(reason: "raw transient-array scope end ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_end() -> bool
+@unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
 
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_time_now_unix_micros() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros()
+
+@always_inline
+fn _sffi_env_set(key: text, value: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_env_set(key, value)
+
+@always_inline
+fn _sffi_transient_array_scope_begin() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_begin()
+
+@always_inline
+fn _sffi_transient_array_scope_pause() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_pause()
+
+@always_inline
+fn _sffi_transient_array_scope_end() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_end()
+
+@always_inline
+fn _sffi_transient_heap_promote(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
+
 fn flat_module_env_get(key: text) -> text:
-    rt_env_get(key) ?? ""
+    _sffi_env_get(key) ?? ""
 
 fn flat_decl_tag_text(idx: i64) -> text:
     val tag = decl_get_tag(idx)
@@ -1179,7 +1221,7 @@ pub fn flat_pools_restore_all(blob: text) -> bool:
 var _fab_roundtrip_cached: i64 = -1
 fn flat_roundtrip_enabled() -> bool:
     if _fab_roundtrip_cached < 0:
-        _fab_roundtrip_cached = if (rt_env_get("SIMPLE_FLAT_POOL_ROUNDTRIP") ?? "") == "1": 1 else: 0
+        _fab_roundtrip_cached = if (_sffi_env_get("SIMPLE_FLAT_POOL_ROUNDTRIP") ?? "") == "1": 1 else: 0
     _fab_roundtrip_cached == 1
 
 # Round-trip self-check, DEFAULT OFF (SIMPLE_FLAT_POOL_ROUNDTRIP=1).
@@ -1255,32 +1297,40 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
     # or bridge spent them, and on a sharded build nine processes interleave
     # into one log so even that N is unattributable.
     # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
-    val _hp_t0 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
-    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
-    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    val _hp_t0 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
+    val saved_lex_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
     parser_init_with_path(source, path)
-    val _hp_t1 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    val _hp_t1 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     if not flat_pools_restore_all(blob):
         # Leave nothing half-restored behind for the reparse that follows.
         reset_all_pools()
         parser_init_with_path(source, path)
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+        val source_restored = _sffi_env_set(
+            "SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+        val path_restored = _sffi_env_set(
+            "SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+        if not source_restored or not path_restored:
+            return nil
         return nil
-    val _hp_t2 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    val _hp_t2 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     val built = flat_ast_to_module(path)
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    val source_restored = _sffi_env_set(
+        "SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    val path_restored = _sffi_env_set(
+        "SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    if not source_restored or not path_restored:
+        return nil
     if fab_phase_prof_enabled():
-        val _hp_t3 = rt_time_now_unix_micros()
+        val _hp_t3 = _sffi_time_now_unix_micros()
         print("PARSEHIT\tinit={(_hp_t1 - _hp_t0) / 1000}ms\trestore={(_hp_t2 - _hp_t1) / 1000}ms\tbridge={(_hp_t3 - _hp_t2) / 1000}ms\ttotal={(_hp_t3 - _hp_t0) / 1000}ms\tbytes={blob.len()}\tpath={path}")
     Some(built)
 
 pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
-    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
-    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    val saved_lex_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
     parser_init_with_path(source, path)
     val _rt_zero = if flat_roundtrip_enabled(): flat_pools_dump_all() else: ""
@@ -1288,11 +1338,13 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     # AOT low-memory path. Keep the scope alive while the rich ParserModule is
     # copied out of the flat AST, then promote that retained graph before the
     # arena is cleared.
-    val transient_scope = if streaming_scope: rt_transient_array_scope_begin() else: false
-    val _pp_t0 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    val transient_scope = if streaming_scope: _sffi_transient_array_scope_begin() else: false
+    if streaming_scope and not transient_scope:
+        panic("transient parser scope unavailable for {path}")
+    val _pp_t0 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     _fab_parse_module_body_calls = _fab_parse_module_body_calls + 1
     parse_module_body()
-    val _pp_t1 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    val _pp_t1 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     if fab_phase_prof_enabled():
         si_stats_reset()
     # String interpolation fragments are parsed only after the enclosing module
@@ -1300,20 +1352,20 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     # call argument produces its enclosing callback lambda before the bridge
     # converts flat nodes into ParserModule expressions.
     val module_has_placeholder = expand_string_interpolations_with_placeholder_receipt(0)
-    val _pp_t2 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    val _pp_t2 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     if module_has_placeholder:
         transform_placeholder_call_args_after_interpolation_known_present()
-    val _pp_t2b = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    val _pp_t2b = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     # Driver/native-build path only: promote + desugar placeholder lambdas that
     # were written as interpolated string call arguments. The interpreter path
     # gets this from core_frontend_parse(); this path does not go through it.
     # doc/08_tracking/bug/placeholder_lambda_fix_missed_driver_native_build_parse_path_2026-08-09.md
     expand_interpolated_placeholder_call_args(0)
-    val _pp_t3 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    val _pp_t3 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     desugar_collections(0, 0)
-    val _pp_t4 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    val _pp_t4 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     compiler_coverage_inventory_record_module(path)
-    val _pp_t5 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    val _pp_t5 = if fab_phase_prof_enabled(): _sffi_time_now_unix_micros() else: 0
     if parser_has_errors():
         val errors = parser_get_errors()
         var ei = 0
@@ -1321,7 +1373,8 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
             print "  {errors[ei]}"
             ei = ei + 1
     if transient_scope:
-        val _paused = rt_transient_array_scope_pause()
+        if not _sffi_transient_array_scope_pause():
+            panic("transient parser scope pause failed for {path}")
     if flat_roundtrip_enabled():
         flat_pools_roundtrip_selfcheck(path, _rt_zero)
     # A parse that reported errors is never stored: the driver poisons that
@@ -1332,23 +1385,27 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
         _fab_captured_blob = flat_pools_dump_all()
     val built_module = flat_ast_to_module(path)
     if fab_phase_prof_enabled():
-        val _pp_t6 = rt_time_now_unix_micros()
+        val _pp_t6 = _sffi_time_now_unix_micros()
         print("PARSEPHASE\tparse_module_body\t{_pp_t1 - _pp_t0}\tinterp\t{_pp_t2 - _pp_t1}\tph_transform\t{_pp_t2b - _pp_t2}\tph_expand\t{_pp_t3 - _pp_t2b}\tdesugar_coll\t{_pp_t4 - _pp_t3}\tcoverage_inv\t{_pp_t5 - _pp_t4}\tbridge\t{_pp_t6 - _pp_t5}\tpath\t{path}")
         si_stats_report(path)
     if transient_scope:
-        val _promoted = rt_transient_heap_promote(built_module)
+        if not _sffi_transient_heap_promote(built_module):
+            panic("transient parser graph promotion failed for {path}")
         # ORDER IS LOAD-BEARING: end the scope before replacing lexer or AST
         # owners. Both cleanup functions allocate fresh process-lifetime arrays;
         # inside the scope those replacements are stamped with its id and then
         # reclaimed, leaving dangling globals for the next parse. Same fix as
         # driver_end_transient_parse_scope(). See
         # doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
-        val _ended = rt_transient_array_scope_end()
+        if not _sffi_transient_array_scope_end():
+            panic("transient parser scope end failed for {path}")
         lexer_release_parse_source_globals()
         ast_reset()
     else:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+        if not _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source):
+            panic("failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE for {path}")
+        if not _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path):
+            panic("failed to restore SIMPLE_BOOTSTRAP_LEX_PATH for {path}")
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
     built_module
 
