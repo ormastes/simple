@@ -38,6 +38,7 @@ use compiler.core.ast_expr.{
     expr_count, expr_tag, expr_s_val
 }
 use compiler.frontend.core.frontend.{core_frontend_parse_reset}
+use compiler.frontend.core.ast_expr.{expr_get_str, expr_get_int}
 use std.string_core.{char_from_code}
 
 fn lb() -> text:
@@ -109,3 +110,28 @@ describe "pure-Simple frontend string interpolation promotion":
         )
         expect(parse_src(src)).to_equal(true)
         expect(count_tag(EXPR_INTERPOLATED_STRING)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+    it "decodes doubled braces in a nested-JSON literal to single braces (seed parity)":
+        step("Verify: decodes doubled braces in a nested-JSON literal to single braces (seed parity)")
+        # Reclassification of doc/08_tracking/bug/string_literal_double_brace_collapse_2026-06-16.md:
+        # the documented grammar makes `{{`/`}}` escapes in EVERY double-quoted
+        # literal, so a nested-JSON tail is spelled `}}}}` and decodes to `}}`.
+        # The pure-Simple lexer keeps the token raw; the collapse happens in
+        # string_interpolation_expand.spl::decode_interpolation_brace_escapes.
+        val q = char_from_code(34)
+        val esc_q = char_from_code(92) + q
+        val src = (
+            "fn main():\n" +
+            "    print(\"" + lb() + lb() + esc_q + "a" + esc_q + ":" + lb() + lb() +
+            esc_q + "b" + esc_q + ":1" + rb() + rb() + rb() + rb() + "\")\n"
+        )
+        expect(parse_src(src)).to_equal(true)
+        expect(count_tag(EXPR_INTERPOLATED_STRING)).to_equal(0)  # oracle: 0 — escapes are not regions
+        val expected = lb() + q + "a" + q + ":" + lb() + q + "b" + q + ":1" + rb() + rb()
+        var found = false
+        var idx = 0
+        while idx < expr_count():
+            if expr_tag[idx] == EXPR_STRING_LIT and expr_get_int(idx) == 2 and expr_get_str(idx) == expected:
+                found = true
+            idx = idx + 1
+        expect(found).to_equal(true)

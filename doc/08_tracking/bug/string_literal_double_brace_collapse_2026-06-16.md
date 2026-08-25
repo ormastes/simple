@@ -3,7 +3,7 @@
 - **ID:** string_literal_double_brace_collapse_2026-06-16
 - **Severity:** P2 (silently corrupts any literal building JSON/braces; root cause of broken LSP code-action edits)
 - **Area:** language / interpreter (string-literal lexing)
-- **Status:** open — minimal repro confirmed
+- **Status:** RECLASSIFIED 2026-08-25 — works as documented (see "Reclassification" below); no lexer change
 - **Found while:** isolating the "substring off-by-one" suspected during reliable-mode P1/R3 (turns out NOT substring — see below)
 
 ## Summary
@@ -82,3 +82,72 @@ Per this sweep's scope rules (no edits under `src/compiler_rust/**`), this
 defect is left **OPEN / out of scope for this sweep** — the fix, if the
 seed's behavior is confirmed as the sole reproduction site, belongs in
 `src/compiler_rust/parser/src/lexer/strings.rs`. No source changes made.
+
+## Reclassification (2026-08-25): works as documented — NOT a lexer defect
+
+**Grammar reading.** The documented contract is that `{{` and `}}` are the
+escapes for literal braces in EVERY double-quoted text literal, interpolated
+or not (Python f-string semantics). Sources, quoted:
+
+- `doc/02_requirements/compiler/parsing/syntax/parser_literals.md` (generated
+  from `test/03_system/feature/usage/parser_literals_spec.spl` "escapes braces"):
+  > **Example:** escapes braces
+  > Given val s = "literal {{braces}}"
+  > Then  expect s == r"literal {braces}"
+- `src/compiler_rust/parser/src/lexer/strings.rs` (contract comment at
+  `current_literal_raw`): "The documented language contract ... is that
+  `{{`/`}}` collapse to a single literal brace in EVERY double-quoted text
+  literal, interpolated or not — a briefly-landed 'keep raw when no
+  interpolation' variant broke `.contains()` against single-brace text and
+  was reverted here."
+- `doc/08_tracking/bug/runtime_surface_spec_brace_escape_contains_red_2026-08-17.md`:
+  option 1 of this record WAS landed (`d7213eb61742`), broke every
+  `{{...}}` `.contains()` needle in the tree, and was reverted on 2026-08-18;
+  that record closes with "`string_literal_double_brace_collapse_2026-06-16`
+  remains decided the other way".
+- `doc/07_guide/quick_reference/syntax_quick_reference.md` § "String
+  Interpolation (Default)" shows `{expr}` interpolation only and is SILENT on
+  brace escapes — it does not contradict the above; it just omits it.
+
+Consequently the "minimal repro" above is the grammar working: `"x}}y"` IS
+`x}y` (len 3), `"end}}"` IS `end}`, and `"{\"a\":{\"b\":1}}"` IS
+`{"a":{"b":1}` — the first `}` closes nothing and is literal, the trailing
+`}}` is one escaped brace. A nested-JSON tail needing two real braces must be
+written `}}}}` (or built by concatenation / a raw `'...'` string). This is
+option 2 of "Expected behavior"; option 1 was tried and rejected.
+
+**Stale note corrected.** The 2026-08-09 triage above says the self-hosted
+lexer "does not perform an unconditional `{{`→`{` / `}}`→`}` collapse". That
+is true of `lexer_struct.spl::scan_string` in isolation but wrong for the
+pipeline: the pure-Simple lexer keeps the token RAW by design, and the collapse
+happens downstream in
+`src/compiler/10.frontend/core/string_interpolation_expand.spl` —
+`parse_string_interpolation_parts` skips depth-0 `{{`/`}}` as non-regions and
+`decode_interpolation_brace_escapes` rewrites them (called from
+`expand_string_interpolations`). Both compilers therefore agree.
+
+**Evidence (2026-08-25, no source change under `src/`):**
+
+- Seed probe (`bin/release/x86_64-unknown-linux-gnu/simple`, seed):
+  `print("{\"a\":{\"b\":1}}}}")` -> `{"a":{"b":1}}`;
+  `print("{\"a\":{\"b\":1}}")` -> `{"a":{"b":1}`;
+  `val x = 1; print("v={x}}")` -> `v=1}`; `print("v={x}}}")` -> `v=1}`;
+  `print("{{literal}}")` -> `{literal}`; `print("end}}")` -> `end}`;
+  `print("x}}}y")` -> `x}}y`.
+- Seed pinned test: `cargo test -p simple-parser double_braces_collapse_to_one_literal_brace`
+  -> `test lexer::tests::fstring_brace_escape_tests::double_braces_collapse_to_one_literal_brace ... ok`.
+- `test/01_unit/compiler/lexer_brace_escape_spec.spl` (+3 examples: `}}}}`
+  nested-JSON tail, `}}}` triple, lone `}` after an interpolation):
+  `Results: 11 total, 11 passed, 0 failed`.
+- Self-hosted frontend, executed (not inspection):
+  `test/01_unit/compiler/interpreter/pure_simple_frontend_interpolation_promotion_spec.spl`
+  (+1 example driving `core_frontend_parse_reset` -> `expand_string_interpolations`
+  on the nested-JSON literal and asserting the decoded `EXPR_STRING_LIT` value is
+  `{"a":{"b":1}}`): `Results: 5 total, 5 passed, 0 failed`.
+
+**Downstream.** `test/01_unit/lib/common/parsers_json_core_spec.spl` and
+`test/01_unit/app/llm_caret/claude_cli_spec.spl` build their fixtures by
+concatenation; that is a valid spelling under this grammar and needs no
+rewrite (they may equally use `}}}}`). The LSP code-action emitter cited under
+"Impact" must emit `}}}}` or concatenate — its bug record, not the lexer, owns
+that fix.
