@@ -585,3 +585,7 @@ passing placeholder.
      explicitly tagged `unsafe(ffi)`. Validate opaque-handle generation,
      kind/index access, owned text, and release contracts without extra registry
      lookups, AST walks, allocations, string copies, branches, or dispatch.
+115. Keep all 29 application-interpreter AST declarations explicitly tagged
+     `unsafe(ffi)` until its raw-name import surface can be migrated to the
+     canonical owner. Preserve boolean results and direct opaque-handle calls;
+     do not add registry lookups, AST walks, allocations, copies, or dispatch.

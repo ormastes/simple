@@ -1365,3 +1365,10 @@ unavailable.
 Estimated totals decrease from 11,681 to 11,652 declaration rows while symbols
 remain 3,137. Unsafe-tagged rows increase from 1,862 to 1,891, untouched rows
 remain 9,563, and exact-artifact verified-and-signed admission remains zero.
+
+The application interpreter's 29 raw declarations are now also explicitly
+tagged while its raw-name relative-import API remains intact. The shared AST
+ratchet covers both surfaces. No ABI, boolean representation, registry access,
+AST traversal, allocation, copy, release, branch, or dispatch changed.
+Estimated unsafe-tagged rows increase from 1,891 to 1,920 and untouched rows
+decrease from 9,563 to 9,534; signed exact-artifact admission remains zero.
