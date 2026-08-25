@@ -270,6 +270,16 @@ Focused static and source checks pass with zero runtime/performance change. The
 ledger is 12,031 `rt_*` rows / 3,175 symbols: 1,198 tagged, 646
 contract-declared, 10,567 untouched, and zero exact-artifact signed/admitted.
 
+Checkpoint: removed eight legacy raw declarations from the canonical signature
+facade. Its RSA/Ed25519/P-256 public names now return checked `Result` values;
+malformed input/provider failure cannot become empty signatures or `false`.
+Primary specs were migrated to explicit success/error assertions. Static and
+facade source checks pass; executable SSpec is blocked by the unrelated
+`env_access_host.spl` parser failure. No provider-call, allocation, copy,
+lookup, or hashing regression was introduced. The ledger is 12,023 `rt_*`
+rows / 3,172 symbols: 1,190 tagged, 638 contract-declared, 10,567 untouched,
+and zero exact-artifact signed/admitted.
+
 ### 7. Verify once, then stop
 
 - Run sabotage and parity across interpreter, JIT, native, sealed dynload, and

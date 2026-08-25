@@ -346,3 +346,28 @@ bootstrap seed rather than admitted self-hosted evidence.
 The source-only ledger is now 12,031 `rt_*` declaration rows / 3,175 symbols:
 1,198 rows unsafe-tagged, 646 `unsafe_contract_declared`, 10,567 untouched, and
 zero exact-artifact verified-and-signed.
+
+## Canonical signature facade checked-result checkpoint
+
+The canonical no-GC signature facade no longer declares the eight legacy
+RSA-SHA256, RSA-SHA512, Ed25519, and ECDSA-P256 sign/verify entry points. Its
+existing public names now return `Result` and delegate to the corresponding
+checked provider contracts. A genuine verification mismatch remains
+`Ok(false)`; malformed arrays, private keys, signature shapes, corrupt result
+descriptors, and provider signing failure are typed errors. Signing can no
+longer expose an empty array as a successful value.
+
+Primary compiler, TLS, Ed25519, and cross-provider specs were updated so
+positive vectors unwrap checked results and malformed cases assert `Err`.
+Production TLS/package consumers already used the checked names. The change
+performs the same one cryptographic provider call and adds only bounded status,
+descriptor-length, and signature-length checks. It adds no per-call hash beyond
+the algorithm itself, symbol lookup, map lookup, generic dispatch, input copy,
+or provider allocation.
+
+The static ratchet and facade source check passed. Executable SSpec remains
+blocked before the target spec by the unrelated parser error in
+`src/app/io/env_access_host.spl`; the available binary also identifies itself
+as the bootstrap seed. The source-only ledger is now 12,023 `rt_*` declaration
+rows / 3,172 symbols: 1,190 tagged, 638 `unsafe_contract_declared`, 10,567
+untouched, and zero exact-artifact verified-and-signed.
