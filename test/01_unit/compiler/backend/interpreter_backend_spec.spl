@@ -21,8 +21,9 @@ doc/05_design/REQ-COMPILER-BACKEND-001.md
 use compiler.feature.codegen.backends.interpreter.backend.{create_interpreter_backend}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
 use compiler.backend.backend.env.{Environment}
-use compiler.backend.backend_types.{BackendErrorKind, Value}
+use compiler.backend.backend_types.{BackendErrorKind, FunctionValue, Value}
 use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
 use compiler.frontend._FlatAstBridge.convert_nodes.{op_kind_to_binop}
 use compiler.frontend.parser_types_expr.{BinOp}
 use std.io_runtime.{file_read}
@@ -129,6 +130,67 @@ describe "Interpreter Backend":
         expect(calls_source).to_contain("var found_index = -1")
         expect(calls_source).to_contain("self.resolve_function_by_name(f_t.name, ctx)")
         expect(interpreter_source).to_contain("self.resolve_function_by_name(cname_t, ctx)")
+
+    it "builds symbol names and globals in exactly one symbol traversal":
+        # @req: REQ-COMPILER-BACKEND-001
+        step("Verify: builds symbol names and globals in exactly one symbol traversal")
+        val source = file_read("src/compiler/70.backend/backend/interpreter.spl")
+        val start = source.index_of("fn process_module(module: HirModule)")
+        val end = source.index_of("fn process_function(fn_: HirFunction)", start)
+        expect(start).to_be_greater_than(-1)
+        expect(end).to_be_greater_than(start)
+        val body = source.substring(start, end)
+        val symbol_values = "module.symbols.symbols.values()"
+        val symbol_traversal = body.index_of(symbol_values)
+        val symbol_loop_end = body.index_of("# Build the name -> HirFunction index ONCE", symbol_traversal)
+        expect(body.split(symbol_values).len() - 1).to_equal(1)
+        expect(symbol_traversal).to_be_greater_than(-1)
+        expect(symbol_loop_end).to_be_greater_than(symbol_traversal)
+        val symbol_loop = body.substring(symbol_traversal, symbol_loop_end)
+        val names_write = symbol_loop.index_of("names_map[ns_id] = ns.name")
+        val global_write = symbol_loop.index_of("env.define_global(ns.name, Value.Function(symbol_fv))")
+        expect(names_write).to_be_greater_than(-1)
+        expect(global_write).to_be_greater_than(names_write)
+
+        val function_global_write = body.index_of("ctx.env.define_global(f.name, Value.Function(g_fv2))")
+        expect(function_global_write).to_be_greater_than(symbol_loop_end)
+        val before_function_global = body.substring(0, function_global_write)
+        val function_registration_loop = before_function_global.last_index_of("for fn_ in module.functions.values():")
+        expect(function_registration_loop).to_be_greater_than(symbol_loop_end)
+
+    it "preserves symbol-before-function last-writer-wins registration":
+        # @req: REQ-COMPILER-BACKEND-001
+        step("Verify: preserves symbol-before-function last-writer-wins registration")
+        # Couple this behavioral overwrite oracle to the production writes: it
+        # must fail if either registration is removed or their order reverses.
+        val source = file_read("src/compiler/70.backend/backend/interpreter.spl")
+        val start = source.index_of("fn process_module(module: HirModule)")
+        val end = source.index_of("fn process_function(fn_: HirFunction)", start)
+        val body = source.substring(start, end)
+        val symbol_write = body.index_of("env.define_global(ns.name, Value.Function(symbol_fv))")
+        val function_write = body.index_of("ctx.env.define_global(f.name, Value.Function(g_fv2))")
+        expect(symbol_write).to_be_greater_than(-1)
+        expect(function_write).to_be_greater_than(symbol_write)
+
+        var env = Environment.new()
+        env.define_global("shared", Value.Function(FunctionValue(
+            symbol: SymbolId(id: 11), name: "shared")))
+        env.define_global("symbol_only", Value.Function(FunctionValue(
+            symbol: SymbolId(id: 33), name: "symbol_only")))
+        env.define_global("shared", Value.Function(FunctionValue(
+            symbol: SymbolId(id: 22), name: "shared")))
+
+        match env.lookup("shared"):
+            case Some(Value.Function(fn_value)):
+                expect(fn_value.symbol.id).to_equal(22)
+                expect(fn_value.name).to_equal("shared")
+            case _:
+                expect(false).to_equal(true)
+        match env.lookup("symbol_only"):
+            case Some(Value.Function(fn_value)):
+                expect(fn_value.symbol.id).to_equal(33)
+            case _:
+                expect(false).to_equal(true)
 
     it "uses runtime enum discriminants for struct-shadowed variants":
         # @req: REQ-COMPILER-BACKEND-001

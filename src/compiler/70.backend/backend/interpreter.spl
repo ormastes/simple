@@ -118,16 +118,21 @@ impl InterpreterBackendImpl:
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
         # Create evaluation context
         val env = Environment.new()
-        # Build the id -> name map (bug doc iteration 21, target (a)). The
+        # Build the id -> name map and register symbol-backed function values
+        # in one traversal (bug doc iteration 21, target (a)). The
         # environment is keyed by variable NAME; a `Let`/`Var`'s SymbolId is
         # resolved to its name through this map. `module.symbols.symbols` is a
         # Dict<i64, HirSymbol>; iterate .values() bound to `val s: HirSymbol` (ANY-
         # erasure cure) and read the proven-readable `s.id.id` / `s.name`.
+        # Registration stays in dictionary iteration order, before the later
+        # HirFunction registrations, so duplicate names remain last-writer-wins.
         var names_map: Dict<i64, text> = {}
         for nsym_ in module.symbols.symbols.values():
             val ns: HirSymbol = nsym_
             val ns_id: i64 = ns.id.id
             names_map[ns_id] = ns.name
+            val symbol_fv: FunctionValue = FunctionValue(symbol: ns.id, name: ns.name)
+            env.define_global(ns.name, Value.Function(symbol_fv))
         # Build the name -> HirFunction index ONCE (perf). Both the Call
         # fast-path in eval_expr and call_function used to linear-scan
         # module.functions.values() with NO early break on every named call;
@@ -161,20 +166,6 @@ impl InterpreterBackendImpl:
         # element to a typed local `val f: HirFunction = ...` restores the real
         # struct type so field access resolves the correct index (proven with a
         # minimal field-name-collision repro, iteration 9).
-        # Iterate .values() (not .keys()+re-index) and bind each element to a
-        # typed local `val sym: HirSymbol`. `module.symbols.symbols` is a
-        # Dict<i64, HirSymbol>, but the seed erases Dict<K,V> to ANY, so both
-        # .keys()/[] re-index elements and .values() elements come out ANY-typed.
-        # Field access (`sym.id`/`sym.name`/`sym.id.id`) on an ANY receiver hits
-        # the seed's most-fields-wins resolver and reads the WRONG struct's field
-        # index -> a nil slot -> "field access on nil receiver" trap (iteration
-        # 10). The typed binding restores the real HirSymbol type so field indices
-        # resolve correctly (same idiom as the functions.values() loop below).
-        for sym_ in module.symbols.symbols.values():
-            val sym: HirSymbol = sym_
-            val g_fv: FunctionValue = FunctionValue(symbol: sym.id, name: sym.name)
-            ctx.env.define_global(sym.name, Value.Function(g_fv))
-
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
             val fsym = f.symbol
