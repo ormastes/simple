@@ -206,6 +206,14 @@ passed. The current ledger is 12,070 declaration rows, 1,148 unsafe-tagged,
 754 contract-documented, 485 unsafe-minimized, 10,653 untouched, and zero
 exact-artifact verified-and-signed admissions.
 
+Checkpoint: contract-reason parsing now counts explicit failure/null/family
+semantics without promoting source claims to evidence. The updated ledger is
+12,070 total rows, 1,163 unsafe-tagged, 883 contract-documented, 614
+unsafe-minimized, 10,638 untouched, and zero verified-and-signed. TCP accept
+and connect budgets now fail closed, native signatures are registered, the C
+connect timeout performs bounded nonblocking polling, and SimpleOS holds one
+netstack owner value across its bounded accept loop.
+
 For each row, prefer a pure-Simple owner. Otherwise require either:
 
 1. admitted exact evidence plus a typed safe wrapper; or

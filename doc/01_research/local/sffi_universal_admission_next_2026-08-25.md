@@ -214,3 +214,18 @@ increased to 1,148 and untouched rows decreased to 10,653. Contract-documented
 rows remain 754 and unsafe-minimized rows remain 485 because source annotations
 alone are not executable admission contracts. Verified-and-signed rows remain
 zero.
+
+## Executable reason-contract census checkpoint
+
+The inventory now recognizes explicit unsafe reason clauses such as `false
+means close failed`, `negative ... means failure`, nil/empty distinctions, and
+socket-family mappings as documented contracts. This changes only debt
+classification: it does not create evidence, verify a signature, or admit an
+artifact. A unit fixture proves a false-status reason is documented while its
+cryptographic admission and evidence remain absent.
+
+After TCP connect/accept/family hardening and removal of the dormant fabricated
+C bind provider, the ledger is 12,070 rows / 3,171 symbols: 1,163 unsafe-tagged,
+883 contract-documented, 614 unsafe-minimized, and 10,638 untouched. Provider
+definitions are C 2,377, Rust 2,178, Simple 576, and C++ 219. Verified-and-signed
+remains zero.
