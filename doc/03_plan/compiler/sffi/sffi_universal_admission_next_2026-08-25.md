@@ -81,11 +81,19 @@ shim. The checked work happens once during provider loading; cached foreign
 calls receive no new branch, allocation, lookup, or signature work.
 
 Verification checkpoint: the expanded SFFI null/signature guard passes. The
-runtime duplicate-owner audit reports all six `same` bodies, including the new
-checked loader, as non-divergent. Its overall result remains red because twelve
+runtime duplicate-owner audit reports all seven `same` bodies, including the
+checked loader and resolver, as non-divergent. Its overall result remains red because twelve
 unrelated runtime/runtime-native or runtime/legacy-core duplicate symbols are
 above the current baseline; those symbols are outside this lane and were not
 silently folded into the SFFI change.
+
+Checkpoint: the same status/out contract now covers symbol resolution through
+`spl_dlsym_checked(handle, name, out_symbol)`. Canonical Simple call and cached
+slot resolution use the checked result; raw `sym`/`spl_dlsym` remain explicitly
+unsafe compatibility surfaces for callers still awaiting migration. Each
+checked resolution initializes output to zero and rejects null handles, empty
+or malformed names, and null results. Cached slot invocation remains a direct
+pointer call with no added work.
 
 ### 3. Complete resolved-HIR inventory
 

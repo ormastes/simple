@@ -281,6 +281,32 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Interpreter implementation of the status/out symbol-resolution ABI.
+pub fn spl_dlsym_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "spl_dlsym_checked requires 3 arguments (handle, name, out_symbol)",
+        ));
+    }
+    let output = match &args[2] {
+        Value::BorrowMut(value) => value,
+        _ => {
+            return Err(CompileError::runtime(
+                "spl_dlsym_checked: output must be &mut i64",
+            ));
+        }
+    };
+    *output.inner_mut() = Value::Int(0);
+    match spl_dlsym(&args[..2]) {
+        Ok(Value::Int(symbol)) if symbol != 0 => {
+            *output.inner_mut() = Value::Int(symbol);
+            Ok(Value::Int(0))
+        }
+        Ok(_) => Ok(Value::Int(3)),
+        Err(_) => Ok(Value::Int(3)),
+    }
+}
+
 /// Close a loaded library.
 ///
 /// Callable from Simple as: `spl_dlclose(handle: i64) -> i64`

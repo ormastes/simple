@@ -142,13 +142,25 @@ int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle) {
 }
 
 int64_t spl_dlsym(int64_t handle, int64_t name_value) {
+    int64_t symbol = 0;
+    return spl_dlsym_checked(handle, name_value, &symbol) == 0 ? symbol : 0;
+}
+
+int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbol) {
+    if (!out_symbol) return 1;
+    *out_symbol = 0;
     const char* name = rt_interp_cstr(name_value);
-    if (!handle || !name) return 0;
+    if (!handle || !name || !name[0]) return 1;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)GetProcAddress((HMODULE)(intptr_t)handle, name);
+    FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
 #else
-    return (int64_t)(intptr_t)dlsym((void*)(intptr_t)handle, name);
+    void* symbol = dlsym((void*)(intptr_t)handle, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
 #endif
+    return 0;
 }
 
 int64_t spl_dlclose(int64_t handle) {

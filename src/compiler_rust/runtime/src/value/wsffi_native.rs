@@ -271,18 +271,42 @@ pub extern "C" fn spl_dlopen_checked(path_rv: RuntimeValue, out_handle: *mut i64
 /// Returns the symbol address as a raw i64.
 #[no_mangle]
 pub extern "C" fn spl_dlsym(handle: i64, name_rv: RuntimeValue) -> i64 {
+    let mut symbol = 0i64;
+    if spl_dlsym_checked(handle, name_rv, &mut symbol) == 0 {
+        symbol
+    } else {
+        0
+    }
+}
+
+/// Status/out symbol-resolution primitive.
+///
+/// Returns 0 only when `out_symbol` receives a non-null function address.
+#[no_mangle]
+pub extern "C" fn spl_dlsym_checked(
+    handle: i64,
+    name_rv: RuntimeValue,
+    out_symbol: *mut i64,
+) -> i64 {
+    if out_symbol.is_null() {
+        return 1;
+    }
+    unsafe { out_symbol.write(0) };
     let raw_ptr = rt_string_data(name_rv);
     if raw_ptr.is_null() || handle == 0 {
-        return 0;
+        return 1;
     }
 
     let len = rt_string_len(name_rv);
-    if len < 0 {
-        return 0;
+    if len <= 0 {
+        return 1;
     }
 
     // Build a null-terminated copy
     let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len as usize) };
+    if slice.contains(&0) {
+        return 1;
+    }
     let mut buf = Vec::with_capacity(len as usize + 1);
     buf.extend_from_slice(slice);
     buf.push(0);
@@ -290,14 +314,26 @@ pub extern "C" fn spl_dlsym(handle: i64, name_rv: RuntimeValue) -> i64 {
     #[cfg(unix)]
     {
         let result = unsafe { libc::dlsym(handle as *mut libc::c_void, buf.as_ptr() as *const libc::c_char) };
-        result as i64
+        if result.is_null() {
+            return 3;
+        }
+        unsafe { out_symbol.write(result as i64) };
+        0
     }
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
-        unsafe { GetProcAddress(handle as _, buf.as_ptr()) }
-            .map(|symbol| symbol as *const () as i64)
-            .unwrap_or(0)
+        let result = unsafe { GetProcAddress(handle as _, buf.as_ptr()) };
+        let Some(symbol) = result else {
+            return 3;
+        };
+        unsafe { out_symbol.write(symbol as *const () as i64) };
+        0
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = buf;
+        4
     }
 }
 
@@ -748,6 +784,15 @@ mod tests {
         assert_eq!(spl_dlopen_checked(empty, &mut handle), 1);
         assert_eq!(handle, 0);
         assert_eq!(spl_dlopen_checked(empty, std::ptr::null_mut()), 1);
+    }
+
+    #[test]
+    fn checked_symbol_lookup_initializes_output_and_rejects_null_handle() {
+        let name = rt_string_new(b"rt_probe".as_ptr(), 8);
+        let mut symbol = 99i64;
+        assert_eq!(spl_dlsym_checked(0, name, &mut symbol), 1);
+        assert_eq!(symbol, 0);
+        assert_eq!(spl_dlsym_checked(0, name, std::ptr::null_mut()), 1);
     }
 
     #[test]

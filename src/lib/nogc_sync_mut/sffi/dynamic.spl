@@ -31,6 +31,8 @@ extern fn spl_dlopen(path: text) -> i64
 extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64
 @unsafe(reason: "raw dynamic symbol resolution ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_dlsym(handle: i64, name: text) -> i64
+@unsafe(reason: "status/out dynamic symbol resolution ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_dlsym_checked(handle: i64, name: text, out_symbol: *mut i64) -> i64
 @unsafe(reason: "raw dynamic library release ABI", capabilities: [ffi])
 extern fn spl_dlclose(handle: i64) -> i64
 @unsafe(reason: "copies the provider into a sealed Linux admission snapshot", capabilities: [ffi])
@@ -58,6 +60,19 @@ fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
     if handle <= 0:
         return Err("E-SFFI-009: provider load succeeded with a null handle: {path}")
     Ok(handle)
+
+@unsafe(reason: "checked resolver returns an unverified raw function pointer", capabilities: [ffi, raw_ptr])
+fn _sffi_dlsym_checked(handle: i64, name: text) -> Result<i64, text>:
+    if handle <= 0:
+        return Err("E-SFFI-001: cannot resolve {name} from a null provider handle")
+    var symbol: i64 = 0
+    val status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_dlsym_checked(handle, name, &mut symbol)
+    if status != 0:
+        return Err("E-SFFI-001: unresolved foreign symbol: {name} (status {status})")
+    if symbol <= 0:
+        return Err("E-SFFI-009: symbol resolution succeeded with a null pointer: {name}")
+    Ok(symbol)
 
 # Resolved, immutable integer-only call slot. Resolution happens once; calls do
 # not perform dlsym, path lookup, hashing, or signature verification. This is a
@@ -170,14 +185,18 @@ impl DynLib:
             return 0
         spl_dlsym(self.handle, name)
 
+    @unsafe(reason: "resolves an unverified raw function pointer into a typed error channel", capabilities: [ffi, raw_ptr])
+    fn sym_checked(name: text) -> Result<i64, text>:
+        _sffi_dlsym_checked(self.handle, name)
+
     # Call a function with 0 arguments.
     @unsafe(reason: "invokes an untyped foreign function pointer", capabilities: [ffi, raw_ptr])
     fn call0(name: text) -> i64:
         if self.handle <= 0:
             panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = spl_dlsym(self.handle, name)
-        if fptr <= 0:
-            panic("E-SFFI-001: unresolved foreign symbol: {name}")
+        val fptr = match _sffi_dlsym_checked(self.handle, name):
+            case Ok(symbol): symbol
+            case Err(error): panic(error)
         var args: [i64] = []
         spl_wffi_call_i64(fptr, args, 0)
 
@@ -186,9 +205,9 @@ impl DynLib:
     fn call1(name: text, a0: i64) -> i64:
         if self.handle <= 0:
             panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = spl_dlsym(self.handle, name)
-        if fptr <= 0:
-            panic("E-SFFI-001: unresolved foreign symbol: {name}")
+        val fptr = match _sffi_dlsym_checked(self.handle, name):
+            case Ok(symbol): symbol
+            case Err(error): panic(error)
         var args: [i64] = []
         args.push(a0)
         spl_wffi_call_i64(fptr, args, 1)
@@ -198,9 +217,9 @@ impl DynLib:
     fn call2(name: text, a0: i64, a1: i64) -> i64:
         if self.handle <= 0:
             panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = spl_dlsym(self.handle, name)
-        if fptr <= 0:
-            panic("E-SFFI-001: unresolved foreign symbol: {name}")
+        val fptr = match _sffi_dlsym_checked(self.handle, name):
+            case Ok(symbol): symbol
+            case Err(error): panic(error)
         var args: [i64] = []
         args.push(a0)
         args.push(a1)
@@ -211,9 +230,9 @@ impl DynLib:
     fn call3(name: text, a0: i64, a1: i64, a2: i64) -> i64:
         if self.handle <= 0:
             panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = spl_dlsym(self.handle, name)
-        if fptr <= 0:
-            panic("E-SFFI-001: unresolved foreign symbol: {name}")
+        val fptr = match _sffi_dlsym_checked(self.handle, name):
+            case Ok(symbol): symbol
+            case Err(error): panic(error)
         var args: [i64] = []
         args.push(a0)
         args.push(a1)
@@ -225,9 +244,9 @@ impl DynLib:
     fn call4(name: text, a0: i64, a1: i64, a2: i64, a3: i64) -> i64:
         if self.handle <= 0:
             panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = spl_dlsym(self.handle, name)
-        if fptr <= 0:
-            panic("E-SFFI-001: unresolved foreign symbol: {name}")
+        val fptr = match _sffi_dlsym_checked(self.handle, name):
+            case Ok(symbol): symbol
+            case Err(error): panic(error)
         var args: [i64] = []
         args.push(a0)
         args.push(a1)
@@ -242,9 +261,9 @@ impl DynLib:
             panic("E-SFFI-001: provider is not loaded: {self.path}")
         if args.len() > 8:
             panic("E-SFFI-014: integer bridge supports at most 8 arguments")
-        val fptr = spl_dlsym(self.handle, name)
-        if fptr <= 0:
-            panic("E-SFFI-001: unresolved foreign symbol: {name}")
+        val fptr = match _sffi_dlsym_checked(self.handle, name):
+            case Ok(symbol): symbol
+            case Err(error): panic(error)
         val nargs = args.len()
         spl_wffi_call_i64(fptr, args, nargs)
 
@@ -254,9 +273,9 @@ impl DynLib:
     fn call_checked(name: text, args: [i64]) -> Result<i64, text>:
         if self.handle <= 0:
             return Err("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = spl_dlsym(self.handle, name)
-        if fptr <= 0:
-            return Err("E-SFFI-001: unresolved foreign symbol: {name}")
+        val fptr = match _sffi_dlsym_checked(self.handle, name):
+            case Ok(symbol): symbol
+            case Err(error): return Err(error)
         val result = _sffi_call_i64_raw_checked(fptr, args)
         if result.len() != 2:
             return Err("E-SFFI-017: corrupt checked transport result: {name}")
@@ -273,9 +292,9 @@ impl DynLib:
             return Err("E-SFFI-001: provider is not loaded: {self.path}")
         if arity < 0 or arity > 8:
             return Err("E-SFFI-003: unsupported i64 ABI arity {arity} for {name}; expected 0..8")
-        val fptr = spl_dlsym(self.handle, name)
-        if fptr <= 0:
-            return Err("E-SFFI-001: unresolved foreign symbol: {name}")
+        val fptr = match _sffi_dlsym_checked(self.handle, name):
+            case Ok(symbol): symbol
+            case Err(error): return Err(error)
         Ok(DynI64FnSlot(
             fptr: fptr,
             symbol: name,
@@ -478,6 +497,6 @@ fn sffi_call_checked(func_name: text, args: [i64]) -> Result<i64, text>:
     var loader = DynLoader.instance()
     loader.call_checked(lib_path, func_name, args)
 
-export spl_dlopen, spl_dlopen_checked, spl_dlsym, spl_dlclose
+export spl_dlopen, spl_dlopen_checked, spl_dlsym, spl_dlsym_checked, spl_dlclose
 export spl_wffi_call_i64, spl_wffi_call_i64_checked
 export DynI64FnSlot, DynLib, DynLoader
