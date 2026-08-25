@@ -320,8 +320,18 @@ pub(package) fn riscv32_sv32_mapping_prepare_v1(
     val bound = executable_authority_bind_riscv32_mapping_root_v1(
         owner, transaction._pin, root.unwrap().root_id, root.unwrap().generation)
     if bound.is_err():
-        _ = riscv32_sv32_user_root_abort_fresh_v1(root.unwrap())
-        _ = mutex_raw_unlock(_rv32_mapping_mutex_v1)
+        val root_released = riscv32_sv32_user_root_abort_fresh_v1(root.unwrap())
+        if not root_released:
+            # The authority never adopted this root, so no registry release
+            # coordinate can recover it.  Keep the architecture slot as the
+            # sole owner and fail the whole mapper closed rather than losing
+            # the live allocation behind an ordinary authority rejection.
+            _rv32_mapping_poisoned_v1 = true
+        val unlocked = mutex_raw_unlock(_rv32_mapping_mutex_v1)
+        if not unlocked: _rv32_mapping_poisoned_v1 = true
+        if not root_released or not unlocked:
+            return _rv32_abort_unmaterialized_reject_v1(
+                owner, transaction, Riscv32Sv32MappingErrorV1.RollbackFailed)
         return _rv32_abort_unmaterialized_reject_v1(
             owner, transaction, Riscv32Sv32MappingErrorV1.AuthorityRejected)
     var leaves: [Riscv32Sv32OwnedLeafV1] = []

@@ -370,9 +370,15 @@ class StaticFileHandler:
                 chunked: false
             )
 
-        # Range request check
+        # Range is defined for GET. HEAD and other methods ignore it and use
+        # the metadata/full-representation path below. If-None-Match has
+        # already been evaluated because conditional request preconditions
+        # take precedence over Range and If-Range.
         val range_header = _get_header_ci(request.headers, "range")
-        if range_header.len() > 0:
+        val if_range = _get_header_ci(request.headers, "if-range")
+        if (request.method == "GET" and
+            range_header.len() > 0 and
+            static_file_if_range_matches(if_range, etag)):
             val range = static_file_parse_range(range_header, size)
             if range.0 == -1 and range.1 == -1:
                 return HttpResponseData(
@@ -392,8 +398,6 @@ class StaticFileHandler:
                     chunked: false
                 )
             val range_result = static_file_serve_range(actual_path, range.0, range.1, size, etag, mime)
-            if request.method == "HEAD":
-                return static_file_head_response(range_result, range.1 - range.0 + 1)
             return range_result
 
         # HEAD returns the same representation metadata as GET without
@@ -498,6 +502,24 @@ fn static_file_check_etag(request_etag: text, file_etag: text) -> bool:
     if req.starts_with("W/"):
         req = req.slice(2, req.len())
     req == file_etag
+
+fn static_file_if_range_matches(if_range: text, file_etag: text) -> bool:
+    """Return whether a Range request may use the current representation.
+
+    An absent If-Range permits normal Range processing. Entity-tag validators
+    use the strong comparison required by HTTP: weak tags never match, and the
+    field value must be exactly the current strong ETag. HTTP-date validators
+    conservatively miss because this handler does not yet emit Last-Modified;
+    a miss correctly falls back to the full representation rather than 416.
+    """
+    val validator = if_range.trim()
+    if validator.len() == 0:
+        return true
+    if validator.starts_with("W/"):
+        return false
+    if not validator.starts_with("\""):
+        return false
+    validator == file_etag
 
 fn static_file_parse_range(range_header: text, file_size: i64) -> (i64, i64):
     """Parse a `Range: bytes=...` header value.
@@ -619,22 +641,6 @@ fn static_file_serve_range(path: text, start: i64, end: i64, file_size: i64, eta
         body_file: path,
         body_offset: start,
         body_length: length,
-        chunked: false
-    )
-
-fn static_file_head_response(resp: HttpResponseData, content_length: i64) -> HttpResponseData:
-    """Suppress a filesystem response body while retaining GET metadata."""
-    var headers = resp.headers
-    headers.push(("Content-Length", content_length.to_text()))
-    HttpResponseData(
-        status: resp.status,
-        reason: resp.reason,
-        headers: headers,
-        body: "",
-        body_bytes: [],
-        body_file: "",
-        body_offset: 0,
-        body_length: 0,
         chunked: false
     )
 

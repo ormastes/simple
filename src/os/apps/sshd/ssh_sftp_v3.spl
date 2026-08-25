@@ -1,13 +1,40 @@
-# Bounded SFTP v3 negotiation and framing owner. Filesystem operations fail closed.
+# Bounded SFTP v3 negotiation, framing, and positioned filesystem owner.
 
-use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_put_u32, ssh_put_text}
+use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_put_u32, ssh_put_string, ssh_put_text}
+use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_open, g_vfs_positioned_close, g_vfs_positioned_read_at, g_vfs_positioned_write_at}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{OpenFlags}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 
 val SSH_FXP_INIT: u8 = 1
 val SSH_FXP_VERSION: u8 = 2
+val SSH_FXP_OPEN: u8 = 3
+val SSH_FXP_CLOSE: u8 = 4
+val SSH_FXP_READ: u8 = 5
+val SSH_FXP_WRITE: u8 = 6
 val SSH_FXP_STATUS: u8 = 101
+val SSH_FXP_HANDLE: u8 = 102
+val SSH_FXP_DATA: u8 = 103
+val SSH_FX_OK: u32 = 0
+val SSH_FX_EOF: u32 = 1
+val SSH_FX_NO_SUCH_FILE: u32 = 2
+val SSH_FX_PERMISSION_DENIED: u32 = 3
+val SSH_FX_FAILURE: u32 = 4
+val SSH_FX_BAD_MESSAGE: u32 = 5
 val SSH_FX_OP_UNSUPPORTED: u32 = 8
+val SSH_FXF_READ: u32 = 1
+val SSH_FXF_WRITE: u32 = 2
+val SSH_FXF_APPEND: u32 = 4
+val SSH_FXF_CREAT: u32 = 8
+val SSH_FXF_TRUNC: u32 = 16
+val SSH_FXF_EXCL: u32 = 32
+val SSH_FXF_ALL: u32 = 63
 val SFTP_V3: u32 = 3
 val SFTP_MAX_PACKET: u32 = 35000
+val SFTP_MAX_PATH: u64 = 4096
+val SFTP_MAX_IO: u64 = 32768
+val SFTP_MAX_HANDLES: u64 = 32
+val SFTP_HANDLE_MAGIC: u32 = 0x53465450u32
 val SFTP_ACCUMULATOR_CAP: u64 = (SFTP_MAX_PACKET.to_u64() + 4u64) * 2u64
 val SFTP_COUNTER_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
 
@@ -31,6 +58,11 @@ class SftpSessionV3:
     complete_frames: u64
     peak_retained_bytes: u64
     work_counter_saturated: bool
+    file_objects: [u64]
+    handle_generations: [u32]
+    handle_active: [bool]
+    handle_readable: [bool]
+    handle_writable: [bool]
 
     pub static fn new() -> SftpSessionV3:
         SftpSessionV3(
@@ -44,7 +76,12 @@ class SftpSessionV3:
             header_scan_bytes: 0,
             complete_frames: 0,
             peak_retained_bytes: 0,
-            work_counter_saturated: false
+            work_counter_saturated: false,
+            file_objects: [0u64; SFTP_MAX_HANDLES],
+            handle_generations: [1u32; SFTP_MAX_HANDLES],
+            handle_active: [false; SFTP_MAX_HANDLES],
+            handle_readable: [false; SFTP_MAX_HANDLES],
+            handle_writable: [false; SFTP_MAX_HANDLES]
         )
 
 fn _record_work(current: u64, added: u64) -> (u64, bool):
@@ -74,11 +111,223 @@ fn _status(request_id: u32, code: u32, message: text) -> [u8]:
     body = ssh_put_text(body, "")
     _frame(body)
 
+fn _get_u64(data: [u8], offset: u64) -> u64:
+    var value: u64 = 0
+    var i: u64 = 0
+    while i < 8u64:
+        value = (value << 8u64) | data[offset + i].to_u64()
+        i = i + 1u64
+    value
+
+fn _fs_status(error: FsError) -> u32:
+    match error:
+        case FsError.NotFound: SSH_FX_NO_SUCH_FILE
+        case FsError.Permission: SSH_FX_PERMISSION_DENIED
+        case FsError.ReadOnly: SSH_FX_PERMISSION_DENIED
+        case FsError.PathTraversal: SSH_FX_PERMISSION_DENIED
+        case FsError.StaleHandle: SSH_FX_FAILURE
+        case FsError.InvalidArg: SSH_FX_BAD_MESSAGE
+        case _: SSH_FX_FAILURE
+
+fn _path_is_admitted(bytes: [u8]) -> bool:
+    if bytes.len() == 0u64 or bytes.len() > SFTP_MAX_PATH or bytes[0] != 47u8:
+        return false
+    var component_len: u64 = 0
+    var component_dots: u64 = 0
+    var i: u64 = 1
+    while i < bytes.len():
+        val byte = bytes[i]
+        if byte == 0u8:
+            return false
+        if byte == 47u8:
+            if component_len == 1u64 and component_dots == 1u64:
+                return false
+            if component_len == 2u64 and component_dots == 2u64:
+                return false
+            component_len = 0
+            component_dots = 0
+        else:
+            component_len = component_len + 1u64
+            if byte == 46u8 and component_dots + 1u64 == component_len:
+                component_dots = component_dots + 1u64
+        i = i + 1u64
+    not ((component_len == 1u64 and component_dots == 1u64) or
+        (component_len == 2u64 and component_dots == 2u64))
+
+fn _open_flags(pflags: u32) -> OpenFlags:
+    var flags = if (pflags & SSH_FXF_READ) != 0u32 and (pflags & SSH_FXF_WRITE) != 0u32:
+        OpenFlags.read_write()
+    elif (pflags & SSH_FXF_WRITE) != 0u32:
+        OpenFlags.write_only()
+    else:
+        OpenFlags.read_only()
+    if (pflags & SSH_FXF_CREAT) != 0u32: flags = flags.with_create()
+    if (pflags & SSH_FXF_EXCL) != 0u32: flags = flags.with_excl()
+    if (pflags & SSH_FXF_TRUNC) != 0u32: flags = flags.with_trunc()
+    if (pflags & SSH_FXF_APPEND) != 0u32: flags = flags.with_append()
+    flags
+
 impl SftpSessionV3:
     pub me close_all():
+        var slot: u64 = 0
+        while slot < SFTP_MAX_HANDLES:
+            if self.handle_active[slot]:
+                val _closed = g_vfs_positioned_close(self.file_objects[slot])
+                self._retire_handle(slot)
+            slot = slot + 1u64
         self.initialized = false
         self.client_version = 0u32
         self._clear_retained()
+
+    me _retire_handle(slot: u64):
+        self.file_objects[slot] = 0u64
+        self.handle_active[slot] = false
+        self.handle_readable[slot] = false
+        self.handle_writable[slot] = false
+        var generation = self.handle_generations[slot] + 1u32
+        if generation == 0u32: generation = 1u32
+        self.handle_generations[slot] = generation
+
+    fn _handle_token(slot: u64) -> [u8]:
+        var token = _u32(SFTP_HANDLE_MAGIC)
+        token = ssh_put_u32(token, slot.to_u32())
+        token = ssh_put_u32(token, self.handle_generations[slot])
+        token
+
+    fn _decode_handle(frame: [u8], offset: u64) -> i64:
+        if offset + 16u64 != frame.len():
+            return -1
+        if ssh_get_u32(frame, offset) != 12u32:
+            return -1
+        if ssh_get_u32(frame, offset + 4u64) != SFTP_HANDLE_MAGIC:
+            return -1
+        val slot = ssh_get_u32(frame, offset + 8u64).to_u64()
+        if slot >= SFTP_MAX_HANDLES or not self.handle_active[slot]:
+            return -1
+        if ssh_get_u32(frame, offset + 12u64) != self.handle_generations[slot]:
+            return -1
+        slot.to_i64()
+
+    fn _alloc_handle(file_object: u64, readable: bool, writable: bool) -> i64:
+        var slot: u64 = 0
+        while slot < SFTP_MAX_HANDLES:
+            if not self.handle_active[slot]:
+                self.file_objects[slot] = file_object
+                self.handle_active[slot] = true
+                self.handle_readable[slot] = readable
+                self.handle_writable[slot] = writable
+                return slot.to_i64()
+            slot = slot + 1u64
+        -1
+
+    me _handle_open(frame: [u8], request_id: u32) -> [u8]:
+        if frame.len() < 21u64:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "truncated open request")
+        val path_len = ssh_get_u32(frame, 9u64).to_u64()
+        if path_len == 0u64 or path_len > SFTP_MAX_PATH:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid path length")
+        val path_start = 13u64
+        val flags_at = path_start + path_len
+        if flags_at + 8u64 != frame.len():
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid open framing")
+        var path_bytes: [u8] = []
+        var i: u64 = 0
+        while i < path_len:
+            path_bytes.push(frame[path_start + i])
+            i = i + 1u64
+        if not _path_is_admitted(path_bytes):
+            return _status(request_id, SSH_FX_PERMISSION_DENIED, "path denied")
+        val pflags = ssh_get_u32(frame, flags_at)
+        if pflags == 0u32 or (pflags & (0xFFFFFFFFu32 ^ SSH_FXF_ALL)) != 0u32:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid open flags")
+        if (pflags & SSH_FXF_EXCL) != 0u32 and (pflags & SSH_FXF_CREAT) == 0u32:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "exclusive open requires create")
+        if ((pflags & (SSH_FXF_CREAT | SSH_FXF_TRUNC | SSH_FXF_APPEND)) != 0u32) and
+            (pflags & SSH_FXF_WRITE) == 0u32:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "write flag required")
+        # Only the empty v3 ATTRS encoding is supported: flags == 0 and no tail.
+        if ssh_get_u32(frame, flags_at + 4u64) != 0u32:
+            return _status(request_id, SSH_FX_OP_UNSUPPORTED, "open attributes unsupported")
+        val decoded = validated_utf8_bytes_to_text_linear(path_bytes)
+        match decoded:
+            Err(_): _status(request_id, SSH_FX_BAD_MESSAGE, "path is not valid UTF-8")
+            Ok(path):
+                match g_vfs_positioned_open(path, _open_flags(pflags)):
+                    Err(error): _status(request_id, _fs_status(error), "open failed")
+                    Ok(file_object):
+                        val slot = self._alloc_handle(file_object,
+                            (pflags & SSH_FXF_READ) != 0u32,
+                            (pflags & SSH_FXF_WRITE) != 0u32)
+                        if slot < 0:
+                            val _closed = g_vfs_positioned_close(file_object)
+                            return _status(request_id, SSH_FX_FAILURE, "handle limit reached")
+                        var body: [u8] = [SSH_FXP_HANDLE]
+                        body = ssh_put_u32(body, request_id)
+                        body = ssh_put_string(body, self._handle_token(slot.to_u64()))
+                        _frame(body)
+
+    me _handle_close(frame: [u8], request_id: u32) -> [u8]:
+        val slot = self._decode_handle(frame, 9u64)
+        if slot < 0:
+            return _status(request_id, SSH_FX_FAILURE, "invalid handle")
+        val index = slot.to_u64()
+        val closed = g_vfs_positioned_close(self.file_objects[index])
+        self._retire_handle(index)
+        match closed:
+            Err(error): _status(request_id, _fs_status(error), "close failed")
+            Ok(_): _status(request_id, SSH_FX_OK, "ok")
+
+    me _handle_read(frame: [u8], request_id: u32) -> [u8]:
+        if frame.len() != 37u64 or ssh_get_u32(frame, 9u64) != 12u32:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid read framing")
+        val slot = self._decode_handle(frame.slice(0u64, 25u64), 9u64)
+        if slot < 0:
+            return _status(request_id, SSH_FX_FAILURE, "invalid handle")
+        val index = slot.to_u64()
+        if not self.handle_readable[index]:
+            return _status(request_id, SSH_FX_PERMISSION_DENIED, "handle is not readable")
+        val offset = _get_u64(frame, 25u64)
+        val length = ssh_get_u32(frame, 33u64).to_u64()
+        if length == 0u64 or length > SFTP_MAX_IO or offset > SFTP_COUNTER_MAX - length:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid read range")
+        match g_vfs_positioned_read_at(self.file_objects[index], offset, length):
+            Err(error): _status(request_id, _fs_status(error), "read failed")
+            Ok(data):
+                if data.len() == 0u64:
+                    return _status(request_id, SSH_FX_EOF, "eof")
+                if data.len() > length:
+                    return _status(request_id, SSH_FX_FAILURE, "invalid VFS read length")
+                var body: [u8] = [SSH_FXP_DATA]
+                body = ssh_put_u32(body, request_id)
+                body = ssh_put_string(body, data)
+                _frame(body)
+
+    me _handle_write(frame: [u8], request_id: u32) -> [u8]:
+        if frame.len() < 37u64 or ssh_get_u32(frame, 9u64) != 12u32:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid write framing")
+        val data_len = ssh_get_u32(frame, 33u64).to_u64()
+        if data_len == 0u64 or data_len > SFTP_MAX_IO or 37u64 + data_len != frame.len():
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid write length")
+        val slot = self._decode_handle(frame.slice(0u64, 25u64), 9u64)
+        if slot < 0:
+            return _status(request_id, SSH_FX_FAILURE, "invalid handle")
+        val index = slot.to_u64()
+        if not self.handle_writable[index]:
+            return _status(request_id, SSH_FX_PERMISSION_DENIED, "handle is not writable")
+        val offset = _get_u64(frame, 25u64)
+        if offset > SFTP_COUNTER_MAX - data_len:
+            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid write range")
+        var data: [u8] = []
+        var i: u64 = 0
+        while i < data_len:
+            data.push(frame[37u64 + i])
+            i = i + 1u64
+        match g_vfs_positioned_write_at(self.file_objects[index], offset, data):
+            Err(error): _status(request_id, _fs_status(error), "write failed")
+            Ok(written):
+                if written != data_len:
+                    return _status(request_id, SSH_FX_FAILURE, "short write")
+                _status(request_id, SSH_FX_OK, "ok")
 
     fn _ring_byte(offset: u64) -> u8:
         self.rx_ring[(self.rx_head + offset) % SFTP_ACCUMULATOR_CAP]
@@ -185,7 +434,15 @@ impl SftpSessionV3:
         if not self.initialized or frame.len() < 9u64:
             return _status(0, SSH_FX_OP_UNSUPPORTED, "sftp not initialized")
         val request_id = ssh_get_u32(frame, 5)
+        if kind == SSH_FXP_OPEN:
+            return self._handle_open(frame, request_id)
+        if kind == SSH_FXP_CLOSE:
+            return self._handle_close(frame, request_id)
+        if kind == SSH_FXP_READ:
+            return self._handle_read(frame, request_id)
+        if kind == SSH_FXP_WRITE:
+            return self._handle_write(frame, request_id)
         _status(request_id, SSH_FX_OP_UNSUPPORTED,
-            "sftp filesystem capability unavailable")
+            "sftp operation unsupported")
 
 export SftpSessionV3, SftpAccumulatorWorkV3

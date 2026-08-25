@@ -337,6 +337,13 @@ class DbServerCapsule:
         if ids_text == "" or ids.len() > bounds.max_items:
             return err_response(ERR_LIMIT, "BATCH_GET requires 1..{bounds.max_items} ids")
         var values: [text] = []
+        # `encode_response(ok_with("values", joined))` has the exact wire form
+        # `OK values=<joined>` (plus two quotes when the value is empty or has
+        # horizontal whitespace).  Account for that incrementally instead of
+        # copying and joining the complete prefix, sorting a one-field response,
+        # and serializing it again for every item.
+        var joined_bytes = 0
+        var joined_needs_quotes = false
         for id in ids:
             var args: Dict<text, text> = {}
             for (key, value) in request.args:
@@ -353,11 +360,15 @@ class DbServerCapsule:
                 value = item.fields["id"]
             else:
                 return err_response(ERR_MALFORMED, "batch item has no value or id")
-            var prospective = values
-            prospective.push(value)
-            if encode_response(ok_with("values", prospective.join(","))).bytes().len() > bounds.max_response_bytes:
+            if values.len() > 0:
+                joined_bytes = joined_bytes + 1
+            joined_bytes = joined_bytes + value.bytes().len()
+            joined_needs_quotes = joined_needs_quotes or value.contains(" ") or value.contains("\t")
+            val quote_bytes = if joined_bytes == 0 or joined_needs_quotes: 2 else: 0
+            # "OK values=" is 10 bytes.
+            if 10 + joined_bytes + quote_bytes > bounds.max_response_bytes:
                 return err_response(ERR_LIMIT, "batch response exceeds {bounds.max_response_bytes} bytes")
-            values = prospective
+            values.push(value)
         val joined = values.join(",")
         if encode_response(ok_with("values", joined)).bytes().len() > MAX_RESPONSE_BYTES:
             return err_response(ERR_LIMIT, "batch response exceeds {MAX_RESPONSE_BYTES} bytes")
@@ -402,13 +413,20 @@ class DbServerCapsule:
                 ids.push(id)
         ids.sort()
         var bounded_ids: [text] = []
+        var joined_bytes = 0
+        var joined_needs_quotes = false
         var index = 0
         while index < ids.len() and index < limit:
-            var prospective = bounded_ids
-            prospective.push(ids[index])
-            if encode_response(ok_with("ids", prospective.join(","))).bytes().len() > bounds.max_response_bytes:
+            val id = ids[index]
+            if bounded_ids.len() > 0:
+                joined_bytes = joined_bytes + 1
+            joined_bytes = joined_bytes + id.bytes().len()
+            joined_needs_quotes = joined_needs_quotes or id.contains(" ") or id.contains("\t")
+            val quote_bytes = if joined_bytes == 0 or joined_needs_quotes: 2 else: 0
+            # "OK ids=" is 7 bytes.
+            if 7 + joined_bytes + quote_bytes > bounds.max_response_bytes:
                 return err_response(ERR_LIMIT, "range response exceeds {bounds.max_response_bytes} bytes")
-            bounded_ids = prospective
+            bounded_ids.push(id)
             index = index + 1
         val joined = bounded_ids.join(",")
         if encode_response(ok_with("ids", joined)).bytes().len() > MAX_RESPONSE_BYTES:

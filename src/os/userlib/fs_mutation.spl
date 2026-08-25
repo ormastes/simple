@@ -3,7 +3,7 @@
 # mutation authorities; this client additionally owns bounded wire validation.
 
 use os.userlib.fs.{vfs_ipc_request_bytes}
-use os.userlib.ipc_protocol.{VFS_MKDIR, VFS_REMOVE, VFS_RMDIR, VFS_CHMOD, VFS_SYMLINK}
+use os.userlib.ipc_protocol.{VFS_MKDIR, VFS_REMOVE, VFS_RENAME, VFS_RMDIR, VFS_CHMOD, VFS_SYMLINK}
 
 pub const VFS_MUTATION_PATH_MAX_BYTES: u64 = 4096u64
 
@@ -52,6 +52,23 @@ pub fn vfs_unlink_checked(path: text) -> Result<bool, text>:
 pub fn vfs_rmdir_checked(path: text) -> Result<bool, text>:
     """Remove one empty directory after canonical VFS capability/grant checks."""
     _vfs_mutate_checked(VFS_RMDIR, path)
+
+pub fn vfs_rename_checked(old_path: text, new_path: text) -> Result<bool, text>:
+    """Rename one entry after canonical VFS capability/grant checks."""
+    var payload = _mutation_path_bytes(old_path)?
+    payload.push(0u8)
+    val new_path_bytes = _mutation_path_bytes(new_path)?
+    if payload.len() > VFS_MUTATION_PATH_MAX_BYTES or
+        new_path_bytes.len() > VFS_MUTATION_PATH_MAX_BYTES - payload.len():
+        return Err("rename request exceeds 4096-byte limit")
+    for byte in new_path_bytes:
+        payload.push(byte)
+    val response = vfs_ipc_request_bytes(VFS_RENAME, payload)?
+    if response.len() != 8u64:
+        return Err("malformed VFS rename reply")
+    if _read_u64_le(response) != 1u64:
+        return Err("VFS rename was not acknowledged")
+    Ok(true)
 
 pub fn vfs_chmod_checked(path: text, mode: u16) -> Result<bool, text>:
     """Change mode after canonical VFS capability/grant checks."""
