@@ -12,6 +12,33 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## HIR module-surface authority checkpoint
+
+`module_surface_registry.spl` had two genuine runtime interfaces and 63
+ambient call sites: one content hash and 62 transient-heap ownership
+promotions.  Both declarations are now explicitly tagged and every call is
+routed through one of two mandatory-inline `ffi` owners.  The focused
+`hir-module-surface-sffi-authority.shs` ratchet passed, pins the compiler-owned
+ABI registry, and preserves the exact promotion count and order.
+
+Every promotion result was already either checked by the existing
+short-circuit/failure diagnostic path or returned as the function's final
+boolean result; no fabricated success was found.  The change adds no graph
+operation, environment access, allocation, copy, loop, lookup, lock, hash,
+signature operation, or generic dispatch.  Its O(total retained surface
+fields) ownership work and failure attribution are unchanged.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,539 -> 19,478
+- lexical unsafe: 3,219 -> 3,221
+- function unsafe: unchanged at 919
+- missing authority: 15,401 -> 15,338
+
+The file itself now reports two raw rows, both lexically authorized, and zero
+missing authority.  Runtime ownership proof and exact signed compiler artifacts
+remain absent, so verified-and-signed admission remains 0.
+
 ## MIR expression-dispatch authority checkpoint
 
 The largest remaining compiler file was a genuine boundary rather than census
