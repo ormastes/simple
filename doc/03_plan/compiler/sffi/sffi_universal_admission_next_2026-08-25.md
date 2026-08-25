@@ -255,6 +255,15 @@ Rust bootstrap seed. The source-only ledger is 12,038 `rt_*` rows / 3,179
 symbols: 1,202 tagged, 650 contract-declared, 10,570 untouched, and zero
 exact-artifact verified-and-signed.
 
+Checkpoint: removed the unresolved P-384/P-521 signing and verification SFFI
+surface. No provider, interpreter registration, or codegen contract existed;
+the canonical engines are already pure Simple. The host-key dispatcher is now
+typed `Result` and directs these algorithms to those owners rather than
+fabricating `false`. Static and source checks pass, with no foreign dispatch or
+new hot-path work. The ledger is now 12,034 `rt_*` rows / 3,175 symbols: 1,198
+tagged, 646 contract-declared, 10,570 untouched, and zero exact-artifact
+verified-and-signed.
+
 ### 7. Verify once, then stop
 
 - Run sabotage and parity across interpreter, JIT, native, sealed dynload, and

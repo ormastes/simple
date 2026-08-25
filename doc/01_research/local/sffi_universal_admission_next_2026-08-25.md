@@ -307,3 +307,27 @@ The refreshed source-only ledger remains 12,038 `rt_*` declaration rows and
 3,179 symbols: 1,202 rows are unsafe-tagged, 650 are in
 `unsafe_contract_declared`, 10,570 are untouched, and zero are exact-artifact
 verified-and-signed.
+
+## P-384/P-521 unresolved-provider removal checkpoint
+
+The four advertised `rt_ecdsa_p{384,521}_{sign,verify}` declarations had no C
+or Rust implementation, interpreter registration, or typed codegen entry. They
+could therefore only fail resolution or be replaced by a fabricated weak/stub
+result. They are now removed from the sync and async signature facades. The SSH
+host-key dispatcher returns `Result<bool, text>` and reports that these
+algorithms require their canonical pure-Simple providers instead of mapping
+provider absence to `false`.
+
+The working P-384/P-521 implementations remain the pure-Simple
+`os.crypto.p384` and `os.crypto.ecdsa_p521` engines already used by TLS. This
+removal eliminates foreign dispatch and cannot add hot-path hashing, lookup,
+allocation, or copying. A static ratchet rejects reintroduction of any of the
+four raw declarations and asserts that both pure-Simple sign/verify owners
+remain present. The ratchet and focused two-module source check passed; the
+available executable still identifies itself as a bootstrap seed and is not
+accepted as self-hosted verification.
+
+Removing the nonexistent APIs changes the source-only ledger to 12,034 `rt_*`
+declaration rows and 3,175 symbols: 1,198 rows are unsafe-tagged, 646 are in
+`unsafe_contract_declared`, 10,570 are untouched, and zero are exact-artifact
+verified-and-signed.
