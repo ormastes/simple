@@ -20,13 +20,29 @@ val CUDA_F64_MUL = 2
 val CUDA_F64_DIV = 3
 val CUDA_F64_MIN = 0
 val CUDA_F64_MAX = 1
+val CUDA_MAX_BUFFER_BYTES: i64 = 268435456
+val CUDA_MAX_F64_ELEMENTS: i64 = CUDA_MAX_BUFFER_BYTES / 8
+
+@inline
+fn checked_cuda_f64_bytes(count: i64) -> Result<i64, i64>:
+    if count < 0 or count > CUDA_MAX_F64_ELEMENTS:
+        return Err(CUDA_ERROR_INVALID_VALUE)
+    Ok(count * 8)
+
+@inline
+fn checked_cuda_f64_product_bytes(left: i64, right: i64) -> Result<i64, i64>:
+    if left < 0 or right < 0:
+        return Err(CUDA_ERROR_INVALID_VALUE)
+    if left > 0 and right > CUDA_MAX_F64_ELEMENTS / left:
+        return Err(CUDA_ERROR_INVALID_VALUE)
+    Ok(left * right * 8)
 
 class CudaBuffer:
     ptr: i64
     size: i64
 
     static fn allocate(size: i64) -> Result<CudaBuffer, i64>:
-        if size <= 0:
+        if size <= 0 or size > CUDA_MAX_BUFFER_BYTES:
             return Err(CUDA_ERROR_INVALID_VALUE)
         val ptr = cuda_mem_alloc(size)
         if ptr <= 0:
@@ -35,7 +51,7 @@ class CudaBuffer:
 
     fn copy_from_i64_values(values: [i64]) -> Result<i64, i64>:
         unsafe(capabilities: [ffi, raw_ptr]):
-            val bytes = values.len() * 8
+            val bytes = checked_cuda_f64_bytes(values.len())?
             if bytes > self.size:
                 return Err(CUDA_ERROR_INVALID_VALUE)
             val host = rt_alloc(bytes)
@@ -53,8 +69,8 @@ class CudaBuffer:
 
     fn copy_to_i64_values(count: i64) -> Result<[i64], i64>:
         unsafe(capabilities: [ffi, raw_ptr]):
-            val bytes = count * 8
-            if count < 0 or bytes > self.size:
+            val bytes = checked_cuda_f64_bytes(count)?
+            if bytes > self.size:
                 return Err(CUDA_ERROR_INVALID_VALUE)
             if count == 0:
                 return Ok([])
@@ -112,7 +128,7 @@ class CudaNDArray:
                     dtype: DType.F64,
                     device: Device.CUDA(index: device_id)
                 ))
-            val buffer = CudaBuffer.allocate(count * 8)?
+            val buffer = CudaBuffer.allocate(checked_cuda_f64_bytes(count)?)?
             var bits: [i64] = []
             var i = 0
             while i < count:
@@ -142,7 +158,10 @@ class CudaNDArray:
             val current = arrays[i]
             if current.dtype != DType.F64 or current.shape.dims.len() != 1 or current.device != first.device:
                 return Err(CUDA_ERROR_INVALID_VALUE)
-            total = total + current.shape.dims[0].value
+            val current_count = current.shape.dims[0].value
+            if current_count < 0 or current_count > CUDA_MAX_F64_ELEMENTS - total:
+                return Err(CUDA_ERROR_INVALID_VALUE)
+            total = total + current_count
             i = i + 1
         if total < 0:
             return Err(CUDA_ERROR_INVALID_VALUE)
@@ -153,12 +172,12 @@ class CudaNDArray:
                 dtype: DType.F64,
                 device: first.device
             ))
-        val out_buffer = CudaBuffer.allocate(total * 8)?
+        val out_buffer = CudaBuffer.allocate(checked_cuda_f64_bytes(total)?)?
         var dst_offset = 0
         i = 0
         while i < arrays.len():
             val current = arrays[i]
-            val bytes = current.shape.dims[0].value * 8
+            val bytes = checked_cuda_f64_bytes(current.shape.dims[0].value)?
             if bytes > 0:
                 val rc = cuda_memcpy_dtod(out_buffer.ptr + dst_offset, current.buffer.ptr, bytes)
                 if rc != CUDA_SUCCESS:
@@ -238,7 +257,7 @@ class CudaNDArray:
                 dtype: DType.F64,
                 device: self.device
             ))
-        val out_buffer = CudaBuffer.allocate(rows * cols * 8)?
+        val out_buffer = CudaBuffer.allocate(checked_cuda_f64_product_bytes(rows, cols)?)?
         var row = 0
         while row < rows:
             var col = 0
@@ -291,7 +310,7 @@ class CudaNDArray:
                     dtype: DType.F64,
                     device: self.device
                 ))
-            val out_buffer = CudaBuffer.allocate(count * 8)?
+            val out_buffer = CudaBuffer.allocate(checked_cuda_f64_bytes(count)?)?
             val rc = cuda_f64_scalar_div(out_buffer.ptr, self.buffer.ptr, count, spl_f64_to_bits(value.value))
             if rc != CUDA_SUCCESS:
                 out_buffer.free()
@@ -345,7 +364,7 @@ class CudaNDArray:
             cols
         else:
             rows
-        val out_buffer = CudaBuffer.allocate(out_len * 8)?
+        val out_buffer = CudaBuffer.allocate(checked_cuda_f64_bytes(out_len)?)?
         val rc = cuda_f64_sum_axis(out_buffer.ptr, self.buffer.ptr, rows, cols, normalized)
         if rc != CUDA_SUCCESS:
             out_buffer.free()
@@ -371,7 +390,7 @@ class CudaNDArray:
             val sums = self.sum_axis_f64(Axis.new(normalized))?
             val out_shape = sums.shape
             val out_len = out_shape.numel().value
-            val out_buffer = CudaBuffer.allocate(out_len * 8)?
+            val out_buffer = CudaBuffer.allocate(checked_cuda_f64_bytes(out_len)?)?
             val rc = cuda_f64_scalar_div(out_buffer.ptr, sums.buffer.ptr, out_len, spl_f64_to_bits(denom.to_f64()))
             if rc != CUDA_SUCCESS:
                 out_buffer.free()
@@ -460,9 +479,11 @@ class CudaNDArray:
                 dtype: DType.F64,
                 device: self.device
             ))
-        val out_buffer = CudaBuffer.allocate(length * 8)?
-        val src_ptr = self.buffer.ptr + start * 8
-        val rc = cuda_memcpy_dtod(out_buffer.ptr, src_ptr, length * 8)
+        val byte_count = checked_cuda_f64_bytes(length)?
+        val src_offset = checked_cuda_f64_bytes(start)?
+        val out_buffer = CudaBuffer.allocate(byte_count)?
+        val src_ptr = self.buffer.ptr + src_offset
+        val rc = cuda_memcpy_dtod(out_buffer.ptr, src_ptr, byte_count)
         if rc != CUDA_SUCCESS:
             out_buffer.free()
             return Err(rc)
@@ -484,7 +505,7 @@ class CudaNDArray:
                 dtype: DType.F64,
                 device: self.device
             ))
-        val out_buffer = CudaBuffer.allocate(length * 8)?
+        val out_buffer = CudaBuffer.allocate(checked_cuda_f64_bytes(length)?)?
         val rc = cuda_f64_slice_1d(out_buffer.ptr, self.buffer.ptr, start, step, length)
         if rc != CUDA_SUCCESS:
             out_buffer.free()
@@ -509,12 +530,14 @@ class CudaNDArray:
                 device: self.device
             ))
         val source_cols = self.shape.dims[1].value
-        val out_buffer = CudaBuffer.allocate(row_count * col_count * 8)?
+        val output_bytes = checked_cuda_f64_product_bytes(row_count, col_count)?
+        val row_bytes = checked_cuda_f64_bytes(col_count)?
+        val out_buffer = CudaBuffer.allocate(output_bytes)?
         var row = 0
         while row < row_count:
             val src_offset = ((row_start + row) * source_cols + col_start) * 8
-            val dst_offset = row * col_count * 8
-            val rc = cuda_memcpy_dtod(out_buffer.ptr + dst_offset, self.buffer.ptr + src_offset, col_count * 8)
+            val dst_offset = row * row_bytes
+            val rc = cuda_memcpy_dtod(out_buffer.ptr + dst_offset, self.buffer.ptr + src_offset, row_bytes)
             if rc != CUDA_SUCCESS:
                 out_buffer.free()
                 return Err(rc)
@@ -539,7 +562,7 @@ class CudaNDArray:
                 device: self.device
             ))
         val source_cols = self.shape.dims[1].value
-        val out_buffer = CudaBuffer.allocate(row_count * col_count * 8)?
+        val out_buffer = CudaBuffer.allocate(checked_cuda_f64_product_bytes(row_count, col_count)?)?
         val rc = cuda_f64_slice_2d(out_buffer.ptr, self.buffer.ptr, source_cols, row_start, row_step, row_count, col_start, col_step, col_count)
         if rc != CUDA_SUCCESS:
             out_buffer.free()
@@ -574,7 +597,7 @@ class CudaNDArray:
                 dtype: DType.F64,
                 device: self.device
             ))
-        val out_buffer = CudaBuffer.allocate(count * 8)?
+        val out_buffer = CudaBuffer.allocate(checked_cuda_f64_bytes(count)?)?
         val rc = cuda_f64_binary_op(out_buffer.ptr, self.buffer.ptr, other.buffer.ptr, count, op_code)
         if rc != CUDA_SUCCESS:
             out_buffer.free()
@@ -598,7 +621,7 @@ class CudaNDArray:
                     dtype: DType.F64,
                     device: self.device
                 ))
-            val scalar_buffer = CudaBuffer.allocate(count * 8)?
+            val scalar_buffer = CudaBuffer.allocate(checked_cuda_f64_bytes(count)?)?
             var bits: [i64] = []
             var i = 0
             val scalar_bits = spl_f64_to_bits(value.value)
@@ -629,7 +652,7 @@ class CudaNDArray:
                 dtype: DType.F64,
                 device: self.device
             ))
-        val bytes = count * 8
+        val bytes = checked_cuda_f64_bytes(count)?
         if bytes > self.buffer.size:
             return Err(CUDA_ERROR_INVALID_VALUE)
         val out_buffer = CudaBuffer.allocate(bytes)?

@@ -2272,3 +2272,12 @@ to 17,739 repository-wide and 9,621 to 9,570 in production. All 51 became
 lexically scoped. The per-file table now reports this owner as 51 calls / 35
 symbols / zero missing. The broader `rt_cuda` family has 138 explicit and 308
 missing call sites. Exact-artifact verified-and-signed admission remains zero.
+
+The queued extent patch now centralizes checked f64 byte and two-dimensional
+product geometry. Counts above 33,554,432 f64 elements or 256 MiB are rejected
+before multiplication, allocation, pointer offset, or device copy. Concatenate
+uses subtraction-before-addition, and contiguous 2D copy hoists checked row
+bytes outside its loop. Both constant-time helpers carry `@inline`; successful
+operations retain the same allocation count, copy count, and loop complexity.
+The unavailable production Simple binary prevents executable optimizer/runtime
+evidence in this worktree, so the facade remains unsafe and unverified.
