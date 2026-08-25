@@ -1,7 +1,11 @@
 # @feature simplebox.filesystem-applets
 # Streaming filesystem applets for the filesystem-launched SimpleOS simplebox.
 
-use os.userlib.fs.{file_open_direct, file_read_direct, file_write_direct, file_close_direct}
+use os.userlib.fs.{
+    file_open_direct, file_read_direct, file_write_direct, file_close_direct,
+    file_sync_direct, file_rename_direct
+}
+use nogc_async_mut_noalloc.path.{bm_path_normalize}
 
 extern fn stdout_write(data: text)
 
@@ -206,3 +210,91 @@ pub fn simplebox_wc(args: [text]) -> i32:
             if paths.len() > 1u64:
                 stdout_write(_wc_line(total, "total"))
             0
+
+fn _two_path_args(command: text, args: [text]) -> Result<(text, text), text>:
+    if args.len() < 2u64:
+        return Err("{command}: missing file operand")
+    if args.len() > 2u64:
+        return Err("{command}: too many operands")
+    if args[0] == "" or args[1] == "":
+        return Err("{command}: empty path")
+    Ok((args[0], args[1]))
+
+pub fn simplebox_cp(args: [text]) -> i32:
+    """Copy one bounded regular file without buffering the complete payload."""
+    val parsed = _two_path_args("cp", args)
+    match parsed:
+        case Err(reason):
+            stdout_write(reason + "\n")
+            1
+        case Ok((source, destination)):
+            if bm_path_normalize(source) == bm_path_normalize(destination):
+                stdout_write("cp: source and destination are the same path\n")
+                return 1
+            val source_opened = file_open_direct(source, 0u32)
+            match source_opened:
+                case Err(reason):
+                    stdout_write("cp: " + source + ": " + reason + "\n")
+                    1
+                case Ok(source_fd):
+                    # O_WRONLY | O_CREAT | O_TRUNC. The kernel remains the
+                    # path/descriptor authority and validates every copied byte.
+                    val destination_opened = file_open_direct(destination, 0xC1u32)
+                    match destination_opened:
+                        case Err(reason):
+                            val _ = file_close_direct(source_fd)
+                            stdout_write("cp: " + destination + ": " + reason + "\n")
+                            1
+                        case Ok(destination_fd):
+                            var copied: u64 = 0u64
+                            var failure = ""
+                            var complete = false
+                            while not complete and failure == "":
+                                val read = file_read_direct(source_fd, SIMPLEBOX_READ_CHUNK_BYTES)
+                                match read:
+                                    case Err(reason): failure = "read: " + reason
+                                    case Ok(chunk):
+                                        if chunk.len() == 0u64:
+                                            complete = true
+                                        elif copied > SIMPLEBOX_FILE_BYTES_LIMIT or
+                                             chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT - copied:
+                                            failure = "source exceeds simplebox byte limit"
+                                        else:
+                                            var write_offset: u64 = 0u64
+                                            while write_offset < chunk.len() and failure == "":
+                                                val remaining = chunk.slice(
+                                                    write_offset as i64, chunk.len() as i64)
+                                                match file_write_direct(destination_fd, remaining):
+                                                    case Err(reason): failure = "write: " + reason
+                                                    case Ok(count):
+                                                        if count == 0u64 or count > remaining.len():
+                                                            failure = "write made invalid progress"
+                                                        else:
+                                                            write_offset = write_offset + count
+                                                            copied = copied + count
+                            if failure == "":
+                                match file_sync_direct(destination_fd):
+                                    case Err(reason): failure = reason
+                                    case Ok(_): ()
+                            failure = _close_result(source_fd, failure)
+                            failure = _close_result(destination_fd, failure)
+                            if failure != "":
+                                stdout_write("cp: " + source + " -> " + destination + ": " + failure + "\n")
+                                return 1
+                            0
+
+pub fn simplebox_mv(args: [text]) -> i32:
+    """Atomically rename one path through the kernel-owned filesystem API."""
+    val parsed = _two_path_args("mv", args)
+    match parsed:
+        case Err(reason):
+            stdout_write(reason + "\n")
+            1
+        case Ok((source, destination)):
+            if bm_path_normalize(source) == bm_path_normalize(destination):
+                return 0
+            match file_rename_direct(source, destination):
+                case Err(reason):
+                    stdout_write("mv: " + source + " -> " + destination + ": " + reason + "\n")
+                    1
+                case Ok(_): 0
