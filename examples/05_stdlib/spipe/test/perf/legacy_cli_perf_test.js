@@ -13,13 +13,19 @@ const cliPath = join(moduleRoot, "cli/spipe.js");
 const baseline = JSON.parse(readFileSync(join(testRoot, "fixture/wave0_cli_perf_baseline.json"), "utf8"));
 const host = mkdtempSync(join(tmpdir(), "spipe-perf-host-"));
 
+function invoke(args) {
+  const start = performance.now();
+  const result = spawnSync(process.execPath, [cliPath, ...args], { cwd: host, stdio: "ignore", timeout: 10_000 });
+  assert.ok(result.status === 0 || (args[0] === "doctor" && result.status === 1));
+  return performance.now() - start;
+}
+
 function p95(args) {
   const samples = [];
+  // Match the 80-sample qualification and remove first-load cache effects.
+  for (let index = 0; index < 3; index += 1) invoke(args);
   for (let index = 0; index < baseline.testSamples; index += 1) {
-    const start = performance.now();
-    const result = spawnSync(process.execPath, [cliPath, ...args], { cwd: host, stdio: "ignore", timeout: 10_000 });
-    samples.push(performance.now() - start);
-    assert.ok(result.status === 0 || (args[0] === "doctor" && result.status === 1));
+    samples.push(invoke(args));
   }
   samples.sort((left, right) => left - right);
   return samples[Math.ceil(samples.length * 0.95) - 1];

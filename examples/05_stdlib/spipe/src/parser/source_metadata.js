@@ -7,6 +7,7 @@ import {
   sha256,
 } from "../core/identity.js";
 import { parseMetadataAttributes } from "./sdn.js";
+import { assertCanonicalUid } from "../model/identity.js";
 
 function freeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== "object" || seen.has(value)) return value;
@@ -24,9 +25,9 @@ function arrayValue(value) {
   return normalizeText(value).split(/[;,]/).map(normalizeText).filter(Boolean);
 }
 
-function sourceMarker(line) {
+function sourceMarker(line, bounds) {
   const match = line.match(/(?:\/\/|#|\/\*+|<!--)\s*spipe:(?:symbol|source)\s+([\s\S]*?)(?:\s*\*\/|\s*-->)?\s*$/i);
-  return match ? parseMetadataAttributes(match[1]) : null;
+  return match ? parseMetadataAttributes(match[1], { bounds }) : null;
 }
 
 function annotations(line) {
@@ -46,8 +47,8 @@ function declaration(line) {
   return null;
 }
 
-function uidForSymbol(path, declarationInfo, line, ordinal) {
-  return `SY-${sha256(`source_symbol_v1\0${path}\0${declarationInfo.kind}\0${declarationInfo.name}\0${ordinal}\0${line}`).slice(0, 32)}`;
+function uidForSymbol(projectUid, declarationInfo, line, ordinal) {
+  return `P-${projectUid || "unregistered"}-${sha256(`source_symbol_provisional_v1\0${declarationInfo.kind}\0${declarationInfo.name}\0${ordinal}\0${line}`)}`;
 }
 
 /**
@@ -56,6 +57,15 @@ function uidForSymbol(path, declarationInfo, line, ordinal) {
  */
 export function parseSourceMetadata(input, options = {}) {
   const source = typeof input === "string" ? input : String(input?.content ?? "");
+  const maxBytes = options.maxBytes ?? 1_048_576;
+  const maxSymbols = options.maxSymbols ?? 10_000;
+  const maxSdnNodes = options.maxSdnNodes ?? 100_000;
+  const maxSdnDepth = options.maxSdnDepth ?? 64;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new TypeError("maxBytes must be a positive integer");
+  if (!Number.isSafeInteger(maxSymbols) || maxSymbols < 1) throw new TypeError("maxSymbols must be a positive integer");
+  if (!Number.isSafeInteger(maxSdnNodes) || maxSdnNodes < 1) throw new TypeError("maxSdnNodes must be a positive integer");
+  if (!Number.isSafeInteger(maxSdnDepth) || maxSdnDepth < 1) throw new TypeError("maxSdnDepth must be a positive integer");
+  if (Buffer.byteLength(source, "utf8") > maxBytes) throw new RangeError("SPK020 parser_input_too_large");
   const pathInput = options.path ?? input?.path ?? "";
   const path = canonicalPath(pathInput);
   const normalized = source.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
@@ -63,21 +73,23 @@ export function parseSourceMetadata(input, options = {}) {
   const diagnostics = [];
   if (!path.valid) diagnostics.push(diagnostic("SPK009", "error", "path.invalid_canonical_path", { path: pathInput }));
   const symbols = [];
+  const sdnBounds = { nodes: 0, maxNodes: maxSdnNodes, maxDepth: maxSdnDepth };
   let pendingMarker = null;
   let pendingAnnotations = [];
   let ordinal = 0;
   let lineOffset = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    const marker = sourceMarker(line);
-    if (marker) { pendingMarker = marker; continue; }
+    const marker = sourceMarker(line, sdnBounds);
+    if (marker) { pendingMarker = marker; lineOffset += line.length + 1; continue; }
     const refs = annotations(line);
     if (refs.length) pendingAnnotations = [...pendingAnnotations, ...refs];
     const declarationInfo = declaration(line);
     if (!declarationInfo) { lineOffset += line.length + 1; continue; }
     const markerData = pendingMarker || {};
     const explicitUid = normalizeText(markerData.uid);
-    const uid = explicitUid || uidForSymbol(path.path, declarationInfo, line, ordinal);
+    if (explicitUid) assertCanonicalUid(explicitUid, "source symbol uid", ["SY"]);
+    const uid = explicitUid || uidForSymbol(options.projectUid, declarationInfo, line, ordinal);
     const key = normalizeSemanticKey(markerData.key) || normalizeSemanticKey(`${path.path}:${declarationInfo.name}`);
     const symbol = {
       uid,
@@ -95,6 +107,7 @@ export function parseSourceMetadata(input, options = {}) {
       content_hash: contentHash(line),
     };
     symbols.push(symbol);
+    if (symbols.length > maxSymbols) throw new RangeError("SPK021 parser_node_limit_exceeded");
     ordinal += 1;
     pendingMarker = null;
     pendingAnnotations = [];
@@ -106,6 +119,7 @@ export function parseSourceMetadata(input, options = {}) {
     content_hash: contentHash(normalized),
     symbols,
     diagnostics: diagnostics.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    budget_usage: { sdn_nodes: sdnBounds.nodes },
   };
   return freeze(result);
 }
@@ -114,6 +128,6 @@ export const parseSource = parseSourceMetadata;
 
 export function sourceMetadataForSymbol(symbol, options = {}) {
   const source = { ...symbol };
-  if (!source.uid) source.uid = uidForSymbol(options.path || source.canonical_path || "", source, source.name || "", options.ordinal || 0);
+  if (!source.uid) source.uid = uidForSymbol(options.projectUid, source, source.name || "", options.ordinal || 0);
   return freeze(source);
 }

@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 /** Canonical project-relative paths use POSIX separators on every host. */
@@ -25,10 +25,7 @@ export function normalizeRelativePath(input, { allowEmpty = false } = {}) {
 export function canonicalRoot(input) {
   if (typeof input !== "string" || input.length === 0) throw new TypeError("root must be a non-empty path");
   const absolute = resolve(input);
-  if (existsSync(absolute)) {
-    const info = lstatSync(absolute);
-    if (info.isSymbolicLink()) return realpathSync(absolute);
-  }
+  if (existsSync(absolute)) return realpathSync(absolute);
   return absolute;
 }
 

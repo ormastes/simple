@@ -1,4 +1,14 @@
-import { createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import {
+  contentHash as modelContentHash,
+  assertUid,
+  isProvisionalArtifactUid,
+  normalizeAlias as modelNormalizeAlias,
+  normalizeCanonicalPath,
+  normalizeSemanticKey as modelNormalizeSemanticKey,
+  normalizeText as modelNormalizeText,
+  sha256 as modelSha256
+} from "../model/identity.js";
 
 export const IDENTITY_VERSION = "spipe-identity-v1";
 
@@ -20,19 +30,18 @@ function text(value) {
 }
 
 export function normalizeText(value) {
-  return text(value).normalize("NFC").trim();
+  const normalized = text(value).normalize("NFC").trim();
+  return normalized ? modelNormalizeText(normalized, "value") : "";
 }
 
 export function normalizeSemanticKey(value) {
-  return normalizeText(value)
-    .toLocaleLowerCase("en-US")
-    .replace(/[\\/\s]+/g, ".")
-    .replace(/\.+/g, ".")
-    .replace(/^\.+|\.+$/g, "");
+  const normalized = normalizeText(value).toLowerCase().replace(/[\\/\s:]+/g, ".").replace(/\.+/g, ".").replace(/^\.+|\.+$/g, "");
+  return normalized ? modelNormalizeSemanticKey(normalized, "value") : "";
 }
 
 export function normalizeAlias(value) {
-  return normalizeSemanticKey(value);
+  const normalized = normalizeText(value);
+  return normalized ? modelNormalizeAlias(normalized, "value") : "";
 }
 
 export function slugify(value) {
@@ -43,26 +52,16 @@ export function slugify(value) {
 }
 
 export function canonicalPath(value) {
-  const raw = normalizeText(value).replaceAll("\\", "/");
-  const segments = [];
-  for (const part of raw.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") return { path: raw, valid: false };
-    segments.push(part);
-  }
-  return { path: segments.join("/"), valid: !raw.startsWith("/") && !/^[A-Za-z]:/.test(raw) };
+  try { return { path: normalizeCanonicalPath(value, "path"), valid: true }; }
+  catch { return { path: normalizeText(value).replaceAll("\\", "/"), valid: false }; }
 }
 
 export function sha256(value) {
-  return createHash("sha256").update(text(value), "utf8").digest("hex");
+  return modelSha256(text(value));
 }
 
 export function contentHash(value) {
-  return `sha256:${sha256(value)}`;
-}
-
-function hashUid(prefix, tuple) {
-  return `${prefix}-${sha256(tuple).slice(0, 32)}`;
+  return modelContentHash(text(value));
 }
 
 export function provisionalArtifactUid(projectUid, bytesOrHash) {
@@ -71,16 +70,29 @@ export function provisionalArtifactUid(projectUid, bytesOrHash) {
   return `P-${project}-${hash}`;
 }
 
-export function proposedArtifactUid({ projectUid = "unregistered", canonicalPath: path = "", contentHash: hash = "" } = {}) {
-  return hashUid("A", `artifact_uid_proposal_v1\0${normalizeText(projectUid)}\0${normalizeText(path)}\0${normalizeText(hash)}`);
+export function opaqueUid(prefix, entropy = randomBytes(16)) {
+  if (!/^[A-Z][A-Z0-9]*$/.test(prefix)) throw new TypeError("UID prefix must be uppercase ASCII");
+  const bytes = Buffer.from(entropy);
+  if (bytes.length !== 16) throw new TypeError("opaque UID entropy must be exactly 16 bytes");
+  return `${prefix}-${bytes.toString("hex").toUpperCase()}`;
 }
 
-export function proposedSectionUid({ artifactUid = "", ordinal = 0, key = "" } = {}) {
-  return hashUid("S", `section_uid_proposal_v1\0${normalizeText(artifactUid)}\0${ordinal}\0${normalizeSemanticKey(key)}`);
+export function proposedArtifactUid(options = {}) {
+  return opaqueUid("A", options.entropy);
+}
+
+export function proposedSectionUid(options = {}) {
+  return opaqueUid("S", options.entropy);
 }
 
 export function identityStatus(uid) {
-  return normalizeText(uid).startsWith("P-") ? "provisional" : "authoritative";
+  return isProvisionalArtifactUid(normalizeText(uid)) ? "provisional" : "canonical";
+}
+
+export function assertDurableIdentity(uid, operation = "operation") {
+  const valid = assertUid(uid, "uid");
+  if (isProvisionalArtifactUid(valid)) throw new TypeError(`${operation} requires a durable canonical identity`);
+  return valid;
 }
 
 function diagnostic(code, severity, messageKey, details = {}) {
@@ -94,7 +106,9 @@ function candidateRecord(uid, kind, record, field) {
 function recordParts(item) {
   const artifact = item?.artifact && typeof item.artifact === "object" ? item.artifact : item;
   const sections = Array.isArray(item?.sections) ? item.sections : [];
-  return { artifact: artifact || {}, sections };
+  const scenarios = Array.isArray(item?.scenarios) ? item.scenarios : [];
+  const symbols = Array.isArray(item?.symbols) ? item.symbols : [];
+  return { artifact: artifact || {}, sections, scenarios, symbols };
 }
 
 function keyFor(record) {
@@ -129,6 +143,7 @@ export function buildIdentityIndex(records = []) {
   const byUid = new Map();
   const byKey = new Map();
   const byAlias = new Map();
+  const byName = new Map();
   const diagnostics = [];
 
   const addUid = (uid, kind, record, field) => {
@@ -150,7 +165,7 @@ export function buildIdentityIndex(records = []) {
   };
 
   for (const item of items) {
-    const { artifact, sections } = recordParts(item);
+    const { artifact, sections, scenarios, symbols } = recordParts(item);
     const artifactUid = normalizeText(artifact.uid);
     if (artifactUid) {
       addUid(artifactUid, "artifact", artifact, "uid");
@@ -164,6 +179,18 @@ export function buildIdentityIndex(records = []) {
       if (section.key) addName(byKey, section.key, sectionUid, "section", section, "key");
       for (const alias of aliasesFor(section)) addName(byAlias, alias, sectionUid, "section", section, "alias");
     }
+    for (const scenario of scenarios) {
+      const uid = normalizeText(scenario.uid);
+      if (!uid) continue;
+      addUid(uid, "scenario", scenario, "uid");
+      if (scenario.key) addName(byKey, scenario.key, uid, "scenario", scenario, "key");
+    }
+    for (const symbol of symbols) {
+      const uid = normalizeText(symbol.uid);
+      if (!uid) continue;
+      addUid(uid, "symbol", symbol, "uid");
+      if (symbol.key) addName(byKey, symbol.key, uid, "symbol", symbol, "key");
+    }
   }
 
   const ambiguous = (map, label) => {
@@ -176,16 +203,24 @@ export function buildIdentityIndex(records = []) {
   };
   ambiguous(byKey, "key");
   ambiguous(byAlias, "alias");
+  for (const [name, values] of [...byKey.entries(), ...byAlias.entries()]) {
+    const prior = byName.get(name) || [];
+    prior.push(...values);
+    byName.set(name, prior);
+  }
+  ambiguous(byName, "key_or_alias");
 
   const frozenByUid = immutableMapEntries(byUid);
   const frozenByKey = immutableMapEntries(byKey);
   const frozenByAlias = immutableMapEntries(byAlias);
+  const frozenByName = immutableMapEntries(byName);
   const sortedDiagnostics = diagnostics.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   const index = {
     version: IDENTITY_VERSION,
     by_uid: frozenByUid,
     by_key: frozenByKey,
     by_alias: frozenByAlias,
+    by_name: frozenByName,
     diagnostics: sortedDiagnostics,
   };
   Object.defineProperty(index, "resolve", {
@@ -201,7 +236,7 @@ export function resolveIdentity(index, value) {
   const direct = index.by_uid[raw] || [];
   const key = normalizeSemanticKey(raw);
   const alias = normalizeAlias(raw);
-  const matches = direct.length ? direct : (index.by_key[key] || index.by_alias[alias] || []);
+  const matches = direct.length ? direct : (index.by_name[key] || index.by_name[alias] || []);
   const unique = [...new Map(matches.map((candidate) => [candidate.uid, candidate])).values()]
     .sort((left, right) => left.uid.localeCompare(right.uid));
   if (!unique.length) return freeze({ status: "not_found", value: raw, candidates: [] });
@@ -219,27 +254,22 @@ export function planUidInjection(parsed, options = {}) {
   const proposals = [];
   for (const item of records) {
     const artifact = item?.artifact && typeof item.artifact === "object" ? item.artifact : item;
-    if (!artifact || artifact.uid === undefined || artifact.identity_status !== "provisional") continue;
+    if (!artifact || artifact.uid === undefined) continue;
     const path = artifact.canonical_path || artifact.canonicalPath || "";
-    const proposedUid = proposedArtifactUid({
-      projectUid: artifact.project_uid || artifact.projectUid,
-      canonicalPath: path,
-      contentHash: artifact.content_hash || artifact.contentHash,
-    });
-    const marker = `<!-- spipe:artifact uid=${proposedUid} key=${artifact.key || slugify(artifact.title)} -->\n`;
-    proposals.push({
-      kind: "artifact_uid",
-      path,
-      proposed_uid: proposedUid,
-      offset: Number.isInteger(options.artifactOffset) ? options.artifactOffset : 0,
-      insertion: marker,
-      operation: "insert_marker",
-      canonical_mutation: false,
-      reason: "missing_artifact_uid",
-    });
+    const uidFactory = options.uidFactory ?? ((prefix) => opaqueUid(prefix));
+    if (artifact.identity_status === "provisional") {
+      const proposedUid = uidFactory("A");
+      const marker = `<!-- spipe:artifact uid=${proposedUid} key=${artifact.key || slugify(artifact.title)} -->\n`;
+      proposals.push({
+        kind: "artifact_uid", path, proposed_uid: proposedUid,
+        offset: Number.isInteger(options.artifactOffset) ? options.artifactOffset : 0,
+        insertion: marker, operation: "insert_marker", canonical_mutation: false,
+        reason: "missing_artifact_uid",
+      });
+    }
     for (const section of item.sections || []) {
       if (section.uid) continue;
-      const sectionUid = proposedSectionUid({ artifactUid: proposedUid, ordinal: section.ordinal, key: section.key || section.heading });
+      const sectionUid = uidFactory("S");
       proposals.push({
         kind: "section_uid",
         path,

@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { canonicalJson, canonicalTuple, freezeDeep, sha256Hex, ZERO_HASH } from "./canonical.js";
+import { canonicalJson, freezeDeep, ZERO_HASH } from "./canonical.js";
+import { canonicalSnapshotTuple as canonicalModelSnapshotTuple, createSnapshotId } from "../model/identity.js";
 import { safeNamespace } from "../workspace/paths.js";
 import { canonicalRoot } from "../workspace/paths.js";
 
@@ -46,11 +47,35 @@ function tupleFields(input) {
 }
 
 export function canonicalSnapshotTuple(input) {
-  return canonicalTuple("snapshot_v1", tupleFields(input));
+  const fields = tupleFields(input);
+  return canonicalModelSnapshotTuple({
+    project_uid: fields[0],
+    worktree_uid: fields[1],
+    revision_id: fields[2],
+    base_generation_hash: fields[3],
+    overlay_generation_hash: fields[4],
+    schema_version: fields[5],
+    parser_version: fields[6],
+    analyzer_version: fields[7],
+    provider_contract_version: fields[8],
+    policy_hash: fields[9]
+  });
 }
 
 export function computeSnapshotId(input) {
-  return `${SNAPSHOT_ID_PREFIX}${sha256Hex(canonicalSnapshotTuple(input))}`;
+  const fields = tupleFields(input);
+  return createSnapshotId({
+    project_uid: fields[0],
+    worktree_uid: fields[1],
+    revision_id: fields[2],
+    base_generation_hash: fields[3],
+    overlay_generation_hash: fields[4],
+    schema_version: fields[5],
+    parser_version: fields[6],
+    analyzer_version: fields[7],
+    provider_contract_version: fields[8],
+    policy_hash: fields[9]
+  });
 }
 
 export const snapshotIdFor = computeSnapshotId;

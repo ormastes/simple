@@ -1,6 +1,6 @@
 # SPipe Knowledge Compiler Operator Guide
 
-**Status:** Design guide; commands become operational as implementation waves land  
+**Status:** Wave 2 core accepted; later commands remain planned until their dependency wave lands
 **Date:** 2026-08-25
 
 ## 1. What the knowledge compiler does
@@ -64,6 +64,48 @@ dependency-free exact/BM25/graph path. Do not describe that as proof of the
 missing provider.
 
 ## 5. Primary operator workflow
+
+### 5.0 Current Wave 2 API boundary
+
+The dependency-free package now provides schemas and JavaScript APIs for
+artifact/project/section/edge/alias/view records, Markdown/SDN/SSpec/source
+metadata parsing, identity diagnostics, UID-injection planning, explicit
+workspace/project/worktree registration, immutable objects and snapshots, and
+per-worktree overlays. `compileKnowledgeInventory` accepts an explicit bounded
+set of `{path, content}` inputs; filesystem enumeration remains a workspace
+adapter responsibility so the core cannot silently scan or escape a project
+root.
+
+Wave 2 validates explicit artifact, section, scenario, and source-symbol IDs by
+record kind. Parser budgets apply across the full inventory, including metadata
+and recursively nested inline SDN. Unmarked sections remain typed candidates
+with explicit incremental deltas rather than masquerading as canonical section
+records.
+
+Trust is registry-derived. The raw compatibility compiler always emits
+`untrusted_data`; elevated compilation requires a composition-root-injected,
+verification-only `AuthorizationPort` and an Ed25519 receipt bound to the exact
+project, worktree, revision, canonical source set, policy version/hash,
+capability, principal, expiry, and audit evidence. `reviewed_reference` requires
+`trust_scope.assign`; `executable_policy` requires `policy.publish`. Content,
+plain option objects, forged signatures, provisional artifacts, stale receipts,
+and receipts for a different source set cannot elevate trust.
+
+Linked-project resolution authorizes the requested relation UID before relation
+lookup or any project, revision, trust, mount, or filesystem disclosure.
+Unauthorized callers receive the same bounded diagnostic shape for existing and
+missing relation IDs. Persisted registries additionally bind the trusted
+workspace root, authorized project roots, and exact realpath-resolved mount.
+
+Unmarked artifacts receive only snapshot-scoped provisional identity of the
+form `P-<project-uid>-<content-hash>`. A durable UID proposal is opaque random
+identity and is persisted only through a later approved canonical edit; it is
+never derived from path, title, key, or content. Tests may inject a deterministic
+UID factory solely to replay a transaction fixture.
+
+The `spipe index`, `view`, `search`, `trace`, and refactor commands below are
+the stable planned operator surface. They must not be treated as reachable
+until their named implementation wave and focused compatibility evidence land.
 
 ### 5.1 Index canonical knowledge artifacts
 

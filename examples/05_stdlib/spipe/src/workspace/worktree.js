@@ -1,21 +1,23 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { canonicalJson, freezeDeep, hashCanonicalTuple } from "../storage/canonical.js";
+import { canonicalJson, freezeDeep } from "../storage/canonical.js";
 import { canonicalExistingIdentity, canonicalRoot, safeNamespace } from "./paths.js";
+import { opaqueUid } from "../core/identity.js";
+import { assertCanonicalUid } from "../model/identity.js";
 
 export function deriveWorktreeUid({ projectUid, gitCommonDir, gitDir, explicitUid } = {}) {
-  if (explicitUid) return safeNamespace(String(explicitUid), "worktree uid");
-  if (!projectUid || !gitCommonDir || !gitDir) throw new TypeError("projectUid, gitCommonDir, and gitDir are required to derive a worktree UID");
-  const common = canonicalExistingIdentity(gitCommonDir);
-  const local = canonicalExistingIdentity(gitDir);
-  return `WT-${hashCanonicalTuple("worktree_v1", [projectUid, common, local])}`;
+  if (explicitUid) return assertCanonicalUid(String(explicitUid), "worktree uid", ["W"]);
+  if (!projectUid || !gitCommonDir || !gitDir) throw new TypeError("projectUid, gitCommonDir, and gitDir are required to assign a worktree UID");
+  canonicalExistingIdentity(gitCommonDir);
+  canonicalExistingIdentity(gitDir);
+  return opaqueUid("W");
 }
 
 export function createWorktreeRecord(input) {
   if (!input || typeof input !== "object") throw new TypeError("worktree must be an object");
   const projectUid = String(input.projectUid ?? input.project_uid ?? "");
-  if (!projectUid) throw new TypeError("worktree projectUid is required");
+  assertCanonicalUid(projectUid, "worktree projectUid", ["P"]);
   const worktreeRoot = input.root ?? input.worktreeRoot;
   if (typeof worktreeRoot !== "string" || worktreeRoot.length === 0) throw new TypeError("worktree root is required");
   const root = canonicalRoot(worktreeRoot);

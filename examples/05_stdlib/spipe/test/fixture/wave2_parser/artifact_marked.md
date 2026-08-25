@@ -5,7 +5,7 @@ spipe:
     key: design.search.core
     aliases: [design.db.bm25, bm25-core]
     kind: design
-    project_uid: P-simple
+    project_uid: P-000000000000000000000000000000AA
     features: [search, project_knowledge]
     components: [std.common.search]
     layers: [ranking]
@@ -19,4 +19,3 @@ The index applies immutable deltas.
 
 ## Query Ranking
 This section intentionally has no marker during observe-only migration.
-

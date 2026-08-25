@@ -10,6 +10,7 @@ import {
   slugify,
 } from "../core/identity.js";
 import { parseMetadataAttributes } from "./sdn.js";
+import { assertCanonicalUid } from "../model/identity.js";
 
 function freeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== "object" || seen.has(value)) return value;
@@ -27,9 +28,9 @@ function arrayValue(value) {
   return normalizeText(value).split(/[;,]/).map(normalizeText).filter(Boolean);
 }
 
-function marker(line, kind) {
+function marker(line, kind, bounds) {
   const match = line.match(new RegExp(`^\\s*#\\s*spipe:${kind}\\s+([\\s\\S]*?)\\s*$`, "i"));
-  return match ? parseMetadataAttributes(match[1]) : null;
+  return match ? parseMetadataAttributes(match[1], { bounds }) : null;
 }
 
 function requirementIds(text) {
@@ -53,22 +54,37 @@ function declaration(line) {
 /** Parse SSpec comments/declarations into an artifact and scenario metadata. */
 export function parseSspecMetadata(input, options = {}) {
   const source = typeof input === "string" ? input : String(input?.content ?? "");
+  const maxBytes = options.maxBytes ?? 1_048_576;
+  const maxScenarios = options.maxScenarios ?? 10_000;
+  const maxAliases = options.maxAliases ?? 100_000;
+  const maxSdnNodes = options.maxSdnNodes ?? 100_000;
+  const maxSdnDepth = options.maxSdnDepth ?? 64;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new TypeError("maxBytes must be a positive integer");
+  if (!Number.isSafeInteger(maxScenarios) || maxScenarios < 1) throw new TypeError("maxScenarios must be a positive integer");
+  if (!Number.isSafeInteger(maxAliases) || maxAliases < 1) throw new TypeError("maxAliases must be a positive integer");
+  if (!Number.isSafeInteger(maxSdnNodes) || maxSdnNodes < 1) throw new TypeError("maxSdnNodes must be a positive integer");
+  if (!Number.isSafeInteger(maxSdnDepth) || maxSdnDepth < 1) throw new TypeError("maxSdnDepth must be a positive integer");
+  if (Buffer.byteLength(source, "utf8") > maxBytes) throw new RangeError("SPK020 parser_input_too_large");
   const pathInput = options.path ?? input?.path ?? "";
   const path = canonicalPath(pathInput);
   const normalized = source.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   const lines = normalized.split("\n");
   const offsets = lineOffsets(normalized);
   const diagnostics = [];
+  const sdnBounds = { nodes: 0, maxNodes: maxSdnNodes, maxDepth: maxSdnDepth };
   if (!path.valid) diagnostics.push(diagnostic("SPK009", "error", "path.invalid_canonical_path", { path: pathInput }));
   let artifactMarker = null;
   let pendingScenario = null;
   let pendingTags = [];
   const scenarios = [];
   const suites = [];
+  const scenarioLines = lines.map((line, index) => declaration(line)?.kind === "scenario" ? index : -1).filter((index) => index >= 0);
+  if (scenarioLines.length > maxScenarios) throw new RangeError("SPK021 parser_node_limit_exceeded");
+  const nextScenarioByLine = new Map(scenarioLines.map((line, index) => [line, scenarioLines[index + 1] ?? lines.length]));
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    artifactMarker ||= marker(line, "artifact") || marker(line, "sspec");
-    const scenarioMarker = marker(line, "scenario");
+    artifactMarker ||= marker(line, "artifact", sdnBounds) || marker(line, "sspec", sdnBounds);
+    const scenarioMarker = marker(line, "scenario", sdnBounds);
     if (scenarioMarker) { pendingScenario = scenarioMarker; continue; }
     const tagMatch = line.match(/^\s*#\s*(?:tags?|tag):\s*(.+)$/i);
     if (tagMatch) { pendingTags = [...pendingTags, ...arrayValue(tagMatch[1])]; continue; }
@@ -82,11 +98,10 @@ export function parseSspecMetadata(input, options = {}) {
     const ordinal = scenarios.length;
     const title = normalizeText(data.title) || found.title;
     const uid = normalizeText(data.uid);
+    if (uid) assertCanonicalUid(uid, "scenario uid", ["SS"]);
     const key = normalizeSemanticKey(data.key) || normalizeSemanticKey(`${path.path}:${slugify(title)}`);
-    const end = (() => {
-      for (let next = index + 1; next < lines.length; next += 1) if (declaration(lines[next])?.kind === "scenario") return offsets[next];
-      return normalized.length;
-    })();
+    const nextScenario = nextScenarioByLine.get(index);
+    const end = nextScenario === lines.length ? normalized.length : offsets[nextScenario];
     const ids = [...new Set([...requirementIds(line), ...requirementIds(data.requirements), ...requirementIds(data.requirement_ids)])].sort();
     scenarios.push({
       uid: uid || undefined,
@@ -106,26 +121,30 @@ export function parseSspecMetadata(input, options = {}) {
   const hash = contentHash(normalized);
   const projectUid = normalizeText(options.projectUid ?? artifactMarker?.project_uid) || "unregistered";
   const artifactUid = normalizeText(artifactMarker?.uid) || provisionalArtifactUid(projectUid, hash);
+  if (artifactMarker?.uid) assertCanonicalUid(artifactUid, "SSpec artifact uid", ["A"]);
   const title = normalizeText(artifactMarker?.title) || suites[0]?.title || path.path.split("/").at(-1)?.replace(/\.spl$/i, "") || "SSpec";
   const artifact = {
     uid: artifactUid,
     key: normalizeSemanticKey(artifactMarker?.key) || normalizeSemanticKey(`${path.path}:${slugify(title)}`),
     project_uid: projectUid,
     revision: normalizeText(options.revision ?? artifactMarker?.revision),
-    kind: "sspec",
+    kind: "test",
     title,
     canonical_path: path.path,
     content_hash: hash,
+    budget_usage: { sdn_nodes: sdnBounds.nodes },
     aliases: arrayValue(artifactMarker?.aliases).map(normalizeAlias),
     features: arrayValue(artifactMarker?.features),
     components: arrayValue(artifactMarker?.components),
     layers: arrayValue(artifactMarker?.layers),
     visibility: normalizeText(artifactMarker?.visibility) || "project",
-    trust: normalizeText(artifactMarker?.trust) || "reviewed_reference",
+    trust_scope: "untrusted_data",
+    declared_trust_scope: normalizeText(artifactMarker?.trust_scope ?? artifactMarker?.trust),
     status: normalizeText(artifactMarker?.status) || "proposed",
     identity_status: identityStatus(artifactUid),
     parser: { id: "sspec", version: 1 },
   };
+  if (artifact.aliases.length > maxAliases) throw new RangeError("SPK021 parser_alias_limit_exceeded");
   const result = {
     parser: { id: "sspec", version: 1 },
     artifact,
@@ -139,4 +158,3 @@ export function parseSspecMetadata(input, options = {}) {
 }
 
 export const parseSspec = parseSspecMetadata;
-
