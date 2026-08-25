@@ -7,7 +7,7 @@ use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_UNIMPLEMENTED, SSH_MSG_DEBUG, SSH_MSG_KEXINIT, ssh_build_unimplemented}
-use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, ChannelPeerCloseDecisionV1, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
+use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, ChannelPeerCloseDecisionV1, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, SSH_OPEN_ADMINISTRATIVELY_PROHIBITED, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_open_failure}
 use os.apps.sshd.ssh_channel_open_request.{ssh_channel_open_request_classify_v1, ssh_channel_open_rejection_payload_v1, ssh_channel_open_transport_must_close_v1}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
@@ -341,6 +341,9 @@ impl SshSession:
                 if decision == SshGlobalRequestDecisionV1.Malformed:
                     self.transition_closed()
                     return
+                if decision == SshGlobalRequestDecisionV1.ApplyNoMoreSessions or
+                    decision == SshGlobalRequestDecisionV1.ApplyNoMoreSessionsReplySuccess:
+                    self.no_more_session_channels = true
                 val reply = ssh_global_request_reply_payload(decision)
                 if reply.len() > 0u64:
                     self.send_packet(reply)
@@ -398,6 +401,14 @@ impl SshSession:
         val rejection = ssh_channel_open_rejection_payload_v1(request)
         if rejection.len() > 0u64:
             self.send_packet(rejection)
+            return
+
+        if self.no_more_session_channels:
+            self.send_packet(ssh_build_channel_open_failure(
+                request.sender_channel,
+                SSH_OPEN_ADMINISTRATIVELY_PROHIBITED,
+                "additional session channels disabled"
+            ))
             return
 
         val remote_id = request.sender_channel

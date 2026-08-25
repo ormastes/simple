@@ -6,6 +6,7 @@ use std.http_server.response.{
 }
 use std.http_server.types.{HttpResponseData}
 use std.json.builder.{escape_json}
+use std.common.crypto.sha256.{sha256_text}
 use app.simple_portal.content_db.{
     PortalContentDb, PortalPageRecord, PortalExampleRecord,
     portal_content_db_load_resolved, portal_page_by_slug,
@@ -110,12 +111,12 @@ class SimplePortalServer:
         if clean_path.starts_with("/static/"):
             if method != "GET" and method != "HEAD":
                 return self._method_not_allowed(clean_path)
-            return self._serve_static(clean_path, method == "HEAD")
+            return self._serve_static(clean_path, method == "HEAD", headers)
 
         if clean_path == "/":
             if method != "GET" and method != "HEAD":
                 return self._method_not_allowed(clean_path)
-            return self._serve_index(method == "HEAD")
+            return self._serve_index(method == "HEAD", headers)
 
         if clean_path == "/api/portal/pages":
             if method != "GET" and method != "HEAD":
@@ -160,13 +161,14 @@ class SimplePortalServer:
 
         self._finalize(_build_error(404, "Not Found"), false, false)
 
-    fn _serve_index(head_only: bool) -> text:
+    fn _serve_index(head_only: bool, headers: text) -> text:
         val index_path = "{self.app_root}/public/index.html"
         if not file_exists(index_path):
             return self._error("Missing portal shell", 500)
-        self._finalize(build_html(rt_file_read_text(index_path)), head_only, false)
+        val content = rt_file_read_text(index_path)
+        self._finalize_static(build_html(content), content, head_only, headers)
 
-    fn _serve_static(clean_path: text, head_only: bool) -> text:
+    fn _serve_static(clean_path: text, head_only: bool, headers: text) -> text:
         val rel = clean_path["/static/".length():]
         if rel == "" or rel.contains("..") or rel.contains("\\") or rel.starts_with("/"):
             return self._error("Static path traversal rejected", 404)
@@ -174,13 +176,32 @@ class SimplePortalServer:
         if not file_exists(full_path):
             return self._finalize(_build_error(404, "Not Found"), false, false)
         val mime = _mime_type(full_path)
+        val content = rt_file_read_text(full_path)
         val resp = if mime == "text/html":
-            build_html(rt_file_read_text(full_path))
+            build_html(content)
         elif mime == "application/json":
-            build_json(rt_file_read_text(full_path))
+            build_json(content)
         else:
-            build_text(rt_file_read_text(full_path))
-        self._finalize(resp, head_only, false)
+            build_text(content)
+        self._finalize_static(resp, content, head_only, headers)
+
+    fn _finalize_static(resp: HttpResponseData, content: text, head_only: bool, request_headers: text) -> text:
+        val etag = "\"" + sha256_text(content) + "\""
+        if _if_none_match_matches(_header_value(request_headers, "If-None-Match"), etag):
+            var not_modified = HttpResponseData(
+                status: 304,
+                reason: "Not Modified",
+                headers: [],
+                body: "",
+                body_file: "",
+                body_offset: 0,
+                body_length: 0,
+                chunked: false
+            )
+            not_modified = _add_response_header(not_modified, "ETag", etag)
+            return self._finalize(not_modified, false, false)
+        val validated = _add_response_header(resp, "ETag", etag)
+        self._finalize(validated, head_only, false)
 
     fn _serve_page(slug: text, head_only: bool) -> text:
         if val page = portal_page_by_slug(self.db, slug):
@@ -344,6 +365,21 @@ fn _header_value(headers: text, name: text) -> text:
         if key == wanted:
             return line[idx + 1:].trim()
     ""
+
+# If-None-Match uses weak comparison for GET and HEAD.  A weak request tag
+# therefore matches the same opaque tag emitted as a strong static validator.
+fn _if_none_match_matches(value: text, current_etag: text) -> bool:
+    if value == "":
+        return false
+    for raw_tag in value.split(","):
+        var candidate = raw_tag.trim()
+        if candidate == "*":
+            return true
+        if candidate.starts_with("W/") or candidate.starts_with("w/"):
+            candidate = candidate[2:].trim()
+        if candidate == current_etag:
+            return true
+    false
 
 fn _authorized_run(headers: text, port: i32, run_token: text) -> bool:
     val origin = _header_value(headers: headers, name: "Origin")

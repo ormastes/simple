@@ -6,7 +6,9 @@ use nogc_sync_mut.database.pure_sql._PureDatabase.row_value_helpers.*
 # sql_parser + MVCC in-process storage.
 
 use std.io_runtime
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write}
+use std.nogc_sync_mut.io.file_ops.{
+    file_exists, file_read, file_atomic_write, file_lock, file_unlock
+}
 use std.database.sql.types.{DbValue, DbRow, DbError}
 use nogc_sync_mut.db.dbfs_engine.sql_parser.{
     sql_parse, SqlStmtKind, SqlExprKind, SqlExpr,
@@ -37,6 +39,7 @@ class PureDatabase:
     _last_rowid: i64
     _last_changes: i64
     _in_transaction: bool
+    _txn_disk_base: text
     _dirty: bool
     _auto_checkpoint: bool
     _tbl_fts_next_doc_id: [i64]
@@ -88,6 +91,7 @@ class PureDatabase:
             _last_rowid: 0,
             _last_changes: 0,
             _in_transaction: false,
+            _txn_disk_base: "",
             _dirty: false,
             _auto_checkpoint: true,
             _tbl_fts_next_doc_id: [],
@@ -1054,9 +1058,51 @@ class PureDatabase:
     me _persist() -> Result<(), DbError>:
         if self._path == "":
             return Ok(())
-        if file_write(self._path, self._serialize_disk()):
+        # Publication must be a single rename, not delete followed by write:
+        # readers may open the database concurrently and must never observe a
+        # missing or partially-written durable image.
+        if file_atomic_write(self._path, self._serialize_disk()):
             return Ok(())
         Err(DbError.ConnectionFailed(path: self._path, message: "failed to persist pure database"))
+
+    me _persist_transaction_if_current() -> Result<(), DbError>:
+        if self._path == "":
+            return Ok(())
+
+        # Serialize before taking the inter-process lock so the critical
+        # section contains only compare-and-publish. The lock makes the
+        # durable-image comparison and atomic replacement one indivisible
+        # commit decision across independently opened PureDatabase handles.
+        val next_image = self._serialize_disk()
+        # Lock a stable sidecar rather than the database inode: atomic replace
+        # swaps that inode, which could otherwise split concurrent lockers
+        # between the retired and newly published files.
+        val lock_handle = file_lock(self._path + ".commit.lock", 10)
+        if lock_handle < 0:
+            return Err(DbError.ConnectionFailed(
+                path: self._path,
+                message: "failed to acquire pure database commit lock"
+            ))
+
+        val current_image = if file_exists(self._path): file_read(self._path) else: ""
+        if current_image != self._txn_disk_base:
+            file_unlock(lock_handle)
+            return Err(DbError.QueryFailed(
+                sql: "COMMIT",
+                message: "concurrent commit conflict: durable database changed since BEGIN"
+            ))
+
+        val published = file_atomic_write(self._path, next_image)
+        # Publication is already durable once the atomic replacement succeeds.
+        # A lock-release diagnostic must not report the commit as failed: that
+        # would invite the caller to ROLLBACK state which is already visible.
+        file_unlock(lock_handle)
+        if not published:
+            return Err(DbError.ConnectionFailed(
+                path: self._path,
+                message: "failed to atomically publish pure database transaction"
+            ))
+        Ok(())
 
     me _load_from_disk() -> Result<PureDatabase, DbError>:
         val content = file_read(self._path)
@@ -1699,6 +1745,13 @@ class PureDatabase:
     me _do_begin() -> Result<i64, DbError>:
         if self._in_transaction:
             return Err(DbError.QueryFailed(sql: "BEGIN", message: "already in transaction"))
+        # Retain the exact durable image read by this transaction. Reads stay
+        # on the in-memory snapshot; COMMIT validates this image under the
+        # publication lock so a concurrent writer cannot be silently lost.
+        self._txn_disk_base = if self._path != "" and file_exists(self._path):
+            file_read(self._path)
+        else:
+            ""
         self._snapshot_tables()
         self._in_transaction = true
         self._last_changes = 0
@@ -1707,7 +1760,18 @@ class PureDatabase:
     me _do_commit() -> Result<i64, DbError>:
         if not self._in_transaction:
             return Err(DbError.QueryFailed(sql: "COMMIT", message: "no active transaction"))
+        if self._auto_checkpoint and self._dirty:
+            var si: i32 = 0
+            while si < self._tbl_mvcc_stale.len() as i32:
+                self._ensure_mvcc_sync(si)
+                si = si + 1
+            # On conflict this returns without changing transaction state or
+            # clearing its rollback snapshot, so the caller can still retry or
+            # ROLLBACK. No durable bytes have been published in that case.
+            self._persist_transaction_if_current()?
+            self._dirty = false
         self._in_transaction = false
+        self._txn_disk_base = ""
         self._snap_tbl_names = []
         self._snap_tbl_cols = []
         self._snap_row_tidx = []
@@ -1725,6 +1789,7 @@ class PureDatabase:
             return Err(DbError.QueryFailed(sql: "ROLLBACK", message: "no active transaction"))
         self._restore_from_snapshot()
         self._in_transaction = false
+        self._txn_disk_base = ""
         self._snap_tbl_names = []
         self._snap_tbl_cols = []
         self._snap_row_tidx = []
