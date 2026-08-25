@@ -2,8 +2,11 @@
 # Streaming filesystem applets for the filesystem-launched SimpleOS simplebox.
 
 use os.userlib.fs.{
-    file_open_direct, file_read_direct, file_write_direct, file_close_direct,
+    file_open_direct, file_read_direct, file_write_direct, file_write_progress_direct, file_close_direct,
     file_sync_direct, file_rename_direct, list_directory_bounded, readlink
+}
+use os.userlib.ipc_protocol.{
+    VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC, VFS_OPEN_O_APPEND
 }
 use nogc_async_mut_noalloc.path.{bm_path_normalize}
 use os.kernel.types.fs_types.{DirEntry}
@@ -86,6 +89,93 @@ fn _write_stdout_bytes(bytes: [u8]) -> Result<bool, text>:
                     return Err("write made invalid progress")
                 offset = offset + count
     Ok(true)
+
+fn _write_all_direct(fd: i32, bytes: [u8]) -> Result<bool, text>:
+    var offset: u64 = 0u64
+    while offset < bytes.len():
+        val remaining = bytes.slice(offset, bytes.len())
+        match file_write_progress_direct(fd, remaining):
+            case Err(reason): return Err(reason)
+            case Ok(count):
+                if count == 0u64:
+                    return Err("write made no progress")
+                offset = offset + count
+    Ok(true)
+
+fn _tee_close_outputs(fds: [i32]) -> bool:
+    var closed = true
+    for fd in fds:
+        if not file_close_direct(fd):
+            closed = false
+    closed
+
+pub fn simplebox_tee(args: [text]) -> i32:
+    """Copy bounded stdin to stdout and each named file.
+
+    `-a` selects append; the default creates or truncates. Input, operand
+    count, and path sizes share Simplebox's filesystem bounds. Every output
+    retries partial writes and rejects a zero-progress descriptor.
+    """
+    var append = false
+    var start: u64 = 0u64
+    if args.len() > 0u64 and args[0] == "-a":
+        append = true
+        start = 1u64
+    elif args.len() > 0u64 and args[0].starts_with("-") and args[0] != "--":
+        stdout_write("tee: unsupported option: " + args[0] + "\n")
+        return 1
+    elif args.len() > 0u64 and args[0] == "--":
+        start = 1u64
+    if args.len() - start > SIMPLEBOX_FILE_LIMIT:
+        stdout_write("tee: too many files\n")
+        return 1
+
+    var outputs: [i32] = []
+    val flags = VFS_OPEN_O_WRONLY | VFS_OPEN_O_CREAT |
+        (if append: VFS_OPEN_O_APPEND else: VFS_OPEN_O_TRUNC)
+    var index = start
+    while index < args.len():
+        val path = args[index]
+        if path.len() == 0u64 or path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT:
+            val _closed = _tee_close_outputs(outputs)
+            stdout_write("tee: invalid path length\n")
+            return 1
+        match file_open_direct(path, flags):
+            case Err(reason):
+                val _closed = _tee_close_outputs(outputs)
+                stdout_write("tee: " + path + ": " + reason + "\n")
+                return 1
+            case Ok(fd): outputs.push(fd)
+        index = index + 1u64
+
+    var consumed: u64 = 0u64
+    var failure = ""
+    var complete = false
+    while not complete and failure == "":
+        match file_read_direct(0, SIMPLEBOX_READ_CHUNK_BYTES):
+            case Err(reason): failure = "stdin: " + reason
+            case Ok(chunk):
+                if chunk.len() == 0u64:
+                    complete = true
+                elif consumed + chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT:
+                    failure = "input exceeds simplebox byte limit"
+                else:
+                    match _write_all_direct(1, chunk):
+                        case Err(reason): failure = "stdout: " + reason
+                        case Ok(_):
+                            for fd in outputs:
+                                if failure == "":
+                                    match _write_all_direct(fd, chunk):
+                                        case Err(reason): failure = reason
+                                        case Ok(_): ()
+                            if failure == "":
+                                consumed = consumed + chunk.len()
+    if not _tee_close_outputs(outputs) and failure == "":
+        failure = "close failed"
+    if failure != "":
+        stdout_write("tee: " + failure + "\n")
+        return 1
+    0
 
 fn _file_args_with_limit(command: text, args: [text]) -> Result<[text], text>:
     if args.len() == 0:

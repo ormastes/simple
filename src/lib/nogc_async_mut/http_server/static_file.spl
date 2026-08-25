@@ -352,6 +352,26 @@ class StaticFileHandler:
         val mtime = file_stat(actual_path)
         val etag = static_file_etag(actual_path, mtime, size)
 
+        # If-Match is the first representation precondition. Evaluate it
+        # before If-None-Match and Range so a stale client cannot read or
+        # schedule a sendfile body for a representation it did not match.
+        val if_match = _get_header_ci(request.headers, "if-match")
+        if if_match.len() > 0 and not static_file_if_match_matches(if_match, etag):
+            return HttpResponseData(
+                status: 412,
+                reason: "Precondition Failed",
+                headers: [
+                    ("ETag", etag),
+                    ("Server", "SimpleServer")
+                ],
+                body: "",
+                body_bytes: [],
+                body_file: "",
+                body_offset: 0,
+                body_length: 0,
+                chunked: false
+            )
+
         # ETag / If-None-Match check
         val if_none_match = _get_header_ci(request.headers, "if-none-match")
         if if_none_match.len() > 0 and static_file_check_etag(if_none_match, etag):
@@ -502,6 +522,24 @@ fn static_file_check_etag(request_etag: text, file_etag: text) -> bool:
     if req.starts_with("W/"):
         req = req.slice(2, req.len())
     req == file_etag
+
+fn static_file_if_match_matches(if_match: text, file_etag: text) -> bool:
+    """Return whether If-Match strongly matches the current representation.
+
+    The wildcard succeeds because this helper is called only after the static
+    file has been found. A comma-separated field succeeds when any strong
+    entity-tag matches; weak validators never satisfy If-Match.
+    """
+    val condition = if_match.trim()
+    if condition == "*":
+        return true
+    for candidate_raw in condition.split(","):
+        val candidate = candidate_raw.trim()
+        if candidate.starts_with("W/"):
+            continue
+        if candidate == file_etag:
+            return true
+    false
 
 fn static_file_if_range_matches(if_range: text, file_etag: text) -> bool:
     """Return whether a Range request may use the current representation.

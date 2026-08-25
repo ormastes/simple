@@ -1,6 +1,18 @@
 # Bounded SFTP v3 negotiation, framing, and positioned filesystem owner.
 
 use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_put_u32, ssh_put_string, ssh_put_text}
+use os.apps.sshd.ssh_sftp_namespace_v3.{
+    SSH_FXP_REMOVE_V3, SSH_FXP_MKDIR_V3, SSH_FXP_RMDIR_V3,
+    SSH_FXP_RENAME_V3, SSH_FXP_READLINK_V3, SSH_FXP_SYMLINK_V3,
+    SftpNamespaceKindV3, sftp_namespace_decode_v3,
+    sftp_namespace_request_id_v3, sftp_namespace_status_v3,
+    sftp_namespace_readlink_name_v3
+}
+use os.userlib.fs_mutation.{
+    vfs_mkdir_checked, vfs_unlink_checked, vfs_rmdir_checked,
+    vfs_rename_checked, vfs_chmod_checked, vfs_symlink_checked,
+    vfs_readlink_checked
+}
 use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_open, g_vfs_positioned_close, g_vfs_positioned_read_at, g_vfs_positioned_write_at}
 use os.services.vfs.vfs_write_ops.{g_vfs_readdir}
 use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind}
@@ -173,6 +185,18 @@ fn _fs_status(error: FsError) -> u32:
         case FsError.StaleHandle: SSH_FX_FAILURE
         case FsError.InvalidArg: SSH_FX_BAD_MESSAGE
         case _: SSH_FX_FAILURE
+
+fn _namespace_error_status(error: text) -> u32:
+    # The current canonical mutation facade preserves the VFS error text, not
+    # its service status integer.  Map only stable, unambiguous classes and
+    # fail closed for every other backend or transport failure.
+    if error == "filesystem is read-only" or error.contains("permission") or
+        error.contains("denied") or error.contains("lookup grant"):
+        return SSH_FX_PERMISSION_DENIED
+    if error.contains("not found") or
+        error.starts_with("no filesystem mounted for path:"):
+        return SSH_FX_NO_SUCH_FILE
+    SSH_FX_FAILURE
 
 fn _path_is_admitted(bytes: [u8]) -> bool:
     if bytes.len() == 0u64 or bytes.len() > SFTP_MAX_PATH or bytes[0] != 47u8:
@@ -484,6 +508,65 @@ impl SftpSessionV3:
                     return _status(request_id, SSH_FX_FAILURE, "short write")
                 _status(request_id, SSH_FX_OK, "ok")
 
+    me _handle_namespace(frame: [u8]) -> [u8]:
+        val fallback_request_id = sftp_namespace_request_id_v3(frame)
+        match sftp_namespace_decode_v3(frame):
+            Err(error):
+                sftp_namespace_status_v3(fallback_request_id,
+                    SSH_FX_BAD_MESSAGE, error)
+            Ok(request):
+                match request.kind:
+                    case SftpNamespaceKindV3.Remove:
+                        match vfs_unlink_checked(request.path):
+                            Err(error): sftp_namespace_status_v3(request.request_id,
+                                _namespace_error_status(error), "remove failed")
+                            Ok(_): sftp_namespace_status_v3(request.request_id,
+                                SSH_FX_OK, "ok")
+                    case SftpNamespaceKindV3.Mkdir:
+                        match vfs_mkdir_checked(request.path):
+                            Err(error): sftp_namespace_status_v3(request.request_id,
+                                _namespace_error_status(error), "mkdir failed")
+                            Ok(_):
+                                match vfs_chmod_checked(request.path,
+                                    request.directory_mode.to_u16()):
+                                    Err(error): sftp_namespace_status_v3(
+                                        request.request_id,
+                                        _namespace_error_status(error),
+                                        "mkdir mode application failed")
+                                    Ok(_): sftp_namespace_status_v3(
+                                        request.request_id, SSH_FX_OK, "ok")
+                    case SftpNamespaceKindV3.Rmdir:
+                        match vfs_rmdir_checked(request.path):
+                            Err(error): sftp_namespace_status_v3(request.request_id,
+                                _namespace_error_status(error), "rmdir failed")
+                            Ok(_): sftp_namespace_status_v3(request.request_id,
+                                SSH_FX_OK, "ok")
+                    case SftpNamespaceKindV3.Rename:
+                        match vfs_rename_checked(request.path, request.second_path):
+                            Err(error): sftp_namespace_status_v3(request.request_id,
+                                _namespace_error_status(error), "rename failed")
+                            Ok(_): sftp_namespace_status_v3(request.request_id,
+                                SSH_FX_OK, "ok")
+                    case SftpNamespaceKindV3.Readlink:
+                        match vfs_readlink_checked(request.path):
+                            Err(error): sftp_namespace_status_v3(request.request_id,
+                                _namespace_error_status(error), "readlink failed")
+                            Ok(target):
+                                match sftp_namespace_readlink_name_v3(
+                                    request.request_id, target):
+                                    Err(_): sftp_namespace_status_v3(
+                                        request.request_id, SSH_FX_FAILURE,
+                                        "invalid VFS readlink target")
+                                    Ok(response): response
+                    case SftpNamespaceKindV3.Symlink:
+                        # v3 sends linkpath first, targetpath second; the VFS
+                        # facade deliberately accepts target before link path.
+                        match vfs_symlink_checked(request.second_path, request.path):
+                            Err(error): sftp_namespace_status_v3(request.request_id,
+                                _namespace_error_status(error), "symlink failed")
+                            Ok(_): sftp_namespace_status_v3(request.request_id,
+                                SSH_FX_OK, "ok")
+
     fn _ring_byte(offset: u64) -> u8:
         self.rx_ring[(self.rx_head + offset) % SFTP_ACCUMULATOR_CAP]
 
@@ -601,6 +684,10 @@ impl SftpSessionV3:
             return self._handle_opendir(frame, request_id)
         if kind == SSH_FXP_READDIR:
             return self._handle_readdir(frame, request_id)
+        if kind == SSH_FXP_REMOVE_V3 or kind == SSH_FXP_MKDIR_V3 or
+            kind == SSH_FXP_RMDIR_V3 or kind == SSH_FXP_RENAME_V3 or
+            kind == SSH_FXP_READLINK_V3 or kind == SSH_FXP_SYMLINK_V3:
+            return self._handle_namespace(frame)
         _status(request_id, SSH_FX_OP_UNSUPPORTED,
             "sftp operation unsupported")
 

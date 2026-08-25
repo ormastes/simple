@@ -5,6 +5,9 @@ use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.userlib.syscall_raw
 use os.userlib.ipc_protocol(VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE, VFS_STAT, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST, VFS_READLINK, VFS_OPEN_O_RDONLY, VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC)
 use os.kernel.types.fs_types(DirEntry, FsNode, FsNodeKind)
+use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_fstat}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileStat}
 use os.kernel.types.ipc_types(IpcPort, IpcMessage)
 use std.common.crypto.secure_memory.{secure_zero_u8_slots, secure_set_u8_length}
 pub use std.common.contracts.os.dbfs_vfs_mount_capability_v1.{DbfsVfsMountCapabilityV1}
@@ -19,6 +22,20 @@ pub const VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT: u64 = 3072u64
 pub struct VfsDirectoryListing:
     entries: [DirEntry]
     total_name_bytes: u64
+
+pub struct VfsFileStat:
+    """Bounded SFTP-ready metadata with explicit availability flags."""
+    kind: FsNodeKind
+    size: u64
+    mode: u32
+    uid: u32
+    gid: u32
+    atime_ns: u64
+    mtime_ns: u64
+    kind_available: bool
+    mode_available: bool
+    uid_gid_available: bool
+    times_available: bool
 
 pub fn dbfs_vfs_mount_capability_v1() -> DbfsVfsMountCapabilityV1:
     match syscall(79, 0, 0, 0, 0, 0):
@@ -56,6 +73,22 @@ pub fn file_write_direct(fd: i32, bytes: [u8]) -> Result<u64, text>:
         return Err("write failed with code {rc}")
     if rc as u64 != bytes.len() as u64:
         return Err("short write {rc}/{bytes.len()}")
+    Ok(rc as u64)
+
+pub fn file_write_progress_direct(fd: i32, bytes: [u8]) -> Result<u64, text>:
+    """Perform one bounded descriptor write and preserve partial progress.
+
+    Callers that require complete delivery must retry the unwritten suffix.
+    A zero-byte successful write is returned as progress so the caller can
+    reject the stalled descriptor without spinning.
+    """
+    if bytes.len() == 0 or bytes.len() > _DIRECT_FILE_MAX_BYTES:
+        return Err("invalid write bound")
+    val rc = rt_simpleos_file_write_bytes(fd as u64, bytes)
+    if rc < 0:
+        return Err("write failed with code {rc}")
+    if rc as u64 > bytes.len():
+        return Err("write returned invalid length {rc}/{bytes.len()}")
     Ok(rc as u64)
 
 pub fn file_close_direct(fd: i32) -> bool:
@@ -316,6 +349,49 @@ fn stat(path: text) -> Result<FsNode, text>:
         modified_ns: 0u64
     ))
 
+pub fn file_stat_bounded(path: text) -> Result<VfsFileStat, text>:
+    """Stat one bounded path through canonical VFS_STAT.
+
+    The current wire reply owns kind, size, and permission bits only. UID/GID
+    and times are marked unavailable rather than presented as real zeroes.
+    """
+    if path.len() == 0u64 or path.len() > 4096u64 or path.contains("\0"):
+        return Err("invalid stat path length")
+    val node = stat(path)?
+    val type_bits = match node.kind:
+        case FsNodeKind.Directory: 0o040000u32
+        case FsNodeKind.Symlink: 0o120000u32
+        case FsNodeKind.Device: 0o060000u32
+        case FsNodeKind.Pipe: 0o010000u32
+        case _: 0o100000u32
+    Ok(VfsFileStat(
+        kind: node.kind, size: node.size,
+        mode: type_bits | node.permissions.to_u32(),
+        uid: 0u32, gid: 0u32, atime_ns: 0u64, mtime_ns: 0u64,
+        kind_available: true, mode_available: true,
+        uid_gid_available: false, times_available: false))
+
+fn _vfs_kind_from_mode(mode: u32) -> FsNodeKind:
+    val type_bits = mode & 0o170000u32
+    if type_bits == 0o040000u32: return FsNodeKind.Directory
+    if type_bits == 0o120000u32: return FsNodeKind.Symlink
+    if type_bits == 0o060000u32 or type_bits == 0o020000u32:
+        return FsNodeKind.Device
+    if type_bits == 0o010000u32: return FsNodeKind.Pipe
+    FsNodeKind.File
+
+pub fn file_fstat_bounded(file_object_id: u64) -> Result<VfsFileStat, FsError>:
+    """Stat a live positioned file object without weakening handle ownership."""
+    val value: FileStat = g_vfs_positioned_fstat(file_object_id)?
+    Ok(VfsFileStat(
+        kind: _vfs_kind_from_mode(value.mode), size: value.size,
+        mode: value.mode, uid: value.uid, gid: value.gid,
+        atime_ns: value.atime_ns, mtime_ns: value.mtime_ns,
+        kind_available: (value.mode & 0o170000u32) != 0u32,
+        mode_available: value.mode != 0u32,
+        uid_gid_available: false,
+        times_available: value.atime_ns != 0u64 or value.mtime_ns != 0u64))
+
 pub fn readlink(path: text) -> Result<text, text>:
     """Read one symbolic-link target through the canonical VFS service."""
     if path.len() == 0u64 or path.len() > 4096u64:
@@ -429,5 +505,6 @@ fn mount_list() -> Result<[text], text>:
 
 # Minimal process-side byte I/O surface used by filesystem-launched tools.
 export file_open_direct, file_read_direct, file_close_direct, stat, list_directory_bounded,
-    VfsDirectoryListing, VFS_DIRECTORY_ENTRY_LIMIT,
+    VfsDirectoryListing, VfsFileStat, file_stat_bounded, file_fstat_bounded,
+    VFS_DIRECTORY_ENTRY_LIMIT,
     VFS_DIRECTORY_NAME_BYTES_LIMIT, VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT

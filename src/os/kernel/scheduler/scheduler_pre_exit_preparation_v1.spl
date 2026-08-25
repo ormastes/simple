@@ -559,11 +559,6 @@ pub(package) fn scheduler_pre_exit_consume_terminal_v1(
         _ = _scheduler_pre_exit_unlock_v1()
         return Err("stale scheduler pre-exit handle")
     var slot = _scheduler_pre_exit_owner_v1.slots[index]
-    if slot.state == SchedulerPreExitPreparationStateV1.Consumed:
-        val replay = _scheduler_pre_exit_receipt_v1(slot, false, false, false)
-        if not _scheduler_pre_exit_unlock_v1():
-            return Err("consumed receipt replay indeterminate")
-        return Ok(replay)
     if slot.state != SchedulerPreExitPreparationStateV1.Completed:
         _ = _scheduler_pre_exit_unlock_v1()
         return Err("scheduler pre-exit transaction not terminal")
@@ -584,11 +579,18 @@ pub(package) fn scheduler_pre_exit_consume_terminal_v1(
             _ = _scheduler_pre_exit_unlock_v1()
             return Err("DBD cleanup terminal receipt unavailable")
         slot.dbd_consumed = true
+    # The returned receipt is the one-shot authority to publish terminal task
+    # state.  Do not retain a replayable Consumed slot containing the departed
+    # task/artifact lifecycle identity: doing so exhausts this bounded owner and
+    # lets a copied handle recover terminal authority after teardown.  Build the
+    # receipt from a local terminal snapshot, then invalidate the handle and
+    # release the slot before making the receipt observable.
     slot.state = SchedulerPreExitPreparationStateV1.Consumed
-    _scheduler_pre_exit_owner_v1.slots[index] = slot
     val receipt = _scheduler_pre_exit_receipt_v1(slot, false, false, false)
+    _scheduler_pre_exit_owner_v1.slots[index] =
+        _scheduler_pre_exit_empty_v1(slot.generation)
     if not _scheduler_pre_exit_unlock_v1():
-        return Err("terminal receipt retention indeterminate")
+        return Err("terminal receipt retirement indeterminate")
     Ok(receipt)
 
 export SchedulerPreExitPreparationHandleV1
