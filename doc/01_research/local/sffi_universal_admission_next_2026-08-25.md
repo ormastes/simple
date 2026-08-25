@@ -1914,6 +1914,28 @@ production missing authority fell from 10,169 to 10,140. Declaration totals
 remain 11,627, with 2,443 unsafe-tagged and 9,005 untouched declaration rows.
 Exact-artifact verified-and-signed admission remains zero.
 
+## TCP byte-write consumer checkpoint
+
+Two duplicate TCP consumers bypassed the canonical facade's authority: SSH
+client transport called `rt_io_tcp_write`, and the async driver called
+`rt_io_tcp_write_bytes`. Both declarations and calls now use minimal lexical
+`unsafe(ffi)` scopes. The SSH adapter rejects invalid descriptors, zero
+progress for nonempty input, and provider counts larger than the borrowed
+slice before advancing its send cursor.
+
+The native C provider remains a direct descriptor/array validation followed
+by one `write(2)` call; the interpreter uses its typed network registration.
+No provider call, allocation, copy, lookup, lock, hash, signature operation,
+or dispatch layer was added. The existing SSH suffix slicing remains a known
+copying cost and is not claimed verified by this authority change.
+
+The source census measured missing authority decreasing from 18,276 to 18,274
+repository-wide and from 10,106 to 10,104 in production. `rt_io` now has 315
+explicit and 25 missing call sites. Declaration totals remain 11,627;
+unsafe-tagged declarations increase from 2,447 to 2,449 and untouched
+declarations decrease from 9,001 to 8,999. Exact-artifact
+verified-and-signed admission remains zero.
+
 ## Synchronous file I/O raw-contract checkpoint
 
 The canonical `FileHandle`/`File` facade has 16 explicitly unsafe declarations
