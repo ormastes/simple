@@ -2406,6 +2406,33 @@ signature verification, ownership evidence, and proof receipts remain absent,
 so this facade and the broader SFFI surface are not globally safe, verified, or
 signed; exact-artifact verified-and-signed admission remains 0.
 
+## Thread-sleep ABI and authority checkpoint
+
+The owned Simple source and tests contain 40 declarations and 55 calls of
+`rt_thread_sleep`.  Both authoritative providers are void: C declares
+`void rt_thread_sleep(int64_t)` and Rust exports
+`extern "C" fn rt_thread_sleep(i64)` without a result.  The two SSH declarations
+that claimed an `i64` return now match that ABI, and no caller reads a fabricated
+return register.
+
+Every declaration now carries explicit FFI metadata and every standalone call
+is enclosed by the smallest lexical `unsafe(ffi)` scope.  This migration adds
+compile-time authority only: it does not add a branch, wrapper dispatch,
+allocation, copy, lookup, lock, hash, signature operation, or extra sleep.
+
+The repository-wide ABI/authority ratchet passed.  The authoritative census
+changed:
+
+- raw call sites: unchanged at 20,796
+- missing authority: 16,941 -> 16,905
+- lexical unsafe: 2,936 -> 2,972
+- function unsafe: unchanged at 919
+
+The symbol is now consistently declared and explicitly unsafe, but provider
+artifact identity and proof/signature receipts remain absent.  Therefore the
+thread-sleep boundary and the broader SFFI surface are not globally verified
+or signed; exact-artifact verified-and-signed admission remains 0.
+
 ## Synchronous SIMD SFFI facade checkpoint
 
 `src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
