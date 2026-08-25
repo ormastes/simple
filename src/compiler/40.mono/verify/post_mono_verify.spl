@@ -21,7 +21,6 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
-extern fn rt_enum_discriminant(value: Any) -> i64
 
 # Bound transport diagnostics independently of the invariant count. A broken
 # aggregate boundary can affect every type in a full compiler closure; emitting
@@ -216,11 +215,12 @@ class PostMonoVerifier:
             case HirTypeKind.Tensor(element, _, _): self.walk_type(element)
             case HirTypeKind.Layer(_, _): pass_do_nothing("layer dims carry no HirType")
             case _:
-                # Keep the receipt in this frame: passing `ty` through another
-                # method would add a HirType aggregate boundary to the fault.
-                val bad_disc = rt_enum_discriminant(ty.kind)
+                # The value reaching this arm is already malformed. Do not
+                # inspect its kind payload or span while reporting the fault:
+                # either access adds another unsafe aggregate dereference and
+                # can hide the original transport defect behind a crash.
                 if self.transport_receipts < POST_MONO_TRANSPORT_RECEIPT_LIMIT:
-                    print "[post-mono-type-transport] receipt={self.transport_receipts + 1}/{POST_MONO_TRANSPORT_RECEIPT_LIMIT} module_symbol={self.symbol} disc={bad_disc} source={ty.span.file}:{ty.span.line}:{ty.span.col}"
+                    print "[post-mono-type-transport] receipt={self.transport_receipts + 1}/{POST_MONO_TRANSPORT_RECEIPT_LIMIT} module_symbol={self.symbol} context=walk_type malformed_hir_type"
                 self.hit_unreachable("HirTypeKind", "walk_type")
 
     me walk_types(tys: [HirType]):
