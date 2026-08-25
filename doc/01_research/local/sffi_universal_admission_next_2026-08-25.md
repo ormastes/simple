@@ -70,6 +70,35 @@ No production self-hosted optimizer or benchmark was available.  Exact
 artifact identity, signatures, and evidence admission remain absent;
 verified-and-signed admission remains 0.
 
+## AST declaration-node environment authority checkpoint
+
+The flat declaration arena now confines its four environment ABIs to
+mandatory-inline lexical `unsafe(ffi)` owners.  Text lookup is truthfully
+nullable.  Integer lookup preserves its explicit default, and set/remove keep
+semantic booleans rather than numeric substitutes.
+
+The legacy bootstrap environment mirror previously ignored mutation failure,
+which could retain a larger prior file's declaration tail and miscompile the
+next file.  Mirror writes and removals now fail loudly.  Native/compiler normal
+operation remains arena-preferred (`ast_decl_mode_cached = 1`) and therefore
+does not execute those environment mutations.  On the compatibility path, the
+new branch consumes the status of an already-existing libc operation; it adds
+no environment scan, allocation, copy, lookup, hash, lock, loop, or foreign
+call.
+
+All four symbols have typed-native and interpreter registration.  The focused
+static authority/performance ratchet passed.  The authoritative census changed:
+
+- raw call sites: 18,912 -> 18,893
+- missing authority: 14,642 -> 14,619
+- lexical unsafe: 3,313 -> 3,317
+- function unsafe: unchanged at 957
+
+Registration does not prove process-environment isolation, exact artifact
+identity, signatures, or provenance.  No production self-hosted optimizer or
+benchmark was available.  The declaration arena and wider SFFI estate are not
+globally verified or signed; verified-and-signed admission remains 0.
+
 ## Driver HIR-lowering authority checkpoint
 
 The phase-3 HIR driver now confines all twelve raw ABI families.  Eleven use
