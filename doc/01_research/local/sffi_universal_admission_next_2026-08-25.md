@@ -1062,3 +1062,25 @@ Unsafe-tagged rows increase from 1,533 to 1,573, untouched rows decrease from
 9,945 to 9,905, and exact-artifact verified-and-signed admission remains zero.
 The raw string out-length and pointer ownership contracts still require typed
 ABI validation before this module can be called safe.
+
+## Audio raw-contract ownership checkpoint
+
+The canonical audio owner contains 39 declarations; one pitch contract was
+already tagged, and the remaining 38 now carry adjacent, operation-specific
+`@unsafe(... capabilities: [ffi])` metadata. The contracts cover engine,
+source, playback, SDL2-device, and capture-session handles; path and backend
+text; live/queued/frame/underrun counts; spatial listener/source state; and PCM
+array or raw pointer/count inputs. The PCM contracts explicitly require the
+array or pointed storage to cover the declared sample/channel/frame extent.
+
+A static ratchet fixes the inventory at 39 and requires every declaration to
+remain tagged. It passed with the whitespace check. This pass changes no ABI
+signature, playback/queue call count, callback, sample conversion, allocation,
+buffer copy, queue query, or audio data layout; latency-sensitive paths remain
+unchanged. Production Simple and optimizer verification remain unavailable.
+
+Estimated totals remain 11,736 `rt_*` declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,573 to 1,611, untouched rows decrease from
+9,905 to 9,867, and exact-artifact verified-and-signed admission remains zero.
+Executable extent validation and exact provider evidence remain required before
+raw PCM or generation-handle operations can be treated as verified-safe.

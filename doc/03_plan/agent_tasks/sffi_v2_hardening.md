@@ -528,3 +528,7 @@ passing placeholder.
      `unsafe(ffi)`. Validate the string out-length ABI and owned/borrowed pointer
      distinctions before safe publication; preserve existing allocation,
      clone/free, environment, and filesystem call counts.
+101. Keep all 39 canonical audio declarations explicitly tagged `unsafe(ffi)`.
+     Enforce PCM pointer/count/channel/frame extent and handle-generation
+     contracts at the boundary without sample copies, callback indirection, or
+     extra queue/provider calls; exact signed admission remains required.
