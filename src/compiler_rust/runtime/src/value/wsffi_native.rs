@@ -430,6 +430,38 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
     try_call_i64_value(fptr, args_rv, nargs).unwrap_or(0)
 }
 
+/// Allocation-free typed C-boolean call with no arguments.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_bool0_checked(fptr: i64, out_value: *mut bool) -> i64 {
+    if out_value.is_null() {
+        return WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_value.write(false) };
+    if fptr == 0 {
+        return WFFI_NULL_FUNCTION;
+    }
+    type Fn = unsafe extern "C" fn() -> bool;
+    let value = unsafe { std::mem::transmute::<usize, Fn>(fptr as usize)() };
+    unsafe { out_value.write(value) };
+    WFFI_OK
+}
+
+/// Allocation-free typed C-boolean call with one i64 argument.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_bool1_checked(fptr: i64, arg0: i64, out_value: *mut bool) -> i64 {
+    if out_value.is_null() {
+        return WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_value.write(false) };
+    if fptr == 0 {
+        return WFFI_NULL_FUNCTION;
+    }
+    type Fn = unsafe extern "C" fn(i64) -> bool;
+    let value = unsafe { std::mem::transmute::<usize, Fn>(fptr as usize)(arg0) };
+    unsafe { out_value.write(value) };
+    WFFI_OK
+}
+
 /// Checked integer WFFI transport.
 ///
 /// Returns a bridge status and writes the foreign result to `out[0]` only on
@@ -829,6 +861,14 @@ mod tests {
         0
     }
 
+    unsafe extern "C" fn bool_true() -> bool {
+        true
+    }
+
+    unsafe extern "C" fn bool_is_positive(value: i64) -> bool {
+        value > 0
+    }
+
     #[test]
     fn checked_dynload_initializes_output_and_rejects_invalid_contracts() {
         let empty = rt_string_new(std::ptr::NonNull::<u8>::dangling().as_ptr(), 0);
@@ -884,6 +924,19 @@ mod tests {
         let args = rt_array_new(0);
         let rejected = spl_wffi_call_i64_checked(i64_zero as usize as i64, args, 1);
         assert_eq!(rt_array_get(rejected, 0).as_int(), WFFI_INVALID_ARGUMENT);
+    }
+
+    #[test]
+    fn checked_boolean_transport_preserves_bool_and_failure_identity() {
+        let mut value = false;
+        assert_eq!(spl_wffi_call_bool0_checked(bool_true as usize as i64, &mut value), WFFI_OK);
+        assert!(value);
+        assert_eq!(spl_wffi_call_bool1_checked(bool_is_positive as usize as i64, -1, &mut value), WFFI_OK);
+        assert!(!value);
+        value = true;
+        assert_eq!(spl_wffi_call_bool0_checked(0, &mut value), WFFI_NULL_FUNCTION);
+        assert!(!value);
+        assert_eq!(spl_wffi_call_bool0_checked(bool_true as usize as i64, std::ptr::null_mut()), WFFI_INVALID_ARGUMENT);
     }
 
     unsafe extern "C" fn f64_no_args() -> f64 {

@@ -2276,6 +2276,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "spl_dlsym_checked",
     "spl_dlsym_process_checked",
     "spl_wffi_call_i64_checked",
+    "spl_wffi_call_bool0_checked",
+    "spl_wffi_call_bool1_checked",
     "spl_wffi_call_f64_checked",
     "spl_fonts_call_init_blob",
     "spl_fonts_call_init_path",

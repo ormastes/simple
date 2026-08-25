@@ -8086,6 +8086,24 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
 #define SPL_WFFI_NULL_FUNCTION 2
 #define SPL_WFFI_UNSUPPORTED_SIGNATURE 3
 
+int64_t spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value) {
+    typedef bool (*Fn)(void);
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
+    *out_value = ((Fn)(uintptr_t)fptr)() ? 1 : 0;
+    return SPL_WFFI_OK;
+}
+
+int64_t spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0, int8_t* out_value) {
+    typedef bool (*Fn)(int64_t);
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
+    *out_value = ((Fn)(uintptr_t)fptr)(arg0) ? 1 : 0;
+    return SPL_WFFI_OK;
+}
+
 static int64_t spl_wffi_i64_checked_result(int64_t status, int64_t value) {
     SplArray* result = rt_array_new(2);
     if (!result) return rt_core_nil();

@@ -465,6 +465,9 @@ int64_t  rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
 int8_t   rt_array_push_i64_raw(SplArray* array, int64_t value);
 int64_t  spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value,
                                     int64_t nargs);
+int64_t  spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value);
+int64_t  spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0,
+                                     int8_t* out_value);
 int8_t   rt_array_extend_i64(int64_t dst, int64_t src, int64_t count); /* append count (<0 = all) elems of src onto dst */
 int64_t  rt_array_get_i64_raw(SplArray* array, int64_t index);
 /* Closure-invoking collection ops. rt_array_reduce takes `init` BEFORE the

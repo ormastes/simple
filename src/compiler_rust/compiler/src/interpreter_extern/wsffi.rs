@@ -519,6 +519,48 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(result))
 }
 
+/// Allocation-free typed C-boolean call with no arguments.
+pub fn spl_wffi_call_bool0_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Ok(Value::Int(1));
+    }
+    let fptr = match args[0] {
+        Value::Int(value) if value != 0 => value as usize,
+        _ => return Ok(Value::Int(2)),
+    };
+    let output = match &args[1] {
+        Value::BorrowMut(value) => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    *output.inner_mut() = Value::Bool(false);
+    let function: extern "C" fn() -> bool = unsafe { std::mem::transmute(fptr) };
+    *output.inner_mut() = Value::Bool(function());
+    Ok(Value::Int(0))
+}
+
+/// Allocation-free typed C-boolean call with one i64 argument.
+pub fn spl_wffi_call_bool1_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Ok(Value::Int(1));
+    }
+    let fptr = match args[0] {
+        Value::Int(value) if value != 0 => value as usize,
+        _ => return Ok(Value::Int(2)),
+    };
+    let arg0 = match args[1] {
+        Value::Int(value) => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    let output = match &args[2] {
+        Value::BorrowMut(value) => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    *output.inner_mut() = Value::Bool(false);
+    let function: extern "C" fn(i64) -> bool = unsafe { std::mem::transmute(fptr) };
+    *output.inner_mut() = Value::Bool(function(arg0));
+    Ok(Value::Int(0))
+}
+
 /// Checked WFFI transport. Returns `[status, value]`; value is meaningful only
 /// for status zero. Bridge failures never masquerade as a foreign zero result.
 pub fn spl_wffi_call_i64_checked(args: &[Value]) -> Result<Value, CompileError> {
