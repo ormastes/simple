@@ -331,16 +331,40 @@ fn _semantic_value_lines(u: DeclUniverse, type_text: text, v: text, indent: text
         return indent + "state = _ast_semantic_mark_uncacheable(state, \"Any\")\n"
     indent + "state = _ast_semantic_mark_uncacheable(state, \"unsupported:" + t + "\")\n"
 
+fn _semantic_binders(u: DeclUniverse, fields: [FieldDecl], variant: text) -> text:
+    """Render arm-local names so LLVM globals cannot alias across variants."""
+    if fields.len() == 0: return ""
+    val prefix = "b_" + variant + "_"
+    var out = "("
+    var i = 0
+    while i < fields.len():
+        if i > 0: out = out + ", "
+        val f = fields[i]
+        # Keep binder admission identical to `_semantic_value_lines`, including
+        # its structural list fallback beyond DeclUniverse's coarse category.
+        val c = u.classify(f.type_text)
+        val t = _strip_opt(f.type_text)
+        val optional = f.type_text.trim().ends_with("?")
+        val used = not _semantic_is_span(f.type_text) and (
+            optional or c.cat == "node" or c.cat == "list" or
+            c.cat == "pair" or c.cat == "prim" or
+            (t.starts_with("[") and t.ends_with("]"))
+        )
+        out = out + (if used: prefix + f.binder else: "_")
+        i = i + 1
+    out + ")"
+
 fn _semantic_enum_arms(u: DeclUniverse, decl: NodeDecl, indent: text) -> text:
     var out = ""
     for row in decl.variants:
         val fields = parse_payload_fields(row.payload_schema)
-        out = out + indent + "case " + row.variant + _binders(u, fields, true) + ":\n"
+        val prefix = "b_" + row.variant + "_"
+        out = out + indent + "case " + row.variant + _semantic_binders(u, fields, row.variant) + ":\n"
         out = out + indent + "    handled = true\n"
         out = out + indent + "    state = _ast_semantic_mix_tag(state, \"" + row.variant + "\")\n"
         var idx = 0
         for f in fields:
-            out = out + _semantic_value_lines(u, f.type_text, "b_" + f.binder, indent + "    ", idx)
+            out = out + _semantic_value_lines(u, f.type_text, prefix + f.binder, indent + "    ", idx)
             idx = idx + 3
     out
 
