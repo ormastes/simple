@@ -43,6 +43,26 @@ describe "domain block HIR lowering":
         expect(hir.domain_blocks[1].kind).to_equal("style")
         expect(hir.domain_blocks[1].payload).to_equal("Button.primary: padding 8px")
 
+    it "preserves ordinary lines and domain positions through fused extraction":
+        # The string literal deliberately trips the cheap `schema{` precheck
+        # without being a domain line. Leading/trailing whitespace around the
+        # real style block, the empty line, and the final newline exercise the
+        # exact raw-line/blank-line reconstruction contract.
+        val source = "val before = 1\nschema{Building: id Uuid}\nval marker_text = \"schema{not a block}\"\n# schema{unterminated marker\n\n  style{ Button.primary: padding 8px }  \nval after = 2\n"
+        val module = parse_full_frontend(source, "mixed_domain_blocks", "mixed_domain_blocks", make_logger())
+
+        expect(module.domain_blocks.len()).to_equal(2)
+        expect(module.domain_blocks[0].kind).to_equal("schema")
+        expect(module.domain_blocks[0].payload).to_equal("Building: id Uuid")
+        expect(module.domain_blocks[1].kind).to_equal("style")
+        expect(module.domain_blocks[1].payload).to_equal("Button.primary: padding 8px")
+        expect(module.constants.has("before")).to_equal(true)
+        expect(module.constants.has("marker_text")).to_equal(true)
+        expect(module.constants.has("after")).to_equal(true)
+        expect(module.constants["before"].span.line).to_equal(1)
+        expect(module.constants["marker_text"].span.line).to_equal(3)
+        expect(module.constants["after"].span.line).to_equal(7)
+
     it "does not treat ordinary schema identifiers as domain blocks":
         val log = make_logger()
         val source = "val schema = 1"

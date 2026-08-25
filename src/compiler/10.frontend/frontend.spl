@@ -45,33 +45,29 @@ fn frontend_domain_kind_for_line(line: text) -> text:
             return kind
     ""
 
-fn frontend_line_is_domain_block(line: text) -> bool:
-    frontend_domain_kind_for_line(line) != ""
-
 fn frontend_may_have_domain_block(source: text) -> bool:
     (source.contains("schema{") or source.contains("style{") or
         source.contains("ui{") or source.contains("music{") or
         source.contains("bim{") or source.contains("cad{") or
         source.contains("city{") or source.contains("rtl{"))
 
-fn frontend_collect_domain_blocks(source: text) -> [DomainBlock]:
+fn frontend_extract_domain_blocks(source: text) -> ([DomainBlock], text):
+    # Domain-bearing modules used to split, trim, and traverse the complete
+    # source twice: once to collect metadata and again to blank the consumed
+    # lines. Build both results from one snapshot so large schema/style inputs
+    # retain one line array and one trimmed string per line instead of two.
     var blocks: [DomainBlock] = []
+    var lines: [text] = []
     for raw_line in source.split("\n"):
         val line = raw_line.trim()
         val kind = frontend_domain_kind_for_line(line)
         if kind != "":
             val payload = line.substring(kind.len() + 1, line.len() - 1).trim()
             blocks.push(DomainBlock(kind, payload, "module", Span.empty()))
-    blocks
-
-fn frontend_strip_domain_block_lines(source: text) -> text:
-    var lines: [text] = []
-    for raw_line in source.split("\n"):
-        if frontend_line_is_domain_block(raw_line.trim()):
             lines.push("")
         else:
             lines.push(raw_line)
-    lines.join("\n")
+    (blocks, lines.join("\n"))
 
 fn frontend_has_outline_authority(source: text) -> bool:
     source.contains("friend ") or source.contains("internal_export")
@@ -125,8 +121,9 @@ fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: te
     var domain_blocks: [DomainBlock] = []
     var parse_source = preprocessed
     if frontend_may_have_domain_block(preprocessed):
-        domain_blocks = frontend_collect_domain_blocks(preprocessed)
-        parse_source = frontend_strip_domain_block_lines(preprocessed)
+        val (extracted_blocks, stripped_source) = frontend_extract_domain_blocks(preprocessed)
+        domain_blocks = extracted_blocks
+        parse_source = stripped_source
     val has_outline_authority = frontend_has_outline_authority(parse_source)
     val authority_source = parse_source
     var authority_friends: [text] = []
