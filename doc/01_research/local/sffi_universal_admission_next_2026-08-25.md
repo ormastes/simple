@@ -12,6 +12,35 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## LLVM-library expression translation authority checkpoint
+
+`llvm_lib_translate_expr.spl` had six local declarations; unused
+`rt_text_eq_any` and `rt_ptr_read_i64` boundaries are removed.  The four active
+array/enum/tuple interfaces now use mandatory-inline `ffi` owners, while the
+existing environment-policy lookup remains in its minimal lexical scope.  The
+focused `llvm-lib-translate-expr-sffi-authority.shs` ratchet passed, pins the
+C/Rust array providers and compiler ABI registry, and preserves enum/tuple
+probe counts.
+
+Five `rt_array_push_i64_raw` results were previously discarded while building
+LLVM GEP, call-argument, and parameter-type vectors.  Allocation/capacity
+failure could therefore emit a shorter vector and continue compilation.  The
+owner now traps on false status.  Each valid append gains one unlikely status
+comparison with no new allocation, copy, lookup, lock, hash, signature
+operation, or generic dispatch.  Translation algorithms and data layout remain
+unchanged.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,305 -> 19,262
+- lexical unsafe: 3,240 -> 3,244
+- function unsafe: unchanged at 919
+- missing authority: 15,146 -> 15,099
+
+The file now reports five raw rows, all lexically authorized, and zero missing
+authority.  LLVM provider proofs and exact signed compiler artifacts remain
+absent, so verified-and-signed admission remains 0.
+
 ## Compiler lexer authority checkpoint
 
 The core lexer had four genuine file/environment/array runtime interfaces and
