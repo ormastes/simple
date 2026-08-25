@@ -674,3 +674,13 @@ passing placeholder.
      signature check, registry lookup beyond the existing table/index access,
      allocation, copy, lock, or generic dispatch. Exact signed admission and
      cross-lane contract equivalence remain required before safe publication.
+130. Keep all 24 canonical oneAPI declarations explicitly tagged and all raw
+     calls lexically scoped. The current native and interpreter lanes expose
+     only 14 fixed unavailable stubs; the other 10 declarations are unbacked.
+     Do not treat unavailable sentinels as a verified GPU provider and do not
+     fabricate successful cleanup/wait for invalid handles. Replace both C
+     stub copies and the handwritten Rust dispatcher with one generated typed
+     registry only when a real SYCL/Level Zero provider exists. Bind device,
+     allocation, queue, module, kernel, span, and error contracts to exact
+     signed admission without adding per-launch hashing, signing, discovery,
+     lookup, allocation, copy, lock, or generic dispatch.

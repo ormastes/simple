@@ -1721,3 +1721,33 @@ implemented, so this family is not safe or verified.
 Estimated repository totals remain 11,639 declarations / 3,141 symbols.
 Unsafe-tagged rows increase from 2,298 to 2,319, untouched rows decrease from
 9,162 to 9,141, and exact-artifact verified-and-signed admission remains zero.
+
+## oneAPI partial-provider raw-contract checkpoint
+
+The canonical oneAPI facade declares 24 `rt_oneapi_*` operations. Native C,
+the seed-only C satellite, and the Rust interpreter dispatcher expose only the
+same 14 symbols, all fixed capability-unavailable stubs; device metadata and
+selection, shared allocation, both copies, global synchronization, and error
+text are unbacked. The Rust dispatcher incorrectly described the partial stub
+ABI as the full family and accepts only integer values even where the Simple
+surface declares text or byte arrays. This is neither a real oneAPI provider
+nor cross-lane typed evidence.
+
+All 24 declarations now carry operation-specific `unsafe(ffi)` metadata, with
+`raw_ptr` on allocation, span, module, kernel, and queue operations. Every raw
+call is lexically scoped. Invalid pointer/module/queue wrappers now return
+`false` instead of fabricating successful release or wait. Host-data allocation
+now observes copy failure, releases the allocation on that error path, and
+returns an invalid value instead of reporting a populated device allocation.
+
+No successful allocation, copy, compile, lookup, launch, wait, or release path
+gains hashing, signature verification, provider discovery, dynamic lookup,
+allocation, copying, locking, or generic dispatch. The host-data helper gains
+one required status branch and cleanup only when its existing transfer fails.
+Exact signed provider admission remains zero, and this family stays unverified
+until a real provider, typed generated registry, ownership/generation model,
+and cross-lane tests replace the handwritten partial stubs.
+
+Estimated repository totals remain 11,639 declarations / 3,141 symbols.
+Unsafe-tagged rows increase from 2,319 to 2,343, untouched rows decrease from
+9,141 to 9,117, and exact-artifact verified-and-signed admission remains zero.
