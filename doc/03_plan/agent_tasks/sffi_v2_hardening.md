@@ -650,3 +650,10 @@ passing placeholder.
      duplicate declarations together. Preserve one provider call per operation
      and add no polling, filesystem scan, launch, allocation, copy, lookup,
      lock, branch, or generic dispatch beyond contract-required status checks.
+127. Keep all 37 shared `io_runtime` declarations explicitly tagged and
+     lexically scoped. Preserve optional raw byte/list/platform results with
+     one-call public fallbacks. Generate canonical typed exit thunks for Rust
+     `i32`/never and simple-core `i64`/return differences, and replace shell,
+     destructive directory, hash, clock, and array ambiguity with typed
+     contracts. Add no filesystem operation, traversal, launch, allocation,
+     copy, lookup, lock, or generic dispatch beyond required status checks.

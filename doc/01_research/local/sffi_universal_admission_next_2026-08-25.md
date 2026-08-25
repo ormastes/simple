@@ -1614,3 +1614,31 @@ replaces duplicate declarations.
 Estimated repository totals remain 11,651 declarations / 3,137 symbols.
 Unsafe-tagged rows increase from 2,249 to 2,260, untouched rows decrease from
 9,207 to 9,196, and exact-artifact verified-and-signed admission remains zero.
+
+## Shared I/O runtime raw-contract checkpoint
+
+The shared no-GC I/O owner has 37 raw declarations. Its final 18 untagged file,
+directory, platform, clock, hash, exit, and shell declarations now carry
+operation-specific `unsafe(ffi)` metadata and their direct calls are lexically
+scoped. Provider inspection confirmed that raw byte reads, directory lists,
+and platform names can return `nil`; those raw declarations are now optional,
+while their existing public APIs retain the intended `[]` or `"unknown"`
+fallback. This fixes the type contract without an additional provider call,
+scan, allocation, or copy.
+
+Remaining unverified semantics include Boolean I/O failure conflation,
+recursive-delete policy, empty recursive-walk failure, shell output/status
+ambiguity, runtime hash stability, clock failure, and array ownership. The
+Rust native `rt_exit` accepts `i32` and never returns, while simple-core accepts
+`i64` and returns `i64`; the audit pins this cross-lane ABI conflict pending
+generated typed thunks. `rt_shell_exec` remains interpreter-only rather than a
+native provider.
+
+All added unsafe regions are compile-time structure. Existing wrappers retain
+one provider invocation and their previous algorithms; no filesystem call,
+directory traversal, shell launch, allocation, copy, lookup, lock, or generic
+dispatch was added.
+
+Estimated repository totals remain 11,651 declarations / 3,137 symbols.
+Unsafe-tagged rows increase from 2,260 to 2,278, untouched rows decrease from
+9,196 to 9,178, and exact-artifact verified-and-signed admission remains zero.
