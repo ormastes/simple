@@ -83,6 +83,11 @@ surfaces. No UI is introduced, so TUI/GUI design is not applicable.
 - `RtHalExactRequest`, `RtHalCanonicalReceipt`, and `RtHalExactJoin` form the
   comparison ABI. `RtHalProcessTaskArena` preallocates at most 16 adapters and
   256 task slots; opaque handles include slot generations to reject stale joins.
+- `rt_hal_execute_registered_exact` is the public tagged entry to that ABI. It
+  accepts already-observed Pure receipts and schedules only registered C/Rust
+  adapters; callback-shaped foreign execution fails closed. Pure-only legacy
+  calls remain synchronous and are admitted through the same queue/output byte
+  bounds without using the runtime pool.
 - `EnvAccessCapability` separates common validation/receipt construction from
   the app-owned host implementation. Tool paths require declared identity hashes
   and repo files require canonical containment.

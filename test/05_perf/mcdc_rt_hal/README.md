@@ -1,5 +1,10 @@
 # MC/DC and rt(hal) performance evidence
 
+> **RT/HAL foreign lanes are currently non-admissible.** They still target the
+> rejected callback compatibility API and their parent-only RSS/allocation
+> accounting omits comparator children. See
+> `doc/08_tracking/bug/mcdc_rt_hal_perf_harness_legacy_foreign_callback_2026-08-25.md`.
+
 Run `sh test/05_perf/mcdc_rt_hal/run_perf_evidence.shs`. The runner builds all
 MC/DC modes from one fixture, warms each process lane once, retains seven
 identical samples, records p50 in-process time and peak RSS, checks output

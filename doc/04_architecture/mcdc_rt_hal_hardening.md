@@ -148,6 +148,14 @@ receive the already-observed Pure receipt and replay capability, not authority
 to repeat the host effect. Unsupported, timeout, cancellation failure, mismatch,
 and memory-bound admission are distinct results.
 
+The public tag facade exposes this production route as
+`rt_hal_execute_registered_exact`. It requires at least one configured foreign
+comparator and delegates only to installed, isolated process adapters. The
+legacy callback-shaped facade remains available for synchronous Pure-only
+compatibility, but rejects foreign execution before materializing or invoking a
+foreign callback because that shape cannot prove cancellation, frozen input, or
+an already-observed Pure receipt.
+
 ## Environment, RT criticality, and unwind
 
 `EnvAccessPlan` is validated before the app host resolves a repo-contained path

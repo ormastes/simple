@@ -1,10 +1,12 @@
 # @cover src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl 80%
 use std.spec
 use std.common.env_access.model.{EnvToolIdentity}
-use std.common.rt_hal.model.{RtHalOperationKind, rt_hal_default_comparison}
+use std.common.rt_hal.model.{RtHalOperationKind}
 use std.nogc_sync_mut.rt_hal.process_task_arena.*
+use std.nogc_sync_mut.rt_hal.tagged.{RtHalTagPolicy, rt_hal_execute_registered_exact}
 use std.nogc_sync_mut.rt_hal.exact_boundary.{
-    RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactJoin
+    RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactJoin,
+    RtHalExactStatus
 }
 
 var fake_owner = 41
@@ -88,8 +90,11 @@ describe "secure bounded RT/HAL isolated task arena":
         fake_owner = 41
         expect(rt_hal_process_host_install(secure_host(), 1)).to_equal("")
         expect(rt_hal_process_adapter_register(rt_hal_c_process_adapter(21, tool("c")))).to_equal("")
-        val comparison = rt_hal_default_comparison(true, false, 1, 2, 10, 1024, true)
-        expect(rt_hal_process_install_boundary_exact(true, false, 1, 2, 10, 1024)).to_equal("")
+        val policy = RtHalTagPolicy(
+            compare_c: true, compare_rust: false,
+            worker_count: 1, queue_capacity: 2,
+            timeout_ticks: 10, max_output_bytes: 1024,
+            require_all: true)
         val request = RtHalExactRequest(
             case_id: 9, operation: RtHalOperationKind.Query,
             operation_digest: digest(1), input_digest: digest(2)
@@ -98,8 +103,12 @@ describe "secure bounded RT/HAL isolated task arena":
             case_id: 9, outcome_digest: digest(10), error_digest: digest(20),
             trace_digest: digest(30), observed_once: true
         )
-        val report = rt_hal_process_compare_observed_exact(comparison, [request], [receipt])
+        val report = rt_hal_execute_registered_exact(policy, [request], [receipt])
         expect(report.error).to_equal("")
         expect(report.results.len()).to_equal(1)
         expect(report.submitted_tasks).to_equal(1)
+        expect(report.completed_tasks).to_equal(1)
+        expect(report.results[0].status).to_equal(RtHalExactStatus.Match)
+        expect(report.results[0].provider_id).to_equal("c-comparator")
+        expect(report.actual_parallel).to_equal(false)
         expect(rt_hal_process_arena_shutdown()).to_equal("")
