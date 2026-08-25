@@ -2463,6 +2463,35 @@ PID operation counts.  No new dispatch, allocation, copy, scan, lookup, lock,
 hash, or signature check was added.  Remaining low-volume process calls and
 artifact verification are outstanding; verified-and-signed admission is 0.
 
+## simple-core process complete authority checkpoint
+
+The remaining 20 process/time ABI operations now have mandatory-inline owners:
+abort/time/timeval/clock, byte load, array and argv handles, tuple/integer
+construction, string length/stderr, parent PID, signal handler/group/set
+operations, sysconf, and C-string length.  Pointer outputs, signal handlers,
+and C-string access require `ffi, raw_ptr`; scalar and tagged-handle operations
+retain `ffi`.
+
+Together with the prior checkpoints, all 36 used raw operations in
+`core_process.spl` are confined: 18 pointer-bearing owners and 18 scalar/handle
+owners.  `simple-core-process-authority.shs` passed with exact raw-call and
+owner inventories, mandatory-inline policy, and all four pointer-intrinsic
+lowerings pinned.
+
+The final pass changed the authoritative census as follows:
+
+- raw call sites: 19,896 -> 19,890
+- missing authority: 15,875 -> 15,849
+- lexical unsafe: 3,102 -> 3,122
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Signed clock, PID, signal, process-group, and configuration results remain
+unchanged.  Mandatory inlining adds no dispatch, allocation, copy, scan,
+lookup, lock, hash, or signature check.  Static authority is complete for this
+file, but provider semantics and exact-artifact proof are not; verified-and-
+signed admission remains 0.
+
 ## simple-core filesystem open/seek authority checkpoint
 
 The next 40 `core_fs.spl` operations—heap allocation, FILE/path opening,
