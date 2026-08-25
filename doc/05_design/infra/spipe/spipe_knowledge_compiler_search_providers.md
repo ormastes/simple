@@ -1094,7 +1094,13 @@ gates independent of timing. No provisional absolute latency or capacity value
 in this document may be reported as PASS until a checked-in benchmark profile
 qualifies the hardware, dataset, warmups, samples, variance rule, and budget.
 `measureQualifiedSearch` is the sole system-test helper allowed to issue a
-qualified performance receipt.
+qualified performance receipt. Its one frozen signature is
+`measureQualifiedSearch(profile_path, fixture_path, operation_plan_path,
+functional_receipt_uri, output_path)`. Each path is absolute, canonical, and
+nonsymlink; `functional_receipt_uri` is a canonical `file://` URI resolving to
+such a path. There is no overload, implicit provider/repetition argument, or
+environment-derived fallback: provider identity and counts come from the
+hashed profile and operation plan.
 
 The initial qualification fixture is 50,000 artifacts, 1,000,000 graph nodes,
 10 linked projects, and 5 worktrees. It uses one warm-up followed by at least
@@ -1103,6 +1109,267 @@ is checked in, the conditional gates are warm query P95 below 100 ms,
 one-document update P95 below 100 ms, and median full rebuild divided by median
 one-document update at least `20.0`. Peak RSS/index/cache budgets come from that
 profile. Degradation measurements are separate from steady-state samples.
+
+#### 14.6.1 Minimal qualified receipt contract
+
+The checked-in profile is one closed canonical-JSON
+`QualifiedSearchProfileV1` object. Unknown, missing, duplicate-normalized, or
+wrong-typed fields make the host unqualified:
+
+```text
+schema = "spipe-qualified-search-profile-v1"
+id = nonempty ASCII identifier
+budget_version = nonempty ASCII identifier
+subject = {implementation, provider_id, provider_version,
+           protocol_version, analyzer_id, score_id}
+host = {os, kernel, architecture, cpu_model,
+        logical_cpu_count_min, logical_cpu_count_max,
+        memory_bytes_min, core_policy}
+core_policy = {mode = "exclusive-cpuset" | "scheduler-default",
+               logical_cpu_ids, simultaneous_multithreading,
+               frequency_governor}
+adapter = {counter_adapter_id, counter_adapter_version,
+           os, architecture, containment_kind, peak_rss_counter,
+           syscall_observer, journal_schema = "spipe-counter-journal-v1"}
+fixture = {id, sha256, artifact_count, graph_node_count, token_count,
+           content_bytes, linked_project_count, worktree_count,
+           snapshot_sha256, query_plan_sha256, query_count_per_sample}
+method = {warmup_count, sample_count,
+          percentile = "nearest-rank-ceil-v1",
+          median = "lower-middle-v1", variance_rule}
+variance_rule = {metric = "warm-query-p95-ns",
+                 max_median_absolute_deviation_milli,
+                 maximum_discarded_samples = 0}
+budgets = {warm_query_p95_ns_max,
+           one_document_publish_p95_ns_max,
+           rebuild_to_publish_ratio_milli_min,
+           max_rss_bytes_max, index_bytes_max, cache_bytes_max}
+```
+
+Every count, byte value, duration, logical CPU ID, and fixed-point milli value
+is a non-negative JSON safe integer. Counts and budget maxima are positive;
+`warmup_count >= 1`, `sample_count >= 20`, and the logical CPU list is sorted,
+unique, and within the declared inclusive CPU-count range. Host strings compare
+byte-for-byte; no regex, prefix, family, or “equivalent machine” matching is
+permitted. The observed host must match OS, kernel, architecture, CPU model,
+core policy, and adapter identity exactly, its CPU count inclusively, and its
+memory at or above `memory_bytes_min`. The collector observes these values; it
+does not copy them from the profile. `scheduler-default` requires an empty CPU
+list; `exclusive-cpuset` requires proof of exclusive affinity to exactly the
+listed IDs. The variance rule uses the unmodified warm-query samples and
+integer lower-middle medians: `floor(1000 * MAD / median)`. A zero median or a
+value above the limit is `not_evidence`. Samples are never discarded,
+winsorized, retried, or substituted.
+
+`measureQualifiedSearch(profile_path, fixture_path, operation_plan_path,
+functional_receipt_uri, output_path)` returns exactly one
+`QualifiedSearchReceiptV1` only after Stage 4 admission and every functional
+prerequisite succeeds. It returns a typed `not_evidence` diagnostic and writes
+no receipt when the binary/provenance pair is absent, fails admission, the
+fixture or query-plan hash differs, the provider exits nonzero, a sample is
+missing, an activity guard is nonzero, or any bound is exceeded. An observation
+file must never be relabeled as this receipt.
+
+The canonical JSON object is closed and contains these fields:
+
+```text
+schema = "spipe-qualified-search-receipt-v1"
+profile = {id, sha256, budget_version}
+subject = {implementation, provider_id, provider_version,
+           protocol_version, analyzer_id, score_id}
+executable = {canonical_path, sha256, build_mode,
+              stage4_provenance_path, stage4_provenance_sha256,
+              toolchain_id, toolchain_version, toolchain_sha256,
+              collector_runtime_id, collector_runtime_version,
+              collector_runtime_sha256}
+host = {os, kernel, architecture, cpu_model, logical_cpu_count,
+        core_policy, memory_bytes, clock_source, rss_counter_source}
+fixture = {id, sha256, artifact_count, graph_node_count, token_count,
+           content_bytes, linked_project_count, worktree_count,
+           snapshot_sha256, query_plan_sha256, query_count_per_sample}
+method = {collector_version, command_argv, environment_allowlist,
+          warmup_count, sample_count, percentile = "nearest-rank-ceil-v1",
+          rss_scope = "qualified-containment-tree-peak-bytes",
+          operation_plan_path, operation_plan_sha256,
+          counter_adapter_id, counter_adapter_version}
+samples = {warm_startup_ns, warm_query_ns,
+           one_document_publish_ns, full_rebuild_ns, timed_queries}
+summary = {warm_query_p95_ns, one_document_publish_p95_ns,
+           full_rebuild_median_ns, one_document_publish_median_ns,
+           rebuild_to_publish_ratio_milli, max_rss_bytes,
+           index_bytes, cache_bytes}
+guards = {provider_start_count, per_query_spawn_count,
+          warm_full_tree_scan_count, warm_repeated_source_read_count,
+          counter_evidence_uri, counter_evidence_sha256,
+          functional_conformance_receipt_uri,
+          functional_conformance_receipt_sha256}
+result = {exit_status, started_at_utc, completed_at_utc}
+```
+
+All durations and byte counts are non-negative JSON safe integers; ratios are
+fixed-point integers. `warm_startup_ns` is one scalar for opening the admitted
+warm snapshot. Update and rebuild arrays contain exactly `sample_count`
+entries. `warm_query_ns` contains exactly
+`sample_count * query_count_per_sample` entries in hashed-plan order: every
+repetition executes the full query plan against one persistent provider, but
+each request is timed separately. P95 is the sorted per-request sample at
+one-based rank `ceil(0.95 * n)` and median uses the lower middle sample for even
+`n`. `max_rss_bytes` is the maximum resident set of the qualified containment
+tree from provider launch through clean shutdown, obtained from the
+profile-approved OS peak counter named by `rss_counter_source`; heap size or
+periodic best-effort sampling is not a substitute. Before provider launch, the
+collector creates and seals a dedicated platform containment object and starts
+the independent counter adapter. Every provider child and descendant is
+enrolled at creation. Membership survives ordinary reparenting and is retained
+until every enrolled process exits; launch, exec, fork/spawn, reparent, exit,
+and peak-RSS events remain attributable even when a descendant outlives its
+parent. An adapter unable to prove pre-launch enrollment, descendant coverage,
+reparent retention, event-loss detection, and terminal enumeration fails
+closed as `not_evidence`.
+
+`timed_queries` has the same cardinality and order as `warm_query_ns`. Each
+closed record is `{round_index, query_index, query_id,
+expected_result_sha256, observed_result_sha256, status, duration_ns}`. Indices
+are zero-based safe integers; the query ID and expected digest come from the
+hashed operation plan; the observed digest is SHA-256 of the exact canonical
+response bytes after normal conformance validation. `status` has the sole
+qualified value `matched`, both digests are 64 lowercase hexadecimal bytes and
+equal, and `duration_ns` equals the corresponding raw duration. Timeout, error,
+rejection, mismatch, omission, or reordering invalidates the whole receipt.
+
+`rebuild_to_publish_ratio_milli` uses checked widened integer arithmetic:
+`floor((full_rebuild_median_ns * 1000) /
+one_document_publish_median_ns)`. Overflow or a zero denominator is
+`not_evidence`; floating point and nearest rounding are forbidden. The initial
+`20.0` gate is the integer comparison `>= 20000`.
+
+The guard counters are computed by that independent adapter, never provider
+self-report. `provider_start_count` counts admitted provider launches;
+`per_query_spawn_count` counts process creations within a query interval;
+`warm_full_tree_scan_count` counts fixture-workspace root enumerations during
+warm query intervals; and `warm_repeated_source_read_count` counts second or
+later content reads of an unchanged source path in those intervals. The
+adapter emits a canonical append-only journal with sequence numbers, monotonic
+timestamps, request/operation attribution, and a SHA-256 predecessor chain.
+The checker resolves its canonical `file://` URI, verifies its terminal hash,
+replays membership and intervals, recomputes all guards and peak RSS, and
+rejects chain failure, event loss/overflow, unsupported adapters, or any
+provider-authored counter.
+
+The journal is canonical UTF-8 JSON Lines: exactly one canonical JSON object
+plus one LF per line, with no BOM or CR. It begins with the closed header
+`{schema = "spipe-counter-journal-v1", journal_id, adapter_id,
+adapter_version, host_boot_id, monotonic_clock_id, workspace,
+containment_identity, first_sequence = 0, lost_event_count = 0}`. `workspace`
+is `{canonical_path, path_identity_kind, volume_or_device_id,
+file_id_or_inode}`. Its identity is captured from an opened nonsymlink root
+handle before launch; path events are classified by handle-relative identity,
+never textual prefix.
+
+Each closed event is `{sequence, monotonic_ns, event, process_id,
+process_start_identity, parent_process_id, request_id, operation_id,
+path_identity, bytes, source_version, source_content_sha256,
+source_change_witness, predecessor_sha256}`, where the closed witness is
+`{kind, identity_generation, size_bytes, modified_time_ns, witness_sha256}`.
+Nonapplicable fields use their typed zero or empty-string sentinel and are never
+omitted or null. Sequence numbers are contiguous from zero. The first
+predecessor is 64 zeroes; each later value is SHA-256 of the preceding line
+bytes including LF. The event enum is `containment_create`, `process_launch`,
+`process_exec`, `process_spawn`, `process_reparent`, `process_exit`,
+`query_begin`, `query_end`, `workspace_enumerate`, `source_open`,
+`source_change`, `rss_peak`, `adapter_overflow`, and
+`containment_enumerate`.
+
+`workspace_enumerate` means an OS enumeration whose opened directory handle is
+the workspace-root identity. `source_open` means a successful read-capable open
+of a fixture-source identity.
+
+Every closed event additionally contains `source_version`,
+`source_content_sha256`, and `source_change_witness = {kind,
+identity_generation, size_bytes, modified_time_ns, witness_sha256}`. For
+`source_open` and `source_change` events, `source_version` is a non-negative safe
+integer and `source_content_sha256` is exactly 64 lowercase hexadecimal
+characters. Non-source events use `source_version = 0`,
+`source_content_sha256 = ""`, and the typed zero/empty-string witness sentinel.
+A successful `source_open` must carry the current per-path-identity
+version, the hash of the exact bytes read, and a witness derived by the approved
+adapter from the opened handle; a `source_change` event is added to the event
+enum and must increment that identity's version and bind the new content hash
+and witness before a later open is attributed. Replay classifies a reread as
+unchanged only when path identity, version, content hash, and witness all match
+and no intervening `source_change` exists. Missing, regressing, skipped, or
+contradictory versions, hashes, or witnesses are `NOT EVIDENCE`, making an
+unchanged-source reread mechanically replayable rather than inferred from path.
+
+Process creation follows successful kernel create/spawn/fork/clone semantics;
+exec does not add a process and failed syscalls do not increment a counter. The
+approved adapter observes these OS semantics rather than inferring them from
+provider logs.
+
+The final closed trailer is `{schema =
+"spipe-counter-journal-terminal-v1", journal_id, event_count, last_sequence,
+lost_event_count, live_process_count, terminal_membership_sha256,
+predecessor_sha256, terminal_sha256}`. Its predecessor hashes the last event
+line. `terminal_sha256` hashes the trailer's canonical bytes with that field
+temporarily set to 64 zeroes, excluding its final LF. The receipt's journal
+hash covers the complete stored bytes including every LF. Overflow, nonzero
+loss/live count, gaps, unknown events, path-identity ambiguity, incomplete
+terminal enumeration, or predecessor/terminal mismatch is `not_evidence`.
+
+`provider_start_count` must equal `1`; the other three activity counters must
+equal `0`. The functional-conformance receipt URI names the exact successful
+Wave 4 receipt produced before timing, and its bytes must match
+`functional_conformance_receipt_sha256`. The checker revalidates its subject,
+executable, fixture, scope, completed matrix, and success status. That matrix
+contains each required `W4-SRCH-01` through `W4-SRCH-08` and `W4-SRCH-10`
+through `W4-SRCH-14` ID exactly once in ascending numeric order, with no other
+ID; it explicitly excludes performance cell `W4-SRCH-09`. Ordering is acyclic:
+functional conformance produces this receipt first, then qualified performance
+consumes it and alone evaluates `W4-SRCH-09`; cell 09 is never a prerequisite
+of the receipt it consumes. Host
+scheduling noise may make values vary,
+but identity, method, sample cardinality, percentile calculation, and
+acceptance are deterministic and independently recomputable.
+
+The hashed `benchmark_operation_plan_v1.json` freezes the schedule. After the
+single provider start, the collector opens and verifies baseline `S0`. Each of
+exactly `warmup_count` discarded rounds runs the full query plan against `S0`,
+applies fixed one-document delta `D` to declared `S1`, resets to byte-identical
+`S0`, performs a full rebuild of `S0`, then resets and verifies `S0`. Each of
+exactly `sample_count` measured rounds first resets/verifies `S0`, then times
+all queries in plan order. Even rounds time publish `D`, reset/verify `S0`, then
+time a full rebuild; odd rounds time the full rebuild, reset/verify `S0`, then
+time publish `D`. A final untimed reset follows each round. Resets are outside
+operation timings but inside RSS/activity observation and never restart the
+provider. Queries never observe `S1` or rebuilt mutable state. The plan binds
+`S0`, `S1`, `D`, query order, counts, reset method, and expected hashes; any
+schedule, state, or hash deviation is `not_evidence`.
+
+#### 14.6.2 Sole collection command
+
+After implementation, the only qualified collection entry point is:
+
+```bash
+SPIPE_SIMPLE_BIN=/absolute/admitted/simple \
+SPIPE_STAGE4_PROVENANCE=/absolute/admitted/stage4-candidate.sdn \
+node examples/05_stdlib/spipe/test/perf/measure_qualified_search.mjs \
+  --profile examples/05_stdlib/spipe/test/fixture/wave4_search/qualified_search_profile_v1.json \
+  --fixture examples/05_stdlib/spipe/test/fixture/wave4_search/qualified_search_50000_v1.json \
+  --operation-plan examples/05_stdlib/spipe/test/fixture/wave4_search/benchmark_operation_plan_v1.json \
+  --functional-receipt file:///absolute/admitted/wave4-functional-conformance-v1.json \
+  --output build/test-artifacts/spipe-wave4/qualified-search-receipt-v1.json
+```
+
+The executable accepts no implicit binary, provenance, fixture, output, or
+profile fallback. Paths must be absolute after canonicalization and may not be
+symlinks. It first invokes the canonical Stage 4 provenance verifier and Wave 4
+conformance admission used by the parity harness, then measures. The checked-in
+profile freezes budgets and method; the large generated fixture may be
+content-addressed, but its manifest/hash and deterministic generator are
+tracked. The command exits nonzero and removes any temporary output when
+admission or collection fails. Because no admitted Stage 4 executable exists
+at this design freeze, W4-SRCH-09 remains `NOT EVIDENCE`; no seed or source-mode
+run can satisfy it.
 
 ### 14.7 Unicode 17.0.0 table deliverable
 
