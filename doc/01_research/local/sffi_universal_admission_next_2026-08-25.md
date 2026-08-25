@@ -2101,3 +2101,33 @@ became function-scoped and one became lexically scoped. The `rt_lyon` family
 therefore has 50 explicit and zero missing call sites. The fixture adds one
 unsafe-tagged declaration; production declaration counts are unchanged.
 Exact-artifact verified-and-signed admission remains zero.
+
+## Rapier2D interpreter-provider checkpoint
+
+Rapier2D has 48 tagged raw declarations and an interpreter implementation, but
+no matching native C/Rust artifact provider was found outside the interpreter.
+All 48 production raw calls, contained in 41 wrapper functions, now carry
+function-scoped FFI authority. Three convenience wrappers that delegate to
+those functions also propagate the same authority. The facade remains unsafe
+because its integer handles have no provider generation, ownership proof, or
+signed ABI identity.
+
+Provider review found that ray casting, every joint operation, and joint
+counting returned plausible false/zero values despite being unimplemented.
+Missing body getters and missing contact records likewise returned valid-looking
+zero tuples. These paths now return typed interpreter runtime errors and retain
+the last-error diagnostic. Removing an unknown world returns semantic `false`,
+and five invalid facade cleanup paths no longer fabricate `true`.
+
+Successful operations retain their existing `HashMap`/mutex access, algorithms,
+and allocations. No lookup, lock, copy, hash, signing operation, or dispatch
+was added. Diagnostic formatting and allocation occur only on newly fail-closed
+error paths. The existing physics-step body-ID vector and contact computation
+were not changed or made more expensive.
+
+The source census measured missing authority decreasing by exactly 48: 18,019
+to 17,971 repository-wide and 9,850 to 9,802 in production. All 48 became
+function-scoped authorities; the `rt_rapier2d` family now has 48 explicit and
+zero missing call sites. Focused Rust verification passed four fail-closed
+provider tests with zero failures. Exact-artifact verified-and-signed admission
+remains zero.
