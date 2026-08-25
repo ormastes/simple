@@ -198,6 +198,14 @@ contract-documented, 485 unsafe-minimized, and 10,744 untouched. The provider
 definition census is C 2,378, Rust 2,178, Simple 576, and C++ 219. Exact-artifact
 verified-and-signed admission remains zero.
 
+Checkpoint: TCP status booleans now have one ABI across C, Rust, Simple, and
+native codegen. Timeout setters use a scalar, allocation-free sentinel ABI and
+reject malformed interpreter bridge values instead of treating them as “clear
+timeout.” Focused C compilation and Rust provider/interpreter/codegen tests
+passed. The current ledger is 12,070 declaration rows, 1,148 unsafe-tagged,
+754 contract-documented, 485 unsafe-minimized, 10,653 untouched, and zero
+exact-artifact verified-and-signed admissions.
+
 For each row, prefer a pure-Simple owner. Otherwise require either:
 
 1. admitted exact evidence plus a typed safe wrapper; or

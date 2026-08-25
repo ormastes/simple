@@ -197,3 +197,20 @@ symbols. Of those rows, 1,057 are unsafe-tagged, 754 have documented contracts,
 485 are unsafe-minimized, and 10,744 remain untouched. Provider definitions are
 2,378 C, 2,178 Rust, 576 Simple, and 219 C++. Cryptographically verified,
 signed, and admitted rows remain zero; annotations are not admission evidence.
+
+## TCP boolean and timeout ABI checkpoint
+
+The TCP close, flush, shutdown, bind/listen status, and socket-option families
+now use semantic `bool` in C and Rust providers and the backend boolean carrier
+(`I8`) in native codegen. Timeout setters no longer reuse an incompatible
+tagged `RuntimeValue`/raw-integer symbol: their raw ABI is `(i64 fd, i64 ms) ->
+bool`, with non-positive milliseconds clearing the timeout. Safe Simple
+wrappers retain `i64?` and lower `nil` to `-1` once before the direct call.
+This removes runtime-value decoding and uses saturating millisecond-to-nanosecond
+conversion; it adds no lookup, allocation, lock, or generic dispatch.
+
+The refreshed ledger remains 12,070 rows / 3,171 symbols. Unsafe-tagged rows
+increased to 1,148 and untouched rows decreased to 10,653. Contract-documented
+rows remain 754 and unsafe-minimized rows remain 485 because source annotations
+alone are not executable admission contracts. Verified-and-signed rows remain
+zero.
