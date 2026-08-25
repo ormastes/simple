@@ -237,9 +237,13 @@ Wave 3 admits `Workspace`, `Worktree`, `Project`, `ProjectRelation`, `Mount`,
 and `Tag`. Alias and mount content remains owned by registry records; graph
 nodes are immutable projections of those records solely so `aliases` and
 `mounted_as` have typed endpoints. Alias projection UIDs use `AL-` plus the
-first 26 lowercase base32 characters of SHA-256 canonical JSON
+first 26 characters of uppercase Crockford base32 (alphabet
+`0123456789ABCDEFGHJKMNPQRSTVWXYZ`, no padding, digest bits consumed
+most-significant-bit first) of SHA-256 over UTF-8
+`spipe-alias-projection-v1\0` followed by canonical JSON
 `[workspace_uid,project_uid-or-null,kind,alias,canonical_target_uid]`; mount
-projection UIDs use `M-` over
+projection UIDs use the same encoding of SHA-256 over UTF-8
+`spipe-mount-projection-v1\0` followed by
 `[workspace_uid,relation_uid,linkage,mount,canonical_target_uid]`. Workspace
 nodes and workspace-scoped aliases set `project_uid=null`; hash collisions are
 fatal. `Behavior`, `TestRun`, `TestResult`,
@@ -250,8 +254,14 @@ requirements, `SS-` for scenarios, `SY-` for source symbols, `WS-` for
 workspaces, and `WT-` for new worktree identities. Schema-v1 `W-` values are
 decoded by record type (`workspace` or `worktree`) and never compared across
 types. Schema v2 writes only `WS-`/`WT-` and records a tracked
-`IdentityMigrationRecord(old_uid, old_record_type, new_uid, migrated_at_revision)`;
-old immutable snapshots remain byte-readable and are never rewritten. Snapshot
+`IdentityMigrationRecord(old_uid, old_record_type, new_uid, migrated_at_revision)`.
+The new UID is derived, not randomly allocated: `WS-` or `WT-` plus the first
+26 Crockford characters under the encoding above of SHA-256 over UTF-8
+`spipe-identity-migration-v1\0`, the target record type, a NUL byte, and the
+legacy `W-` UID bytes. Mutable record content is excluded. Identical
+`(old_record_type,old_uid)` therefore produces one identity across snapshots;
+a derived-UID collision is fatal. Existing
+immutable snapshots remain byte-readable and are never rewritten. Snapshot
 and projection validators accept legacy `W-` only when `schema_version=1` and
 emit v2 identities for new publications. `R-` remains exclusively
 `ProjectRelation`. Human labels such as `REQ-SPKC-003` are display aliases;
@@ -344,6 +354,10 @@ returns `SPK901` without retry loops.
 | `promoted_from` | common unit -> contributing project unit |
 | `depends_on` | dependent project/artifact -> dependency |
 | `mounted_as` | project relation -> concrete mount record |
+
+The table is the full-system edge vocabulary. Wave 3 enables every row except
+`produces` and `promoted_from`; those fail closed until later waves publish the
+canonical run/result and promotion node schemas.
 
 ### 4.4 Trace authority
 

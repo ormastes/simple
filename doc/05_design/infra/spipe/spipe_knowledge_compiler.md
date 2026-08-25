@@ -188,28 +188,103 @@ Wave 3 canonical records are closed schemas; unknown fields fail validation:
 
 ```text
 GraphNode = {uid:Uid, node_kind:NodeKind, project_uid:ProjectUid|null,
-             revision_id:NonEmptyString, record_type:RecordType,
+             revision_id:NonEmptyString|null, record_type:RecordType,
              record_hash:Sha256, visibility:Visibility,
              trust_scope:TrustScope, status:NodeStatus}
-RequirementRecord = {type, uid, kind, key, display_id, project_uid,
-                     revision_id, artifact_uid, section_uid, title, status,
-                     content_hash, aliases}
-SSpecScenarioRecord = {type, uid, key, project_uid, revision_id, artifact_uid,
-                       title, ordinal, source_span, content_hash,
-                       requirement_uids, status}
-SourceSymbolRecord = {type, uid, project_uid, revision_id, canonical_path,
-                      symbol_kind, name, qualified_name, signature_hash,
-                      source_span, content_hash, annotation_uids, status}
-IdentityMigrationRecord = {old_uid, old_record_type, new_uid,
-                           migrated_at_revision}
+RequirementRecord = {type:"requirement"|"non_functional_requirement",
+ uid:RequirementUid|NfrUid, kind:"requirement"|"nfr", key:SemanticKey,
+ display_id:DisplayId, project_uid:ProjectUid, revision_id:NonEmptyString,
+ artifact_uid:ArtifactUid, section_uid:SectionUid, title:NonEmptyString,
+ status:RequirementStatus, content_hash:Sha256, aliases:list<SemanticKey>}
+SSpecScenarioRecord = {type:"sspec_scenario", uid:ScenarioUid,
+ key:SemanticKey, project_uid:ProjectUid, revision_id:NonEmptyString,
+ artifact_uid:ArtifactUid, title:NonEmptyString, ordinal:u32,
+ source_location:SourceLocation, content_hash:Sha256,
+ requirement_uids:list<RequirementUid|NfrUid>, status:ScenarioStatus}
+SourceSymbolRecord = {type:"source_symbol", uid:SourceSymbolUid,
+ project_uid:ProjectUid, revision_id:NonEmptyString,
+ canonical_path:CanonicalRelativePath, symbol_kind:SymbolKind,
+ name:NonEmptyString, qualified_name:NonEmptyString, signature_hash:Sha256|null,
+ source_location:SourceLocation, content_hash:Sha256,
+ annotation_uids:list<RequirementUid|NfrUid|ScenarioUid>, status:SymbolStatus}
+TestRecord = {type:"test", uid:TestUid,
+ test_kind:"unit"|"integration"|"system", project_uid:ProjectUid,
+ revision_id:NonEmptyString, artifact_uid:ArtifactUid,
+ scenario_uid:ScenarioUid|null, title:NonEmptyString, source_location:SourceLocation,
+ content_hash:Sha256, verifies_uids:list<Uid>, status:TestStatus}
+ClassificationRecord = {type:"classification", uid:ClassificationUid,
+ classification_kind:"feature"|"component"|"layer"|"tag",
+ key:SemanticKey, workspace_uid:WorkspaceUid,
+ project_uid:ProjectUid|null, source_hash:Sha256, status:"active"}
+IdentityMigrationRecord = {type:"identity_migration", old_uid:LegacyWUid,
+ old_record_type:"workspace"|"worktree", new_uid:WorkspaceUid|WorktreeUid,
+ migrated_at_revision:NonEmptyString}
 ```
 
 All fields are required unless `|null` is shown; arrays default to `[]` and no
 other defaults exist. Strings are UTF-8 NFC; hashes are lowercase `sha256:`
-hex. `Visibility={public,project,private}`, `TrustScope={trusted,reviewed,
-untrusted}`, and `NodeStatus={candidate,proposed,accepted,deprecated}`.
+plus 64 hex digits. Derived UID types require their exact prefix and 26
+uppercase Crockford base32 payload characters under the architecture encoding;
+Wave 3 adds `AL`, `M`, `RQ`, `NFR`, `SS`, `SY`, `WS`, `WT`, `F`, `C`, `L`,
+`TG`, and `T` to the
+identity prefix registry. `SourceSpan={start_byte:u64,end_byte:u64}` and
+`SourceLocation={source_artifact_uid:ArtifactUid,source_hash:Sha256,
+span:SourceSpan}`. A span indexes the exact unmodified containing-file bytes
+identified by `source_hash`, independently of the record's normalized-content
+hash; offsets are zero-based
+and half-open, CRLF is not rewritten, and boundaries lie on UTF-8 code-point
+boundaries. `start_byte <= end_byte`; `ordinal` is `0..4294967295`. Semantic keys match
+`[a-z0-9]+(?:[._-][a-z0-9]+)*`; lists are duplicate-free and bytewise sorted.
+`RequirementStatus={proposed,accepted,designed,specified,implemented,verified,
+superseded,stale,deprecated}`,
+`ScenarioStatus={candidate,proposed,accepted,deprecated}`, and
+`SymbolStatus={candidate,accepted,deprecated}`; `TestStatus={candidate,
+accepted,deprecated}`. `SymbolKind={module,type,function,method,constructor,
+field,constant,trait,interface,enum,variant}`; unknown kinds fail the negotiated
+provider schema version.
+For requirements, `type=requirement` requires `kind=requirement` and `RQ-`,
+while `type=non_functional_requirement` requires `kind=nfr` and `NFR-`.
+For migrations, `old_record_type=workspace` requires `WS-`; `worktree`
+requires `WT-`. `DisplayId` matches `(?:REQ|NFR)-[A-Z0-9]+(?:-[A-Z0-9]+)+`.
+
+`Visibility={public,project,restricted,private}` and
+`TrustScope={untrusted_data,reviewed_reference,executable_policy}` exactly match
+Wave 2. `NodeStatus` is the union
+`{candidate,proposed,accepted,deprecated,active,unavailable,draft,approved,
+designed,specified,implemented,verified,superseded,stale}`. Projection copies the source status verbatim;
+alias/mount projections use `active`, with no lossy mapping.
 `NodeKind` is exactly the Wave 3 architecture list. Existing registry kinds use
 their accepted Wave 2 closed schemas; the records above add trace kinds.
+
+`NodeKind={Workspace,Worktree,Project,ProjectRelation,Mount,Alias,Artifact,
+Section,Requirement,NonFunctionalRequirement,SSpecScenario,SourceSymbol,
+UnitTest,IntegrationTest,SystemTest,Feature,Component,Layer,Tag}`.
+`RecordType={workspace,worktree,project,project_relation,mount_projection,
+alias_projection,artifact,section,requirement,non_functional_requirement,
+sspec_scenario,source_symbol,test,feature,component,layer,tag}`.
+
+Registry projections use this closed mapping:
+
+| Record | project/revision | visibility | trust scope | status |
+|---|---|---|---|---|
+| Workspace | `null/null` | `private` | least-trusted registered project; empty is `untrusted_data` | `active` |
+| Worktree | registered project / worktree revision | `project` | workspace minimum | `active` |
+| Project | project UID / nullable project revision | project visibility or `project` | project trust scope | project status |
+| ProjectRelation | from-project / nullable relation revision | `project` | trusted/reviewed→`reviewed_reference`; untrusted→`untrusted_data` | `active` |
+| Alias projection | target project/revision | target visibility | target trust scope | `active` |
+| Mount projection | target project / nullable relation revision | `project` | relation mapping | `active` |
+| Artifact | owning project / artifact revision | artifact visibility | artifact trust scope | artifact status |
+| Section | owning artifact project/revision | owning artifact visibility | owning artifact trust scope | `candidate` if provisional, otherwise owning artifact status |
+| Requirement/Scenario/Symbol/Test | owning project / record revision | owning artifact visibility | minimum artifact/source trust | record status |
+| Feature/Component/Layer/Tag | classification project or null / null | `project` | minimum trust of referring artifacts, empty is `untrusted_data` | `active` |
+
+Missing nullable values remain null and are never fabricated.
+Classification prefixes are feature=`F`, component=`C`, layer=`L`, tag=`TG`.
+Their UID payload is the first 26 uppercase Crockford characters of SHA-256
+over UTF-8 `spipe-classification-v1\0` followed by canonical JSON
+`[workspace_uid,project_uid-or-null,classification_kind,key]`; collisions are
+fatal. `source_hash` hashes the sorted referring artifact UID/hash pairs, so
+clean and incremental construction produce the same record.
 
 Requirement keys are normalized lowercase semantic keys; `display_id` is the
 readable uppercase label. Markdown uses this exact grammar:
@@ -227,9 +302,61 @@ readable uppercase label. Markdown uses this exact grammar:
 An SSpec marker is `# spipe:scenario uid=SS-... key=<lowercase-key>
 requires=RQ-...,NFR-...` immediately before its declaration. A source marker is
 `# spipe:symbol uid=SY-... implements=RQ-...,SS-...` immediately before its
-declaration. Parsers bind exactly the next declaration, reject unknown or
+declaration. A test marker is `# spipe:test uid=T-... kind=unit|integration|system
+verifies=RQ-...,NFR-...,SS-...,SY-...` immediately before the test declaration;
+test UIDs are author-assigned canonical identities and never path-derived.
+Unmarked tests are candidates without graph identity until dry-run marker
+injection is approved. Parsers bind exactly the next declaration, reject unknown or
 duplicate attributes and UIDs, and resolve aliases before storing targets.
 Markerless or ambiguous records remain candidates, never strict evidence.
+
+```text
+EdgeRecord = {type:"edge", uid:EdgeUid, edge_type:EdgeType,
+ from_uid:Uid, to_uid:Uid, origin:EdgeOrigin, status:EdgeStatus,
+ confidence_milli:u16, created_by:PrincipalId,
+ created_at_revision:NonEmptyString, evidence_uids:list<Uid>,
+ generator:GeneratorEvidence|null, provenance:EdgeProvenance,
+ authority:EdgeAuthority|null}
+EdgeProvenance = {project_uid:ProjectUid, worktree_uid:WorktreeUid,
+ revision_id:NonEmptyString, input_snapshot_uid:SnapshotUid,
+ source_uid:Uid|null, source_location:SourceLocation|null,
+ decision_uid:DecisionUid|null}
+EdgeAuthority = {kind:"explicit_review"|"trusted_generator",
+ receipt_uid:DecisionUid, policy_hash:Sha256, policy_version:u32}
+GeneratorEvidence = {generator_id:NonEmptyString, version:NonEmptyString,
+ rule:NonEmptyString, input_snapshot_uid:SnapshotUid}
+```
+
+`EdgeType` is exactly the stored-edge list in architecture section 4.5.
+`EdgeOrigin={explicit,generated,structural,lexical_inference,
+semantic_inference,llm_inference}`; `EdgeStatus={accepted,proposed,rejected,
+stale,superseded}` exactly preserves Wave 2; `confidence_milli` is `0..1000`.
+
+The Wave 3 endpoint-kind table is closed (`Test` means any of the three test
+kinds, `Classification` means Feature/Component/Layer/Tag, and `Any` means any
+admitted Wave 3 kind):
+
+| Edge type | From kinds | To kinds |
+|---|---|---|
+| contains | Workspace, Worktree, Project, Artifact, Section | Any except Workspace/Worktree |
+| classifies | Artifact, Section | Classification |
+| evidence_for, derives | Artifact, Section | Artifact, Section, Requirement, NonFunctionalRequirement |
+| satisfies, realizes | Artifact, Section, SourceSymbol | Requirement, NonFunctionalRequirement, Artifact, Section, Component |
+| schedules | Artifact, Section | Requirement, NonFunctionalRequirement, SSpecScenario, SourceSymbol, Test |
+| specifies | SSpecScenario | Requirement, NonFunctionalRequirement |
+| implements | SourceSymbol | Requirement, NonFunctionalRequirement, SSpecScenario, Artifact, Section |
+| verifies | Test | Requirement, NonFunctionalRequirement, SSpecScenario, SourceSymbol |
+| covers | Test | SourceSymbol, Artifact |
+| links_to | Any | Any |
+| aliases | Alias | Any except Alias |
+| supersedes | Artifact, Section, Requirement, NonFunctionalRequirement | same kind as source |
+| extends | Project, Artifact | Project, Artifact |
+| depends_on | Project, Artifact | Project, Artifact |
+| mounted_as | ProjectRelation | Mount |
+
+`produces` and `promoted_from` reject in Wave 3 because their canonical run,
+result, and promotion node schemas arrive in later waves. Invalid pairs fail
+before hashing.
 
 ```sdn
 edge:
@@ -247,7 +374,8 @@ edge:
   generator: nil
   provenance: {project_uid: P-..., worktree_uid: WT-..., revision_id: 3b676a1...,
                input_snapshot_uid: spks1-..., source_uid: A-...,
-               source_span: {start: 10, end: 20}, decision_uid: D-...}
+               source_location: {source_artifact_uid: A-..., source_hash: sha256:...,
+                 span: {start_byte: 10, end_byte: 20}}, decision_uid: D-...}
   authority: {kind: explicit_review, receipt_uid: D-...,
               policy_hash: sha256:..., policy_version: 1}
 ```
@@ -306,7 +434,7 @@ UIDs must agree. A repeat is idempotent only when its recorded delta hash maps
 to the same output root; otherwise post-publication replay is stale. A
 `before_hash` hashes canonical JSON of the complete stored wrapper. The graph
 root hashes exact canonical JSON `{schema:1,nodes:[...],edges:[...]}`, nodes by
-UID and edges by `(from_uid,type,to_uid,uid)`, with no omitted fields.
+UID and edges by `(from_uid,edge_type,to_uid,uid)`, with no omitted fields.
 Endpoint/type/origin/provenance changes
 are remove-plus-add with a new EdgeUid, not updates.
 
@@ -477,12 +605,12 @@ Only `status=accepted` is evidence. The minimum accepted origin is:
 
 | Lifecycle obligation | Advisory | Standard | Strict | Mission-critical |
 |---|---|---|---|---|
-| rationale/evidence -> requirement | any accepted or candidate shown | explicit/generated accepted | explicit/generated accepted | same + trusted immutable evidence |
-| design satisfies requirement | candidate may warn only | explicit/generated accepted | explicit/generated accepted | same + approved design revision |
-| scenario specifies requirement | candidate may warn only | explicit/generated accepted | explicit/generated accepted | same + signed spec revision |
-| source implements requirement/spec | structural candidate allowed | accepted explicit/generated or compiler annotation | explicit/generated accepted | same + trusted compiler snapshot |
-| test verifies requirement/spec | candidate may warn only | explicit/generated accepted | explicit/generated accepted | same + immutable signed result |
-| run produces passing result | latest result displayed | non-stale accepted result | non-stale accepted result | signed, immutable, policy-approved environment |
+| rationale/evidence -> requirement | candidate or verified accepted | verified explicit/generated accepted | receipt-bound accepted | same + trusted immutable evidence |
+| design satisfies requirement | candidate may warn only | verified explicit/generated accepted | receipt-bound accepted | same + approved design revision |
+| scenario specifies requirement | candidate may warn only | verified explicit/generated accepted | receipt-bound accepted | same + signed spec revision |
+| source implements requirement/spec | structural candidate allowed | verified annotation/explicit/generated | receipt-bound accepted | same + trusted compiler snapshot |
+| test verifies requirement/spec | candidate may warn only | verified explicit/generated accepted | receipt-bound accepted | same + immutable signed result |
+| run produces passing result | latest result displayed | verified non-stale accepted result | receipt-bound non-stale result | signed, immutable, policy-approved environment |
 
 Inferred evidence may improve discovery in all profiles but cannot satisfy an
 obligation. Advisory reports candidates distinctly; it does not relabel them

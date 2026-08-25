@@ -155,7 +155,7 @@ scenarios include:
 - semantic-provider absence, denial, timeout, or malformed response degrades to
   lexical/graph retrieval without being reported as semantic PASS;
 - clean-build versus incremental-index ordering and explanations are equal;
-- explicit/generated accepted trace edges satisfy strict profiles while
+- receipt-bound explicit/generated accepted trace edges satisfy strict profiles while
   lexical, structural, semantic, and LLM-inferred candidates do not;
 - research-to-requirement-to-design-to-SSpec-to-source-to-test-to-result paths
   are queryable and stale results are diagnosed after source/spec mutation;
@@ -387,9 +387,9 @@ or package smoke gates activated by the actual changed paths.
 
 ### Scenario: Legacy identity migration is deterministic
 
-- **Given** a schema-v1 snapshot containing workspace and worktree `W-` records
-- **When** schema v2 is published
-- **Then** record type selects deterministic `WS-`/`WT-` identities, migration records are emitted, and v1 bytes remain unchanged.
+- **Given** two schema-v1 snapshots with the same workspace/worktree `W-` identities but changed project membership and revision fields
+- **When** both independently migrate to schema v2
+- **Then** record type and legacy UID select identical `WS-`/`WT-` identities, migration records match, and both v1 snapshots remain unchanged.
 
 ### Scenario: Edge authority fails closed
 
