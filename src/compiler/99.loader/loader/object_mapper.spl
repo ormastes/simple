@@ -61,7 +61,8 @@ impl SharedExecMapper:
             if not allow_replace:
                 return Err("Symbol already mapped: {symbol}")
             val old = self.records[symbol]
-            val old_freed = native_free_exec_memory(old.address, old.size)
+            val old_freed = unsafe(capabilities: [raw_ptr]):
+                native_free_exec_memory(old.address, old.size)
             if not old_freed:
                 return Err("Failed to free existing mapping for {symbol}")
             self.total_bytes = self.total_bytes - old.size
@@ -71,18 +72,23 @@ impl SharedExecMapper:
         if addr == 0:
             return Err("Executable allocation failed for {symbol} ({code_size} bytes)")
 
-        val written = native_write_exec_memory(addr, code, 0)
+        val written = unsafe(capabilities: [raw_ptr]):
+            native_write_exec_memory(addr, code, 0)
         if written != code_size:
-            _ = native_free_exec_memory(addr, code_size)
+            unsafe(capabilities: [raw_ptr]):
+                _ = native_free_exec_memory(addr, code_size)
             return Err("Failed to copy executable bytes for {symbol}")
 
-        val executable = native_make_executable(addr, code_size)
+        val executable = unsafe(capabilities: [raw_ptr]):
+            native_make_executable(addr, code_size)
         if not executable:
-            _ = native_free_exec_memory(addr, code_size)
+            unsafe(capabilities: [raw_ptr]):
+                _ = native_free_exec_memory(addr, code_size)
             return Err("Failed to switch RW->RX for {symbol}")
 
         native_flush_icache(addr, code_size)
-        val fn_ptr = native_get_function_pointer(addr)
+        val fn_ptr = unsafe(capabilities: [raw_ptr]):
+            native_get_function_pointer(addr)
 
         self.generation = self.generation + 1
         self.records[symbol] = SharedExecRecord(
@@ -114,7 +120,8 @@ impl SharedExecMapper:
             return false
 
         val rec = self.records[symbol]
-        val freed = native_free_exec_memory(rec.address, rec.size)
+        val freed = unsafe(capabilities: [raw_ptr]):
+            native_free_exec_memory(rec.address, rec.size)
         if not freed:
             return false
 
@@ -243,11 +250,14 @@ fn apply_smf_relocations(
     global_symbols: Dict<text, i64>
 ) -> Result<(), text>:
     for reloc in relocs:
+        # Validate the complete write width before deriving patch_addr. This
+        # prevents both end-of-mapping overrun and address-addition overflow.
+        val write_width = if reloc.reloc_type == 1: 8 else: 4
+        if code_addr <= 0 or code_size < write_width or reloc.offset < 0 or reloc.offset > code_size - write_width:
+            return Err("Relocation offset {reloc.offset} with width {write_width} out of bounds (code_size={code_size})")
+        if code_addr > 0x7FFFFFFFFFFFFFFF - reloc.offset:
+            return Err("Relocation address overflow at offset {reloc.offset}")
         val patch_addr = code_addr + reloc.offset
-
-        # Bounds check
-        if reloc.offset < 0 or reloc.offset >= code_size:
-            return Err("Relocation offset {reloc.offset} out of bounds (code_size={code_size})")
 
         # Resolve symbol address
         var sym_addr = 0i64
@@ -266,23 +276,28 @@ fn apply_smf_relocations(
             1:
                 # Abs64: write 8 bytes = sym_addr + addend
                 val value = sym_addr + reloc.addend
-                native_reloc_write_i64(code_addr, reloc.offset, value)
+                unsafe(capabilities: [raw_ptr]):
+                    native_reloc_write_i64(code_addr, reloc.offset, value)
             2:
                 # Rel32/Pc32: write 4 bytes = (sym_addr - patch_addr + addend) as i32
                 val value = sym_addr - patch_addr + reloc.addend
-                native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+                unsafe(capabilities: [raw_ptr]):
+                    native_reloc_write_i32(code_addr, reloc.offset, value as i32)
             3:
                 # PltRel32/Plt32: same as Pc32
                 val value = sym_addr - patch_addr + reloc.addend
-                native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+                unsafe(capabilities: [raw_ptr]):
+                    native_reloc_write_i32(code_addr, reloc.offset, value as i32)
             4:
                 # GotRel32/GotPcRel: same as Pc32 (GOT entry resolved)
                 val value = sym_addr - patch_addr + reloc.addend
-                native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+                unsafe(capabilities: [raw_ptr]):
+                    native_reloc_write_i32(code_addr, reloc.offset, value as i32)
             5:
                 # Abs32: write low 4 bytes = sym_addr + addend
                 val value = sym_addr + reloc.addend
-                native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+                unsafe(capabilities: [raw_ptr]):
+                    native_reloc_write_i32(code_addr, reloc.offset, value as i32)
             _:
                 return Err("Unknown relocation type: {reloc.reloc_type}")
 

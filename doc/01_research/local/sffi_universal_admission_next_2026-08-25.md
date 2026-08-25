@@ -262,6 +262,26 @@ minimal `raw_ptr` authority instead of wrapping it in a second `Ok`. This adds
 no success-path allocation, lookup, or dispatch beyond the pre-existing
 `Result` contract already used by the parallel top-level implementation.
 
+## Shared executable mapper caller-authority checkpoint
+
+The shared loader/JIT executable mapper now enters `raw_ptr` authority only at
+the twelve calls that consume mapping records it created and owns. The safe
+mapper surface still performs the same linear allocation, one bulk code write,
+RW-to-RX transition, instruction-cache flush, and address lift; no additional
+pass, lookup, allocation, copy, lock, or dispatch was introduced.
+
+Relocation validation now checks the complete four- or eight-byte write extent
+before deriving the patch address, and rejects signed address-addition overflow.
+The previous first-byte-only check could admit an eight-byte write beginning in
+the last seven bytes of a mapping. The five existing relocation writes remain
+one-for-one inside minimal authority blocks.
+
+The focused static authority/bounds/performance ratchet passed. This caller
+propagation does not change the raw-call census because it governs typed Simple
+facades rather than new runtime ABI calls. No production compiler, optimizer,
+runtime memory-safety tool, or benchmark was available, so executable mapping
+remains unverified beyond the static ratchet and is not signed.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
