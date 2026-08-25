@@ -971,3 +971,24 @@ rows decrease from 11,819 to 11,776 while unique symbols remain 3,138.
 Unsafe-tagged rows remain 1,410, untouched rows decrease from 10,151 to 10,108,
 and exact-artifact verified-and-signed admission remains zero. The 43 canonical
 debug declarations remain the next contract-tagging target.
+
+## Debug raw-contract ownership checkpoint
+
+All 43 canonical debug declarations now carry adjacent, operation-specific
+`@unsafe(... capabilities: [ffi])` contracts. The metadata distinguishes
+debugger global and stack mutation, blocking synchronization, borrowed
+pointer/length text inputs, runtime-owned text, OS ptrace process control,
+register-map and process-memory ownership, blocking wait status, and owned
+DWARF handle/string-array lifetimes. The owner ratchet now requires all 43 raw
+declarations to remain explicitly tagged.
+
+This is compile-time ownership metadata only. It changes no syscall, debugger
+wait, provider call, allocation, process-memory copy, dictionary/array layout,
+or wrapper result. The owner ratchet and whitespace check passed; production
+Simple and optimizer verification remain unavailable.
+
+Totals remain an estimated 11,776 `rt_*` declaration rows / 3,138 symbols.
+Unsafe-tagged rows increase from 1,410 to 1,453, untouched rows decrease from
+10,108 to 10,065, and exact-artifact verified-and-signed admission remains
+zero. Raw ptrace and DWARF APIs remain unsafe until their status, absence,
+ownership, platform policy, and exact provider evidence are fully admitted.

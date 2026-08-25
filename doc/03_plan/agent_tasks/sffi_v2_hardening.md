@@ -511,3 +511,8 @@ passing placeholder.
     `std.nogc_sync_mut.sffi.debug`; never restore its 43 duplicate declarations.
     Tag and classify the canonical ptrace/DWARF contracts next, preserving
     direct debug calls and exact buffer behavior.
+97. Keep all 43 canonical debug declarations explicitly tagged `unsafe(ffi)`.
+    Before publishing safe ptrace/DWARF APIs, type status and not-found results,
+    prove returned collection ownership, enforce platform/debug capability
+    policy, and bind the exact provider artifact without adding debug syscalls
+    or process-memory copies.
