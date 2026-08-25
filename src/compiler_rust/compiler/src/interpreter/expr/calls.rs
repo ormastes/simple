@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use simple_parser::ast::{Argument, Expr};
+use simple_parser::ast::{Argument, Expr, MoveMode};
 
 use super::evaluate_expr;
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
-    evaluate_call, evaluate_call_args, evaluate_method_call, exec_method_function, find_and_exec_method_with_self,
+    evaluate_call, evaluate_call_args, evaluate_method_call, exec_function_with_values, exec_method_function,
+    find_and_exec_method_with_self,
     find_and_exec_method_with_self_owned_values, object_method_exists, ClassDef, Enums, Env, FunctionDef, ImplMethods,
     BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
 };
@@ -90,9 +91,28 @@ pub(super) fn eval_call_expr(
             impl_methods,
         )?)),
         // CUDA kernel launch: kernel<<<grid, block>>>(args)
-        // In interpreter mode, kernel launches are no-ops since GPU code
-        // (GpuBuffer indexing, thread intrinsics) can't run on the CPU.
-        Expr::KernelLaunch { .. } => Ok(Some(Value::Nil)),
+        // Interpreter meaning (plan E3, 2026-08-25): desugar to the host
+        // executor `gpu_launch_emulated(grid, block, \ -> kernel(args))` from
+        // std.gc_async_mut.gpu_ops, which runs the body once per work-item with
+        // the gpu_*_id builtins set. Without that import the launch is a hard
+        // error — it used to return Nil silently, which hid every missing
+        // launch behind a green test.
+        Expr::KernelLaunch {
+            kernel,
+            grid,
+            block,
+            args,
+        } => Ok(Some(eval_kernel_launch(
+            kernel,
+            grid,
+            block,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?)),
         Expr::MethodCall {
             receiver, method, args, ..
         } => {
@@ -1241,4 +1261,69 @@ pub(super) fn eval_call_expr(
         }
         _ => Ok(None),
     }
+}
+
+/// Normalise a `<<<>>>` grid/block operand: an integer `n` means `(n, 1, 1)`;
+/// a 3-tuple of integers passes through; anything else is an error.
+fn kernel_launch_dim(value: Value, which: &str) -> Result<Value, CompileError> {
+    match value {
+        Value::Int(n) => Ok(Value::Tuple(vec![Value::Int(n), Value::Int(1), Value::Int(1)])),
+        Value::Tuple(items) if items.len() == 3 && items.iter().all(|v| matches!(v, Value::Int(_))) => {
+            Ok(Value::Tuple(items))
+        }
+        other => Err(CompileError::semantic_with_context(
+            format!("kernel launch `<<<>>>` {which} must be an int or a 3-tuple of ints, got {other:?}"),
+            ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("write `grid: 4` for (4, 1, 1) or `grid: (4, 2, 1)`".to_string()),
+        )),
+    }
+}
+
+/// Interpreter meaning of `kernel<<<grid: g, block: b>>>(args)`: call the
+/// user-visible host executor `gpu_launch_emulated(g, b, \ -> kernel(args))`
+/// exported by std.gc_async_mut.gpu_ops. The zero-arg closure is synthesised
+/// as an `Expr::Lambda` and evaluated through the normal lambda path so its
+/// capture keeps global-binding metadata (module-var writes inside the kernel
+/// must land on the module var, not on a demoted local copy).
+#[allow(clippy::too_many_arguments)]
+fn eval_kernel_launch(
+    kernel: &Expr,
+    grid: &Expr,
+    block: &Expr,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    const LAUNCHER: &str = "gpu_launch_emulated";
+    let Some(launcher) = functions.get(LAUNCHER).cloned() else {
+        return Err(CompileError::semantic_with_context(
+            "kernel launch `<<<>>>` requires `use std.gc_async_mut.gpu_ops.*` in interpreter mode".to_string(),
+            ErrorContext::new()
+                .with_code(codes::UNDEFINED_FUNCTION)
+                .with_help(format!("import `{LAUNCHER}` from std.gc_async_mut.gpu_ops (the host executor for `<<<>>>`)")),
+        ));
+    };
+    let grid_v = kernel_launch_dim(
+        evaluate_expr(grid, env, functions, classes, enums, impl_methods)?,
+        "grid",
+    )?;
+    let block_v = kernel_launch_dim(
+        evaluate_expr(block, env, functions, classes, enums, impl_methods)?,
+        "block",
+    )?;
+    let closure_expr = Expr::Lambda {
+        params: Vec::new(),
+        body: Box::new(Expr::Call {
+            callee: Box::new(kernel.clone()),
+            args: args.to_vec(),
+        }),
+        move_mode: MoveMode::default(),
+        capture_all: false,
+    };
+    let closure = evaluate_expr(&closure_expr, env, functions, classes, enums, impl_methods)?;
+    exec_function_with_values(&launcher, &[grid_v, block_v, closure], env, functions, classes, enums, impl_methods)
 }

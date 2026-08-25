@@ -5,6 +5,17 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **GPU/CUDA programming hardening, tutorial port, and launch expressiveness** (2026-08-25) —
+  repair the CUDA surface (`std.io` cuda_sffi phantom ABI, `gpu_ops` typed-transfer SEGV,
+  torch-gated device probe, fake Vulkan context, `cuda_jit` lane import); add real CUDA
+  streams/events/async copies and `rt_cuda_launch_kernel_ex` with `std.cuda` `CudaStream`/
+  `CudaEvent` and `std.io` `cuda_launch_on`; make `kernel<<<grid, block>>>(args)` execute in
+  the interpreter via the new 3-D `gpu_launch_emulated` instead of silently evaluating to nil;
+  mount `ormastes/simple_cuda_example` (the `cuda_exercise` workbook in Simple) under
+  `examples/08_gpu/` with per-module specs and md-embedded sdoctests; add the
+  same-code/three-config backend example (`examples/08_gpu/backends/`); add an MDSOC GPU
+  layer/facet spec and fix `85.mdsoc/cross_query.spl` imports; new guide
+  `doc/07_guide/lib/gpu_3d/cuda_gpu_programming.md`; nine new bug records.
 - **Exact-ref mandatory-check evidence** — retain bootstrap gate logs in a
   commit-ready textual evidence tree, validate them from the exact pushed Git
   revision, reject dirty bootstrap attribution, and allow receipt-backed TODO

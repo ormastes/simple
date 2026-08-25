@@ -114,6 +114,7 @@ type CUmodule = *mut c_void;
 type CUfunction = *mut c_void;
 type CUdeviceptr = u64;
 type CUstream = *mut c_void;
+type CUevent = *mut c_void;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -185,6 +186,17 @@ mod cuda_driver {
     type CuMemsetD32 = unsafe extern "C" fn(CUdeviceptr, u32, usize) -> c_int;
     type CuModuleLoad = unsafe extern "C" fn(*mut CUmodule, *const c_char) -> c_int;
     type CuDeviceComputeCapability = unsafe extern "C" fn(*mut c_int, *mut c_int, CUdevice) -> c_int;
+    // Streams / events / async copies (plan E2).
+    type CuStreamCreate = unsafe extern "C" fn(*mut CUstream, c_uint) -> c_int;
+    type CuStreamDestroy = unsafe extern "C" fn(CUstream) -> c_int;
+    type CuStreamSynchronize = unsafe extern "C" fn(CUstream) -> c_int;
+    type CuEventCreate = unsafe extern "C" fn(*mut CUevent, c_uint) -> c_int;
+    type CuEventDestroy = unsafe extern "C" fn(CUevent) -> c_int;
+    type CuEventRecord = unsafe extern "C" fn(CUevent, CUstream) -> c_int;
+    type CuEventSynchronize = unsafe extern "C" fn(CUevent) -> c_int;
+    type CuEventElapsedTime = unsafe extern "C" fn(*mut f32, CUevent, CUevent) -> c_int;
+    type CuMemcpyHtoDAsync = unsafe extern "C" fn(CUdeviceptr, *const c_void, usize, CUstream) -> c_int;
+    type CuMemcpyDtoHAsync = unsafe extern "C" fn(*mut c_void, CUdeviceptr, usize, CUstream) -> c_int;
 
     struct CudaFns {
         _lib: Library,
@@ -212,6 +224,16 @@ mod cuda_driver {
         cuMemsetD32_v2: CuMemsetD32,
         cuModuleLoad: CuModuleLoad,
         cuDeviceComputeCapability: CuDeviceComputeCapability,
+        cuStreamCreate: CuStreamCreate,
+        cuStreamDestroy_v2: CuStreamDestroy,
+        cuStreamSynchronize: CuStreamSynchronize,
+        cuEventCreate: CuEventCreate,
+        cuEventDestroy_v2: CuEventDestroy,
+        cuEventRecord: CuEventRecord,
+        cuEventSynchronize: CuEventSynchronize,
+        cuEventElapsedTime: CuEventElapsedTime,
+        cuMemcpyHtoDAsync_v2: CuMemcpyHtoDAsync,
+        cuMemcpyDtoHAsync_v2: CuMemcpyDtoHAsync,
     }
 
     unsafe impl Send for CudaFns {}
@@ -285,6 +307,16 @@ mod cuda_driver {
             cuMemsetD32_v2: sym!(b"cuMemsetD32_v2\0", CuMemsetD32),
             cuModuleLoad: sym!(b"cuModuleLoad\0", CuModuleLoad),
             cuDeviceComputeCapability: sym!(b"cuDeviceComputeCapability\0", CuDeviceComputeCapability),
+            cuStreamCreate: sym!(b"cuStreamCreate\0", CuStreamCreate),
+            cuStreamDestroy_v2: sym!(b"cuStreamDestroy_v2\0", CuStreamDestroy),
+            cuStreamSynchronize: sym!(b"cuStreamSynchronize\0", CuStreamSynchronize),
+            cuEventCreate: sym!(b"cuEventCreate\0", CuEventCreate),
+            cuEventDestroy_v2: sym!(b"cuEventDestroy_v2\0", CuEventDestroy),
+            cuEventRecord: sym!(b"cuEventRecord\0", CuEventRecord),
+            cuEventSynchronize: sym!(b"cuEventSynchronize\0", CuEventSynchronize),
+            cuEventElapsedTime: sym!(b"cuEventElapsedTime\0", CuEventElapsedTime),
+            cuMemcpyHtoDAsync_v2: sym!(b"cuMemcpyHtoDAsync_v2\0", CuMemcpyHtoDAsync),
+            cuMemcpyDtoHAsync_v2: sym!(b"cuMemcpyDtoHAsync_v2\0", CuMemcpyDtoHAsync),
             _lib: lib,
         })
     }
@@ -397,6 +429,56 @@ mod cuda_driver {
 
     pub unsafe fn cuMemcpyDtoH_v2(dstHost: *mut c_void, srcDevice: CUdeviceptr, ByteCount: usize) -> c_int {
         dispatch!(cuMemcpyDtoH_v2(dstHost, srcDevice, ByteCount))
+    }
+
+    pub unsafe fn cuStreamCreate(phStream: *mut CUstream, Flags: c_uint) -> c_int {
+        dispatch!(cuStreamCreate(phStream, Flags))
+    }
+
+    pub unsafe fn cuStreamDestroy_v2(hStream: CUstream) -> c_int {
+        dispatch!(cuStreamDestroy_v2(hStream))
+    }
+
+    pub unsafe fn cuStreamSynchronize(hStream: CUstream) -> c_int {
+        dispatch!(cuStreamSynchronize(hStream))
+    }
+
+    pub unsafe fn cuEventCreate(phEvent: *mut CUevent, Flags: c_uint) -> c_int {
+        dispatch!(cuEventCreate(phEvent, Flags))
+    }
+
+    pub unsafe fn cuEventDestroy_v2(hEvent: CUevent) -> c_int {
+        dispatch!(cuEventDestroy_v2(hEvent))
+    }
+
+    pub unsafe fn cuEventRecord(hEvent: CUevent, hStream: CUstream) -> c_int {
+        dispatch!(cuEventRecord(hEvent, hStream))
+    }
+
+    pub unsafe fn cuEventSynchronize(hEvent: CUevent) -> c_int {
+        dispatch!(cuEventSynchronize(hEvent))
+    }
+
+    pub unsafe fn cuEventElapsedTime(pMilliseconds: *mut f32, hStart: CUevent, hEnd: CUevent) -> c_int {
+        dispatch!(cuEventElapsedTime(pMilliseconds, hStart, hEnd))
+    }
+
+    pub unsafe fn cuMemcpyHtoDAsync_v2(
+        dstDevice: CUdeviceptr,
+        srcHost: *const c_void,
+        ByteCount: usize,
+        hStream: CUstream,
+    ) -> c_int {
+        dispatch!(cuMemcpyHtoDAsync_v2(dstDevice, srcHost, ByteCount, hStream))
+    }
+
+    pub unsafe fn cuMemcpyDtoHAsync_v2(
+        dstHost: *mut c_void,
+        srcDevice: CUdeviceptr,
+        ByteCount: usize,
+        hStream: CUstream,
+    ) -> c_int {
+        dispatch!(cuMemcpyDtoHAsync_v2(dstHost, srcDevice, ByteCount, hStream))
     }
 
     pub unsafe fn cuCtxSynchronize() -> c_int {
@@ -2678,6 +2760,314 @@ pub extern "C" fn rt_cuda_launch_kernel(
     _block_x: i64,
     _block_y: i64,
     _block_z: i64,
+    _args_ptr: i64,
+) -> i64 {
+    -3
+}
+
+// ============================================================================
+// Streams / events / async copies / extended launch (plan E2, 2026-08-25)
+//
+// Handle contract: success returns the CUstream/CUevent pointer as a positive
+// i64; failure returns a NEGATIVE value (-1 bad input, -(CUresult) driver error,
+// -3 when built without CUDA). Stream handle 0 is the legacy default stream
+// and is accepted everywhere a stream is taken.
+// ============================================================================
+
+#[cfg(feature = "cuda")]
+fn cuda_status(err: c_int) -> i64 {
+    if err == 0 {
+        0
+    } else {
+        -(err as i64)
+    }
+}
+
+/// Create a CUDA stream. `flags`: 0 = CU_STREAM_DEFAULT, 1 = CU_STREAM_NON_BLOCKING.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_stream_create(flags: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    unsafe {
+        let mut stream: CUstream = ptr::null_mut();
+        let err = cuStreamCreate(&mut stream, flags as c_uint);
+        if err != 0 {
+            return -(err as i64);
+        }
+        if stream.is_null() {
+            return -1;
+        }
+        stream as i64
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_stream_create(_flags: i64) -> i64 {
+    -3
+}
+
+/// Destroy a stream. Handle 0 (default stream) is a no-op success.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_stream_destroy(stream: i64) -> i64 {
+    if stream < 0 {
+        return -1;
+    }
+    if stream == 0 {
+        return 0;
+    }
+    cuda_status(unsafe { cuStreamDestroy_v2(stream as CUstream) })
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_stream_destroy(_stream: i64) -> i64 {
+    -3
+}
+
+/// Wait for every operation queued on `stream` (0 = default stream).
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_stream_synchronize(stream: i64) -> i64 {
+    if stream < 0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    cuda_status(unsafe { cuStreamSynchronize(stream as CUstream) })
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_stream_synchronize(_stream: i64) -> i64 {
+    -3
+}
+
+/// Create an event. `flags`: 0 = CU_EVENT_DEFAULT (timing enabled).
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_event_create(flags: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    unsafe {
+        let mut event: CUevent = ptr::null_mut();
+        let err = cuEventCreate(&mut event, flags as c_uint);
+        if err != 0 {
+            return -(err as i64);
+        }
+        if event.is_null() {
+            return -1;
+        }
+        event as i64
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_event_create(_flags: i64) -> i64 {
+    -3
+}
+
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_event_destroy(event: i64) -> i64 {
+    if event <= 0 {
+        return -1;
+    }
+    cuda_status(unsafe { cuEventDestroy_v2(event as CUevent) })
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_event_destroy(_event: i64) -> i64 {
+    -3
+}
+
+/// Record `event` on `stream` (0 = default stream).
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_event_record(event: i64, stream: i64) -> i64 {
+    if event <= 0 || stream < 0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    cuda_status(unsafe { cuEventRecord(event as CUevent, stream as CUstream) })
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_event_record(_event: i64, _stream: i64) -> i64 {
+    -3
+}
+
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_event_synchronize(event: i64) -> i64 {
+    if event <= 0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    cuda_status(unsafe { cuEventSynchronize(event as CUevent) })
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_event_synchronize(_event: i64) -> i64 {
+    -3
+}
+
+/// Elapsed milliseconds between two recorded events; negative on error.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_event_elapsed_ms(start: i64, end: i64) -> f64 {
+    if start <= 0 || end <= 0 {
+        return -1.0;
+    }
+    unsafe {
+        let mut ms: f32 = 0.0;
+        let err = cuEventElapsedTime(&mut ms, start as CUevent, end as CUevent);
+        if err != 0 {
+            return -(err as f64);
+        }
+        ms as f64
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_event_elapsed_ms(_start: i64, _end: i64) -> f64 {
+    -3.0
+}
+
+/// Elapsed nanoseconds (integer) between two recorded events; negative on
+/// error. Backs the symbol `gpu_lane/cuda_native_profile.spl` already declares.
+#[no_mangle]
+pub extern "C" fn rt_cuda_event_elapsed_ns(start: i64, end: i64) -> i64 {
+    let ms = rt_cuda_event_elapsed_ms(start, end);
+    if ms < 0.0 {
+        return ms as i64;
+    }
+    (ms * 1_000_000.0) as i64
+}
+
+/// Async host->device copy on `stream` (0 = default stream). The host buffer
+/// must stay alive until the stream is synchronized.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_memcpy_htod_async(dst: i64, src: i64, size: i64, stream: i64) -> i64 {
+    if stream < 0 || size < 0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    cuda_status(unsafe {
+        cuMemcpyHtoDAsync_v2(dst as CUdeviceptr, src as *const c_void, size as usize, stream as CUstream)
+    })
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_memcpy_htod_async(_dst: i64, _src: i64, _size: i64, _stream: i64) -> i64 {
+    -3
+}
+
+/// Async device->host copy on `stream` (0 = default stream).
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_memcpy_dtoh_async(dst: i64, src: i64, size: i64, stream: i64) -> i64 {
+    if stream < 0 || size < 0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    cuda_status(unsafe {
+        cuMemcpyDtoHAsync_v2(dst as *mut c_void, src as CUdeviceptr, size as usize, stream as CUstream)
+    })
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_memcpy_dtoh_async(_dst: i64, _src: i64, _size: i64, _stream: i64) -> i64 {
+    -3
+}
+
+/// `rt_cuda_launch_kernel` plus dynamic shared memory and a stream slot.
+/// Same `(ptr, len)` function-name and `args_ptr` param-block contract.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn rt_cuda_launch_kernel_ex(
+    module: i64,
+    func_name_ptr: *const u8,
+    func_name_len: u64,
+    grid_x: i64,
+    grid_y: i64,
+    grid_z: i64,
+    block_x: i64,
+    block_y: i64,
+    block_z: i64,
+    shared_bytes: i64,
+    stream: i64,
+    args_ptr: i64,
+) -> i64 {
+    if func_name_ptr.is_null() || func_name_len == 0 || shared_bytes < 0 || stream < 0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    unsafe {
+        let bytes = std::slice::from_raw_parts(func_name_ptr, func_name_len as usize);
+        let Ok(func_name) = CString::new(bytes) else {
+            return -1;
+        };
+        let mut func: CUfunction = ptr::null_mut();
+        let err = cuModuleGetFunction(&mut func, module as CUmodule, func_name.as_ptr());
+        if err != 0 {
+            return -(err as i64);
+        }
+        cuda_status(cuLaunchKernel(
+            func,
+            grid_x as c_uint,
+            grid_y as c_uint,
+            grid_z as c_uint,
+            block_x as c_uint,
+            block_y as c_uint,
+            block_z as c_uint,
+            shared_bytes as c_uint,
+            stream as CUstream,
+            args_ptr as *mut *mut c_void,
+            ptr::null_mut(),
+        ))
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn rt_cuda_launch_kernel_ex(
+    _module: i64,
+    _func_name_ptr: *const u8,
+    _func_name_len: u64,
+    _grid_x: i64,
+    _grid_y: i64,
+    _grid_z: i64,
+    _block_x: i64,
+    _block_y: i64,
+    _block_z: i64,
+    _shared_bytes: i64,
+    _stream: i64,
     _args_ptr: i64,
 ) -> i64 {
     -3
