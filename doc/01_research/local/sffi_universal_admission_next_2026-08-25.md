@@ -833,3 +833,26 @@ verified-and-signed admission remains zero. The existing wrappers still encode
 some invalid-handle failures as dummy resources, zeros, empty arrays, or
 booleans; those APIs require typed failure migration before they can be called
 safe.
+
+## SIMD raw-contract ownership checkpoint
+
+The canonical SIMD module's 49 raw declarations now carry adjacent
+`@unsafe(... capabilities: [ffi])` contracts. The contracts distinguish target
+feature queries, profile discriminants and text, mutable bulk array copying,
+fixed-width vector operations, shifts, fused operations, and reductions. A new
+static ratchet fixes the reviewed inventory at 49 and requires every declaration
+to retain its FFI capability tag.
+
+This pass deliberately does not wrap or redirect an intrinsic: no signature,
+dispatch tier, call count, branch, allocation, copy, vector layout, or fallback
+behavior changed. That preserves the SIMD hot path and avoids laundering an ABI
+boundary into a slower generic adapter. The static ratchet and whitespace check
+passed; no production-runtime or optimizer claim is made while the self-hosted
+runtime remains unavailable.
+
+Totals remain 11,870 `rt_*` declaration rows / 3,135 symbols. Unsafe-tagged
+rows increase from 1,259 to 1,308, untouched rows decrease from 10,353 to
+10,304, and exact-artifact verified-and-signed admission remains zero. These
+annotations identify unsafe ownership only; exact target ABI fingerprints and
+signed provider admission are still required before SIMD can be called fully
+verified.

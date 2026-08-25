@@ -479,3 +479,8 @@ passing placeholder.
     verified. Migrate resource construction, tuple/count access, and array
     extraction to typed failure without extra provider calls or copies, then
     bind the exact provider artifact to signed admission evidence.
+90. Keep all 49 canonical SIMD declarations explicitly tagged `unsafe(ffi)`
+    without adding generic dispatch or wrapper allocations. Next bind each
+    target-specific vector signature and provider implementation to an ABI
+    fingerprint and exact signed artifact; retain direct typed calls on the hot
+    path and keep feature/profile values semantically typed.
