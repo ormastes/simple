@@ -2433,6 +2433,36 @@ artifact identity and proof/signature receipts remain absent.  Therefore the
 thread-sleep boundary and the broader SFFI surface are not globally verified
 or signed; exact-artifact verified-and-signed admission remains 0.
 
+## SSH helper Pure Simple boundary checkpoint
+
+The SSH helper owner removed 28 per-byte foreign append calls, two raw slice
+calls, one raw byte accessor, and two direct serial calls.  Its 37 parser and
+validation diagnostic wrapper calls were also removed, avoiding text
+interpolation and serial dispatch on malformed or ordinary handshake traffic.
+Unused crypto, sleep, byte, and array extern declarations were deleted.
+
+Byte access is now bounds-checked Simple indexing, ranges use the bounded
+Simple slice operation, and the retained `rt_push_byte` spelling is an inline
+Pure Simple `_append_byte` helper.  The only remaining foreign operation is a
+byte-array-to-text lift in `_read_text_field_fast`; it has one minimal lexical
+`unsafe(ffi)` scope and rejects non-empty input becoming empty text.  Length
+parsing now uses subtraction-based overflow-safe bounds, and KEXINIT trailing
+data is rejected instead of merely logged and accepted.
+
+The focused static boundary ratchet passed.  The authoritative census changed:
+
+- raw call sites: 20,796 -> 20,763
+- missing authority: 16,905 -> 16,871
+- lexical unsafe: 2,972 -> 2,973
+- function unsafe: unchanged at 919
+
+The valid byte-building path removes foreign dispatch and adds only constant-
+time bounds checks already required before indexing.  No lookup, lock, hash,
+signature operation, generic dispatch, or extra copy was introduced.  The
+remaining text provider lacks exact-artifact proof/signature admission, so the
+SSH helper family and wider SFFI surface remain not globally verified or
+signed; exact-artifact verified-and-signed admission remains 0.
+
 ## Synchronous SIMD SFFI facade checkpoint
 
 `src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
