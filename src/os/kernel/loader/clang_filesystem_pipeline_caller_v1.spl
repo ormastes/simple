@@ -10,16 +10,31 @@ use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.scheduler_types.{SchedulerCurrentTaskAdmissionV1}
 use os.kernel.loader.clang_filesystem_pipeline_owner_v1.{
     ClangFilesystemPipelineRequestV1,
+    ClangFilesystemTerminalReceiptV1,
     clang_filesystem_pipeline_reserve_v1,
     clang_filesystem_pipeline_dispatch_v1,
     clang_filesystem_pipeline_cancel_v1,
     clang_filesystem_pipeline_begin_current_v1,
-    clang_filesystem_pipeline_mark_outcome_unknown_v1
+    clang_filesystem_pipeline_mark_outcome_unknown_v1,
+    clang_filesystem_pipeline_take_terminal_v1
 }
 use os.kernel.loader.clang_filesystem_scheduler_backend_v1.{
+    ClangFilesystemSchedulerEvidenceV1,
     ClangFilesystemSchedulerLaunchPlanV1,
-    clang_filesystem_scheduler_launch_plan_v1
+    clang_filesystem_scheduler_launch_plan_v1,
+    clang_filesystem_scheduler_finish_success_v1
 }
+use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
+    AuthenticatedFsExecSubmissionV1,
+    authenticated_fs_exec_submit_v1
+}
+use os.kernel.loader.executable_admission_pipeline.{executable_loader_revoke}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionEvidenceTokenV1,
+    scheduler_execution_evidence_consume_once_v2
+}
+use std.fs_driver.mount_table.{MountTable}
 
 pub(package) fn clang_filesystem_pipeline_prepare_scheduler_backend_v1(
     request: ClangFilesystemPipelineRequestV1,
@@ -42,3 +57,80 @@ pub(package) fn clang_filesystem_pipeline_prepare_scheduler_backend_v1(
         return Err(command_result.unwrap_err())
     Ok(clang_filesystem_scheduler_launch_plan_v1(command_result.unwrap()))
 
+fn _revoke_unused_submission_v1(
+    table: MountTable,
+    submission: AuthenticatedFsExecSubmissionV1
+) -> bool:
+    executable_loader_revoke(
+        table, submission.authorities, submission.token).is_ok()
+
+fn _consume_failed_evidence_if_any_v1(
+    token: SchedulerExecutionEvidenceTokenV1?
+):
+    if token.?:
+        _ = scheduler_execution_evidence_consume_once_v2(token.unwrap())
+
+pub(package) fn clang_filesystem_pipeline_submit_authenticated_v1(
+    scheduler: Scheduler,
+    table: MountTable,
+    plan: ClangFilesystemSchedulerLaunchPlanV1,
+    compile_submission: AuthenticatedFsExecSubmissionV1,
+    link_submission: AuthenticatedFsExecSubmissionV1,
+    execute_submission: AuthenticatedFsExecSubmissionV1
+) -> Result<ClangFilesystemTerminalReceiptV1, text>:
+    """Submit the exact three-stage plan and consume its terminal receipt.
+
+    Loader-issued authority is supplied independently for each executable.
+    Scheduler evidence is accepted only from the authenticated execution
+    service, and the terminal pipeline row is consumed before returning.
+    """
+    val compile_run = authenticated_fs_exec_submit_v1(
+        scheduler, table, compile_submission,
+        plan.compile_path, plan.compile_argv)
+    if compile_run.exit_code != 0 or not compile_run.evidence.?:
+        _consume_failed_evidence_if_any_v1(compile_run.evidence)
+        val link_retired = _revoke_unused_submission_v1(
+            table, link_submission)
+        val execute_retired = _revoke_unused_submission_v1(
+            table, execute_submission)
+        val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            plan.command.dispatch)
+        if not link_retired or not execute_retired or pipeline_retired.is_err():
+            return Err("clang-submit-cleanup-indeterminate")
+        return Err("clang-authenticated-submit-failed")
+
+    val link_run = authenticated_fs_exec_submit_v1(
+        scheduler, table, link_submission, plan.link_path, plan.link_argv)
+    if link_run.exit_code != 0 or not link_run.evidence.?:
+        _consume_failed_evidence_if_any_v1(compile_run.evidence)
+        _consume_failed_evidence_if_any_v1(link_run.evidence)
+        val execute_retired = _revoke_unused_submission_v1(
+            table, execute_submission)
+        val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            plan.command.dispatch)
+        if not execute_retired or pipeline_retired.is_err():
+            return Err("lld-submit-cleanup-indeterminate")
+        return Err("lld-authenticated-submit-failed")
+
+    val execute_run = authenticated_fs_exec_submit_v1(
+        scheduler, table, execute_submission,
+        plan.execute_path, plan.execute_argv)
+    if execute_run.exit_code != 0 or not execute_run.evidence.?:
+        _consume_failed_evidence_if_any_v1(compile_run.evidence)
+        _consume_failed_evidence_if_any_v1(link_run.evidence)
+        _consume_failed_evidence_if_any_v1(execute_run.evidence)
+        val pipeline_retired = clang_filesystem_pipeline_mark_outcome_unknown_v1(
+            plan.command.dispatch)
+        if pipeline_retired.is_err():
+            return Err("hello-submit-cleanup-indeterminate")
+        return Err("hello-authenticated-submit-failed")
+
+    val terminal = clang_filesystem_scheduler_finish_success_v1(
+        plan,
+        ClangFilesystemSchedulerEvidenceV1(
+            compile: compile_run.evidence.unwrap(),
+            link: link_run.evidence.unwrap(),
+            execute: execute_run.evidence.unwrap()))
+    if terminal.is_err(): return Err(terminal.unwrap_err())
+    clang_filesystem_pipeline_take_terminal_v1(
+        terminal.unwrap(), plan.command.dispatch.actor)
