@@ -2376,3 +2376,43 @@ this checkpoint does not fabricate a local distinction.  No production
 self-hosted runtime was available for executable optimizer or RSS evidence, so
 the lane is unsafe-bounded, not verified.  Verified-and-signed admission
 remains 0.
+## Standard-library file I/O SFFI checkpoint
+
+The synchronous file facade now has explicit authority on all 36 declarations
+and minimal lexical scopes on all 47 calls.  Four previously unscoped calls in
+the related mmap facade were also bounded; its seven declarations and seven
+calls are now all explicit.  The focused `stdlib-file-io-sffi-contract.shs`
+audit passed.
+
+Provider review found and corrected contract defects rather than working around
+them:
+
+- `rt_file_get_size` is registered as `i64`; native now returns signed `i64`
+  and uses `-1` for invalid descriptors, metadata failure, and overflow rather
+  than fabricating zero.  Both Simple declarations now match.  The legacy
+  `Option<i32>` facade narrows only representable values.
+- `file_size()` now calls the actual `rt_file_size` provider instead of
+  misinterpreting the modification-time `rt_file_stat` result as bytes.
+- text, line-list, byte-array, and directory-list nil failures remain distinct
+  from valid empty values in safe `Result` wrappers.  The explicitly `_unsafe`
+  compatibility wrappers retain their documented empty sentinels.
+- `is_dir()` now calls the semantic boolean provider instead of allocating a
+  directory listing and returning the always-true expression `len >= 0`.
+- `rt_dir_create` and `rt_dir_remove` now pass the required recursive boolean
+  argument explicitly, eliminating an ABI register mismatch.
+
+The authoritative census changed exactly as expected:
+
+- missing authority: 17,591 -> 17,540
+- lexical unsafe: 2,667 -> 2,718
+- function unsafe: unchanged at 918
+
+The focused Rust descriptor test passed (`1 passed`, 1,226 filtered) and now
+distinguishes an empty file size of zero from invalid descriptor failure `-1`.
+Normal file operations retain direct calls and their existing I/O complexity;
+the semantic directory query removes a directory scan and result allocation.
+No per-operation hashing, signature work, discovery, lock, or generic dispatch
+was added.  Production Simple optimizer/performance evidence remains
+unavailable in this worktree.  Glob/find/walk and some legacy unsafe helpers
+still have empty-result ambiguity, so this lane is not globally verified or
+signed; verified-and-signed admission remains 0.

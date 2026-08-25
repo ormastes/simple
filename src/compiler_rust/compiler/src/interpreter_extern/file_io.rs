@@ -2113,7 +2113,7 @@ pub fn rt_dir_list(args: &[Value]) -> Result<Value, CompileError> {
                 .collect();
             Ok(Value::array(names))
         }
-        Err(_) => Ok(Value::array(vec![])),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
