@@ -13,7 +13,7 @@ use crate::interpreter::{
     MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node};
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, WhileStmt};
 use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -194,6 +194,119 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
             ))
         }
     }
+}
+
+enum WhileConditionDecision {
+    Stop,
+    Run,
+    RunWithBindings(HashMap<String, Value>),
+}
+
+/// Evaluate one block-closure `while` condition exactly once and preserve the
+/// pattern-binding semantics of the canonical statement executor.
+fn evaluate_block_while_condition(
+    while_stmt: &WhileStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<WhileConditionDecision, CompileError> {
+    let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
+    let Some(pattern) = &while_stmt.let_pattern else {
+        return Ok(if is_condition_present(&while_stmt.condition, &value) {
+            WhileConditionDecision::Run
+        } else {
+            WhileConditionDecision::Stop
+        });
+    };
+
+    match optional_let_binding(pattern, &value) {
+        LetBind::Skip => Ok(WhileConditionDecision::Stop),
+        LetBind::Bind(name, inner) => {
+            let mut bindings = HashMap::with_capacity(1);
+            bindings.insert(name, inner);
+            Ok(WhileConditionDecision::RunWithBindings(bindings))
+        }
+        LetBind::NotApplicable => {
+            let mut bindings = HashMap::new();
+            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                Ok(WhileConditionDecision::RunWithBindings(bindings))
+            } else {
+                Ok(WhileConditionDecision::Stop)
+            }
+        }
+    }
+}
+
+/// Execute a `while` in a BDD/lambda block. Pattern names are block-local for
+/// the lifetime of the loop and are restored on every exit, including errors.
+fn exec_block_while(
+    while_stmt: &WhileStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    let mut last_value = None;
+    loop {
+        if crate::interpreter::is_timeout_exceeded() {
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
+        }
+
+        // Ordinary boolean loops take the `None` arm and allocate nothing.
+        // Pattern loops snapshot only the source-sized set of names actually
+        // bound by this successful match.
+        let iteration_scope = match evaluate_block_while_condition(
+            while_stmt,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
+            WhileConditionDecision::Stop => break,
+            WhileConditionDecision::Run => None,
+            WhileConditionDecision::RunWithBindings(bindings) => {
+                let mut saved = Vec::with_capacity(bindings.len());
+                for (name, value) in bindings {
+                    saved.push((name.clone(), env.get(&name).cloned()));
+                    env.enter_block_local(name.clone());
+                    env.insert(name, value);
+                }
+                Some(saved)
+            }
+        };
+
+        let body_result = exec_block_closure_mut(
+            &while_stmt.body.statements,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        );
+        if let Some(saved) = iteration_scope {
+            // The pattern is scoped to this iteration's body. Restore before
+            // deciding continue/break/error so the next condition and every
+            // outward exit observe the pre-binding environment.
+            crate::interpreter::restore_block_scope_shadows(saved, env);
+        }
+
+        match body_result {
+            Ok(value) => last_value = Some(value),
+            Err(CompileError::LoopBreak(value)) => {
+                last_value = Some(value.unwrap_or(Value::Nil));
+                break;
+            }
+            Err(CompileError::LoopContinue) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(last_value)
 }
 
 /// Execute a block closure (BDD DSL colon-block) against a fresh scope.
@@ -1085,42 +1198,24 @@ pub(super) fn exec_block_closure_into(
                 }
                 last_value = Value::Nil;
             }
-            Node::While(while_stmt) => loop {
-                if crate::interpreter::is_timeout_exceeded() {
-                    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
-                    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                    return Err(CompileError::TimeoutExceeded {
-                        timeout_secs: crate::interpreter::timeout_limit_secs(),
-                    });
-                }
-                let cond = evaluate_expr(
-                    &while_stmt.condition,
-                    &mut local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
-                if !is_condition_present(&while_stmt.condition, &cond) {
-                    break;
-                }
-                match exec_block_closure_mut(
-                    &while_stmt.body.statements,
+            Node::While(while_stmt) => {
+                match exec_block_while(
+                    while_stmt,
                     &mut local_env,
                     functions,
                     classes,
                     enums,
                     impl_methods,
                 ) {
-                    Ok(val) => last_value = val,
-                    Err(CompileError::LoopBreak(val)) => {
-                        last_value = val.unwrap_or(Value::Nil);
-                        break;
+                    Ok(Some(value)) => last_value = value,
+                    Ok(None) => {}
+                    Err(error) => {
+                        CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
+                        IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
+                        return Err(error);
                     }
-                    Err(CompileError::LoopContinue) => continue,
-                    Err(e) => return Err(e),
                 }
-            },
+            }
             Node::Loop(loop_stmt) => loop {
                 if crate::interpreter::is_timeout_exceeded() {
                     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
@@ -1803,40 +1898,18 @@ fn exec_block_closure_mut_inner(
                 );
                 last_value = Value::Nil;
             }
-            Node::While(while_stmt) => loop {
-                if crate::interpreter::is_timeout_exceeded() {
-                    return Err(CompileError::TimeoutExceeded {
-                        timeout_secs: crate::interpreter::timeout_limit_secs(),
-                    });
-                }
-                let cond = evaluate_expr(
-                    &while_stmt.condition,
+            Node::While(while_stmt) => {
+                if let Some(value) = exec_block_while(
+                    while_stmt,
                     local_env,
                     functions,
                     classes,
                     enums,
                     impl_methods,
-                )?;
-                if !is_condition_present(&while_stmt.condition, &cond) {
-                    break;
+                )? {
+                    last_value = value;
                 }
-                match exec_block_closure_mut(
-                    &while_stmt.body.statements,
-                    local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                ) {
-                    Ok(val) => last_value = val,
-                    Err(CompileError::LoopBreak(val)) => {
-                        last_value = val.unwrap_or(Value::Nil);
-                        break;
-                    }
-                    Err(CompileError::LoopContinue) => continue,
-                    Err(e) => return Err(e),
-                }
-            },
+            }
             Node::Loop(loop_stmt) => loop {
                 if crate::interpreter::is_timeout_exceeded() {
                     return Err(CompileError::TimeoutExceeded {
