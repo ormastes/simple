@@ -58,10 +58,12 @@ Two further blockers were found behind it and fixed here as well:
 2. A variable named `namespace` was rejected by the "common mistake" detector
    (`test_runner_mcdc_report.spl:331`), renamed to `ns_hash`.
 
-**Still blocking `bin/simple test` on clean content:** the same detector rejects
-`dict[Ctor(...)] = v` as `List[T]` generics, at 42 sites —
+**`bin/simple test` on clean content now WORKS.** With the two fixes above, a clean `origin/main`
+worktree runs `test/fixtures/doctest/green.md` to `SDoctest Results: 1 total, 1 passed`. (A bare
+worktree additionally needs a built binary present for the sdoctest subprocess; that is normal, not
+a defect.) The `dict[Ctor(...)]`-read-as-generics diagnostics that accompanied this were
+warning-level noise, not a blocker, and are now fixed too —
 `doc/08_tracking/bug/common_mistake_detector_false_positive_dict_index_ctor_2026-08-25.md`.
-That is a detector fix, not 42 source edits, so it is filed rather than worked around.
 
 **Unrelated finding worth acting on:** a fresh `todo-scan` of clean `origin/main` yields 239
 entries while the committed `doc/08_tracking/todo/todo_db.sdn` holds roughly 741 lines' worth —
