@@ -5641,3 +5641,42 @@ length checks are constant branches; no additional copy, allocation, lookup,
 lock, hash, signature operation, or generic dispatch was added. The one text
 lift and exact artifacts remain unverified/unsigned, so verified-and-signed
 admission remains 0.
+
+## LLVM target-machine mirror authority checkpoint
+
+The canonical synchronous SFFI target module, asynchronous SFFI mirror, and
+compatibility FFI mirror all invoke LLVM through cached but untyped all-integer
+dynamic thunks. Every one of their 20 target initialization, target-machine,
+pass-manager, and memory-buffer APIs now carries caller-visible
+`unsafe(ffi, raw_ptr)` authority. The three mirror bodies are mechanically
+identical apart from ownership namespace/header spelling.
+
+Three real C-string bugs were fixed in every mirror: target triples passed to
+`LLVMGetTargetFromTriple`, output filenames passed to
+`LLVMTargetMachineEmitToFile`, and pass pipelines passed to `LLVMRunPasses` now
+use scoped NUL-terminated text. The asynchronous mirror also gains the
+canonical allocation-failure cleanup for target/error/buffer out-pointers,
+preventing null pointer writes and partial-allocation leaks.
+
+The focused `llvm-target-sffi-authority.shs` audit passed. It pins 3 mirrors x
+20 authorities, the three terminators, null-allocation cleanup, normalized
+mirror equality, and both-registry coverage for all five underlying
+allocation/pointer/generic-call primitives. Registration is not proof of LLVM
+signature compatibility or artifact authenticity.
+
+The authoritative census changed as follows:
+
+- raw call sites: 18,497 -> 18,501 (four required failure-cleanup calls added)
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,087
+- missing authority: 13,398 -> 13,354
+- lexical unsafe: unchanged at 3,429
+- function unsafe: 1,670 -> 1,718
+
+The generic bridge's existing cached symbol lookup remains unchanged; no new
+lookup, lock, hash, signature check, or dispatch is introduced. Each corrected
+C-string adds one scoped allocation/copy only on cold target lookup, emission,
+or pass-pipeline setup—not per IR instruction. The four extra raw calls occur
+only during allocation failure cleanup. Typed thunks, signed LLVM admission,
+and the older combined `ffi/llvm_instructions.spl` surface remain unresolved;
+verified-and-signed admission remains 0.
