@@ -2335,6 +2335,32 @@ dispatch.  Existing signed length/status returns are preserved rather than
 converted to booleans.  Production timing/RSS and exact-artifact evidence are
 still unavailable; verified-and-signed admission remains 0.
 
+## simple-core string tagged-handle authority checkpoint
+
+All 19 used tagged-value ABI operations in `core_string.spl` are now confined
+to mandatory-inline capability owners.  This covers array allocation,
+length/get/push/metadata, dictionary queries, boxed scalar conversion, and
+enum construction/projection.  The borrowed `array_items` pointer alone
+requires `ffi, raw_ptr`; the other operations retain the narrower `ffi`
+capability.  Integer discriminants, signed status values, and handles are not
+collapsed to booleans or fabricated defaults.
+
+The extended `simple-core-string-memory-authority.shs` ratchet passed with
+exact token-boundary confinement and call-inventory checks.  The authoritative
+census (50 recognized rows for 54 source occurrences) changed as follows:
+
+- raw call sites: 20,419 -> 20,388
+- missing authority: 16,490 -> 16,440
+- lexical unsafe: 3,010 -> 3,029
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+The mandatory-inline owners preserve every existing handle operation and add
+no allocation, copy, scan, lookup, lock, hash, signature check, or generic
+dispatch.  Production timing/RSS and exact artifact/proof receipts remain
+unavailable, so the family is explicitly unsafe rather than verified-and-
+signed; repository admission remains 0.
+
 ## Pure Simple SSH cipher boundary checkpoint
 
 The general SSH cipher no longer declares or calls `serial_println` or

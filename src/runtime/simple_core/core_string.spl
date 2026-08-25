@@ -48,7 +48,7 @@ extern fn rt_array_push(array: i64, value: i64) -> i8
 extern fn rt_array_get(array: i64, idx: i64) -> i64
 @unsafe(reason: "raw tagged-array handle validity ABI", capabilities: [ffi])
 extern fn array_is_valid(array: i64) -> i64
-@unsafe(reason: "raw tagged-array borrowed items-pointer ABI", capabilities: [ffi])
+@unsafe(reason: "raw tagged-array borrowed items-pointer ABI", capabilities: [ffi, raw_ptr])
 extern fn array_items(array: i64) -> i64
 @unsafe(reason: "raw tagged-array flags ABI", capabilities: [ffi])
 extern fn array_flags(array: i64) -> i64
@@ -148,6 +148,101 @@ fn _sffi_write(fd: i64, ptr: i64, count: i64) -> i64:
 fn _sffi_read(fd: i64, ptr: i64, count: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]):
         read(fd, ptr, count)
+
+@always_inline
+fn _sffi_rt_array_len(array: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_array_len(array)
+
+@always_inline
+fn _sffi_rt_array_len_safe(array: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_array_len_safe(array)
+
+@always_inline
+fn _sffi_rt_array_new(cap: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_array_new(cap)
+
+@always_inline
+fn _sffi_rt_array_new_with_cap_u64(cap: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_array_new_with_cap_u64(cap)
+
+@always_inline
+fn _sffi_rt_byte_array_new(cap: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_byte_array_new(cap)
+
+@always_inline
+fn _sffi_rt_array_push(array: i64, value: i64) -> i8:
+    unsafe(capabilities: [ffi]):
+        rt_array_push(array, value)
+
+@always_inline
+fn _sffi_rt_array_get(array: i64, idx: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_array_get(array, idx)
+
+@always_inline
+fn _sffi_array_is_valid(array: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        array_is_valid(array)
+
+@always_inline
+fn _sffi_array_items(array: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        array_items(array)
+
+@always_inline
+fn _sffi_array_flags(array: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        array_flags(array)
+
+@always_inline
+fn _sffi_rt_dict_len(dict: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_dict_len(dict)
+
+@always_inline
+fn _sffi_rt_dict_contains(dict: i64, key: i64) -> i8:
+    unsafe(capabilities: [ffi]):
+        rt_dict_contains(dict, key)
+
+@always_inline
+fn _sffi_rt_value_int(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_value_int(value)
+
+@always_inline
+fn _sffi_rt_value_as_int(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_value_as_int(value)
+
+@always_inline
+fn _sffi_rt_value_float(value: f64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_value_float(value)
+
+@always_inline
+fn _sffi_rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_new(enum_id, discriminant, payload)
+
+@always_inline
+fn _sffi_rt_enum_discriminant(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+@always_inline
+fn _sffi_rt_enum_id(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_id(value)
+
+@always_inline
+fn _sffi_rt_enum_payload(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_payload(value)
 # UTF-8 slice-boundary audit, stage 1 (COUNTING ONLY). Level-gated by
 # SIMPLE_UTF8_SLICE_AUDIT and DEFAULT OFF; defined in
 # src/runtime/runtime_simd_utf8.c, which owns the validator this tier has no
@@ -333,23 +428,23 @@ pub fn rt_string_builder_free(handle: i64):
 pub fn rt_string_bytes(value: i64) -> i64:
     val ptr = string_ptr(value)
     if ptr < 1:
-        return rt_array_new(0)
+        return _sffi_rt_array_new(0)
     val len = string_len_ptr(ptr)
-    val out = rt_array_new(len)
+    val out = _sffi_rt_array_new(len)
     var i = 0
     while i < len:
         # BUGFIX (byte_span_cross_module_misread_2026-07-19): store the RAW byte,
-        # NOT rt_value_int(byte). `.bytes()` is declared `[u8]`, and a `[u8]`
+        # NOT _sffi_rt_value_int(byte). `.bytes()` is declared `[u8]`, and a `[u8]`
         # array (as produced by `[73u8,..]` literals and `push(u8)`) stores raw
         # untagged byte values in its slots — the `[u8]` element read truncates
         # the slot with `& 0xFF` and does NOT untag. Wrapping in rt_value_int
-        # tagged the slot as `byte << 3` (rt_value_int(73)=584=0x248), so the
+        # tagged the slot as `byte << 3` (_sffi_rt_value_int(73)=584=0x248), so the
         # `[u8]` read returned the tag's low byte (0x48=72) instead of 73. The
         # generic/[i64]/inferred read path conditionally untags, so it happened
         # to still work — which is why the corruption only surfaced at `[u8]`
         # sites (function params, struct fields like ByteSpan.data, `var x:[u8]`).
         # Storing raw matches push-built [u8] exactly and is correct at ALL sites.
-        rt_array_push(out, _sffi_load_u8(string_data_ptr_value(ptr), i) & 255)
+        _sffi_rt_array_push(out, _sffi_load_u8(string_data_ptr_value(ptr), i) & 255)
         i = i + 1
     return out
 
@@ -363,10 +458,10 @@ pub fn rt_string_is_text(value: i64) -> i64:
 pub fn rt_string_chars(value: i64) -> i64:
     val ptr = string_ptr(value)
     if ptr < 1:
-        return rt_array_new(0)
+        return _sffi_rt_array_new(0)
     val data = string_data_ptr_value(ptr)
     val len = string_len_ptr(ptr)
-    val out = rt_array_new(len)
+    val out = _sffi_rt_array_new(len)
     if len < 1:
         return out
     # The pure runtime has no global short-string cache. Reuse each ASCII
@@ -394,7 +489,7 @@ pub fn rt_string_chars(value: i64) -> i64:
                     _sffi_store_i64(ascii_cache, cache_offset, char_value)
         else:
             char_value = rt_string_new(data + byte_index, width)
-        rt_array_push(out, char_value)
+        _sffi_rt_array_push(out, char_value)
         byte_index = byte_index + width
     if ascii_cache > 0:
         _sffi_free(ascii_cache)
@@ -526,7 +621,7 @@ pub fn rt_char_from_code(code: i64) -> i64:
 pub fn rt_any_add(left: i64, right: i64) -> i64:
     if (left & 7) == 1 or (right & 7) == 1:
         return rt_string_concat(rt_to_string(left), rt_to_string(right))
-    return rt_value_int(rt_value_as_int(left) + rt_value_as_int(right))
+    return _sffi_rt_value_int(_sffi_rt_value_as_int(left) + _sffi_rt_value_as_int(right))
 
 pub fn rt_str_hash(value: i64) -> i64:
     if (value & 7) < 1 or (value & 7) > 1:
@@ -613,9 +708,9 @@ pub fn rt_len(value: i64) -> i64:
     if (value & 7) == 1 and value > 4095:
         val kind = _sffi_load_u8(value & -8, 0)
         if kind == 2:
-            return rt_array_len(value)
+            return _sffi_rt_array_len(value)
         if kind == 6:
-            return rt_dict_len(value)
+            return _sffi_rt_dict_len(value)
     return 0
 
 fn runtime_integer_matches(value: i64, expected: i64) -> i64:
@@ -647,12 +742,12 @@ fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:
             val signed_left = left >> 3
             return if signed_left >= 0 and _sffi_load_i64(right & -8, 8) >= 0 and signed_left == _sffi_load_i64(right & -8, 8): 1 else: 0
         return 0
-    val left_disc = rt_enum_discriminant(left)
-    val right_disc = rt_enum_discriminant(right)
+    val left_disc = _sffi_rt_enum_discriminant(left)
+    val right_disc = _sffi_rt_enum_discriminant(right)
     if left_disc >= 0 or right_disc >= 0:
-        if left_disc < 0 or right_disc < 0 or rt_enum_id(left) != rt_enum_id(right) or left_disc != right_disc:
+        if left_disc < 0 or right_disc < 0 or _sffi_rt_enum_id(left) != _sffi_rt_enum_id(right) or left_disc != right_disc:
             return 0
-        return rt_native_eq_inner(rt_enum_payload(left), rt_enum_payload(right), depth + 1)
+        return rt_native_eq_inner(_sffi_rt_enum_payload(left), _sffi_rt_enum_payload(right), depth + 1)
     val left_ptr = registered_string_ptr(left)
     val right_ptr = registered_string_ptr(right)
     if left_ptr > 0 or right_ptr > 0:
@@ -667,22 +762,22 @@ fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:
         if cmp < 0 or cmp > 0:
             return 0
         return 1
-    val left_array = array_is_valid(left) > 0
-    val right_array = array_is_valid(right) > 0
+    val left_array = _sffi_array_is_valid(left) > 0
+    val right_array = _sffi_array_is_valid(right) > 0
     if left_array or right_array:
         if not left_array or not right_array:
             return 0
-        val len = rt_array_len(left)
-        if len != rt_array_len(right):
+        val len = _sffi_rt_array_len(left)
+        if len != _sffi_rt_array_len(right):
             return 0
-        val left_flags = array_flags(left)
-        val right_flags = array_flags(right)
+        val left_flags = _sffi_array_flags(left)
+        val right_flags = _sffi_array_flags(right)
         val left_bytes = (left_flags & 8) > 0
         val right_bytes = (right_flags & 8) > 0
         val left_u64 = (left_flags & 16) > 0
         val right_u64 = (right_flags & 16) > 0
-        val left_items = array_items(left)
-        val right_items = array_items(right)
+        val left_items = _sffi_array_items(left)
+        val right_items = _sffi_array_items(right)
         var i = 0
         if left_bytes and right_bytes:
             while i < len:
@@ -779,12 +874,12 @@ pub fn rt_contains(collection: i64, value: i64) -> i8:
     if (collection & 7) == 1 and collection > 4095:
         val kind = _sffi_load_u8(collection & -8, 0)
         if kind == 6:
-            return rt_dict_contains(collection, value)
+            return _sffi_rt_dict_contains(collection, value)
         if kind == 2:
-            val len = rt_array_len(collection)
+            val len = _sffi_rt_array_len(collection)
             var i = 0
             while i < len:
-                if rt_native_eq(rt_array_get(collection, i), value) > 0:
+                if rt_native_eq(_sffi_rt_array_get(collection, i), value) > 0:
                     return 1
                 i = i + 1
     return 0
@@ -806,10 +901,10 @@ pub fn rt_slice(value: i64, start: i64, end: i64, step: i64) -> i64:
         return 3
     val ptr = string_ptr(value)
     if ptr < 1:
-        if array_is_valid(value) < 1:
+        if _sffi_array_is_valid(value) < 1:
             return 3
         val array_ptr = value & -8
-        val array_len = rt_array_len_safe(value)
+        val array_len = _sffi_rt_array_len_safe(value)
         var array_begin = if start < 0: array_len + start else: start
         var array_finish = if end < 0: array_len + end else: end
         if array_begin < 0:
@@ -826,7 +921,7 @@ pub fn rt_slice(value: i64, start: i64, end: i64, step: i64) -> i64:
             count = count + 1
             count_i = count_i + step
         val flags = _sffi_load_u8(array_ptr, 1)
-        val out = if (flags & 8) > 0: rt_byte_array_new(count) elif (flags & 16) > 0: rt_array_new_with_cap_u64(count) else: rt_array_new(count)
+        val out = if (flags & 8) > 0: _sffi_rt_byte_array_new(count) elif (flags & 16) > 0: _sffi_rt_array_new_with_cap_u64(count) else: _sffi_rt_array_new(count)
         if out < 4096:
             return 3
         val source_items = _sffi_load_i64(array_ptr, 24)
@@ -1403,25 +1498,25 @@ pub fn rt_string_rfind(value: i64, needle: i64) -> i64:
 pub fn rt_string_index_of(value: i64, needle: i64) -> i64:
     val found = rt_string_find(value, needle)
     if found < 0:
-        return rt_enum_new(1, 1, 3)
-    return rt_enum_new(1, 0, found)
+        return _sffi_rt_enum_new(1, 1, 3)
+    return _sffi_rt_enum_new(1, 0, found)
 
 # rt_string_split — split value by delimiter, returning a new array of strings.
 pub fn rt_string_split(value: i64, delimiter: i64) -> i64:
     val ptr = string_ptr(value)
     val del_ptr = string_ptr(delimiter)
     if ptr < 1 or del_ptr < 1:
-        return rt_array_new(4)
+        return _sffi_rt_array_new(4)
     val len = string_len_ptr(ptr)
     val del_len = string_len_ptr(del_ptr)
-    val result = rt_array_new(4)
+    val result = _sffi_rt_array_new(4)
 
     if del_len < 1:
         # Empty delimiter: split every byte into its own string.
         var i = 0
         while i < len:
             val part = rt_string_new(string_data_ptr_value(ptr) + i, 1)
-            rt_array_push(result, part)
+            _sffi_rt_array_push(result, part)
             i = i + 1
         return result
 
@@ -1441,11 +1536,11 @@ pub fn rt_string_split(value: i64, delimiter: i64) -> i64:
         if found < 0:
             # No more delimiters — push remainder and break.
             val part = rt_string_new(string_data_ptr_value(ptr) + start, len - start)
-            rt_array_push(result, part)
+            _sffi_rt_array_push(result, part)
             start = len + 1
         else:
             val part = rt_string_new(string_data_ptr_value(ptr) + start, found - start)
-            rt_array_push(result, part)
+            _sffi_rt_array_push(result, part)
             start = found + del_len
     return result
 
@@ -1457,19 +1552,19 @@ pub fn rt_string_split_limit(value: i64, delimiter: i64, limit: i64) -> i64:
     val ptr = string_ptr(value)
     val del_ptr = string_ptr(delimiter)
     if ptr < 1 or del_ptr < 1:
-        return rt_array_new(4)
+        return _sffi_rt_array_new(4)
     val len = string_len_ptr(ptr)
     val del_len = string_len_ptr(del_ptr)
-    val result = rt_array_new(4)
+    val result = _sffi_rt_array_new(4)
     if limit == 1:
-        rt_array_push(result, value)
+        _sffi_rt_array_push(result, value)
         return result
     if del_len < 1:
         var byte_start = 0
-        while byte_start < len and rt_array_len(result) < limit - 1:
-            rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + byte_start, 1))
+        while byte_start < len and _sffi_rt_array_len(result) < limit - 1:
+            _sffi_rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + byte_start, 1))
             byte_start = byte_start + 1
-        rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + byte_start, len - byte_start))
+        _sffi_rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + byte_start, len - byte_start))
         return result
     var start = 0
     var count = 1
@@ -1482,14 +1577,14 @@ pub fn rt_string_split_limit(value: i64, delimiter: i64, limit: i64) -> i64:
             else:
                 j = j + 1
         if found < 0:
-            rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + start, len - start))
+            _sffi_rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + start, len - start))
             return result
         else:
-            rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + start, found - start))
+            _sffi_rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + start, found - start))
             start = found + del_len
             count = count + 1
     if start <= len:
-        rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + start, len - start))
+        _sffi_rt_array_push(result, rt_string_new(string_data_ptr_value(ptr) + start, len - start))
     return result
 
 # rt_string_join — join an array of strings with a separator.
@@ -1502,7 +1597,7 @@ pub fn rt_string_join(array: i64, separator: i64) -> i64:
     # `< 4096` gate).
     if array < 4096:
         return rt_string_new(0, 0)
-    val arr_len = rt_array_len_safe(array)
+    val arr_len = _sffi_rt_array_len_safe(array)
     if arr_len <= 0:
         return rt_string_new(0, 0)
     val sep_ptr = string_ptr(separator)
@@ -1514,7 +1609,7 @@ pub fn rt_string_join(array: i64, separator: i64) -> i64:
     var total = 0
     var i = 0
     while i < arr_len:
-        val elem = rt_array_get(array, i)
+        val elem = _sffi_rt_array_get(array, i)
         val elem_ptr = string_ptr(elem)
         if elem_ptr > 0:
             total = total + string_len_ptr(elem_ptr)
@@ -1534,7 +1629,7 @@ pub fn rt_string_join(array: i64, separator: i64) -> i64:
         if i > 0 and sep_len > 0:
             _sffi_memcpy(string_data_ptr_value(out_ptr) + offset, string_data_ptr_value(sep_ptr), sep_len)
             offset = offset + sep_len
-        val elem = rt_array_get(array, i)
+        val elem = _sffi_rt_array_get(array, i)
         val elem_ptr = string_ptr(elem)
         if elem_ptr > 0:
             val elem_len = string_len_ptr(elem_ptr)
@@ -1610,7 +1705,7 @@ pub fn rt_string_to_float(value: i64) -> i64:
         if is_space_byte(_sffi_load_u8(cursor, 0)) < 1:
             return 3
         cursor = cursor + 1
-    return rt_value_float(parsed)
+    return _sffi_rt_value_float(parsed)
 
 # -- Lexer source cache (mirrors src/runtime/runtime_native.c
 # rt_lexer_source_set / rt_lexer_source_slice). The parser/lexer set the
