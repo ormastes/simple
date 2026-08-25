@@ -347,20 +347,49 @@ pub extern "C" fn rt_tls_client_read(conn: i64, max_bytes: i64) -> crate::value:
     rt_tls_client_read_timeout(conn, max_bytes, TLS_CLIENT_IO_TIMEOUT.as_millis() as i64)
 }
 
+/// Checked client read: NIL is an I/O/contract failure, empty text is clean EOF.
+#[no_mangle]
+pub extern "C" fn rt_tls_client_read_checked(
+    conn: i64,
+    max_bytes: i64,
+) -> crate::value::RuntimeValue {
+    tls_client_read_timeout_impl(
+        conn,
+        max_bytes,
+        TLS_CLIENT_IO_TIMEOUT.as_millis() as i64,
+        true,
+    )
+}
+
 #[no_mangle]
 pub extern "C" fn rt_tls_client_read_timeout(
     conn: i64,
     max_bytes: i64,
     timeout_ms: i64,
 ) -> crate::value::RuntimeValue {
-    if max_bytes <= 0 { return empty_text(); }
+    tls_client_read_timeout_impl(conn, max_bytes, timeout_ms, false)
+}
+
+#[inline]
+fn tls_client_read_timeout_impl(
+    conn: i64,
+    max_bytes: i64,
+    timeout_ms: i64,
+    checked: bool,
+) -> crate::value::RuntimeValue {
+    if max_bytes <= 0 {
+        return tls_client_read_failure(checked);
+    }
     let timeout = match tls_client_timeout_from_ms(timeout_ms) {
         Some(t) => t.min(TLS_CLIENT_IO_TIMEOUT),
-        None => return empty_text(),
+        None => return tls_client_read_failure(checked),
     };
     let entry_arc = {
         let guard = TLS_CLIENT_CONNS.lock().unwrap();
-        match guard.get(&conn) { Some(a) => a.clone(), None => return empty_text() }
+        match guard.get(&conn) {
+            Some(entry) => entry.clone(),
+            None => return tls_client_read_failure(checked),
+        }
     };
     let size = max_bytes.min(65_536) as usize;
     let mut buf = vec![0u8; size];
@@ -368,21 +397,27 @@ pub extern "C" fn rt_tls_client_read_timeout(
         let mut entry_guard = entry_arc.lock().unwrap();
         let entry = &mut *entry_guard;
         if apply_socket_timeout(&entry.stream, timeout).is_err() {
-            return empty_text();
+            return tls_client_read_failure(checked);
         }
         let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
         tls_stream.read(&mut buf)
     };
     let n = match read_result {
         Ok(n) => n,
-        Err(error) => {
-            eprintln!("rt_tls_client_read: {}", error);
+        Err(_) => {
             TLS_CLIENT_CONNS.lock().unwrap().remove(&conn);
-            return empty_text();
+            return tls_client_read_failure(checked);
         }
     };
-    if n == 0 { return empty_text(); }
+    if n == 0 {
+        return empty_text();
+    }
     unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), n as u64) }
+}
+
+#[inline]
+fn tls_client_read_failure(checked: bool) -> crate::value::RuntimeValue {
+    if checked { crate::value::RuntimeValue::NIL } else { empty_text() }
 }
 
 #[no_mangle]
@@ -842,10 +877,16 @@ pub extern "C" fn rt_tls_hash_cert(_cert_path: crate::value::RuntimeValue) -> cr
 
 #[cfg(test)]
 mod platform_trust_tests {
-    use super::TLS_CLIENT_CONFIG;
+    use super::{rt_tls_client_read, rt_tls_client_read_checked, TLS_CLIENT_CONFIG};
 
     #[test]
     fn platform_verifier_initializes() {
         assert!(TLS_CLIENT_CONFIG.is_ok(), "{:?}", TLS_CLIENT_CONFIG.as_ref().err());
+    }
+
+    #[test]
+    fn checked_read_distinguishes_invalid_handle_from_legacy_empty_text() {
+        assert!(rt_tls_client_read_checked(-1, 1024).is_nil());
+        assert!(!rt_tls_client_read(-1, 1024).is_nil());
     }
 }

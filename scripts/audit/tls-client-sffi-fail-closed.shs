@@ -9,6 +9,8 @@ runtime_net="$root/src/compiler_rust/runtime/src/value/net.rs"
 runtime_stub="$root/src/compiler_rust/runtime/src/value/net_tls_stub.rs"
 runtime_value_mod="$root/src/compiler_rust/runtime/src/value/mod.rs"
 runtime_lib="$root/src/compiler_rust/runtime/src/lib.rs"
+runtime_tls="$root/src/compiler_rust/runtime/src/value/net_tls.rs"
+web_client="$root/src/app/ui.web/tls_client.spl"
 failed=0
 
 if grep -n -E '_ => (RuntimeValue::NIL|0)|unwrap_or\((0|false)\)' "$source_file"; then
@@ -32,8 +34,19 @@ if ! grep -q '^export use std\.nogc_sync_mut\.io\.tls_sffi\.\*$' "$app_facade"; 
     echo "application TLS facade must re-export the canonical owner" >&2
     failed=1
 fi
-if [ "$(grep -c '^[[:space:]]*extern fn rt_tls_' "$canonical_facade")" -ne 35 ]; then
+if [ "$(grep -c '^[[:space:]]*extern fn rt_tls_' "$canonical_facade")" -ne 36 ]; then
     echo "canonical TLS declaration inventory changed without contract review" >&2
+    failed=1
+fi
+if ! grep -q 'extern fn rt_tls_client_read_checked(conn: i64, max_bytes: i64) -> text?' "$canonical_facade" ||
+   ! grep -q 'rt_tls_client_read_checked' "$web_client" ||
+   grep -q '^[[:space:]]*rt_tls_client_read,$' "$web_client"; then
+    echo "web TLS client must use nullable checked reads, not ambiguous empty-text reads" >&2
+    failed=1
+fi
+if ! grep -q 'return crate::value::RuntimeValue::NIL' "$runtime_tls" ||
+   ! grep -q 'if n == 0' "$runtime_tls"; then
+    echo "checked TLS provider must distinguish failure NIL from clean EOF" >&2
     failed=1
 fi
 if [ -e "$runtime_stub" ] || grep -q 'net_tls_stub.rs' "$runtime_net"; then

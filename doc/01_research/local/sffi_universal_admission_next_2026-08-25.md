@@ -603,3 +603,29 @@ The TLS static fail-closed ratchet also passed. This changes provider behavior,
 not Simple declaration inventory, so the ledger remains 11,942 rows / 3,156
 symbols, 1,189 tagged, 637 `unsafe_contract_declared`, 10,487 untouched, and
 zero exact-artifact verified-and-signed.
+
+## TLS client checked-read checkpoint
+
+The rustls client provider previously returned empty text for invalid input,
+unknown handles, socket-timeout setup failure, read failure, and clean EOF.
+`rt_tls_client_read_checked` now returns `nil` for the failure cases while
+retaining empty text for clean EOF. The web TLS client consumes that nullable
+contract and maps only `nil` to `Result.Err`; legitimate empty reads remain
+`Result.Ok("")`. The legacy symbol remains available for unmigrated callers.
+
+Both entry points share one implementation. The checked success path keeps one
+handle lookup, one bounded buffer allocation, one socket read, and one text
+lift; it adds no descriptor, copy, retry, generic dispatch, or symbol lookup.
+The legacy path adds only a failure-path conversion to its historical empty
+sentinel. The TLS static ratchet, both runtime feature compile checks, and the
+focused runtime and interpreter bridge tests passed. The compiler now selects
+the real `runtime-tls` provider explicitly, and its compile check passed; this
+prevents fake-stub removal from leaving registered interpreter handlers without
+implementations. Rust formatting remains WARN
+because unrelated `wsffi_native.rs` and surrounding export lists were already
+not rustfmt-clean; they were not absorbed into this lane.
+
+One tagged declaration/symbol is added for the checked ABI: 11,943 rows / 3,157
+symbols, 1,190 tagged, 638 `unsafe_contract_declared`, 10,487 untouched, and
+zero exact-artifact verified-and-signed. The broader TLS/SFFI surface remains
+unsafe and unadmitted.

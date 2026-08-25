@@ -413,3 +413,9 @@ passing placeholder.
     fail linkage/admission when the real provider is absent. Preserve the real
     provider hot path byte-for-byte and keep both feature configurations under
     compile checks. Next migrate raw application TLS imports to checked owners.
+79. Keep web TLS reads on `rt_tls_client_read_checked`: nil is provider/contract
+    failure, empty text is clean EOF, and nonempty text is data. Preserve the
+    shared single-read implementation so the checked success path adds no
+    descriptor, copy, retry, lookup, allocation, or dispatch. Migrate server
+    reads and remaining browser/client declarations next; exact-artifact
+    signing/admission remains zero and must not be inferred from this check.

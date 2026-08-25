@@ -863,6 +863,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_tls_client_connect_address_with_sni_timeout",
     "rt_tls_client_write",
     "rt_tls_client_read",
+    "rt_tls_client_read_checked",
     "rt_tls_client_write_timeout",
     "rt_tls_client_read_timeout",
     "rt_tls_client_close",
