@@ -1781,3 +1781,31 @@ implementation of the six missing symbols.
 Estimated repository totals remain 11,639 declarations / 3,141 symbols.
 Unsafe-tagged rows increase from 2,343 to 2,366, untouched rows decrease from
 9,117 to 9,094, and exact-artifact verified-and-signed admission remains zero.
+
+## `CudaDynFfi` authority-reduction checkpoint
+
+The second Engine2D CUDA facade declared 21 static hooks. Twelve were unused,
+unbacked helpers/aliases, or an ABI-incompatible function-handle declaration
+under the canonical module/name `rt_cuda_launch_kernel` symbol. The facade now
+retains only nine provider-backed declarations, all explicitly `unsafe(ffi)`
+and lexically scoped. The class itself remains unsafe because dynamic symbol
+identity, handle generations, ownership, and pointer arguments are unproved.
+
+Static PTX loading, function lookup, and synchronization now use the canonical
+`rt_cuda_module_load_data`, `rt_cuda_module_get_function`, and `rt_cuda_sync`
+identities. No exact static function-handle launch provider exists, so that
+branch fails closed instead of invoking the canonical symbol with shifted
+arguments and undefined behavior. Dynamic mode retains its one direct
+`cuLaunchKernel` call. Legacy shutdown also returns failure rather than claiming
+an operation that the facade cannot perform.
+
+Scalar guards reject invalid device, module, function, allocation, geometry,
+and shared-memory inputs before foreign execution. Generic dynamic dispatch is
+still prohibited for device count, context creation, and memory allocation
+because those CUDA APIs return through out pointers. Valid dynamic launch and
+typed static calls gain no allocation, copy, lookup beyond the already selected
+symbol, lock, hash, signing work, provider call, or adapter layer.
+
+Estimated repository totals decrease to 11,627 declarations / 3,141 symbols.
+Unsafe-tagged rows increase from 2,366 to 2,375, untouched rows decrease from
+9,094 to 9,073, and exact-artifact verified-and-signed admission remains zero.

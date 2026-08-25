@@ -694,3 +694,11 @@ passing placeholder.
      fail closed. Preserve direct launch/copy paths with constant-time extent
      guards and no per-call hashing, signing, discovery, extra allocation,
      copy, lock, lookup, or generic dispatch.
+133. Keep `CudaDynFfi` reduced to nine exact, explicitly unsafe static CUDA
+     declarations. Never restore its unbacked Engine2D helpers, legacy shutdown,
+     old aliases, or function-handle signature under the canonical module/name
+     `rt_cuda_launch_kernel` identity. Static function-handle launch must fail
+     closed until a uniquely named typed provider exists; dynamic launch may
+     retain one direct `cuLaunchKernel` call. Continue using typed static thunks
+     for CUDA out-parameter operations. Add no per-launch allocation, copy,
+     hash, signature check, discovery, lock, lookup, or adapter dispatch.
