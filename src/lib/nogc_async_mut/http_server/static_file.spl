@@ -380,6 +380,8 @@ class StaticFileHandler:
                     reason: "Range Not Satisfiable",
                     headers: [
                         ("Content-Range", "bytes */" + size.to_text()),
+                        ("Accept-Ranges", "bytes"),
+                        ("ETag", etag),
                         ("Server", "SimpleServer")
                     ],
                     body: "",
@@ -390,7 +392,30 @@ class StaticFileHandler:
                     chunked: false
                 )
             val range_result = static_file_serve_range(actual_path, range.0, range.1, size, etag, mime)
+            if request.method == "HEAD":
+                return static_file_head_response(range_result, range.1 - range.0 + 1)
             return range_result
+
+        # HEAD returns the same representation metadata as GET without
+        # reading the file or scheduling a sendfile body.
+        if request.method == "HEAD":
+            return HttpResponseData(
+                status: 200,
+                reason: "OK",
+                headers: [
+                    ("Content-Type", mime),
+                    ("Content-Length", size.to_text()),
+                    ("ETag", etag),
+                    ("Accept-Ranges", "bytes"),
+                    ("Server", "SimpleServer")
+                ],
+                body: "",
+                body_bytes: [],
+                body_file: "",
+                body_offset: 0,
+                body_length: 0,
+                chunked: false
+            )
 
         # For small files, read into memory and try compression cache.
         # For large files, use sendfile (body_file) — cannot be cached.
@@ -495,6 +520,10 @@ fn static_file_parse_range(range_header: text, file_size: i64) -> (i64, i64):
     if not range_header.starts_with(prefix):
         return (-1, -1)
     val spec = range_header.slice(prefix.len(), range_header.len())
+    # Multipart byte ranges are intentionally unsupported by this bounded
+    # static-file path. Reject them instead of silently serving only one.
+    if spec.contains(","):
+        return (-1, -1)
     val dash_pos = spec.index_of("-")
     if dash_pos < 0:
         return (-1, -1)
@@ -512,7 +541,7 @@ fn static_file_parse_range(range_header: text, file_size: i64) -> (i64, i64):
         val suffix = _parse_i64(after)
         if suffix <= 0:
             return (-1, -1)
-        start = file_size - suffix
+        start = if suffix >= file_size: 0 else: file_size - suffix
         end = file_size - 1
     elif after.len() == 0:
         # bytes=start-
@@ -590,6 +619,22 @@ fn static_file_serve_range(path: text, start: i64, end: i64, file_size: i64, eta
         body_file: path,
         body_offset: start,
         body_length: length,
+        chunked: false
+    )
+
+fn static_file_head_response(resp: HttpResponseData, content_length: i64) -> HttpResponseData:
+    """Suppress a filesystem response body while retaining GET metadata."""
+    var headers = resp.headers
+    headers.push(("Content-Length", content_length.to_text()))
+    HttpResponseData(
+        status: resp.status,
+        reason: resp.reason,
+        headers: headers,
+        body: "",
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
         chunked: false
     )
 

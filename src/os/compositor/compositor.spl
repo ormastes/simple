@@ -21,7 +21,7 @@ use common.ui.host_input_event.{
     HOST_MOD_CTRL,
     HOST_MOD_ALT,
 }
-use common.ui.key_code.{CANON_TAB}
+use common.ui.key_code.{CANON_F4, CANON_TAB}
 
 # Per-frame ceiling on how many events are pulled from a backend into the
 # queue. Fixed so a chatty or stuck backend cannot starve the frame.
@@ -504,6 +504,21 @@ class Compositor:
                 self.focused_idx = prior_index
         if self.focused_idx < 0:
             self._focus_top_visible()
+
+    me close_focused_window() -> bool:
+        """Close the compositor-owned focused surface and select its fallback.
+
+        Global keyboard producers use this owner operation instead of copying
+        focused-index checks and destruction policy into backend-specific
+        paths. destroy_window retains responsibility for cancelling pointer
+        interaction, releasing content, and choosing the next visible focus.
+        """
+        if (self.focused_idx < 0 or
+            self.focused_idx >= self.surfaces.len()):
+            return false
+        val focused_id = self.surfaces[self.focused_idx].id
+        self.destroy_window(focused_id)
+        true
 
     me focus_window(id: i32):
         val found = self.surface_index(id as u64)
@@ -1218,6 +1233,9 @@ class Compositor:
                     else:
                         self.cycle_focus()
                     return
+                if ((mods & HOST_MOD_ALT) != 0 and code == CANON_F4):
+                    self.close_focused_window()
+                    return
                 if ch == "":
                     return
                 val ctrl = (mods & HOST_MOD_CTRL) != 0
@@ -1390,10 +1408,7 @@ class Compositor:
             elif self.ps2_alt_held and sc == 0x0F:
                 self.cycle_focus()
             elif self.ps2_alt_held and sc == 0x3E:
-                if (self.focused_idx >= 0 and
-                    self.focused_idx < self.surfaces.len()):
-                    val focused_id = self.surfaces[self.focused_idx].id
-                    self.destroy_window(focused_id)
+                self.close_focused_window()
             elif sc == 0x57:
                 self.input_sequence = self.input_sequence + 1
                 self.pending_fullscreen_sequence = self.input_sequence

@@ -360,9 +360,25 @@ impl SshSession:
                 # payload is exactly the message byte plus one uint32 channel;
                 # rejecting trailing bytes keeps malformed connection-layer
                 # frames from being accepted as a valid state transition.
-                if payload.len() != 5u64 or not self.channels.mark_peer_eof(_read_u32_stable(payload, 1u64)):
+                if payload.len() != 5u64:
                     self.transition_closed()
                     return
+                val eof_recipient = _read_u32_stable(payload, 1u64)
+                if not self.channels.mark_peer_eof(eof_recipient):
+                    self.transition_closed()
+                    return
+                # EOF ends the peer-to-server byte stream, so an SFTP parser
+                # can never complete any retained partial frame after this
+                # point.  Release subsystem-owned framing state immediately,
+                # while preserving RFC 4254 half-close semantics for the SSH
+                # channel itself.  Waiting for CHANNEL_CLOSE previously kept
+                # attacker-controlled retained bytes and future filesystem
+                # handles alive indefinitely on a multiplexed connection.
+                if self.sftp_enabled and self.sftp_local_channel_id == eof_recipient:
+                    self.sftp.close_all()
+                    self.sftp = SftpSessionV3.new()
+                    self.sftp_enabled = false
+                    self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
                 continue
             elif msg_type == 97:
                 self._handle_channel_close(payload)

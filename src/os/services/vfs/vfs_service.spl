@@ -23,6 +23,7 @@
 #   MOUNT_LIST: (empty)
 #   CHMOD:  path (text) \0 mode (u16)
 #   SYMLINK: target (text) \0 link_path (text)
+#   READLINK: path (text)
 
 use os.services.vfs.vfs.{VfsManager, SeekWhence}
 use os.kernel.types.fs_types.{FileDescriptor, FileFlags, FsNode, FsNodeKind, DirEntry}
@@ -48,6 +49,7 @@ val VFS_SEEK: u32 = 11
 val VFS_CHMOD: u32 = 12
 val VFS_SYMLINK: u32 = 13
 val VFS_RMDIR: u32 = 14
+val VFS_READLINK: u32 = 17
 
 # VFS_OPEN carries the kernel's POSIX O_* bit layout, never a service-private
 # flag encoding.  Keep this decoding boundary aligned with os.kernel.fd_table.
@@ -208,6 +210,7 @@ impl VfsService:
             VFS_CHMOD: self.dispatch_chmod(src_port, payload_addr, payload_len)
             VFS_SYMLINK: self.dispatch_symlink(src_port, payload_addr, payload_len)
             VFS_RMDIR: self.dispatch_rmdir(src_port, payload_addr, payload_len)
+            VFS_READLINK: self.dispatch_readlink(src_port, payload_addr, payload_len)
             _: self.send_error_reply(src_port, STATUS_INVALID, "unknown VFS method")
 
     # ========================================================================
@@ -417,6 +420,15 @@ impl VfsService:
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_ERR, e)
 
+    me dispatch_readlink(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Parse READLINK request: path(text)."""
+        val path = _read_text(payload_addr, payload_len)
+        match self.vfs.readlink(path):
+            Result.Ok(target):
+                self.send_text_reply(src_port, STATUS_OK, target)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
+
     me dispatch_mount_list(src_port: u64):
         """Return list of mount points."""
         var reply_text = ""
@@ -584,6 +596,7 @@ fn _vfs_request_payload_is_valid(method: u32, addr: u64, payload_len: u32) -> bo
         VFS_CHMOD: _vfs_has_exact_path_before_trailer(addr, payload_len, 2u32)
         VFS_SYMLINK: _vfs_has_exact_two_nonempty_nul_paths(addr, payload_len)
         VFS_RMDIR: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_READLINK: _vfs_has_nonempty_plain_path(addr, payload_len)
         _: true
 
 fn _read_text(addr: u64, len: u32) -> text:
