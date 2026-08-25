@@ -296,7 +296,7 @@ helpers supply port operations invoked by that authorized holder; they never
 receive, issue, grant, supply, or hold the capability. The exact API is:
 
 ```text
-open_view_root(capability) -> SafeViewRoot
+open_view_root(grant: MaterializerRootGrant) -> SafeViewRoot
 stage_generated(root, projection_uid, relative_path, bytes) -> StagedGeneratedFile
 create_generated_directory(root, relative_path) -> CreatedDirectory
 atomic_replace_generated(root, StagedGeneratedFile, destination) -> AppliedMutation
@@ -304,6 +304,17 @@ remove_generated(root, relative_path, expected_projection_uid) -> AppliedMutatio
 sync_generated_file(root, relative_path) -> DurabilityReceipt
 sync_generated_directory(root, relative_path) -> DurabilityReceipt
 ```
+
+Inside the authorized `ProjectionService` materializer adapter,
+`SafeFilesystem.Materializer` is consumed to create one non-authorizing
+`MaterializerRootGrant`. The grant contains only opaque view-root identity,
+normalized generated-path prefix/set, allowed materialization operation set,
+projection/snapshot binding, byte/count budget, and expiry. It contains no
+principal, tenant, policy, bearer token, credential, capability, or reusable
+authorization authority. `open_view_root` and external helper messages receive
+only this sanitized grant. A provider validates operation arguments against the
+grant's bounds but cannot widen them or use the grant to authorize another
+workspace, root, projection, or operation.
 
 There are no raw-write, absolute-path, recursive-delete, or symlink-following
 operations. The port cannot mutate canonical artifacts, aliases, journals, or
@@ -328,15 +339,16 @@ protocol version. Startup verifies ownership/permissions, digest, protocol,
 the exact `MaterializerSafeFilesystemPort` operation set above,
 descriptor-relative/no-follow guarantees, and a fresh
 challenge response before admitting the helper as an operation provider.
-Requests use bounded
-length-prefixed canonical messages, workspace/view root handles or OS-equivalent
-root capabilities, request nonce, operation, relative components, expected file
-identities/hashes, and deadline. Responses bind nonce, protocol, helper build
-digest, result identities, and durable-operation receipt. Digest/protocol drift,
-unexpected output, timeout, restart, ambiguous identity, or missing guarantee
-revokes the helper's operation-provider admission and fails closed. The helper
-never accepts an arbitrary absolute mutation path and never receives the
-authorization capability.
+Requests use bounded length-prefixed canonical messages containing the sanitized
+`MaterializerRootGrant`, OS-equivalent opaque root identity, request nonce,
+operation, relative components, expected file identities/hashes, and deadline.
+They never contain the source capability or authorization metadata. Responses
+bind nonce, protocol, helper build digest, result identities, and
+durable-operation receipt. Digest/protocol drift, unexpected output, timeout,
+restart, ambiguous identity, or missing guarantee revokes the helper's
+operation-provider admission and fails closed. The helper never accepts an
+arbitrary absolute mutation path and never receives the authorization
+capability.
 
 The `ProjectionService` materializer adapter opens the view root, creates
 generated directories, stages each projection-bound file, publishes it with
@@ -428,9 +440,12 @@ The same positive suite runs the `ProjectionService` materializer adapter after
 `TrustedFilesystemHelper` operation provider. First publish, incremental
 replace, cleanup, crash recovery, identity preservation, and
 descriptor-relative race resistance must work on each declared supported
-platform. Tests assert that neither provider observes or possesses the
-capability. Helper tests also reject digest or protocol drift, replayed nonce,
-arbitrary absolute paths,
+platform. Tests assert that the adapter derives exactly one bounded
+`MaterializerRootGrant`, neither provider observes or possesses the capability,
+and captured native/helper requests contain no principal, policy, token,
+credential, or authorization authority. Tests also reject widened path/operation
+bounds, expired or replayed grants, cross-snapshot/projection use, digest or
+protocol drift, replayed nonce, arbitrary absolute paths,
 malformed/oversized frames, timeout, and helper restart.
 `PortableNodeFilesystemVerifier` has read-only diagnostics tests only. A
 platform is not reported as supporting materialization if it has only portable

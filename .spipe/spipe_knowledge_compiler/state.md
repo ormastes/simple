@@ -47,7 +47,7 @@ Implement the selected SPipe Knowledge Compiler direction end to end as a portab
 - Generated-manual review owner: primary Codex, after an independent sidecar checks operator readability and trace coverage.
 
 ## Phase
-design-review-failed
+design-done
 
 ## Log
 - dev: Created state file with 18 acceptance criteria (type: feature); recorded parallel ownership, shared interfaces, manual steps, checker helpers, and highest-capability review.
@@ -60,3 +60,5 @@ design-review-failed
 - resumed-review-cycle-1: Closed five prior blockers; failed on search adapter injection and exact safe-filesystem API/holder consistency.
 - resumed-review-cycle-2: Closed adapter and API/holder contracts; failed on materializer capability issuer/holder wording in the MCP design.
 - resumed-review-cycle-3: `STATUS: FAIL`; stopped at the fresh three-cycle cap. Remaining blockers: filesystem port signature/provider visibility must not expose `SafeFilesystem.Materializer`; TLDR must route issuance from `AuthorizationPort`; `RevisionId` dirty-overlay wording must be singular; Wave 10 must exclude completed DBFS migration; ADR-SPKC-013 must require registry-authorized `executable_policy`, not generic reviewed status.
+- final-review-cycle-1: Closed provider isolation, RevisionId, Wave-10 DBFS, and ADR trust contradictions; failed only on TLDR capability-issuer wording.
+- final-review-cycle-2: `STATUS: PASS`; independent highest-capability review found no implementation blockers. Design phase accepted.

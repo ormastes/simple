@@ -95,7 +95,7 @@ isolation is part of the tuple.
 | `WorkspaceId`, `ProjectId`, `WorktreeId` | registry-assigned, immutable |
 | `ArtifactUid`, `SectionUid`, `EdgeUid` | immutable, never reused |
 | `SemanticKey` | normalized dotted name, renameable, alias-retained |
-| `RevisionId` | VCS commit or explicit dirty-overlay revision |
+| `RevisionId` | fully resolved committed/base revision, or registry-resolved immutable base for non-VCS; never a dirty-overlay revision—every dirty byte contributes only to `overlay_generation_hash` |
 | `ContentHash` | SHA-256 over canonical bytes |
 | `SchemaVersion` | integer major/minor; incompatible major fails closed |
 
@@ -872,8 +872,11 @@ maintenance review accepts the adapter.
 
 ### Wave 10 — Database/server and optional semantics
 
-- [ ] Complete textual, embedded/DBFS, and server adapters; WAND/Block-Max WAND,
-  tenancy/capability/cancellation, optional ANN and safe semantic policy.
+- [ ] Complete the textual BM25 side index, remaining embedded-database
+  consumers, and server adapters; add WAND/Block-Max WAND,
+  tenancy/capability/cancellation, optional ANN, and safe semantic policy.
+- [ ] Do not reopen DBFS scorer/facade migration here: its compatibility and
+  parity gate completed in Wave 4; Wave 10 may consume that frozen surface only.
 - **Gate:** snapshot/transaction/auth semantics hold per tier, optimized top-k
   equals exhaustive, and semantic outage retains exact/BM25/graph behavior.
 

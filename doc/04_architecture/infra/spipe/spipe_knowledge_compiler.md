@@ -128,11 +128,17 @@ atomic move into the transaction rollback area; cleanup follows commit receipt.
 `AuthorizationPort.authorize_materializer(view, principal, snapshot)` separately
 issues non-copyable `SafeFilesystem.Materializer`, bound to one worktree's view
 root, projection/snapshot, generated relative paths, budget, and expiry. Only
-the `ProjectionService` materializer adapter may hold it. The exact
+the authorized `ProjectionService` adapter may hold it; it must never pass that
+capability to a provider. The adapter validates the binding and derives a
+sanitized, non-authorizing `MaterializerRootGrant` containing only opaque root
+identity, normalized generated-path bounds, allowed operation set,
+projection/snapshot binding, byte/count budget, and expiry. It contains no
+principal, policy, token, credential, capability, or reusable authorization.
+The provider sees only this operation/root-bound grant. The exact
 `MaterializerSafeFilesystemPort` API is:
 
 ```text
-open_view_root(capability) -> SafeViewRoot
+open_view_root(grant: MaterializerRootGrant) -> SafeViewRoot
 stage_generated(root, projection_uid, relative_path, bytes) -> StagedGeneratedFile
 create_generated_directory(root, relative_path) -> CreatedDirectory
 atomic_replace_generated(root, StagedGeneratedFile, destination) -> AppliedMutation
@@ -144,7 +150,8 @@ sync_generated_directory(root, relative_path) -> DurabilityReceipt
 Both ports are descriptor-relative and no-follow. `SafeFilesystem.Refactor` and
 `SafeFilesystem.Materializer` are least-authority and non-implying: neither port
 accepts the other capability, and neither canonical/rollback root namespace can
-address a generated-view root or vice versa.
+address a generated-view root or vice versa. `MaterializerRootGrant` is not a
+third capability and cannot be exchanged at `AuthorizationPort`.
 
 ### 3.4 Common records
 
