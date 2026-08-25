@@ -5414,3 +5414,36 @@ dispatch, or boot-state transition was added. MMIO/DMA ownership and mutex
 providers remain separate unverified boundaries, and exact artifacts/evidence
 remain unsigned. This module and the wider estate are not globally verified
 or signed; verified-and-signed admission remains 0.
+
+## POSIX dynamic-call bridge authority checkpoint
+
+All 14 raw declarations in the POSIX dynamic-call bridge now carry explicit
+`ffi, raw_ptr` authority. The exact provider-query and CLI-command owners and
+all seven generic integer-only call owners carry the same caller-visible
+authority. A null symbol address is now rejected as negative failure while an
+existing negative loader diagnostic is preserved; null can no longer reach a
+generic call and appear as integer zero.
+
+The exact two bridge families retain their existing bounded allocations,
+request/result cleanup, decoded-size checks, and status agreement checks. The
+focused `posix-dynlib-sffi-authority.shs` audit passed and records provider
+coverage as 6 symbols in both typed registries, 1 in one registry, and 7 in
+neither. Registration does not establish arbitrary target ABI compatibility,
+handle lifetime, artifact identity, or signature trust.
+
+The authoritative census changed exactly by the 25 newly bounded calls:
+
+- raw call sites: unchanged at 18,568
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,088
+- missing authority: 13,569 -> 13,544
+- lexical unsafe: unchanged at 3,426
+- function unsafe: 1,573 -> 1,598
+
+The null hardening broadens one existing constant branch and adds no
+allocation, copy, lookup, lock, hash, signature operation, or dispatch. The
+generic wrappers still perform symbol-name resolution on every call and use
+an all-integer ABI; this pre-existing cost and ABI unsafety remain visible and
+make them ineligible for hardened/critical hot paths. Typed cached thunks and
+signed provider admission remain unimplemented, so verified-and-signed
+admission remains 0.
