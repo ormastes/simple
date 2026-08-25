@@ -120,7 +120,68 @@ candidate_frontend_smoke() (
     }
     retention_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
         "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$retention_output" 2>/dev/null) || exit 1
-    [ "$retention_stdout" = 3 ]
+    [ "$retention_stdout" = 3 ] || exit 1
+
+    # Positional-entry no-crash probe (2026-08-25). Both probes above name the
+    # entry with the `--entry` FLAG, and that flag form is the ONLY form this
+    # gate ever exercised. Measured on build/bootstrap/s5 and s5full: the SAME
+    # binary that passes everything above SIGSEGVs (rc=139,
+    # E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED) when the identical build is
+    # asked for with a POSITIONAL entry instead -- the form a human types. That
+    # is how a compiler unable to compile hello world was ADMITTED. See
+    # doc/08_tracking/bug/stage2_admitted_while_hello_world_native_build_segv_2026-08-25.md
+    #
+    # This is a NO-CRASH check, not a must-succeed check, and must stay that
+    # way: a healthy compiler may legitimately reject a positional entry with a
+    # clean non-zero diagnostic, and demanding success here would false-reject
+    # it. Only death-by-signal and a hang are failures. `--entry-closure` is
+    # mandatory -- without it the candidate scans the default source roots and
+    # runs unbounded on a two-line fixture.
+    positional_output=$probe_dir/hello_world_positional
+    SIMPLE_BINARY="$candidate" \
+    SIMPLE_BIN="$candidate" \
+    SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
+    SIMPLE_FRONTEND_DELEGATE="$candidate" \
+    SIMPLE_FRONTEND_DELEGATED=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_EXECUTION_MODE= \
+    SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
+    SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
+    SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
+        "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+        "${COMPILER_BUILD_TIMEOUT_SECONDS}s" "$candidate" native-build \
+        --backend "$candidate_backend" \
+        --runtime-bundle core-c-bootstrap \
+        --entry-closure \
+        --cache-dir "$probe_dir/cache-hello-world-positional" \
+        --mode one-binary \
+        scripts/check/cert/redeploy_gate/fixtures/hello_world.spl \
+        --output "$positional_output" >>"$probe_dir/build.log" 2>&1
+    # Status read DIRECTLY into a variable on the line after the command --
+    # never through a pipe, whose $? is the last element's status.
+    positional_status=$?
+    if [ "$positional_status" -eq 124 ]; then
+        echo "candidate_frontend_smoke: candidate HUNG (timeout) native-building a two-line hello world with a positional entry" >&2
+        exit 1
+    fi
+    if [ "$positional_status" -ge 128 ]; then
+        echo "candidate_frontend_smoke: candidate CRASHED (signal $((positional_status - 128)), rc=$positional_status) native-building a two-line hello world with a positional entry" >&2
+        tail -c 4096 "$probe_dir/build.log" >&2
+        exit 1
+    fi
+    # A clean non-zero exit is deliberately accepted here; see above. When the
+    # build DID succeed, the artifact must actually run and print the fixture's
+    # output -- an exit-0 build proves nothing about the binary it produced.
+    if [ "$positional_status" -eq 0 ] && [ -x "$positional_output" ]; then
+        positional_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+            "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$positional_output" 2>/dev/null)
+        positional_run_status=$?
+        if [ "$positional_run_status" -ne 0 ] || [ "$positional_stdout" != hello ]; then
+            echo "candidate_frontend_smoke: hello world built from a positional entry did not run correctly (rc=$positional_run_status, stdout='$positional_stdout')" >&2
+            exit 1
+        fi
+    fi
+    :
 )
 
 candidate_frontend_delegate_fidelity() (
