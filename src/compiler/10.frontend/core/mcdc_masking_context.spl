@@ -1,0 +1,153 @@
+# codex-impl
+# Compiler-owned formal masking contexts for short-circuit Boolean decisions.
+# This module runs during inventory/lowering, never on the application hot path.
+
+use compiler.core.ast_expr.*
+use std.common.hash.djb2.{djb2_hash_text}
+use std.common.mcdc.masking_context.{McdcMaskingContext}
+
+pub struct CompilerMcdcContextRequirement:
+    node_expr_id: i64
+    required_outcome: bool
+
+pub struct CompilerMcdcTargetContext:
+    context: McdcMaskingContext
+    requirements: [CompilerMcdcContextRequirement]
+    reason: text
+    proof_fingerprint: text
+    context_fingerprint: text
+    condition_leaves: [i64]
+
+fn compiler_mcdc_positive_hash(value: text) -> i64:
+    val result = djb2_hash_text(value) & 2147483647
+    return if result == 0: 1 else: result
+
+fn compiler_mcdc_is_boolean_node(expr_id: i64) -> bool:
+    return expr_id >= 0 and expr_get_tag(expr_id) == EXPR_BINARY and
+        (expr_get_int(expr_id) == 55 or expr_get_int(expr_id) == 56)
+
+fn compiler_mcdc_leaf_fingerprint(expr_id: i64) -> text:
+    if expr_id < 0: return "nil"
+    val tag = expr_get_tag(expr_id)
+    return "{tag}:{expr_get_int(expr_id)}:{expr_get_str(expr_id)}:" +
+        compiler_mcdc_leaf_fingerprint(expr_get_left(expr_id)) + ":" +
+        compiler_mcdc_leaf_fingerprint(expr_get_right(expr_id))
+
+fn compiler_mcdc_tree_fingerprint(expr_id: i64) -> text:
+    if not compiler_mcdc_is_boolean_node(expr_id):
+        return "L(" + compiler_mcdc_leaf_fingerprint(expr_id) + ")"
+    val op = if expr_get_int(expr_id) == 55: "AND" else: "OR"
+    return "{op}(" + compiler_mcdc_tree_fingerprint(expr_get_left(expr_id)) + "," +
+        compiler_mcdc_tree_fingerprint(expr_get_right(expr_id)) + ")"
+
+fn compiler_mcdc_collect_leaves(expr_id: i64, leaves: mut [i64]):
+    if compiler_mcdc_is_boolean_node(expr_id):
+        compiler_mcdc_collect_leaves(expr_get_left(expr_id), leaves)
+        compiler_mcdc_collect_leaves(expr_get_right(expr_id), leaves)
+    else:
+        leaves.push(expr_id)
+
+fn compiler_mcdc_find_target_path(
+    expr_id: i64, target_expr_id: i64,
+    requirements: mut [CompilerMcdcContextRequirement]
+) -> bool:
+    if not compiler_mcdc_is_boolean_node(expr_id):
+        return expr_id == target_expr_id
+    val left = expr_get_left(expr_id)
+    val right = expr_get_right(expr_id)
+    # The sibling must have the operator's identity value for the target to
+    # control the parent: true for AND, false for OR.
+    val neutral = expr_get_int(expr_id) == 55
+    if compiler_mcdc_find_target_path(left, target_expr_id, requirements):
+        requirements.push(CompilerMcdcContextRequirement(
+            node_expr_id: right, required_outcome: neutral))
+        return true
+    if compiler_mcdc_find_target_path(right, target_expr_id, requirements):
+        requirements.push(CompilerMcdcContextRequirement(
+            node_expr_id: left, required_outcome: neutral))
+        return true
+    return false
+
+fn compiler_mcdc_requirement_fingerprint(
+    requirements: [CompilerMcdcContextRequirement]
+) -> text:
+    var result = ""
+    for requirement in requirements:
+        result = result + compiler_mcdc_tree_fingerprint(requirement.node_expr_id) +
+            "=" + (if requirement.required_outcome: "1" else: "0") + ";"
+    return result
+
+pub fn compiler_mcdc_formal_contexts(
+    decision_id: i64, decision_expr_id: i64
+) -> [CompilerMcdcTargetContext]:
+    var leaves: [i64] = []
+    compiler_mcdc_collect_leaves(decision_expr_id, leaves)
+    if leaves.len() > 256: return []
+    val tree = compiler_mcdc_tree_fingerprint(decision_expr_id)
+    val proof_id = compiler_mcdc_positive_hash("mcdc-proof-v1|{decision_id}|{tree}")
+    var contexts: [CompilerMcdcTargetContext] = []
+    var target = 0
+    while target < leaves.len():
+        var requirements: [CompilerMcdcContextRequirement] = []
+        if not compiler_mcdc_find_target_path(
+            decision_expr_id, leaves[target], requirements):
+            return []
+        val target_fingerprint = compiler_mcdc_leaf_fingerprint(leaves[target])
+        var coupled = false
+        var other = 0
+        while other < leaves.len():
+            if (other != target and
+                compiler_mcdc_leaf_fingerprint(leaves[other]) == target_fingerprint):
+                coupled = true
+            other = other + 1
+        val context_fingerprint = "mcdc-context-v1|{proof_id}|{target}|" +
+            compiler_mcdc_requirement_fingerprint(requirements)
+        val context_id = compiler_mcdc_positive_hash(context_fingerprint)
+        contexts.push(CompilerMcdcTargetContext(
+            context: McdcMaskingContext(
+                decision_id: decision_id, target_ordinal: target,
+                proof_id: proof_id, context_id: context_id,
+                requirement_count: requirements.len(),
+                strong_coupling: coupled),
+            requirements: requirements,
+            reason: if coupled:
+                "compiler-identical-condition-occurrence"
+            else:
+                "compiler-formal-short-circuit-context-v1",
+            proof_fingerprint: tree,
+            context_fingerprint: context_fingerprint,
+            condition_leaves: leaves
+        ))
+        target = target + 1
+    return contexts
+
+pub fn compiler_mcdc_context_manifest_row(
+    target: CompilerMcdcTargetContext
+) -> text:
+    val context = target.context
+    var row = "context|{context.decision_id}|{context.target_ordinal}|" +
+        "{context.proof_id}|{context.context_id}|{target.requirements.len()}|" +
+        (if context.strong_coupling: "true" else: "false") + "|{target.reason}"
+    var ordinal = 0
+    for requirement in target.requirements:
+        row = row + "|{ordinal}:" +
+            (if requirement.required_outcome: "true" else: "false") +
+            ":" + compiler_mcdc_requirement_program(
+                requirement.node_expr_id, target.condition_leaves)
+        ordinal = ordinal + 1
+    return row
+
+fn compiler_mcdc_leaf_ordinal(expr_id: i64, leaves: [i64]) -> i64:
+    var ordinal = 0
+    while ordinal < leaves.len():
+        if leaves[ordinal] == expr_id: return ordinal
+        ordinal = ordinal + 1
+    return -1
+
+fn compiler_mcdc_requirement_program(expr_id: i64, leaves: [i64]) -> text:
+    if not compiler_mcdc_is_boolean_node(expr_id):
+        return "c" + compiler_mcdc_leaf_ordinal(expr_id, leaves).to_text()
+    val operator = if expr_get_int(expr_id) == 55: "a" else: "o"
+    return compiler_mcdc_requirement_program(expr_get_left(expr_id), leaves) +
+        "," + compiler_mcdc_requirement_program(expr_get_right(expr_id), leaves) +
+        "," + operator

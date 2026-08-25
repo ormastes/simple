@@ -21,6 +21,11 @@ use std.spec.skip_governance.{
     skip_ref, validate_skip_it, validate_bare_pending,
     validate_free_text_skip, validate_skip_ref_record
 }
+use std.spec.scenario_governance.{
+    ScenarioOmissionStatus, scenario_omission_status_name,
+    validate_scenario_omission, scenario_governance_collect_mcdc_exclusion
+}
+use lib.common.env_access.model.{EnvScenarioSelection}
 
 # ================================================================
 # Global Test State
@@ -62,6 +67,11 @@ fn _run_test(kind: text) -> bool:
     if filter == "skipped":
         return kind == "skipped"
     kind != "skipped"
+
+fn _run_omission() -> bool:
+    # Unlike legacy skips, typed environment omissions must be visible in an
+    # ordinary run. The dedicated skipped filter also includes them.
+    _test_filter() != "slow"
 
 fn _write_test_result_evidence(passed: i64, failed: i64):
     """Persist the running tally.
@@ -226,6 +236,20 @@ fn _reject_skip(name: text, message: text):
     test_errors.push("{current_suite} > {name}: {message}")
     _write_test_result_evidence(test_passed, test_failed)
 
+fn _scenario_wire_field(value: text) -> text:
+    value.replace("|", "/").replace("\n", " ").replace("\r", " ").trim()
+
+fn _scenario_artifacts_wire(paths: [text]) -> text:
+    var safe: [text] = []
+    for path in paths:
+        safe.push(_scenario_wire_field(path).replace(";", ","))
+    safe.join(";")
+
+fn _emit_scenario_omission(status: ScenarioOmissionStatus,
+                           selection: EnvScenarioSelection):
+    val label = scenario_omission_status_name(status)
+    print "__SIMPLE_SCENARIO_OMISSION_V1__|{label}|{_scenario_wire_field(selection.scenario_id)}|{_scenario_wire_field(selection.reason)}|{_scenario_wire_field(selection.prerequisite)}|{_scenario_wire_field(selection.owner)}|{_scenario_wire_field(selection.tracking_id)}|{_scenario_artifacts_wire(selection.artifact_paths)}|{_scenario_wire_field(selection.resume_command)}"
+
 pub fn skip_it(name: text, block: fn()):
     if not _run_test("skipped"):
         return
@@ -287,6 +311,46 @@ pub fn skip_via_ref(name: text, id: text, block: fn()):
         return
     test_skipped = test_skipped + 1
     print "    it {name} ... skipped ({record.reason})"
+
+# Environment-dependent scenarios have typed non-pass outcomes. Callers build
+# the selection with env_scenario_skip/env_scenario_exclude; this runner then
+# checks it against the same SDN registry used by skip_via_ref.
+pub fn unavailable_scenario(name: text, status: ScenarioOmissionStatus,
+                            selection: EnvScenarioSelection):
+    if not _run_omission():
+        return
+    if status == ScenarioOmissionStatus.Excluded:
+        _reject_skip(name, "use excluded_mcdc_scenario for reviewed exclusions")
+        return
+    val validation = validate_scenario_omission(selection, status)
+    if not validation.ok:
+        _reject_skip(name, validation.message)
+        return
+    test_skipped = test_skipped + 1
+    val label = scenario_omission_status_name(status)
+    print "    it {name} ... {label} ({selection.reason}; owner={selection.owner}; tracking={selection.tracking_id})"
+    _emit_scenario_omission(status, selection)
+
+pub fn blocked_scenario(name: text, selection: EnvScenarioSelection):
+    unavailable_scenario(name, ScenarioOmissionStatus.Blocked, selection)
+
+pub fn unsupported_scenario(name: text, selection: EnvScenarioSelection):
+    unavailable_scenario(name, ScenarioOmissionStatus.Unsupported, selection)
+
+pub fn excluded_mcdc_scenario(name: text, semantic_decision_id: text,
+                              condition_ordinal: i64,
+                              identity_version: text,
+                              selection: EnvScenarioSelection):
+    if not _run_omission():
+        return
+    val collection_problem = scenario_governance_collect_mcdc_exclusion(
+        selection, semantic_decision_id, condition_ordinal, identity_version)
+    if collection_problem != "":
+        _reject_skip(name, collection_problem)
+        return
+    test_skipped = test_skipped + 1
+    val label = scenario_omission_status_name(ScenarioOmissionStatus.Excluded)
+    print "    it {name} ... {label} ({semantic_decision_id} condition={condition_ordinal}; {selection.reason}; owner={selection.owner}; tracking={selection.tracking_id}; identity-version={identity_version})"
 
 # ================================================================
 # pending_on / pending_skip (inline-only due to runtime limitation)

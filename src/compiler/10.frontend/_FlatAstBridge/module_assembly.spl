@@ -37,6 +37,7 @@ use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NA
 use compiler.core.types.{span_start, span_end, span_line, span_col, span_is_valid}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
+use compiler.common.attributes.{parse_function_attrs}
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
 use compiler.frontend.desugar.collection_desugar.{desugar_collections}
 use compiler.frontend.core.string_interpolation_expand.{expand_interpolated_placeholder_call_args}
@@ -45,6 +46,7 @@ use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.resource_registry.{resource_registry_declare}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_declare}
 use compiler.frontend.effect_registry.{effect_registry_declare}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_declare}
 use compiler.frontend.aspect_registry.{aspect_registry_declare}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -717,6 +719,18 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                                             pass
                                     di = di + 1
                                     continue
+                                elif helper_name == "__rt_criticality_decl" and args.len() >= 2:
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(rt_fn, _):
+                                            match args[1].value.kind:
+                                                case ExprKind.StringLit(rt_args, _):
+                                                    rt_criticality_declare(path, rt_fn, rt_args)
+                                                case _:
+                                                    pass
+                                        case _:
+                                            pass
+                                    di = di + 1
+                                    continue
                                 elif helper_name == "__effect_decl" and args.len() >= 3:
                                     # C4 `@copy_budget(N)` / `@bounded_loop`
                                     # (doc/03_plan/compiler/forwarding/
@@ -1052,6 +1066,30 @@ fn flat_ast_to_module(path: text) -> ParserModule:
 
     if flat_bridge_trace_enabled():
         print "[flat-bridge] building frontend module path={path}"
+    # A typed parser decision, not a source scan: only modules whose retained
+    # FunctionAttr contains @rt(hal) acquire the runtime boundary dependency.
+    var has_rt_hal_boundary = false
+    var has_rt_hal_comparator = false
+    for function in functions.values():
+        val rt_hal_attr = parse_function_attrs(function.attributes)
+        if rt_hal_attr.is_rt_hal:
+            has_rt_hal_boundary = true
+            if rt_hal_attr.rt_hal_compare_c or rt_hal_attr.rt_hal_compare_rust:
+                has_rt_hal_comparator = true
+    if has_rt_hal_boundary:
+        imports.push(ParserImport(
+            module: "std.nogc_sync_mut.rt_hal.boundary",
+            items: [], is_lazy: false, span: make_span()
+        ))
+    if has_rt_hal_comparator:
+        imports.push(ParserImport(
+            module: "std.nogc_sync_mut.rt_hal.process_task_arena",
+            items: [], is_lazy: false, span: make_span()
+        ))
+        imports.push(ParserImport(
+            module: "app.io.env_access_host",
+            items: [], is_lazy: false, span: make_span()
+        ))
     var built_module = parser_module_new(
         name: path,
         imports: imports,

@@ -1,0 +1,63 @@
+# Typed build and provider-admission plans for the test-only external RT/HAL
+# comparators. There is no PATH lookup or shell command surface.
+
+use std.common.env_access.model.*
+
+pub struct RtHalExternalFixtureConfig:
+    repo: text
+    cc: text
+    cc_hash: text
+    rustc: text
+    rustc_hash: text
+    c_output: text
+    rust_output: text
+
+fn tool(tool_id: text, path: text, digest: text) -> EnvToolIdentity:
+    EnvToolIdentity(tool_id: tool_id, canonical_path: path,
+        identity_hash: "sha256:" + digest)
+
+fn compile_instruction(tool_id: text, arguments: [text]) -> EnvAccessInstruction:
+    EnvAccessInstruction(
+        kind: EnvAccessKind.RunAllowedTool, resource: tool_id,
+        arguments: arguments, timeout_ms: 120000,
+        max_stdout_bytes: 4096, max_stderr_bytes: 8192
+    )
+
+pub fn rt_hal_external_build_plan(config: RtHalExternalFixtureConfig) -> EnvAccessPlan:
+    val c_source = config.repo + "/test/fixtures/rt_hal_external/rthal_scalar_provider.c"
+    val rust_source = config.repo + "/test/fixtures/rt_hal_external/rthal_scalar_provider.rs"
+    EnvAccessPlan(
+        plan_id: "rt-hal-external-build-v1", canonical_repo_root: config.repo,
+        instructions: [
+            compile_instruction("pinned-cc", [
+                "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                "-static", "-no-pie",
+                c_source, "-o", config.c_output
+            ]),
+            compile_instruction("pinned-rustc", [
+                "--edition=2021", "-C", "opt-level=3", "-C", "panic=abort",
+                "-C", "target-feature=+crt-static",
+                "-C", "relocation-model=static",
+                "-C", "link-arg=-static", "-C", "link-arg=-no-pie",
+                rust_source, "-o", config.rust_output
+            ])
+        ],
+        max_total_bytes: 24576, max_processes: 2,
+        allowed_tools: [
+            tool("pinned-cc", config.cc, config.cc_hash),
+            tool("pinned-rustc", config.rustc, config.rustc_hash)
+        ], allowed_hardware_probes: []
+    )
+
+pub fn rt_hal_external_provider_plan(config: RtHalExternalFixtureConfig, c_hash: text, rust_hash: text) -> EnvAccessPlan:
+    EnvAccessPlan(
+        plan_id: "rt-hal-external-providers-v1",
+        canonical_repo_root: config.repo, instructions: [],
+        # Declare the same outer envelope passed to isolated comparator setup:
+        # two children may run concurrently with 4 KiB aggregate output.
+        max_total_bytes: 4096, max_processes: 2,
+        allowed_tools: [
+            tool("rthal-c-v1", config.c_output, c_hash),
+            tool("rthal-rust-v1", config.rust_output, rust_hash)
+        ], allowed_hardware_probes: []
+    )

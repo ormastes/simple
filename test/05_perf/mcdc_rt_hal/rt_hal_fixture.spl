@@ -1,0 +1,96 @@
+# Reproducible bounded rt(hal) comparison fixture.  Pure Simple remains the
+# authority; C/Rust adapters produce comparison results only.
+
+use test.perf.bench.lib.timing.{bench_now_ns}
+use std.nogc_sync_mut.cli.{get_cli_args}
+use std.common.rt_hal.model.*
+use std.nogc_sync_mut.rt_hal.parallel_executor.{
+    RtHalPureTaskAdapter, RtHalComparatorTaskAdapter
+}
+use std.nogc_sync_mut.rt_hal.tagged.{RtHalTagPolicy, rt_hal_execute_tagged}
+
+fn bench_arg(name: text, fallback: text) -> text:
+    val prefix = "--" + name + "="
+    for argument in get_cli_args():
+        if argument.starts_with(prefix): return argument.substring(prefix.len())
+    fallback
+
+fn bench_flag(name: text) -> bool:
+    val expected = "--" + name
+    for argument in get_cli_args():
+        if argument == expected: return true
+    false
+
+fn fixture_value(item: RtHalWorkItem) -> i64:
+    item.case_id * 17 + 11
+
+var _pure_effect_count: i64 = 0
+
+fn fixture_effect(item: RtHalWorkItem) -> i64:
+    _pure_effect_count = _pure_effect_count + 1
+    fixture_value(item)
+
+fn make_requests() -> [RtHalRequest]:
+    var requests: [RtHalRequest] = []
+    var i: i64 = 0
+    while i < 32:
+        val operation = if i == 31: RtHalOperationKind.Effectful else: RtHalOperationKind.Query
+        requests.push(RtHalRequest(
+            case_id: i, operation: operation,
+            operation_id: "register-read", input_hash: "fixed-v1",
+            replay_hash: if i == 31: "pure-effect-receipt-v1" else: ""
+        ))
+        i = i + 1
+    requests
+
+fn main():
+    val lane = bench_arg("lane", "pure")
+    val measured_iterations = if bench_flag("empty"):
+        0
+    else:
+        2000
+    val compare_c = lane == "c" or lane == "c-rust"
+    val compare_rust = lane == "rust" or lane == "c-rust"
+    val policy = RtHalTagPolicy(
+        compare_c: compare_c, compare_rust: compare_rust,
+        worker_count: 2, queue_capacity: 128,
+        timeout_ticks: 1000, max_output_bytes: 1048576,
+        require_all: true
+    )
+    val pure = RtHalPureTaskAdapter(
+        provider_id: "pure-simple", query_word_fn: fixture_value,
+        effect_word_fn: fixture_effect
+    )
+    var comparators: [RtHalComparatorTaskAdapter] = []
+    if compare_c:
+        comparators.push(RtHalComparatorTaskAdapter(
+            provider_id: "c-comparator", query_word_fn: fixture_value,
+            replay_word_fn: fixture_value
+        ))
+    if compare_rust:
+        comparators.push(RtHalComparatorTaskAdapter(
+            provider_id: "rust-comparator", query_word_fn: fixture_value,
+            replay_word_fn: fixture_value
+        ))
+    val requests = make_requests()
+
+    # One cold invocation warms code/data before the retained samples.
+    val warm = rt_hal_execute_tagged(policy, requests, pure, comparators)
+    var checksum = warm.results.len()
+    val start = bench_now_ns()
+    var iteration: i64 = 0
+    var final_error = ""
+    while iteration < measured_iterations:
+        val report = rt_hal_execute_tagged(policy, requests, pure, comparators)
+        checksum = checksum + report.results.len() + report.completed_tasks
+        final_error = report.error
+        iteration = iteration + 1
+    val elapsed = bench_now_ns() - start
+    val expected_effect_count = measured_iterations + 1
+    val status = if final_error != "":
+        final_error
+    elif _pure_effect_count != expected_effect_count:
+        "RTHAL-E-EFFECT-COUNT"
+    else:
+        "ok"
+    print "lane=rt-hal-{lane} iterations={measured_iterations} elapsed_ns={elapsed} checksum={checksum} effect_count={_pure_effect_count} status={status}"

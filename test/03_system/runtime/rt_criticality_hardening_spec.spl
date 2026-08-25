@@ -1,0 +1,35 @@
+# @req REQ-012 REQ-013 REQ-015
+# @manual: primary
+"""RT mission-critical default, staged diagnostics, and transitive admission."""
+use std.spec.*
+use std.spec.step
+use compiler.semantics.rt_criticality.*
+
+fn fact(name: text, effects: i64 = 0, callees: [text] = []) -> RtCriticalFact:
+    RtCriticalFact(name: name, own_effects: effects, bounded_effects: 0,
+        callees: callees, line: 1, effect_units: {})
+
+describe "RT criticality hardening":
+    it "should stage one stable implicit-criticality warning then error":
+        step("enforce RT criticality")
+        val warning = rt_critical_profile_diagnostics("control_tick", "", "", false)
+        val error = rt_critical_profile_diagnostics("control_tick", "", "", true)
+        expect(warning.len()).to_equal(1)
+        expect(warning[0]).to_contain("W-RT-PROFILE-001")
+        expect(error.len()).to_equal(1)
+        expect(error[0]).to_contain("E-RT-PROFILE-001")
+
+    it "should admit an allocation-free bounded direct closure":
+        step("enforce RT criticality")
+        val diagnostics = rt_critical_admit("control_tick", [fact("control_tick", 0, ["read_register"]), fact("read_register")])
+        expect(diagnostics.len()).to_equal(0)
+
+    it "should reject allocation blocking recursion dispatch logging synchronization and loader work":
+        step("enforce RT criticality")
+        val forbidden = RT_EFFECT_ALLOC | RT_EFFECT_BLOCKING | RT_EFFECT_DISPATCH |
+            RT_EFFECT_LOGGING | RT_EFFECT_SYNC | RT_EFFECT_LOADER
+        val diagnostics = rt_critical_admit("control_tick", [fact("control_tick", 0, ["unsafe_helper"]), fact("unsafe_helper", forbidden, ["unsafe_helper"])])
+        expect(diagnostics).to_contain("error[RT-E-UNBOUNDED-ALLOCATION]: critical RT closure 'control_tick' contains unproved allocation")
+        expect(diagnostics).to_contain("error[RT-E-UNBOUNDED-RECURSION]: critical RT closure 'control_tick' contains unproved recursion")
+        expect(diagnostics).to_contain("error[RT-E-UNBOUNDED-LOADER]: critical RT closure 'control_tick' contains unproved loader")
+

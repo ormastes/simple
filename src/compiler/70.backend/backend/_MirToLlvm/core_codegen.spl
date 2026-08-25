@@ -1239,7 +1239,40 @@ impl MirTextCodegen for MirToLlvm:
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:emit index={block_index} variant=abort"
 
-            case CallTerminator(dest, func, args, normal, unwind):
+            case Throw(payload, type_tag):
+                val unwind_arch = self.config.triple.arch
+                val unwind_os = self.config.triple.os
+                val elf_arch_supported = unwind_arch == "x86_64" or unwind_arch == "aarch64" or unwind_arch == "riscv64"
+                val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
+                if not elf_arch_supported or not posix_elf_supported:
+                    panic("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
+                val payload_ops: [MirOperand] = [payload]
+                val tag_ops: [MirOperand] = [type_tag]
+                val payload_raw = self.translate_operand_at(payload_ops, 0)
+                val tag_raw = self.translate_operand_at(tag_ops, 0)
+                val payload_i64 = self.value_as_type(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64")
+                val tag_i64 = self.value_as_type(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64")
+                self.builder.emit("  call void @rt_exception_throw(i64 {payload_i64}, i64 {tag_i64})")
+                self.builder.emit("  unreachable")
+
+            case Resume(payload, type_tag):
+                val unwind_arch = self.config.triple.arch
+                val unwind_os = self.config.triple.os
+                val elf_arch_supported = unwind_arch == "x86_64" or unwind_arch == "aarch64" or unwind_arch == "riscv64"
+                val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
+                if not elf_arch_supported or not posix_elf_supported:
+                    panic("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
+                val payload_ops: [MirOperand] = [payload]
+                val tag_ops: [MirOperand] = [type_tag]
+                val payload_raw = self.translate_operand_at(payload_ops, 0)
+                val tag_raw = self.translate_operand_at(tag_ops, 0)
+                val payload_i64 = self.value_as_type(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64")
+                val tag_i64 = self.value_as_type(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64")
+                self.builder.emit("  call void @rt_exception_resume(i64 {payload_i64}, i64 {tag_i64})")
+                self.builder.emit("  unreachable")
+
+            case CallTerminator(dest, func, args, normal, unwind,
+                                unwind_payload_dest, unwind_type_tag_dest):
                 val func_operands: [MirOperand] = [func]
                 val normal_id = normal.bootstrap_value()
                 val has_unwind = unwind != nil
@@ -1248,6 +1281,13 @@ impl MirTextCodegen for MirToLlvm:
                 val dest_id = if has_dest: (dest ?? LocalId(id: 0)).id else: 0
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:call index={block_index} dest={has_dest} normal={normal_id} unwind={has_unwind}"
+                if has_unwind:
+                    val unwind_arch = self.config.triple.arch
+                    val unwind_os = self.config.triple.os
+                    val elf_arch_supported = unwind_arch == "x86_64" or unwind_arch == "aarch64" or unwind_arch == "riscv64"
+                    val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
+                    if not elf_arch_supported or not posix_elf_supported:
+                        panic("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
                 var func_val = self.translate_operand_at(func_operands, 0)
                 match func.kind:
                     case Copy(local) | Move(local):
@@ -1277,6 +1317,58 @@ impl MirTextCodegen for MirToLlvm:
                     arg_i = arg_i + 1
                     arg_index = arg_index + 1
                 val args_str = arg_vals.join(", ")
+                if has_unwind:
+                    val frame = self.builder.fresh_local()
+                    val setjmp_status_i32 = self.builder.fresh_local()
+                    val setjmp_status = self.builder.fresh_local()
+                    val capture = self.builder.fresh_local()
+                    val payload_value = self.builder.fresh_local()
+                    val finish_status = self.builder.fresh_local()
+                    val is_unwind = self.builder.fresh_local()
+                    val call_label = "exc.call.{block_index}"
+                    val unwind_store_label = "exc.unwind.{block_index}"
+                    self.builder.emit("  {frame} = call ptr @rt_exception_frame_push()")
+                    self.builder.emit("  {setjmp_status_i32} = call i32 @_setjmp(ptr {frame})")
+                    self.builder.emit("  {setjmp_status} = sext i32 {setjmp_status_i32} to i64")
+                    self.builder.emit("  {capture} = call {{ i64, i64 }} @rt_exception_frame_capture(i64 {setjmp_status})")
+                    self.builder.emit("  {payload_value} = extractvalue {{ i64, i64 }} {capture}, 0")
+                    self.builder.emit("  {finish_status} = extractvalue {{ i64, i64 }} {capture}, 1")
+                    self.builder.emit("  {is_unwind} = icmp ne i64 {finish_status}, 0")
+                    self.builder.emit("  br i1 {is_unwind}, label %{unwind_store_label}, label %{call_label}")
+                    self.builder.emit("{unwind_store_label}:")
+                    if unwind_payload_dest.?:
+                        val payload_dest_id = unwind_payload_dest.unwrap().id
+                        val payload_dest_name = self.get_local(payload_dest_id)
+                        val elem_ty = self.alloca_elem_type_for_value(payload_dest_name)
+                        if elem_ty != "":
+                            val payload_typed = self.value_as_type(payload_value, "i64", elem_ty)
+                            self.builder.emit_store(elem_ty, payload_typed, payload_dest_name)
+                    if unwind_type_tag_dest.?:
+                        val tag_value = self.builder.fresh_local()
+                        self.builder.emit("  {tag_value} = call i64 @rt_exception_caught_type_tag()")
+                        val tag_dest_id = unwind_type_tag_dest.unwrap().id
+                        val tag_dest_name = self.get_local(tag_dest_id)
+                        val tag_ty = self.alloca_elem_type_for_value(tag_dest_name)
+                        if tag_ty != "":
+                            val tag_typed = self.value_as_type(tag_value, "i64", tag_ty)
+                            self.builder.emit_store(tag_ty, tag_typed, tag_dest_name)
+                    self.builder.emit_br("bb{unwind_id}")
+                    self.builder.emit("{call_label}:")
+                    if has_dest:
+                        val dest_name = self.get_local(dest_id)
+                        val slot_ty = self.alloca_elem_type_for_value(dest_name)
+                        val ret_ty = if slot_ty != "": slot_ty else: self.valid_llvm_type(self.get_local_type(dest_id))
+                        val call_value = self.builder.fresh_local()
+                        self.builder.emit("  {call_value} = call {ret_ty} {call_func_val}({args_str})")
+                        if slot_ty != "":
+                            self.builder.emit_store(ret_ty, call_value, dest_name)
+                    else:
+                        self.builder.emit("  call void {call_func_val}({args_str})")
+                    self.builder.emit("  call void @rt_exception_frame_pop()")
+                    self.builder.emit_br("bb{normal_id}")
+                    if bootstrap_debug:
+                        print "[mir-to-llvm] terminator:emit index={block_index} variant=recoverable-call"
+                    return
                 if has_dest:
                     val dest_name = self.get_local(dest_id)
                     val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))

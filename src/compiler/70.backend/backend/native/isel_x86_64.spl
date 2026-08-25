@@ -125,11 +125,30 @@ fn isel_function_with_avx2_capability(ctx: ISelContext, func: MirFunction, capab
 
     mach_func = mach_func_add_block(mach_func, prologue_block)
 
+    var next_trampoline_id = 0
+    for block in func.blocks:
+        if block.id.id >= next_trampoline_id: next_trampoline_id = block.id.id + 1
     # Translate each MIR block
     for block in func.blocks:
-        var result = isel_block_with_simd(local_ctx, block, simd_plan.registers)
+        var trampoline_id = -1
+        var trampoline_tag_dest = -1
+        var trampoline_target = -1
+        match block.terminator:
+            case CallTerminator(_, _, _, _, Some(unwind), _, Some(tag_dest)):
+                trampoline_id = next_trampoline_id
+                next_trampoline_id = next_trampoline_id + 1
+                trampoline_tag_dest = tag_dest.id
+                trampoline_target = unwind.id
+            case _: ()
+        var result = isel_block_with_simd(local_ctx, block, simd_plan.registers, trampoline_id)
         local_ctx = result.ctx
         mach_func = mach_func_add_block(mach_func, result.block)
+        if trampoline_id >= 0:
+            var trampoline = new_mach_block("exc.tag.{block.id.id}", trampoline_id)
+            trampoline = mach_block_add_inst(trampoline, new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_caught_type_tag")]))
+            trampoline = mach_block_add_inst(trampoline, new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(trampoline_tag_dest), op_phys(X86_RAX)]))
+            trampoline = mach_block_add_inst(trampoline, new_mach_inst(X86_OP_JMP, [op_label(trampoline_target)]))
+            mach_func = mach_func_add_block(mach_func, trampoline)
 
     # Set frame size (aligned to 16)
     var frame_size = local_ctx.next_frame_offset
@@ -150,9 +169,9 @@ fn isel_function_with_avx2_capability(ctx: ISelContext, func: MirFunction, capab
     ISelFuncResult(func: mach_func, ctx: out_ctx)
 
 fn isel_block(ctx: ISelContext, block: MirBlock) -> ISelBlockResult:
-    isel_block_with_simd(ctx, block, {})
+    isel_block_with_simd(ctx, block, {}, -1)
 
-fn isel_block_with_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, i64>) -> ISelBlockResult:
+fn isel_block_with_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, i64>, unwind_trampoline_id: i64) -> ISelBlockResult:
     val label = if block.label.?: block.label.unwrap() else: "bb{block.id.id}"
     var mach_block = new_mach_block(label, block.id.id)
     var current_ctx = ctx
@@ -165,7 +184,7 @@ fn isel_block_with_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, 
             mach_block = mach_block_add_inst(mach_block, mi)
 
     # Lower terminator
-    var term_result = isel_terminator(current_ctx, block.terminator)
+    var term_result = isel_terminator(current_ctx, block.terminator, unwind_trampoline_id)
     current_ctx = term_result.ctx
     for mi in term_result.insts:
         mach_block = mach_block_add_inst(mach_block, mi)
@@ -1047,7 +1066,7 @@ fn isel_rotate(ctx: ISelContext, dest: LocalId, args: [MirOperand], is_left: boo
 # Instruction Selection - Terminators
 # ============================================================================
 
-fn isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
+fn isel_terminator(ctx: ISelContext, term: MirTerminator, unwind_trampoline_id: i64) -> ISelInstResult:
     match term:
         case Goto(target):
             val inst = new_mach_inst(X86_OP_JMP, [op_label(target.id)])
@@ -1089,21 +1108,73 @@ fn isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
             # then ran straight on into whatever block was laid out next, with
             # exactly the corrupt state the abort existed to stop. INT3 traps.
             ISelInstResult(insts: [new_mach_inst(X86_OP_INT3, [])], ctx: ctx)
-        case CallTerminator(dest, func, args, normal, unwind):
+        case Throw(payload, type_tag):
+            val payload_low = lower_operand(ctx, payload)
+            val tag_low = lower_operand(payload_low.ctx, type_tag)
+            var throw_ctx = isel_add_extern(tag_low.ctx, "rt_exception_throw")
+            var insts = payload_low.insts
+            for tag_inst in tag_low.insts:
+                insts.push(tag_inst)
+            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RDI), payload_low.result]))
+            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RSI), tag_low.result]))
+            insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_throw")]))
+            insts.push(new_mach_inst(X86_OP_INT3, []))
+            ISelInstResult(insts: insts, ctx: throw_ctx)
+        case Resume(payload, type_tag):
+            val payload_low = lower_operand(ctx, payload)
+            val tag_low = lower_operand(payload_low.ctx, type_tag)
+            var resume_ctx = isel_add_extern(tag_low.ctx, "rt_exception_resume")
+            var insts = payload_low.insts
+            for tag_inst in tag_low.insts:
+                insts.push(tag_inst)
+            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RDI), payload_low.result]))
+            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RSI), tag_low.result]))
+            insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_resume")]))
+            insts.push(new_mach_inst(X86_OP_INT3, []))
+            ISelInstResult(insts: insts, ctx: resume_ctx)
+        case CallTerminator(dest, func, args, normal, unwind, unwind_payload_dest, unwind_type_tag_dest):
             # Contract (mir_interpreter.spl `case CallTerminator`): perform the
             # call, bind the return value into `dest` when present, then
             # transfer to `normal`. The NOP this used to emit dropped both the
             # call and the edge.
             if unwind.?:
-                # The native backend has no landing pads. Silently discarding
-                # the unwind edge would send an unwinding call into `normal`.
-                panic("x86_64 isel: CallTerminator with an unwind edge has no lowering (native backend has no exception handling)")
+                var unwind_ctx = isel_add_extern(ctx, "rt_exception_frame_push")
+                unwind_ctx = isel_add_extern(unwind_ctx, "_setjmp")
+                unwind_ctx = isel_add_extern(unwind_ctx, "rt_exception_frame_capture")
+                unwind_ctx = isel_add_extern(unwind_ctx, "rt_exception_caught_type_tag")
+                unwind_ctx = isel_add_extern(unwind_ctx, "rt_exception_frame_pop")
+                unwind_ctx = isel_alloc_vreg(unwind_ctx)
+                val frame = op_reg(virtual_reg(isel_get_vreg(unwind_ctx)))
+                unwind_ctx = isel_alloc_vreg(unwind_ctx)
+                val capture_status = op_reg(virtual_reg(isel_get_vreg(unwind_ctx)))
+                var insts: [MachInst] = []
+                insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_frame_push")]))
+                insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [frame, op_phys(X86_RAX)]))
+                insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RDI), frame]))
+                insts.push(new_mach_inst(X86_OP_CALL, [op_sym("_setjmp")]))
+                insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RDI), op_phys(X86_RAX)]))
+                # SysV returns the two-word capture as payload/status in
+                # RAX/RDX, so no value must survive another call.
+                insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_frame_capture")]))
+                match unwind_payload_dest:
+                    case Some(d): insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(d.id), op_phys(X86_RAX)]))
+                    case None: ()
+                insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [capture_status, op_phys(X86_RDX)]))
+                insts.push(new_mach_inst(X86_OP_TEST, [capture_status, capture_status]))
+                val exceptional_target = if unwind_trampoline_id >= 0: unwind_trampoline_id else: unwind.unwrap().id
+                insts.push(new_mach_inst(X86_OP_JNZ, [op_label(exceptional_target)]))
+                val call_res = isel_call(unwind_ctx, dest, func, args)
+                for call_inst in call_res.insts:
+                    insts.push(call_inst)
+                insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_frame_pop")]))
+                insts.push(new_mach_inst(X86_OP_JMP, [op_label(normal.id)]))
+                return ISelInstResult(insts: insts, ctx: call_res.ctx)
             val call_res = isel_call(ctx, dest, func, args)
             var insts = call_res.insts
             insts.push(new_mach_inst(X86_OP_JMP, [op_label(normal.id)]))
             ISelInstResult(insts: insts, ctx: call_res.ctx)
         case _:
-            # All seven MirTerminator variants are handled above. A NOP here
+            # All nine MirTerminator variants are handled above. A NOP here
             # would silently delete a terminator; fail loudly instead.
             panic("x86_64 isel: unhandled MirTerminator variant -- terminator lowered to nothing")
 

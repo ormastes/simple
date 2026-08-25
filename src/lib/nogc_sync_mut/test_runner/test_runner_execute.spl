@@ -18,6 +18,8 @@ use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_decision_manifest_sdn}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{env_set, env_get}
+use std.io.{random_hex}
+use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_size_raw, file_modified_time}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_with_limits_bounded, ProcessResult}
@@ -32,6 +34,7 @@ use std.test_runner.test_executor_parsing.{
     coverage_wrapper_suffix, build_coverage_wrapper,
     extract_coverage_sdn, strip_coverage_blocks,
     COVERAGE_BEGIN, COVERAGE_END,
+    extract_compiler_mcdc_obligation_manifest,
     list_tests_static, extract_static_test_name,
     _tp_get_temp_dir
 }
@@ -45,6 +48,8 @@ export use nogc_sync_mut.test_runner.test_executor_parsing.{
 }
 
 use std.io_runtime.{getpid}
+extern fn rt_file_create_excl(path: text, content: text) -> bool
+extern fn rt_package_chmod(file_path: text, mode: i32) -> i32
 # NOTE: composite/baremetal/QEMU lane symbols intentionally NOT imported here.
 # They live behind test_executor_lanes.spl (which eagerly loads GPU/JIT lane
 # executors + ~300 compiler-backend modules, ~40s seed load). Importers that
@@ -94,7 +99,8 @@ fn limit_exceeded_message(result: ProcessResult, options: TestOptions) -> text:
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
     # Coverage probes are MIR-owned. The HIR tree interpreter never executes
     # them, so route coverage runs through the real LLVM native path.
-    if options.coverage:
+    val configured_mcdc_mode = env_get("SIMPLE_MCDC_MODE") ?? ""
+    if options.coverage or configured_mcdc_mode == "on" or configured_mcdc_mode == "dynamic":
         return run_test_file_native(file_path, options)
     # Fork mode: use fork() + COW instead of subprocess spawn (Linux only)
     # Fork output does not yet carry child coverage payloads back to the parent.
@@ -244,7 +250,10 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         path: result.path, passed: result.passed, failed: result.failed,
         skipped: result.skipped, pending: result.pending,
         duration_ms: result.duration_ms, setup_ms: setup_ms,
-        error: result.error, timed_out: result.timed_out, cached: result.cached
+        error: result.error, timed_out: result.timed_out, cached: result.cached,
+        mcdc_evidence_v1: result.mcdc_evidence_v1,
+        blocked: result.blocked, unsupported: result.unsupported,
+        omission_evidence: result.omission_evidence
     )
 
 # A completed .smf artifact (SMF header + trailer + at least some code) is
@@ -729,6 +738,9 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
+    val configured_mcdc_mode = env_get("SIMPLE_MCDC_MODE") ?? ""
+    val mcdc_enabled = configured_mcdc_mode == "on" or
+        configured_mcdc_mode == "dynamic"
 
     # Native mode normally compiles SMF. Coverage must execute the MIR probes,
     # so it uses the LLVM AOT path and the core-C coverage owner instead.
@@ -741,7 +753,9 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     # cleanup below used to orphan a stub .smf next to the .spl, which then
     # shadowed the module and poisoned the smf cache (bug doc
     # smf_stub_shadowing_unresolved_describe_2026-07-24.md).
-    val artifact_suffix = if options.coverage: ".coverage-native" else: ".smf"
+    val artifact_suffix = if options.coverage: ".coverage-native"
+        elif mcdc_enabled: ".mcdc-native"
+        else: ".smf"
     val smf_path = _tp_get_temp_dir() + "/" + file_path.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".spl", artifact_suffix)
     var compile_args: [text] = []
     if options.coverage:
@@ -756,6 +770,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val compile_stdout = compile_result.stdout
     val compile_stderr = compile_result.stderr
     val compile_exit = compile_result.exit_code
+    val compile_output = compile_stdout + "\n" + compile_stderr
 
     if compile_exit != 0:
         val end = time_now_unix_micros()
@@ -776,7 +791,6 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         )
 
     if options.coverage:
-        val compile_output = compile_stdout + "\n" + compile_stderr
         val (compiler_manifest, compiler_manifest_valid) = extract_compiler_coverage_manifest_sdn(compile_output)
         if not compiler_manifest_valid or not record_compiler_decision_manifest_sdn(compiler_manifest):
             val end = time_now_unix_micros()
@@ -786,6 +800,42 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: duration_ms, setup_ms: 0,
                 error: "test-runner: missing or malformed compiler coverage manifest",
+                timed_out: false, cached: false
+            )
+
+    var mcdc_manifest_path = ""
+    if mcdc_enabled:
+        val (mcdc_manifest, mcdc_manifest_valid) =
+            extract_compiler_mcdc_obligation_manifest(compile_output)
+        if not mcdc_manifest_valid:
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path,
+                cleanup_path, file_path, options.keep_artifacts)
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (time_now_unix_micros() - start) / 1000,
+                setup_ms: 0,
+                error: "test-runner: missing or malformed MC/DC obligation manifest",
+                timed_out: false, cached: false
+            )
+        # O_EXCL rejects pre-existing files (including symlinks). A fresh CSPRNG
+        # name in the private runner temp directory prevents tested code from
+        # predicting the handoff path before creation.
+        var manifest_attempt = 0
+        while manifest_attempt < 4 and mcdc_manifest_path == "":
+            val nonce = random_hex(16)
+            if nonce != nil:
+                val candidate = _tp_get_temp_dir() + "/mcdc-" + nonce.unwrap() + ".obligations.sdn"
+                if rt_file_create_excl(candidate, mcdc_manifest):
+                    mcdc_manifest_path = candidate
+            manifest_attempt = manifest_attempt + 1
+        if mcdc_manifest_path == "" or rt_package_chmod(mcdc_manifest_path, 256) != 0:
+            if mcdc_manifest_path != "" and file_exists(mcdc_manifest_path): file_delete(mcdc_manifest_path)
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path,
+                cleanup_path, file_path, options.keep_artifacts)
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (time_now_unix_micros() - start) / 1000,
+                setup_ms: 0, error: "test-runner: cannot securely persist MC/DC obligation manifest",
                 timed_out: false, cached: false
             )
 
@@ -799,6 +849,10 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         run_args.push("--gc-log")
     if options.gc_off and not options.coverage:
         run_args.push("--gc=off")
+    if mcdc_manifest_path != "":
+        run_args.push("--simple-mcdc-manifest={mcdc_manifest_path}")
+        run_args.push("--simple-mcdc-manifest-length={mcdc_manifest.len()}")
+        run_args.push("--simple-mcdc-manifest-sha256={sha256_text(mcdc_manifest)}")
 
     var stdout = ""
     var stderr = ""
@@ -813,6 +867,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             val end2 = time_now_unix_micros()
             val dur = (end2 - start) / 1000
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            if mcdc_manifest_path != "":
+                if not options.keep_artifacts and file_exists(mcdc_manifest_path): file_delete(mcdc_manifest_path)
             return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
                 duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false)
     else:
@@ -822,6 +878,9 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         exit_code = code
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
+
+    if mcdc_manifest_path != "" and not options.keep_artifacts and file_exists(mcdc_manifest_path):
+        file_delete(mcdc_manifest_path)
 
     # Clean up .smf artifact unless keeping
     cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)

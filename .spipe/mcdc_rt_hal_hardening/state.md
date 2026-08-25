@@ -53,7 +53,7 @@ Deliver production-grade pure-Simple MC/DC instrumentation, enforcement, RT/HAL 
 
 ## Phase
 
-implementation-in-progress-stage2-admitted
+implementation-in-progress-unverified
 
 ## Log
 
@@ -105,3 +105,67 @@ implementation-in-progress-stage2-admitted
   static off is the default. A native `.to_i64()` coercion returned pointer-like
   values, so bounds use the fail-closed decimal parser. Focused Stage 2 config
   smoke compiled and executed `compiler-mcdc-config-ok`.
+- implementation alignment (unverified): MC/DC is now represented by HIR
+  decision metadata and MIR `DecisionProbe`/`ConditionProbe` records. MIR
+  lowering preserves short-circuit control flow, emits explicit evaluated,
+  truth, and Boolean-derivative masking information, and expands admitted
+  probes to static or dynamic Pure Simple runtime calls before backend
+  translation. Backends and the interpreter fail closed if an unexpanded probe
+  reaches them; static-off phase gates omit the route entirely.
+- implementation alignment (unverified): the dynamic controller validates the
+  aspect ABI/schema/readiness at a cold quiescent publication boundary, binds a
+  preallocated owner capsule through TLS, and keeps the dormant decision path
+  to a publication branch without catalog lookup or allocation. Static
+  recording shares the same bounded capsule/recorder representation without
+  dynamic dispatch.
+- implementation alignment (unverified): the test runner now accepts bounded,
+  framed `MCDC-EVIDENCE-v1` child transport, analyzes declared obligations,
+  validates reasoned exclusions/omissions separately, and applies the
+  assurance-sensitive exact-completion gate. No runner or gate check has been
+  accepted yet.
+- implementation alignment (unverified): `rt(hal)` metadata survives frontend
+  and HIR lowering into a MIR boundary. Pure observations are compared through
+  exact 256-bit canonical receipts in a bounded process task arena; C/Rust
+  workers receive scalar encoded requests or replay receipts and cannot commit
+  the original effect. Parent order is deterministic and timed cancellation is
+  explicit.
+- implementation alignment (unverified): typed environment plans now resolve
+  repo-contained resources and pinned allowlisted tools before one bounded host
+  execution, with typed rejection/blocked/timeout receipts. Scenario omissions
+  require stable identity, reason, prerequisite, owner, evidence, and resume
+  data and remain distinct from MC/DC denominator exclusions.
+- implementation alignment (unverified): RT declarations retain profile/reason/
+  bounds through AST and HIR registries. Transitive admission defaults implicit
+  RT to critical, stages the warning/error policy, and checks allocation,
+  blocking, recursion, dispatch, synchronization, logging, loader work, and
+  declared bound manifests.
+- implementation alignment (unverified): recoverable exception MIR gained a
+  bounded thread-local frame ABI for POSIX ELF x86-64/AArch64/RV64 and explicit
+  rejection elsewhere. C, LLVM-library, RV32, and unsupported object targets
+  remain tracked gaps; source presence is not backend verification.
+- evidence scaffolding (unverified): executable system specs, mirrored manuals,
+  and pinned MC/DC/analyzer/RT-HAL performance fixtures and receipt scripts now
+  exist. They deliberately reject missing timing, peak RSS, allocation, or
+  optimizer evidence and must not be cited as PASS until executed by an
+  admitted self-hosted runtime.
+- remediation alignment (unverified): the compiler serializes proof-bound
+  formal masking contexts for each Boolean leaf. The runner derives evidence
+  only on the cold reporting path using memoized three-valued postfix evaluation;
+  each context admits at most 64 sibling requirements (within the existing
+  256-condition decision bound), and fingerprints bind it to the Boolean tree.
+- remediation alignment (unverified): tagged RT/HAL returns now perform O(1)
+  scalar/reference writes into fixed per-owner receipt rings (16 owners, 64
+  receipts each). Hashing, process work, comparison, diagnostics, and final
+  status occur after quiescence in the cold drain. An injected finalizer rejects
+  undrained, saturated, timed-out, or mismatched evidence.
+- remediation alignment (unverified): hosted hardware access uses a sealed typed
+  probe registry capped at 64 adapters. Registration validates identity/schema/
+  bounds; execution rejects undeclared, unavailable, duplicate, late, or
+  over-bound probes, and adapters do not receive process capability.
+- remediation alignment (unverified): native recoverable-unwind source lowering
+  is present for POSIX ELF x86-64/AArch64/RV64. C translation, LLVM-library,
+  Mach-O, RV32, and other unsupported combinations remain stable errors.
+- remediation alignment (unverified): real test-only C and Rust comparators now
+  implement `rthal-scalar-v1`. A typed plan builds them with pinned compiler
+  identities, hashes the outputs, and admits them to the exact process arena;
+  Pure Simple remains the effect and semantic owner.

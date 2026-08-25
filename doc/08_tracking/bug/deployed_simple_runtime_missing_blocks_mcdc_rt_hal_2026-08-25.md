@@ -73,3 +73,14 @@ contract smoke compiled five modules with zero failures and executed
 `hir-complete` near 2.7 GiB RSS but published no artifact or terminal receipt.
 General verification still needs Stage 3/4 recovery; explicitly stage-scoped
 native smokes can continue feature development.
+
+## Current impact update
+
+The working tree now contains the broader MIR probe expansion, dynamic aspect,
+runner transport/gate, exact RT/HAL process arena, typed environment executor,
+RT criticality, recoverable unwind, system specs, manuals, and performance
+harness. None has been accepted as verified. Stage 2's limited `native-build`
+smokes cannot establish compiler/lib checks, SPipe behavior, cross-backend
+unwind, static-off binary absence, or same-fixture timing/peak-RSS/allocation
+thresholds. The unblock condition remains an admitted self-hosted Stage 3/4
+executable with `check` and `test`; source completeness cannot close this bug.

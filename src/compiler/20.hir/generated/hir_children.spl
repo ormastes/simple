@@ -261,6 +261,15 @@ fn hir_children_of_expr(node: HirExpr) -> [HirNode]:
             hir_visit_nothing()
         case TypeTest(b_value, _):
             out = out.push(HirNode.Expr(b_value))
+        case TryCatch(b_body, b_clauses, b_finally):
+            out = _hir_extend(out, hir_children_of_block(b_body))
+            for clause in b_clauses:
+                if clause.has_pattern:
+                    out = out.push(HirNode.Pattern(clause.pattern))
+                if clause.has_type_:
+                    out = out.push(HirNode.Type_(clause.type_))
+                out = _hir_extend(out, hir_children_of_block(clause.body))
+            out = _hir_extend(out, hir_children_of_block(b_finally))
         case _: unreachable_hir_variant("HirExprKind", "hir_children_of_expr")
     out
 
@@ -827,6 +836,18 @@ fn hir_expand_expr_child_frames_reverse(node: HirExpr, sink: HirChildFrameSink):
             hir_visit_nothing()
         case TypeTest(b_value, _):
             sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
+        case TryCatch(b_body, b_clauses, b_finally):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_finally))
+            var catch_i = b_clauses.len()
+            while catch_i > 0:
+                catch_i = catch_i - 1
+                val clause = b_clauses[catch_i]
+                sink.push_hir_child_frame(HirChildFrame.Block(clause.body))
+                if clause.has_type_:
+                    sink.push_hir_child_frame(HirChildFrame.Type_(clause.type_))
+                if clause.has_pattern:
+                    sink.push_hir_child_frame(HirChildFrame.Pattern(clause.pattern))
+            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
         case _: unreachable_hir_variant("HirExprKind", "hir_expand_expr_child_frames_reverse")
     if node.has_type_:
         sink.push_hir_child_frame(HirChildFrame.Type_(node.type_))

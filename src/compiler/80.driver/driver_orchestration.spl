@@ -21,7 +21,7 @@ use compiler.common.attributes.{
 }
 use compiler.frontend.parser_types.{ParserModule, ParserFunction}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
-use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit}
+use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit, compiler_mcdc_obligation_manifest_emit}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
@@ -82,6 +82,10 @@ impl CompilerDriver:
 
     me compile() -> CompileResult:
         val log = self.ctx.logger
+        if self.ctx.config.contains_key("mcdc_config_error"):
+            val mcdc_config_error = self.ctx.config["mcdc_config_error"] ?? "invalid MC/DC configuration"
+            self.ctx.add_error(mcdc_config_error)
+            return CompileResult.CodegenError(mcdc_config_error)
         var compile_mode_text = self.ctx.options.mode.to_text()
         if self.ctx.options.cli_mode_text != "":
             compile_mode_text = self.ctx.options.cli_mode_text
@@ -113,7 +117,12 @@ impl CompilerDriver:
 
         log_phase("phase2:parse:start")
         log_debug("phase 2: parsing...")
-        compiler_coverage_inventory_reset(self.ctx.config.contains_key("coverage"))
+        val mcdc_mode_text = self.ctx.config["mcdc_mode"] ?? "off"
+        val mcdc_enabled = mcdc_mode_text == "on" or mcdc_mode_text == "dynamic"
+        compiler_coverage_inventory_reset(
+            self.ctx.config.contains_key("coverage") or mcdc_enabled,
+            self.ctx.config["mcdc_include"] ?? "",
+            self.ctx.config["mcdc_exclude"] ?? "")
         val parse_ok = self.parse_all_committing_impl()
         if not parse_ok:
             # Name the recorded diagnostics. A phase-2 verdict of false with an
@@ -130,11 +139,14 @@ impl CompilerDriver:
             log_build_progress("parse", "files", -1, self.ctx.sources.len(),
                 "failed", 1, 6, 1, 0, "failed")
             return CompileResult.ParseError(self.ctx.errors)
-        if self.ctx.config.contains_key("coverage"):
+        if self.ctx.config.contains_key("coverage") or mcdc_enabled:
             if not compiler_coverage_inventory_valid():
                 self.ctx.add_error(compiler_coverage_inventory_error())
                 return CompileResult.ParseError(self.ctx.errors)
+        if self.ctx.config.contains_key("coverage"):
             compiler_coverage_inventory_emit()
+        if mcdc_enabled:
+            compiler_mcdc_obligation_manifest_emit()
         if self.ctx.options.backend == "vhdl":
             self.capture_vhdl_metadata()
         log_debug("phase 2 done")

@@ -35,6 +35,7 @@ use compiler.common.assurance.policy_names.{normalize_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata, normalize_gpu_target_metadata_name}
 use compiler.mir.mir_types.{MirConstant, mir_type_probe_text}
+use compiler.mir.mir_rt_hal_boundary.{inject_rt_hal_boundary}
 
 # Return-type classification probe (E-SFFI-016, 2026-08-24). Default OFF.
 #
@@ -316,6 +317,11 @@ impl MirLowering:
         if trace_enabled:
             print "[mir-lower] lower_function:begin-function-done {fn_.name}"
         self.builder = bldr
+
+        # Only an executed entrypoint allocates recorder storage. Libraries and
+        # static-off builds carry neither initialization calls nor dependencies.
+        if fn_.name == "main" and self.mcdc_mode != 0:
+            self.emit_mcdc_runtime_configuration()
 
         # Map parameters to locals
         var arg_locals: Dict<i64, LocalId> = {}
@@ -658,6 +664,13 @@ impl MirLowering:
 
         # Propagate function-level codegen attributes from HIR.
         fn_result = self.apply_function_attr_to_mir(fn_result, resolved_function_attr)
+        if resolved_function_attr.is_rt_hal:
+            val rt_hal_operation_id = fn_.span.file + "::" + fn_.name
+            fn_result = inject_rt_hal_boundary(
+                fn_result, rt_hal_operation_id,
+                resolved_function_attr.rt_hal_compare_c,
+                resolved_function_attr.rt_hal_compare_rust
+            )
         if is_gpu_kernel:
             val gpu_selection = parse_gpu_kernel_target(gpu_target)
             fn_result.is_kernel = true

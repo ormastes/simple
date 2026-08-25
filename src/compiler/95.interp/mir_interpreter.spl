@@ -92,6 +92,7 @@ class MirInterpreter:
     execir_arenas: {text: ExecIrArenaCtx}
     execir_verdicts: {text: i64}
     execir_probe_count: i64
+    pending_exception_type_tag: i64
 
 impl MirInterpreter:
     static fn create() -> MirInterpreter:
@@ -132,7 +133,8 @@ impl MirInterpreter:
             execir_modules: {},
             execir_arenas: {},
             execir_verdicts: {},
-            execir_probe_count: 0
+            execir_probe_count: 0,
+            pending_exception_type_tag: 0
         )
 
     fn execir_memo_size() -> i64:
@@ -1122,6 +1124,12 @@ impl MirInterpreter:
     me _execute_intrinsic(name: text, args: [MirOperand]) -> i64:
         """Execute a built-in intrinsic by name and return result."""
         match name:
+            case "__simple_exception_type_tag":
+                self.pending_exception_type_tag
+            case "__simple_exception_set_type_tag":
+                if args.len() > 0:
+                    self.pending_exception_type_tag = self.get_operand(args[0])
+                self.pending_exception_type_tag
             case "__simple_ssa_phi":
                 # Pseudo-phi args are either plain values or predecessor/value pairs.
                 if args.len() >= 4:
@@ -1380,7 +1388,14 @@ impl MirInterpreter:
                 self.has_returned = true
                 Some(InterpError.RuntimeError(message: "Abort: {message}"))
 
-            case CallTerminator(dest, call_target, args, normal, unwind):
+            case Throw(payload, type_tag):
+                Some(InterpError.Exception(payload: self.get_operand(payload), type_tag: self.get_operand(type_tag)))
+
+            case Resume(payload, type_tag):
+                Some(InterpError.Exception(payload: self.get_operand(payload), type_tag: self.get_operand(type_tag)))
+
+            case CallTerminator(dest, call_target, args, normal, unwind,
+                                unwind_payload_dest, unwind_type_tag_dest):
                 val func_name = _extract_func_name(call_target)
                 if func_name.?:
                     val name = func_name.unwrap()
@@ -1389,12 +1404,22 @@ impl MirInterpreter:
                         val callee = callee_opt.unwrap()
                         val call_result = self._call_function(callee, args)
                         if call_result[1].?:
-                            # Error during call - jump to unwind if available
-                            if unwind.?:
-                                self.previous_block = self.current_block
-                                self.current_block = Some(unwind.unwrap().id)
-                                return nil
-                            return call_result[1]
+                            val call_error = call_result[1].unwrap()
+                            # Runtime faults remain diagnostics. Only an
+                            # explicit language exception selects `unwind`.
+                            match call_error:
+                                case InterpError.Exception(payload, type_tag):
+                                    if unwind.?:
+                                        self.pending_exception_type_tag = type_tag
+                                        if unwind_payload_dest.?:
+                                            self.set_local(unwind_payload_dest.unwrap(), payload)
+                                        if unwind_type_tag_dest.?:
+                                            self.set_local(unwind_type_tag_dest.unwrap(), type_tag)
+                                        self.previous_block = self.current_block
+                                        self.current_block = Some(unwind.unwrap().id)
+                                        return nil
+                                    return Some(call_error)
+                                case _: return Some(call_error)
                         if dest.?:
                             val ret = call_result[0] ?? 0
                             self.set_local(dest.unwrap(), ret)

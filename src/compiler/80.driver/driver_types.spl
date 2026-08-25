@@ -46,6 +46,7 @@ use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
     serialize_const_value}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.mcdc.model.{McdcMode, mcdc_mode_from_text, mcdc_mode_name}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_kind_to_u8, storage_conversion_policy_to_u8
 }
@@ -503,9 +504,32 @@ class CompileContext:
     static fn create(options: CompileOptions) -> CompileContext:
         # Load config
         var config: Dict<text, text> = {}
-        val compiler_config = CompilerConfig.from_env()
-        if compiler_config.coverage_enabled:
+        var compiler_config = CompilerConfig.from_env()
+        # CompileOptions is the real CLI-to-driver boundary. Apply its values
+        # after environment loading so command-line authority wins without a
+        # process-global env write that could leak into concurrent compiles.
+        if options.mcdc_mode_text != "":
+            if val cli_mcdc_mode = mcdc_mode_from_text(options.mcdc_mode_text):
+                compiler_config.mcdc_mode = cli_mcdc_mode
+            else:
+                config["mcdc_config_error"] = "MCDC-E-MODE: unknown MC/DC mode '{options.mcdc_mode_text}'"
+        if options.mcdc_owner_bytes > 0:
+            compiler_config.mcdc_owner_bytes = options.mcdc_owner_bytes
+        if options.mcdc_global_bytes > 0:
+            if options.mcdc_global_bytes >= compiler_config.mcdc_owner_bytes:
+                compiler_config.mcdc_global_bytes = options.mcdc_global_bytes
+            else:
+                config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget"
+        if compiler_config.mcdc_global_bytes < compiler_config.mcdc_owner_bytes:
+            config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget"
+        if compiler_config.coverage_enabled or options.coverage_enabled:
             config["coverage"] = "1"
+        config["mcdc_mode"] = mcdc_mode_name(compiler_config.mcdc_mode)
+        config["mcdc_owner_bytes"] = compiler_config.mcdc_owner_bytes.to_text()
+        config["mcdc_global_bytes"] = compiler_config.mcdc_global_bytes.to_text()
+        config["mcdc_include"] = compiler_config.mcdc_include
+        config["mcdc_exclude"] = compiler_config.mcdc_exclude
+        config["rt_hal_plan"] = compiler_config.get("rt-hal-plan") ?? ""
 
         # Standalone native CLI transports its requested mode through the
         # stable text field because the enum field can be corrupted by the

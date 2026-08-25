@@ -1,0 +1,39 @@
+# @req REQ-010 REQ-011
+# @capture exec
+# @capture artifact
+# @manual: primary
+"""Typed bounded environment instruction, receipt, BLOCKED, and exclusion contract."""
+use std.spec.*
+use std.spec.step
+use std.common.env_access.model.*
+
+fn instruction(resource: text = "HAL_TARGET") -> EnvAccessInstruction:
+    EnvAccessInstruction(kind: EnvAccessKind.ReadEnv, resource: resource,
+        arguments: [], timeout_ms: 100, max_stdout_bytes: 128, max_stderr_bytes: 128)
+
+fn plan() -> EnvAccessPlan:
+    EnvAccessPlan(plan_id: "rt-hal-env-v1", canonical_repo_root: "/workspace/simple",
+        instructions: [instruction()], max_total_bytes: 256, max_processes: 0,
+        allowed_tools: [], allowed_hardware_probes: [])
+
+describe "RT HAL environment receipts":
+    it "should accept a typed bounded instruction plan without direct process access":
+        step("execute environment instructions")
+        expect(env_access_instruction_error(instruction())).to_equal("")
+        expect(env_access_plan_error(plan())).to_equal("")
+
+    it "should reject undeclared unsafe or unbounded interactions":
+        step("execute environment instructions")
+        expect(env_access_instruction_error(instruction(""))).to_equal("ENV-E-UNDECLARED")
+        val unbounded = EnvAccessInstruction(kind: EnvAccessKind.HardwareProbe, resource: "gpio",
+            arguments: [], timeout_ms: 600001, max_stdout_bytes: 0, max_stderr_bytes: 0)
+        expect(env_access_instruction_error(unbounded)).to_equal("ENV-E-BOUND")
+
+    it "should retain a blocked scenario with reason owner artifact and resume command":
+        step("execute environment instructions")
+        val blocked = env_scenario_skip("board-gpio", "board is not attached", "hal-team",
+            "BUG-204", "attach board rev C", ["build/evidence/board-gpio.log"],
+            "bin/simple test test/03_system/runtime/rt_hal_environment_receipt_spec.spl")
+        expect(env_scenario_selection_error(blocked)).to_equal("")
+        expect(blocked.disposition).to_equal(EnvScenarioDisposition.Skip)
+        expect(env_scenario_selection_error(env_scenario_skip("board-gpio", "", "", "", "", [], ""))).to_equal("ENV-E-OMISSION-REASON")

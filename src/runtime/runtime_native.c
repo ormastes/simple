@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <math.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <time.h>
 #include <stdatomic.h>
 #include <fcntl.h>
@@ -45,9 +46,11 @@
 #ifndef F_ADD_SEALS
 #define F_ADD_SEALS 1033
 #endif
+
 #ifndef F_SEAL_SEAL
 #define F_SEAL_SEAL 0x0001
 #endif
+
 #ifndef F_SEAL_SHRINK
 #define F_SEAL_SHRINK 0x0002
 #endif
@@ -101,6 +104,110 @@
 #define AT_EMPTY_PATH 0x1000
 #endif
 #endif
+
+/* Recoverable exception transport is deliberately separate from host/C++
+ * unwinding. Pure Simple MIR owns try/catch/finally semantics; this capsule
+ * supplies bounded thread-local storage and non-local transfer only. */
+#define RT_EXCEPTION_FRAME_CAPACITY 64
+
+typedef struct RtExceptionFrame {
+    jmp_buf environment;
+    int64_t payload;
+    int64_t type_tag;
+} RtExceptionFrame;
+
+typedef struct RtExceptionThreadState {
+    RtExceptionFrame frames[RT_EXCEPTION_FRAME_CAPACITY];
+    uint32_t depth;
+    int64_t caught_type_tag;
+} RtExceptionThreadState;
+
+static _Thread_local RtExceptionThreadState rt_exception_state;
+
+void* rt_exception_frame_push(void) {
+    RtExceptionThreadState* state = &rt_exception_state;
+    if (state->depth >= RT_EXCEPTION_FRAME_CAPACITY) {
+        fputs("fatal: recoverable exception frame capacity exceeded\n", stderr);
+        abort();
+    }
+    RtExceptionFrame* frame = &state->frames[state->depth++];
+    frame->payload = 0;
+    frame->type_tag = 0;
+    return (void*)&frame->environment;
+}
+
+void rt_exception_frame_pop(void) {
+    RtExceptionThreadState* state = &rt_exception_state;
+    if (state->depth == 0) {
+        fputs("fatal: recoverable exception frame underflow\n", stderr);
+        abort();
+    }
+    state->depth--;
+}
+
+int64_t rt_exception_peek_payload(void) {
+    RtExceptionThreadState* state = &rt_exception_state;
+    if (state->depth == 0) return 0;
+    return state->frames[state->depth - 1].payload;
+}
+
+int64_t rt_exception_peek_type_tag(void) {
+    RtExceptionThreadState* state = &rt_exception_state;
+    if (state->depth == 0) return 0;
+    return state->frames[state->depth - 1].type_tag;
+}
+
+int64_t rt_exception_frame_finish(int64_t setjmp_status) {
+    RtExceptionThreadState* state = &rt_exception_state;
+    if (setjmp_status == 0) return 0;
+    if (state->depth == 0) {
+        fputs("fatal: recoverable exception frame finish underflow\n", stderr);
+        abort();
+    }
+    state->caught_type_tag = state->frames[state->depth - 1].type_tag;
+    state->depth--;
+    return setjmp_status;
+}
+
+RtExceptionCapture rt_exception_frame_capture(int64_t setjmp_status) {
+    RtExceptionCapture capture = {0, setjmp_status};
+    RtExceptionThreadState* state = &rt_exception_state;
+    if (setjmp_status == 0) return capture;
+    if (state->depth == 0) {
+        fputs("fatal: recoverable exception frame capture underflow\n", stderr);
+        abort();
+    }
+    RtExceptionFrame* frame = &state->frames[state->depth - 1];
+    capture.payload = frame->payload;
+    state->caught_type_tag = frame->type_tag;
+    state->depth--;
+    return capture;
+}
+
+int64_t rt_exception_caught_type_tag(void) { return rt_exception_state.caught_type_tag; }
+int64_t rt_exception_frame_depth(void) { return (int64_t)rt_exception_state.depth; }
+int64_t rt_exception_frame_capacity(void) { return RT_EXCEPTION_FRAME_CAPACITY; }
+int64_t __simple_exception_type_tag(void) { return rt_exception_state.caught_type_tag; }
+int64_t __simple_exception_set_type_tag(int64_t type_tag) {
+    rt_exception_state.caught_type_tag = type_tag;
+    return type_tag;
+}
+
+void rt_exception_throw(int64_t payload, int64_t type_tag) {
+    RtExceptionThreadState* state = &rt_exception_state;
+    if (state->depth == 0) {
+        fputs("fatal: uncaught Simple exception\n", stderr);
+        abort();
+    }
+    RtExceptionFrame* frame = &state->frames[state->depth - 1];
+    frame->payload = payload;
+    frame->type_tag = type_tag;
+    longjmp(frame->environment, 1);
+}
+
+void rt_exception_resume(int64_t payload, int64_t type_tag) {
+    rt_exception_throw(payload, type_tag);
+}
 
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
  * the workers in platform/unix_common.h and platform/platform_win.h. */

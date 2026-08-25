@@ -15,6 +15,7 @@ use compiler.driver.driver_types (CompileOptions, CompileMode, CompileResult, Ou
 use compiler.common.driver_core_types (driver_core_compile_options_default, compileoptions_normalize_mir_optimization)
 use compiler.mir_opt (mir_optimization_inventory_lines)
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
+use std.common.convert.{try_parse_int}
 
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
@@ -47,6 +48,23 @@ fn cli_parse_opt_level(level: text) -> i64?:
         return Some(3)
     nil
 
+fn cli_mcdc_mode_canonical(raw: text) -> text?:
+    match raw.trim().to_lower():
+        case "off" | "static-off" | "disabled" | "0": Some("off")
+        case "on" | "static" | "static-on" | "enabled" | "1": Some("on")
+        case "dynamic" | "dynamic-aspect" | "aspect" | "dynload": Some("dynamic")
+        case _: nil
+
+fn cli_mcdc_route_requested(mode: text, owner_bytes: i64, global_bytes: i64) -> bool:
+    mode == "on" or mode == "dynamic" or owner_bytes > 0 or global_bytes > 0
+
+fn cli_reject_unsupported_mcdc_route(route: text, mode: text):
+    _cli_eprint("Error: MC/DC instrumentation is unsupported by {route}")
+    if mode == "dynamic":
+        _cli_eprint("MCDC-E-DYNAMIC-UNSUPPORTED: use an admitted dynamic-capable target")
+    else:
+        _cli_eprint("MCDC-E-PROBE-UNLOWERED: use the Pure Simple native/LLVM driver")
+
 fn cli_print_shared_opt_level_help():
     print "  --opt-level=<level>  Optimization level: none, basic, standard, aggressive"
 
@@ -76,7 +94,7 @@ fn cli_print_shared_optimization_inventory(command: text):
         print "  - Release MIR/self-hosted builds normalize to standard unless --opt-level overrides it."
 
 # Pure Simple compiler implementation (no Rust SFFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, target_opt_ctx: TargetOptContext, debug_trace_level: text) -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, target_opt_ctx: TargetOptContext, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64) -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -125,6 +143,10 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     options.target_opt_ctx = target_opt_ctx
     if debug_trace_level != "":
         options.debug_trace_level = debug_trace_level
+    options.coverage_enabled = coverage_enabled
+    options.mcdc_mode_text = mcdc_mode_text
+    options.mcdc_owner_bytes = mcdc_owner_bytes
+    options.mcdc_global_bytes = mcdc_global_bytes
     options = compileoptions_normalize_mir_optimization(options)
 
     val driver = compiler_driver_create(options)
@@ -156,7 +178,7 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
         source_file.replace(".spl", ".lsm")
     val smf_out = out + ".smf.tmp"
 
-    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2, if release: "prod" else: "dev", target_opt_context_default(), "")
+    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2, if release: "prod" else: "dev", target_opt_context_default(), "", false, "", 0, 0)
     if compile_status != 0:
         return compile_status
 
@@ -267,6 +289,10 @@ fn cli_compile(args: [text]) -> i64:
     var optimization_requested: bool = false
     var profile: text = "dev"
     var debug_trace_level: text = ""
+    var coverage_enabled: bool = false
+    var mcdc_mode_text: text = ""
+    var mcdc_owner_bytes: i64 = 0
+    var mcdc_global_bytes: i64 = 0
     var vulkan_assembly_output: text = ""
 
     var i = 0
@@ -291,6 +317,11 @@ fn cli_compile(args: [text]) -> i64:
             print "  --driver-mode=<mode>  Driver packaging mode: dynamic emits .lsm"
             print "  --emit-c              Emit C++20 source code (C backend)"
             print "  --coverage            Enable coverage instrumentation"
+            print "  --mcdc                Enable static MC/DC instrumentation"
+            print "  --mcdc-mode=<mode>    MC/DC mode: static-off, static-on, dynamic-aspect"
+            print "  --no-mcdc             Fully disable MC/DC instrumentation"
+            print "  --mcdc-owner-bytes=N  Fixed per-owner MC/DC buffer budget"
+            print "  --mcdc-global-bytes=N Fixed process-wide MC/DC buffer budget"
             print "  --coverage-output=<p> Coverage output file path"
             print "  --release             Release build (optimized, prefers LLVM)"
             print "  --release-optimized   Max optimization: -O3 + x86-64-v3 + ThinLTO"
@@ -475,8 +506,45 @@ fn cli_compile(args: [text]) -> i64:
         elif arg.starts_with("--pgo-use="):
             pgo_use_path = arg.substring(10)
         elif arg == "--coverage":
-            # Pass-through (compiler config reads env/args)
-            pass
+            coverage_enabled = true
+        elif arg == "--mcdc":
+            mcdc_mode_text = "on"
+        elif arg == "--no-mcdc":
+            mcdc_mode_text = "off"
+        elif arg.starts_with("--mcdc-mode="):
+            val mode_value = arg.substring(12)
+            val canonical_mode = cli_mcdc_mode_canonical(mode_value)
+            if canonical_mode.is_none():
+                _cli_eprint("Error: Unknown MC/DC mode: {mode_value}")
+                _cli_eprint("Valid modes: static-off, static-on, dynamic-aspect")
+                return 1
+            mcdc_mode_text = canonical_mode ?? ""
+        elif arg == "--mcdc-mode":
+            i = i + 1
+            if i >= args.len():
+                _cli_eprint("Error: --mcdc-mode requires an argument")
+                return 1
+            val mode_value = args[i]
+            val canonical_mode = cli_mcdc_mode_canonical(mode_value)
+            if canonical_mode.is_none():
+                _cli_eprint("Error: Unknown MC/DC mode: {mode_value}")
+                _cli_eprint("Valid modes: static-off, static-on, dynamic-aspect")
+                return 1
+            mcdc_mode_text = canonical_mode ?? ""
+        elif arg.starts_with("--mcdc-owner-bytes="):
+            val owner_value = arg.substring(19)
+            val parsed_owner = try_parse_int(owner_value)
+            if parsed_owner.is_none() or (parsed_owner ?? 0) <= 0:
+                _cli_eprint("Error: --mcdc-owner-bytes requires a positive integer")
+                return 1
+            mcdc_owner_bytes = parsed_owner ?? 0
+        elif arg.starts_with("--mcdc-global-bytes="):
+            val global_value = arg.substring(20)
+            val parsed_global = try_parse_int(global_value)
+            if parsed_global.is_none() or (parsed_global ?? 0) <= 0:
+                _cli_eprint("Error: --mcdc-global-bytes requires a positive integer")
+                return 1
+            mcdc_global_bytes = parsed_global ?? 0
         elif arg.starts_with("--coverage-output="):
             # Pass-through (handled by compiler)
             pass
@@ -521,7 +589,13 @@ fn cli_compile(args: [text]) -> i64:
         _cli_eprint("Error: --emit-vulkan-spirv-assembly requires --backend=vulkan")
         return 1
 
+    val mcdc_route_requested = cli_mcdc_route_requested(
+        mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+
     if driver_mode != "":
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("dynamic driver packaging", mcdc_mode_text)
+            return 1
         if driver_mode != "dynamic":
             _cli_eprint("Error: Unknown driver mode: {driver_mode}")
             _cli_eprint("Supported driver modes: dynamic")
@@ -529,23 +603,38 @@ fn cli_compile(args: [text]) -> i64:
         return cli_compile_dynamic_driver_library(source_file, output_file, backend, verbose, release, low_memory)
 
     if backend == "vhdl":
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("the VHDL backend", mcdc_mode_text)
+            return 1
         return compile_vhdl(source_file, output_file, verbose)
 
     if backend == "cuda" or backend == "ptx":
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("the CUDA backend", mcdc_mode_text)
+            return 1
         return compile_cuda(source_file, output_file, verbose)
 
     if backend == "opencl" or backend == "opencl-c" or backend == "opencl-spirv" or backend == "cl":
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("the OpenCL backend", mcdc_mode_text)
+            return 1
         return compile_opencl(source_file, output_file, verbose)
 
     if backend == "vulkan" or backend == "spirv":
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("the Vulkan backend", mcdc_mode_text)
+            return 1
         var vulkan_output = vulkan_assembly_output
         if vulkan_output == "":
             vulkan_output = output_file
         if vulkan_output == "":
             vulkan_output = source_file.replace(".spl", ".spvasm")
-        return cli_compile_pure_simple(source_file, vulkan_output, "vulkan", "vulkan", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level)
+        return cli_compile_pure_simple(source_file, vulkan_output, "vulkan", "vulkan", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
     if backend == "c" or backend == "cpp" or backend == "ccodegen" or emit_c:
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("the C backend", mcdc_mode_text)
+            return 1
         return compile_c_backend(source_file, output_file, verbose)
 
     # LLVM and native compilation — route through Pure Simple driver or native pipeline
@@ -557,15 +646,22 @@ fn cli_compile(args: [text]) -> i64:
         if out == "":
             out = source_file.replace(".spl", "")
         # Use Pure Simple compiler driver for all LLVM backends
-        if backend == "llvm-lib" or backend == "llvmlib":
-            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level)
+        if (backend == "llvm-lib" or backend == "llvmlib" or coverage_enabled or mcdc_mode_text != "" or
+            mcdc_owner_bytes > 0 or mcdc_global_bytes > 0):
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
         return compile_native(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 
     if target.starts_with("baremetal-"):
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("the bare-metal target route", mcdc_mode_text)
+            return 1
         return compile_baremetal(source_file, target, emit, output_file, verbose)
 
     # SimpleOS targets — route through Pure Simple compiler (bare-metal ELF)
     if target.contains("simpleos"):
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("the SimpleOS target route", mcdc_mode_text)
+            return 1
         return compile_simpleos(source_file, target, emit, output_file, verbose)
 
     if output_format != "":
@@ -576,18 +672,24 @@ fn cli_compile(args: [text]) -> i64:
 
     # WASM targets: emit WAT via the pure-Simple WASM backend (no LLVM needed).
     if _cli_is_wasm_target(target) or backend == "wasm":
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("the WASM backend", mcdc_mode_text)
+            return 1
         var wout = output_file
         if wout == "":
             wout = source_file.replace(".spl", ".wat")
-        return cli_compile_pure_simple(source_file, wout, output_format, "wasm", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level)
+        return cli_compile_pure_simple(source_file, wout, output_format, "wasm", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
     if target != "" and not target.starts_with("baremetal-"):
+        if mcdc_route_requested:
+            cli_reject_unsupported_mcdc_route("the external target route", mcdc_mode_text)
+            return 1
         # Route non-baremetal targets through the Rust frontend so wasm and
         # full target triples share the same canonical build path.
         return cli_compile_via_runtime(args)
 
     # Use Pure Simple compiler driver for all compilation
-    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level)
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:

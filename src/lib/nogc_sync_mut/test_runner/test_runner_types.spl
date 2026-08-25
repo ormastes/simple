@@ -51,6 +51,22 @@ enum TestRunOutcome:
     # never a failure verdict -- but it is never a pass either. Requirement R3,
     # doc/02_requirements/infra/supervised_test_runner.md.
     Unverified
+    BlockedScenario
+    UnsupportedScenario
+
+enum TestOmissionStatus:
+    Blocked
+    Unsupported
+
+struct TestOmissionEvidence:
+    status: TestOmissionStatus
+    scenario_id: text
+    reason: text
+    prerequisite: text
+    owner: text
+    tracking_id: text
+    artifact_paths: [text]
+    resume_command: text
 
 # =========================================================================
 # Test Options
@@ -210,6 +226,14 @@ struct TestFileResult:
     # hidden. Defaulted so none of the ~85 existing constructor sites
     # change.
     in_development: i64 = 0
+    # Bounded child-to-parent MC/DC protocol payload. Empty means the child
+    # supplied no evidence; a malformed carrier is retained as an invalid
+    # sentinel so report completion fails closed instead of silently dropping
+    # it. Defaulted to preserve existing constructor sites and cached records.
+    mcdc_evidence_v1: text = ""
+    blocked: i64 = 0
+    unsupported: i64 = 0
+    omission_evidence: [TestOmissionEvidence] = []
 
 impl TestFileResult:
     # Routed through the single classifier below rather than re-deriving the
@@ -263,6 +287,10 @@ fn classify_test_run_result(result: TestRunResult, empty_is_success: bool) -> Te
         # below so a contended host cannot manufacture a phantom code defect.
         if test_file_result_is_unverified(file_result):
             return TestRunOutcome.Unverified
+        if file_result.blocked > 0:
+            return TestRunOutcome.BlockedScenario
+        if file_result.unsupported > 0:
+            return TestRunOutcome.UnsupportedScenario
         if file_result.error != "" and file_result.failed == 0:
             return TestRunOutcome.InternalError
     if result.total_failed > 0:
@@ -309,6 +337,10 @@ fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
         return "TERMINATED"
     if token == "TIMEOUT":
         return "TIMEOUT"
+    if token == "BLOCKED":
+        return "BLOCKED"
+    if token == "UNSUPPORTED":
+        return "UNSUPPORTED"
     if token == "NOT EXECUTED" or token == "NOT RUN":
         return "NOT_RUN"
     if token != "":
@@ -319,6 +351,10 @@ fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
         return "TIMEOUT"
     if file_result.failed > 0:
         return "ERROR"
+    if file_result.blocked > 0:
+        return "BLOCKED"
+    if file_result.unsupported > 0:
+        return "UNSUPPORTED"
     val examples = (file_result.passed + file_result.failed +
                     file_result.skipped + file_result.pending +
                     file_result.in_development)
@@ -344,6 +380,8 @@ fn test_run_outcome_exit_code(outcome: TestRunOutcome) -> i64:
         case EmptySelection: 4
         case TimeoutResourceFailure: 124
         case Unverified: 5
+        case BlockedScenario: 6
+        case UnsupportedScenario: 7
 
 fn test_run_outcome_name(outcome: TestRunOutcome) -> text:
     match outcome:
@@ -354,6 +392,8 @@ fn test_run_outcome_name(outcome: TestRunOutcome) -> text:
         case EmptySelection: "empty_selection"
         case TimeoutResourceFailure: "timeout_resource_failure"
         case Unverified: "unverified"
+        case BlockedScenario: "blocked"
+        case UnsupportedScenario: "unsupported"
 
 # =========================================================================
 # Skip Feature Info

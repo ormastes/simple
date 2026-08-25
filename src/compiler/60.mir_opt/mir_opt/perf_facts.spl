@@ -406,10 +406,15 @@ fn perf_terminator_access(terminator: MirTerminator) -> MirInstructionAccess:
             if value.?: access.use_operand(value.unwrap())
         case If(condition, _, _): access.use_operand(condition)
         case Switch(value, _, _): access.use_operand(value)
-        case CallTerminator(dest, function, args, _, _):
+        case CallTerminator(dest, function, args, _, _, unwind_payload_dest, unwind_type_tag_dest):
             if dest.?: access.define(dest.unwrap())
+            if unwind_payload_dest.?: access.define(unwind_payload_dest.unwrap())
+            if unwind_type_tag_dest.?: access.define(unwind_type_tag_dest.unwrap())
             access.use_operand(function)
             for arg in args: access.use_operand(arg)
+        case Throw(payload, type_tag) | Resume(payload, type_tag):
+            access.use_operand(payload)
+            access.use_operand(type_tag)
         case Goto(_) | Unreachable | Abort(_): pass_dn
     access
 
@@ -578,7 +583,7 @@ fn perf_facts_terminator_successors(term: MirTerminator) -> [BlockId]:
                 result.push(target_case.target)
             result.push(default)
             result
-        case CallTerminator(_, _, _, normal, unwind):
+        case CallTerminator(_, _, _, normal, unwind, _, _):
             match unwind:
                 case Some(unwind_target): [normal, unwind_target]
                 case nil: [normal]
@@ -684,16 +689,22 @@ fn perf_facts_build_internal(func: MirFunction, raw_request: PerfFactRequest) ->
                 else:
                     def_use_complete = false
                     invalid_local_reference_count = invalid_local_reference_count + 1
-            var unwind_edge_definition = -1
+            var edge_definition0 = -1
+            var edge_definition1 = -1
+            var edge_definition2 = -1
             match block.terminator:
-                case CallTerminator(dest, _, _, _, unwind):
-                    if dest.? and unwind.?: unwind_edge_definition = dest.unwrap().id
+                case CallTerminator(dest, _, _, _, unwind, unwind_payload_dest, unwind_type_tag_dest):
+                    if unwind.?:
+                        if dest.?: edge_definition0 = dest.unwrap().id
+                        if unwind_payload_dest.?: edge_definition1 = unwind_payload_dest.unwrap().id
+                        if unwind_type_tag_dest.?: edge_definition2 = unwind_type_tag_dest.unwrap().id
                 case _: pass_dn
             for local in terminator_access.defs:
                 if local_index.has(local.id):
                     val position = local_index[local.id]
                     definition_buckets[position].push(MirDefUseSite(block.id, -1, local, true))
-                    if liveness_cells_admitted and local.id != unwind_edge_definition:
+                    if (liveness_cells_admitted and local.id != edge_definition0 and
+                        local.id != edge_definition1 and local.id != edge_definition2):
                         block_definition_bits[(index - 1) * local_count + position] = true
                 else:
                     def_use_complete = false

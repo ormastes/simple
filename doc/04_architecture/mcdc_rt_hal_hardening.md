@@ -96,3 +96,121 @@ prove static-off elimination; land bounded recording/analyzer/exclusions; land
 environment receipts; add Pure-first HAL query and execute-once comparison; add
 dynamic target adapters; run the RT warning epoch; promote to error next epoch;
 retire the rewrite only after compatibility and parity evidence.
+
+## Implemented source topology (unverified)
+
+The implementation refines the original three abstract probes into frozen HIR
+decision metadata and MIR `DecisionProbe`/`ConditionProbe` records. The MIR
+records are compiler-internal markers: `driver_pipeline_lowering.spl` must
+expand them to direct static or dynamic runtime calls before backend selection.
+Every backend and the MIR interpreter rejects an unexpanded marker. This makes
+static-off a compile-time absence property instead of a runtime flag check and
+prevents a backend from silently dropping coverage semantics.
+
+Short-circuit lowering records a condition only after its expression evaluates.
+It emits explicit evaluated/truth words and Boolean-derivative mask ranges for
+the unevaluated side of `and`/`or`. Analysis consumes a per-condition policy:
+unique-cause requires equality of all non-target evaluated values, while masking
+uses compiler-produced projection words. Missing masking metadata is a named
+classification, never inferred from coincidental outcomes. Decision grouping,
+policy lookup, and signature matching use bounded open-addressed tables; the
+event and signature layouts use inline scalar words rather than per-row arrays.
+
+`dynamic_probe.spl` is the runtime controller. Catalog readiness, ABI/schema
+validation, owner registration, allocation, activation, and unload are cold
+operations performed only while all registered owners are quiescent. The
+published state and TLS owner slot are then sufficient for the dormant probe
+path; it does not query the aspect catalog, allocate, format, lock globally, or
+perform loader work. Static mode calls the same owner-local capsule operations
+directly. Capacity is reserved per owner under the global byte ceiling, and
+drop/overwrite saturation remains explicit evidence loss.
+
+## Evidence transport and enforcement
+
+Instrumented test children emit one bounded `MCDC-EVIDENCE-v1` frame. The parent
+runner parses only admitted row shapes under byte/row caps, associates them with
+the compile-time obligation manifest, runs the analyzer, and feeds one typed
+gate report to both machine and human renderers. Normal and stricter assurance
+require integer equality of covered and required conditions. Saturation,
+malformed transport, missing obligations, invalid exclusions, and missing pairs
+fail closed. Reasoned scenario omissions are governed separately from decision
+exclusions so an unavailable environment cannot become covered evidence.
+
+## Exact RT/HAL comparison boundary
+
+The current RT/HAL boundary is `rt_hal_compare_observed_pure_exact`. Pure Simple
+executes first and supplies the canonical receipt (status, result/error, and
+four-word SHA-256 trace identity). A bounded process task arena submits C/Rust
+comparison or replay work using frozen scalar arguments, pinned tool identity,
+schema, deadline, and output caps. Children return result envelopes; only the
+parent compares and commits in case/provider order. Effectful foreign providers
+receive the already-observed Pure receipt and replay capability, not authority
+to repeat the host effect. Unsupported, timeout, cancellation failure, mismatch,
+and memory-bound admission are distinct results.
+
+## Environment, RT criticality, and unwind
+
+`EnvAccessPlan` is validated before the app host resolves a repo-contained path
+or a pinned allowlisted tool. The common executor performs a single declared,
+bounded instruction through `EnvAccessCapability` and hashes/truncates output
+into a typed receipt. Test leaves therefore describe interactions but cannot
+open files, read raw environment state, or spawn arbitrary processes.
+
+RT profile/reason/bounds metadata is retained from declaration parsing through
+HIR semantic admission. The closure checker computes stable facts and requires
+explicit bound capabilities for otherwise forbidden allocation, blocking,
+recursion, dynamic dispatch, synchronization, logging, and loader work. Implicit
+RT remains a staged critical warning/error controlled by the migration epoch;
+no runtime guard is added to admitted hot paths.
+
+Recoverable exceptions use a bounded thread-local runtime frame stack carrying
+an integer payload and structural type tag. POSIX ELF x86-64, AArch64, and RV64
+native/LLVM paths have source lowering to push/capture/pop and throw/resume.
+Unsupported targets fail before emission. C translation, LLVM-library emission,
+RV32 payload transport, and composite collision-free type identity remain open
+and are tracked explicitly; this architecture is not yet verified end to end.
+
+## Verification status
+
+All topology described above is present in the working source but unverified.
+The self-hosted Stage 3/4 runtime is unavailable, no system/performance suite is
+accepted, and no static-off binary inventory or timing/RSS/allocation comparison
+has been produced. Generated manuals are review artifacts, not execution proof.
+
+## Remediation refinements (unverified)
+
+Masking acceptance is proof-bound rather than based on raw masked bits. The
+frontend walks the canonical short-circuit Boolean tree, assigns each leaf a
+target context, and records sibling subtrees that must equal the operator's
+identity value for that target to control the decision. Tree, proof, and context
+fingerprints bind the manifest to that structure; repeated leaf fingerprints
+mark strong coupling. The runner derives three-valued context evidence only
+after execution and memoizes each sibling program once per row, retaining an
+expected O(E*C) cold-analysis shape. A serialized target context is capped at
+64 requirements; the decision/event representation remains capped at 256
+conditions. Missing, conflicting, or over-cap context evidence fails closed.
+
+The tagged RT return path does not hash, allocate, spawn, wait, format, or
+compare. It writes operation, provider flags, Pure scalar receipt, and optional
+four-word trace into fixed SoA storage: 16 collision-checked owner slots and 64
+receipts per owner (1024 total). After producer quiescence, the controller drains
+the ring, constructs exact digests, and performs bounded foreign work. The
+injected finalizer makes undrained data, capacity loss, mismatch, timeout, or
+cancellation failure a run failure rather than best-effort telemetry.
+
+Hardware interaction is a startup registry of typed app-host function ports,
+not executable commands. At most 64 adapters may register before first plan
+execution seals the registry. Identity, schema, argument count, deadline, and
+output caps must fit the admitted plan; platform absence returns a typed
+`Unsupported` receipt. Hardware adapters never receive process-spawn authority.
+
+Real test-only C and Rust executables implement the fixed `rthal-scalar-v1`
+protocol. A typed plan invokes pinned compiler paths, hashes each output, and
+admits those exact binaries to the arena. Children consume already-observed Pure
+receipts and emit bounded outcome/error/trace digests; replay cannot repeat the
+host effect.
+
+Recoverable unwind remains asymmetric: POSIX ELF x86-64, AArch64, and RV64 have
+native/textual-LLVM source lowering over the bounded frame ABI. C translation,
+LLVM-library emission, Mach-O, RV32, and unlisted targets reject with stable
+diagnostics. This matrix remains unverified pending cross-backend execution.

@@ -125,6 +125,12 @@ struct MirBuilder:
     # expr_dispatch.spl::lower_expr and mir_lowering_stmts.spl::lower_stmt
     # for the save/restore wrappers that maintain this stack discipline.
     current_span: Span?
+    # Active protected-region destination. Nil outside try blocks, so normal
+    # compilation pays one predictable lowering-time branch and emits exactly
+    # the pre-existing Call instruction shape.
+    unwind_target: BlockId?
+    unwind_payload: LocalId?
+    unwind_type_tag: LocalId?
 
 impl MirBuilder:
     static fn new() -> MirBuilder:
@@ -143,7 +149,10 @@ impl MirBuilder:
             locals: [],
             blocks: [],
             instructions: [],
-            current_span: nil
+            current_span: nil,
+            unwind_target: nil,
+            unwind_payload: nil,
+            unwind_type_tag: nil
         )
 
     # ========================================================================
@@ -193,6 +202,9 @@ impl MirBuilder:
         # prologue instructions) still carries a real, in-function location
         # instead of nil.
         self.current_span = Some(span)
+        self.unwind_target = nil
+        self.unwind_payload = nil
+        self.unwind_type_tag = nil
         if mir_builder_trace_enabled():
             print "MIRB begin {name} post-reset blocks={self.blocks.len()} locals={self.locals.len()}"
 
@@ -609,10 +621,13 @@ impl MirBuilder:
         # flat LocalId? payload then see the box header as the id.
         val dest: LocalId? = if return_type.kind != MirTypeKind.Unit: self.new_temp(return_type) else: nil
 
-        self.emit(MirInst(
-            kind: MirInstKind.Call(dest, func, args),
-            span: self.current_span
-        ))
+        if val unwind = self.unwind_target:
+            val normal = self.new_block(Some("invoke_cont"))
+            self.set_terminator(MirTerminator.CallTerminator(
+                dest, func, args, normal, Some(unwind), self.unwind_payload, self.unwind_type_tag))
+            self.switch_to_block(normal)
+        else:
+            self.emit(MirInst(kind: MirInstKind.Call(dest, func, args), span: self.current_span))
 
         dest
 
@@ -628,10 +643,13 @@ impl MirBuilder:
         val dest = self.new_temp(return_type)
         if mirb_trace:
             eprint("[mir-call-value] new-temp-after id={dest.id} next={self.next_local_id}\n")
-        self.emit(MirInst(
-            kind: MirInstKind.Call(dest, func, args),
-            span: self.current_span
-        ))
+        if val unwind = self.unwind_target:
+            val normal = self.new_block(Some("invoke_value_cont"))
+            self.set_terminator(MirTerminator.CallTerminator(
+                Some(dest), func, args, normal, Some(unwind), self.unwind_payload, self.unwind_type_tag))
+            self.switch_to_block(normal)
+        else:
+            self.emit(MirInst(kind: MirInstKind.Call(Some(dest), func, args), span: self.current_span))
         if mirb_trace:
             eprint("[mir-call-value] emit-after id={dest.id}\n")
         dest
@@ -643,10 +661,13 @@ impl MirBuilder:
         # flat LocalId? payload then see the box header as the id.
         val dest: LocalId? = if return_type.kind != MirTypeKind.Unit: self.new_temp(return_type) else: nil
 
-        self.emit(MirInst(
-            kind: MirInstKind.CallIndirect(dest, ptr, args, sig),
-            span: self.current_span
-        ))
+        if val unwind = self.unwind_target:
+            val normal = self.new_block(Some("invoke_indirect_cont"))
+            self.set_terminator(MirTerminator.CallTerminator(
+                dest, ptr, args, normal, Some(unwind), self.unwind_payload, self.unwind_type_tag))
+            self.switch_to_block(normal)
+        else:
+            self.emit(MirInst(kind: MirInstKind.CallIndirect(dest, ptr, args, sig), span: self.current_span))
 
         dest
 
@@ -746,6 +767,19 @@ impl MirBuilder:
         x86_64, BRK #0 on aarch64, EBREAK on riscv32/64.
         """
         self.set_terminator(MirTerminator.Abort(message))
+
+    me terminate_throw(payload: MirOperand, type_tag: MirOperand):
+        """Start recoverable exception propagation without allocation."""
+        self.set_terminator(MirTerminator.Throw(payload, type_tag))
+
+    me terminate_resume(payload: MirOperand, type_tag: MirOperand):
+        """Resume propagation after running a cleanup pad."""
+        self.set_terminator(MirTerminator.Resume(payload, type_tag))
+
+    me set_unwind_target(target: BlockId?, payload: LocalId?, type_tag: LocalId?):
+        self.unwind_target = target
+        self.unwind_payload = payload
+        self.unwind_type_tag = type_tag
 
     me set_terminator(term: MirTerminator):
         """Set terminator for current block."""

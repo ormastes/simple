@@ -16,7 +16,8 @@
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_is_regular_no_follow, file_read, file_write, file_copy, file_delete, file_atomic_write}
 use std.nogc_sync_mut.io.file_ops.{file_append, file_modified_time, file_stat, file_remove, file_hash_sha256, file_read_lines}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_size, file_size_raw}
-use std.nogc_sync_mut.io.file_ops.{file_read_text, file_read_bytes, file_read_bytes_i64, file_write_bytes, file_mmap_read_text, file_mmap_read_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_read_text_at, file_read_bytes, file_read_bytes_i64, file_write_bytes, file_mmap_read_text, file_mmap_read_bytes}
+use std.nogc_sync_mut.ffi.io.{path_absolute}
 use std.nogc_sync_mut.io_runtime.{file_rename}
 
 # Directory operations
@@ -25,11 +26,13 @@ use std.nogc_sync_mut.io.dir_ops.{dir_list, dir_remove}
 
 # Process operations
 use std.nogc_sync_mut.io.process_ops.{ProcessResult}
-use std.nogc_sync_mut.io.process_ops.{process_run, process_run_bounded, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_run, process_run_bounded, process_bounded_timed_out, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded}
 use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_wait, process_is_running, process_kill}
 use std.nogc_sync_mut.io.process_ops.{
     process_spawn_piped, browser_renderer_spawn_sandboxed, browser_renderer_sandbox_enter, process_write_stdin, process_write_stdin_some,
-    process_read_stdout, process_is_piped_alive, process_close_piped
+    process_read_stdout, process_is_piped_alive, process_close_piped,
+    process_pin_executable, process_close_pinned_executable,
+    process_spawn_pinned_piped
 }
 use std.nogc_sync_mut.io.process_ops.{process_output, shell}
 use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default, shell_output_trimmed, shell_lines, shell_int}
@@ -38,6 +41,12 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # it is only defined (pub) in the pre-migration io_runtime.spl monolith.
 use std.nogc_sync_mut.io_runtime.{shell_output, read_file_text_result}
 use app.io.process_env_ops.{process_spawn_async_env, process_is_alive}
+use app.io.rt_hal_isolated_host.{
+    RtHalIsolatedExactHostConfig, rt_hal_linux_isolated_host_port,
+    rt_hal_install_isolated_exact_host,
+    rt_hal_install_isolated_exact_host_from_plan
+}
+use app.io.env_access_host.{rt_hal_install_isolated_exact_host_from_plan_path, rt_hal_install_isolated_exact_host_from_plan_path_or_fail}
 
 # Process limit enforcer
 use std.nogc_sync_mut.io.process_limit_enforcer.{build_ulimit_command, build_timeout_wrapper}
@@ -85,7 +94,7 @@ use std.nogc_sync_mut.io.string_helpers.{text_hash_native}
 
 
 # Thread management
-use std.nogc_sync_mut.io.thread.{thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id}
+use std.nogc_sync_mut.io.thread.{thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id, thread_native_current_id, thread_native_sleep_ms}
 use std.nogc_sync_mut.io.thread.{atomic_i64_load, atomic_i64_store, atomic_i64_fetch_add, atomic_i64_compare_exchange}
 
 # Math (advanced functions from moved module)
@@ -233,7 +242,8 @@ fn write_volatile(addr: i64, value: i64):
 export file_exists, file_is_regular_no_follow, file_read, file_write, file_copy, file_delete, file_atomic_write
 export file_append, file_modified_time, file_stat, file_remove, file_hash_sha256, file_read_lines
 export file_lock, file_unlock, file_size, file_size_raw
-export file_read_text, file_read_bytes, file_read_bytes_i64, file_write_bytes, file_mmap_read_text, file_mmap_read_bytes
+export file_read_text, file_read_text_at, file_read_bytes, file_read_bytes_i64, file_write_bytes, file_mmap_read_text, file_mmap_read_bytes
+export path_absolute
 export read_file_text_result
 export file_rename
 
@@ -243,11 +253,17 @@ export dir_list, dir_remove
 
 # Process operations
 export ProcessResult
-export process_run, process_run_bounded, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded
+export process_run, process_run_bounded, process_bounded_timed_out, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded
 export process_spawn_async, process_wait, process_is_running, process_kill
 export process_spawn_piped, browser_renderer_spawn_sandboxed, browser_renderer_sandbox_enter, process_write_stdin, process_write_stdin_some
+export process_pin_executable, process_close_pinned_executable, process_spawn_pinned_piped
 export process_read_stdout, process_is_piped_alive, process_close_piped
 export process_spawn_async_env, process_is_alive
+export RtHalIsolatedExactHostConfig, rt_hal_linux_isolated_host_port
+export rt_hal_install_isolated_exact_host
+export rt_hal_install_isolated_exact_host_from_plan
+export rt_hal_install_isolated_exact_host_from_plan_path
+export rt_hal_install_isolated_exact_host_from_plan_path_or_fail
 export process_output, shell
 export shell_bool, shell_output, shell_output_default, shell_output_trimmed, shell_lines, shell_int
 export eprint
@@ -298,6 +314,7 @@ export text_hash_native
 
 # Thread management
 export thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id
+export thread_native_current_id, thread_native_sleep_ms
 export atomic_i64_load, atomic_i64_store, atomic_i64_fetch_add, atomic_i64_compare_exchange
 
 # Math

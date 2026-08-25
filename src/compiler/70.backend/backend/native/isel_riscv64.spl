@@ -248,11 +248,30 @@ fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
 
     mach_func = mach_func_add_block(mach_func, prologue_block)
 
+    var next_trampoline_id = 0
+    for block in func.blocks:
+        if block.id.id >= next_trampoline_id: next_trampoline_id = block.id.id + 1
     # Translate each MIR block
     for block in func.blocks:
-        var result = rv_isel_block(local_ctx, block)
+        var trampoline_id = -1
+        var trampoline_tag_dest = -1
+        var trampoline_target = -1
+        match block.terminator:
+            case CallTerminator(_, _, _, _, Some(unwind), _, Some(tag_dest)):
+                trampoline_id = next_trampoline_id
+                next_trampoline_id = next_trampoline_id + 1
+                trampoline_tag_dest = tag_dest.id
+                trampoline_target = unwind.id
+            case _: ()
+        var result = rv_isel_block(local_ctx, block, trampoline_id)
         local_ctx = result.ctx
         mach_func = mach_func_add_block(mach_func, result.block)
+        if trampoline_id >= 0:
+            var trampoline = new_mach_block("exc.tag.{block.id.id}", trampoline_id)
+            trampoline = mach_block_add_inst(trampoline, new_mach_inst(RV_OP_CALL, [op_sym("rt_exception_caught_type_tag")]))
+            trampoline = mach_block_add_inst(trampoline, new_mach_inst(RV_OP_MV, [local_vreg_op(trampoline_tag_dest), op_phys(RV_X10)]))
+            trampoline = mach_block_add_inst(trampoline, new_mach_inst(RV_OP_JAL, [op_phys(RV_X0), op_label(trampoline_target)]))
+            mach_func = mach_func_add_block(mach_func, trampoline)
 
     # Set frame size using the shared Linux ABI stack alignment contract.
     var frame_size = local_ctx.next_frame_offset
@@ -275,7 +294,7 @@ fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
 
     ISelFuncResult(func: mach_func, ctx: out_ctx)
 
-fn rv_isel_block(ctx: ISelContext, block: MirBlock) -> ISelBlockResult:
+fn rv_isel_block(ctx: ISelContext, block: MirBlock, unwind_trampoline_id: i64) -> ISelBlockResult:
     val label = match block.label:
         case Some(lbl): lbl
         case None: "bb{block.id.id}"
@@ -290,7 +309,7 @@ fn rv_isel_block(ctx: ISelContext, block: MirBlock) -> ISelBlockResult:
             mach_block = mach_block_add_inst(mach_block, mi)
 
     # Lower terminator
-    var term_result = rv_isel_terminator(current_ctx, block.terminator)
+    var term_result = rv_isel_terminator(current_ctx, block.terminator, unwind_trampoline_id)
     current_ctx = term_result.ctx
     for mi in term_result.insts:
         mach_block = mach_block_add_inst(mach_block, mi)
@@ -704,7 +723,7 @@ fn rv_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [Mi
 # Instruction Selection - Terminators
 # ============================================================================
 
-fn rv_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
+fn rv_isel_terminator(ctx: ISelContext, term: MirTerminator, unwind_trampoline_id: i64) -> ISelInstResult:
     match term:
         case Goto(target):
             # JAL x0, target_label (unconditional jump, discard return address)
@@ -724,21 +743,69 @@ fn rv_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
             # ran straight on into whatever block was laid out next, with exactly
             # the corrupt state the abort existed to stop. EBREAK traps.
             ISelInstResult(insts: [new_mach_inst(RV_OP_EBREAK, [])], ctx: ctx)
-        case CallTerminator(dest, func, args, normal, unwind):
+        case Throw(payload, type_tag):
+            val payload_low = rv_lower_operand(ctx, payload)
+            val tag_low = rv_lower_operand(payload_low.ctx, type_tag)
+            var throw_ctx = isel_add_extern(tag_low.ctx, "rt_exception_throw")
+            var insts = payload_low.insts
+            for tag_inst in tag_low.insts:
+                insts.push(tag_inst)
+            insts.push(new_mach_inst(RV_OP_MV, [op_phys(RV_X10), payload_low.result]))
+            insts.push(new_mach_inst(RV_OP_MV, [op_phys(RV_X11), tag_low.result]))
+            insts.push(new_mach_inst(RV_OP_CALL, [op_sym("rt_exception_throw")]))
+            insts.push(new_mach_inst(RV_OP_EBREAK, []))
+            ISelInstResult(insts: insts, ctx: throw_ctx)
+        case Resume(payload, type_tag):
+            val payload_low = rv_lower_operand(ctx, payload)
+            val tag_low = rv_lower_operand(payload_low.ctx, type_tag)
+            var resume_ctx = isel_add_extern(tag_low.ctx, "rt_exception_resume")
+            var insts = payload_low.insts
+            for tag_inst in tag_low.insts:
+                insts.push(tag_inst)
+            insts.push(new_mach_inst(RV_OP_MV, [op_phys(RV_X10), payload_low.result]))
+            insts.push(new_mach_inst(RV_OP_MV, [op_phys(RV_X11), tag_low.result]))
+            insts.push(new_mach_inst(RV_OP_CALL, [op_sym("rt_exception_resume")]))
+            insts.push(new_mach_inst(RV_OP_EBREAK, []))
+            ISelInstResult(insts: insts, ctx: resume_ctx)
+        case CallTerminator(dest, func, args, normal, unwind, unwind_payload_dest, unwind_type_tag_dest):
             # Contract (mir_interpreter.spl `case CallTerminator`): perform the
             # call, bind the return value into `dest` when present, then
             # transfer to `normal`. The NOP this used to emit dropped both the
             # call and the edge.
             if unwind.?:
-                # The native backend has no landing pads. Silently discarding
-                # the unwind edge would send an unwinding call into `normal`.
-                panic("riscv64 isel: CallTerminator with an unwind edge has no lowering (native backend has no exception handling)")
+                var unwind_ctx = isel_add_extern(ctx, "rt_exception_frame_push")
+                unwind_ctx = isel_add_extern(unwind_ctx, "_setjmp")
+                unwind_ctx = isel_add_extern(unwind_ctx, "rt_exception_frame_capture")
+                unwind_ctx = isel_add_extern(unwind_ctx, "rt_exception_caught_type_tag")
+                unwind_ctx = isel_add_extern(unwind_ctx, "rt_exception_frame_pop")
+                unwind_ctx = isel_alloc_vreg(unwind_ctx)
+                val frame = op_reg(virtual_reg(isel_get_vreg(unwind_ctx)))
+                unwind_ctx = isel_alloc_vreg(unwind_ctx)
+                val capture_status = op_reg(virtual_reg(isel_get_vreg(unwind_ctx)))
+                var insts: [MachInst] = []
+                insts.push(new_mach_inst(RV_OP_CALL, [op_sym("rt_exception_frame_push")]))
+                insts.push(new_mach_inst(RV_OP_MV, [frame, op_phys(RV_X10)]))
+                insts.push(new_mach_inst(RV_OP_MV, [op_phys(RV_X10), frame]))
+                insts.push(new_mach_inst(RV_OP_CALL, [op_sym("_setjmp")]))
+                insts.push(new_mach_inst(RV_OP_CALL, [op_sym("rt_exception_frame_capture")]))
+                match unwind_payload_dest:
+                    case Some(d): insts.push(new_mach_inst(RV_OP_MV, [local_vreg_op(d.id), op_phys(RV_X10)]))
+                    case None: ()
+                insts.push(new_mach_inst(RV_OP_MV, [capture_status, op_phys(RV_X11)]))
+                val exceptional_target = if unwind_trampoline_id >= 0: unwind_trampoline_id else: unwind.unwrap().id
+                insts.push(new_mach_inst(RV_OP_BNE, [capture_status, op_phys(RV_X0), op_label(exceptional_target)]))
+                val call_res = rv_isel_call(unwind_ctx, dest, func, args)
+                for call_inst in call_res.insts:
+                    insts.push(call_inst)
+                insts.push(new_mach_inst(RV_OP_CALL, [op_sym("rt_exception_frame_pop")]))
+                insts.push(new_mach_inst(RV_OP_JAL, [op_phys(RV_X0), op_label(normal.id)]))
+                return ISelInstResult(insts: insts, ctx: call_res.ctx)
             val call_res = rv_isel_call(ctx, dest, func, args)
             var insts = call_res.insts
             insts.push(new_mach_inst(RV_OP_JAL, [op_phys(RV_X0), op_label(normal.id)]))
             ISelInstResult(insts: insts, ctx: call_res.ctx)
         case _:
-            # All seven MirTerminator variants are handled above. Returning a
+            # All nine MirTerminator variants are handled above. Returning a
             # NOP here would silently delete a terminator; fail loudly instead.
             panic("riscv64 isel: unhandled MirTerminator variant -- terminator lowered to nothing")
 

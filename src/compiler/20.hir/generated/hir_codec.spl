@@ -498,6 +498,10 @@ fn hc_enc_function_attr(w: HirCodecWriter, node: FunctionAttr):
     w.put_i64(node.unroll_factor)
     w.put_i64(node.pipeline_ii)
     w.put_i64(node.memory_banks)
+    w.put_bool(node.is_rt_hal)
+    w.put_bool(node.rt_hal_compare_c)
+    w.put_bool(node.rt_hal_compare_rust)
+    w.put_text(node.rt_hal_error)
 
 fn hc_dec_function_attr(r: FlatPoolReader) -> FunctionAttr:
     val raw0 = r.next()
@@ -544,7 +548,15 @@ fn hc_dec_function_attr(r: FlatPoolReader) -> FunctionAttr:
     val f_pipeline_ii = if raw18 == "N": nil else: flat_pool_parse_i64(raw18)
     val raw19 = r.next()
     val f_memory_banks = if raw19 == "N": nil else: flat_pool_parse_i64(raw19)
-    FunctionAttr(is_entry: f_is_entry, is_naked: f_is_naked, is_noreturn: f_is_noreturn, section: f_section, is_interrupt: f_is_interrupt, is_boot: f_is_boot, is_alloc: f_is_alloc, is_no_alloc: f_is_no_alloc, is_gpu_kernel: f_is_gpu_kernel, gpu_target: f_gpu_target, gpu_backends: f_gpu_backends, is_simd: f_is_simd, has_fast_math: f_has_fast_math, simd_enable: f_simd_enable, simd_disable: f_simd_disable, simd_prefer_scalable: f_simd_prefer_scalable, optimization_req: f_optimization_req, unroll_factor: f_unroll_factor, pipeline_ii: f_pipeline_ii, memory_banks: f_memory_banks)
+    val raw20 = r.next()
+    val f_is_rt_hal = if raw20 == "N": nil else: raw20 == "1"
+    val raw21 = r.next()
+    val f_rt_hal_compare_c = if raw21 == "N": nil else: raw21 == "1"
+    val raw22 = r.next()
+    val f_rt_hal_compare_rust = if raw22 == "N": nil else: raw22 == "1"
+    val raw23 = r.next()
+    val f_rt_hal_error = if raw23 == "\\N": nil else: flat_pool_unescape(raw23)
+    FunctionAttr(is_entry: f_is_entry, is_naked: f_is_naked, is_noreturn: f_is_noreturn, section: f_section, is_interrupt: f_is_interrupt, is_boot: f_is_boot, is_alloc: f_is_alloc, is_no_alloc: f_is_no_alloc, is_gpu_kernel: f_is_gpu_kernel, gpu_target: f_gpu_target, gpu_backends: f_gpu_backends, is_simd: f_is_simd, has_fast_math: f_has_fast_math, simd_enable: f_simd_enable, simd_disable: f_simd_disable, simd_prefer_scalable: f_simd_prefer_scalable, optimization_req: f_optimization_req, unroll_factor: f_unroll_factor, pipeline_ii: f_pipeline_ii, memory_banks: f_memory_banks, is_rt_hal: f_is_rt_hal, rt_hal_compare_c: f_rt_hal_compare_c, rt_hal_compare_rust: f_rt_hal_compare_rust, rt_hal_error: f_rt_hal_error)
 
 fn hc_enc_hir_aop_advice(w: HirCodecWriter, node: HirAopAdvice):
     w.put_text(node.predicate_text)
@@ -2583,6 +2595,25 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
                 w.put_i64(1)
                 hc_enc_hir_expr(w, b_value)
             w.put_text(b_type_name)
+        case TryCatch(b_body, b_clauses, b_finally):
+            w.put_i64(57)
+            if b_body == nil:
+                w.put_i64(0)
+            else:
+                w.put_i64(1)
+                hc_enc_hir_block(w, b_body)
+            w.put_i64(if b_clauses == nil: 0 else: b_clauses.len())
+            for clause in (b_clauses ?? []):
+                if clause == nil:
+                    w.put_i64(0)
+                else:
+                    w.put_i64(1)
+                    hc_enc_hir_catch_clause(w, clause)
+            if val finally_body = b_finally:
+                w.put_i64(1)
+                hc_enc_hir_block(w, finally_body)
+            else:
+                w.put_i64(0)
         case _: w.reject("unencodable HirExprKind enum")
 
 fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
@@ -3170,6 +3201,23 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         val raw59 = r.next()
         val f_type_name = if raw59 == "\\N": nil else: flat_pool_unescape(raw59)
         return HirExprKind.TypeTest(f_value, f_type_name)
+    if tag == 57:
+        var f_body: HirBlock? = nil
+        if r.next_i64() == 1:
+            f_body = hc_dec_hir_block(r)
+        var f_clauses: [HirCatchClause] = []
+        val clause_count = r.next_len()
+        var clause_i = 0
+        while clause_i < clause_count:
+            var clause: HirCatchClause? = nil
+            if r.next_i64() == 1:
+                clause = hc_dec_hir_catch_clause(r)
+            f_clauses.push(clause)
+            clause_i = clause_i + 1
+        var f_finally: HirBlock? = nil
+        if r.next_i64() == 1:
+            f_finally = hc_dec_hir_block(r)
+        return HirExprKind.TryCatch(f_body, f_clauses, f_finally)
     hc_bad_tag("HirExprKind", tag)
     hc_dec_hir_expr_kind(r)
 
@@ -3819,6 +3867,50 @@ fn hc_dec_hir_match_arm(r: FlatPoolReader) -> HirMatchArm:
     if r.next_i64() == 1:
         f_span = hc_dec_span(r)
     HirMatchArm(pattern: f_pattern, has_guard: f_has_guard, guard: f_guard, body: f_body, span: f_span)
+
+fn hc_enc_hir_catch_clause(w: HirCodecWriter, node: HirCatchClause):
+    w.put_bool(node.has_pattern)
+    if node.pattern == nil:
+        w.put_i64(0)
+    else:
+        w.put_i64(1)
+        hc_enc_hir_pattern(w, node.pattern)
+    w.put_bool(node.has_type_)
+    if node.type_ == nil:
+        w.put_i64(0)
+    else:
+        w.put_i64(1)
+        hc_enc_hir_type(w, node.type_)
+    if node.body == nil:
+        w.put_i64(0)
+    else:
+        w.put_i64(1)
+        hc_enc_hir_block(w, node.body)
+    if node.span == nil:
+        w.put_i64(0)
+    else:
+        w.put_i64(1)
+        hc_enc_span(w, node.span)
+
+fn hc_dec_hir_catch_clause(r: FlatPoolReader) -> HirCatchClause:
+    val raw_has_pattern = r.next()
+    val f_has_pattern = if raw_has_pattern == "N": nil else: raw_has_pattern == "1"
+    var f_pattern: HirPattern? = nil
+    if r.next_i64() == 1:
+        f_pattern = hc_dec_hir_pattern(r)
+    val raw_has_type = r.next()
+    val f_has_type = if raw_has_type == "N": nil else: raw_has_type == "1"
+    var f_type: HirType? = nil
+    if r.next_i64() == 1:
+        f_type = hc_dec_hir_type(r)
+    var f_body: HirBlock? = nil
+    if r.next_i64() == 1:
+        f_body = hc_dec_hir_block(r)
+    var f_span: Span? = nil
+    if r.next_i64() == 1:
+        f_span = hc_dec_span(r)
+    HirCatchClause(has_pattern: f_has_pattern, pattern: f_pattern,
+                   has_type_: f_has_type, type_: f_type, body: f_body, span: f_span)
 
 fn hc_enc_hir_mock_decl(w: HirCodecWriter, node: HirMockDecl):
     w.put_text(node.name)
@@ -6883,5 +6975,7 @@ fn hc_dec_visibility(r: FlatPoolReader) -> Visibility:
         return Visibility.Private
     hc_bad_tag("Visibility", tag)
     hc_dec_visibility(r)
+
+export hc_enc_hir_catch_clause, hc_dec_hir_catch_clause
 
 export hc_enc_asm_constraint_kind, hc_dec_asm_constraint_kind, hc_enc_asm_location, hc_dec_asm_location, hc_enc_asm_target_spec, hc_dec_asm_target_spec, hc_enc_asm_version_constraint, hc_dec_asm_version_constraint, hc_enc_closure, hc_dec_closure, hc_enc_device_type, hc_dec_device_type, hc_enc_dim_expr, hc_dec_dim_expr, hc_enc_dim_expr_kind, hc_dec_dim_expr_kind, hc_enc_driver_manifest_attr, hc_dec_driver_manifest_attr, hc_enc_driver_manifest_attr_kind, hc_dec_driver_manifest_attr_kind, hc_enc_effect, hc_dec_effect, hc_enc_effect_kind, hc_dec_effect_kind, hc_enc_export_attr, hc_dec_export_attr, hc_enc_function_attr, hc_dec_function_attr, hc_enc_hir_aop_advice, hc_dec_hir_aop_advice, hc_enc_hir_arch_rule, hc_dec_hir_arch_rule, hc_enc_hir_asm, hc_dec_hir_asm, hc_enc_hir_asm_constraint, hc_dec_hir_asm_constraint, hc_enc_hir_asm_match_arm, hc_dec_hir_asm_match_arm, hc_enc_hir_assign_op, hc_dec_hir_assign_op, hc_enc_hir_assoc_type_decl, hc_dec_hir_assoc_type_decl, hc_enc_hir_assoc_type_impl, hc_dec_hir_assoc_type_impl, hc_enc_hir_attribute, hc_dec_hir_attribute, hc_enc_hir_bin_op, hc_dec_hir_bin_op, hc_enc_hir_bitfield, hc_dec_hir_bitfield, hc_enc_hir_bitfield_field, hc_dec_hir_bitfield_field, hc_enc_hir_block, hc_dec_hir_block, hc_enc_hir_call_arg, hc_dec_hir_call_arg, hc_enc_hir_class, hc_dec_hir_class, hc_enc_hir_comp_clause, hc_dec_hir_comp_clause, hc_enc_hir_comp_clause_kind, hc_dec_hir_comp_clause_kind, hc_enc_hir_comprehension_kind, hc_dec_hir_comprehension_kind, hc_enc_hir_const, hc_dec_hir_const, hc_enc_hir_contract_block, hc_dec_hir_contract_block, hc_enc_hir_contract_clause, hc_dec_hir_contract_clause, hc_enc_hir_contract_clause_kind, hc_dec_hir_contract_clause_kind, hc_enc_hir_contract_outcome, hc_dec_hir_contract_outcome, hc_enc_hir_di_binding, hc_dec_hir_di_binding, hc_enc_hir_domain_block, hc_dec_hir_domain_block, hc_enc_hir_enum, hc_dec_hir_enum, hc_enc_hir_enum_payload, hc_dec_hir_enum_payload, hc_enc_hir_expr, hc_dec_hir_expr, hc_enc_hir_expr_kind, hc_dec_hir_expr_kind, hc_enc_hir_extend_constructor, hc_dec_hir_extend_constructor, hc_enc_hir_extend_enum, hc_dec_hir_extend_enum, hc_enc_hir_field, hc_dec_hir_field, hc_enc_hir_function, hc_dec_hir_function, hc_enc_hir_if_arm, hc_dec_hir_if_arm, hc_enc_hir_impl, hc_dec_hir_impl, hc_enc_hir_import, hc_dec_hir_import, hc_enc_hir_import_item, hc_dec_hir_import_item, hc_enc_hir_interpolation, hc_dec_hir_interpolation, hc_enc_hir_match_arm, hc_dec_hir_match_arm, hc_enc_hir_mock_decl, hc_dec_hir_mock_decl, hc_enc_hir_module, hc_dec_hir_module, hc_enc_hir_param, hc_dec_hir_param, hc_enc_hir_pattern, hc_dec_hir_pattern, hc_enc_hir_pattern_kind, hc_dec_hir_pattern_kind, hc_enc_hir_pattern_payload, hc_dec_hir_pattern_payload, hc_enc_hir_static_assert, hc_dec_hir_static_assert, hc_enc_hir_stmt, hc_dec_hir_stmt, hc_enc_hir_stmt_kind, hc_dec_hir_stmt_kind, hc_enc_hir_struct, hc_dec_hir_struct, hc_enc_hir_symbol, hc_dec_hir_symbol, hc_enc_hir_trait, hc_dec_hir_trait, hc_enc_hir_trait_bound, hc_dec_hir_trait_bound, hc_enc_hir_type, hc_dec_hir_type, hc_enc_hir_type_kind, hc_dec_hir_type_kind, hc_enc_hir_type_param, hc_dec_hir_type_param, hc_enc_hir_unary_op, hc_dec_hir_unary_op, hc_enc_hir_variant, hc_dec_hir_variant, hc_enc_hir_variant_kind, hc_dec_hir_variant_kind, hc_enc_hir_with_item, hc_dec_hir_with_item, hc_enc_layout_attr, hc_dec_layout_attr, hc_enc_method_resolution, hc_dec_method_resolution, hc_enc_optimization_backend, hc_dec_optimization_backend, hc_enc_optimization_req, hc_dec_optimization_req, hc_enc_optimization_req_level, hc_dec_optimization_req_level, hc_enc_scope, hc_dec_scope, hc_enc_scope_id, hc_dec_scope_id, hc_enc_scope_kind, hc_dec_scope_kind, hc_enc_span, hc_dec_span, hc_enc_symbol_id, hc_dec_symbol_id, hc_enc_symbol_kind, hc_dec_symbol_kind, hc_enc_symbol_table, hc_dec_symbol_table, hc_enc_type, hc_dec_type, hc_enc_type_kind, hc_dec_type_kind, hc_enc_type_layout_kind, hc_dec_type_layout_kind, hc_enc_vhdl_clocked_metadata, hc_dec_vhdl_clocked_metadata, hc_enc_vhdl_generic_metadata, hc_dec_vhdl_generic_metadata, hc_enc_vhdl_hardware_metadata, hc_dec_vhdl_hardware_metadata, hc_enc_vhdl_reset_polarity, hc_dec_vhdl_reset_polarity, hc_enc_vhdl_reset_synchrony, hc_dec_vhdl_reset_synchrony, hc_enc_vhdl_return_field_metadata, hc_dec_vhdl_return_field_metadata, hc_enc_visibility, hc_dec_visibility

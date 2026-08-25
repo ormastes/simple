@@ -38,6 +38,26 @@ extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 fn mir_expr_env_get(key: text) -> text?:
     rt_env_get(key)
 
+fn mir_exception_type_tag(type_: HirType?) -> i64:
+    """Stable, allocation-free tags for catchable runtime types.
+
+    Composite structural types remain untagged until the runtime-frame ABI can
+    carry a collision-free canonical identity; returning zero makes lowering
+    reject those typed catches instead of selecting them unsoundly.
+    """
+    if type_ == nil:
+        return 0
+    match type_.kind:
+        case HirTypeKind.Int(bits, signed): 100000 + bits * 2 + (if signed: 1 else: 0)
+        case HirTypeKind.Float(bits): 200000 + bits
+        case HirTypeKind.Bool: 300001
+        case HirTypeKind.Char: 300002
+        case HirTypeKind.Str: 300003
+        case HirTypeKind.Unit: 300004
+        case HirTypeKind.Named(symbol, _): 1000000000 + symbol.id
+        case HirTypeKind.DynTrait(symbol): 2000000000 + symbol.id
+        case _: 0
+
 # ----------------------------------------------------------------------------
 # Garbage-HirExpr breadcrumb (stage-3 self-host blocker #8, 2026-08-05)
 #
@@ -1638,6 +1658,9 @@ impl MirLowering:
         if val rv = value:
             var br = self.builder
             var result = self.lower_expr(rv)
+            # The return payload is evaluated before control transfers; only
+            # then release decisions owned by the abandoned enclosing path.
+            self.emit_mcdc_abort_if_active()
             # current_function uses a boxed Option on this lane; only the
             # explicit Some arm unboxes it safely.
             var cur_builder = self.builder
@@ -1651,6 +1674,12 @@ impl MirLowering:
                     case _:
                         ()
             br = self.builder
+            self.emit_pending_finally_for_transfer()
+            br = self.builder
+            if br.current_block_has_explicit_terminator():
+                val overridden = br.new_temp(MirType.unit())
+                self.builder = br
+                return overridden
             # WP-E: an explicit `return expr` is a real control-flow exit --
             # drop every still-owned resource local except `result` itself,
             # which is being handed back to the caller (a transfer, not a
@@ -1684,6 +1713,13 @@ impl MirLowering:
             br.terminate_return(ret_box)
             self.builder = br
         else:
+            self.emit_mcdc_abort_if_active()
+            self.emit_pending_finally_for_transfer()
+            var after_finally = self.builder
+            if after_finally.current_block_has_explicit_terminator():
+                val overridden = after_finally.new_temp(MirType.unit())
+                self.builder = after_finally
+                return overridden
             self.emit_pending_resource_drops(nil)
             var br_void = self.builder
             br_void.terminate_return(nil)
@@ -1692,6 +1728,24 @@ impl MirLowering:
         val ret_temp = br2.new_temp(MirType.unit())
         self.builder = br2
         ret_temp
+
+    me emit_pending_finally_for_transfer():
+        """Run active finally blocks inner-to-outer before a nonlocal exit.
+
+        The lexical stack is restored after CFG emission so sibling branches
+        lowered later still see the same enclosing regions. Popping before
+        lowering each finally prevents a return inside that finally from
+        recursively re-entering itself; such a return may still run outers.
+        """
+        val saved = self.finally_stack
+        while self.finally_stack.len() > 0:
+            val i = self.finally_stack.len() - 1
+            val cleanup = self.finally_stack[i]
+            self.finally_stack.pop()
+            self.lower_block(cleanup)
+            if self.builder.current_block_has_explicit_terminator():
+                break
+        self.finally_stack = saved
 
     me lower_index_expr_from_hir(expr_value: HirExpr) -> LocalId:
         val payload = rt_enum_payload(expr_value.kind)
@@ -2279,7 +2333,9 @@ impl MirLowering:
                 # branch. Same class of bug as
                 # bare_optional_in_condition_position_wrong_branch, which fixed
                 # `if`/`while` but left `and`/`or` behind.
+                val left_start_ordinal = self.mcdc_next_condition_ordinal
                 val left_local = self.lower_cond_expr(left)
+                val left_end_ordinal = self.mcdc_next_condition_ordinal
                 var b_logic = self.builder
                 val rhs_block = b_logic.new_block(Some("logic_rhs"))
                 val short_block = b_logic.new_block(Some("logic_short"))
@@ -2310,6 +2366,12 @@ impl MirLowering:
                 # LHS above. The Bool->i64 normalization below still applies
                 # on top of whatever lower_cond_expr returns.
                 val right_local = self.lower_cond_expr(right)
+                # Boolean-derivative masking: when the RHS controls this node
+                # (false for AND, true for OR), every evaluated occurrence in
+                # the LHS subtree is provably irrelevant to this outcome.
+                self.emit_mcdc_mask_range(
+                    left_start_ordinal, left_end_ordinal, right_local,
+                    op == HirBinOp.Or)
                 var right_value = right_local
                 var b_rhs_done = self.builder
                 if val right_type = self.local_mir_type_of(right_local):
@@ -4113,6 +4175,8 @@ impl MirLowering:
                 var b_none_uw = self.builder
                 b_none_uw.switch_to_block(none_block_uw)
                 self.builder = b_none_uw
+                self.emit_mcdc_abort_if_active()
+                b_none_uw = self.builder
                 val panic_msg_uw = b_none_uw.emit_const_str("called `!` force-unwrap on a nil Option")
                 val panic_op_uw = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_panic"),
@@ -4152,6 +4216,9 @@ impl MirLowering:
                 # `expr?` — Err propagates via early return, Ok yields payload.
                 self.lower_try_expr(try_base)
 
+            case TryCatch(try_body, catch_clauses, finally_body):
+                self.lower_try_catch(try_body, catch_clauses, finally_body, expr_value.type_)
+
             case HostGpuLane(lane_code, payload_size, marker, body):
                 self.lower_host_gpu_lane(lane_code, payload_size, marker, body)
 
@@ -4169,9 +4236,11 @@ impl MirLowering:
 
             case Break(break_label, break_value):
                 if self.loop_stack.len() > 0:
+                    self.emit_pending_finally_for_transfer()
                     val (loop_continue_block, break_block) = self.loop_stack[self.loop_stack.len() - 1]
                     var b = self.builder
-                    b.terminate_goto(break_block)
+                    if not b.current_block_has_explicit_terminator():
+                        b.terminate_goto(break_block)
                     self.builder = b
                 var b = self.builder
                 val break_temp = b.new_temp(MirType.unit())
@@ -4180,9 +4249,11 @@ impl MirLowering:
 
             case Continue(cont_label):
                 if self.loop_stack.len() > 0:
+                    self.emit_pending_finally_for_transfer()
                     val (continue_block, loop_break_block) = self.loop_stack[self.loop_stack.len() - 1]
                     var b = self.builder
-                    b.terminate_goto(continue_block)
+                    if not b.current_block_has_explicit_terminator():
+                        b.terminate_goto(continue_block)
                     self.builder = b
                 var b = self.builder
                 val cont_temp = b.new_temp(MirType.unit())
@@ -4430,8 +4501,31 @@ impl MirLowering:
             case StructLit(_, _):
                 self.unsupported_expr_kind("E-MIR-EXPR-StructLit", "struct literal", expr_value.span)
 
-            case Throw(_):
-                self.unsupported_expr_kind("E-MIR-EXPR-Throw", "throw expression", expr_value.span)
+            case Throw(throw_value):
+                # Evaluate before abandoning the path, then close any active
+                # MC/DC decision token. The hook is a compile-time no-op when
+                # coverage is statically off, preserving the zero-overhead ABI.
+                val throw_local = self.lower_expr(throw_value)
+                self.emit_mcdc_abort_if_active()
+                var throw_builder = self.builder
+                val throw_type_tag = mir_exception_type_tag(throw_value.type_)
+                throw_builder.emit(MirInst(kind: MirInstKind.Intrinsic(
+                    nil, "__simple_exception_set_type_tag", [mir_operand_const_int(throw_type_tag)]),
+                    span: Some(throw_value.span)))
+                if throw_builder.unwind_target.? and throw_builder.unwind_payload.?:
+                    throw_builder.emit_copy(throw_builder.unwind_payload.unwrap(), throw_local)
+                    if throw_builder.unwind_type_tag.?:
+                        throw_builder.emit_const(throw_builder.unwind_type_tag.unwrap(),
+                                                 MirConstValue.Int(throw_type_tag), MirType.i64())
+                    throw_builder.terminate_goto(throw_builder.unwind_target.unwrap())
+                else:
+                    throw_builder.terminate_throw(mir_operand_move(throw_local),
+                                                  mir_operand_const_int(throw_type_tag))
+                # lower_expr is value-shaped even for diverging expressions;
+                # return a typed dead temporary without emitting an allocation.
+                val dead = throw_builder.new_temp(MirType.unit())
+                self.builder = throw_builder
+                dead
 
             case TupleIndex(_, _):
                 self.unsupported_expr_kind("E-MIR-EXPR-TupleIndex", "tuple index access (`t.0`)", expr_value.span)
@@ -4485,6 +4579,165 @@ impl MirLowering:
                 val t_unsupported = b_unsupported.new_temp(MirType.unit())
                 self.builder = b_unsupported
                 t_unsupported
+
+    me lower_try_catch(body: HirBlock, clauses: [HirCatchClause], finally_: HirBlock?, expected_type: HirType?) -> LocalId:
+        """Lower recoverable try/catch with explicit exceptional CFG edges.
+
+        Calls emitted while lowering `body` become CallTerminators through the
+        builder's protected-region state. A single preallocated payload local
+        is shared by those edges, so nested failures do not allocate.
+        """
+        var b = self.builder
+        val catch_block = b.new_block(Some("catch_dispatch"))
+        val normal_finally = b.new_block(Some("try_normal_finally"))
+        val catch_cleanup = b.new_block(Some("catch_cleanup"))
+        val merge_block = b.new_block(Some("try_merge"))
+        val payload = b.new_temp(MirType.i64())
+        val caught_type_tag = b.new_temp(MirType.i64())
+        val cleanup_payload = b.new_temp(MirType.i64())
+        val cleanup_type_tag = b.new_temp(MirType.i64())
+        val result_type = if val hir_ty = expected_type: self.lower_type(hir_ty) else: MirType.unit()
+        val result = b.new_temp(result_type)
+        val outer_unwind = b.unwind_target
+        val outer_payload = b.unwind_payload
+        val outer_type_tag = b.unwind_type_tag
+        b.set_unwind_target(Some(catch_block), Some(payload), Some(caught_type_tag))
+        self.builder = b
+
+        if val finally_body = finally_:
+            self.finally_stack.push(finally_body)
+        val body_value = self.lower_block(body)
+        if finally_.? and self.finally_stack.len() > 0:
+            self.finally_stack.pop()
+        b = self.builder
+        b.set_unwind_target(outer_unwind, outer_payload, outer_type_tag)
+        if not b.current_block_has_explicit_terminator():
+            if val value = body_value:
+                b.emit_copy(result, value)
+            b.terminate_goto(normal_finally)
+
+        # Normal finally path.
+        b.switch_to_block(normal_finally)
+        self.builder = b
+        if val finally_body = finally_:
+            self.lower_block(finally_body)
+        b = self.builder
+        if not b.current_block_has_explicit_terminator():
+            b.terminate_goto(merge_block)
+
+        # Exceptional path: MC/DC cleanup must occur before user catch code.
+        b.switch_to_block(catch_block)
+        self.builder = b
+        self.emit_mcdc_abort_if_active()
+        b = self.builder
+        self.builder = b
+        var handled = false
+        var clause_i = 0
+        while clause_i < clauses.len() and not handled:
+            val clause: HirCatchClause = clauses[clause_i]
+            var pattern_supported = false
+            match clause.pattern.kind:
+                case HirPatternKind.Wildcard:
+                    pattern_supported = true
+                case HirPatternKind.Binding(symbol, _):
+                    self.local_map[symbol.id] = payload
+                    pattern_supported = true
+                case _:
+                    self.error("catch pattern is not supported by recoverable MIR lowering", Some(clause.span))
+            if clause.has_type_:
+                val wanted_tag = mir_exception_type_tag(clause.type_)
+                if wanted_tag == 0:
+                    self.error("typed catch uses a type without a collision-free runtime tag", Some(clause.span))
+                elif pattern_supported:
+                    b = self.builder
+                    val arm_block = b.new_block(Some("typed_catch_arm"))
+                    val next_clause = b.new_block(Some("catch_next"))
+                    val matches = b.emit_binop(MirBinOp.Eq, mir_operand_copy(caught_type_tag),
+                                               mir_operand_const_int(wanted_tag), MirType.bool())
+                    b.terminate_if(mir_operand_copy(matches), arm_block, next_clause)
+                    b.switch_to_block(arm_block)
+                    self.builder = b
+                    self.lower_selected_catch(clause, payload, result, catch_cleanup,
+                                              cleanup_payload, cleanup_type_tag,
+                                              outer_unwind, outer_payload,
+                                              outer_type_tag,
+                                              finally_, merge_block)
+                    b = self.builder
+                    b.switch_to_block(next_clause)
+                    self.builder = b
+            elif pattern_supported:
+                handled = true
+                self.lower_selected_catch(clause, payload, result, catch_cleanup,
+                                          cleanup_payload, cleanup_type_tag,
+                                          outer_unwind, outer_payload,
+                                          outer_type_tag,
+                                          finally_, merge_block)
+            clause_i = clause_i + 1
+
+        if not handled:
+            b = self.builder
+            if val finally_body = finally_:
+                self.lower_block(finally_body)
+                b = self.builder
+            if not b.current_block_has_explicit_terminator():
+                if outer_unwind.? and outer_payload.?:
+                    b.emit_copy(outer_payload.unwrap(), payload)
+                    if outer_type_tag.?:
+                        b.emit_copy(outer_type_tag.unwrap(), caught_type_tag)
+                    b.terminate_goto(outer_unwind.unwrap())
+                else:
+                    b.terminate_resume(mir_operand_move(payload), mir_operand_copy(caught_type_tag))
+
+        # Any exception raised while a catch body is executing must still run
+        # finally before it leaves this region. This is a real cleanup pad,
+        # distinct from catch dispatch, so nested payloads cannot overwrite the
+        # exception originally caught by the arm.
+        b.switch_to_block(catch_cleanup)
+        b.set_unwind_target(outer_unwind, outer_payload, outer_type_tag)
+        self.builder = b
+        if val finally_body = finally_:
+            self.lower_block(finally_body)
+            b = self.builder
+        if not b.current_block_has_explicit_terminator():
+            if outer_unwind.? and outer_payload.?:
+                b.emit_copy(outer_payload.unwrap(), cleanup_payload)
+                if outer_type_tag.?:
+                    b.emit_copy(outer_type_tag.unwrap(), cleanup_type_tag)
+                b.terminate_goto(outer_unwind.unwrap())
+            else:
+                b.terminate_resume(mir_operand_move(cleanup_payload), mir_operand_copy(cleanup_type_tag))
+
+        b.switch_to_block(merge_block)
+        b.set_unwind_target(outer_unwind, outer_payload, outer_type_tag)
+        self.builder = b
+        result
+
+    me lower_selected_catch(clause: HirCatchClause, payload: LocalId, result: LocalId,
+                            catch_cleanup: BlockId, cleanup_payload: LocalId,
+                            cleanup_type_tag: LocalId,
+                            outer_unwind: BlockId?, outer_payload: LocalId?,
+                            outer_type_tag: LocalId?,
+                            finally_: HirBlock?, merge_block: BlockId):
+        var b = self.builder
+        b.set_unwind_target(Some(catch_cleanup), Some(cleanup_payload), Some(cleanup_type_tag))
+        self.builder = b
+        if val finally_body = finally_:
+            self.finally_stack.push(finally_body)
+        val catch_value = self.lower_block(clause.body)
+        if finally_.? and self.finally_stack.len() > 0:
+            self.finally_stack.pop()
+        b = self.builder
+        b.set_unwind_target(outer_unwind, outer_payload, outer_type_tag)
+        if not b.current_block_has_explicit_terminator():
+            if val value = catch_value:
+                b.emit_copy(result, value)
+            if val finally_body = finally_:
+                self.builder = b
+                self.lower_block(finally_body)
+                b = self.builder
+        if not b.current_block_has_explicit_terminator():
+            b.terminate_goto(merge_block)
+        self.builder = b
 
     # ========================================================================
     # B5b Phase 1 — MatchCase lowering (integer-literal patterns only)

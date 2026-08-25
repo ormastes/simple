@@ -99,6 +99,8 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
+use compiler.mir.mir_rt_hal_boundary.{inject_rt_hal_controller_finalize}
+use compiler.semantics.rt_hal_tag.{rt_hal_compilation_requires_finalize, rt_hal_compilation_configured_plan_path}
 use compiler.mir.mir_types.{MirType}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
@@ -225,6 +227,7 @@ impl MirLowering:
 
     static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext) -> MirLowering:
         val empty_loop_stack: [(BlockId, BlockId)] = []
+        val empty_finally_stack: [HirBlock] = []
         val empty_errors: [MirError] = []
         MirLowering(
             builder: MirBuilder.new(),
@@ -241,11 +244,23 @@ impl MirLowering:
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
+            finally_stack: empty_finally_stack,
             errors: empty_errors,
             type_transport_receipts: 0,
             type_transport_owner: "",
             type_transport_context: "",
             type_transport_param_index: -1,
+            mcdc_mode: 0,
+            mcdc_owner_bytes: 1048576,
+            mcdc_global_bytes: 67108864,
+            mcdc_include_csv: "",
+            mcdc_exclude_csv: "",
+            mcdc_next_runtime_id: 1,
+            mcdc_active_decision_id: 0,
+            mcdc_active_decision_semantic: "",
+            mcdc_next_condition_ordinal: 0,
+            mcdc_active_dynamic_token: LocalId(id: -1),
+            mcdc_active_tokens: [],
             field_map: {},
             bitfield_map: {},
             bitfield_value_syms: {},
@@ -1465,6 +1480,10 @@ impl MirLowering:
 
         # Lower functions (skip extern declarations - they have no body)
         val fn_values = module.functions.values()
+        var module_has_rt_hal = false
+        for candidate in fn_values:
+            if candidate.func_attr.is_rt_hal and (candidate.func_attr.rt_hal_compare_c or candidate.func_attr.rt_hal_compare_rust):
+                module_has_rt_hal = true
         if bootstrap_trace:
             print "[mir-lower] function-keys"
         var fni = 0
@@ -1481,6 +1500,9 @@ impl MirLowering:
                 if bootstrap_trace:
                     print "[mir-lower] function:start"
                 var mir_fn = self.lower_function(fn_)
+                if (module_has_rt_hal or rt_hal_compilation_requires_finalize()) and fn_.name == "main":
+                    mir_fn = inject_rt_hal_controller_finalize(
+                        mir_fn, rt_hal_compilation_configured_plan_path())
                 if fn_.has_vhdl_metadata:
                     mir_fn.has_vhdl_metadata = true
                     mir_fn.vhdl_metadata = fn_.vhdl_metadata

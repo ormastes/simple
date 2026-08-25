@@ -38,6 +38,31 @@ extern "C" {
 void rt_set_macro_trace(bool enabled);
 bool rt_is_macro_trace_enabled(void);
 void rt_set_debug_mode(bool enabled);
+
+/* ===== Recoverable language exception frames =====
+ *
+ * Frames are fixed-capacity, per-thread runtime storage.  The compiler owns
+ * the language semantics and calls `_setjmp` directly with the pointer
+ * returned by rt_exception_frame_push(); the runtime only owns bounded frame
+ * storage and the non-local transfer mechanism.
+ */
+void*    rt_exception_frame_push(void);
+void     rt_exception_frame_pop(void);
+typedef struct RtExceptionCapture {
+    int64_t payload;
+    int64_t status;
+} RtExceptionCapture;
+RtExceptionCapture rt_exception_frame_capture(int64_t setjmp_status);
+int64_t  rt_exception_frame_finish(int64_t setjmp_status);
+int64_t  rt_exception_peek_payload(void);
+int64_t  rt_exception_peek_type_tag(void);
+int64_t  rt_exception_caught_type_tag(void);
+int64_t  rt_exception_frame_depth(void);
+int64_t  rt_exception_frame_capacity(void);
+int64_t  __simple_exception_type_tag(void);
+int64_t  __simple_exception_set_type_tag(int64_t type_tag);
+void     rt_exception_throw(int64_t payload, int64_t type_tag);
+void     rt_exception_resume(int64_t payload, int64_t type_tag);
 bool rt_is_debug_mode_enabled(void);
 bool rt_is_interpreter_runtime(void);
 bool rt_is_jit_runtime(void);
@@ -913,6 +938,9 @@ bool     rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+int64_t     rt_process_pin_executable(const char* canonical_path);
+bool        rt_process_close_pinned_executable(int64_t handle);
+int64_t     rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args);
 int64_t     rt_browser_renderer_spawn_sandboxed(const char* cmd, SplArray* args);
 bool        rt_browser_renderer_sandbox_enter(void);
 bool        rt_browser_renderer_sandbox_netns_active(void);

@@ -22,6 +22,7 @@ use compiler.driver.driver_source_loading.{
 }
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
+use compiler.common.attributes.{parse_function_attrs}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -221,7 +222,36 @@ impl CompilerDriver:
                         closure_scan_sources.len(), closure_src.path,
                         0, 6, 0, 0, "running")
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
-                val (_, closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)
+                val (_, cached_closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)
+                var closure_imports = cached_closure_imports
+                # Hidden compiler ABI dependencies are admitted from a typed
+                # parser result. The substring is only an allocation-saving
+                # prefilter; it never decides whether a declaration is HAL.
+                if closure_src.content.contains("@rt"):
+                    val rt_probe = parse_full_frontend(
+                        closure_src.content, closure_src.path,
+                        closure_src.module_name, self.ctx.logger)
+                    var closure_has_rt_hal = false
+                    var closure_has_rt_hal_foreign = false
+                    for probe_fn in rt_probe.functions.values():
+                        val probe_attr = parse_function_attrs(probe_fn.attributes)
+                        if probe_attr.is_rt_hal:
+                            closure_has_rt_hal = true
+                            if probe_attr.rt_hal_compare_c or probe_attr.rt_hal_compare_rust:
+                                closure_has_rt_hal_foreign = true
+                    if closure_has_rt_hal:
+                        closure_imports.push("std.nogc_sync_mut.rt_hal.boundary")
+                    if closure_has_rt_hal_foreign:
+                        closure_imports.push("std.nogc_sync_mut.rt_hal.process_task_arena")
+                        closure_imports.push("app.io.env_access_host")
+                # Dynamic MC/DC probes call the Pure-Simple capsule patchpoint
+                # ABI directly. Keep that owner in entry-closure builds even
+                # though the authored source does not need a synthetic import.
+                val mcdc_closure_mode = self.ctx.config["mcdc_mode"] ?? "off"
+                if mcdc_closure_mode == "dynamic":
+                    closure_imports.push("std.nogc_sync_mut.mcdc.dynamic_probe")
+                elif mcdc_closure_mode == "on":
+                    closure_imports.push("std.nogc_sync_mut.mcdc.static_probe")
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
