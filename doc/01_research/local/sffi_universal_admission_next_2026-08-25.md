@@ -1084,3 +1084,25 @@ Unsafe-tagged rows increase from 1,573 to 1,611, untouched rows decrease from
 9,905 to 9,867, and exact-artifact verified-and-signed admission remains zero.
 Executable extent validation and exact provider evidence remain required before
 raw PCM or generation-handle operations can be treated as verified-safe.
+
+## Bootstrap allocation raw-contract checkpoint
+
+All 37 declarations in the bootstrap standard library allocation module now
+carry adjacent, operation-specific `@unsafe(... capabilities: [ffi])` metadata.
+The contracts distinguish owned heap pointers and reallocation failure,
+runtime array/dictionary handles and mutation, owned result handles, untyped
+pop/get/lookup absence sentinels, dynamic `Any` dictionary keys, runtime text
+ownership, string-derived array handles, and in-place collection operations.
+
+A static ratchet fixes the inventory at 37 and requires every declaration to
+retain its tag. It passed with the whitespace check. This pass changes no ABI
+signature, allocation/reallocation/free call, collection traversal, clone,
+string transformation, branch, copy, handle layout, or dispatch. Core memory
+and collection hot paths remain unchanged; production Simple and optimizer
+verification remain unavailable.
+
+Estimated totals remain 11,736 `rt_*` declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,611 to 1,648, untouched rows decrease from
+9,867 to 9,830, and exact-artifact verified-and-signed admission remains zero.
+The dynamic-key ABI and untyped collection absence/error returns must be
+replaced by canonical typed contracts before safe publication.

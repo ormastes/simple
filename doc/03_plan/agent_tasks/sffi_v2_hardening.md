@@ -532,3 +532,7 @@ passing placeholder.
      Enforce PCM pointer/count/channel/frame extent and handle-generation
      contracts at the boundary without sample copies, callback indirection, or
      extra queue/provider calls; exact signed admission remains required.
+102. Keep all 37 bootstrap allocation/collection/string declarations explicitly
+     tagged `unsafe(ffi)`. Replace dynamic `Any` and untyped pop/get/lookup
+     sentinels with canonical typed ABI contracts without adding allocations,
+     collection scans, string copies, or generic hot-path dispatch.
