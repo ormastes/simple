@@ -26,7 +26,6 @@ use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_SEMICOLON}
 use compiler.core.tokens.{TOK_AMPERSAND, TOK_STAR, TOK_KW_NIL}
 use compiler.core.tokens.{TOK_AT, TOK_MINUS}
-use compiler.core.lexer_chars.{is_digit}
 use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next, lex_next_snapshot, lex_mark_current_token_as_generic_close}
 use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
@@ -415,11 +414,30 @@ fn par_record_error(msg: text):
 fn parser_guarded_int_text(t: text) -> i64:
     # Lexer bugs must surface as located parser errors, not location-less
     # interpreter aborts ("cannot parse '\"' as i64", stage4 2026-07-03).
-    var ok = t.len() > 0
+    val digit_count = t.len()
+    var ok = digit_count > 0
+    var too_big = digit_count > 19
+    var still_equal = digit_count == 19
+    val max19 = "9223372036854775808"
+    var acc: i64 = 0
     var gi = 0
-    while gi < t.len():
-        if not is_digit(t[gi:gi+1]):
+    while gi < digit_count:
+        val code = t.byte_at(gi)
+        if code < 48 or code > 57:
             ok = false
+        else:
+            if still_equal:
+                val max_code = max19.byte_at(gi)
+                if code > max_code:
+                    too_big = true
+                    still_equal = false
+                elif code < max_code:
+                    still_equal = false
+            # Stop before the first inadmissible 19-digit multiplication. The
+            # exact 2**63 magnitude never sets too_big and intentionally wraps
+            # to i64::MIN, while ...5809 reports range before it can overflow.
+            if digit_count <= 19 and not too_big:
+                acc = acc * 10 + (code - 48)
         gi = gi + 1
     if not ok:
         parser_error("malformed integer literal token text '" + t + "'")
@@ -435,39 +453,15 @@ fn parser_guarded_int_text(t: text) -> i64:
     # magnitude is required by the `-9223372036854775808` (i64::MIN) literal
     # idiom, which relies on this text wrapping to i64::MIN here and then
     # wrapping back to i64::MIN under negation. Anything larger is rejected.
-    if t.len() > 19:
+    if too_big:
         parser_error("integer literal out of range for i64: '" + t + "'")
         return 0
-    if t.len() == 19:
-        val max19 = "9223372036854775808"
-        var ci = 0
-        var too_big = false
-        var still_equal = true
-        while ci < 19:
-            val tc = char_code(t[ci:ci + 1])
-            val mc = char_code(max19[ci:ci + 1])
-            if still_equal:
-                if tc > mc:
-                    too_big = true
-                    still_equal = false
-                elif tc < mc:
-                    still_equal = false
-            ci = ci + 1
-        if too_big:
-            parser_error("integer literal out of range for i64: '" + t + "'")
-            return 0
     # Manual decimal accumulation: the builtin int(text) miscompiles on stage4
     # (returns the FIRST character's char code: int("1")==49, int("12")==49 —
     # print(1+1) printed 98; bug doc iteration 18/20 #87). The input is
     # digit-guarded above, so this is semantically identical to int(t).
     # (Regressed by bb9aa222509 which reverted the iteration-18 accumulation to
     # a bare int(t); restored here.)
-    var acc: i64 = 0
-    var di = 0
-    while di < t.len():
-        val code = char_code(t[di:di + 1])
-        acc = acc * 10 + (code - 48)
-        di = di + 1
     acc
 
 fn parser_warn(msg: text):
