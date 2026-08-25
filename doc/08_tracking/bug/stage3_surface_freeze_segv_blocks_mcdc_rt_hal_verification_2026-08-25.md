@@ -46,6 +46,26 @@ unsupported nested enum-payload patterns in
 `src/compiler/driver/driver_compile_vhdl_lowering.spl`. Evidence remains in
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`.
 
+The next bounded audit isolated a second import-graph defect. A wildcard
+candidate was allowed to chase the target module's private imports, so
+`mir_instruction_kinds.*` invented a third route to its private
+`mir_types.MirSignature` dependency. The retained ambiguity trace captured two
+correct `mir_types::MirSignature` candidates and the false third spelling
+`mir_types::compiler.mir.mir_types`. Candidate admission now requires a direct
+declaration or a syntactically exported spelling before any re-export chase.
+
+After that gate, Stage 2 again passed native build, compiler sanity, the struct
+receiver/runtime proof, and admission. The final Stage-3 run eliminated the
+original `Type`/`MirSignature` family and emitted no nested-pattern diagnostic.
+It still failed HIR lowering: 2,956 ambiguity rows and 711 unresolved-type rows,
+now concentrated in callable owners that depend on glob imports for signature
+types (`_CBackendTranslate.class_core`, backend `env`, and split HIR owners).
+Explicit owner imports for the dominant families were added after the mandatory
+three-cycle cap and remain unverified. One profiling-enabled diagnostic run also
+faulted nondeterministically in `flat_ast_to_module`; an otherwise identical
+profiling-disabled run completed all 713 parses, so profiler/global-static
+interaction remains a separate release risk.
+
 ## Cleared blockers in the same audit
 
 1. Borrow checking referenced `unwind_payload_dest` and
@@ -58,7 +78,8 @@ unsupported nested enum-payload patterns in
 
 ## Unblock condition
 
-Repair the reported import/materialization ambiguity and nested-pattern
-lowering errors without weakening either gate, rebuild and admit Stage 2, then
-run one canonical admitted Stage-3 continuation. The former SIGSEGV is cleared;
-do not re-investigate surface freezing unless new evidence points there.
+Verify the explicit owner-import hardening in a fresh bounded session, then
+resolve any residual callable-owner ambiguity and the profiler/global-static
+interaction. Rebuild and admit Stage 2 and run one canonical Stage-3
+continuation. The surface-freeze and nested-pattern failures are cleared; do
+not re-investigate them unless new evidence points there.
