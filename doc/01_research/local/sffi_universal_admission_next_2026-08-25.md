@@ -5383,3 +5383,34 @@ was added. Handle ownership, query-next done/error separation, nullable column
 text, exact SQLite artifact identity, typed-native registration, and signed
 evidence remain unresolved. Therefore these wrappers and the wider SFFI estate
 are not globally verified or signed; verified-and-signed admission remains 0.
+
+## VFS boot-state authority checkpoint
+
+The canonical VFS boot-state owner's two used runtime families now carry
+explicit FFI authority and route through two mandatory-inline owners. Five
+unused runtime declarations were removed. The ELF readiness predicate retains
+one four-byte extent guard followed by exactly four inline byte reads; no
+per-byte loop, allocation, or copy was introduced. Boot readiness remains a
+semantic `bool`, and the existing pure-Simple NVMe/FAT32 commit ordering is
+unchanged.
+
+The focused `vfs-boot-state-sffi-authority.shs` audit passed. It confirms that
+the byte accessor is present in both typed registries while the boot logger is
+interpreter-only. This is registration coverage, not proof or signed artifact
+admission.
+
+The authoritative census changed as follows:
+
+- raw call sites: 18,592 -> 18,568
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,088
+- missing authority: 13,595 -> 13,569
+- lexical unsafe: 3,424 -> 3,426
+- function unsafe: unchanged at 1,573
+
+Annotations and mandatory inlining preserve direct-call behavior. No runtime
+branch, allocation, copy, lookup, lock, hash, signature operation, generic
+dispatch, or boot-state transition was added. MMIO/DMA ownership and mutex
+providers remain separate unverified boundaries, and exact artifacts/evidence
+remain unsigned. This module and the wider estate are not globally verified
+or signed; verified-and-signed admission remains 0.

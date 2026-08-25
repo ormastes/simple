@@ -55,14 +55,20 @@ use os.services.vfs.nvme_boot_runtime_owner.*
 use os.services.vfs.direct_fat32_boot_reader.*
 
 val PURE_FAT32_FILE_READ_MAX: u64 = 33554432
+@unsafe(reason: "raw boot diagnostic line output ABI", capabilities: [ffi])
 extern fn serial_println(msg: text)
-extern fn rt_text_to_bytes(s: text) -> [u8]
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_array_new_with_cap(cap: i64) -> [u8]
-extern fn rt_byte_array_new(cap: i64) -> [u8]
-extern fn rt_typed_bytes_u8_push(array: [u8], value: i64) -> bool
+@unsafe(reason: "foreign byte indexing requires caller-proven array bounds", capabilities: [ffi])
 extern fn rt_bytes_u8_at(array: [u8], index: i64) -> i64
 
+@always_inline
+fn _vfs_state_serial_println(msg: text):
+    unsafe(capabilities: [ffi]):
+        serial_println(msg)
+
+@always_inline
+fn _vfs_state_elf_byte(bytes: [u8], index: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_bytes_u8_at(bytes, index) & 0xFF
 
 var g_vfs: VfsManager = VfsManager.new()
 class VfsFileSize:
@@ -581,25 +587,25 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     """Try the pure-Simple NVMe -> BlockDevice -> FAT32 stack first."""
     g_pure_nvme_root_fat32_ready = false
     log_raw_println("[vfs-init] Trying pure-Simple NVMe + FAT32 stack...")
-    serial_println("[vfs-init] pure-nvme begin")
+    _vfs_state_serial_println("[vfs-init] pure-nvme begin")
     val grant_result = pcimgr_grant_device(nvme_idx, 0)
     if grant_result.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe grant failed: {grant_result.unwrap_err()}")
-        serial_println("[vfs-init] pure-nvme grant failed")
+        _vfs_state_serial_println("[vfs-init] pure-nvme grant failed")
         return false
     nvme_boot_runtime_reset()
     val grant = grant_result.unwrap()
-    serial_println("[vfs-init] pure-nvme grant ok")
+    _vfs_state_serial_println("[vfs-init] pure-nvme grant ok")
     val nvme_init = nvme_boot_runtime_init(grant)
     if nvme_init.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe init failed: {nvme_init.unwrap_err()}")
-        serial_println("[vfs-init] pure-nvme init failed")
+        _vfs_state_serial_println("[vfs-init] pure-nvme init failed")
         return false
     val transfer_evidence_result = nvme_boot_runtime_transfer_evidence(
         device_grant_is_isolated(grant))
     if transfer_evidence_result.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe transfer probe failed: {transfer_evidence_result.unwrap_err()}")
-        serial_println("[vfs-init] pure-nvme transfer failed")
+        _vfs_state_serial_println("[vfs-init] pure-nvme transfer failed")
         return false
     val transfer_evidence = transfer_evidence_result.unwrap()
     val lease_result = vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(
@@ -610,7 +616,7 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     val lease = if lease_result.is_err():
         val lease_err = lease_result.unwrap_err()
         log_raw_println("[vfs-init] pure-Simple NVMe evidence lease policy degraded: {lease_err}")
-        serial_println("[vfs-init] pure-nvme lease policy degraded " + lease_err)
+        _vfs_state_serial_println("[vfs-init] pure-nvme lease policy degraded " + lease_err)
         vfs_boot_nvme_system_fat32_lease(nvme_boot_runtime_sector_size(), nvme_boot_runtime_sector_count(), grant)
     else:
         lease_result.unwrap()
@@ -618,16 +624,16 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     val bounce_init = adapter.init_bounce_buffer()
     if bounce_init.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe bounce buffer failed: {bounce_init.unwrap_err()}")
-        serial_println("[vfs-init] pure-nvme bounce failed")
+        _vfs_state_serial_println("[vfs-init] pure-nvme bounce failed")
         return false
     val backend_binding = nvme_boot_runtime_backend_binding(lease.base_lba, lease.lba_count)
     if backend_binding.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe backend identity unavailable: {backend_binding.unwrap_err()}")
-        serial_println("[vfs-init] pure-nvme backend identity unavailable")
+        _vfs_state_serial_println("[vfs-init] pure-nvme backend identity unavailable")
         return false
     val boot_dma = _vfs_boot_nvme_shared_dma(4096u32)
     if boot_dma.is_err():
-        serial_println("[vfs-init] boot sector dma alloc failed")
+        _vfs_state_serial_println("[vfs-init] boot sector dma alloc failed")
         return false
     val boot_shared = boot_dma.unwrap()
     var zero_i: u64 = 0
@@ -638,23 +644,23 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     if boot_sector_probe.is_err():
         val boot_read_err = boot_sector_probe.unwrap_err()
         log_raw_println("[vfs-init] pure-Simple FAT32 boot sector read failed: {boot_read_err}")
-        serial_println("[vfs-init] boot sector direct read failed " + boot_read_err)
+        _vfs_state_serial_println("[vfs-init] boot sector direct read failed " + boot_read_err)
         return false
-    serial_println("[vfs-init] boot sector direct read ok")
+    _vfs_state_serial_println("[vfs-init] boot sector direct read ok")
     if not _vfs_boot_init_direct_fat32_reader_from_addr(boot_shared.cpu_virt_addr):
         log_raw_println("[vfs-init] pure-Simple direct FAT32 mount failed")
-        serial_println("[vfs-init] fat32 direct mount failed")
+        _vfs_state_serial_println("[vfs-init] fat32 direct mount failed")
         return false
     var version_probe = _vfs_boot_read_version_probe_raw()
     if version_probe.len() <= 0:
         log_raw_println("[vfs-init] version file read probe failed path=/VERSION.TXT")
-        serial_println("[vfs-init] version read failed")
+        _vfs_state_serial_println("[vfs-init] version read failed")
         return false
-    serial_println("[vfs-init] numeric version probe ok bytes={version_probe.len()}")
+    _vfs_state_serial_println("[vfs-init] numeric version probe ok bytes={version_probe.len()}")
     app_registry_load_hardcoded_fallback()
     val exec_probe = _vfs_boot_read_app_name11_raw(0x42u32, 0x52u32, 0x4Fu32, 0x57u32, 0x53u32, 0x4Du32, 0x46u32, 0x20u32, 0x53u32, 0x4Du32, 0x46u32)
     if exec_probe.len() <= 4 or not _bytes_have_elf_magic(exec_probe):
-        serial_println("[vfs-init] exec probe failed")
+        _vfs_state_serial_println("[vfs-init] exec probe failed")
         return false
     # The direct reader above is only bootstrap evidence.  Completion requires
     # publishing the same lease-backed adapter through the canonical shared
@@ -665,7 +671,7 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
         log_raw_println("[vfs-init] shared FAT32 root mounted after direct bootstrap")
     else:
         log_raw_println("[vfs-init] shared FAT32 root mount required after direct bootstrap")
-        serial_println("[vfs-init] shared FAT32 root mount failed")
+        _vfs_state_serial_println("[vfs-init] shared FAT32 root mount failed")
         return false
     g_root_fat32 = nil
     g_vfs_initialized = true
@@ -676,7 +682,7 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     val hello_bytes = _vfs_boot_read_app_name11_raw(0x48u32, 0x45u32, 0x4Cu32, 0x4Cu32, 0x4Fu32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
     val clang_bytes = _vfs_boot_read_app_name11_raw(0x43u32, 0x4Cu32, 0x41u32, 0x4Eu32, 0x47u32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
     if hello_bytes.len() <= 4 or clang_bytes.len() <= 4:
-        serial_println("[vfs-init] required desktop app payload missing")
+        _vfs_state_serial_println("[vfs-init] required desktop app payload missing")
         return false
     app_registry_cache_bytes("/sys/apps/hello_world", hello_bytes)
     app_registry_cache_bytes("/sys/apps/clang", clang_bytes)
@@ -686,7 +692,7 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     # bootstrap path must not leave an apparently ready storage handoff.
     boot_nvme_production_handoff_provision_bound(
         adapter, transfer_evidence, lease, backend_binding.unwrap())
-    serial_println("[vfs-init] required desktop app payloads cached")
+    _vfs_state_serial_println("[vfs-init] required desktop app payloads cached")
     log_raw_println("[vfs-init] version file read ok path=/sys/version.txt bytes={version_probe.len()}")
     log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo.smf bytes={exec_probe.len()}")
     log_raw_println("[vfs] mounted fat32 provider=pure-simple-direct")
@@ -879,10 +885,10 @@ fn _known_app_has_elf_magic(buf_addr: u64) -> bool:
 fn _bytes_have_elf_magic(bytes: [u8]) -> bool:
     if bytes.len() < 4:
         return false
-    (rt_bytes_u8_at(bytes, 0) & 0xFF) == 0x7F and
-        (rt_bytes_u8_at(bytes, 1) & 0xFF) == 0x45 and
-        (rt_bytes_u8_at(bytes, 2) & 0xFF) == 0x4C and
-        (rt_bytes_u8_at(bytes, 3) & 0xFF) == 0x46
+    _vfs_state_elf_byte(bytes, 0) == 0x7F and
+        _vfs_state_elf_byte(bytes, 1) == 0x45 and
+        _vfs_state_elf_byte(bytes, 2) == 0x4C and
+        _vfs_state_elf_byte(bytes, 3) == 0x46
 
 fn _copy_bytes_from_addr(addr: u64, size: u64) -> [u8]:
     var out: [u8] = []
@@ -909,9 +915,9 @@ fn _cache_c_fat32_exec_bytes(path: text) -> [u8]:
 fn _seed_c_fat32_exec_bytes(label: text, path: text) -> [u8]:
     val bytes = _cache_c_fat32_exec_bytes(path)
     if bytes.len() > 0:
-        serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
+        _vfs_state_serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
     else:
-        serial_println("[vfs-fix] {label} probe skipped path={path}")
+        _vfs_state_serial_println("[vfs-fix] {label} probe skipped path={path}")
     bytes
 
 fn _seed_root_fat32_app_registry(root: Fat32Core):
@@ -927,9 +933,9 @@ fn _seed_root_fat32_app_registry(root: Fat32Core):
 fn _seed_root_fat32_exec_bytes(root: Fat32Core, label: text, path: text) -> [u8]:
     val bytes = vfs_boot_root_read_file_bytes_once(root, path)
     if bytes.len() > 4 and _bytes_have_elf_magic(bytes):
-        serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
+        _vfs_state_serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
         return bytes
-    serial_println("[vfs-fix] {label} probe skipped path={path}")
+    _vfs_state_serial_println("[vfs-fix] {label} probe skipped path={path}")
     []
 
 fn _seed_root_fat32_exec_cache(root: Fat32Core):
