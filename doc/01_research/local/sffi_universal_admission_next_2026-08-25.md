@@ -2455,3 +2455,36 @@ breakpoint mutation/query boundaries and adds no hashing, signing, discovery,
 generic dispatch, or long-lived allocation.  Ptrace/DWARF and 15 debugger
 operations are still unavailable, so the module is not verified or signed;
 verified-and-signed admission remains 0.
+
+## GLFW SFFI contract and dispatch checkpoint
+
+The hosted GLFW facade has 40 raw declarations and 41 raw calls.  All
+declarations now carry explicit FFI authority and all calls are covered by 24
+minimal lexical scopes; the raw ARGB word-pointer path additionally requires
+`raw_ptr`.  The focused `glfw-sffi-contract.shs` audit passed.
+
+Provider and wrapper review corrected contract defects instead of converting
+them to convenient values:
+
+- invalid window handles now make `rt_glfw_should_close` return `-1`; the
+  Simple wrapper accepts only the semantic 0/1 boolean domain;
+- unavailable or invalid clipboard access returns null and lifts to `text?`,
+  preserving a valid empty clipboard string as distinct from absence;
+- window and frame dimensions are bounded to 8192 and frame input to 256 MiB
+  before allocation or byte access;
+- the Rust interpreter bridge caches each resolved typed-family symbol in a
+  fixed atomic slot, eliminating its prior `dlsym` on every event/frame call.
+
+The authoritative census changed exactly by the 41 newly bounded calls:
+
+- missing authority: 17,498 -> 17,457
+- lexical unsafe: 2,760 -> 2,800
+- function unsafe: 918 -> 919 (the raw-pointer method is now explicitly unsafe)
+
+GNU C11 syntax validation and the focused Rust GLFW bridge tests passed.  The
+cached path adds no hashing, signature operation, mutex, allocation, or symbol
+lookup; its remaining signature-table scan is fixed at 41 entries and predates
+this checkpoint.  No production self-hosted optimizer or benchmark was
+available.  GLFW lifetime, callback, and artifact-evidence obligations remain
+unsafe, so this module is not globally verified or signed; verified-and-signed
+admission remains 0.

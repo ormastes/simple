@@ -34,7 +34,7 @@ extern fn rt_glfw_destroy_window(handle: i64) -> i64
 extern fn rt_glfw_present_argb(
     handle: i64, pixels: [u32], width: i64, height: i64
 ) -> i64
-@unsafe(reason: "raw GLFW ARGB pointer/count presentation ABI; count must cover dimensions", capabilities: [ffi])
+@unsafe(reason: "raw GLFW ARGB pointer/count presentation ABI; count must cover dimensions", capabilities: [ffi, raw_ptr])
 extern fn rt_glfw_present_argb_words_raw(
     handle: i64,
     pixels_addr: i64,
@@ -105,7 +105,7 @@ extern fn rt_glfw_content_scale_milli(handle: i64) -> i64
 @unsafe(reason: "raw GLFW window-handle frame-sequence ABI", capabilities: [ffi])
 extern fn rt_glfw_frame_sequence(handle: i64) -> i64
 @unsafe(reason: "raw GLFW window-handle runtime-owned clipboard text ABI", capabilities: [ffi])
-extern fn rt_glfw_clipboard_get(handle: i64) -> text
+extern fn rt_glfw_clipboard_get(handle: i64) -> text?
 @unsafe(reason: "raw GLFW window-handle borrowed clipboard text status ABI", capabilities: [ffi])
 extern fn rt_glfw_clipboard_set(handle: i64, value: text) -> i64
 
@@ -115,8 +115,16 @@ class SimpleGlfw:
     events: WindowEventLoop
 
 impl SimpleGlfw:
+    @inline
+    static fn _bool_contract(raw: i64) -> bool:
+        match raw:
+            case 0: false
+            case 1: true
+            case _: panic("invalid GLFW boolean discriminant")
+
     static fn create(event_capacity: i64, text_capacity: i64) -> SimpleGlfw:
-        val initialized = rt_glfw_init() != 0
+        val initialized = unsafe(capabilities: [ffi]):
+            SimpleGlfw._bool_contract(rt_glfw_init())
         SimpleGlfw(
             available: initialized,
             init_status: if initialized:
@@ -153,18 +161,21 @@ impl SimpleGlfw:
 
     me terminate():
         if self.available:
-            rt_glfw_terminate()
+            unsafe(capabilities: [ffi]):
+                rt_glfw_terminate()
         self.available = false
 
     fn create_window(title: text, width: i64, height: i64) -> i64:
         if not self.available:
             return 0
-        rt_glfw_create_window(spl_str_ptr(title), width, height)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_create_window(spl_str_ptr(title), width, height)
 
     fn destroy_window(handle: i64) -> i64:
         if not self.available:
             return WINDOW_STATUS_BACKEND_ERROR
-        val status = rt_glfw_destroy_window(handle)
+        val status = unsafe(capabilities: [ffi]):
+            rt_glfw_destroy_window(handle)
         if status == WINDOW_STATUS_OK:
             self.events.drop_window_events(handle)
         status
@@ -174,8 +185,10 @@ impl SimpleGlfw:
     ) -> i64:
         if not self.available:
             return WINDOW_STATUS_BACKEND_ERROR
-        rt_glfw_present_argb(handle, pixels, width, height)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_present_argb(handle, pixels, width, height)
 
+    @unsafe(reason: "caller must provide a live aligned ARGB pointer covering pixel_count words", capabilities: [ffi, raw_ptr])
     fn present_argb_words_raw(
         handle: i64,
         pixels_addr: i64,
@@ -185,33 +198,35 @@ impl SimpleGlfw:
     ) -> i64:
         if not self.available:
             return WINDOW_STATUS_BACKEND_ERROR
-        rt_glfw_present_argb_words_raw(
-            handle, pixels_addr, pixel_count, width, height
-        )
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_glfw_present_argb_words_raw(
+                handle, pixels_addr, pixel_count, width, height
+            )
 
     me poll_events() -> i64:
         if not self.available:
             return WINDOW_STATUS_BACKEND_ERROR
-        rt_glfw_pump_events()
-        var kind = rt_glfw_pop_event()
-        while kind != WINDOW_EVENT_NONE:
-            val window_handle = rt_glfw_event_window()
-            val sequence = rt_glfw_event_sequence()
-            val timestamp_ns = rt_glfw_event_timestamp_ns()
-            if kind == WINDOW_EVENT_TEXT:
-                self.events.enqueue_text(
-                    window_handle, sequence, timestamp_ns, rt_glfw_event_text()
-                )
-            else:
-                self.events.enqueue_scalar(
-                    kind, window_handle, sequence, timestamp_ns,
-                    rt_glfw_event_key(), rt_glfw_event_scancode(),
-                    rt_glfw_event_action(), rt_glfw_event_modifiers(),
-                    rt_glfw_event_x_milli(), rt_glfw_event_y_milli(),
-                    rt_glfw_event_dx_milli(), rt_glfw_event_dy_milli(),
-                    rt_glfw_event_width(), rt_glfw_event_height()
-                )
-            kind = rt_glfw_pop_event()
+        unsafe(capabilities: [ffi]):
+            rt_glfw_pump_events()
+            var kind = rt_glfw_pop_event()
+            while kind != WINDOW_EVENT_NONE:
+                val window_handle = rt_glfw_event_window()
+                val sequence = rt_glfw_event_sequence()
+                val timestamp_ns = rt_glfw_event_timestamp_ns()
+                if kind == WINDOW_EVENT_TEXT:
+                    self.events.enqueue_text(
+                        window_handle, sequence, timestamp_ns, rt_glfw_event_text()
+                    )
+                else:
+                    self.events.enqueue_scalar(
+                        kind, window_handle, sequence, timestamp_ns,
+                        rt_glfw_event_key(), rt_glfw_event_scancode(),
+                        rt_glfw_event_action(), rt_glfw_event_modifiers(),
+                        rt_glfw_event_x_milli(), rt_glfw_event_y_milli(),
+                        rt_glfw_event_dx_milli(), rt_glfw_event_dy_milli(),
+                        rt_glfw_event_width(), rt_glfw_event_height()
+                    )
+                kind = rt_glfw_pop_event()
         WINDOW_STATUS_OK
 
     me poll_event_scalar() -> i64:
@@ -219,52 +234,69 @@ impl SimpleGlfw:
         self.events.poll_scalar()
 
     fn dropped_event_count() -> i64:
-        self.events.dropped_event_count + rt_glfw_dropped_event_count()
+        unsafe(capabilities: [ffi]):
+            self.events.dropped_event_count + rt_glfw_dropped_event_count()
 
     fn queued_event_count() -> i64:
-        self.events.queued_count() + rt_glfw_queued_event_count()
+        unsafe(capabilities: [ffi]):
+            self.events.queued_count() + rt_glfw_queued_event_count()
 
     fn live_window_count() -> i64:
-        rt_glfw_live_window_count()
+        unsafe(capabilities: [ffi]):
+            rt_glfw_live_window_count()
 
     fn should_close(handle: i64) -> bool:
-        rt_glfw_should_close(handle) != 0
+        unsafe(capabilities: [ffi]):
+            SimpleGlfw._bool_contract(rt_glfw_should_close(handle))
 
     fn framebuffer_width(handle: i64) -> i64:
-        rt_glfw_framebuffer_width(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_framebuffer_width(handle)
 
     fn framebuffer_height(handle: i64) -> i64:
-        rt_glfw_framebuffer_height(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_framebuffer_height(handle)
 
     fn window_width(handle: i64) -> i64:
-        rt_glfw_window_width(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_window_width(handle)
 
     fn window_height(handle: i64) -> i64:
-        rt_glfw_window_height(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_window_height(handle)
 
     fn content_scale_milli(handle: i64) -> i64:
-        rt_glfw_content_scale_milli(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_content_scale_milli(handle)
 
     fn frame_sequence(handle: i64) -> i64:
-        rt_glfw_frame_sequence(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_frame_sequence(handle)
 
     fn set_visible(handle: i64, visible: bool) -> i64:
-        rt_glfw_set_visible(handle, if visible: 1 else: 0)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_set_visible(handle, if visible: 1 else: 0)
 
     fn focus(handle: i64) -> i64:
-        rt_glfw_focus(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_focus(handle)
 
     fn minimize(handle: i64) -> i64:
-        rt_glfw_minimize(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_minimize(handle)
 
     fn maximize(handle: i64) -> i64:
-        rt_glfw_maximize(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_maximize(handle)
 
     fn restore(handle: i64) -> i64:
-        rt_glfw_restore(handle)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_restore(handle)
 
-    fn clipboard_get(handle: i64) -> text:
-        rt_glfw_clipboard_get(handle)
+    fn clipboard_get(handle: i64) -> text?:
+        unsafe(capabilities: [ffi]):
+            rt_glfw_clipboard_get(handle)
 
     fn clipboard_set(handle: i64, value: text) -> i64:
-        rt_glfw_clipboard_set(handle, value)
+        unsafe(capabilities: [ffi]):
+            rt_glfw_clipboard_set(handle, value)
