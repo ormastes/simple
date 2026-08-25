@@ -25,6 +25,8 @@ pub val DBD_MAX_JOURNAL_LINE_BYTES: i64 = 512
 pub val DBD_MAX_SESSION_BYTES: i64 = 65536
 pub val DBD_MAX_REQUESTS_PER_SESSION: i64 = 64
 pub val DBD_MAX_RESPONSE_BYTES_PER_SESSION: i64 = 65536
+pub val DBD_MAX_TRANSACTION_COMMANDS: i64 = 32
+pub val DBD_MAX_TRANSACTION_BYTES: i64 = 16384
 pub val DBD_MAX_PRINCIPAL_BYTES: i64 = 64
 pub val DBD_MIN_CREDENTIAL_BYTES: i64 = 32
 pub val DBD_MAX_CREDENTIAL_BYTES: i64 = 128
@@ -48,7 +50,7 @@ val DBD_DBFS_OWNER_VERIFIED: bool = false
 
 # Advertised capabilities are intentionally conservative: features without a
 # verified implementation must remain visibly blocked.
-pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;journal=ChecksummedBase64V1;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;quit=TerminalAfterReplyV1;auth=DigestVerifierImplementedUnprovisionedV1;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=Blocked;dbfs_adapter=DiagnosticReadOnly;live_dbfs_durability=Blocked"
+pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;journal=ChecksummedBase64V1;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;quit=TerminalAfterReplyV1;auth=DigestVerifierImplementedUnprovisionedV1;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=BoundedDbfsAtomicExecNoWatchV1;dbfs_adapter=GenerationBoundTransactionalReplaceV1;live_dbfs_durability=ProvisioningGated"
 
 pub fn dbd_production_startup_ready() -> bool:
     """True only after real auth, TLS, and DBFS owners verify admission."""
@@ -169,6 +171,20 @@ pub class DbdPersistenceBudget:
             return false
         self.record_count = self.record_count + 1
         self.journal_bytes = self.journal_bytes + line_bytes
+        true
+
+    pub fn can_append_batch(record_count: i64, byte_count: i64) -> bool:
+        if not self.healthy or record_count <= 0 or byte_count <= 0:
+            return false
+        if record_count > DBD_MAX_JOURNAL_RECORDS - self.record_count:
+            return false
+        byte_count <= DBD_MAX_JOURNAL_BYTES - self.journal_bytes
+
+    pub me commit_verified_batch(record_count: i64, byte_count: i64) -> bool:
+        if not self.can_append_batch(record_count, byte_count):
+            return false
+        self.record_count = self.record_count + record_count
+        self.journal_bytes = self.journal_bytes + byte_count
         true
 
     pub me mark_unhealthy():
@@ -355,6 +371,96 @@ pub fn dbd_command_terminates_session(args: [text]) -> bool:
     had terminated.
     """
     args.len() > 0 and args[0].upper() == "QUIT"
+
+pub enum DbdTransactionQueueStatusV1:
+    Queued
+    NotActive
+    InvalidControl
+    LimitExceeded
+    DurabilityUnsupported
+
+pub class DbdTransactionOwnerV1:
+    """Bounded per-session MULTI queue; the DbdServer remains commit owner."""
+    active: bool
+    failed: bool
+    queued_bytes: i64
+    commands: [[text]]
+
+    pub static fn new() -> DbdTransactionOwnerV1:
+        DbdTransactionOwnerV1(
+            active: false, failed: false, queued_bytes: 0, commands: [])
+
+    pub me begin(args: [text]) -> bool:
+        if self.active or args.len() != 1:
+            return false
+        self.active = true
+        self.failed = false
+        self.queued_bytes = 0
+        self.commands = []
+        true
+
+    pub fn is_active() -> bool:
+        self.active
+
+    pub fn is_failed() -> bool:
+        self.failed
+
+    pub me queue(args: [text]) -> DbdTransactionQueueStatusV1:
+        if not self.active:
+            return DbdTransactionQueueStatusV1.NotActive
+        if args.len() == 0 or args.len().to_i64() > DBD_MAX_JOURNAL_ARGS:
+            self.failed = true
+            return DbdTransactionQueueStatusV1.LimitExceeded
+        val command = args[0].upper()
+        if command == "MULTI" or command == "EXEC" or command == "DISCARD" or
+            command == "WATCH" or command == "UNWATCH" or
+            command == "AUTH" or command == "QUIT":
+            self.failed = true
+            return DbdTransactionQueueStatusV1.InvalidControl
+        if dbd_command_is_mutating(command) and
+            not dbd_command_has_durable_journal_semantics(command):
+            self.failed = true
+            return DbdTransactionQueueStatusV1.DurabilityUnsupported
+        if dbd_command_has_durable_journal_semantics(command) and
+            not dbd_journal_args_valid(args):
+            self.failed = true
+            return DbdTransactionQueueStatusV1.DurabilityUnsupported
+        var command_bytes: i64 = 8
+        for arg in args:
+            if arg.len() > DBD_MAX_TRANSACTION_BYTES - command_bytes:
+                self.failed = true
+                return DbdTransactionQueueStatusV1.LimitExceeded
+            command_bytes = command_bytes + arg.len()
+        if self.commands.len().to_i64() >= DBD_MAX_TRANSACTION_COMMANDS or
+            command_bytes > DBD_MAX_TRANSACTION_BYTES - self.queued_bytes:
+            self.failed = true
+            return DbdTransactionQueueStatusV1.LimitExceeded
+        self.commands.push(args)
+        self.queued_bytes = self.queued_bytes + command_bytes
+        DbdTransactionQueueStatusV1.Queued
+
+    pub me take_for_exec() -> [[text]]:
+        if not self.active or self.failed:
+            self.clear()
+            return []
+        val owned = self.commands
+        self.active = false
+        self.failed = false
+        self.queued_bytes = 0
+        self.commands = []
+        owned
+
+    pub me discard() -> bool:
+        if not self.active:
+            return false
+        self.clear()
+        true
+
+    pub me clear():
+        self.active = false
+        self.failed = false
+        self.queued_bytes = 0
+        self.commands = []
 
 fn _dbd_journal_scalar_safe(value: text) -> bool:
     if value.len() > DBD_MAX_JOURNAL_LINE_BYTES:

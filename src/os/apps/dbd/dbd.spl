@@ -42,7 +42,7 @@
 # serve_connection()'s buffering logic (drain all complete commands per read,
 # retain a trailing partial fragment) on top of the freestanding primitives.
 
-use os.apps.dbd.dbd_protocol.{DbdEngine, DbdSessionBudget, DbdPersistenceBudget, DbdCredentialProvider, dbd_command_is_mutating, dbd_command_has_durable_journal_semantics, dbd_command_terminates_session, dbd_encode_journal_line, dbd_parse_next_authenticated_command, dbd_redact_diagnostic, DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_LINE_BYTES}
+use os.apps.dbd.dbd_protocol.{DbdEngine, DbdSessionBudget, DbdPersistenceBudget, DbdCredentialProvider, DbdTransactionOwnerV1, DbdTransactionQueueStatusV1, dbd_command_is_mutating, dbd_command_has_durable_journal_semantics, dbd_command_terminates_session, dbd_encode_journal_line, dbd_parse_next_authenticated_command, dbd_redact_diagnostic, DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_LINE_BYTES}
 use os.apps.dbd.dbd_auth_ingress.{
     DbdMutableAuthRequestOwnerV1, DbdAuthIngressStatusV1
 }
@@ -167,6 +167,7 @@ class DbdLiveClientSessionV1:
     auth: DbdMutableAuthRequestOwnerV1
     budget: DbdSessionBudget
     commands: DbdAuthenticatedRespIngressV1
+    transaction: DbdTransactionOwnerV1
 
     static fn create(
         tls: DbdTlsSessionV1,
@@ -176,7 +177,8 @@ class DbdLiveClientSessionV1:
             tls: tls,
             auth: auth,
             budget: DbdSessionBudget.new(),
-            commands: DbdAuthenticatedRespIngressV1.new()
+            commands: DbdAuthenticatedRespIngressV1.new(),
+            transaction: DbdTransactionOwnerV1.new()
         )
 
     me send_text(sock_fd: i64, message: text) -> DbdTlsSendStatusV1:
@@ -194,6 +196,7 @@ class DbdLiveClientSessionV1:
         self.tls.close()
         self.auth.close()
         self.commands.close()
+        self.transaction.clear()
         self.budget.close()
 
 pub class DbdServer:
@@ -455,6 +458,62 @@ impl DbdServer:
         if not self.persist_journal_line(journal_line):
             return "-ERR persist failed\r\n"
         self.engine.dispatch(args)
+
+    me handle_transaction(commands: [[text]]) -> text:
+        """Publish one bounded MULTI mutation set, then dispatch in order.
+
+        DBFS receives one generation-bound transactional replacement for the
+        whole write set. No queued command reaches the canonical Redis owner
+        before that publication succeeds, so a failed EXEC has no partial
+        in-memory or durable effect. Read-only batches need no journal write.
+        """
+        if commands.len() == 0:
+            return "*0\r\n"
+        var journal_lines: [text] = []
+        var journal_bytes: i64 = 0
+        var mutation_count: i64 = 0
+        for args in commands:
+            if args.len() > 0 and dbd_command_is_mutating(args[0]):
+                if not dbd_command_has_durable_journal_semantics(args[0]):
+                    return "-EXECABORT durable command unsupported\r\n"
+                val line = dbd_encode_journal_line(args)
+                if line == "" or line.len() > DBD_MAX_LINE_BYTES:
+                    return "-EXECABORT command cannot be journaled\r\n"
+                val added = line.len() + 1
+                if added > DBD_MAX_JOURNAL_BYTES - journal_bytes:
+                    return "-EXECABORT transaction journal limit\r\n"
+                journal_lines.push(line)
+                journal_bytes = journal_bytes + added
+                mutation_count = mutation_count + 1
+        if mutation_count > 0:
+            if not self.backend_is_dbfs or not self.dbfs_adapter.ready():
+                return "-EXECABORT DBFS transaction owner unavailable\r\n"
+            if not self.persistence.can_append_batch(
+                mutation_count, journal_bytes):
+                return "-EXECABORT durable journal limit\r\n"
+            if journal_bytes > DBD_MAX_JOURNAL_BYTES - self.log_text.len():
+                return "-EXECABORT durable journal limit\r\n"
+            # Join once: repeated text concatenation makes an N-command EXEC
+            # quadratic in journal bytes under value semantics.
+            val journal_suffix = journal_lines.join("\n") + "\n"
+            val updated = self.log_text + journal_suffix
+            val committed = self.dbfs_adapter.commit_and_sync(
+                DBD_LOG_PATH, rt_string_to_byte_array(updated))
+            if committed.is_err():
+                self.persistence.mark_unhealthy()
+                return "-EXECABORT durable publication failed\r\n"
+            self.log_text = updated
+            if not self.persistence.commit_verified_batch(
+                mutation_count, journal_bytes):
+                # Admission was checked before publication; reaching this edge
+                # means owner accounting diverged and the service must stop.
+                self.persistence.mark_unhealthy()
+                return "-EXECABORT durable accounting failed\r\n"
+        var response_parts: [text] = [
+            "*" + commands.len().to_text() + "\r\n"]
+        for args in commands:
+            response_parts.push(self.engine.dispatch(args))
+        response_parts.join("")
 
     # ------------------------------------------------------------------
     # Listener/session ownership.  The canonical DbdServer value owns both
@@ -723,7 +782,56 @@ impl DbdServer:
                                     return true
                                 val terminal_command =
                                     dbd_command_terminates_session(parsed.0)
-                                val reply = self.handle_command(parsed.0)
+                                var reply = ""
+                                val command = if parsed.0.len() > 0:
+                                    parsed.0[0].upper()
+                                else:
+                                    ""
+                                if terminal_command:
+                                    # QUIT owns the connection lifecycle, not
+                                    # the transaction queue. Drop uncommitted
+                                    # work before producing its terminal reply.
+                                    live.transaction.clear()
+                                    reply = self.handle_command(parsed.0)
+                                elif command == "MULTI":
+                                    if live.transaction.begin(parsed.0):
+                                        reply = "+OK\r\n"
+                                    else:
+                                        reply = "-ERR MULTI calls cannot be nested or carry arguments\r\n"
+                                elif command == "DISCARD":
+                                    if parsed.0.len() != 1:
+                                        reply = "-ERR wrong number of arguments for 'discard'\r\n"
+                                    elif live.transaction.discard():
+                                        reply = "+OK\r\n"
+                                    else:
+                                        reply = "-ERR DISCARD without MULTI\r\n"
+                                elif command == "EXEC":
+                                    if parsed.0.len() != 1:
+                                        reply = "-ERR wrong number of arguments for 'exec'\r\n"
+                                    elif not live.transaction.is_active():
+                                        reply = "-ERR EXEC without MULTI\r\n"
+                                    elif live.transaction.is_failed():
+                                        val _ = live.transaction.discard()
+                                        reply = "-EXECABORT transaction discarded because of previous errors\r\n"
+                                    else:
+                                        val transaction_commands =
+                                            live.transaction.take_for_exec()
+                                        reply = self.handle_transaction(
+                                            transaction_commands)
+                                elif live.transaction.is_active():
+                                    match live.transaction.queue(parsed.0):
+                                        case DbdTransactionQueueStatusV1.Queued:
+                                            reply = "+QUEUED\r\n"
+                                        case DbdTransactionQueueStatusV1.LimitExceeded:
+                                            reply = "-ERR transaction queue limit exceeded\r\n"
+                                        case DbdTransactionQueueStatusV1.DurabilityUnsupported:
+                                            reply = "-ERR command lacks durable transaction semantics\r\n"
+                                        case DbdTransactionQueueStatusV1.InvalidControl:
+                                            reply = "-ERR command invalid inside MULTI\r\n"
+                                        case DbdTransactionQueueStatusV1.NotActive:
+                                            reply = "-ERR transaction owner inactive\r\n"
+                                else:
+                                    reply = self.handle_command(parsed.0)
                                 val send_status = live.send_text(client_fd, reply)
                                 if send_status == DbdTlsSendStatusV1.BudgetRejected:
                                     val _ = live.send_text(
