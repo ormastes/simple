@@ -196,6 +196,42 @@ The file now reports ten raw rows, all lexically authorized, and zero missing
 authority.  It remains explicitly unsafe and unverified; verified-and-signed
 admission remains 0.
 
+## AOT native-output driver authority checkpoint
+
+The native-output driver now gives each of its 13 foreign ABI families one
+mandatory-inline owner and confines the raw call to a minimal lexical
+`unsafe(ffi)` scope.  Filesystem and capability predicates retain semantic
+`bool` results, process execution retains its signed `i64` exit status, and
+file/environment reads now truthfully declare absence with `text?`.
+
+Review also removed fail-open cache setup behavior.  Failure to create or
+clean the cache scope, consume the one-build clean flag, or write the phase and
+lane-ownership markers now returns `CompileResult.CodegenError`.  Existing
+copy, object-write, archiver, relocatable-link, and receipt failures were
+already checked and remain fail closed.
+
+The focused static authority/performance ratchet passed.  The authoritative
+census changed as expected:
+
+- raw call sites: 19,152 -> 19,119
+- missing authority: 14,976 -> 14,930
+- lexical unsafe: 3,257 -> 3,270
+- function unsafe: unchanged at 919
+
+The reduction in recognized call sites comes from routing 46 former direct
+calls through 13 owners.  `@always_inline` preserves one foreign dispatch per
+operation; no hashing, lookup, lock, allocation, copy, or loop was added.  The
+source-fingerprint loop still performs exactly one existing foreign hash per
+source plus one final manifest hash.  No production self-hosted optimizer or
+benchmark was available.
+
+This checkpoint does not authenticate runtime/provider artifacts.  Native
+provider coverage remains lane-dependent (notably stdout flush and SIMD query
+are interpreter-registered rather than present in the typed native registry),
+and the existing non-cryptographic `rt_hash_text` is cache identity rather than
+security evidence.  The AOT boundary and the wider SFFI estate are therefore
+not globally verified or signed; verified-and-signed admission remains 0.
+
 ## HIR module-surface authority checkpoint
 
 `module_surface_registry.spl` had two genuine runtime interfaces and 63
