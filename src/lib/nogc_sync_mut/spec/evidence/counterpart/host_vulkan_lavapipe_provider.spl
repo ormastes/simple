@@ -213,6 +213,7 @@ fn outcome_unavailable(
 # justifies `CounterpartRelation.image_exact` rather than a tolerance: a clear
 # performs no filtering, no blending, and no gamma conversion, so there is no
 # lossy stage for a tolerance to absorb.
+@unsafe(reason: "unverified host Vulkan provider and process-global ICD selection", capabilities: [ffi])
 pub fn host_vulkan_clear_readback(
     icd_path: text,
     width: i64,
@@ -224,6 +225,14 @@ pub fn host_vulkan_clear_readback(
 ) -> HostVulkanClearOutcome:
     val requested = (r, g, b, a)
     val provider_id = host_vk_provider_id(icd_path)
+
+    # Bound both device geometry and the host readback allocation. 8192^2 * 4
+    # is 256 MiB and cannot overflow i64; positive geometry also guarantees
+    # the four-byte observation below exists.
+    if width <= 0 or height <= 0 or width > 8192 or height > 8192:
+        return outcome_unavailable(icd_path, "invalid or unbounded readback dimensions", "", requested)
+    if r < 0 or r > 255 or g < 0 or g > 255 or b < 0 or b > 255 or a < 0 or a > 255:
+        return outcome_unavailable(icd_path, "clear channels must be whole RGBA8 values", "", requested)
 
     # Release any instance an earlier attempt in this process created, so the
     # loader re-reads VK_DRIVER_FILES at the next instance creation.
@@ -262,8 +271,14 @@ pub fn host_vulkan_clear_readback(
         return outcome_unavailable(icd_path, "graphics unavailable: color image creation returned " + color.to_text() + " (last_error=[" + rt_vulkan_get_last_error() + "])", device_name, requested)
 
     val depth = rt_vulkan_create_image(dev, width, height, HOST_VK_FORMAT_D32_SFLOAT, HOST_VK_USAGE_DEPTH_TARGET)
+    if depth <= 0:
+        rt_vulkan_destroy_image(color)
+        rt_vulkan_destroy_render_pass(render_pass)
+        rt_vulkan_shutdown()
+        return outcome_unavailable(icd_path, "graphics unavailable: depth image creation returned " + depth.to_text() + " (last_error=[" + rt_vulkan_get_last_error() + "])", device_name, requested)
     val framebuffer = rt_vulkan_create_framebuffer(dev, render_pass, color, depth, width, height)
     if framebuffer <= 0:
+        rt_vulkan_destroy_image(depth)
         rt_vulkan_destroy_image(color)
         rt_vulkan_destroy_render_pass(render_pass)
         rt_vulkan_shutdown()
@@ -272,6 +287,7 @@ pub fn host_vulkan_clear_readback(
     val cmd = rt_vulkan_begin_graphics()
     if cmd <= 0:
         rt_vulkan_destroy_framebuffer(framebuffer)
+        rt_vulkan_destroy_image(depth)
         rt_vulkan_destroy_image(color)
         rt_vulkan_destroy_render_pass(render_pass)
         rt_vulkan_shutdown()
@@ -287,6 +303,7 @@ pub fn host_vulkan_clear_readback(
     recorded = recorded and rt_vulkan_end_graphics(cmd)
     if not recorded:
         rt_vulkan_destroy_framebuffer(framebuffer)
+        rt_vulkan_destroy_image(depth)
         rt_vulkan_destroy_image(color)
         rt_vulkan_destroy_render_pass(render_pass)
         rt_vulkan_shutdown()
@@ -295,6 +312,7 @@ pub fn host_vulkan_clear_readback(
     val fence = rt_vulkan_submit_graphics_and_wait_fence(cmd)
     if fence <= 0:
         rt_vulkan_destroy_framebuffer(framebuffer)
+        rt_vulkan_destroy_image(depth)
         rt_vulkan_destroy_image(color)
         rt_vulkan_destroy_render_pass(render_pass)
         rt_vulkan_shutdown()
@@ -303,6 +321,7 @@ pub fn host_vulkan_clear_readback(
     rt_vulkan_destroy_fence(fence)
     if not fence_ok:
         rt_vulkan_destroy_framebuffer(framebuffer)
+        rt_vulkan_destroy_image(depth)
         rt_vulkan_destroy_image(color)
         rt_vulkan_destroy_render_pass(render_pass)
         rt_vulkan_shutdown()
@@ -317,6 +336,7 @@ pub fn host_vulkan_clear_readback(
     val read_ok = rt_vulkan_copy_from_image(pixels, color)
 
     rt_vulkan_destroy_framebuffer(framebuffer)
+    rt_vulkan_destroy_image(depth)
     rt_vulkan_destroy_image(color)
     rt_vulkan_destroy_render_pass(render_pass)
     rt_vulkan_shutdown()
@@ -375,6 +395,7 @@ pub fn host_vulkan_clear_readback(
 # Device-reachability probe that does NOT need the graphics half of the
 # runtime: pins the ICD, initialises, and returns the REAL device name (empty
 # when no device could be reached).
+@unsafe(reason: "unverified host Vulkan provider and process-global ICD selection", capabilities: [ffi])
 pub fn host_vulkan_probe_device_name(icd_path: text) -> text:
     rt_vulkan_shutdown()
     if not env_set("VK_DRIVER_FILES", icd_path):

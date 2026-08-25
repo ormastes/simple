@@ -2168,3 +2168,32 @@ to 17,916 repository-wide and 9,802 to 9,747 in production. All 55 became
 function-scoped authorities. The broader `rt_cuda` family now has 109 explicit
 and 337 missing call sites. Twelve declaration rows moved from untouched to
 unsafe-tagged. Exact-artifact verified-and-signed admission remains zero.
+
+## Host Vulkan/lavapipe evidence-provider checkpoint
+
+The host lavapipe counterpart exposes two public functions that mutate the
+process-global Vulkan ICD selection and directly drive an unsigned Vulkan
+provider. Both entries are now explicitly FFI-unsafe. Their 62 previously
+unscoped calls became function-scoped; ten newly added calls are also inside
+that authority boundary.
+
+The clear/readback path previously multiplied unchecked dimensions, allocated
+an unbounded byte array, indexed the first four bytes even when geometry could
+produce fewer, accepted a failed depth-image creation, and leaked every valid
+depth image. O(1) preflight checks now require positive dimensions no larger
+than 8192 per axis and RGBA8 channels in 0..255, capping readback allocation at
+256 MiB without overflow. Depth creation fails closed, and six post-creation
+cleanup paths release the depth image. The other four new calls provide the
+new depth-failure cleanup and diagnostic.
+
+The render/submit/readback hot sequence, pixel-loop complexity, and existing
+allocation/copy count are unchanged. No lookup, lock, hash, signing operation,
+generic dispatch, or successful-path allocation was added. Cleanup gains one
+required destroy call and removes a device-memory leak.
+
+Because ten contract/cleanup calls were added, production raw-call inventory
+increased from 12,803 to 12,813 while missing authority still decreased by
+exactly 62: 17,916 to 17,854 repository-wide and 9,747 to 9,685 in production.
+All 72 calls in the two provider entries are function-scoped. The broader
+`rt_vulkan` family now has 206 explicit and 262 missing call sites.
+Exact-artifact verified-and-signed admission remains zero.
