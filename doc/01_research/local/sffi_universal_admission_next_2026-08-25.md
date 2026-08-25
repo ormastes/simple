@@ -227,6 +227,34 @@ freestanding provider closure, exact artifact identity, trusted signatures,
 and proof receipts remain unresolved. This loader and the wider estate are not
 globally verified or signed; verified-and-signed admission remains 0.
 
+## Engine2D WM frame logging authority checkpoint
+
+The production frame executor's 37 foreign calls were all writes to the same
+scalar `serial_println(text)` provider. They now route through one
+mandatory-inline `_engine2d_wm_log` owner containing the sole lexical
+`unsafe(ffi)` call. This minimizes unsafe scope without marking negotiation,
+damage planning, rendering, or receipt-validation methods unsafe.
+
+The rewrite is mechanical and preserves every message and branch. Mandatory
+inlining prevents an added per-frame call layer; no allocation, copy, scan,
+loop, lookup, lock, hash, signature operation, or new dispatch was introduced.
+The existing device receipt validation and checked MMIO presentation remain
+unchanged.
+
+The focused authority/provider/performance ratchet passed. `serial_println`
+appears in only one typed registry, so provider closure remains incomplete.
+Consolidating repeated boundary ownership changed the census as follows:
+
+- raw call sites: 18,846 -> 18,810
+- missing authority: 14,176 -> 14,139
+- lexical unsafe: 3,402 -> 3,403
+- function unsafe: unchanged at 1,268
+
+Serial ordering/error semantics, cross-lane provider closure, exact artifact
+identity, trusted signatures, and proof receipts remain unresolved. This frame
+executor and the wider estate are not globally verified or signed;
+verified-and-signed admission remains 0.
+
 ## MIR switch/operator lowering authority checkpoint
 
 MIR switch, operator, and call lowering now confines its two used raw ABI
