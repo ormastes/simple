@@ -1,0 +1,59 @@
+# Feature: SPipe Knowledge Compiler
+
+## Raw Request
+`$sp_dev imlldoc/01_research/infra/spipe/spipe_knowledge_compiler.md with pherallel agents with detail guide and higher model review. make design plan details. sync push often gh main`
+
+## Task Type
+feature
+
+## Refined Goal
+Implement the selected SPipe Knowledge Compiler direction end to end as a portable, dependency-free SPipe core with stable artifact identity, typed traceability, deterministic hybrid search and virtual views, transactional refactoring, constrained rebalancing, common-knowledge promotion, Simple-native provider integrations, operator documentation for every delivered command, and verified compatibility with standalone SPipe, the Simple host, legacy MCP stdio, negotiated MCP 2026 HTTP, file-only materialized-view clients, linked projects, and concurrent worktrees.
+
+## Acceptance Criteria
+- AC-1: Final feature and NFR requirements explicitly preserve every selected decision and acceptance criterion in `doc/01_research/infra/spipe/spipe_knowledge_compiler.md`, with stable REQ/NFR identifiers and no pending option selection.
+- AC-2: Detailed architecture, ADRs, implementation plan, system-test plan, agent ownership plan, and detail design define the canonical lifecycle tree, immutable artifact/section identity, typed graph, provider boundaries, worktree/link behavior, security model, migration strategy, database adapters, and dependency-wave exit gates.
+- AC-3: The dependency-free SPipe implementation parses and indexes canonical Markdown, SDN, SSpec, and supported source metadata into deterministic immutable snapshots plus per-worktree deltas, diagnoses duplicate/ambiguous identity, and never treats paths as identity.
+- AC-4: Exact/alias lookup, deterministic fixed-point BM25, graph candidates, RRF fusion, explanations, and optional semantic-provider degradation satisfy shared golden-corpus ordering and clean-rebuild versus incremental-update parity.
+- AC-5: Read-only `spipe://` lifecycle, feature, component, layer, matrix, trace, project, status, and diagnostic views are available through model-callable MCP list/read/search/resolve/trace/diagnostic tools and bounded materialized `.spipe/view/` output; artifact virtual files resolve to exactly one canonical artifact UID, while aggregate directory/search/trace/diagnostic outputs carry a synthetic projection UID bound to one immutable snapshot.
+- AC-6: Legacy MCP stdio remains compatible and the target stateless MCP 2026 transport exposes deterministic pagination and visibility-safe cache hints without authorization leakage.
+- AC-7: Approved artifact, section, tag, feature, and component rename/move operations use hash-preconditioned journals, atomic application, alias preservation, incremental reindexing, verification, recovery, and rollback; unapproved virtual-view writes fail closed.
+- AC-8: Research-to-result traceability uses typed, provenance-bearing edges; strict profiles accept only explicit/generated accepted evidence, retain TRC231/TRC232 compatibility, diagnose missing/stale cross-project and cross-worktree evidence, and preserve accepted trace through refactors.
+- AC-9: Tree audit and hybrid rebalancing preserve fixed lifecycle roots and all hard constraints, produce deterministic connected virtual communities without churn, and restrict physical moves to explainable approved proposals with rollback maps.
+- AC-10: Common-knowledge discovery combines exact, fingerprint, lexical, structural, graph, and optional semantic evidence; promotion requires provenance, conflict review, consuming-project validation, and safe `extends`/override behavior.
+- AC-11: One canonical skill/rule source generates the tracked Claude, Codex, Gemini, and `.agents` surfaces enumerated by the skill compiler manifest; generated files identify source UID/version/hash, semantic-equivalence fixtures cover every manifest target, and stale generated surfaces fail verification.
+- AC-12: Simple provides canonical shared-search/provider/source-symbol and textual/embedded/server database adapters with deterministic parity, snapshot/capability isolation, exhaustive-versus-WAND equivalence, and no mandatory dependency from SPipe to Simple.
+- AC-13: Executable SSpec scenarios and mirrored Markdown manuals cover navigation, search, trace, refactor failure injection, worktree/link isolation, rebalance stability, promotion safety, protocol compatibility, and provider parity using real assertions and built-in matchers; manuals are usable without opening spec source.
+- AC-14: Performance, privacy, path traversal, symlink/junction escape, cache-scope, authorization, transaction recovery, and scale fixtures have named verification evidence; unavailable optional semantic or OS-mount providers degrade safely and are not counted as PASS.
+- AC-15: Existing SPipe CLI/setup/link/doctor behavior remains compatible, no new baseline Node runtime dependency is introduced, and changed Simple code passes focused lint, duplicate, check, test, runtime-facade, MCP/LSP, and package smoke gates applicable to its scope.
+- AC-16: Knowledge updates ship with implementation: the research document is preserved; architecture/design/plan/spec/manual/guide artifacts are current; feature- and layer-expert wiki entries describe reachable behavior; unresolved gaps have tracked bug/TODO records with file/line, owner, and actionable unblock condition; workflow surfaces under `.codex`, `.agents`, `.claude`, and `.gemini` are updated when their contract changes.
+- AC-17: Final highest-capability review verifies all sidecar outputs, generated-manual quality, exclusions, done marks, security boundaries, and every AC against authoritative current-state evidence; at most three distinct verify/fix cycles are used and unchanged green checks are never rerun.
+
+## Delivery Criteria
+- DC-1: Each verified increment is committed alone, rebased linearly onto `main@origin` with before/after tracked-file count protection, and pushed to GitHub `main` with unrelated concurrent work excluded.
+
+## Scope Exclusions
+- FUSE/ProjFS implementation is deferred unless MCP resources/tools, materialized views, and editor-provider evidence prove insufficient; its adapter contract and decision gate remain designed.
+- Remote embeddings and automatic LLM acceptance are optional providers and never required for core correctness or strict trace compliance.
+- Physical tree moves and common-knowledge publication are never automatic.
+
+## Cooperative Review
+- Sidecar lanes: repository/current-state audit; requirements and trace matrix; architecture/security/worktree design; search/provider/database design; MCP/virtual-view design; refactor/rebalancer/promotion design; SSpec/manual/guide design; implementation lanes partitioned by published interfaces.
+- Merge owner: primary Codex `/root`; only the merge owner edits shared schemas, state, cross-lane indexes, and integration manifests.
+- Final reviewer: normal/highest-capability primary Codex after independent higher-capability review findings are returned.
+- Shared interfaces: `KnowledgeCompiler`, `KnowledgeSnapshot`, `KnowledgeDelta` (the envelope over `ArtifactDelta`, `GraphDelta`, and `IndexDelta`), `ArtifactRecord`, `SectionRecord`, `TraceEdge`, `DiagnosticRecord`, `RefactorPlan`, `RebalanceProposal`, and `PromotionCandidate`. Internal orchestration uses `LexicalSearchPort`, `SemanticSearchPort`, `SymbolIndexPort`, and `ProjectionPort`; external accelerators implement `SearchProvider`, `SourceSymbolProvider`, or `ProjectionProvider` adapters for those ports.
+- Manual `step("...")` flow helpers: `Index canonical knowledge artifacts`; `Browse virtual knowledge views`; `Search and trace artifacts`; `Apply a transactional refactor`; `Audit tree balance and promotion candidates`.
+- Setup/checker helpers: `setup_spipe_knowledge_fixture`, `check_spipe_knowledge_compiler`, `check_spipe_provider_parity`, `check_spipe_refactor_recovery`, and `check_spipe_virtual_view_safety`.
+- Fail-fast policy: temporary scenario or adapter placeholders must call `assert(false)` or `fail(...)`; placeholder passes, empty bodies, and inferred-only strict evidence are forbidden.
+- Generated-manual review owner: primary Codex, after an independent sidecar checks operator readability and trace coverage.
+
+## Phase
+design-review-failed
+
+## Log
+- dev: Created state file with 18 acceptance criteria (type: feature); recorded parallel ownership, shared interfaces, manual steps, checker helpers, and highest-capability review.
+- dev: `dev-done` denotes completion of goal refinement only, not research, design, implementation, verification, release, or the thread goal.
+- review: Converted delivery-only AC-18 to DC-1 and tightened client, projection-identity, and generated-surface acceptance after independent highest-capability review.
+- design: Produced final REQ/NFR, plans, architecture, 15 ADRs, integrating and focused designs, operator guide, five deliberately RED executable SSpec scaffolds, and five authored non-PASS mirrors.
+- review-cycle-1: Failed on security, transaction, projection, provider, prompt-isolation, promotion, and missing executable-scaffold contracts; corrections applied.
+- review-cycle-2: Failed on cross-artifact identity, interface, RRF, materializer, metric, wave, and stale-current-state inconsistencies; corrections applied.
+- review-cycle-3: `STATUS: FAIL`; stopped at the mandatory three-cycle cap. Remaining blockers: canonical port/provider vocabulary mapping; one ProjectionUid prefix and example; refactor-safe filesystem capability/API; closed `trust_scope` contract; TLDR provisional-performance wording; DBFS lane/wave ownership; ADR-SPKC-005 trace to REQ-SPKC-014.
