@@ -2456,6 +2456,34 @@ generic dispatch, or long-lived allocation.  Ptrace/DWARF and 15 debugger
 operations are still unavailable, so the module is not verified or signed;
 verified-and-signed admission remains 0.
 
+## HTTP/WebSocket call-authority checkpoint
+
+The three legacy HTTP/WebSocket facades each retain 26 explicitly tagged raw
+declarations and now place all 29 wrapper calls in minimal lexical
+`unsafe(ffi)` scopes.  The focused `http-sffi-call-authority.shs` ratchet
+passed: 78 declarations and 87 calls are covered without making the entire
+safe-looking wrapper functions unsafe.
+
+Provider inspection confirms that coverage remains partial.  Native C owns
+GET, generic request, download, and client lifecycle/request operations; the
+Rust interpreter owns GET and generic request.  The other declared operations
+remain unsafe and link-fail-closed.  No zero, false, empty-text, or nil provider
+stub was added.  The active native response reader's existing 64 MiB bound is
+retained.
+
+The authoritative census changed exactly by the 87 newly bounded calls:
+
+- missing authority: 17,457 -> 17,370
+- lexical unsafe: 2,800 -> 2,887
+- function unsafe: unchanged at 919
+
+Lexical capability scopes are compile-time metadata and add no network work,
+allocation, copy, lookup, lock, branch, hashing, signing, or generic dispatch.
+No production self-hosted optimizer or benchmark was available.  Missing
+providers, ambiguous WebSocket empty-text receive semantics, TLS policy, and
+artifact evidence remain unresolved, so the family is not globally verified
+or signed; verified-and-signed admission remains 0.
+
 ## GLFW SFFI contract and dispatch checkpoint
 
 The hosted GLFW facade has 40 raw declarations and 41 raw calls.  All
