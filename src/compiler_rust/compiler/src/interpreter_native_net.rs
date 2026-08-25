@@ -969,14 +969,15 @@ pub fn native_tcp_set_read_timeout_interp(args: &[Value]) -> Result<Value, Compi
 
 pub fn rt_io_tcp_set_read_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok());
-    let timeout = timeout_ms.and_then(|ms| {
-        if ms < 0 {
-            None
-        } else {
-            Some(Duration::from_millis(ms as u64))
-        }
-    });
+    let timeout_ms = args
+        .get(1)
+        .and_then(|v| v.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(1, "i64"))?;
+    let timeout = if timeout_ms <= 0 {
+        None
+    } else {
+        Some(Duration::from_millis(timeout_ms as u64))
+    };
     Ok(Value::Bool(
         with_tcp_stream(handle, |stream| stream.set_read_timeout(timeout)).is_ok(),
     ))
@@ -988,14 +989,15 @@ pub fn native_tcp_set_write_timeout_interp(args: &[Value]) -> Result<Value, Comp
 
 pub fn rt_io_tcp_set_write_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok());
-    let timeout = timeout_ms.and_then(|ms| {
-        if ms < 0 {
-            None
-        } else {
-            Some(Duration::from_millis(ms as u64))
-        }
-    });
+    let timeout_ms = args
+        .get(1)
+        .and_then(|v| v.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(1, "i64"))?;
+    let timeout = if timeout_ms <= 0 {
+        None
+    } else {
+        Some(Duration::from_millis(timeout_ms as u64))
+    };
     Ok(Value::Bool(
         with_tcp_stream(handle, |stream| stream.set_write_timeout(timeout)).is_ok(),
     ))
@@ -1296,5 +1298,12 @@ mod tcp_read_contract_tests {
         let result = rt_io_tcp_read_interp(&[Value::Int(-1), Value::Int(16)])
             .expect("invalid descriptor is a provider result, not a bridge error");
         assert!(matches!(result, Value::Nil));
+    }
+
+    #[test]
+    fn tcp_timeout_rejects_non_scalar_bridge_values() {
+        let args = [Value::Int(-1), Value::text("not milliseconds")];
+        assert!(rt_io_tcp_set_read_timeout_interp(&args).is_err());
+        assert!(rt_io_tcp_set_write_timeout_interp(&args).is_err());
     }
 }

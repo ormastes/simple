@@ -12720,15 +12720,17 @@ bool rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled) {
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
+bool rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
-    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
+    tv.tv_sec = ms < 0 ? 0 : ms / 1000;
+    tv.tv_usec = ms < 0 ? 0 : (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
+bool rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
-    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
+    tv.tv_sec = ms < 0 ? 0 : ms / 1000;
+    tv.tv_usec = ms < 0 ? 0 : (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
@@ -12828,8 +12830,8 @@ bool rt_io_tcp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return fal
 bool rt_io_tcp_set_nodelay(int64_t f, bool e) { (void)f; (void)e; return false; }
 bool rt_io_tcp_set_reuseport(int64_t f, bool e) { (void)f; (void)e; return false; }
 bool rt_io_tcp_set_reuseaddr(int64_t f, bool e) { (void)f; (void)e; return false; }
-int64_t rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
-int64_t rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
+bool rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
+bool rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
 int64_t rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return 0; }
 int64_t rt_io_udp_bind(int64_t a) { (void)a; return -1; }
 int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return 0; }

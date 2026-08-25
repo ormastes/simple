@@ -370,18 +370,11 @@ fn runtime_byte_array_to_vec(data: crate::value::RuntimeValue) -> Option<Vec<u8>
     Some(out)
 }
 
-fn timeout_from_optional_ms(ms: crate::value::RuntimeValue) -> Option<Duration> {
-    if ms.is_nil() {
-        return None;
-    }
-    if !ms.is_int() {
-        return None;
-    }
-    let millis = ms.as_int();
-    if millis < 0 {
-        None
+fn timeout_nanos_from_ms(millis: i64) -> i64 {
+    if millis <= 0 {
+        -1
     } else {
-        Some(Duration::from_millis(millis as u64))
+        millis.saturating_mul(1_000_000)
     }
 }
 
@@ -685,17 +678,15 @@ pub extern "C" fn rt_io_tcp_set_nodelay(handle: i64, enabled: bool) -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_io_tcp_set_read_timeout(handle: i64, ms: crate::value::RuntimeValue) -> bool {
-    let timeout = timeout_from_optional_ms(ms);
-    let nanos = timeout.map(|d| d.as_nanos() as i64).unwrap_or(-1);
-    native_tcp_set_read_timeout(handle, nanos) == NetError::Success as i64
+pub extern "C" fn rt_io_tcp_set_read_timeout(handle: i64, ms: i64) -> bool {
+    native_tcp_set_read_timeout(handle, timeout_nanos_from_ms(ms))
+        == NetError::Success as i64
 }
 
 #[no_mangle]
-pub extern "C" fn rt_io_tcp_set_write_timeout(handle: i64, ms: crate::value::RuntimeValue) -> bool {
-    let timeout = timeout_from_optional_ms(ms);
-    let nanos = timeout.map(|d| d.as_nanos() as i64).unwrap_or(-1);
-    native_tcp_set_write_timeout(handle, nanos) == NetError::Success as i64
+pub extern "C" fn rt_io_tcp_set_write_timeout(handle: i64, ms: i64) -> bool {
+    native_tcp_set_write_timeout(handle, timeout_nanos_from_ms(ms))
+        == NetError::Success as i64
 }
 
 #[no_mangle]
@@ -706,6 +697,14 @@ pub extern "C" fn rt_io_tcp_shutdown(handle: i64, how: i64) -> bool {
 #[cfg(test)]
 mod tcp_read_contract_tests {
     use super::*;
+
+    #[test]
+    fn scalar_timeout_sentinel_maps_without_runtime_value() {
+        assert_eq!(timeout_nanos_from_ms(-1), -1);
+        assert_eq!(timeout_nanos_from_ms(0), -1);
+        assert_eq!(timeout_nanos_from_ms(25), 25_000_000);
+        assert_eq!(timeout_nanos_from_ms(i64::MAX), i64::MAX);
+    }
 
     #[test]
     fn tcp_read_failure_is_nil_not_empty_bytes() {

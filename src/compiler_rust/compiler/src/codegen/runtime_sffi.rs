@@ -1338,6 +1338,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // rt_io_tcp_write_text(fd: i64, data_ptr: i64) -> bytes_written: i64
     RuntimeFuncSpec::new("rt_io_tcp_write_text", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_io_tcp_flush", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_read_timeout", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_write_timeout", &[I64, I64], &[I8]),
     // rt_io_tcp_close(fd: i64) -> ok: bool
     RuntimeFuncSpec::new("rt_io_tcp_close", &[I64], &[I8]),
     // rt_event_loop_create() -> epfd: i64
@@ -2571,6 +2573,21 @@ mod tests {
             .expect("TCP flush must be registered for native codegen");
         assert_eq!(spec.params, [I64]);
         assert_eq!(spec.returns, [I8]);
+    }
+
+    #[test]
+    fn tcp_timeout_setters_use_scalar_boolean_abi() {
+        for name in [
+            "rt_io_tcp_set_read_timeout",
+            "rt_io_tcp_set_write_timeout",
+        ] {
+            let spec = RUNTIME_FUNCS
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered for native codegen"));
+            assert_eq!(spec.params, [I64, I64]);
+            assert_eq!(spec.returns, [I8]);
+        }
     }
 
     #[test]
