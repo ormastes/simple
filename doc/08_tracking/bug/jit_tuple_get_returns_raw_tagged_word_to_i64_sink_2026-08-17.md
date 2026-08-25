@@ -3,7 +3,8 @@
 **ID:** jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17
 **Date:** 2026-08-17
 **Severity:** P1 — silent wrong value, exit 0, no diagnostic.
-**Status:** OPEN — re-verified on the 2026-08-17 12:58 seed; the omitted lowering site is now identified (see the end of this record). Not fixed: Rust seed.
+**Status:** FIX IMPLEMENTED — UNVERIFIED. Manual verification was explicitly
+skipped on 2026-08-25; retain this status until the focused JIT matrix runs.
 
 ## How it was found
 
@@ -141,3 +142,24 @@ This also predicts the record's open question about `f64`/struct tuple sinks:
 every non-`ANY` scalar sink is affected, and `u64`/`i32` "passing" in the matrix
 probe is most likely those rows' sinks not being statically typed, not the
 defect being i64-specific. Not measured; stated as a prediction, not a finding.
+
+## Implemented fix (2026-08-25, unverified)
+
+Rust-seed HIR and MIR method lowering now recognize only a statically typed
+tuple `.get()` with one non-negative, in-range integer-literal index. Both
+derive the selected position's type from
+`HirType::Tuple`/`HirType::LabeledTuple`; HIR gives consumers the correct
+representation contract, and MIR routes the call through the existing
+`lower_index_expr` path, which already emits `rt_tuple_get` followed by the
+shared type-directed unbox operation.
+
+Dynamic, negative, out-of-range, erased-receiver, non-tuple, wrong-arity, and
+missing-method calls deliberately retain their prior dispatch/error behavior.
+The fast path adds no scan or allocation and evaluates the receiver and index
+once. Focused coverage extends the existing absolute-oracle JIT matrix with a
+direct print consumer, an inferred local, heterogeneous `(text, i64)` and
+`(i64, text)` reads, and labeled-tuple primitive/reference reads, while the
+existing checks reject leaked raw-tag renderings.
+
+No test, build, benchmark, SPipe, optimizer, or other manual verification was
+run for this implementation, by instruction.

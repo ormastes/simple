@@ -58,6 +58,21 @@ impl<'a> MirLowerer<'a> {
             || recovered_ty.is_some_and(|ty| matches!(registry.get(ty), Some(HirType::Dict { .. })))
     }
 
+    /// Return the element type for a statically valid tuple index.
+    ///
+    /// Keep this deliberately narrower than general index inference: the MIR
+    /// index path can select `rt_tuple_get` only when the receiver's own HIR
+    /// type is a tuple. Erased/dynamic receivers therefore stay on the
+    /// existing method-dispatch path instead of being speculatively rerouted.
+    fn tuple_element_type_at(&self, receiver_ty: TypeId, index: usize) -> Option<TypeId> {
+        let registry = self.type_registry?;
+        match registry.get(receiver_ty) {
+            Some(HirType::Tuple(elements)) => elements.get(index).copied(),
+            Some(HirType::LabeledTuple(fields)) => fields.get(index).map(|(_, ty)| *ty),
+            _ => None,
+        }
+    }
+
     fn enum_payload_type_for_method_receiver(&self, ty: TypeId) -> Option<TypeId> {
         let registry = self.type_registry?;
         match registry.get(ty) {
@@ -249,6 +264,26 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // A tuple `.get(constant_index)` is the same positional read as tuple
+        // indexing, but the generic dotted-name path emits bare
+        // `rt_tuple_get`. That runtime call intentionally returns the stored
+        // tagged RuntimeValue, so an i64 sink observed `5 << 3 == 40` rather
+        // than 5. Only a non-negative, in-range literal gives us an
+        // authoritative per-position type for a heterogeneous tuple; keep
+        // dynamic, negative, out-of-range, erased, and non-tuple calls on the
+        // existing dispatch/error path. `lower_index_expr` evaluates receiver
+        // and index once and applies the shared type-directed unbox tail.
+        // See doc/08_tracking/bug/jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17.md
+        if method == "get" && args.len() == 1 {
+            if let crate::hir::HirExprKind::Integer(index) = &args[0].kind {
+                if let Ok(index) = usize::try_from(*index) {
+                    if let Some(element_ty) = self.tuple_element_type_at(receiver.ty, index) {
+                        return self.lower_index_expr(receiver, &args[0], element_ty);
+                    }
+                }
+            }
+        }
+
         // `xs.get(i)` on an array is the SAME read as `xs[i]`, but the generic
         // dotted-name path emitted a bare `rt_index_get` and fed the tag-boxed
         // slot word (`rt_value_int(v) == v << 3`) straight into an int-typed
@@ -257,7 +292,7 @@ impl<'a> MirLowerer<'a> {
         // `lower_index_expr` pairs the read with an explicit
         // `UnboxInt`/`UnboxFloat` (+ `UnitNarrow` for narrow element widths).
         // Route `.get(i)` through that exact path. This sits BEFORE the receiver
-        // and args are lowered, so nothing is evaluated twice. Dict/String/tuple
+        // and args are lowered, so nothing is evaluated twice. Dict/String
         // receivers are untouched — `receiver_is_array` gates it.
         // See doc/08_tracking/bug/list_get_returns_tag_boxed_value_shifted_left_3_2026-07-28.md
         if method == "get" && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
