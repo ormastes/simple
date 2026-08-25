@@ -2361,6 +2361,33 @@ dispatch.  Production timing/RSS and exact artifact/proof receipts remain
 unavailable, so the family is explicitly unsafe rather than verified-and-
 signed; repository admission remains 0.
 
+## simple-core array-operations authority checkpoint
+
+All 23 raw operations used by `core_array_ops.spl` now have one
+`@always_inline` capability owner each.  The set covers libc allocation/copy,
+compiler pointer load/store intrinsics, archive-level array header projections
+and mutations, registry publication/removal, index normalization, and runtime
+array allocation/push.  The unused `numeric_index` declaration remains tagged
+but has no call or unsafe scope.  No file- or public-function-wide unsafe
+authority was introduced.
+
+`simple-core-array-ops-authority.shs` passed.  It verifies exact raw-call
+confinement, mandatory inlining, both native intrinsic lowerings, and the
+archive-level provider definitions.  The authoritative census changed exactly
+by the 261 previously missing calls moving behind 23 owners:
+
+- raw call sites: 20,388 -> 20,150
+- missing authority: 16,440 -> 16,179
+- lexical unsafe: 3,029 -> 3,052
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+Mandatory inlining retains the same pointer operation, allocation, copy, and
+handle mutation counts.  No validation scan, new allocation/copy, lookup,
+lock, hash, signature check, or generic dispatch was added.  Production
+timing/RSS and signed exact-artifact proof remain unavailable, so this file is
+authority-bounded but not verified-and-signed; repository admission remains 0.
+
 ## Pure Simple SSH cipher boundary checkpoint
 
 The general SSH cipher no longer declares or calls `serial_println` or
