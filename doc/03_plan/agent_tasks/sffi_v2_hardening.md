@@ -636,3 +636,10 @@ passing placeholder.
      byte spans, typed status/handles, bounded decompression, safe extraction,
      and exact signed admission without extra hot-path lookups, copies,
      allocations, locks, or generic dispatch.
+125. Keep all 23 unbacked SSH/SFTP declarations explicitly tagged
+     `unsafe(ffi)` and keep compatibility families delegated to the canonical
+     no-GC owner. Do not add weak providers. A future typed provider must bind
+     host-key policy, credentials, handle generations, partial I/O, bounded
+     command/channel output, remote path semantics, and typed errors to exact
+     signed admission without extra network/file operations, allocations,
+     copies, lookups, locks, or generic dispatch on the hot path.

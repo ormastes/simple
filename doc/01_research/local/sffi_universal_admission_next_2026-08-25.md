@@ -1566,3 +1566,27 @@ requires all 24 tags and rejects the appearance of an unreviewed provider.
 Estimated repository totals are 11,651 declarations / 3,137 symbols.
 Unsafe-tagged rows increase from 2,202 to 2,226, untouched rows decrease from
 9,254 to 9,230, and exact-artifact verified-and-signed admission remains zero.
+
+## SSH and SFTP raw-contract checkpoint
+
+The canonical no-GC SSH facade owns 23 raw SSH/SFTP declarations; the other
+memory/concurrency families and application module are compatibility facades.
+No matching transport provider exists in non-vendored runtime C or Rust code.
+All 23 declarations now carry adjacent operation-specific `unsafe(ffi)`
+metadata, and the stale comment claiming 30 declarations is corrected.
+
+Unresolved obligations include host-key and TLS-equivalent transport policy,
+credential/passphrase lifetime, generation-checked session/channel/SFTP
+handles, command output bounds, binary channel extents and partial writes,
+remote/local path validation, destructive SFTP operations, metadata failure
+encoding, and empty-versus-EOF/failure text results. The unrelated in-tree SSH
+AES and authentication-test helpers are not providers for this facade.
+
+This is metadata only: it adds no connection, authentication, command, read,
+write, transfer, filesystem access, allocation, copy, lookup, lock, branch, or
+dispatch. A static ratchet requires all 23 tags and rejects appearance of an
+unreviewed provider.
+
+Estimated repository totals remain 11,651 declarations / 3,137 symbols.
+Unsafe-tagged rows increase from 2,226 to 2,249, untouched rows decrease from
+9,230 to 9,207, and exact-artifact verified-and-signed admission remains zero.
