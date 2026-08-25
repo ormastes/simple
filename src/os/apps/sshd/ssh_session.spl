@@ -68,6 +68,7 @@ extern fn serial_println(msg: text)
 # flow control prevented every captured byte from reaching the peer.  Proper
 # buffering across WINDOW_ADJUST is a separate asynchronous state machine.
 val SSH_EXIT_REMOTE_WINDOW_EXHAUSTED: u32 = 125u32
+val SSH_ENCRYPTED_FRAME_MAX_EMPTY_POLLS: u64 = 4096u64
 
 fn _live_openssh_client_version_bytes() -> [u8]:
     serial_println("[sshd-session] version builder start")
@@ -674,8 +675,14 @@ impl SshSession:
                 val new_data = self.raw_recv(RECV_BUF_SIZE)
                 if new_data.len() == 0:
                     empty_spins = empty_spins + 1
-                    if empty_spins > 100000:
+                    # An incomplete encrypted frame must not retain one of the
+                    # server's bounded session slots through an effectively
+                    # unbounded slow-read interval. raw_recv is nonblocking on
+                    # this owner and each empty poll sleeps, so cap all three
+                    # frame-fill phases with the same transport budget.
+                    if empty_spins >= SSH_ENCRYPTED_FRAME_MAX_EMPTY_POLLS:
                         serial_println("[sshd-session] recv encrypted timeout head seq={self.cipher.seq_c2s}")
+                        self.transition_transport_failed()
                         return []
                     rt_thread_sleep(1)
                     pass_dn
@@ -696,8 +703,9 @@ impl SshSession:
                     val more_head = self.raw_recv(RECV_BUF_SIZE)
                     if more_head.len() == 0:
                         empty_spins = empty_spins + 1
-                        if empty_spins > 100000:
+                        if empty_spins >= SSH_ENCRYPTED_FRAME_MAX_EMPTY_POLLS:
                             serial_println("[sshd-session] recv encrypted timeout min-header seq={self.cipher.seq_c2s} recv_buf_len={self.recv_ring.len()}")
+                            self.transition_transport_failed()
                             return []
                         rt_thread_sleep(1)
                         pass_dn
@@ -723,8 +731,9 @@ impl SshSession:
                 val more = self.raw_recv(RECV_BUF_SIZE)
                 if more.len() == 0:
                     empty_spins = empty_spins + 1
-                    if empty_spins > 100000:
+                    if empty_spins >= SSH_ENCRYPTED_FRAME_MAX_EMPTY_POLLS:
                         serial_println("[sshd-session] recv encrypted timeout body seq={self.cipher.seq_c2s} need={total_needed} have={self.recv_ring.len()}")
+                        self.transition_transport_failed()
                         return []
                     rt_thread_sleep(1)
                     pass_dn

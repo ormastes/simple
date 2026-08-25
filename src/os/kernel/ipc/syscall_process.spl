@@ -25,7 +25,7 @@ use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.ipc.notification.{notification_wait_any, notification_register_multi_waiter}
 use os.kernel.log.klog.{KernelLog, klog_write}
 use os.kernel.log.klog_api.{log_raw_println}
-use os.kernel.loader.executable_source.{resolve_executable_bytes, resolve_executable_bytes_from_path_bytes}
+use os.kernel.loader.executable_source.{canonical_seeded_path_from_bytes, resolve_executable_bytes}
 use os.kernel.loader.app_registry.{app_registry_lookup, app_registry_cached_boot_app_id}
 use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.loader.process_image.{build_user_process_image}
@@ -46,6 +46,7 @@ use os.kernel.ipc.capability.{_vma_range_readable}
 use os.kernel.types.task_types.{TaskState}
 use os.kernel.ipc.syscall_ipc.{IpcSyscallState}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_process_spawn_decision}
+use os.tools.simplebox.simplebox_artifact_contract.{simplebox_resolve_canonical_path_v1}
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
 
@@ -125,6 +126,45 @@ fn _process_grant_errno_for_path(path: text, klog: KernelLog) -> i64:
     var log = klog
     klog_write(log, 3, 1, 0, "process grant denied path={path} reason={reason}")
     0 - EACCES as i64
+
+fn _process_grant_errno_for_resolved_artifact(path: text, klog: KernelLog) -> i64:
+    """Bind process admission to the request and the filesystem artifact.
+
+    Executable resolution normalizes every path and maps SimpleBox applet
+    aliases onto `/bin/simplebox`. Checking only the caller spelling allowed a
+    manifest grant for an alias or non-canonical path to reach an artifact that
+    the same manifest denied explicitly. Preserve command-level policy, then
+    require the independently resolved artifact identity as well.
+    """
+    val requested_errno = _process_grant_errno_for_path(path, klog)
+    if requested_errno < 0:
+        return requested_errno
+    val artifact_path = simplebox_resolve_canonical_path_v1(path)
+    if artifact_path == path:
+        return 0
+    _process_grant_errno_for_path(artifact_path, klog)
+
+fn _resolved_artifact_path_from_bytes(path: text, path_bytes: [u8]) -> text:
+    """Resolve once using the registry/SimpleBox order used by loading.
+
+    `resolve_executable_bytes_from_path_bytes` resolves registered aliases
+    before applying the SimpleBox artifact mapping. Returning that identity
+    lets admission and the subsequent load share one snapshot instead of
+    looking through the mutable registry twice.
+    """
+    val seeded_path = canonical_seeded_path_from_bytes(path_bytes)
+    simplebox_resolve_canonical_path_v1(
+        if seeded_path != nil: seeded_path.unwrap() else: path)
+
+fn _process_grant_errno_for_artifact(
+    requested_path: text, artifact_path: text, klog: KernelLog
+) -> i64:
+    val requested_errno = _process_grant_errno_for_path(requested_path, klog)
+    if requested_errno < 0:
+        return requested_errno
+    if artifact_path == requested_path:
+        return 0
+    _process_grant_errno_for_path(artifact_path, klog)
 
 # ============================================================================
 # Ambient-spawn authority gate (master plan 5.4 — loader/spawn_authority.spl)
@@ -356,10 +396,12 @@ fn _handle_exec_state(args: SyscallArgs, scheduler: Scheduler) -> ProcessSyscall
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
-    val grant_errno = _process_grant_errno_for_path(path, KernelLog.new(16))
+    val artifact_path = _resolved_artifact_path_from_bytes(path, path_bytes)
+    val grant_errno = _process_grant_errno_for_artifact(
+        path, artifact_path, KernelLog.new(16))
     if grant_errno < 0:
         return ProcessSyscallState(result: SyscallResult(value: grant_errno), scheduler: scheduler)
-    val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, CURRENT_EXEC_ARCH)
+    val bytes_result = resolve_executable_bytes(artifact_path, CURRENT_EXEC_ARCH)
     if bytes_result.is_err():
         return ProcessSyscallState(result: SyscallResult(value: -2), scheduler: scheduler)
 
@@ -857,9 +899,9 @@ fn _handle_spawn_binary_state(args: SyscallArgs, scheduler: Scheduler, klog: Ker
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     log_raw_println("[syscall13] path decoded")
-    val grant_errno = _process_grant_errno_for_path(path, klog)
-    if grant_errno < 0:
-        return ProcessSyscallState(result: SyscallResult(value: grant_errno), scheduler: scheduler)
+    val requested_grant_errno = _process_grant_errno_for_path(path, klog)
+    if requested_grant_errno < 0:
+        return ProcessSyscallState(result: SyscallResult(value: requested_grant_errno), scheduler: scheduler)
 
     # Tagged authenticated-run ABI:
     #   arg0 path pointer, arg1 path length, arg2 packed argv base,
@@ -891,8 +933,16 @@ fn _handle_spawn_binary_state(args: SyscallArgs, scheduler: Scheduler, klog: Ker
             result: SyscallResult(value: execution_result),
             scheduler: scheduler)
 
+    val artifact_path = _resolved_artifact_path_from_bytes(path, path_bytes)
+    if artifact_path != path:
+        val artifact_grant_errno = _process_grant_errno_for_path(
+            artifact_path, klog)
+        if artifact_grant_errno < 0:
+            return ProcessSyscallState(
+                result: SyscallResult(value: artifact_grant_errno),
+                scheduler: scheduler)
     val arch = CURRENT_EXEC_ARCH
-    val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
+    val bytes_result = resolve_executable_bytes(artifact_path, arch)
     log_raw_println("[syscall13] resolve_executable_bytes returned")
     if bytes_result.is_err():
         var log = klog
@@ -1073,7 +1123,7 @@ pub fn dispatch_spawn_binary_direct_state(path_ptr: u64, path_len: u64, priority
             path = "/sys/apps/clang"
         if path == "":
             return SpawnBinaryDirectState(pid: -14, scheduler: scheduler)
-        val grant_errno = _process_grant_errno_for_path(path, klog)
+        val grant_errno = _process_grant_errno_for_resolved_artifact(path, klog)
         if grant_errno < 0:
             return SpawnBinaryDirectState(pid: grant_errno, scheduler: scheduler)
         val boot_bytes = app_registry_cached_boot_app_id(path_ptr)
@@ -1098,13 +1148,15 @@ pub fn dispatch_spawn_binary_direct_state(path_ptr: u64, path_len: u64, priority
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     log_raw_println("[syscall13] dispatch_direct path-ready len={path_len} path={path}")
-    val grant_errno = _process_grant_errno_for_path(path, klog)
+    val artifact_path = _resolved_artifact_path_from_bytes(path, path_bytes)
+    val grant_errno = _process_grant_errno_for_artifact(
+        path, artifact_path, klog)
     if grant_errno < 0:
         return SpawnBinaryDirectState(pid: grant_errno, scheduler: scheduler)
     val arch = CURRENT_EXEC_ARCH
     log_raw_println("[syscall13] dispatch_direct arch-ready")
 
-    val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
+    val bytes_result = resolve_executable_bytes(artifact_path, arch)
     log_raw_println("[syscall13] dispatch_direct resolve returned")
     if bytes_result.is_ok():
         log_raw_println("[syscall13] vfs bytes ok; exec handoff active")

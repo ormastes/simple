@@ -7,11 +7,15 @@ use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_arm_init}
 use os.kernel.boot.boot_fs_mount.{boot_fs_mount_fat32_from_device}
 use os.services.vfs.vfs_boot_state.{
     vfs_state_reset_rootfs, vfs_state_mount, vfs_state_mark_rootfs_ready}
+use os.services.vfs.vfs_positioned_ops.{
+    g_vfs_positioned_open, g_vfs_positioned_close,
+    g_vfs_positioned_fstat, g_vfs_positioned_read_at}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.instance.{DriverInstance}
-use std.fs_driver.types.{MountOptions, StatInfo}
+use std.fs_driver.types.{MountOptions, OpenFlags, StatInfo}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.ops.{FsDriver}
+use std.fs_driver.mount_table.{mount_path_canonical}
 use common.string_core.{str_char_at}
 use os.kernel.boot.mmio.{mmio_read32}
 use os.services.vfs.arm_fs_exec_alias.{_arm_exec_alias, arm_fs_exec_disk_alias, _arm_short_name_for_mapped_path}
@@ -30,6 +34,7 @@ extern fn arm_fs_exec_trace(id: u64)
 
 var g_arm_blk: VirtioBlkDriver? = nil
 var g_arm_vfs_initialized: bool = false
+var g_arm_mount_table_ready: bool = false
 var g_arm_hello_smf_bytes: [u8] = []
 var g_arm_version_bytes: [u8] = []
 var g_arm_hello_smf_len: u32 = 0
@@ -85,13 +90,62 @@ fn _text_has_prefix(source: text, prefix: text) -> bool:
 fn _arm_vfs_log(msg: text):
     serial_println(msg)
 
-fn _arm_fs_error_is_not_found(err: FsError) -> bool:
-    match err:
-        case FsError.NotFound: true
-        case _: false
+fn _arm_vfs_read_mounted_regular_file_bounded_v1(
+    path: text, max_bytes: u64
+) -> Result<ArmFsExecRegularFileReadV1, FsError>:
+    """Read one canonical absolute path through the mounted VFS owner.
+
+    The virtual handle keeps lookup, stat, and positioned read bound to one
+    opened object.  Every exit after open closes that handle.  A zero-length
+    regular file is returned as a successful typed observation, distinct from
+    every lookup, type, read, and close error.
+    """
+    if not mount_path_canonical(path) or path == "/":
+        return Err(FsError.InvalidArg)
+    val opened = g_vfs_positioned_open(path, OpenFlags.read_only())
+    if opened.is_err():
+        return Err(opened.unwrap_err())
+    val file_object_id = opened.unwrap()
+    val stat_result = g_vfs_positioned_fstat(file_object_id)
+    if stat_result.is_err():
+        val _ = g_vfs_positioned_close(file_object_id)
+        return Err(stat_result.unwrap_err())
+    val file_stat = stat_result.unwrap()
+    # Reject every explicitly non-regular object.  Legacy FAT32 regular files
+    # publish permission bits without S_IFREG, while directories still publish
+    # S_IFDIR; a zero type is therefore the common-driver regular-file fallback.
+    val file_type = file_stat.mode & 0o170000u32
+    if file_type != 0u32 and file_type != 0o100000u32:
+        val _ = g_vfs_positioned_close(file_object_id)
+        return Err(FsError.InvalidArg)
+    if file_stat.size > max_bytes:
+        val _ = g_vfs_positioned_close(file_object_id)
+        return Err(FsError.TooLarge)
+    if file_stat.size == 0u64:
+        val closed_empty = g_vfs_positioned_close(file_object_id)
+        if closed_empty.is_err():
+            return Err(closed_empty.unwrap_err())
+        return Ok(ArmFsExecRegularFileReadV1(
+            stat: StatInfo(is_dir: false, is_file: true, size: 0),
+            bytes: []))
+    val read_result = g_vfs_positioned_read_at(
+        file_object_id, 0u64, file_stat.size)
+    val close_result = g_vfs_positioned_close(file_object_id)
+    if read_result.is_err():
+        return Err(read_result.unwrap_err())
+    if close_result.is_err():
+        return Err(close_result.unwrap_err())
+    val bytes = read_result.unwrap()
+    if bytes.len() != file_stat.size:
+        return Err(FsError.Corrupt)
+    Ok(ArmFsExecRegularFileReadV1(
+        stat: StatInfo(
+            is_dir: false, is_file: true, size: file_stat.size.to_i64()),
+        bytes: bytes))
 
 pub fn arm_fs_exec_vfs_boot_init() -> bool:
     arm_fs_exec_trace(211)
+    g_arm_mount_table_ready = false
     vfs_state_reset_rootfs()
     _arm_vfs_log("[vfs-init] Starting VirtIO-BLK FAT32 initialization...")
     _arm_vfs_log("[vfs-init] virtio mmio magic={mmio_read32(0x0A003E00)} version={mmio_read32(0x0A003E04)} device_id={mmio_read32(0x0A003E08)}")
@@ -133,6 +187,7 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
     # table. This lets bounded production media readers use the same generic
     # VFS byte path as x86_64 and RV64 instead of a second ARM-only parser.
     vfs_state_mark_rootfs_ready()
+    g_arm_mount_table_ready = true
     _arm_vfs_log("[vfs-init] kernel FAT32 publication ready")
     arm_fs_exec_trace(214)
     val hello_smf_bytes = _arm_fat32_read_path_from_dev(dev, "/sys/apps/hello_world.smf")
@@ -166,6 +221,7 @@ pub fn arm_fs_exec_probe_init() -> bool:
     directory-scan path, independent of the /SYS/APPS descent. Sets g_arm_blk
     to a real device (freestanding module-globals are never zero-initialized,
     so the garbage default must be overwritten before any read)."""
+    g_arm_mount_table_ready = false
     var dev = VirtioBlkDriver.arm_qemu_virt()
     val init_result = virtio_blk_arm_init(dev)
     dev = init_result.driver
@@ -185,20 +241,38 @@ pub fn arm_fs_exec_probe_init() -> bool:
 pub fn arm_fs_exec_read_regular_file_bounded_v1(
     path: text, max_bytes: u64
 ) -> Result<ArmFsExecRegularFileReadV1, FsError>:
-    if path == "" or not _text_has_prefix(path, "/"):
+    if not mount_path_canonical(path) or path == "/":
         return Err(FsError.InvalidArg)
     if max_bytes > ARM_FS_EXEC_MAX_REGULAR_FILE_BYTES:
         return Err(FsError.TooLarge)
     val mapped = _arm_exec_alias(path)
     _arm_vfs_log("[vfs-read] path={path} mapped={mapped} initialized={g_arm_vfs_initialized}")
     val cached_hello_len = rt_arm_array_len_u32(g_arm_hello_smf_bytes)
-    if mapped == "/SYS/APPS/HELLOSMF.SMF" and cached_hello_len > 4:
+    # A published namespace is authoritative over the boot-time byte cache.
+    # Otherwise a later nested mount at /SYS/APPS could be bypassed by the
+    # pre-mount hello image.  Probe-only media may still use the cache.
+    if not g_arm_mount_table_ready and
+       mapped == "/SYS/APPS/HELLOSMF.SMF" and cached_hello_len > 4:
         if cached_hello_len.to_u64() > max_bytes:
             return Err(FsError.TooLarge)
         _arm_vfs_log("[vfs-read] cached-hello len={cached_hello_len}")
         return Ok(ArmFsExecRegularFileReadV1(
             stat: StatInfo(is_dir: false, is_file: true, size: cached_hello_len.to_i64()),
             bytes: g_arm_hello_smf_bytes))
+    # The production ARM boot path publishes its live FAT32 driver into the
+    # canonical MountTable before setting g_arm_vfs_initialized.  Prefer that
+    # backend-neutral path so any safe absolute mounted path (including future
+    # nested directories and non-curated filenames) is readable.  Once a mount
+    # is published its result is authoritative: even NotFound must not fall
+    # through to a raw root-device walk that bypasses nested-mount namespace
+    # routing.  Probe/legacy media use the direct walker only when no MountTable
+    # publication occurred.
+    if g_arm_mount_table_ready:
+        val mounted = _arm_vfs_read_mounted_regular_file_bounded_v1(
+            mapped, max_bytes)
+        if mounted.is_ok():
+            _arm_vfs_log("[vfs-read] mounted-hit len={rt_arm_array_len_u32(mounted.unwrap().bytes)}")
+        return mounted
     if val Some(dev) = g_arm_blk:
         val result = _arm_fat32_read_regular_path_from_dev_v1(dev, mapped, max_bytes)
         if result.is_ok():
