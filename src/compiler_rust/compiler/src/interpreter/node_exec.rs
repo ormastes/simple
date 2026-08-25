@@ -653,6 +653,65 @@ pub(crate) fn exec_node(
     }
 }
 
+/// Mutate an indexed same-file module global in its authoritative store.
+///
+/// `MODULE_GLOBALS.get(...).cloned()` followed by `Arc::make_mut` keeps the
+/// store's Arc alive and therefore copies the entire array/dict on every
+/// write. Borrowing the value mutably in the store means only the first write
+/// may copy against the required module-load Env snapshot; later writes see
+/// the now-unique authoritative Arc and update in place. A real user alias
+/// likewise retains COW value semantics. `Ok(Some(value))` means the container
+/// needs the general path (currently object `__setitem__` or an invalid type).
+fn try_assign_module_global_index(
+    container_name: &str,
+    index_val: &Value,
+    value: Value,
+) -> Result<Option<Value>, CompileError> {
+    MODULE_GLOBALS.with(|cell| {
+        let mut globals = cell.borrow_mut();
+        let Some(container) = globals.get_mut(container_name) else {
+            return Ok(Some(value));
+        };
+        match container {
+            Value::Array(arc) => {
+                let idx = index_val.as_int()? as usize;
+                let arr = Arc::make_mut(arc);
+                if idx < arr.len() {
+                    arr[idx] = value;
+                } else {
+                    while arr.len() < idx {
+                        arr.push(Value::Nil);
+                    }
+                    arr.push(value);
+                }
+                Ok(None)
+            }
+            Value::Dict(dict) => {
+                let key = index_val.to_key_string();
+                let stored = Value::wrap_dict_entry(index_val, value);
+                Arc::make_mut(dict).insert(key, stored);
+                Ok(None)
+            }
+            Value::Tuple(tuple) => {
+                let idx = index_val.as_int()? as usize;
+                if idx >= tuple.len() {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help(format!("tuple has {} element(s)", tuple.len()))
+                        .with_note(format!("index {} is out of bounds", idx));
+                    return Err(CompileError::semantic_with_context(
+                        format!("index out of bounds: tuple index {} out of bounds (len={})", idx, tuple.len()),
+                        ctx,
+                    ));
+                }
+                tuple[idx] = value;
+                Ok(None)
+            }
+            _ => Ok(Some(value)),
+        }
+    })
+}
+
 // Helper function for regular assignment
 pub(crate) fn exec_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
@@ -1239,11 +1298,38 @@ pub(crate) fn exec_assignment(
         }
     } else if let Expr::Index { receiver, index } = &assign.target {
         // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
-        let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+        let mut value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let index_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
 
         // Case 1: Plain identifier: arr[i] = value
         if let Expr::Identifier(container_name) = receiver.as_ref() {
+            // Same-file module variables live in both the evaluation env and
+            // MODULE_GLOBALS. Identifier reads deliberately treat
+            // MODULE_GLOBALS as authoritative for a non-local binding (see
+            // expr/literals.rs), so classify this BEFORE the local in-place
+            // path. Otherwise the first global COW write leaves a uniquely
+            // owned stale Env snapshot, and the next loop iteration mutates
+            // that snapshot then returns without publishing.
+            //
+            // A true local may shadow a same-named module global, while an
+            // owner-qualified imported global belongs to its owner store;
+            // keep both on the existing Env path. Check the allocation-free
+            // flat-store membership first so unrelated writes do not clone
+            // owner/name metadata through `global_binding`.
+            let is_module_global = !env.is_local(container_name)
+                && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(container_name))
+                && env.global_binding(container_name).is_none();
+
+            if is_module_global {
+                if let Some(unhandled_value) =
+                    try_assign_module_global_index(container_name, &index_val, value)?
+                {
+                    value = unhandled_value;
+                } else {
+                    return Ok(Control::Next);
+                }
+            }
+
             // Fast in-place path for a local array/dict that is PROVABLY
             // unaliased (Arc strong_count == 1, no weak refs): mutate in place,
             // avoiding the O(n) copy-on-write clone the `.cloned()` path below
@@ -1256,7 +1342,7 @@ pub(crate) fn exec_assignment(
                 Some(Value::Dict(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                 _ => false,
             };
-            if case1_unique {
+            if !is_module_global && case1_unique {
                 if let Some(slot) = env.get_mut(container_name) {
                     match slot {
                         Value::Array(arc) => {
@@ -1283,14 +1369,11 @@ pub(crate) fn exec_assignment(
                     }
                 }
             }
-            // Try local env first
-            let container_opt = env.get(container_name).cloned();
-            // Try module globals if not in local env
-            let is_global = container_opt.is_none();
-            let container = if let Some(c) = container_opt {
-                Some(c)
+            let env_container = env.get(container_name).cloned();
+            let container = if is_module_global {
+                env_container.or_else(|| MODULE_GLOBALS.with(|cell| cell.borrow().get(container_name).cloned()))
             } else {
-                MODULE_GLOBALS.with(|cell| cell.borrow().get(container_name).cloned())
+                env_container
             };
 
             if let Some(container) = container {
@@ -1391,7 +1474,12 @@ pub(crate) fn exec_assignment(
                 };
 
                 // Update the correct storage
-                if is_global {
+                if is_module_global {
+                    // Publish exactly once. The non-local env entry is only a
+                    // module-load snapshot; identifier reads intentionally use
+                    // MODULE_GLOBALS for it. Avoid cloning `new_container`
+                    // merely to refresh that stale mirror (important for
+                    // tuple values, whose clone is O(n)).
                     MODULE_GLOBALS.with(|cell| {
                         cell.borrow_mut().insert(container_name.clone(), new_container);
                     });
@@ -2674,6 +2762,233 @@ pub(crate) fn exec_augmented_assignment(
             "invalid assignment: unsupported augmented assignment target",
             ctx,
         ))
+    }
+}
+
+/// Regression coverage for a module-level collection indexed from script
+/// control flow. Same-file module variables have a non-local snapshot in the
+/// evaluator Env plus an authoritative entry in MODULE_GLOBALS. Before the
+/// fix, `arr[i] = value` selected the snapshot merely because `env.get(arr)`
+/// succeeded, then wrote only that snapshot. Identifier reads select
+/// MODULE_GLOBALS, so the mutation was observably dropped.
+#[cfg(test)]
+mod module_global_index_assignment_tests {
+    use super::*;
+    use simple_parser::ast::{Block, ForStmt, Pattern};
+    use simple_parser::{Parser, Span};
+
+    fn install_module_snapshot(env: &mut Env, name: &str, value: Value) {
+        env.insert(name.to_string(), value.clone());
+        MODULE_GLOBALS.with(|cell| {
+            cell.borrow_mut().insert(name.to_string(), value);
+        });
+    }
+
+    fn global_value(name: &str) -> Value {
+        MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned().expect("module global"))
+    }
+
+    fn array_elem(value: &Value, index: usize) -> i64 {
+        match value {
+            Value::Array(items) => items[index].as_int().expect("integer array element"),
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    fn index_expr(name: &str, index: i64) -> Expr {
+        Expr::Index {
+            receiver: Box::new(Expr::Identifier(name.to_string())),
+            index: Box::new(Expr::Integer(index)),
+        }
+    }
+
+    fn assignment(name: &str, index: i64, op: AssignOp, value: Expr) -> simple_parser::ast::AssignmentStmt {
+        simple_parser::ast::AssignmentStmt {
+            span: Span::new(0, 0, 0, 0),
+            target: index_expr(name, index),
+            op,
+            value,
+        }
+    }
+
+    fn exec(stmt: &simple_parser::ast::AssignmentStmt, env: &mut Env) -> Result<Control, CompileError> {
+        match stmt.op {
+            AssignOp::Assign => exec_assignment(
+                stmt,
+                env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            ),
+            _ => exec_augmented_assignment(
+                stmt,
+                env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            ),
+        }
+    }
+
+    #[test]
+    fn top_level_index_assignment_in_for_loop_updates_authoritative_global() {
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        let mut env = Env::new();
+        install_module_snapshot(&mut env, "hist", Value::array(vec![Value::Int(0)]));
+        let alias = env.get("hist").expect("module-load snapshot").clone();
+        env.mark_local("original");
+        env.insert("original".to_string(), alias);
+
+        let increment = assignment(
+            "hist",
+            0,
+            AssignOp::Assign,
+            Expr::Binary {
+                op: BinOp::Add,
+                left: Box::new(index_expr("hist", 0)),
+                right: Box::new(Expr::Integer(1)),
+            },
+        );
+        let loop_node = Node::For(ForStmt {
+            span: Span::new(0, 0, 0, 0),
+            pattern: Pattern::Identifier("item".to_string()),
+            iterable: Expr::Array(vec![Expr::Integer(10), Expr::Integer(11), Expr::Integer(12)]),
+            body: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![Node::Assignment(increment)],
+            },
+            simd_requested: false,
+            is_suspend: false,
+            auto_enumerate: false,
+            invariants: vec![],
+            label: None,
+        });
+
+        exec_node(
+            &loop_node,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("top-level for loop");
+
+        assert_eq!(array_elem(&global_value("hist"), 0), 3, "all loop writes must be published");
+        assert_eq!(
+            array_elem(env.get("original").expect("value-semantics alias"), 0),
+            0,
+            "publishing a module write must not mutate a genuine value alias"
+        );
+        assert_eq!(
+            array_elem(env.get("hist").expect("module-load name-precedence snapshot"), 0),
+            0,
+            "the non-local snapshot must remain bound so it continues to shadow same-named callables and types"
+        );
+
+        let parsed = Parser::new("class hist:\n    value: i64\n")
+            .parse()
+            .expect("colliding class fixture");
+        let class = parsed
+            .items
+            .into_iter()
+            .find_map(|node| match node {
+                Node::Class(def) => Some(def),
+                _ => None,
+            })
+            .expect("class definition");
+        let mut colliding_classes = HashMap::new();
+        colliding_classes.insert("hist".to_string(), Arc::new(class));
+        let resolved = evaluate_expr(
+            &Expr::Identifier("hist".to_string()),
+            &mut env,
+            &mut HashMap::new(),
+            &mut colliding_classes,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("module collection must resolve ahead of same-named class");
+        assert_eq!(array_elem(&resolved, 0), 3, "reads must use the authoritative global value");
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    }
+
+    #[test]
+    fn local_shadow_does_not_write_same_named_module_global() {
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        let mut env = Env::new();
+        MODULE_GLOBALS.with(|cell| {
+            cell.borrow_mut()
+                .insert("hist".to_string(), Value::array(vec![Value::Int(90)]));
+        });
+        env.mark_local("hist");
+        env.insert("hist".to_string(), Value::array(vec![Value::Int(10)]));
+
+        exec(&assignment("hist", 0, AssignOp::Assign, Expr::Integer(11)), &mut env)
+            .expect("local indexed assignment");
+
+        assert_eq!(array_elem(env.get("hist").expect("local shadow"), 0), 11);
+        assert_eq!(array_elem(&global_value("hist"), 0), 90, "local shadow must isolate the global");
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    }
+
+    #[test]
+    fn augmented_index_assignment_uses_the_same_global_publication_path() {
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        let mut env = Env::new();
+        install_module_snapshot(&mut env, "counts", Value::array(vec![Value::Int(5)]));
+
+        exec(&assignment("counts", 0, AssignOp::AddAssign, Expr::Integer(2)), &mut env)
+            .expect("module-global augmented indexed assignment");
+
+        assert_eq!(array_elem(&global_value("counts"), 0), 7);
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+    }
+
+    #[test]
+    fn missing_container_and_tuple_bounds_errors_publish_nothing() {
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        let mut env = Env::new();
+        let missing = exec(&assignment("missing", 0, AssignOp::Assign, Expr::Integer(1)), &mut env);
+        assert!(missing.is_err(), "an unknown container must remain an error");
+        assert!(
+            MODULE_GLOBALS.with(|cell| cell.borrow().is_empty()),
+            "a failed lookup must not create a module global"
+        );
+
+        install_module_snapshot(&mut env, "pair", Value::Tuple(vec![Value::Int(4), Value::Int(5)]));
+        let out_of_bounds = exec(&assignment("pair", 2, AssignOp::Assign, Expr::Integer(9)), &mut env);
+        assert!(out_of_bounds.is_err(), "tuple out-of-bounds must remain an error");
+        assert_eq!(
+            global_value("pair"),
+            Value::Tuple(vec![Value::Int(4), Value::Int(5)]),
+            "a rejected indexed write must not publish a partial value"
+        );
+        assert_eq!(
+            env.get("pair").expect("tuple name-precedence snapshot"),
+            &Value::Tuple(vec![Value::Int(4), Value::Int(5)]),
+            "a rejected bounds check must not change Env lookup state"
+        );
+
+        install_module_snapshot(&mut env, "numbers", Value::array(vec![Value::Int(8)]));
+        let invalid_index = simple_parser::ast::AssignmentStmt {
+            span: Span::new(0, 0, 0, 0),
+            target: Expr::Index {
+                receiver: Box::new(Expr::Identifier("numbers".to_string())),
+                index: Box::new(Expr::String("not-an-index".to_string())),
+            },
+            op: AssignOp::Assign,
+            value: Expr::Integer(9),
+        };
+        assert!(exec(&invalid_index, &mut env).is_err(), "invalid array index conversion must fail");
+        assert_eq!(array_elem(&global_value("numbers"), 0), 8);
+        assert_eq!(
+            array_elem(env.get("numbers").expect("array name-precedence snapshot"), 0),
+            8,
+            "a rejected index conversion must not change Env lookup state"
+        );
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
     }
 }
 
