@@ -25,6 +25,12 @@ pub enum SchedulerExecutionDeliveryStatusV2:
     InvalidExpectedCommand
     SerializationUnavailable
 
+pub(package) enum SchedulerExecutionCancellationStatusV1:
+    Cancelled
+    AlreadyAbsent
+    NotCancelable
+    SerializationUnavailable
+
 pub struct SchedulerExecutionDeliveryResultV2:
     status: SchedulerExecutionDeliveryStatusV2
     token: SchedulerExecutionEvidenceTokenV1?
@@ -244,17 +250,33 @@ pub(package) fn scheduler_execution_cancel_adoption_handle_v1(
     handle: SchedulerExecutionObservationHandleV1
 ) -> bool:
     """Cancel only an unpublished, non-terminal adoption observation."""
-    if not _lock(): return false
+    scheduler_execution_cancel_adoption_handle_status_v1(handle) ==
+        SchedulerExecutionCancellationStatusV1.Cancelled
+
+pub(package) fn scheduler_execution_cancel_adoption_handle_status_v1(
+    handle: SchedulerExecutionObservationHandleV1
+) -> SchedulerExecutionCancellationStatusV1:
+    """Cancel with enough state to retry an indeterminate owner transition.
+
+    `AlreadyAbsent` is terminal success for an exact owner-issued handle.  It
+    covers a previous cancellation whose mutation committed but whose unlock
+    result was unavailable.  Callers must never construct handles themselves.
+    """
+    if not _lock():
+        return SchedulerExecutionCancellationStatusV1.SerializationUnavailable
     val index = _handle_index(handle)
-    var cancelled = false
+    var status = SchedulerExecutionCancellationStatusV1.AlreadyAbsent
     if index >= 0:
         val observed = _observation_state.observations[index]
         if not observed.exited and not observed.reaped and
             not observed.delivered and not observed.consumed:
             _consume_index(index)
-            cancelled = true
-    if not _unlock(): return false
-    cancelled
+            status = SchedulerExecutionCancellationStatusV1.Cancelled
+        else:
+            status = SchedulerExecutionCancellationStatusV1.NotCancelable
+    if not _unlock():
+        return SchedulerExecutionCancellationStatusV1.SerializationUnavailable
+    status
 
 pub(package) fn scheduler_execution_observe_stdout_byte_for_handle_v1(
     handle: SchedulerExecutionObservationHandleV1, byte: u8

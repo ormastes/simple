@@ -3,6 +3,12 @@
 # Immutable return-state preparation and the task-bound live U-mode handoff.
 
 use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.arch.riscv32.trap_runtime_v1.{
+    riscv32_trap_runtime_bind_task_v1,
+    riscv32_trap_runtime_dispatch_v1,
+    riscv32_trap_runtime_release_task_v1
+}
 use os.kernel.types.task_types.{TaskContext}
 use os.kernel.types.riscv32_mapping_handle_v1.{
     scheduler_riscv32_mapping_handle_present_v1
@@ -62,6 +68,37 @@ fn rv32_user_debug_write_v1(byte: u32) -> i32:
     riscv_uart_write_byte(RISCV_VIRT_UART_BASE, value)
     0
 
+fn rv32_user_syscall_v1(
+    id: u32,
+    arg0: u32,
+    arg1: u32,
+    arg2: u32,
+    arg3: u32,
+    arg4: u32,
+    arg5: u32
+) -> i32:
+    """Dispatch the bounded RV32 filesystem execution ABI through its owner.
+
+    The live bundle is installed only after the scheduler has selected the
+    authenticated task and its Sv32 root is active.  The whitelist keeps this
+    bootstrap entry from accidentally exposing the wider kernel ABI before a
+    full RV32 interrupt frame owns blocking and rescheduling dispositions.
+    """
+    val supported = (
+        id == 4u32 or id == 10u32 or id == 15u32 or
+        id == 30u32 or id == 31u32 or id == 32u32 or id == 33u32)
+    if not supported:
+        return -38
+    val args = SyscallArgs(
+        id: id as u64,
+        arg0: arg0 as u64,
+        arg1: arg1 as u64,
+        arg2: arg2 as u64,
+        arg3: arg3 as u64,
+        arg4: arg4 as u64,
+        arg5: arg5 as u64)
+    riscv32_trap_runtime_dispatch_v1(args) as i32
+
 @section(".text.trap")
 @naked
 fn _rv32_enter_user_v1(entry: u32, user_sp: u32, user_sstatus: u32) -> i64:
@@ -112,7 +149,44 @@ fn _rv32_enter_user_v1(entry: u32, user_sp: u32, user_sstatus: u32) -> i64:
         "beqz a7, .Lrv32_user_exit_v1"
         "li t1, 60"
         "beq a7, t1, .Lrv32_user_debug_v1"
-        "li a0, -38"
+        "j .Lrv32_user_syscall_v1"
+
+        ".Lrv32_user_syscall_v1:"
+        "csrrw sp, sscratch, sp"
+        "addi sp, sp, -64"
+        "sw ra, 0(sp)"
+        "sw a0, 4(sp)"
+        "sw a1, 8(sp)"
+        "sw a2, 12(sp)"
+        "sw a3, 16(sp)"
+        "sw a4, 20(sp)"
+        "sw a5, 24(sp)"
+        "sw a6, 28(sp)"
+        "sw a7, 32(sp)"
+        "sw gp, 36(sp)"
+        "sw tp, 40(sp)"
+        "lw gp, 132(sp)"
+        "lw tp, 136(sp)"
+        "mv a0, a7"
+        "lw a1, 4(sp)"
+        "lw a2, 8(sp)"
+        "lw a3, 12(sp)"
+        "lw a4, 16(sp)"
+        "lw a5, 20(sp)"
+        "lw a6, 24(sp)"
+        "call rv32_user_syscall_v1"
+        "lw ra, 0(sp)"
+        "lw a1, 8(sp)"
+        "lw a2, 12(sp)"
+        "lw a3, 16(sp)"
+        "lw a4, 20(sp)"
+        "lw a5, 24(sp)"
+        "lw a6, 28(sp)"
+        "lw a7, 32(sp)"
+        "lw gp, 36(sp)"
+        "lw tp, 40(sp)"
+        "addi sp, sp, 64"
+        "csrrw sp, sscratch, sp"
         "j .Lrv32_user_resume_v1"
 
         ".Lrv32_user_debug_v1:"
@@ -216,6 +290,11 @@ pub fn dispatch_enter_user_blocking_v1(
     if observation == nil: return -13
     _rv32_live_observation_child_v1 = task.id.id
     _rv32_live_observation_handle_v1 = observation
+    if not riscv32_trap_runtime_bind_task_v1(
+        owner, task.id, task.capabilities):
+        _rv32_live_observation_child_v1 = 0u64
+        _rv32_live_observation_handle_v1 = nil
+        return -16
     vmm_switch_address_space(task.address_space)
     var exit_code: i64 = -14
     unsafe:
@@ -224,6 +303,8 @@ pub fn dispatch_enter_user_blocking_v1(
             prepared.sepc, prepared.sp, prepared.sstatus)
     csrw_satp(kernel_satp)
     sfence_vma_all()
+    if not riscv32_trap_runtime_release_task_v1(task.id):
+        exit_code = -5
     _rv32_live_observation_child_v1 = 0u64
     _rv32_live_observation_handle_v1 = nil
     exit_code

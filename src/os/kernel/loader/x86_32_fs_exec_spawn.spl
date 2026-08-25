@@ -5,14 +5,35 @@
 # construction/publication with the scheduler adoption owner.
 
 use os.kernel.loader.fs_exec_spawn.{
-    fs_exec_spawn_as, fs_exec_adopt_authenticated_with_launch_v1,
-    FsExecAuthenticatedRunResultV1
+    fs_exec_spawn_as, FsExecAuthenticatedRunResultV1
 }
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{
-    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    executable_authority_snapshot_armed_preparation_v1
 }
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.loader.executable_image_prepare.{executable_prepare_read_exact_v1}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_errno,
+    executable_launch_arguments_v1_validate
+}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check}
+use os.kernel.loader.spawn_authority.{
+    spawn_authority_check_spawn, spawn_authority_spawn_caps
+}
+use os.kernel.loader.spawn_recipes.{
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.x86_32_authenticated_mapping_owner_v1.{
+    X8632AuthenticatedMappingStateV1,
+    X8632AuthenticatedMappingErrorV1,
+    x86_32_authenticated_mapping_prepare_v1
+}
+use os.kernel.scheduler.scheduler_x86_32_executable_adoption_v1.{
+    scheduler_x86_32_adopt_authenticated_mapping_v1
+}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
@@ -25,6 +46,11 @@ use os.kernel.scheduler.process_execution_observation.{
     scheduler_execution_compare_and_deliver_reaped_v2,
     scheduler_execution_discard_terminal_v2
 }
+
+fn _x86_32_parent_caps_v1(caller: i64, recipe: i64) -> CapabilitySet:
+    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.full()
+    val owner = if caller < 0: 0u64 else: caller.to_u64()
+    spawn_recipe_seed_parent_caps(recipe, owner)
 
 pub fn x86_32_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     """Reject an unauthenticated pathname-only i386 execution request."""
@@ -44,17 +70,55 @@ pub fn x86_32_fs_exec_spawn_authenticated_with_launch_v1(
     recipe: i64
 ) -> FsExecAuthenticatedRunResultV1:
     """Consume authority, enter i386 CPL3, and deliver scheduler evidence."""
-    val prepared = fs_exec_adopt_authenticated_with_launch_v1(
-        scheduler, table, authorities, token, consumer, entry_point,
-        caller, path, argv, envp, recipe)
-    if prepared.pid <= 0:
+    val checked = executable_launch_arguments_v1_validate(path, argv, envp)
+    if checked.is_err():
         return FsExecAuthenticatedRunResultV1(
-            exit_code: prepared.pid, evidence: nil)
+            exit_code: executable_launch_arguments_v1_errno(
+                checked.unwrap_err()) as i64,
+            evidence: nil)
+    val launch = checked.unwrap()
+    val gate = exec_cap_check(caller, launch.path)
+    if gate != 0:
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: gate as i64, evidence: nil)
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0:
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: allowed as i64, evidence: nil)
+    val snapshot = executable_authority_snapshot_armed_preparation_v1(
+        authorities, token)
+    if snapshot.is_err():
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil)
+    val preparation = snapshot.unwrap()
+    if (not preparation.identity.has_entry_identity or
+        preparation.identity.entry_point != entry_point or
+        preparation.identity.canonical_source_path != launch.path or
+        preparation.identity.target.os != "simpleos" or
+        preparation.identity.target.arch != "x86" or
+        preparation.identity.target.abi != "simpleos"):
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil)
+    val source = executable_prepare_read_exact_v1(
+        table, preparation.image_handle)
+    if source == nil:
+        return FsExecAuthenticatedRunResultV1(exit_code: -5, evidence: nil)
+    val mapped = x86_32_authenticated_mapping_prepare_v1(
+        preparation.image_handle, source.unwrap())
+    if (mapped.state != X8632AuthenticatedMappingStateV1.MappedBlocked or
+        mapped.error != X8632AuthenticatedMappingErrorV1.None):
+        return FsExecAuthenticatedRunResultV1(exit_code: -8, evidence: nil)
+    val caps = spawn_authority_spawn_caps(
+        caller, recipe, _x86_32_parent_caps_v1(caller, recipe))
+    val adopted = scheduler_x86_32_adopt_authenticated_mapping_v1(
+        scheduler, table, authorities, token, mapped,
+        preparation.image_handle, launch, caps)
+    if adopted.pid <= 0:
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: adopted.pid, evidence: nil)
 
-    val child = TaskId(id: prepared.pid.to_u64())
+    val child = TaskId(id: adopted.pid.to_u64())
     val exit_code = dispatch_fs_exec_user_handoff(
-        Architecture.X86, child.id, prepared.scheduler)
-    var owner = prepared.scheduler
+        Architecture.X86, child.id, adopted.scheduler)
+    var owner = adopted.scheduler
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
     if wait_collect_result_error(collected) != 0 or
@@ -69,4 +133,3 @@ pub fn x86_32_fs_exec_spawn_authenticated_with_launch_v1(
         return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil)
     FsExecAuthenticatedRunResultV1(
         exit_code: exit_code, evidence: delivered.token)
-
