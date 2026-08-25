@@ -47,6 +47,12 @@ use os.kernel.loader.spawn_recipes.{
     spawn_recipe_is_migrated, spawn_recipe_launch_contract_valid
 }
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.services.vfs.vfs_boot_state.{
+    VfsMountTableOwnerHandleV1,
+    vfs_state_mount_table_owner_handle_is_live_v1,
+    vfs_state_mount_table_lease_begin_v1,
+    vfs_state_mount_table_lease_restore_v1
+}
 
 pub(package) const AUTHENTICATED_FS_EXEC_USER_SLOT_LIMIT_V1: i64 = 128
 
@@ -76,9 +82,10 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
     tuple after catalog admission; the public-facing request can only consume
     that tuple once. Slots are not recycled in v1, which makes stale request
     coordinates harmless and bounds retained authority. The checked-mutex
-    capsule below is the sole mutable owner. A blocking handoff receives an
-    owned table move plus a generational `Consuming` reservation; it never
-    shares this service value between syscall execution domains.
+    capsule below is the sole mutable owner. A blocking handoff receives the
+    canonical VFS owner's epoch-and-nonce-bound unique table lease plus a
+    generational `Consuming` reservation; it never shares this service value
+    between syscall execution domains.
 
     `AuthenticatedFsExecSubmissionV1` is a value-semantic bundle of opaque
     registry coordinates, not the mutable authority itself.  The loader
@@ -286,20 +293,28 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
 
 # The checked-mutex capsule is the sole owner of these globals. No authority or
 # namespace object is constructed by module initialization: syscall submission
-# remains fail-closed until a privileged loader owner installs the live table
-# and service and arms an admitted slot.
+# remains fail-closed until privileged boot installs the canonical VFS owner's
+# epoch handle and arms an admitted slot. The broker never retains MountTable or
+# DriverInstance state.
 # Userland can neither call these owner surfaces nor obtain the retained token.
 var g_authenticated_fs_exec_user_service_v1:
     AuthenticatedFsExecUserServiceV1? = nil
-var g_authenticated_fs_exec_user_mount_table_v1: MountTable? = nil
-var g_authenticated_fs_exec_user_mount_table_ready_v1 = false
+var g_authenticated_fs_exec_user_vfs_owner_v1:
+    VfsMountTableOwnerHandleV1? = nil
 val g_authenticated_fs_exec_user_mutex_v1: i64 = mutex_raw_create()
 var g_authenticated_fs_exec_user_quarantined_v1 = false
 
 fn _authenticated_fs_exec_user_lock_v1() -> bool:
-    g_authenticated_fs_exec_user_mutex_v1 > 0 and
-        not g_authenticated_fs_exec_user_quarantined_v1 and
-        mutex_raw_lock(g_authenticated_fs_exec_user_mutex_v1)
+    if g_authenticated_fs_exec_user_mutex_v1 <= 0 or
+        g_authenticated_fs_exec_user_quarantined_v1:
+        return false
+    if not mutex_raw_lock(g_authenticated_fs_exec_user_mutex_v1):
+        return false
+    # Quarantine may have been published while this caller waited.
+    if g_authenticated_fs_exec_user_quarantined_v1:
+        _ = mutex_raw_unlock(g_authenticated_fs_exec_user_mutex_v1)
+        return false
+    true
 
 fn _authenticated_fs_exec_user_unlock_v1() -> bool:
     if mutex_raw_unlock(g_authenticated_fs_exec_user_mutex_v1):
@@ -309,23 +324,32 @@ fn _authenticated_fs_exec_user_unlock_v1() -> bool:
     g_authenticated_fs_exec_user_quarantined_v1 = true
     false
 
+fn _authenticated_fs_exec_user_quarantine_synchronized_v1():
+    """Publish terminal failure only while owning the broker mutex."""
+    if g_authenticated_fs_exec_user_mutex_v1 <= 0: return
+    if not mutex_raw_lock(g_authenticated_fs_exec_user_mutex_v1): return
+    g_authenticated_fs_exec_user_quarantined_v1 = true
+    _ = mutex_raw_unlock(g_authenticated_fs_exec_user_mutex_v1)
+
 pub(package) fn authenticated_fs_exec_user_install_mount_table_v1(
-    table: MountTable
+    owner: VfsMountTableOwnerHandleV1
 ) -> bool:
-    """Install the loader-owned table exactly once during privileged boot.
+    """Install only the canonical VFS owner's epoch handle during boot.
 
     Returning false for a second installation prevents a later subsystem from
-    replacing the namespace beneath already-armed authority coordinates.
+    replacing the namespace beneath already-armed authority coordinates. No
+    filesystem driver or MountTable value crosses this seam.
     """
+    if not vfs_state_mount_table_owner_handle_is_live_v1(owner):
+        return false
     if not _authenticated_fs_exec_user_lock_v1():
         return false
-    if g_authenticated_fs_exec_user_mount_table_ready_v1:
+    if g_authenticated_fs_exec_user_vfs_owner_v1.?:
         val _released = _authenticated_fs_exec_user_unlock_v1()
         return false
     g_authenticated_fs_exec_user_service_v1 =
         Some(AuthenticatedFsExecUserServiceV1.new())
-    g_authenticated_fs_exec_user_mount_table_v1 = Some(table)
-    g_authenticated_fs_exec_user_mount_table_ready_v1 = true
+    g_authenticated_fs_exec_user_vfs_owner_v1 = Some(owner)
     _authenticated_fs_exec_user_unlock_v1()
 
 pub(package) fn authenticated_fs_exec_user_arm_v1(
@@ -337,11 +361,12 @@ pub(package) fn authenticated_fs_exec_user_arm_v1(
     """Privileged loader-owner surface for one exact admitted launch tuple."""
     if not _authenticated_fs_exec_user_lock_v1():
         return -5
-    if not g_authenticated_fs_exec_user_mount_table_ready_v1:
+    if not g_authenticated_fs_exec_user_service_v1.? or
+        not g_authenticated_fs_exec_user_vfs_owner_v1.?:
         val _released = _authenticated_fs_exec_user_unlock_v1()
         return -13
-    if not g_authenticated_fs_exec_user_service_v1.? or
-        not g_authenticated_fs_exec_user_mount_table_v1.?:
+    if not vfs_state_mount_table_owner_handle_is_live_v1(
+        g_authenticated_fs_exec_user_vfs_owner_v1.unwrap()):
         val _released = _authenticated_fs_exec_user_unlock_v1()
         return -13
     var service = g_authenticated_fs_exec_user_service_v1.unwrap()
@@ -362,20 +387,25 @@ pub(package) fn authenticated_fs_exec_user_pre_admit_and_arm_v1(
     """Privileged boot seam from signed catalog material to one-shot ingress."""
     if not _authenticated_fs_exec_user_lock_v1():
         return -5
-    if not g_authenticated_fs_exec_user_mount_table_ready_v1:
+    if not g_authenticated_fs_exec_user_service_v1.? or
+        not g_authenticated_fs_exec_user_vfs_owner_v1.?:
         val _released = _authenticated_fs_exec_user_unlock_v1()
         return -13
-    if not g_authenticated_fs_exec_user_service_v1.? or
-        not g_authenticated_fs_exec_user_mount_table_v1.?:
+    val lease_opt = vfs_state_mount_table_lease_begin_v1(
+        g_authenticated_fs_exec_user_vfs_owner_v1.unwrap())
+    if not lease_opt.?:
         val _released = _authenticated_fs_exec_user_unlock_v1()
         return -13
     var service = g_authenticated_fs_exec_user_service_v1.unwrap()
-    var table = g_authenticated_fs_exec_user_mount_table_v1.unwrap()
+    var lease = lease_opt.unwrap()
     val armed = service.arm_installed_artifact_from_boot_proof_v1(
-        table, authorities,
+        lease.table, authorities,
         caller, canonical_path, recipe, admission, proof)
     g_authenticated_fs_exec_user_service_v1 = Some(service)
-    g_authenticated_fs_exec_user_mount_table_v1 = Some(table)
+    if not vfs_state_mount_table_lease_restore_v1(lease):
+        g_authenticated_fs_exec_user_quarantined_v1 = true
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return -5
     if not _authenticated_fs_exec_user_unlock_v1():
         return -5
     armed
@@ -392,48 +422,53 @@ pub fn authenticated_fs_exec_user_submit_syscall_v1(
     Authority remains in the loader globals above.  Absence of boot-owned table
     installation or of an exact caller/path/recipe admission is EACCES.
     """
-    # Phase 1: reserve the exact slot and move the sole table owner out while
-    # serialized. Other calls see no table and fail closed during execution.
+    # Phase 1: acquire a unique generational loan from the canonical VFS owner,
+    # then reserve the exact slot. A busy VFS cannot burn one-shot authority;
+    # other VFS calls fail closed only after the loan is active.
     if not _authenticated_fs_exec_user_lock_v1():
         return -5
-    if not g_authenticated_fs_exec_user_mount_table_ready_v1:
-        val _released = _authenticated_fs_exec_user_unlock_v1()
-        return -13
     if not g_authenticated_fs_exec_user_service_v1.? or
-        not g_authenticated_fs_exec_user_mount_table_v1.?:
+        not g_authenticated_fs_exec_user_vfs_owner_v1.?:
         val _released = _authenticated_fs_exec_user_unlock_v1()
         return -13
+    val lease_opt = vfs_state_mount_table_lease_begin_v1(
+        g_authenticated_fs_exec_user_vfs_owner_v1.unwrap())
+    if not lease_opt.?:
+        val released = _authenticated_fs_exec_user_unlock_v1()
+        return if released: -16 else: -5
+    var lease = lease_opt.unwrap()
     var service = g_authenticated_fs_exec_user_service_v1.unwrap()
-    var table = g_authenticated_fs_exec_user_mount_table_v1.unwrap()
     val reserved = service.reserve(caller, canonical_path, argv, recipe)
     g_authenticated_fs_exec_user_service_v1 = Some(service)
     if reserved.is_err():
-        g_authenticated_fs_exec_user_mount_table_v1 = Some(table)
+        if not vfs_state_mount_table_lease_restore_v1(lease):
+            g_authenticated_fs_exec_user_quarantined_v1 = true
+            val _released = _authenticated_fs_exec_user_unlock_v1()
+            return -5
         val released = _authenticated_fs_exec_user_unlock_v1()
         return if released: reserved.unwrap_err() else: -5
-    # Nil is an explicit owned move, not merely a readiness flag. No competing
-    # syscall or boot operation can copy/mutate the table during handoff.
-    g_authenticated_fs_exec_user_mount_table_v1 = nil
     if not _authenticated_fs_exec_user_unlock_v1():
+        _ = vfs_state_mount_table_lease_restore_v1(lease)
         return -5
 
     # Phase 2: architecture execution can block without holding a raw mutex.
     val reservation = reserved.unwrap()
     val result = authenticated_fs_exec_submit_v1(
-        scheduler, table, reservation.submission, canonical_path, argv)
+        scheduler, lease.table, reservation.submission, canonical_path, argv)
 
-    # Phase 3: commit the mutated table and retire the exact reservation.
+    # Phase 3: restore canonical VFS ownership before touching broker state.
+    if not vfs_state_mount_table_lease_restore_v1(lease):
+        _authenticated_fs_exec_user_quarantine_synchronized_v1()
+        return -5
     if not _authenticated_fs_exec_user_lock_v1():
         return -5
-    if not g_authenticated_fs_exec_user_service_v1.? or
-        g_authenticated_fs_exec_user_mount_table_v1.?:
+    if not g_authenticated_fs_exec_user_service_v1.?:
         g_authenticated_fs_exec_user_quarantined_v1 = true
         val _released = _authenticated_fs_exec_user_unlock_v1()
         return -5
     var completed_service = g_authenticated_fs_exec_user_service_v1.unwrap()
     val retired = completed_service.finish(reservation)
     g_authenticated_fs_exec_user_service_v1 = Some(completed_service)
-    g_authenticated_fs_exec_user_mount_table_v1 = Some(table)
     if not retired or not _authenticated_fs_exec_user_unlock_v1():
         return -5
     result.exit_code

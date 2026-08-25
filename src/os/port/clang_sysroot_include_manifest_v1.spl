@@ -1,6 +1,7 @@
 """Deterministic bounded manifest builder for a staged Clang include tree."""
 
 use std.nogc_sync_mut.ffi.io.{dir_exists, dir_list, file_size, file_read_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.string_core.{text_to_bytes}
 
@@ -67,8 +68,12 @@ pub fn clang_include_manifest_build_v1(
     var total: i64 = 0
     for relative in paths:
         val host_path = "{host_include_root}/{relative}"
+        if not file_is_regular_no_follow(host_path):
+            return _fail_v1("header-not-regular-or-symlink")
         val size = file_size(host_path)
-        if size <= 0 or size > CLANG_INCLUDE_MANIFEST_MAX_FILE_BYTES_V1 or
+        # Empty regular headers are valid feature-disable shims.  The
+        # no-follow regular-file check above distinguishes them from absence.
+        if size < 0 or size > CLANG_INCLUDE_MANIFEST_MAX_FILE_BYTES_V1 or
            total > CLANG_INCLUDE_MANIFEST_MAX_TREE_BYTES_V1 - size:
             return _fail_v1("header-size-bound")
         val data = file_read_bytes(host_path)
@@ -83,4 +88,3 @@ pub fn clang_include_manifest_build_v1(
     ClangIncludeManifestBuildV1(
         ok: true, reason: "", content: content, root_sha256: root,
         entry_count: paths.len(), total_bytes: total)
-

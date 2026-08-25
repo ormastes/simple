@@ -18,6 +18,7 @@ use os.kernel.arch.riscv64.cpu.{csrw_stvec, csrs_sie, csrc_sie, SIE_SEIE, SIE_ST
 use os.kernel.arch.riscv64.console.{serial_writeln}
 use os.kernel.arch.riscv64.timer.{rv64_handle_timer_interrupt}
 use os.kernel.arch.riscv64.trap_runtime.{Rv64TrapRuntime}
+use os.kernel.arch.riscv64.scheduler_context_bridge.{Rv64SchedulerContextBridge, rv64_scheduler_preempt, rv64_scheduler_activate_selected_address_space}
 use os.kernel.arch.riscv64.trap_model.{RV64_CONTEXT_BYTES, Rv64TrapKind, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result, rv64_prepare_kernel_exit_context}
 use os.kernel.arch.arch_context.{Riscv64Context}
 use os.kernel.arch.riscv64.syscall.{rv64_syscall_handler, rv64_syscall_handler_state}
@@ -134,6 +135,7 @@ var g_trap_runtime: Rv64TrapRuntime? = nil
 var g_trap_scheduler: Scheduler = Scheduler.new_bootstrap()
 var g_trap_ipc: IpcManager = IpcManager.new()
 var g_trap_klog: KernelLog = KernelLog.new(256)
+var g_scheduler_contexts: Rv64SchedulerContextBridge = Rv64SchedulerContextBridge.new()
 
 # Trap handler table (up to 64 entries for simplicity)
 val MAX_HANDLERS: u64 = 64
@@ -287,7 +289,13 @@ fn rv64_handle_external_interrupt():
     # Complete the IRQ
     _plic_complete(g_plic_context, irq)
 
-fn rv64_dispatch_trap(ctx: Riscv64Context, scheduler: Scheduler, ipc: IpcManager, klog: KernelLog) -> Result<Riscv64Context, text>:
+fn rv64_dispatch_trap(
+    ctx: Riscv64Context,
+    contexts: &mut Rv64SchedulerContextBridge,
+    scheduler: &mut Scheduler,
+    ipc: IpcManager,
+    klog: KernelLog
+) -> Result<Riscv64Context, text>:
     """Dispatch an RV64 trap frame through the kernel's policy layer."""
     match classify_rv64_trap(ctx.scause):
         case Rv64TrapKind.ExternalInterrupt:
@@ -295,7 +303,12 @@ fn rv64_dispatch_trap(ctx: Riscv64Context, scheduler: Scheduler, ipc: IpcManager
             Ok(ctx)
         case Rv64TrapKind.TimerInterrupt:
             rv64_handle_timer_interrupt()
-            Ok(ctx)
+            val preemption = rv64_scheduler_preempt(contexts, scheduler, ctx)?
+            if preemption.selected_task_id != preemption.previous_task_id:
+                rv64_scheduler_activate_selected_address_space(
+                    contexts, scheduler, preemption.selected_task_id
+                )?
+            Ok(preemption.context)
         case Rv64TrapKind.SoftwareInterrupt:
             serial_writeln("[INT] RV64 software interrupt")
             Ok(ctx)
@@ -350,6 +363,20 @@ fn rv64_runtime_installed() -> bool:
     """Report whether the RV64 trap bridge has runtime objects installed."""
     g_trap_runtime_installed
 
+fn rv64_bind_scheduler_context(task_id: u64, context: Riscv64Context) -> bool:
+    """Pre-admit a complete native context before first scheduler dispatch."""
+    var owner = g_scheduler_contexts
+    val bound = owner.bind(task_id, context)
+    g_scheduler_contexts = owner
+    bound
+
+fn rv64_install_scheduler_kernel_satp(satp: u64) -> bool:
+    """Install the exact supervisor SATP restored when scheduling kernel work."""
+    var owner = g_scheduler_contexts
+    val installed = owner.install_kernel_satp(satp)
+    g_scheduler_contexts = owner
+    installed
+
 fn rv64_read_trap_log(min_level: u8, offset: u64, max_count: u64) -> [KLogEntry]:
     """Read entries from the installed trap runtime log buffer."""
     if not g_trap_runtime_installed:
@@ -375,7 +402,17 @@ fn rv64_dispatch_installed_trap(ctx: Riscv64Context) -> Result<Riscv64Context, t
         _sync_trap_runtime_state()
         return Ok(rv64_apply_syscall_result(ctx, state.result))
 
-    val result = rv64_dispatch_trap(ctx, g_trap_scheduler, g_trap_ipc, g_trap_klog)
+    # Simple classes have value semantics. Take both mutable owners, loan them
+    # to dispatch, and publish their post-trap state before returning.
+    var scheduler_owner = g_trap_scheduler
+    var contexts_owner = g_scheduler_contexts
+    val result = rv64_dispatch_trap(
+        ctx, &mut contexts_owner, &mut scheduler_owner, g_trap_ipc, g_trap_klog
+    )
+    g_trap_scheduler = scheduler_owner
+    g_scheduler_contexts = contexts_owner
+    if classify_rv64_trap(ctx.scause) == Rv64TrapKind.TimerInterrupt:
+        _sync_trap_runtime_state()
     if result.is_err():
         _log_trap_failure(result.err().unwrap())
     result

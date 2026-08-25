@@ -67,6 +67,15 @@ val CHUNK_TRAILER: i32 = 5
 val CHUNK_TRAILER_LF: i32 = 6
 val CHUNK_COMPLETE: i32 = 7
 
+val CHUNK_EXT_NONE: i32 = 0
+val CHUNK_EXT_NAME_START: i32 = 1
+val CHUNK_EXT_NAME: i32 = 2
+val CHUNK_EXT_VALUE_START: i32 = 3
+val CHUNK_EXT_TOKEN_VALUE: i32 = 4
+val CHUNK_EXT_QUOTED_VALUE: i32 = 5
+val CHUNK_EXT_QUOTED_ESCAPE: i32 = 6
+val CHUNK_EXT_VALUE_COMPLETE: i32 = 7
+
 fn _host_ascii_alpha_numeric(ch: text) -> bool:
     (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
         (ch >= "0" and ch <= "9")
@@ -273,6 +282,7 @@ class Http1RequestFrameOwner:
     chunk_size_value: i64
     chunk_size_digits: i32
     chunk_extension: bool
+    chunk_extension_phase: i32
     chunk_remaining: i64
     chunk_decoded: i64
     chunk_trailer_count: i32
@@ -316,6 +326,7 @@ class Http1RequestFrameOwner:
             chunk_size_value: 0,
             chunk_size_digits: 0,
             chunk_extension: false,
+            chunk_extension_phase: CHUNK_EXT_NONE,
             chunk_remaining: 0,
             chunk_decoded: 0,
             chunk_trailer_count: 0
@@ -481,6 +492,65 @@ class Http1RequestFrameOwner:
             name == "content-encoding" or name == "content-type" or
             name == "content-range")
 
+    me _accept_chunk_extension_byte(byte: u8) -> bool:
+        # RFC 9112 chunk extensions use `;token[=token-or-quoted-string]`.
+        # Validate in the existing byte scan so malformed extension syntax
+        # cannot produce a message boundary that differs from an intermediary,
+        # without retaining extension metadata or allocating token strings.
+        if self.chunk_extension_phase == CHUNK_EXT_NAME_START:
+            if not _http_field_token_byte(byte):
+                return false
+            self.chunk_extension_phase = CHUNK_EXT_NAME
+            return true
+        if self.chunk_extension_phase == CHUNK_EXT_NAME:
+            if byte == 61u8:
+                self.chunk_extension_phase = CHUNK_EXT_VALUE_START
+                return true
+            if byte == 59u8:
+                self.chunk_extension_phase = CHUNK_EXT_NAME_START
+                return true
+            return _http_field_token_byte(byte)
+        if self.chunk_extension_phase == CHUNK_EXT_VALUE_START:
+            if byte == 34u8:
+                self.chunk_extension_phase = CHUNK_EXT_QUOTED_VALUE
+                return true
+            if not _http_field_token_byte(byte):
+                return false
+            self.chunk_extension_phase = CHUNK_EXT_TOKEN_VALUE
+            return true
+        if self.chunk_extension_phase == CHUNK_EXT_TOKEN_VALUE:
+            if byte == 59u8:
+                self.chunk_extension_phase = CHUNK_EXT_NAME_START
+                return true
+            return _http_field_token_byte(byte)
+        if self.chunk_extension_phase == CHUNK_EXT_QUOTED_VALUE:
+            if byte == 34u8:
+                self.chunk_extension_phase = CHUNK_EXT_VALUE_COMPLETE
+                return true
+            if byte == 92u8:
+                self.chunk_extension_phase = CHUNK_EXT_QUOTED_ESCAPE
+                return true
+            return byte == 9u8 or byte == 32u8 or
+                (byte >= 33u8 and byte != 127u8)
+        if self.chunk_extension_phase == CHUNK_EXT_QUOTED_ESCAPE:
+            if not (byte == 9u8 or byte == 32u8 or
+                (byte >= 33u8 and byte != 127u8)):
+                return false
+            self.chunk_extension_phase = CHUNK_EXT_QUOTED_VALUE
+            return true
+        if self.chunk_extension_phase == CHUNK_EXT_VALUE_COMPLETE:
+            if byte != 59u8:
+                return false
+            self.chunk_extension_phase = CHUNK_EXT_NAME_START
+            return true
+        false
+
+    fn _chunk_extension_complete() -> bool:
+        self.chunk_extension_phase == CHUNK_EXT_NONE or
+            self.chunk_extension_phase == CHUNK_EXT_NAME or
+            self.chunk_extension_phase == CHUNK_EXT_TOKEN_VALUE or
+            self.chunk_extension_phase == CHUNK_EXT_VALUE_COMPLETE
+
     me _scan_chunked_body():
         while (self.terminal_error == "" and
             self.chunk_phase != CHUNK_COMPLETE and
@@ -507,7 +577,8 @@ class Http1RequestFrameOwner:
                 if self.chunk_line_length > self.policy.max_header_line as i64:
                     self._fail("431 Chunk-size line exceeds policy")
                 elif byte == 13u8:
-                    if self.chunk_size_digits == 0:
+                    if self.chunk_size_digits == 0 or
+                        not self._chunk_extension_complete():
                         self._fail("400 Malformed chunk size")
                     else:
                         self.chunk_phase = CHUNK_SIZE_LF
@@ -516,6 +587,9 @@ class Http1RequestFrameOwner:
                 elif byte == 59u8:
                     if not self.chunk_extension:
                         self.chunk_extension = true
+                        self.chunk_extension_phase = CHUNK_EXT_NAME_START
+                    elif not self._accept_chunk_extension_byte(byte):
+                        self._fail("400 Malformed chunk extension")
                 elif not self.chunk_extension:
                     val digit = _http_hex_byte(byte)
                     if digit < 0:
@@ -525,6 +599,8 @@ class Http1RequestFrameOwner:
                     else:
                         self.chunk_size_value = self.chunk_size_value * 16 + digit
                         self.chunk_size_digits = self.chunk_size_digits + 1
+                elif not self._accept_chunk_extension_byte(byte):
+                    self._fail("400 Malformed chunk extension")
             elif self.chunk_phase == CHUNK_SIZE_LF:
                 if byte != 10u8:
                     self._fail("400 Malformed chunk-size terminator")
@@ -542,6 +618,7 @@ class Http1RequestFrameOwner:
                 self.chunk_size_value = 0
                 self.chunk_size_digits = 0
                 self.chunk_extension = false
+                self.chunk_extension_phase = CHUNK_EXT_NONE
                 self.chunk_line_length = 0
             elif self.chunk_phase == CHUNK_DATA_CR:
                 if byte != 13u8:

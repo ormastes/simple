@@ -76,9 +76,13 @@ var g_root_nvfs_hosted: NvfsPosixDriver? = nil
 var g_vfs_initialized: bool = false
 var g_vfs_boot_storage_provider: text = "not-mounted"
 var g_vfs_boot_storage_pure_simple: bool = false
-var g_mount_table: MountTable = MountTable.new()
+var g_mount_table: MountTable? = Some(MountTable.new())
 val g_mount_table_mutex_v1: i64 = mutex_raw_create()
 var g_mount_table_quarantined_v1: bool = false
+var g_mount_table_lease_active_v1: bool = false
+var g_mount_table_owner_epoch_v1: u64 = 1u64
+var g_mount_table_next_lease_nonce_v1: u64 = 1u64
+var g_mount_table_active_lease_nonce_v1: u64 = 0u64
 var g_include_positioned_handle_ids_v1: [u64] = []
 var g_include_positioned_tickets_v1: [VfsIncludeMutationTicketV1] = []
 
@@ -100,11 +104,18 @@ fn _include_positioned_ticket_take_v1(handle_id: u64) -> VfsIncludeMutationTicke
         index = index + 1
     nil
 
-fn vfs_state_mount_table_lock_v1() -> bool:
+fn _vfs_state_mount_table_raw_lock_v1() -> bool:
     if g_mount_table_mutex_v1 <= 0 or g_mount_table_quarantined_v1:
         return false
     if not mutex_raw_lock(g_mount_table_mutex_v1): return false
     if g_mount_table_quarantined_v1:
+        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
+        return false
+    true
+
+fn vfs_state_mount_table_lock_v1() -> bool:
+    if not _vfs_state_mount_table_raw_lock_v1(): return false
+    if g_mount_table_lease_active_v1 or not g_mount_table.?:
         _ = mutex_raw_unlock(g_mount_table_mutex_v1)
         return false
     true
@@ -114,15 +125,91 @@ fn vfs_state_mount_table_unlock_v1() -> bool:
     g_mount_table_quarantined_v1 = true
     false
 
+pub(package) struct VfsMountTableOwnerHandleV1:
+    """Copyable coordinate for the canonical VFS owner, never table state."""
+    epoch: u64
+
+pub(package) struct VfsMountTableLeaseV1:
+    """Unique blocking loan moved out of the canonical owner under its lock."""
+    epoch: u64
+    nonce: u64
+    table: MountTable
+
+fn _vfs_state_advance_mount_table_owner_epoch_v1() -> bool:
+    if g_mount_table_owner_epoch_v1 == 0u64 or
+        g_mount_table_owner_epoch_v1 == 0xffffffffffffffffu64:
+        g_mount_table_quarantined_v1 = true
+        return false
+    g_mount_table_owner_epoch_v1 = g_mount_table_owner_epoch_v1 + 1u64
+    true
+
+pub(package) fn vfs_state_mount_table_owner_handle_v1(
+) -> VfsMountTableOwnerHandleV1?:
+    if not vfs_state_mount_table_lock_v1(): return nil
+    val handle = VfsMountTableOwnerHandleV1(
+        epoch: g_mount_table_owner_epoch_v1)
+    if not vfs_state_mount_table_unlock_v1(): return nil
+    Some(handle)
+
+pub(package) fn vfs_state_mount_table_owner_handle_is_live_v1(
+    handle: VfsMountTableOwnerHandleV1
+) -> bool:
+    if not vfs_state_mount_table_lock_v1(): return false
+    val live = handle.epoch != 0u64 and
+        handle.epoch == g_mount_table_owner_epoch_v1
+    if not vfs_state_mount_table_unlock_v1(): return false
+    live
+
+pub(package) fn vfs_state_mount_table_lease_begin_v1(
+    handle: VfsMountTableOwnerHandleV1
+) -> VfsMountTableLeaseV1?:
+    """Move the sole table value out; ordinary VFS operations fail closed."""
+    if not _vfs_state_mount_table_raw_lock_v1(): return nil
+    if g_mount_table_lease_active_v1 or not g_mount_table.? or
+        handle.epoch == 0u64 or handle.epoch != g_mount_table_owner_epoch_v1:
+        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
+        return nil
+    if g_mount_table_next_lease_nonce_v1 == 0u64 or
+        g_mount_table_next_lease_nonce_v1 == 0xffffffffffffffffu64:
+        g_mount_table_quarantined_v1 = true
+        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
+        return nil
+    val nonce = g_mount_table_next_lease_nonce_v1
+    g_mount_table_next_lease_nonce_v1 = nonce + 1u64
+    val table = g_mount_table.unwrap()
+    g_mount_table = nil
+    g_mount_table_lease_active_v1 = true
+    g_mount_table_active_lease_nonce_v1 = nonce
+    if not vfs_state_mount_table_unlock_v1(): return nil
+    Some(VfsMountTableLeaseV1(
+        epoch: handle.epoch, nonce: nonce, table: table))
+
+pub(package) fn vfs_state_mount_table_lease_restore_v1(
+    lease: VfsMountTableLeaseV1
+) -> bool:
+    """Restore exactly one live lease; stale/double restores quarantine owner."""
+    if not _vfs_state_mount_table_raw_lock_v1(): return false
+    if not g_mount_table_lease_active_v1 or g_mount_table.? or
+        lease.epoch == 0u64 or lease.epoch != g_mount_table_owner_epoch_v1 or
+        lease.nonce == 0u64 or
+        lease.nonce != g_mount_table_active_lease_nonce_v1:
+        g_mount_table_quarantined_v1 = true
+        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
+        return false
+    g_mount_table = Some(lease.table)
+    g_mount_table_lease_active_v1 = false
+    g_mount_table_active_lease_nonce_v1 = 0u64
+    vfs_state_mount_table_unlock_v1()
+
 # Narrow owner port for the server-data namespace.  Only opaque seals and
 # immutable revalidation facts cross this seam; the MountTable and DBFS driver
 # remain owned here.
 pub fn vfs_state_acquire_dbfs_root_mount_seal_v1(
 ) -> Result<DbfsRootMountSealV1, FsError>:
     if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.acquire_dbfs_root_mount_seal()
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
@@ -130,7 +217,7 @@ pub fn vfs_state_revalidate_dbfs_root_mount_seal_v1(
     seal: DbfsRootMountSealV1
 ) -> Result<DbfsRootMountSealInfoV1, FsError>:
     if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.revalidate_dbfs_root_mount_seal(seal)
     if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
@@ -139,14 +226,15 @@ pub fn vfs_state_close_dbfs_root_mount_seal_v1(
     seal: DbfsRootMountSealV1
 ) -> Result<(), FsError>:
     if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.close_dbfs_root_mount_seal(seal)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
-# Owner APIs for mutable root and MountTable state. Callers may work on a
-# value-semantic driver copy, but only this declaring module commits it.
+# Owner APIs for mutable root and MountTable state. Ordinary operations receive
+# a mutex-scoped loan and commit only through this declaring module; the sole
+# blocking exception is the exact nonce-bound lease above.
 fn vfs_state_reset_rootfs():
     val ticket = vfs_include_mutation_begin_v1("/usr/include")
     if ticket.is_err(): return
@@ -155,7 +243,13 @@ fn vfs_state_reset_rootfs():
         return
     g_root_fat32 = nil
     g_root_nvfs_hosted = nil
-    g_mount_table = MountTable.new()
+    g_mount_table_lease_active_v1 = false
+    g_mount_table_active_lease_nonce_v1 = 0u64
+    g_mount_table = Some(MountTable.new())
+    if not _vfs_state_advance_mount_table_owner_epoch_v1():
+        _ = vfs_state_mount_table_unlock_v1()
+        _ = vfs_include_mutation_finish_v1(ticket.unwrap())
+        return
     g_vfs_initialized = false
     g_vfs_boot_storage_provider = "not-mounted"
     g_vfs_boot_storage_pure_simple = false
@@ -178,9 +272,9 @@ fn vfs_state_mount(path: text, driver: DriverInstance, options: MountOptions) ->
     if not vfs_state_mount_table_lock_v1():
         _ = vfs_include_mutation_finish_v1(ticket)
         return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.mount(path, driver, options)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1():
         _ = vfs_include_mutation_finish_v1(ticket)
         return Err(FsError.IoError(code: 0u32))
@@ -198,9 +292,9 @@ fn vfs_state_unmount(path: text) -> Result<(), FsError>:
     if not vfs_state_mount_table_lock_v1():
         _ = vfs_include_mutation_finish_v1(ticket)
         return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.unmount(path)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1():
         _ = vfs_include_mutation_finish_v1(ticket)
         return Err(FsError.IoError(code: 0u32))
@@ -217,9 +311,9 @@ fn vfs_state_positioned_open(path: text, flags: OpenFlags) -> Result<FileHandle,
     if not vfs_state_mount_table_lock_v1():
         _ = vfs_include_mutation_finish_v1(include_ticket)
         return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.open(path, flags)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1():
         _ = vfs_include_mutation_finish_v1(include_ticket)
         return Err(FsError.IoError(code: 0u32))
@@ -236,9 +330,9 @@ fn vfs_state_positioned_close(handle: FileHandle) -> Result<(), FsError>:
     if not vfs_state_mount_table_lock_v1():
         _ = vfs_include_mutation_finish_v1(include_ticket)
         return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.close(handle)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1():
         _ = vfs_include_mutation_finish_v1(include_ticket)
         return Err(FsError.IoError(code: 0u32))
@@ -248,50 +342,50 @@ fn vfs_state_positioned_close(handle: FileHandle) -> Result<(), FsError>:
 
 fn vfs_state_positioned_fstat(handle: FileHandle) -> Result<FileStat, FsError>:
     if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.positioned_fstat(handle.id)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_positioned_ftruncate(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
     """Resize one MountTable-owned positioned file object without path lookup."""
     if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.ftruncate(handle, new_size)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_fsync(handle: FileHandle) -> Result<(), FsError>:
     if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.fsync(handle)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_fdatasync(handle: FileHandle) -> Result<(), FsError>:
     if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.fdatasync(handle)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_positioned_read(file_id: u64, kind: PositionedDriverKind, offset: u64, length: u64) -> Result<[u8], FsError>:
     if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.positioned_read_bytes(file_id, kind, offset, length)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_positioned_write(file_id: u64, kind: PositionedDriverKind, offset: u64, data: [u8]) -> Result<u64, FsError>:
     if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table
+    var table = g_mount_table.unwrap()
     val result = table.positioned_write_bytes(file_id, kind, offset, data)
-    g_mount_table = table
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
@@ -350,7 +444,12 @@ fn _vfs_boot_reset_storage_state():
     g_root_fat32 = nil
     g_root_nvfs_hosted = nil
     g_vfs_initialized = false
-    g_mount_table = MountTable.new()
+    g_mount_table_lease_active_v1 = false
+    g_mount_table_active_lease_nonce_v1 = 0u64
+    g_mount_table = Some(MountTable.new())
+    if not _vfs_state_advance_mount_table_owner_epoch_v1():
+        _ = vfs_state_mount_table_unlock_v1()
+        return
     g_vfs = VfsManager.new()
     g_vfs_boot_storage_provider = "not-mounted"
     g_vfs_boot_storage_pure_simple = false

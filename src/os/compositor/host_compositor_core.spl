@@ -769,6 +769,28 @@ class HostCompositor:
             i = i + 1
         -1
 
+    # Native builds keep cache classes out of Dict until native Dict value
+    # mutation is sound.  Keep the parallel ids sorted instead: steady-frame
+    # cache probes are O(log n), while the O(n) insertion/removal shift only
+    # happens when a window first renders or is destroyed.
+    fn _native_content_cache_lower_bound(window_id: i64) -> i32:
+        var lo: i32 = 0
+        var hi: i32 = self.native_cache_window_ids.len().to_i32()
+        while lo < hi:
+            val mid = lo + (hi - lo) / 2
+            if self.native_cache_window_ids[mid] < window_id:
+                lo = mid + 1
+            else:
+                hi = mid
+        lo
+
+    fn _native_content_cache_index(window_id: i64) -> i32:
+        val index = self._native_content_cache_lower_bound(window_id)
+        if (index < self.native_cache_window_ids.len() and
+            self.native_cache_window_ids[index] == window_id):
+            return index
+        -1
+
     fn is_browser_window(window_id: i64) -> bool:
         val index = self._find_window_index(window_id)
         index >= 0 and self.windows[index].app_id == "browser"
@@ -811,13 +833,10 @@ class HostCompositor:
         self.content_caches.remove(window_id)
         self._cancel_window_interaction(window_id)
         self._release_gui_content(window_id)
-        var native_index = 0
-        while native_index < self.native_cache_window_ids.len():
-            if self.native_cache_window_ids[native_index] == window_id:
-                self.native_cache_window_ids.remove(native_index)
-                self.native_content_caches.remove(native_index)
-                return
-            native_index = native_index + 1
+        val native_index = self._native_content_cache_index(window_id)
+        if native_index >= 0:
+            self.native_cache_window_ids.remove(native_index)
+            self.native_content_caches.remove(native_index)
 
     me _cancel_window_interaction(window_id: i64):
         if self.drag_window_id == window_id:
@@ -1202,19 +1221,18 @@ class HostCompositor:
     # correctly a miss+store, not a stale hit.
     me _content_cache_for(window_id: i64, cw: i32, full_h: i32, backend_name: text) -> WebRenderPixelArtifactCache:
         if self.native_pixel_lane:
-            var native_idx = 0
-            while native_idx < self.native_cache_window_ids.len():
-                if self.native_cache_window_ids[native_idx] == window_id:
-                    val native_cache = self.native_content_caches[native_idx]
-                    if native_cache.width == cw and native_cache.height == full_h and native_cache.backend_name == backend_name:
-                        return native_cache
-                    val replacement = web_render_pixel_artifact_cache(cw, full_h, backend_name)
-                    self.native_content_caches[native_idx] = replacement
-                    return replacement
-                native_idx = native_idx + 1
+            val native_idx = self._native_content_cache_lower_bound(window_id)
+            if (native_idx < self.native_cache_window_ids.len() and
+                self.native_cache_window_ids[native_idx] == window_id):
+                val native_cache = self.native_content_caches[native_idx]
+                if native_cache.width == cw and native_cache.height == full_h and native_cache.backend_name == backend_name:
+                    return native_cache
+                val replacement = web_render_pixel_artifact_cache(cw, full_h, backend_name)
+                self.native_content_caches[native_idx] = replacement
+                return replacement
             val native_fresh = web_render_pixel_artifact_cache(cw, full_h, backend_name)
-            self.native_cache_window_ids.push(window_id)
-            self.native_content_caches.push(native_fresh)
+            self.native_cache_window_ids.insert(native_idx, window_id)
+            self.native_content_caches.insert(native_idx, native_fresh)
             return native_fresh
         if self.content_caches.contains_key(window_id):
             val existing = self.content_caches[window_id]
@@ -1732,13 +1750,13 @@ class HostCompositor:
             var window_due = false
             if not window.minimized:
                 if self.native_pixel_lane:
-                    var cache_index = 0
-                    while cache_index < self.native_cache_window_ids.len():
-                        if self.native_cache_window_ids[cache_index] == window.id:
-                            window_due = self.native_content_caches[
-                                cache_index
-                            ].animation_frame_due(now_ms)
-                        cache_index = cache_index + 1
+                    val cache_index = self._native_content_cache_index(
+                        window.id
+                    )
+                    if cache_index >= 0:
+                        window_due = self.native_content_caches[
+                            cache_index
+                        ].animation_frame_due(now_ms)
                 else:
                     if self.content_caches.contains_key(window.id):
                         val cache = self.content_caches[window.id]
