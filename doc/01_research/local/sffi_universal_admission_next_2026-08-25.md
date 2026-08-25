@@ -2525,6 +2525,38 @@ lower transport/crypto owners remain without exact-artifact proof/signature
 admission, so the wider SSH/SFFI surface is not globally verified or signed;
 exact-artifact verified-and-signed admission remains 0.
 
+## SSH daemon tokenization and provider-honesty checkpoint
+
+The daemon owner removed 36 serial diagnostics, its raw byte accessor/append
+calls, and one duplicate byte-to-text call.  Deferred-command tokenization now
+converts the command to bytes once, indexes and appends in Pure Simple, and uses
+one typed text-lift helper that rejects empty or failed token conversion.
+
+The intentional RV64 boot-network bypass remains, because replacing it would
+change the selected transport architecture.  Its bind and one-shot accept
+providers now carry explicit FFI metadata, run in minimal lexical scopes, and
+reject negative or non-`i32` descriptors after normalization.  No lookup,
+allocation, or dispatch was added to accept polling.
+
+Review also removed startup prose and diagnostics claiming an Ed25519 self-test
+had passed.  No such self-test was invoked in this owner; configured credential
+presence, exact 32-byte key lengths, and host-key policy are the actual current
+admission checks.  The focused ratchet prevents restoring the unsupported
+verification claim.
+
+The focused static boundary ratchet passed.  The authoritative census changed:
+
+- raw call sites: 20,712 -> 20,673
+- missing authority: 16,815 -> 16,773
+- lexical unsafe: 2,978 -> 2,981
+- function unsafe: unchanged at 919
+
+The hot command/accept paths are cheaper because raw diagnostics and per-byte
+foreign work disappeared.  The boot TCP and text providers still lack exact-
+artifact ABI/proof/signature evidence, and Ed25519 is not newly verified by
+this checkpoint.  SSH and the wider SFFI surface remain not globally verified
+or signed; exact-artifact verified-and-signed admission remains 0.
+
 ## Synchronous SIMD SFFI facade checkpoint
 
 `src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
