@@ -95,6 +95,12 @@ checked resolution initializes output to zero and rejects null handles, empty
 or malformed names, and null results. Cached slot invocation remains a direct
 pointer call with no added work.
 
+Checkpoint: the compiler core WFFI facade now uses checked load/get operations
+and tags every remaining raw all-`i64` call wrapper with `unsafe(ffi, raw_ptr)`.
+The call wrappers retain their existing allocation/dispatch shape; no defensive
+branch was added to the legacy per-call path. Their long-term replacement is a
+generated typed thunk, not implicit scalar conversion.
+
 ### 3. Complete resolved-HIR inventory
 
 Checkpoint: the bounded source ledgers now report 12,128 `rt_*` declaration
