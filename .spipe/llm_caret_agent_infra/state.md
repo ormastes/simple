@@ -40,7 +40,7 @@ wiki / file-server access from caret and from dev tools (MCP); bootstrap redeplo
 | # | gap | status | unblock condition / owner |
 |---|---|---|---|
 | G1 | All evidence on the Rust SEED, not the self-hosted binary | OPEN | blocked deeper than expected: Stage 3/4 are planner-receipt-gated (simple-bootstrap-planner-admission-v2, 28 bound keys, exit 64 without). Bootstrap chain running; then rerun the 67-spec census |
-| G2 | 5 specs env-blocked (cli_cached, cli_hidden_cached, native_closure, tui_pty, messaging_phase_cli) | OPEN → agent | qualified cached caret artifact + SIMPLE_STAGE3/4_BINARY |
+| G2 | 5 specs env-blocked (cli_cached, cli_hidden_cached, native_closure, tui_pty, messaging_phase_cli) | OPEN | needs a Stage 4 CLI. Stage 2 now BUILDS clean (757 compiled, 0 failed) with the timeout fix but is rejected `sanity FAIL - frontend smoke exited 2` — a genuine smoke error, NOT the old budget clamp (that was exit 1). Next move: hand-replay candidate_frontend_smoke against build/bootstrap/s4chain/stage2/x86_64-unknown-linux-gnu/simple.rejected (sha 38793867…) capturing stderr, which the wrapper discards |
 | G3 | Deployed seed cannot parse origin stdlib (`unsafe(...)`) | **CLOSED 2026-08-25** | seed redeployed 05:16 (60641352, sha 706fa636…); orchestrator probe printed the value |
 | G4 | No STARTTLS (587/143) | **PARTIAL** — negotiation shipped, transport BLOCKED | no fd-upgrade extern exists anywhere; `rt_tls_client_from_fd` designed in tls_no_fd_upgrade_blocks_starttls_2026-08-25; runtime lane |
 | G5 | IMAP FETCH via lenient line scanner; no `UID FETCH` | **CLOSED 2026-08-25** | RFC 3501 parser + literal-aware framer + builder; fetch_parse 9/9, sabotage-proven |
