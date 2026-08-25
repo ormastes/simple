@@ -70,6 +70,34 @@ No production self-hosted optimizer or benchmark was available.  Exact
 artifact identity, signatures, and evidence admission remain absent;
 verified-and-signed admission remains 0.
 
+## MIR function-lowering authority checkpoint
+
+MIR function lowering now confines its tagged-value discriminant ABI and five
+raw environment reads inherited through a glob import to two mandatory-inline
+lexical `unsafe(ffi)` owners.  The return-type debug gate now decodes nullable
+environment absence before comparison.  Both symbols have typed-native and
+interpreter registration.
+
+The discriminant primitive is used 26 times in type lowering and diagnostics.
+The focused ratchet pins that count and mandatory inlining, so the change adds
+no second classification, allocation, copy, lookup, hash, lock, branch, loop,
+or generic dispatch.  Environment probes remain at their existing cached or
+debug-gated sites.
+
+The source census recognizes the locally declared discriminant family (the
+glob-imported environment family remains outside its documented lower-bound
+model).  It changed exactly as expected:
+
+- raw call sites: 18,949 -> 18,924
+- missing authority: 14,691 -> 14,665
+- lexical unsafe: 3,301 -> 3,302
+- function unsafe: unchanged at 957
+
+Provider registration does not prove tagged-value layout, artifact identity,
+signatures, or provenance.  No production self-hosted optimizer or benchmark
+was available.  MIR lowering and the wider SFFI estate are not globally
+verified or signed; verified-and-signed admission remains 0.
+
 ## Flat AST module-assembly authority checkpoint
 
 Flat AST module assembly now confines its seven environment, timing, and
