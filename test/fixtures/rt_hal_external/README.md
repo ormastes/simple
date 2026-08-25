@@ -2,8 +2,12 @@
 
 These test-only C and Rust executables implement the fixed
 `rthal-scalar-v1` comparison protocol. Pure Simple remains the semantic and
-effect owner. A child receives the already-observed Pure receipt and returns
-only its three four-word digests; `replay` never performs the host effect.
+effect owner. Each child independently derives outcome and query-trace digests
+from the operation/input words using the documented fixed SplitMix64 transform;
+it does not echo the expected Pure outcome. Replay additionally consumes the
+already-observed Pure trace but never repeats the host effect. The matching
+Pure reference is `rt_hal_external_expected_receipt` in `fixture_plan.spl`, so
+any C/Rust/reference divergence is falsifiable.
 
 `setup_and_compare.spl` requires canonical absolute compiler paths, their
 64-digit SHA-256 identities, the canonical repository root, and absolute output

@@ -10,7 +10,8 @@ use std.nogc_sync_mut.mcdc.static_probe.{
     mcdc_static_probe_owner_saturated
 }
 use std.nogc_sync_mut.mcdc.dynamic_probe.{
-    mcdc_dynamic_probe_controller_unload_all,
+    mcdc_dynamic_probe_controller_load_builtin_current_owner,
+    mcdc_dynamic_probe_is_published,
     mcdc_dynamic_probe_owner_ids, mcdc_dynamic_probe_owner_recorded_count,
     mcdc_dynamic_probe_owner_dropped_count,
     mcdc_dynamic_probe_owner_overwritten_count,
@@ -53,13 +54,13 @@ fn print_static_saturation():
     val owner = owners[0]
     print "recorded={mcdc_static_probe_owner_recorded_count(owner)} dropped={mcdc_static_probe_owner_dropped_count(owner)} overwritten={mcdc_static_probe_owner_overwritten_count(owner)} saturated={mcdc_static_probe_owner_saturated(owner)}"
 
-fn print_dynamic_saturation():
+fn print_dynamic_saturation(load_ok: bool):
     val owners = mcdc_dynamic_probe_owner_ids()
     if owners.len() == 0:
-        print "recorded=0 dropped=0 overwritten=0 saturated=false"
+        print "recorded=0 dropped=0 overwritten=0 saturated=false dynamic_load_ok={load_ok} dynamic_published={mcdc_dynamic_probe_is_published()}"
         return
     val owner = owners[0]
-    print "recorded={mcdc_dynamic_probe_owner_recorded_count(owner)} dropped={mcdc_dynamic_probe_owner_dropped_count(owner)} overwritten={mcdc_dynamic_probe_owner_overwritten_count(owner)} saturated={mcdc_dynamic_probe_owner_saturated(owner)}"
+    print "recorded={mcdc_dynamic_probe_owner_recorded_count(owner)} dropped={mcdc_dynamic_probe_owner_dropped_count(owner)} overwritten={mcdc_dynamic_probe_owner_overwritten_count(owner)} saturated={mcdc_dynamic_probe_owner_saturated(owner)} dynamic_load_ok={load_ok} dynamic_published={mcdc_dynamic_probe_is_published()}"
 
 fn main():
     val lane = bench_arg("lane", "off")
@@ -67,10 +68,11 @@ fn main():
         0
     else:
         4000000
-    # Publication withdrawal is a cold controller operation.  The measured
-    # dynamic-dormant path therefore contains only its required patch branch.
-    if lane == "dynamic-dormant":
-        val _ = mcdc_dynamic_probe_controller_unload_all()
+    # Loading is a cold operation before warmup. Dormant deliberately performs
+    # no controller load, so its measured path remains the closed epoch branch.
+    var dynamic_load_ok = false
+    if lane == "dynamic-enabled":
+        dynamic_load_ok = mcdc_dynamic_probe_controller_load_builtin_current_owner()
 
     val warm_checksum = decision_workload(200000)
     val start = bench_now_ns()
@@ -81,6 +83,6 @@ fn main():
     if lane == "static-on":
         print_static_saturation()
     elif lane == "dynamic-enabled" or lane == "dynamic-dormant":
-        print_dynamic_saturation()
+        print_dynamic_saturation(dynamic_load_ok)
     else:
         print "recorded=0 dropped=0 overwritten=0 saturated=false"

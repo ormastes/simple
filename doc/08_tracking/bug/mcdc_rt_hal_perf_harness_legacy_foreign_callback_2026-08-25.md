@@ -1,6 +1,7 @@
 # MC/DC RT/HAL perf harness uses rejected foreign callback route
 
-Status: OPEN — performance evidence is not admissible.
+Status: SOURCE FIXED, UNVERIFIED — performance evidence remains inadmissible
+until the replacement runner produces a retained PASS receipt.
 
 ## Evidence
 
@@ -29,3 +30,13 @@ the later lanes.
 Do not claim RT/HAL timing, RSS, or allocation acceptance from
 `run_perf_evidence.shs` until the foreign rows use the exact registered process
 route and their process-tree accounting is retained.
+
+## Source remediation
+
+The runner now builds both typed/pinned static providers once, exercises
+`rt_hal_execute_registered_exact` with a matched fixed Pure receipt corpus, and
+retains each foreign lane independently. A fresh delegated cgroup-v2 scope
+provides whole-tree `memory.peak`; absence of that authority produces a typed
+BLOCKED row. Heaptrack columns are explicitly parent/Pure-only. The final run
+receipt cannot say PASS while any RT/HAL lane is BLOCKED. Runtime validation is
+pending the admitted self-hosted compiler.
