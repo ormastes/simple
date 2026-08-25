@@ -438,6 +438,33 @@ No production optimizer/runtime test was run for this Pure Simple annotation
 change. Ambiguous result types, missing providers, artifact identity, and
 signatures remain open; verified-and-signed admission remains 0.
 
+## AST facade authority checkpoint
+
+`src/lib/nogc_sync_mut/sffi/ast.spl` now keeps 27 expression, argument, and
+node handle operations explicitly unsafe. The facade uses raw `i64` handles
+and does not validate tag, lifetime, ownership, or indexed-child bounds, so a
+zero check or a safe-looking wrapper would not discharge the contract. Only
+process-global registry count/clear remain safe behind two lexical owners.
+
+Semantic literal projection remains typed (`bool`, `i64`, `f64`, optional
+text); no numeric workaround was introduced. All 29 wrappers are
+mandatory-inline, adding no call frame, traversal, allocation, copy, lookup,
+branch, or dispatch. Provider inventory found every symbol in exactly one of
+the typed-native/interpreter registries and none in both, so cross-lane closure
+is wholly incomplete.
+
+The focused static authority/provider/performance ratchet passed. The census
+changed:
+
+- raw call sites: unchanged at 18,846
+- missing authority: 14,428 -> 14,399
+- lexical unsafe: 3,381 -> 3,383
+- function unsafe: 1,037 -> 1,064
+
+No production optimizer/runtime test was run for this Pure Simple annotation
+change. Typed resources, cross-lane providers, artifact identity, and signatures
+remain absent; verified-and-signed admission remains 0.
+
 ## Top-level SMF mmap compatibility authority checkpoint
 
 The distinct top-level SMF mmap implementation now declares all twenty used
