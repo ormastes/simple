@@ -970,8 +970,31 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 );
                 return Some(*candidates[0].1);
             }
+            // Option/Result-family names must never be bound by name-suffix
+            // alone. `func_ids` is PER-MODULE, so in a module that merely USES
+            // `.unwrap()` the only `*_dot_unwrap` symbol in scope is whichever
+            // library defined one — in the self-host closure that is
+            // `nogc_async_mut/async/poll.spl`'s `Poll.unwrap`. That leaves
+            // exactly ONE candidate, so the `> 1` form of this guard never
+            // fired and the single-candidate tail below silently emitted
+            // `call <lib__nogc_async_mut__async__poll__Poll_dot_unwrap>` for an
+            // erased optional receiver. `Poll.unwrap` tests Poll::Ready /
+            // Poll::Pending, matches neither `Some` tag, falls through and
+            // returns 0; 0 is `< 4096`, so `rt_heap_ref_wellformed` reports the
+            // payload malformed while the field still holds a real enum —
+            // E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED, Stage 2 SEGV on hello
+            // world, Stage 3 SEGV at `aot:lower_to_mir`.
+            // Returning None is a ROUTE, not a refusal: the cross-module branch
+            // below already excludes this same name family from its bare
+            // import_map fallback, so resolution reaches
+            // `try_compile_builtin_method_call`, which maps `unwrap` to the
+            // runtime builtin `rt_unwrap_or_trap` (correct Some/Ok-payload-or-trap
+            // semantics for ANY enum receiver). No raw name survives to become a
+            // link-time import, so this cannot regress into a NULL GOT.
+            // Qualified lookups are unaffected — they returned above.
+            // See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
             if type_qualifier.is_none()
-                && candidates.len() > 1
+                && !candidates.is_empty()
                 && matches!(
                     method_part,
                     "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"

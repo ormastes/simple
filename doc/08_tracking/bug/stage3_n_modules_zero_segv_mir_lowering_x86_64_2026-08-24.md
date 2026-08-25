@@ -1412,3 +1412,226 @@ correctly. So a user-defined `fn unwrap()` on a class is shadowed by the builtin
 (`rt_unwrap_or_self`, which returns the receiver — hence the pointer-shaped word)
 on one backend and not the other. Filed in
 `concrete_receiver_unwrap_returns_receiver_word_2026-08-25.md`.
+
+---
+
+## 2026-08-25 — BIND SITE FOUND AND NAMED (probe evidence, real self-host build)
+
+### The site
+
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`, in
+`compile_method_call_static` — the **single-candidate tail of the
+name-suffix binder**. The pre-existing code comment at that tail already
+described it exactly, and reported it without changing the pick:
+
+> Reaching here means `type_qualifier` is None (a qualified lookup returned
+> above) and `candidates.len() <= 1` (the >1 arms all returned). So this is
+> EXACTLY the single-candidate erased-receiver bind that produced the known
+> thefts, and it is silent today. Report it (default-off) without changing
+> the pick.
+
+Probe output from an instrumented **real** Stage-2 self-host compile
+(`--backend=cranelift`, full `src/compiler` + `src/app` + `src/lib` closure):
+
+```
+[CODEGEN-ERASED-RECEIVER-BIND] in 'mir_pass_backend_decision_for_descriptor' bare method 'unwrap'(0 args) receiver_ty=Some(TypeId(3505)) bound by name-suffix alone to 'lib__nogc_async_mut__async__poll__Poll_dot_unwrap' (1 candidate(s)) — receiver type is NOT checked; if the receiver is not that type this is a silent miscall
+[CODEGEN-ERASED-RECEIVER-BIND] in 'run_named_pass_with_record'   bare method 'unwrap'(0 args) receiver_ty=None bound by name-suffix alone to 'lib__nogc_async_mut__async__poll__Poll_dot_unwrap' (1 candidate(s)) — ...
+[CODEGEN-ERASED-RECEIVER-BIND] in 'run_pass_on_module_checked'   bare method 'unwrap'(0 args) receiver_ty=None bound by name-suffix alone to 'lib__nogc_async_mut__async__poll__Poll_dot_unwrap' (1 candidate(s)) — ...
+```
+
+The victim functions are MIR-pass driver functions, consistent with the
+recorded Stage 3 SEGV at `aot:lower_to_mir`.
+
+### Why every earlier search missed it
+
+An Option/Result-family guard ALREADY existed immediately above, and it was
+correct in intent — but it was written as `candidates.len() > 1`.
+`func_ids` is **per-module**. In a module that merely USES `.unwrap()`, the
+only `*_dot_unwrap` symbol in scope is whichever library defined one — in the
+self-host closure, `nogc_async_mut/async/poll.spl`'s `Poll.unwrap`. That
+leaves exactly **ONE** candidate, so the `> 1` guard never fired and control
+fell into the single-candidate tail.
+
+This inverts an earlier reading. The per-module nature of `func_ids` was
+previously cited as evidence that decoy and victim "cannot co-occur" and
+therefore that this path was not the site. In fact per-module `func_ids` is
+the *mechanism*: it is precisely what reduces the candidate set to one and
+slips the theft under a guard that only inspects ambiguous sets. It also
+explains why **no standalone fixture can reproduce this** — a small
+single-module build never has the decoy in scope at all.
+
+### Claims from the previous investigation that measurement REFUTED
+
+- **"`.unwrap()` on a `T?` never becomes a `MethodCallStatic`."** Contradicted
+  in the real build: the bind flows through `compile_method_call_static`. That
+  claim was fixture-derived, and fixtures cannot reproduce this defect.
+- **The `calls.rs` / `build_import_map` first-wins route** (the "current
+  direction" hypothesis, and this lane's own initial hypothesis) is **refuted
+  by measurement**. Instrumenting every rung of the `calls.rs` import ladder
+  and the `imports.rs` ambiguous-first-wins insertion produced, across a full
+  self-host compile: **zero** `imports.rs:ambiguous_first_wins` lines for
+  `unwrap` (i.e. `unwrap` was never ambiguous in the import map at all), and
+  exactly one `calls.rs:import_ladder` line — for `expr_force_unwrap`, an
+  unrelated function that merely contains the substring, resolved correctly
+  via `use_map_direct`. The import map is not involved.
+
+### The fix
+
+Change that guard from `candidates.len() > 1` to `!candidates.is_empty()`, so
+Option/Result-family names are refused by the suffix binder at **every**
+candidate count.
+
+Returning `None` here is a **ROUTE, not a refusal** — the constraint that any
+fix must reach the runtime builtin rather than leave a raw name to become a
+link-time import (which this repo has already seen turn into a NULL GOT and
+the same rc=139 by a different cause). Verified by reading the fallthrough:
+`None` drops into the cross-module branch, which **already** excludes this
+same name family from its bare `import_map` fallback, so resolution reaches
+`try_compile_builtin_method_call`, which maps `unwrap` → `rt_unwrap_or_trap`
+(correct Some/Ok-payload-or-trap semantics for any enum receiver). No raw name
+survives to link. Qualified lookups are untouched — they return earlier.
+
+### Sibling defect found by the same probe (NOT fixed here)
+
+The same single-candidate tail also steals `kind`:
+
+```
+[CODEGEN-ERASED-RECEIVER-BIND] in 'register_block' bare method 'kind'(0 args) receiver_ty=Some(TypeId(14)) bound by name-suffix alone to 'compiler__blocks__blocks__builtin_blocks_data__RegexBlockDef_dot_kind' (1 candidate(s)) — ...
+[CODEGEN-ERASED-RECEIVER-BIND] in 'with_block'     bare method 'kind'(0 args) ... same target ...
+```
+
+Deliberately NOT covered by this fix: `kind` is not an Option/Result-family
+name and has **no runtime builtin to route to**, so the same one-line
+widening would turn a wrong-callee bug into an unresolved-symbol bug. Needs
+its own remedy (receiver-type check, or a vtable switch). Filed separately.
+
+### Gate
+
+`scripts/check/check-erased-receiver-family-not-suffix-bound.shs` — fail-closed,
+`--selftest` first and fatal (5 fixtures), verdict last, `PASS n>0` / `FAIL` /
+`ERROR`. Mutation-tested both directions against the REAL pre-fix source (not a
+synthetic fixture): PASS on the fixed tree, FAIL naming the mechanism on
+`HEAD`'s content.
+
+It pins the SOURCE INVARIANT rather than running a build, because no fixture
+can reproduce the defect (see above) and a real reproduction costs a ~40 min
+self-host compile. It is explicitly **not** a claim that Stage 2 is green —
+that is measured separately by `check-stage2-option-unwrap-not-stolen.shs`.
+
+---
+
+## 2026-08-25 — MEASURED: PARTIAL FIX, MECHANISM CONFIRMED, SECOND SITE OPEN
+
+This is the entry that should hold. The two earlier rewrites of this record
+claimed things before measuring them; everything below is a number read off a
+binary or a verbatim verdict line, and the places where a prediction was
+**wrong** are kept rather than quietly corrected.
+
+### Outcome in one line
+
+The guard fix is **real and correct but insufficient**. It converts 34 call
+sites from the wrong user method to the runtime builtin, exactly conserved,
+regressing nothing — and the advisory Stage-2 gate stays **RED**, because the
+sites the gate counts come from a **second, independent bind site** that this
+binder never reaches. Filed separately as
+`poll_unwrap_second_bind_site_lower_and_check_impl_2026-08-25.md`.
+
+### The differential (the decisive evidence)
+
+Per-function callee counts by disassembly, pre-fix vs post-fix Stage 2, both
+built from this same base by the same replayed bootstrap argv:
+
+| function | `Poll_dot_unwrap` | `rt_unwrap_or_trap` |
+|---|---|---|
+| `run_named_pass_with_record` | 3 → **1** | 0 → **2** |
+| `run_pass_on_module_checked` | 3 → **1** | 0 → **2** |
+| `lower_and_check_impl` (what the gate counts) | 4 → **4** | 0 → **0** |
+| **whole binary** | 307 → **272** (−35) | 117 → **151** (+34) |
+
+**34 sites moved** from the wrong callee to the builtin: `rt_unwrap_or_trap`
+gains exactly +34, and the two probe-named functions account for the change.
+The whole-binary `Poll_dot_unwrap` delta is −35 rather than −34 because one
+further reference, in the unrelated `compiler__types__dim_constraints__DimSolver_dot_solve_constraint`,
+is present in an instrumented build of the same fix and absent in the landed
+one — build variance between two compiles, not part of this fix. The
+load-bearing figure is the **+34 builtin calls** and the per-function rows
+above, which are byte-identical across both builds. The two functions the original probe named
+were fixed precisely as predicted, so the fix's routing argument (`None` →
+cross-module branch → `try_compile_builtin_method_call` → `rt_unwrap_or_trap`)
+is **measured true**, not merely argued. `lower_and_check_impl` is untouched.
+
+### Gate results, verbatim, both directions
+
+Negative control — pre-fix Stage 2 (`simple.rejected`, a real bootstrap
+artifact from this same base):
+
+```
+FAIL -- 2 check(s) performed: 4 Simple '*_dot_unwrap' call site(s) inside
+lower_and_check_impl -- an Option unwrap bound to a user method instead of the
+runtime builtin; hello world emitted
+E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED (rc=139);
+```
+
+Post-fix Stage 2: **byte-identical verdict line**. Neither number moved. That
+is what the differential explains: the gate's function is not this binder's.
+
+### A prediction of this lane's that measurement REFUTED
+
+Before running the differential, this lane wrote down that the likely
+explanation was "the fix is a no-op and its safety comment is false — `None`
+probably falls through to a bare `import_map` lookup that still resolves
+`Poll_dot_unwrap`". **That guess was wrong.** The differential shows the
+routing works exactly as the comment claims. The guess is recorded because it
+was written before the check, and deleting it would repeat this record's
+existing failure mode.
+
+### Liveness caveat — do not over-read the probe
+
+The new guard returns `None` **above** the single-candidate reporter, so the
+probe reading `unwrap=0` proves only that **the guard fired**. It is *not*
+independent evidence that the emitted callee changed. The disassembly is what
+proves that. The probe was separately shown live (64 bind lines, 12+ other
+methods still suffix-bound — `with_note`, `build`, `map`, `kind`,
+`lower_const`, `add_port`, …), so its silence on `unwrap` is a real change and
+not a broken instrument; but liveness and outcome are different claims.
+
+### Still refuted (re-confirmed on this run)
+
+The `calls.rs` import-ladder / `imports.rs` ambiguous-first-wins hypothesis.
+Instrumented across the full self-host compile, the ladder probe fired exactly
+**twice**, both for the unrelated `expr_force_unwrap`, resolved correctly via
+`use_map_direct`. The import map is not involved. (That instrumentation was
+stripped before landing; its findings live here.)
+
+### Seed provenance — why an earlier "failed" Stage 2 was never evidence
+
+An earlier bootstrap in this lane produced
+`build/bootstrap/.../stage2/x86_64-unknown-linux-gnu/simple.rejected` with
+`status=fail`. That artifact was built from seed `de9cfc3e…`, whereas the
+fixed seed is `6f448893…` — **not byte-identical**, so the rejected Stage 2
+predates this fix and its sanity FAIL says nothing about it. It is, however, a
+perfect negative control, and is used as one above.
+
+### Scope note on the gate's behavioural half
+
+`check-stage2-option-unwrap-not-stolen.shs` runs its hello-world check through
+`native-build` on the **script default backend**, not the cranelift path this
+defect reproduces on. The symbolic half (disassembly) is backend-independent
+and is the half that carries the mechanism claim.
+
+### Unrelated but load-bearing for another lane: this base is CLEAN of the
+### `cannot convert array to int` native-build regression
+
+Measured here because a parallel lane is bisecting that regression across ~613
+commits and needs brackets. At commit **`4d11699bc5b`**, using the **pre-fix**
+seed (so the result is a property of the base, not of this fix):
+
+```
+hello world native-build:  NATIVE_BUILD_RC=0
+                           binary produced, ran, printed "hello"
+                           array_to_int_signature=0
+```
+
+So the regression is **absent at `4d11699bc5b`**. Note also that this commit
+does **not** contain `37d046a71b1`, the suspected lead. Citable as a known-good
+point.
