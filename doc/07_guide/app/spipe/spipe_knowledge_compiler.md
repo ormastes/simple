@@ -319,11 +319,19 @@ Provider query limits add: 128 tokens, 64 Boolean clauses, nesting depth 8,
 values each, 1,000 hits, 128 explanation terms and 32 fields per hit, 64 KiB
 explanation per hit/512 KiB per page, 1,000 delta documents, 64 fields/document,
 1 MiB field value, 1,000 duplicate candidates total/100 per document, 1,000
-symbols, and a client deadline from 50 ms through 30 s. Regex and leading
-unbounded wildcards are unsupported.
+symbols, and a client deadline from 1 through 30,000 milliseconds inclusive.
+The deadline starts when the decoder accepts the first frame-header byte, so
+ingress, decoding, validation, normalization, hashing, execution, and response
+construction consume one semantic budget. Regex and leading unbounded
+wildcards are unsupported.
 
-At limit-plus-one, expect typed `frame_too_large`, `limit_exceeded`,
-`deadline_exceeded`, or `invalid_request`; stale/cross-scope requests return
+At a frame-size limit-plus-one, expect a payload-free local
+`TransportDiagnosticV1(code:frame_too_large)` and silent close, not a provider
+response. Invalid UTF-8 is handled identically with `code:invalid_utf8`.
+These two classes are never bound `ProviderErrorV1` codes. After a complete
+typed request is host-bound, applicable named operations may return bound
+`limit_exceeded`, `deadline_exceeded`, or `invalid_request` errors;
+stale/cross-scope requests return
 `stale_cursor` or `unauthorized`. Transactions and analysis additionally use
 `precondition_failed`, `transaction_conflict`, `recovery_required`,
 `unsupported_version`, `constraint_conflict`, `budget_exceeded`,
@@ -555,6 +563,10 @@ insufficient. An absent OS mount is therefore not a core failure, and no
 materialized or editor view may be misreported as OS-mount evidence.
 
 ## 12. Related knowledge
+
+- `doc/04_architecture/infra/spipe/spipe_knowledge_compiler_cooperative_streaming.md`
+- `doc/05_design/infra/spipe/spipe_knowledge_compiler_cooperative_streaming.md`
+- `doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md`
 
 - `doc/00_llm_process/feature_expert/modern_sspec/skill.md`
 - `doc/00_llm_process/feature_expert/mcp_runtime/skill.md`

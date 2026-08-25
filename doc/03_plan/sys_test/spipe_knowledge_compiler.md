@@ -283,7 +283,8 @@ root, `$HOME`, `~`, or unresolved environment variables for destructive work.
 ### 8.1 Frozen hostile-input boundaries
 
 Production defaults may be configured downward, never disabled. MCP cases test
-limit and limit-plus-one for: frame 1 MiB, headers 32 KiB, JSON depth 64,
+limit and limit-plus-one for: frame 1 MiB, headers 32 KiB, JSON depth 16,
+262,144 lexical tokens, 65,536 aggregate object-pair/array-element members,
 method 128 bytes, URI 8 KiB, query 4 KiB, decoded string 256 KiB, aggregate
 arguments 512 KiB, list 100, candidates 1,000, trace depth 8/nodes 2,000,
 response 1 MiB, generated manual 200 lines/about 6,000 tokens, and 16 in-flight
@@ -295,7 +296,8 @@ Provider cases additionally test: 128 query tokens, 64 Boolean clauses, depth
 values/filter, 1,000 hits, 128 explanation terms/hit, 32 fields/hit, 64 KiB
 explanation/hit and 512 KiB/page, 1,000 delta documents, 64 fields/document,
 1 MiB field value, 1,000 duplicate candidates total/100 per document, 1,000
-symbols, and 50 ms..30 s client deadlines. Regex and leading unbounded wildcard
+symbols, and inclusive 1 ms..30 s client deadlines measured from acceptance of
+the first frame-header byte. Regex and leading unbounded wildcard
 queries return `invalid_request`; budget/deadline exhaustion returns
 `limit_exceeded`/`deadline_exceeded` without semantic truncation.
 
@@ -347,16 +349,36 @@ ready. Do not rerun unchanged green gates.
 bin/simple test test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl --mode=interpreter
 bin/simple test test/03_system/app/spipe/feature/spipe_knowledge_compiler_mcp_spec.spl --mode=interpreter
 bin/simple test test/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.spl --mode=interpreter
-bin/simple test test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl --mode=interpreter
+# Provider parity is excluded here; it has the admitted-runtime commands below.
 bin/simple test test/03_system/app/spipe/feature/spipe_knowledge_compiler_rebalance_promotion_spec.spl --mode=interpreter
 ```
 
-If the provider spec contains an admitted native-only Simple lane, run it with
-stub fallback disabled:
+Provider parity and its controlled-work imports use only one admitted absolute
+Stage 4 executable/provenance pair. These commands replace, rather than
+supplement, any `bin/simple` provider-parity command:
 
 ```bash
-SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl --mode=native
+export SPIPE_SIMPLE_BIN=/absolute/admitted/simple
+export SPIPE_STAGE4_PROVENANCE=/absolute/admitted/stage4-candidate.sdn
+cd examples/05_stdlib/spipe && npm run test:wave4-conformance
+cd /absolute/simple-worktree
+"$SPIPE_SIMPLE_BIN" check test/fixtures/spipe_controlled_work/controlled_work_proof.spl
+"$SPIPE_SIMPLE_BIN" test test/01_unit/app/spipe_knowledge_provider/provider_controlled_work_import_smoke_spec.spl --mode=interpreter
+"$SPIPE_SIMPLE_BIN" test test/01_unit/app/spipe_knowledge_provider/provider_deadline_control_spec.spl --mode=interpreter
+"$SPIPE_SIMPLE_BIN" test test/01_unit/app/spipe_knowledge_provider/provider_streaming_limits_spec.spl --mode=interpreter
+"$SPIPE_SIMPLE_BIN" test test/01_unit/app/spipe_knowledge_provider/provider_session_owner_spec.spl --mode=interpreter
+"$SPIPE_SIMPLE_BIN" test test/01_unit/app/spipe_knowledge_provider/provider_stats_count_explain_spec.spl --mode=interpreter
+"$SPIPE_SIMPLE_BIN" test test/01_unit/compiler/import/spipe_controlled_work_import_regression_spec.spl --mode=interpreter
+SIMPLE_NO_STUB_FALLBACK=1 "$SPIPE_SIMPLE_BIN" test test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl --mode=native
+"$SPIPE_SIMPLE_BIN" spipe-docgen test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl --output doc/06_spec --no-index
+"$SPIPE_SIMPLE_BIN" sspec-maintain scan test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl
 ```
+
+The conformance command invokes the canonical Stage 4 candidate-provenance
+verifier before any Simple probe. Each later command consumes the same absolute
+path and the retained conformance receipt binds that binary/provenance hash.
+Missing planned specs are an unimplemented/red gate, never a reason to delete a
+command or fall back to an available bootstrap.
 
 Generate and assess each changed mirror separately:
 
@@ -364,6 +386,9 @@ Generate and assess each changed mirror separately:
 bin/simple spipe-docgen test/03_system/app/spipe/feature/<name>_spec.spl --output doc/06_spec --no-index
 bin/simple sspec-maintain scan test/03_system/app/spipe/feature/<name>_spec.spl
 ```
+
+Those generic commands exclude the provider-parity mirror, whose exact
+admitted-runtime docgen/assessment commands are frozen above.
 
 If Simple MCP/LSP source or wrapper paths change, include the existing owner
 gates exactly once:
@@ -528,7 +553,8 @@ Their signatures are frozen as
 `applyGoldenDeltaSequence(port, deltas)`,
 `assertCleanIncrementalParity(factory, corpus, deltas)`,
 `assertExplanationBoundedAndCanonical(hit)`,
-`measureQualifiedSearch(provider, fixture, repetitions)`,
+`measureQualifiedSearch(profile_path, fixture_path, operation_plan_path,
+functional_receipt_uri, output_path)`,
 `createJsProviderFixture()`, and `createSimpleProviderFixture()`.
 
 The checked-in golden corpus must carry a canonical fixture hash and cover all
@@ -602,7 +628,9 @@ and the logical-root/delta/performance receipts as `artifact`.
 
 ### 13.4 Performance qualification rule
 
-`measureQualifiedSearch` must record machine/CPU and memory, OS, toolchain,
+`measureQualifiedSearch` has only the frozen five-argument signature in detail
+design Section 14.6 and must record machine/CPU and memory, OS, closed
+toolchain/compiler and collector-runtime identities, versions, and binary hashes,
 build identity/mode, provider and contract versions, fixture hash and document/
 token/byte sizes, warm-up count, measured sample count, percentile algorithm,
 raw samples, P95, maximum RSS, command, exit status, and timestamp. The receipt
@@ -626,6 +654,134 @@ Until a checked-in profile freezes hardware class, fixture, warmups, samples,
 variance rule, and absolute budget, the research values such as 50,000
 documents and warm P95 below 100 ms are qualification targets only. A timing
 run may report observations but must not claim an absolute performance PASS.
+
+The W4-SRCH-09 oracle accepts only the closed
+`spipe-qualified-search-receipt-v1` defined by detail-design Section 14.6.1.
+It first validates the closed `spipe-qualified-search-profile-v1`: exact
+subject, host/kernel/CPU/core-policy and adapter identities; inclusive CPU and
+minimum-memory bounds; positive budgets; at least one warmup and twenty
+samples; and the integer MAD variance rule with no discarded or retried
+samples. An unqualified host or adapter is `NOT EVIDENCE`.
+The checker recomputes all file hashes, sample cardinalities, nearest-rank P95,
+lower-middle medians, and the fixed-point rebuild/publish ratio; verifies the
+functional-conformance receipt; and requires one provider start, zero
+per-query spawns, zero warm full-tree scans, and zero repeated source reads.
+It also checks that the fixture manifest binds exactly 50,000 artifacts, the
+query-plan hash and query count, and the admitted binary/provenance hashes.
+Warm startup is one scalar, warm-query evidence contains exactly the bound
+repetition count times query-plan cardinality, and max RSS comes from a
+profile-approved OS process-tree peak counter. It also verifies the canonical
+functional-conformance receipt URI and hash and the canonical
+`benchmark_operation_plan_v1.json` path and hash. The plan encodes the exact
+warmup and measured-round schedule, query-before-mutation rule, alternating
+publish/rebuild order, untimed byte-identical `S0` resets, and expected `S0`/`S1`
+hashes from detail design Section 14.6.1.
+
+The functional prerequisite is exactly one closed canonical-JSON object:
+
+```text
+schema = "spipe-functional-conformance-receipt-v1"
+subject = {implementation, provider_id, provider_version,
+           protocol_version, analyzer_id, score_id}
+executable = {canonical_path, sha256, stage4_provenance_sha256}
+fixture = {id, sha256, snapshot_sha256, query_plan_sha256}
+scope = {principal_scope_digest, policy_version}
+matrix = [{id, status = "passed", evidence_sha256}]
+result = {status = "passed", checker_id, checker_version,
+          checker_sha256, completed_at_utc}
+```
+
+Every leaf except `matrix` is a nonempty UTF-8 string; every SHA-256 and scope
+digest is exactly 64 lowercase hexadecimal characters. `matrix` contains each
+required `W4-SRCH-01` through `W4-SRCH-08` and `W4-SRCH-10` through
+`W4-SRCH-39` ID exactly once in ascending numeric order, with no other ID; it
+explicitly excludes performance cell `W4-SRCH-09`. Ordering is acyclic:
+functional conformance produces this receipt first, then qualified performance
+consumes it and alone evaluates `W4-SRCH-09`; cell 09 is never a prerequisite
+of the receipt it consumes. The checker requires byte-equal subject, executable,
+fixture, and scope bindings to the benchmark inputs. Unknown, missing, null,
+duplicate-normalized, wrong-typed, failed, duplicate, or out-of-order fields or
+entries are `NOT EVIDENCE`.
+
+The operation plan is exactly one closed canonical-JSON object:
+
+```text
+schema = "benchmark-operation-plan-v1"
+plan_id = nonempty ASCII identifier
+fixture = {id, sha256, query_plan_sha256}
+counts = {warmup_count, sample_count, query_count_per_sample}
+states = {s0_snapshot_sha256, s1_snapshot_sha256}
+delta = {artifact_id, delta_sha256, before_revision,
+         before_content_sha256, after_revision, after_content_sha256}
+reset = {method = "restore-canonical-s0-v1", expected_snapshot_sha256}
+queries = [{query_index, query_id, canonical_request_sha256,
+            expected_result_sha256}]
+warmup_rounds = [{round_index, operations}]
+measured_rounds = [{round_index, operations}]
+```
+
+Counts and indices are non-negative JSON safe integers; counts are positive.
+Digests are 64 lowercase hexadecimal characters and all other leaves are
+nonempty UTF-8 strings. Query indices are contiguous from zero and array order
+is execution order. Each `operations` array uses only `verify_s0`,
+`query_all`, `publish_delta`, `reset_s0`, `rebuild_s0`, and `verify_s1`.
+Warmup rounds encode the fixed discarded schedule; measured even and odd rounds
+encode the two required alternating schedules, with `query_all` before either
+mutation and an ending `reset_s0`. The arrays have exactly the declared counts,
+their indices are contiguous, and their query cardinality equals
+`query_count_per_sample`. `reset.expected_snapshot_sha256` equals
+`states.s0_snapshot_sha256`; the delta's before/after bindings produce exactly
+S0/S1. Canonicalization is `canonical-json-v1`: UTF-8 without BOM or trailing
+LF, NFC strings, unsigned decimal safe integers, lexicographically sorted NFC
+object keys, and preserved array order. Unknown, missing, null,
+duplicate-normalized, wrong-typed, inconsistent, or noncanonical input is
+`NOT EVIDENCE`; its SHA-256 covers those exact canonical bytes.
+
+For every timed request the checker recomputes the canonical result SHA-256,
+requires it to equal the operation plan's expected SHA-256 with status
+`matched`, and pairs its duration with the raw duration array. The ratio is the
+checked integer `floor(rebuild_median_ns * 1000 / publish_median_ns)`; zero or
+overflow is `NOT EVIDENCE`, and the initial gate is `>= 20000`.
+
+Guard and RSS evidence comes from an independent, pre-launch platform adapter
+and a hash-chained canonical event journal. The checker replays the journal to
+recompute containment membership, peak RSS, provider starts, query-window
+spawns, warm full-tree enumerations, and repeated unchanged-source reads. The
+lifecycle includes every descendant through exit even after reparenting. Event
+loss, journal-chain failure, self-reported counters, post-launch attachment, an
+escaped or unenumerated descendant, or an adapter without fail-closed lifecycle
+support is `NOT EVIDENCE`.
+The journal oracle also enforces canonical UTF-8 JSONL, contiguous sequences,
+predecessor and terminal hashes, opened-root device/inode or volume/file
+identity, kernel-level create/exec/enumerate/open semantics, zero overflow/loss
+and zero live terminal members. Textual-prefix or provider-log inference is not
+evidence.
+
+Every closed event additionally contains `source_version`,
+`source_content_sha256`, and `source_change_witness = {kind,
+identity_generation, size_bytes, modified_time_ns, witness_sha256}`. For
+`source_open` and `source_change` events, `source_version` is a non-negative safe
+integer and `source_content_sha256` is exactly 64 lowercase hexadecimal
+characters. Non-source events use `source_version = 0`,
+`source_content_sha256 = ""`, and the typed zero/empty-string witness sentinel.
+A successful `source_open` must carry the current per-path-identity
+version, the hash of the exact bytes read, and a witness derived by the approved
+adapter from the opened handle; a `source_change` event is added to the event
+enum and must increment that identity's version and bind the new content hash
+and witness before a later open is attributed. Replay classifies a reread as
+unchanged only when path identity, version, content hash, and witness all match
+and no intervening `source_change` exists. Missing, regressing, skipped, or
+contradictory versions, hashes, or witnesses are `NOT EVIDENCE`, making an
+unchanged-source reread mechanically replayable rather than inferred from path.
+
+Unknown or missing fields, null samples, a seed/source-mode
+binary, an unqualified host/profile, or a nonzero collector exit is
+`NOT EVIDENCE` and cannot be converted to PASS by the system scenario.
+
+The sole planned collection command is the command in detail-design Section
+14.6.2. Test automation may validate a checked-in receipt but must not silently
+rerun a performance measurement. Until an admitted Stage 4 executable and a
+checked-in qualified profile exist, the scenario retains its fail-fast oracle.
 
 ### 13.5 High-review closure matrix
 
@@ -749,12 +905,12 @@ policy/revocation generation, and durable replay evidence without private keys.
 | `W4-SRCH-21` Scoped provider bytes | only closed `ScopedSearchDocumentV1` crosses provider/delta/root boundaries; scoped content hash excludes unauthorized fields; stats exactly match authorized field count/order and reject mismatch |
 | `W4-SRCH-22` Contribution union | absent terms carry exact zero/null fields without denominator work; scored terms carry every fixed-type intermediate; exact qtf and mechanical total reconstruction agree |
 | `W4-SRCH-23` Receipt wire objects | envelopes carry full signed query/operation objects or null, never IDs; candidate expiry uses only `CandidateExpiryReceiptV1` in authority/audit storage; all three domains, length framing, omitted-field sets, authority bindings, revocation/time, byte echo, and restart replay are exact |
-| `W4-SRCH-24` Complete errors | every closed error code is triggered by its named operation; snapshot, semantic, protocol, cancellation, internal, and fatal cases cannot collapse or publish |
+| `W4-SRCH-24` Complete errors | bound `ProviderErrorV1` codes are triggered through applicable named operations; `invalid_utf8`/`frame_too_large` remain payload-free local `TransportDiagnosticV1` decoder classes, pre-binding failures close silently without a fabricated `ProviderResponseV1`, and snapshot, semantic, protocol, cancellation, internal, and fatal cases cannot collapse or publish |
 | `W4-SRCH-25` Candidate terminality | each terminal winner pre-signs its receipt; published atomically commits root pointer + terminal candidate + receipt + publication metadata, while stale/abort atomically commit candidate + receipt without root; candidate-state losers atomically fsync `DurableTerminalErrorV1`; restart preserves every result byte-for-byte |
 | `W4-SRCH-27` Replay identity and absence delete | apply/publish replay has no replay-only status or outcome and returns the original canonical envelope plus signed receipt byte-for-byte across restart; paired-null delete hashes both nulls, yields an unchanged-root signed `no_op` only when absent at base, conflicts when present, and rejects mixed pairs before mutation |
 | `W4-SRCH-26` Initialize closure | exact nested contracts, capabilities, limits, ID arrays, optional fields, minor-version rules, maxima, and negotiated-minimum identity reject every mutation |
 
-`runProviderConformance` executes `W4-SRCH-01` through `W4-SRCH-27` after this
+`runProviderConformance` executes `W4-SRCH-01` through `W4-SRCH-39` after this
 freeze. Add scoped-document/hash/stat mismatch fixtures; absent/scored
 contribution vectors; receipt objects with altered domain, length, omitted
 field, key, revocation generation, and signature; every error-code operation;
@@ -813,3 +969,183 @@ omission of either absence null, either mixed-null delete variant, hashing the
 concatenation. Apply and publish are each executed, persisted, restarted, and
 replayed; the second response must equal the first complete frame byte-for-byte
 and retain the original status and receipt outcome.
+
+### 13.9 Streaming, controlled-work, and admitted-runtime closure
+
+<!-- codex-design -->
+
+Protocol `spipe-search-provider/1.0` still carries exactly one logical request
+and at most one logical response per frame. “Streaming” in this section means
+incremental transport reads/writes and cooperative bounded computation; it does
+not permit chunked result semantics, partial pages, more than one JSON value in
+a frame, or a response whose meaning depends on OS read boundaries.
+
+The production ownership vocabulary is frozen as `ProviderByteStreamPort`,
+`ProviderFrameDecoderV1`, `ProviderFrameEncoderV1`,
+`ProviderRequestControlPort`, `ProviderWorkMachineV1`, and
+`ProviderSessionOwnerV1`. Tests compile against the exact Section 4.1 focused-
+architecture signatures rather than defining aliases. `ProviderByteStreamPort`
+read/write results each use `data | timeout | eof | error` and each call carries
+an absolute transport deadline. `ProviderRequestControlPort` owns
+`register`/`cancel`/`try_commit_admission`/`complete`; its
+`ProviderCommitAdmissionPermitV1` binds registration generation and intent
+hash, arbitrates cancel/deadline eligibility only, and is not a semantic
+mutation linearization point. Durable candidate creation and the combined
+terminal transaction retain that authority. `ProviderSessionOwnerV1` owns one active
+`ProviderWorkMachineV1`, a FIFO of exactly 16 completely
+decoded ordinary requests, one `ProviderFrameDecoderV1`, and one serialized
+`ProviderFrameEncoderV1`.
+`cancel` and `shutdown` are control requests: after full frame validation they
+bypass the ordinary FIFO and act on the active/queued request state. The
+seventeenth queued ordinary request is rejected with the fully bound
+`limit_exceeded` response; a partially decoded request is never enqueued.
+
+The normative protocol-1.0 initialization remains the immutable
+`cancel:true, stats:true` capability object in detail-design Section 14.20.
+Today’s `cancel:false` or platform-dependent `stats:false` implementation is a
+red transition state, not a conforming negotiation. It must not emit a passing
+initialize/conformance receipt. Promotion means implementing and proving both
+capabilities against production owners; a direct helper, fixed clock, source
+assertion, or a locally altered capability object cannot justify it. A
+conforming provider never returns `unsupported_capability` for valid `cancel`
+or `stats`.
+
+No queue-depth, pending-byte, transport-timeout, work-step, or checkpoint-gap
+field is added to the closed protocol-1.0 initialization record. Those values
+remain host-local configuration and payload-free qualification evidence. A
+wire-visible limit extension requires an explicit compatible protocol minor
+and its own closed-schema vectors; this slice does not define one.
+
+#### 13.9.1 Exact limits and accounting
+
+- The eight-byte lowercase-hex header is not part of the payload limit.
+  `00100000` plus exactly 1,048,576 canonical UTF-8 JSON bytes is admitted by
+  `ProviderFrameDecoderV1`; `00100001` is rejected before payload allocation or decode.
+  Total accepted wire bytes are therefore at most 1,048,584 for one frame.
+- The bounded JSON owner permits at most 16 open object/array containers,
+  262,144 lexical tokens, and 65,536 aggregate members (each object pair and
+  each array element counts once). It checks the next increment before growing
+  storage. Crossing a pre-binding parser cap closes the session with zero
+  response bytes because no trustworthy correlation exists; lower
+  operation-schema limits return bound `limit_exceeded` only after a complete
+  canonical request is available.
+  A lexical token is exactly one `{`, `}`, `[`, `]`, `:`, or `,` punctuation
+  byte, one complete JSON string, one complete JSON number, or one complete
+  `true`, `false`, or `null` literal. Whitespace and EOF are not tokens;
+  canonical input contains no whitespace. A member is counted only after its
+  complete object name/value pair or array value is recognized. Token/member
+  limits are checked before accepting the token/member that would exceed them.
+- Canonical encoded output is limited to 1,048,576 payload bytes; search/stats
+  page output remains limited to 524,288 bytes and one explanation to 65,536
+  bytes. `ProviderFrameEncoderV1` must construct and validate the complete payload before the
+  first response byte. An output-limit failure returns one complete bound
+  `limit_exceeded` frame and never a truncated success.
+- `ProviderRequestControlPort.register` receives `first_header_at_ms`, sampled when the first header byte is
+  observed, not after the header or payload completes. The client deadline is
+  the closed inclusive `1..30,000` ms value and is evaluated from that time
+  once decoded. A separate configured 30,000 ms
+  ingress-stall bound covers an incomplete header/payload before correlation;
+  a separate 30,000 ms output-stall bound covers a `ProviderFrameEncoderV1` that cannot make
+  progress. Either uncorrelated ingress stall or partial-output stall closes the
+  session; it must not fabricate a second error frame.
+- `ProviderWorkMachineV1` checks cancellation/deadline before its first unit, after at
+  most every 4,096 input bytes or equivalent bounded inner-loop quantum, before
+  SHA tail/final emission, and immediately before every read-result completion
+  or `try_commit_admission`. At a checkpoint where both are visible,
+  cancellation wins because `ProviderRequestControlPort` tests it first.
+- `ProviderFrameDecoderV1` records exact `header_bytes_read` in `0..8` and
+  `payload_bytes_read` in `0..declared_length`. `ProviderFrameEncoderV1` records
+  `payload_bytes_encoded`, `frame_bytes_total`, and `frame_bytes_written`.
+  A write error or output stall at byte zero records
+  `frame_bytes_written = 0`, abandons the prepared frame, and closes the
+  session without attempting an error response. The same close-without-second-
+  frame rule applies after a nonzero partial count. A success requires
+  `frame_bytes_written == 8 + payload_bytes_encoded`.
+- Every decoder `push` returns at most one closed event (`none`, `header`, or
+  `payload`). The one `header` event follows byte eight and precedes payload
+  consumption even for a coalesced read. Each `payload` event carries an
+  immutable decoder-owned loan bounded by `read_chunk_bytes`, with exact
+  bytes/offset/count and contiguous `frame_payload_offset`; the loan expires at
+  the next decoder mutation. Concatenating the observed loans must reproduce
+  the declared payload exactly once, with no gap, overlap, replay, or second
+  framing cursor. A zero-length frame emits header then no payload event.
+  `take_complete` returns only final length/timestamp metadata.
+- Transport-local `frame_too_large` and `invalid_utf8` are payload-free local
+  `TransportDiagnosticV1` classes, not `ProviderErrorV1` codes,
+  not fabricated wire responses: because the decoder cannot trust a complete
+  request binding, it records the payload-free class/count metrics and closes
+  with zero response bytes. Bound `limit_exceeded`, `invalid_request`, and
+  operation errors are legal only after one complete canonical envelope has
+  established the exact correlation and authorization context. Progress
+  metrics contain lengths, counts, phases, request IDs only after validation,
+  and hashes where allowed; they never retain header/payload bytes, decoded
+  field values, secrets, or private document content.
+
+#### 13.9.2 Exact Wave 4 controlled-work matrix
+
+| Matrix ID | Required oracle | REQ/NFR trace |
+|---|---|---|
+| `W4-SRCH-28` One-MiB byte boundary | exact-limit frame reaches canonical/schema validation; limit-plus-one is rejected before allocation/decode; header is excluded from the payload count; zero/short/uppercase/overflow headers report exact local read counts, zero semantic mutation, and silent close—never a fabricated bound error | REQ-SPKC-013–014; NFR-SPKC-011, 019–022 |
+| `W4-SRCH-29` Incremental Unicode parity | scripted pipe splits at every header byte and inside two-, three-, and four-byte UTF-8 scalars/combining sequences yield byte-identical decoded NFC/canonical JSON and response to the unsplit frame; truncated EOF, overlong, surrogate, and out-of-range scalars record local `invalid_utf8`/counts and close with zero response bytes | REQ-SPKC-011, 013–014; NFR-SPKC-001, 011–012, 019–021 |
+| `W4-SRCH-30` JSON structural/output caps | depth 16/token 262,144/member 65,536 and each minus-one/exact/plus-one boundary are exercised; page, explanation, canonical payload, and per-operation lower caps reject before an oversized allocation or partial response | REQ-SPKC-013–014; NFR-SPKC-011, 020–022 |
+| `W4-SRCH-31` SHA block and quantum parity | lengths 0, 1, 55, 56, 63, 64, 65, 4,095, 4,096, 4,097, and 1,048,576 match the canonical SHA-256 owner for every chosen transport chunking; padding across one/two final blocks is exact; stop is observed no later than the next 4,096-byte quantum and before digest publication | REQ-SPKC-011, 013–014; NFR-SPKC-001, 011–012, 020–021 |
+| `W4-SRCH-32` First-byte and stall deadlines | slow header, slow payload, queued wait, cooperative work, and stalled output use the first-header-byte admission time plus the separate ingress/output stall clocks; exact-minus-one proceeds and exact expiry returns/closes according to Section 13.9.1 | REQ-SPKC-013–015; NFR-SPKC-003, 011, 019–022 |
+| `W4-SRCH-33` Exact cancel/deadline admission | a real cancel frame arriving through `ProviderByteStreamPort` while production work is executing wins before `try_commit_admission` as bound `cancelled` with `retryable:false`; a 1–30,000 ms deadline that expires before commit admission is `deadline_exceeded` with `retryable:true`; simultaneous visibility selects cancellation; unknown target is `cancel_target_not_found` with null receipts; cancel after the permit is `already_complete` or replays the signed result; the test separately proves the permit created no candidate/terminal/publication truth and that durable candidate creation or the combined terminal transaction is the later mutation linearization point; a synthetic clock alone cannot PASS | REQ-SPKC-013, 015; NFR-SPKC-001, 011, 020–022 |
+| `W4-SRCH-34` Async FIFO control | one active operation plus exactly 16 queued ordinary requests preserves order while `ProviderSessionOwnerV1` alternates bounded work with ingress polling; the 17th queued request (18th ordinary request including the active one) is bound `limit_exceeded`; queued deadlines expire without execution; live cancel/shutdown frames bypass ordinary work, stop the target/reject new work/cancel pending work/drain commit-admitted work, and leave no live worker | REQ-SPKC-013, 015; NFR-SPKC-003, 011, 019–022 |
+| `W4-SRCH-35` No partial mutation and exact linearization | stop/fault injection before parser completion, hashing, search/stats completion, candidate creation, `try_commit_admission`, and each CAS/write/rename/file-fsync/directory-fsync boundary leaves the exact valid pre-state or complete post-state root, canonical lifecycle bytes/hash, candidate/replay/publication rows, metadata, and cache state; a granted admission permit alone leaves mutation state unchanged, while a stop after durable candidate creation or the combined terminal transaction returns/replays only that complete committed result | REQ-SPKC-013–015; NFR-SPKC-001–004, 008–009, 011, 020–022 |
+| `W4-SRCH-36` Framing and partial-write truth | scripted pipes cover one-byte splits, truncated header/payload, coalesced frames, UTF-8 splits, zero-progress stalls, and short writes; responses never interleave; injected writes at byte 0, every header byte, and first/middle/final payload byte distinguish zero/partial/complete emission by exact counters without a second error frame | REQ-SPKC-013–014; NFR-SPKC-001, 003, 011, 019–022 |
+| `W4-SRCH-37` Platform statistics truth | every platform declared supported for provider 1.0 advertises the required `stats:true` and uses an admitted owner; `peak_rss_bytes`, `index_bytes`, scoped field statistics, document count, and a zero-cache claim are independently recomputed; a target without such an owner is an unsupported provider target/`NOT EVIDENCE`, not a conforming `stats:false`, fabricated zero, or per-request `unsupported_capability` | REQ-SPKC-013–015; NFR-SPKC-006, 011, 019–022 |
+| `W4-SRCH-38` Stage 4 evidence separation | system evidence binds the exact current pure-Simple Stage 4 executable, SHA-256, source revision, provenance receipt, fixture, and checker; Rust seed, bootstrap-only, stale full CLI, source-only, missing extern, or provenance mismatch is `NOT EVIDENCE`, even when a narrow unit test is green | REQ-SPKC-013–014; NFR-SPKC-003, 020–021, 025 |
+| `W4-SRCH-39` Production controlled-work closure | the import-safe proof corpus and production interfaces agree on canonical SHA/JSON bytes and stop schedules, but only production `ProviderByteStreamPort -> ProviderSessionOwnerV1 -> ProviderWorkMachineV1 -> ProviderFrameEncoderV1` execution under the admitted Stage 4 runtime can PASS; standalone fixture success with an importing-spec/compiler failure remains FAIL | REQ-SPKC-011, 013–014; NFR-SPKC-001, 011–012, 020–022, 025 |
+
+#### 13.9.3 Planned artifacts and scenario allocation
+
+The frozen unit/evidence targets are:
+
+- `test/fixtures/spipe_controlled_work/controlled_work_proof.spl` — diagnostic
+  parity oracle only, never a production acceptance implementation;
+- `test/01_unit/app/spipe_knowledge_provider/provider_controlled_work_import_smoke_spec.spl`
+  — standalone-versus-imported compiler/runtime admission and SHA/JSON boundary
+  vectors;
+- `test/01_unit/app/spipe_knowledge_provider/provider_deadline_control_spec.spl`
+  — cooperative work, exact stop precedence, before/after-commit-admission
+  state, and distinct later durable mutation linearization;
+- `test/01_unit/app/spipe_knowledge_provider/provider_streaming_limits_spec.spl`
+  — planned `ProviderFrameDecoderV1`/JSON/Unicode/header/payload boundary table,
+  including exactly-once header event, contiguous bounded payload loans, loan
+  lifetime, metadata-only completion, and no duplicate framing cursor;
+- `test/01_unit/app/spipe_knowledge_provider/provider_session_owner_spec.spl`
+  — planned active/FIFO/control/partial-write/stall fault schedules;
+- `test/01_unit/app/spipe_knowledge_provider/provider_stats_count_explain_spec.spl`
+  — scoped statistics and platform capability truth;
+- `test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl`
+  and its mirrored manual — the sole system owner of W4 acceptance.
+- `doc/07_guide/app/spipe/spipe_knowledge_compiler.md` — operator-facing
+  framing, timeout, cancel/shutdown, platform-capability, evidence-admission,
+  and recovery guidance updated only after the executable contract is current.
+
+The system spec retains the shared `check_spipe_provider_parity` helper and adds
+these visible titles only after the production targets exist:
+
+1. `should preserve one logical frame across bounded Unicode transport chunks`;
+2. `should stop active and queued work at exact cancellation and deadline boundaries without partial mutation`;
+3. `should report truthful platform statistics and complete response-write counts`;
+4. `should reject stale bootstrap evidence and admit only the current Stage 4 provider`.
+
+Boundary rows remain folded detail. Protocol transition and byte/write counters
+are retained as `protocol` evidence; stop schedules and state digests as
+`artifact`; process/RSS/provenance as `log` plus `artifact`. The generated
+manual must state that an accepted logical result is never a partial stream.
+The operator guide and generated manual are both independently reviewed; a
+current source test with either stale document is not design/verification
+completion.
+
+The conformance producer emits W4 cells 28–39 only after both the standalone
+proof and importing production-target checks run under the same admitted
+runtime. The exact commands are frozen in Section 10 and use the absolute
+admitted Stage 4 executable from detail-design Section 14.6.2;
+substitution of `src/compiler_rust/target/bootstrap/simple`, a stale `bin/simple`,
+or any binary without the matching provenance receipt is rejected before test
+execution. The higher-capability final reviewer must inspect the retained raw
+chunk/control/fault schedules and recompute the evidence hashes; a sidecar or
+source scan cannot mark any of these cells passed.

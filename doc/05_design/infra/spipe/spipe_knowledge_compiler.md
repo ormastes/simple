@@ -24,6 +24,18 @@ than copied here:
 - `spipe_knowledge_compiler_search_providers.md` owns tokenization, fixed-point
   BM25, RRF/search explanations, provider wire protocol, golden parity, source
   symbols, duplicate-analysis extraction, and the three database adapters.
+- `spipe_knowledge_compiler_cooperative_streaming.md` owns raw-byte framing,
+  iterative canonical JSON/emission, incremental SHA, streaming UCD analysis,
+  request budget/checkpoint/cancel admission, the single-owner provider
+  reactor, cross-platform process statistics, and its migration gates.
+
+At their integration boundary, protocol-1.0 semantic deadlines are the
+inclusive 1..30,000 millisecond interval measured from the first accepted
+frame-header byte. `invalid_utf8` and `frame_too_large` remain payload-free
+local `TransportDiagnosticV1` classes and silently close before binding; they
+are not `ProviderErrorV1` codes and cannot be routed through a named operation.
+The search-provider detail owns bound response/error schemas while the focused
+streaming design owns byte-stream diagnosis and deadline enforcement.
 
 The lifecycle-first canonical tree remains physical truth. This design creates
 no second writable document tree. FUSE/ProjFS remains behind a read-only

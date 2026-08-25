@@ -333,6 +333,14 @@ hex, frames above the negotiated maximum, invalid UTF-8, duplicate critical
 keys, trailing data, and unknown required protocol versions. Stderr is bounded
 diagnostic output and never part of the protocol.
 
+Raw-byte transport behavior is normatively refined by
+`spipe_knowledge_compiler_cooperative_streaming.md`. In particular,
+`invalid_utf8` and `frame_too_large` are payload-free local
+`TransportDiagnosticV1` classes. Before a complete typed envelope is
+host-bound, either class discards decoder state and closes silently; it never
+creates a `ProviderResponseV1`, reflects untrusted fields, or enters the bound
+provider error vocabulary.
+
 JSON is the interoperability format; equivalent SDN output may be offered for
 CLI diagnostics but is not a second wire contract.
 
@@ -382,7 +390,7 @@ request_id         opaque client correlation ID
 operation          closed operation vocabulary
 workspace          stable workspace UID
 snapshot           required snapshot or expected parent snapshot
-deadline_ms        relative bounded deadline
+deadline_ms        1..30,000 ms relative to the first accepted header byte
 payload            operation-specific object
 ```
 
@@ -473,7 +481,7 @@ Protocol v1 has hard maxima, further reducible by configuration or handshake:
 | Field value | 1 MiB; frame limit still applies |
 | Duplicate candidates | 1,000 total, 100 per document |
 | Symbol page | 1,000 symbols |
-| Client deadline | 50 ms minimum, 30 s maximum |
+| Client deadline | 1 ms minimum, 30,000 ms maximum |
 
 The parser accounts for expansions before execution and rejects over-budget
 queries rather than truncating them into different semantics. Search also has
@@ -1556,11 +1564,11 @@ ErrorResponseV1 {
   snapshot:SnapshotId, scope_digest:HashText,
   query_receipt:QueryReceiptV1|null,
   operation_receipt:OperationReceiptV1|null,
-  error:{code,message,retryable}
+  error:ProviderErrorV1
 }
 PreBindingErrorResponseV1 {
   request_id, operation, ok:false, protocol,
-  error:{code,message,retryable:false}
+  error:ProviderErrorV1{code,message,retryable:false}
 }
 ```
 
@@ -1572,6 +1580,8 @@ no `provider_generation`, workspace, snapshot, scope, or receipts because no
 binding exists yet. A malformed length header, invalid UTF-8/JSON, noncanonical
 JSON, unknown operation, or request from which those three fields cannot be
 recovered closes the transport silently; it never fabricates a response.
+Specifically, `invalid_utf8` and `frame_too_large` are local
+`TransportDiagnosticV1` classes, not values of `ProviderErrorV1`.
 Every post-initialization error uses `ErrorResponseV1` and echoes the exact
 request bindings. The adapter deterministically creates and sends a non-null
 `query_receipt` for `search` and `explain`; every bound success or error echoes
@@ -2055,14 +2065,23 @@ adding `receipt_id` or `signature` to the preimage changes verification to
 failure. Mutations of authority ID/generation, either time, candidate/apply
 binding, receipt kind, or durable replay bytes also fail.
 
-### 14.18 Closed provider error codes
+### 14.18 Transport diagnostics and bound provider errors
+
+`TransportDiagnosticV1` is local, payload-free evidence. Its closed code set is
+`invalid_utf8 | frame_too_large`; it may retain bounded numeric byte/count
+metrics but no request payload, message/details copied from input, request ID,
+operation, provider generation, workspace, snapshot, scope, or receipt. It is
+never serialized as a provider response. A pre-binding occurrence records the
+local diagnostic and closes silently.
+
+`ProviderErrorV1` is the closed `{code,message,retryable}` object carried only
+by the applicable `ErrorResponseV1` or defined `PreBindingErrorResponseV1`.
+Its code set is:
 
 | Code | Operations | Exact condition |
 |---|---|---|
 | `invalid_request` | all | closed-schema/type/null/order violation |
 | `noncanonical_json` | all | canonical byte-profile violation |
-| `invalid_utf8` | all | invalid/non-shortest UTF-8 or surrogate scalar |
-| `frame_too_large` | pre-binding/all | declared frame length exceeds 1 MiB before allocation |
 | `limit_exceeded` | all | another declared structural/resource bound is exceeded |
 | `protocol_unsupported` | initialize/pre-binding | protocol major/minor cannot be negotiated |
 | `handshake_required` | all except initialize | operation received before healthy initialization |
@@ -2088,7 +2107,7 @@ binding, receipt kind, or durable replay bytes also fail.
 | `candidate_expired` | index_publish | candidate expired before publication |
 | `candidate_aborted` | index_publish | candidate was durably aborted |
 | `deadline_exceeded` | all bound operations | monotonic deadline crossed according to Section 14.19 |
-| `cancelled` | target operation | accepted cancellation won before target linearization |
+| `cancelled` | target operation | accepted cancellation won before target commit admission |
 | `cancel_target_not_found` | cancel | target request never existed in this generation |
 | `semantic_unavailable` | optional future semantic source | source failed/was denied; lexical generation remains valid |
 | `semantic_mismatch` | optional future semantic source | model/snapshot/scope/result binding differs; semantic source quarantined |
@@ -2102,37 +2121,48 @@ candidate exists.
 
 ### 14.19 Cancellation, deadlines, and shutdown
 
-Each request owns an atomic state `pending -> linearized -> completed` or
+Each request-control owner has an atomic state
+`pending -> commit_admitted -> completed` or
 `pending -> cancelled -> completed`. `cancel` linearizes by CAS from pending to
-cancelled; `already_complete` means the target was already linearized or
+cancelled; `already_complete` means the target was already commit-admitted or
 completed. A target that never existed in this provider generation returns the
 bound `cancel_target_not_found` error with `retryable:false`,
 `query_receipt:null`, and `operation_receipt:null`; `not_found` is not a success
 status. An accepted cancellation guarantees no result page, candidate, or
-current-root publication occurs afterward. For `index_apply`, linearization is
+current-root publication occurs afterward. `try_commit_admission` arbitrates
+only cancel/deadline eligibility and creates no search-state truth. For
+`index_apply`, semantic mutation linearization is
 durable candidate creation; for every terminal `index_publish` outcome
 (`published`, `stale_base`, or `aborted`), linearization is the single atomic
 terminal transaction in Section 14.17—not an earlier candidate check or a bare
 root-pointer CAS;
 for reads, immutable snapshot pin plus completed bounded result construction.
 
-The adapter samples a monotonic clock at request admission and computes a
-checked deadline from `deadline_ms`. Expiry before linearization returns
-`deadline_exceeded`; cancellation/deadline winning before the terminal
-transaction prevents that transaction and produces no terminal receipt.
+The decoder samples a monotonic clock when it accepts the first frame-header
+byte. After the typed envelope supplies `deadline_ms`, the request-control owner
+computes the checked absolute deadline from that recorded header timestamp,
+accepting only the inclusive range 1..30,000 milliseconds. Ingress framing,
+UTF-8/JSON/schema work, normalization, hashing, execution, and response
+construction therefore consume one semantic budget. Expiry before a complete
+trusted binding closes silently; expiry after binding but before
+`try_commit_admission` returns `deadline_exceeded`. Cancellation/deadline
+winning commit-admission arbitration prevents the following mutation
+transaction and produces no new candidate or terminal receipt.
 The atomic ordering is binary: cancellation/deadline ordered before the
-terminal transaction prevents it; cancellation/deadline ordered after the
-committed transaction reports `already_complete`/cannot relabel it, and the
-adapter returns or replays the terminal signed result. No observer can order
-inside the transaction. Workers check cancel/deadline at
-bounded work intervals and immediately before entering every durable
+commit-admission permit prevents commit work; once the permit is issued,
+cancellation/deadline reports `already_complete` and cannot relabel the later
+durable result. The permit itself is not the linearization point. The durable
+candidate-creation or combined terminal transaction is indivisible; the
+adapter returns or replays its signed result and no observer can order inside
+it. Workers check cancel/deadline at bounded work intervals and call
+`try_commit_admission` immediately before entering every durable mutation
 linearization transaction.
 
 `shutdown` first linearizes `healthy -> closed-to-new-work`, rejects new work,
-and drains already-linearized operations. It cancels pending operations, waits
+and drains commit-admitted operations. It cancels pending operations, waits
 up to its configured monotonic drain deadline, then kills the owned process
-group. A publish not linearized before shutdown/cancel cannot publish during or
-after drain. Replay storage and the current-root CAS determine restart state;
+group. A publish not commit-admitted before shutdown/cancel cannot publish
+during or after drain. Replay storage and the current-root CAS determine restart state;
 process exit timing never does.
 
 ### 14.20 Closed initialization negotiation

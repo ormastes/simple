@@ -22,6 +22,12 @@ virtual views, MCP boundaries, search providers, refactoring transactions,
 trace authority, rebalancing proposals, promotion proposals, security, and
 performance. Physical FUSE/ProjFS mounts remain deferred adapters.
 
+The normative focused extension
+`spipe_knowledge_compiler_cooperative_streaming.md` owns provider raw-byte
+transport, iterative JSON/SHA/Unicode analysis, cooperative deadline and
+cancellation admission, portable process statistics, and the migration
+gate from honest protocol-1.0 `cancel:false` to qualified `cancel:true`.
+
 ## 2. Architectural Invariants
 
 1. There is exactly one canonical content copy and one immutable UID per
@@ -556,6 +562,18 @@ are untrusted: validate framing, schema, bounds, UTF-8/numbers, snapshot/query
 binding, document-ID membership, ordering, and explanation consistency before
 use or caching. Malformed, replayed, cross-snapshot, or extra-document responses
 reject the provider generation and cannot poison persistent caches.
+
+Protocol 1.0 separates transport evidence from semantic provider errors. A
+payload-free local `TransportDiagnosticV1` records `invalid_utf8` or
+`frame_too_large`; before a complete typed envelope is host-bound, either class
+closes the transport silently and cannot fabricate a `ProviderResponseV1`.
+Only an applicable bound operation may carry a `ProviderErrorV1`. Its semantic
+deadline is 1..30,000 milliseconds inclusive and starts when the decoder
+accepts the first frame-header byte, not when parsing or dispatch completes.
+The focused `spipe_knowledge_compiler_cooperative_streaming.md` architecture
+owns the byte-stream, diagnostic, deadline, and commit-admission mechanics;
+durable provider transactions remain the semantic mutation linearization
+authority.
 
 ## 9. Rebalancing and Promotion Boundaries
 

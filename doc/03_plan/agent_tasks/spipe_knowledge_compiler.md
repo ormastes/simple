@@ -20,6 +20,74 @@ Wave 0 derives and publishes these names and versioned contracts from accepted r
 - Core: `KnowledgeCompiler`, `KnowledgeSnapshot`, `KnowledgeDelta`, `ArtifactRecord`, `SectionRecord`, `TraceEdge`, `DiagnosticRecord`. `KnowledgeDelta` is the sole incremental envelope and contains ordered `ArtifactDelta`, `GraphDelta`, and `IndexDelta` payloads; those payload types are not competing top-level update protocols.
 - Internal ports: `LexicalSearchPort`, `SemanticSearchPort`, `SymbolIndexPort`, and `ProjectionPort`. Core services depend only on these exact `*Port` contracts; no generic search or source-symbol port alias is part of the frozen interface.
 - Provider contracts: `SearchProvider`, `SourceSymbolProvider`, and `ProjectionProvider` cover in-process, process, and server-backed implementations. Adapter mappings are explicit: every search provider is wrapped before injection; `InProcessSearchProviderAdapter` wraps the dependency-free JavaScript `SearchProvider` and satisfies `LexicalSearchPort` plus `SemanticSearchPort` only when that capability is advertised, while `SearchProviderAdapter` wraps configured process/server search providers under the same port rules. `SourceSymbolProviderAdapter` satisfies `SymbolIndexPort`, and `ProjectionProviderAdapter` satisfies `ProjectionPort`. `KnowledgeCompiler` sees only the internal ports and never a provider directly.
+- Provider streaming/control contracts: `ProviderByteStreamPort`,
+  `ProviderFrameDecoderV1`, `ProviderFrameEncoderV1`,
+  `ProviderRequestControlPort`, `ProviderWorkMachineV1`, and
+  `ProviderSessionOwnerV1`. Protocol 1.0
+  remains one logical request/response per frame; only transport progress and
+  bounded computation are incremental. `ProviderSessionOwnerV1` owns one active
+  work machine plus exactly 16 queued ordinary requests and independently dispatches fully
+  validated `cancel`/`shutdown` control frames. Protocol 1.0 requires the exact
+  `cancel:true, stats:true` capability object; the current `cancel:false` or
+  platform-varying `stats:false` state is red/nonconforming until production
+  owners pass the matrix. Helpers or synchronous dispatch cannot promote it.
+  The closed protocol-1.0 initialize schema remains byte-identical: queue,
+  pending-byte, transport-timeout, work-step, and checkpoint-gap limits are
+  host-local configuration/evidence, not new handshake fields. Advertising any
+  such field first requires an explicit compatible protocol minor.
+
+The six streaming interfaces have these frozen language-level operations; a
+lane may add private helpers but may not rename, merge, or bypass them:
+
+```text
+ProviderByteStreamPort.read_some(maximum_bytes: i64, deadline_at_ms: i64) -> ProviderByteReadV1
+ProviderByteStreamPort.write_some(bytes: [u8], offset: i64, maximum_bytes: i64, deadline_at_ms: i64) -> ProviderByteWriteV1
+ProviderFrameDecoderV1.configured(limits: ProviderTransportLimitsV1) -> Result<ProviderFrameDecoderV1, text>
+ProviderFrameDecoderV1.push(bytes: [u8], offset: i64, observed_at_ms: i64) -> ProviderFrameDecodeStepV1
+ProviderFrameDecoderV1.take_complete() -> Result<ProviderFrameCompletionV1, text>
+ProviderFrameEncoderV1.configured(payload: ProviderSegmentedBytesV1, limits: ProviderTransportLimitsV1) -> Result<ProviderFrameEncoderV1, text>
+ProviderFrameEncoderV1.complete() -> bool
+ProviderFrameEncoderV1.next_write(maximum_bytes: i64) -> ProviderFrameWriteLoanV1
+ProviderFrameEncoderV1.advance(written_bytes: i64) -> Result<(), text>
+ProviderRequestControlPort.register(request_id: text, first_header_at_ms: i64, requested_deadline_ms: i64, intent_hash: text) -> Result<ProviderRequestControlHandleV1, text>
+ProviderRequestControlPort.cancel(cancel_request_id: text, target_request_id: text) -> Result<ProviderCancelResultV1, text>
+ProviderRequestControlPort.try_commit_admission(request: ProviderRequestControlHandleV1, intent_hash: text) -> Result<ProviderCommitAdmissionPermitV1, text>
+ProviderRequestControlPort.complete(permit: ProviderCommitAdmissionPermitV1, outcome_hash: text) -> Result<(), text>
+ProviderWorkMachineV1.request_id() -> text
+ProviderWorkMachineV1.step(lease: ProviderStepLeaseV1, budget: ProviderBudgetPort, checkpoint: ProviderCheckpointPort) -> ProviderWorkStepV1
+ProviderSessionOwnerV1.configured(service: SpipeProviderServiceV1, control: ProviderRequestControlPort, limits: ProviderLimitContractV1, stats: ProviderProcessStatsPort) -> Result<ProviderSessionOwnerV1, text>
+ProviderSessionOwnerV1.run_tick(stream: ProviderByteStreamPort) -> Result<ProviderSessionTickV1, text>
+ProviderSessionOwnerV1.finished() -> bool
+```
+
+The focused architecture's Section 4.1 is the normative signature authority.
+Both byte results use the closed four-state status
+`data | timeout | eof | error`; positive progress is `data`, while zero-byte
+would-block is `timeout`, never data. Read and write each receive an absolute
+transport deadline. Each decode step carries exactly one
+`ProviderFrameDecodeEventV1`; its closed `kind` is `none | header | payload`.
+A payload event carries one bounded immutable `ProviderFramePayloadLoanV1`
+with exact `bytes`, `offset`, `count`, and `frame_payload_offset`. The loan is
+backed by uniquely decoder-owned staging and expires at the next mutable
+decoder call. `declared_payload_bytes: i64?` is absent only for pre-header
+`none`, and `payload: ProviderFramePayloadLoanV1?` is present only for
+`payload`. Header emits once before payload, payload offsets are contiguous,
+and `take_complete` returns metadata only. The decoder's payload count is the
+sole framing cursor; adapters may not buffer a second whole-frame copy.
+`ProviderCommitAdmissionPermitV1` binds request ID, registration generation,
+and intent hash. It decides cancel/deadline eligibility only and is not a
+mutation linearization point; durable candidate creation or the combined
+terminal transaction remains authoritative. Work is capped so control is observed
+at least every 4,096 input bytes or equivalent bounded inner-loop units.
+`ProviderSessionOwnerV1.run_tick` performs bounded transport/control/work/output
+progress and never hides an unbounded retry loop.
+
+The parser maxima are also frozen here: 16 simultaneously open JSON object or
+array containers, 262,144 lexical JSON tokens, and 65,536 aggregate members;
+each completed object name/value pair and each completed array element counts
+once. Implementations may configure stricter per-operation limits, never wider
+ones. These and the queue/checkpoint limits remain host-local under protocol
+1.0 as stated above.
 - Mutations: `RefactorPlan`, `TransactionReceipt`, `RebalanceProposal`, `PromotionCandidate`. `RefactorPlan` is the only mutation-plan contract name.
 - Protocol operations: `spipe_list`, `spipe_read`, `spipe_search`, `spipe_resolve`, `spipe_trace`, `spipe_diagnostics`.
 - Phase exchange: the task/research/architecture/spec/implement/refactor/verify/ship UID input/output records used by Wave 7. Their contracts freeze in Wave 0; harness generation remains a separate Wave 9 deliverable.
@@ -84,6 +152,48 @@ result nodes remain Wave 7 work.
 **Depends on:** Waves 2–3 contracts. **Owners:** C owns only the common search/scorer paths; D owns only the dependency-free SPipe fallback provider, `InProcessSearchProviderAdapter`, and SPipe command integration; E owns only the DBFS compatibility-facade paths for this wave.
 **Deliverables:** C publishes shared documents/analyzer/corpus stats/scorer/top-k/explanations/provider protocol and exact + BM25 + graph candidate fusion using deterministic Reciprocal Rank Fusion; D implements the dependency-free fixed-point JavaScript fallback as an in-process `SearchProvider`, always wraps it with `InProcessSearchProviderAdapter` before satisfying internal search ports, and adds initial search/resolve/read commands; E migrates the DBFS scorer compatibility facade to the canonical common scorer without editing C's paths. The shared golden corpus and adapter conformance kit cross-check all three owned outputs. Remaining textual, embedded, and server database adapters consume this contract but are implemented only in Wave 10.
 **Exit gates:** provider ordering/ties and RRF explanations match golden results; real document lengths are used by the DBFS path; DBFS legacy entry points preserve compatibility while producing canonical-scorer golden parity; embeddings are optional; incremental index equals clean rebuild; the adapter conformance kit is frozen for Wave 10.
+
+#### Wave 4 streaming/deadline fan-out
+
+The best-model/merge-owner pass freezes the interfaces above, the
+`W4-SRCH-28` through `W4-SRCH-39` matrix in the system-test plan, the existing
+manual flow `step("Search and trace artifacts")`, and the single system checker
+`check_spipe_provider_parity` before any sidecar edits. Parallel ownership is
+non-overlapping:
+
+| Sublane | Exclusive paths | Required return | Forbidden overlap |
+|---|---|---|---|
+| `W4-PROD-STREAM` | `src/app/spipe_knowledge_provider/{byte_stream,frame_decoder,encoder,request_control,work_machine,session_owner,main,wire_dispatch,wire_core,wire_types,protocol,query_clock}.spl` | one-frame incremental ingress/egress, first-byte timing, one-active+16 FIFO, immediate control, exact progress counters | test fixtures/specs; search/scoring internals; durable lifecycle internals except calls through their published ports |
+| `W4-TEST-BYTES` | `test/fixtures/spipe_controlled_work/controlled_work_proof.spl`, `test/01_unit/app/spipe_knowledge_provider/{provider_controlled_work_import_smoke_spec,provider_streaming_limits_spec}.spl`, `examples/05_stdlib/spipe/test/fixture/wave4_search/provider_protocol_vectors.json` | W4-28–31 vectors and standalone/imported-runtime evidence | production provider code; session/fault spec; system spec/manual/checker |
+| `W4-TEST-CONTROL` | `test/01_unit/app/spipe_knowledge_provider/{provider_deadline_control_spec,provider_session_owner_spec}.spl` | W4-32–36 deterministic boundary clocks plus scripted-pipe live cancel/shutdown frames, FIFO, state-digest, commit/fsync races, and partial-write faults | production provider code; byte/stat specs; system spec/manual |
+| `W4-TEST-STATS` | `test/01_unit/app/spipe_knowledge_provider/provider_stats_count_explain_spec.spl` and ignored evidence root `build/test-artifacts/spipe-wave4/platform-stats/` | W4-37 positive independently recomputed statistics on every supported provider target; an unsupported target is `NOT EVIDENCE`, never `stats:false` conformance | provider implementation; other unit/system specs |
+| `W4-IMPORT-ADMISSION` | `test/01_unit/compiler/import/spipe_controlled_work_import_regression_spec.spl` only in this fan-out | W4-38/39 minimal standalone-versus-imported reproduction under the same admitted Stage 4 runtime; if red, a separately planned compiler-owner fix with exact paths | all production/compiler source; provider/search/DBFS files; broad compiler cleanup; bootstrap substitution |
+| `W4-SYSTEM-MERGE` | `test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl`, `doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.md`, `doc/07_guide/app/spipe/spipe_knowledge_compiler.md`, `examples/05_stdlib/spipe/test/integration/knowledge_wave4_search_test.js`, `examples/05_stdlib/spipe/test/fixture/wave4_search/{conformance_evidence_schema,conformance_applicability}.json`, `doc/03_plan/sys_test/spipe_knowledge_compiler.md`, and `doc/03_plan/agent_tasks/spipe_knowledge_compiler.md` | merge of W4-28–39, real assertions, zero-stub manual, current operator guidance, admitted provenance, evidence hashes | product implementation/protocol vectors; accepting a sidecar's self-reported PASS |
+
+`W4-PROD-STREAM` must publish the six interface signatures before test lanes
+bind production calls. Test-only proof functions are parity oracles, not an
+alternate product implementation. The import-admission lane starts only from
+its exact standalone-versus-imported reproducer; it must record rather than
+work around a short grammar/importer failure. Any source fix is a new
+compiler-owner sublane whose plan names its exact files after the reproducer
+identifies them; until then no compiler source path is shared or implicitly
+authorized.
+
+Sublanes return changed paths, exact commands, exit statuses, runtime/binary
+hash and Stage 4 provenance class, matrix rows exercised, and remaining red
+cells. Lower-model sidecars may draft vectors or audit evidence only. `/root`
+is the merge owner; a fresh best available normal/highest-capability reviewer,
+independent of all implementation/test sublanes, must inspect raw fragment,
+stall, cancellation, fault-injection, stats, and admission records before any
+W4-28–39 PASS mark or `cancel:true` promotion. The merge owner runs each
+acceptance command at most once after integration and observes the three-cycle
+cap.
+
+Streaming/control metrics are payload-free: lanes may retain phase, byte/member
+counts, timing, stop reason, validated request ID, and approved hashes, but no
+raw frame/payload, decoded private value, secret, or unauthorized artifact
+content. The final reviewer rejects a green test whose diagnostic artifact
+violates this evidence boundary.
 
 ### Wave 5 — Virtual resources, tools, and materialization
 
