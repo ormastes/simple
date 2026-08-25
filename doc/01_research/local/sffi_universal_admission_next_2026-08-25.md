@@ -2438,6 +2438,35 @@ each original site.  No new allocation, copy, scan, lookup, lock, hash,
 signature check, or generic dispatch was added.  Lower-volume filesystem calls
 and artifact proof remain outstanding; verified-and-signed admission stays 0.
 
+## simple-core filesystem complete authority checkpoint
+
+The remaining 22 filesystem ABI operations now each have a mandatory-inline
+minimal owner: C string length, stdio read/write/error/seek/tell, descriptor
+read/write/sync, mmap/unmap, directory create/open/read/close, rename/remove,
+tagged array allocation/push, byte-array allocation, and i64 pointer
+load/store.  The mid-file `remove` declaration was moved into the canonical
+declaration block and tagged `ffi, raw_ptr`.
+
+Together with the prior two checkpoints, all 34 raw operations used by
+`core_fs.spl` are confined.  Twenty-seven owners require `raw_ptr`; seven
+handle/descriptor-only owners require only `ffi`.  The completed
+`simple-core-fs-authority.shs` ratchet passed and pins all four compiler memory
+intrinsics plus mandatory-inline policy.
+
+The final filesystem pass changed the authoritative census as follows:
+
+- raw call sites: 20,002 -> 19,990
+- missing authority: 16,019 -> 15,985
+- lexical unsafe: 3,064 -> 3,086
+- function unsafe: unchanged at 919
+- distinct called symbols/caller files: unchanged at 3,260 / 3,088
+
+All signed status, byte-count, position, pointer, and tagged-handle results are
+preserved.  Mandatory inlining adds no call dispatch, allocation, copy, scan,
+lookup, lock, hash, or signature check.  This proves static authority shape,
+not provider semantics or artifact identity; verified-and-signed admission
+remains 0.
+
 ## Pure Simple SSH cipher boundary checkpoint
 
 The general SSH cipher no longer declares or calls `serial_println` or
