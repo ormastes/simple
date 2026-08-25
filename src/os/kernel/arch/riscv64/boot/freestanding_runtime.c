@@ -211,8 +211,8 @@ __asm__(
 #endif
 
 static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
-/* Top of physical RAM, not 0x90000000: rt_riscv_qemu_ram_base() (0x80000000)
- * + rt_riscv_qemu_ram_size() (128 MiB) == 0x88000000. The previous
+/* Top of physical RAM, not 0x90000000: RISCV_QEMU_RAM_BASE (0x80000000)
+ * + RISCV_QEMU_RAM_SIZE (128 MiB) == 0x88000000. The previous
  * 0x90000000 limit reached 128 MiB past the end of QEMU virt's actual RAM,
  * so the bounds check below silently permitted allocations into memory that
  * does not exist (data lost or, worse, MMIO-region corruption on other
@@ -1763,18 +1763,6 @@ spl_u64 rt_riscv_noalloc_pmm_free_pages(void) {
 
 spl_u64 rt_riscv_noalloc_pmm_total_pages(void) {
     return g_riscv_pmm_total_pages;
-}
-
-spl_u64 rt_riscv_qemu_ram_base(void) {
-    return 0x80000000ULL;
-}
-
-spl_u64 rt_riscv_qemu_ram_size(void) {
-    return 128ULL * 1024ULL * 1024ULL;
-}
-
-spl_u64 rt_riscv_qemu_reserved_end(void) {
-    return 0x80400000ULL;
 }
 
 spl_i64 rt_time_now_unix_micros(void) {
