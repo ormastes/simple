@@ -3,7 +3,7 @@
 # mutation authorities; this client additionally owns bounded wire validation.
 
 use os.userlib.fs.{vfs_ipc_request_bytes}
-use os.userlib.ipc_protocol.{VFS_MKDIR, VFS_REMOVE, VFS_RMDIR, VFS_CHMOD}
+use os.userlib.ipc_protocol.{VFS_MKDIR, VFS_REMOVE, VFS_RMDIR, VFS_CHMOD, VFS_SYMLINK}
 
 pub const VFS_MUTATION_PATH_MAX_BYTES: u64 = 4096u64
 
@@ -64,4 +64,35 @@ pub fn vfs_chmod_checked(path: text, mode: u16) -> Result<bool, text>:
         return Err("malformed VFS mutation reply")
     if _read_u64_le(response) != 1u64:
         return Err("VFS mutation was not acknowledged")
+    Ok(true)
+
+pub fn vfs_symlink_checked(target: text, link_path: text) -> Result<bool, text>:
+    """Create one symbolic link through the canonical VFS capability owner.
+
+    The target is stored verbatim and may be relative. The link path is the
+    mutated namespace entry and therefore receives the normal root guard.
+    """
+    if target.len() == 0u64:
+        return Err("empty symbolic-link target")
+    if target.len() > VFS_MUTATION_PATH_MAX_BYTES:
+        return Err("symbolic-link target exceeds 4096-byte limit")
+    var payload: [u8] = []
+    var target_index: u64 = 0u64
+    while target_index < target.len():
+        val byte = target.byte_at(target_index)
+        if byte == 0u8:
+            return Err("symbolic-link target contains NUL")
+        payload.push(byte)
+        target_index = target_index + 1u64
+    payload.push(0u8)
+    val link_bytes = _mutation_path_bytes(link_path)?
+    if payload.len() + link_bytes.len() > VFS_MUTATION_PATH_MAX_BYTES:
+        return Err("symbolic-link request exceeds 4096-byte limit")
+    for byte in link_bytes:
+        payload.push(byte)
+    val response = vfs_ipc_request_bytes(VFS_SYMLINK, payload)?
+    if response.len() != 8u64:
+        return Err("malformed VFS symbolic-link reply")
+    if _read_u64_le(response) != 1u64:
+        return Err("VFS symbolic-link mutation was not acknowledged")
     Ok(true)

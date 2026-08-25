@@ -1431,15 +1431,25 @@ impl MountTable:
             case nil: Err(FsError.StaleHandle)
 
     me fn link(target: text, link_path: text) -> Result<(), FsError>:
-        """Hard link — always returns ENOTSUP; uses path-based resolution."""
-        val entry_opt = self.lookup_text(target)
-        match entry_opt:
-            case nil:
-                Err(FsError.NotFound)
-            case Some(entry):
-                self._generation_available(entry.id, true)?
-                val result = _driver_link_path_text(entry.driver, target, link_path)
-                self._advance_generation(entry.id, true)?
-                result
+        """Create a mount-local hard link when the resolved driver supports it."""
+        val target_resolved = self.resolve(Path(raw: target))?
+        val link_resolved = self.resolve(Path(raw: link_path))?
+        if target_resolved.mount_id.id != link_resolved.mount_id.id:
+            return Err(FsError.InvalidArg)
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            if self.mounts[i].id == target_resolved.mount_id:
+                val caps = FsCapabilitySet(bits: self.mounts[i].active_caps)
+                if not caps.has(Capability.Hardlinks):
+                    return Err(FsError.Unsupported)
+                self._generation_available_at(i, true)?
+                val result = _driver_link_path_text(
+                    self.mounts[i].driver,
+                    target_resolved.relpath.raw,
+                    link_resolved.relpath.raw)
+                self._advance_generation_at(i, true)?
+                return result
+            i = i + 1
+        Err(FsError.NotFound)
 export PositionedDriverKind, StableFileSnapshotLeaseV1, StableFileSnapshotInfoV1, StableFileSnapshotSealV1
 export DbfsRootMountSealV1, DbfsRootMountSealInfoV1
