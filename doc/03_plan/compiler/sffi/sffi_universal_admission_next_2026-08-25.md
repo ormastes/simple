@@ -46,6 +46,11 @@ their semantics without conflating a valid foreign zero with bridge failure.
 Candidate probing still performs one load attempt per candidate and admitted
 hot calls gain no additional lookup or allocation.
 
+Checkpoint: the LLVM adapter no longer creates an invalid `DynLib` when its
+provider is absent and no longer caches or invokes a null symbol. Provider and
+first-resolution failures are fatal; the established cached-symbol hot path is
+unchanged and gains no branch, lookup, allocation, or copy.
+
 ### 3. Complete resolved-HIR inventory
 
 Checkpoint: the bounded source ledgers now report 12,128 `rt_*` declaration
