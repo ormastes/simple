@@ -12,6 +12,34 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Simple-core dynamic-arithmetic authority checkpoint
+
+The pure-Simple `Any` arithmetic layer now retains only its four used raw
+interfaces; the unused `spl_f64_to_bits` declaration was removed.  All 18
+former ambient calls are routed through four mandatory-inline `ffi` owners.
+The focused `simple-core-any-ops-authority.shs` ratchet passed and pins the
+value providers, native/interpreter bit-conversion providers, and both
+compilers' mandatory-inline recognition.
+
+The successful paths retain the same O(1) tag tests, arithmetic, projections,
+and comparison results.  No branch, allocation, copy, lookup, lock, hashing,
+signing, or generic dispatch was added.  Integer division/remainder by zero or
+`INT64_MIN / -1` still yields integer zero in all three C, Rust, and
+pure-Simple runtime lanes.  That is an established ABI behavior with no error
+channel, but it also conflates invalid arithmetic with a valid result; it
+requires a separate cross-lane language-contract repair and is not claimed as
+verified by this authority checkpoint.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,676 -> 19,662
+- lexical unsafe: 3,179 -> 3,183
+- function unsafe: unchanged at 919
+- missing authority: 15,578 -> 15,560
+
+Production execution and exact artifact evidence remain unavailable, so
+verified-and-signed admission remains 0.
+
 ## Simple-core tagged-value authority checkpoint
 
 The pure-Simple tagged-value layer retains eight explicitly tagged raw
