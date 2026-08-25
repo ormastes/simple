@@ -1142,6 +1142,34 @@ Canonical JSON implementation and these focused cases are **in progress**;
 none is marked PASS by this design update. Existing request-control and UTF-8
 PASS evidence and the qualified SHA `W4-SRCH-31` FAIL/status below are unchanged.
 
+Focused canonical-emitter cases under `W4-SRCH-30` are also frozen and remain
+**in progress**:
+
+1. Every operation schema builder produces the exact flat immutable instruction
+   tape and rejects a non-NFC, duplicate, or out-of-order UTF-8 key, an unsafe
+   integer, and an over-limit plan before the emitter or sink advances.
+2. Exact-minus-one, exact, and plus-one boundaries cover the 262,144 plan
+   instructions, 256 instructions per step, 4,096 output bytes per step,
+   segment size, and `maximum_output_bytes`; they prove bounded staging and
+   rejection before oversized allocation or partial publication.
+3. One-byte, boundary-crossing, and irregular chunk schedules yield identical
+   canonical bytes and digest. Instrumentation proves each successful chunk is
+   appended and hashed from the exact same slice, followed by one checkpoint,
+   with one authoritative plan cursor and no replay or gap.
+4. Adversarial plan construction cannot introduce a map, `any`, raw JSON
+   fragment, recursive value, caller punctuation, join buffer, or second
+   cursor. Strings cover every canonical escape and multi-byte NFC boundary.
+5. Inject sink, SHA, budget, and checkpoint failure before byte zero and at
+   first/middle/final chunks. The first reason remains latched; subsequent
+   step/take/digest calls make no progress and return that reason. Partial sink
+   and hash state is unpublishable/discarded, with no retry, rollback, second
+   error response, or zero-copy claim.
+6. Only `ready` permits exactly one take of completed segments and digest;
+   `continue`, `failed`, and subsequent completed calls cannot publish either.
+
+No emitter source or focused test is accepted by this documentation update.
+Decoder and SHA execution records below remain authoritative and unchanged.
+
 #### 13.9.3 Planned artifacts and scenario allocation
 
 Current acceptance status: the work-control prerequisite is accepted and
@@ -1236,3 +1264,41 @@ remains `FAIL`. Before another qualified execution, capture bounded,
 payload-free stage progress receipts or use a provenance-qualified pure-Simple
 Stage 4 executable. The nine-scenario matrix, 1-MiB workload, and 180-second
 ceiling remain unchanged; no ten-scenario, Stage 4, or RSS claim is permitted.
+
+#### 13.9.5 Active canonical-JSON decoder execution record
+
+Fresh focused cycles produced `2/5`, `1/8`, and `7/8`. The final executed
+failure is test syntax in the nested-value assertion (`.unwrap().bytes()`), so
+no file is accepted and canonical-JSON status remains `IN PROGRESS`. The
+candidate also depends on an unaccepted `streaming_sha256` `Result`-wrapper
+fix.
+
+Acceptance still requires observable proof that invalid slice/budget/canonical
+input fails before SHA accounting or raw-cursor advancement, and that failure
+of any category in the atomic reservation leaves stack, root, and event state
+unchanged. In the next fresh session, rewrite only the nested assertion through
+an import-safe local binding and execute the unchanged eight-case focused spec
+once. A complete PASS must then receive highest-capability call-graph review;
+the JSON files and the SHA wrapper dependency are accepted separately or not
+at all. No partial count or source inspection closes this row.
+
+#### 13.9.6 Active canonical-response-emitter execution record
+
+Emitter status is `IN PROGRESS`. Cycle 1 ended at a parser failure; the syntax
+was fixed afterward without a behavioral result. Cycle 2 executed `5/5` on the
+pre-ownership draft, but highest-capability review found a structural ownership
+failure. That result is not accepted evidence, and no cycle-2 source/spec is
+accepted.
+
+The redesigned candidate owns sink, SHA, budget, and checkpoint, rejects
+forged plans and an incorrect predicted output size before emission, finalizes
+before `ready`, and permits exactly one bytes/digest take only from `ready`.
+Cycle 3 executed `0/5` because the focused spec used a nested `.bytes()` form
+unsupported by the compiler. The expression was mechanically split into a
+local after the run but remains unexecuted. No emitter source/spec is accepted.
+
+One fresh-session execution of the unchanged five-case matrix is the next
+allowed evidence step. Only a complete PASS proceeds to highest-capability
+call-graph review of the actual ownership, validation, append/hash/checkpoint,
+terminal failure, finalization, and publication paths. The canonical decoder's
+separate executed result remains `7/8`; the SHA gate remains `W4-SRCH-31 FAIL`.

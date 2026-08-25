@@ -379,6 +379,29 @@ of strings and `join` them. A segmented buffer is necessary because protocol
 1.0's length prefix precedes the payload. The response-byte ceiling bounds that
 buffer, and the encoder computes the prefix from exact segment lengths.
 
+`response_plan.spl` is the sole owner of `ProviderResponsePlanV1`. A plan is a
+flat immutable instruction tape, not a JSON tree: it contains only closed,
+typed emission instructions in their final schema order. The plan has explicit
+maximum instruction and maximum encoded-step limits. A protocol-1.0 plan holds
+at most 262,144 instructions; one step consumes at most 256 instructions and
+emits at most 4,096 bytes, with stricter configured operation limits permitted.
+Each step returns one of the closed results `continue`, `ready`, or `failed`; there is no recursive
+descent, map/`any` payload, caller-provided JSON fragment, string-array join, or
+second emission cursor. Operation-specific schema builders validate all values
+before constructing the tape, including ordered UCD-17 NFC UTF-8 object keys
+and the protocol safe-integer range. Thus the emitter never discovers a schema
+or canonicality error after output has begun.
+
+The emitter owns the sole plan cursor and writes through the bounded segmented
+sink with total staging no greater than `maximum_output_bytes`. For each
+successful chunk, the sink append and SHA update consume the exact same byte
+slice, followed by the required checkpoint; no alternate serialization or
+rehash cursor exists. A sink, SHA, budget, or checkpoint failure terminally
+latches the first reason. Any partially filled internal sink and partially
+advanced hash are then unpublishable and discarded: there is no retry, `take`,
+digest publication, rollback, or zero-copy claim. Only `ready` permits the
+owner to take the completed segments and digest exactly once.
+
 `segmented_bytes.spl` is the target sole owner of
 `ProviderSegmentedBytesV1`; the accepted sink consumes that shared value
 contract. The unaccepted `frame_encoder.spl` still declares a parallel value
@@ -583,3 +606,51 @@ matrix, but no candidate matrix files are accepted and `W4-SRCH-31` remains
 stage-level progress receipt or the same unchanged matrix under a
 provenance-qualified pure-Simple Stage 4 executable; neither the ceiling nor
 the nine-scenario oracle may be weakened.
+
+## 13. Active iterative canonical-JSON verification status
+
+Fresh focused verification attempts produced `2/5`, `1/8`, and `7/8`; none is
+acceptance evidence. The sole remaining executed failure is test syntax in the
+nested-value case (`.unwrap().bytes()`), not a demonstrated decoder result.
+No canonical-JSON implementation or test file from these attempts is accepted.
+
+Static inspection also leaves two architectural gates open: every slice range,
+budget, and canonicality precondition must be validated before SHA accounting
+or advancement of the authoritative raw-byte cursor; and the complete
+multi-category reservation must succeed atomically before stack, root, or
+event state mutates. A `streaming_sha256` `Result`-wrapper correction used by
+the candidate remains an unaccepted dependency and cannot be treated as
+transitive decoder evidence.
+
+The next fresh session must first replace the invalid nested-test expression
+with an import-safe local binding, then execute the unchanged focused matrix
+once. Only a complete PASS may proceed to highest-capability review of the
+actual validation, reservation, cursor, stack/root, and event call graph. The
+decoder, its focused tests, and any required SHA wrapper change remain separate
+acceptance units until each dependency is qualified; otherwise status stays
+`IN PROGRESS`.
+
+## 14. Active canonical-response-emitter verification status
+
+The emitter lane remains `IN PROGRESS`. Cycle 1 stopped at a parser failure;
+that test syntax was corrected, but the cycle produced no behavioral evidence.
+Cycle 2 then executed `5/5` against the pre-ownership draft, after which
+highest-capability review returned structural `FAIL`: the emitter did not own
+the sink, SHA, budget, and checkpoint boundary required above. That green count
+is therefore not acceptance evidence and no cycle-2 source or spec is accepted.
+
+The redesigned candidate owns those four capabilities, rejects forged plans
+and an inexact predicted output size before emission, finalizes SHA before
+entering `ready`, and makes `ready` the sole state permitting exactly-once
+`take` of bytes and digest. Cycle 3 nevertheless executed `0/5` because the
+focused spec used a nested `.bytes()` expression unsupported by the current
+compiler. The expression was mechanically split into an import-safe local
+afterward, but that correction is unexecuted. No emitter source or spec is
+accepted.
+
+The next fresh session may execute the unchanged focused matrix once. Only a
+complete PASS may proceed to highest-capability call-graph review of plan
+prevalidation, exact-size validation, sole cursor/capability ownership,
+append/hash/checkpoint ordering, terminal failure latching, finalize-before-
+ready, and ready-only exactly-once publication. The decoder remains at its
+separate executed `7/8` status and `W4-SRCH-31` remains `FAIL`.

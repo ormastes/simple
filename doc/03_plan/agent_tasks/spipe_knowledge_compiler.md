@@ -190,7 +190,7 @@ non-overlapping:
 | Sublane | Exclusive paths | Required return | Forbidden overlap |
 |---|---|---|---|
 | `W4-RUNTIME-BYTE-POLL` | runtime-owner declarations/implementations plus the concrete `src/app/io` inherited-stdio adapter named by its accepted mini-design | binary-safe pollable partial read/write with absolute monotonic deadline and distinct data/would-block/deadline/EOF/error evidence on every admitted target | provider framing/session code; post-return clock checks around blocking reads; treating piped-child empty-string sentinels as authoritative status |
-| `W4-PROD-STREAM` | `src/app/spipe_knowledge_provider/{byte_stream,frame_decoder,segmented_bytes,segmented_sink,encoder,request_control,work_machine,session_owner,main,wire_dispatch,wire_core,wire_types,protocol,query_clock}.spl` | one-frame incremental ingress/egress, sole canonical segmented-byte value owner, precharged bounded sink growth, first-byte timing, one-active+16 FIFO, immediate control, exact progress counters | test fixtures/specs; search/scoring internals; durable lifecycle internals except calls through their published ports |
+| `W4-PROD-STREAM` | `src/app/spipe_knowledge_provider/{byte_stream,frame_decoder,segmented_bytes,segmented_sink,response_plan,encoder,request_control,work_machine,session_owner,main,wire_dispatch,wire_core,wire_types,protocol,query_clock}.spl` | one-frame incremental ingress/egress, sole canonical segmented-byte and response-plan owners, precharged bounded sink growth, first-byte timing, one-active+16 FIFO, immediate control, exact progress counters | test fixtures/specs; search/scoring internals; durable lifecycle internals except calls through their published ports |
 | `W4-TEST-BYTES` | `test/fixtures/spipe_controlled_work/controlled_work_proof.spl`, `test/01_unit/app/spipe_knowledge_provider/{provider_controlled_work_import_smoke_spec,provider_streaming_limits_spec}.spl`, `examples/05_stdlib/spipe/test/fixture/wave4_search/provider_protocol_vectors.json` | W4-28–31 vectors and standalone/imported-runtime evidence | production provider code; session/fault spec; system spec/manual/checker |
 | `W4-TEST-CONTROL` | `test/01_unit/app/spipe_knowledge_provider/{provider_deadline_control_spec,provider_session_owner_spec}.spl` | W4-32–36 deterministic boundary clocks plus scripted-pipe live cancel/shutdown frames, FIFO, state-digest, commit/fsync races, and partial-write faults | production provider code; byte/stat specs; system spec/manual |
 | `W4-TEST-STATS` | `test/01_unit/app/spipe_knowledge_provider/provider_stats_count_explain_spec.spl` and ignored evidence root `build/test-artifacts/spipe-wave4/platform-stats/` | W4-37 positive independently recomputed statistics on every supported provider target; an unsupported target is `NOT EVIDENCE`, never `stats:false` conformance | provider implementation; other unit/system specs |
@@ -254,6 +254,21 @@ field validity, exact spans/NFC/key ordering/escape rules, primitive-root and
 member/depth accounting, one SHA/cursor, and terminal API behavior, and the
 focused cases execute post-fix. This status does not change or supersede the
 SHA evidence paragraph above.
+
+Canonical response emission is also **in progress** and is a separate
+acceptance unit. `response_plan.spl` solely owns a flat immutable typed
+instruction tape capped at 262,144 instructions. Each step consumes at most
+256 instructions and emits at most 4,096 bytes, subject to stricter configured
+limits. Typed schema builders must
+prevalidate final field order, ordered NFC UTF-8 keys, duplicate keys, safe
+integers, and operation limits. The emitter owns the only cursor and returns
+only `continue`, `ready`, or `failed`; maps, `any`, raw fragments, recursion,
+joins, and staging beyond `maximum_output_bytes` are forbidden. Each accepted
+chunk must be appended and hashed from the identical slice before checkpoint.
+A sink/SHA/budget/checkpoint fault terminally latches, makes partial sink/hash
+state unpublishable and discarded, and forbids retry/take/digest. Only `ready`
+permits one take and digest. This contract makes no rollback or zero-copy
+claim, and it does not change decoder or SHA evidence status.
 
 Budget admission in this wave uses the exact
 `ProviderBudgetPort.charge_all(charges: [ProviderBudgetChargeV1])` owner
@@ -381,3 +396,37 @@ receipts or supply a provenance-qualified pure-Simple Stage 4 executable for
 the unchanged matrix. It must not rerun unchanged, weaken 180 seconds, shrink
 the 1-MiB oracle, claim ten scenarios, claim Stage 4, or borrow an RSS value
 from the bounded probe.
+
+## 9. Active canonical-JSON decoder handoff
+
+The latest fresh focused verification cycles reported `2/5`, `1/8`, and
+`7/8`. The remaining executed failure is invalid nested-test chaining at
+`.unwrap().bytes()`. No candidate decoder, focused test, or dependency file is
+accepted, and the lane remains `IN PROGRESS`.
+
+The next owner must, in a fresh session: (1) bind the nested `unwrap()` value to
+an import-safe local before calling `bytes()`; (2) run the unchanged eight-case
+focused spec once; (3) on a complete PASS only, request highest-capability
+review proving validation precedes SHA/raw-cursor advancement and one atomic
+multi-category reservation precedes stack/root/event mutation; and (4) return
+separate scoped acceptance for the decoder/spec and for the currently
+unaccepted `streaming_sha256` `Result`-wrapper dependency. A source-only fix or
+partial result must not advance Wave 4S-C status.
+
+## 10. Active canonical-response-emitter handoff
+
+The emitter lane remains `IN PROGRESS`. Cycle 1 failed to parse and was
+mechanically corrected. Cycle 2 then reported `5/5` for the pre-ownership
+draft, but highest-capability review returned structural `FAIL`, so neither
+that apparent PASS nor its source/spec is accepted. The redesign makes the
+emitter own sink, SHA, budget, and checkpoint; prevalidates forged plans and
+the exact output size; finalizes SHA before `ready`; and permits exactly one
+take only from `ready`.
+
+Cycle 3 executed `0/5` because a nested `.bytes()` expression is unsupported by
+the current compiler. It was mechanically split through an import-safe local
+after the run, but the correction is unexecuted. No emitter source or spec is
+accepted. The next owner must run the unchanged focused five-case spec once in
+a fresh session and, on a complete PASS only, request highest-capability
+call-graph review of the redesigned ownership/prevalidation/finalization/
+publication boundary. Decoder remains `7/8`; SHA remains `W4-SRCH-31 FAIL`.

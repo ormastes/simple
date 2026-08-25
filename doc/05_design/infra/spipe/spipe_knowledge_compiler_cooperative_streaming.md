@@ -382,20 +382,27 @@ class ProviderSegmentedByteSinkV1 with ProviderByteSinkPort:
     me take() -> ProviderSegmentedBytesV1
 
 class ProviderCanonicalJsonEmitterV1:
-    static fn configured(plan: ProviderResponsePlanV1) \
-        -> ProviderCanonicalJsonEmitterV1
+    static fn configured(plan: ProviderResponsePlanV1,
+                         maximum_output_bytes: i64) \
+        -> Result<ProviderCanonicalJsonEmitterV1, text>
     me step(limits: ProviderStepLimitsV1,
             sink: ProviderByteSinkPort,
             sha: Sha256StreamV1,
             budget: ProviderBudgetPort,
             checkpoint: ProviderCheckpointPort) \
-        -> Result<ProviderWorkStepKindV1, text>
+        -> ProviderEmitterStepV1
+    me take_ready() -> Result<ProviderEmittedResponseV1, text>
 ```
 
-Response schemas supply fields in canonical byte order. The emitter uses an
-explicit stack and string-escape cursor. It emits at most the step limit,
-and updates SHA from the same bytes. It never forms `parts`, calls `join`, or
-serializes into a second full string. `ProviderSegmentedBytesV1` has one target
+Response schemas supply fields in canonical byte order through the flat plan;
+the emitter uses one tape cursor plus a bounded string-escape subcursor. A plan
+contains at most 262,144 instructions. One call consumes at most 256
+instructions and emits at most 4,096 bytes, or stricter positive configured
+limits. It updates SHA from the same emitted slice. It never forms `parts`,
+calls `join`, recurses, maintains a JSON value stack, or serializes into a
+second full string. `ProviderEmitterStepV1.kind` is closed to
+`continue | ready | failed`; only `failed` carries the latched closed reason.
+`ProviderSegmentedBytesV1` has one target
 canonical owner in `segmented_bytes.spl`; the accepted sink imports it. The
 unaccepted `frame_encoder.spl` still declares a parallel type, so migrating the
 encoder to that owner is a red/future obligation and current imports do not
@@ -406,9 +413,9 @@ through one `budget.charge_all` batch, all before mutation or allocation. The
 batch aggregates duplicate categories with checked arithmetic and validates
 all category limits before committing any counter, so a second-category
 failure leaves output-byte and allocation counters unchanged. Segments stay bounded.
-`take` moves all segments to the returned owner and resets the sink without
-retaining aliases. The segmented sink is necessary because the protocol prefix
-requires payload length before output.
+The emitter, not an arbitrary caller, may move the sink through `take_ready`,
+and only after it reaches `ready`; no alias remains. The segmented sink is
+necessary because the protocol prefix requires payload length before output.
 
 ## 4. Incremental SHA-256 contract
 
@@ -781,6 +788,35 @@ linearization point.
 A fake stepping clock can test state transitions, but only a real framed cancel
 through `ProviderByteStreamPort` proves negotiated cancellation.
 
+### 9.1 Typed response-plan and emitter contract
+
+`src/app/spipe_knowledge_provider/response_plan.spl` exclusively defines
+`ProviderResponsePlanV1`. It stores a flat immutable tape of closed typed
+instructions and its validated instruction/encoded-step ceilings. Typed
+operation builders alone may create plans. They prevalidate exact schema field
+order, UCD-17 NFC UTF-8 key order, duplicate keys, safe integers, and all
+operation limits before returning a plan. The tape admits no map, `any`, raw
+JSON fragment, recursive value, caller-controlled punctuation, or join-based
+buffer.
+
+Protocol 1.0 caps a plan at 262,144 instructions. A step consumes at most 256
+instructions and emits at most 4,096 bytes, with stricter positive operation
+limits allowed. These are hard maxima, not scheduler suggestions.
+
+`ProviderCanonicalJsonEmitterV1` owns the only tape cursor. One bounded step
+returns exactly `continue`, `ready`, or `failed`, emits no more than the granted
+work/output limits, and keeps total segmented staging at or below
+`maximum_output_bytes`. For every accepted output chunk it appends and hashes
+the identical `(bytes, offset, count)` slice and then checkpoints. The design
+does not claim rollback or zero-copy behavior.
+
+The first sink, SHA, budget, or checkpoint failure is terminal and stable.
+Later step/take/digest calls return that failure without progress. Partially
+written internal segments and partially advanced SHA state are unpublishable,
+are discarded with the failed emitter, and cannot be retried or taken. Only a
+`ready` result authorizes exactly one move of both completed segmented bytes and
+digest to the session owner; subsequent calls report emitter completion.
+
 ## 10. Startup, hot path, memory, and invalidation
 
 ### 10.1 Startup
@@ -866,7 +902,14 @@ These subwaves refine parent Wave 4 and precede any accepted `cancel:true`.
 ### Wave 4S-C — Iterative JSON and incremental SHA
 
 - Add UTF-8 lexer, explicit JSON stack, typed envelope builders, iterative
-  emitter, segmented sink, and streaming SHA.
+  emitter, flat immutable response plan, segmented sink, and streaming SHA.
+- Make `response_plan.spl` the sole plan owner. Typed schema builders must
+  prevalidate ordered NFC UTF-8 keys and safe integers; the emitter owns one
+  cursor and exposes only `continue | ready | failed`. Reject maps, `any`, raw
+  fragments, recursion, joins, and staging above `maximum_output_bytes`.
+- Terminally latch sink/SHA/budget/checkpoint failure. Partial internal
+  sink/hash state is discarded and permits no retry, take, or digest; only
+  `ready` publishes both outputs. Do not claim rollback or zero-copy.
 - Keep whole-value compatibility facades outside the provider hot path.
 - Exercise UTF-8 with every single split and deterministic mixed/random
   partition sequences through two-, three-, and four-byte scalars and
@@ -962,7 +1005,7 @@ Required evidence includes:
 |---|---|
 | raw framing | every header/payload split, coalesced frames, short/zero/would-block read/write, timeout/EOF/error; exactly one header event precedes contiguous nonempty bounded owned payload chunks; concatenated chunk bytes equal the declared payload once with no gap/overlap/replay; completion returns metadata only |
 | prebinding safety | oversize, malformed header, invalid UTF-8, noncanonical JSON silently close with no reflected content |
-| iterative JSON | depth/token/member/string limits, duplicate/out-of-order keys, integer/escape canonicality, no recursion |
+| iterative JSON | depth/token/member/string limits, duplicate/out-of-order keys, integer/escape canonicality, no recursion; typed flat response-plan instruction/step ceilings; schema-builder rejection of non-NFC/out-of-order/duplicate keys and unsafe integers before emission; identical append/hash chunks; terminal sink/SHA/budget/checkpoint faults leave partial state unpublishable; only `ready` permits one take/digest |
 | incremental SHA | state owns eight digest words, one partial 64-byte block, and one fixed reusable owner-local 64-word message schedule that remains O(1), is never passed/returned, and is not reallocated per block; this is not a zero-copy claim; lengths 0/1/55/56/63/64/65 exercise every single split; 4095/4096/4097/1 MiB exercise exact block/quantum/end boundaries plus multiple deterministic fixed-seed irregular partitions crossing SHA block boundaries; frozen receipt/replay/candidate/payload and domain-input preimages flow through their authoritative exported builders, and every partition preserves exact digest/canonical-byte parity rather than merely comparing a one-shot output; negative offset/count and `offset > len` reject before reading/charging bytes, output, or buffered/compressed-content mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed or digest published by rejection; charge failure prevents its compression, while checkpoint failure terminalizes the stream without digest publication and need not roll back prior compressed state; 4,097-byte full-versus-bounded parity and the cycle-3 guard-probe PASS at 1.26 s/43,852 KiB are bounded optimization evidence only; acceptance still requires the full qualified 1-MiB post-fix PASS |
 | incremental UTF-8 | every single split plus deterministic mixed/random partition sequences preserve valid decoded bytes; negative offset/count and `offset > len` reject before reading/charging bytes, output, or carry mutation, terminally latch the recorded range reason, and make later update/finalize calls fail with that reason; no semantic bytes are consumed; malformed/truncated input fails identically in an executed post-fix PASS |
 | Unicode | NFC split sequences, Hangul, combining reorder/compose, U+0130 expansion, Final_Sigma lookahead across chunks, long carry failure |
@@ -1023,3 +1066,51 @@ that identifies fixture, reference, update/compression, checkpoint, and final
 emission progress, or acquire a provenance-qualified pure-Simple Stage 4
 executable and run the unchanged matrix. Do not extend the timeout, reduce the
 1-MiB workload, relabel the matrix as ten scenarios, or infer an RSS value.
+
+## 15. Iterative canonical-JSON candidate status
+
+The fresh focused cycles ended at `2/5`, `1/8`, and `7/8`. The remaining
+executed failure is the nested-value test expression `.unwrap().bytes()`, so
+the run does not establish either a product failure or a PASS. No decoder,
+focused-spec, or dependency file from this candidate is accepted.
+
+Before consuming or hashing a byte slice, the decoder must validate its range,
+budget, and canonicality preconditions; the authoritative raw-byte cursor may
+advance only afterward. Likewise, the event's complete multi-category charge
+must be reserved atomically before mutation of the container stack, root
+result, or emitted-event state. The candidate's `streaming_sha256`
+`Result`-wrapper fix is an unaccepted dependency and must not be folded into
+JSON acceptance implicitly.
+
+The exact fresh-session sequence is: bind the nested `unwrap()` result to a
+local before requesting `bytes()`; run the unchanged eight-case focused spec
+once; if and only if it passes, perform highest-capability call-graph review of
+validation-before-SHA/cursor and reservation-before-mutation; then accept the
+decoder, spec, and any independently qualified SHA dependency as explicitly
+scoped units. Until then this design lane is `IN PROGRESS`.
+
+## 16. Canonical response-emitter candidate status
+
+This lane is `IN PROGRESS`. Cycle 1 encountered a parser failure, which was
+fixed without producing an executed behavioral result. Cycle 2 passed `5/5`
+on the earlier pre-ownership draft, but subsequent highest-capability review
+returned structural `FAIL`: capability ownership and terminal publication did
+not satisfy the frozen contract. Neither the green count nor its source/spec is
+accepted.
+
+The redesigned emitter owns its segmented sink, SHA stream, budget, and
+checkpoint. Its typed builder rejects forged plans, and configuration verifies
+the exact predicted output size against the bounded plan before emission. SHA
+must finalize successfully before transition to `ready`; only `ready` permits
+one `take_ready`, after which neither bytes nor digest can be taken again.
+Cycle 3 executed `0/5` because a nested `.bytes()` test expression hit a
+compiler limitation. That expression was mechanically split into a local
+after the run and has not been executed. No candidate emitter source or focused
+spec is accepted.
+
+In a fresh session, execute the unchanged five-case focused spec once. A full
+PASS then requires highest-capability call-graph review of forged-plan and
+exact-size prevalidation, exclusive capability/cursor ownership, byte-identical
+sink/SHA input, checkpoint order, failure latching/discard, finalize-before-
+ready, and exactly-once take. Decoder `7/8` and SHA `W4-SRCH-31 FAIL` remain
+unchanged and non-transitive.
