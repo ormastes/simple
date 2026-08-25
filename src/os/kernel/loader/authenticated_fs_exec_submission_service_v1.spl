@@ -7,6 +7,10 @@ path-only facade.
 """
 
 use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.types.{ExecuteTrust}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableAdmissionV1
+}
 use os.kernel.loader.executable_authority_registry.{
     ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
     executable_authority_owner_valid
@@ -14,7 +18,16 @@ use os.kernel.loader.executable_authority_registry.{
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 use os.kernel.loader.fs_exec_spawn.{FsExecAuthenticatedRunResultV1}
 use os.kernel.loader.executable_admission_pipeline.{
-    ExecutableLoaderAdmissionErrorV1, executable_loader_revoke
+    ExecutableLoaderAdmissionErrorV1, ExecutableLoaderVerificationInputsV1,
+    ExecutableLoaderCryptographicProofV1,
+    executable_loader_admit_installed_artifact_open_binding_v1,
+    executable_loader_revoke
+}
+use os.kernel.loader.installed_artifact_manifest_execution_policy_v1.{
+    installed_artifact_active_target_v1
+}
+use os.kernel.loader.installed_artifact_catalog_v1.{
+    installed_artifact_catalog_lookup_target_v1
 }
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.scheduler.process_execution_observation.{
@@ -30,7 +43,10 @@ use os.kernel.loader.executable_launch_arguments_v1.{
     executable_launch_arguments_v1_errno,
     executable_launch_arguments_v1_validate
 }
-use os.kernel.loader.spawn_recipes.{spawn_recipe_launch_contract_valid}
+use os.kernel.loader.spawn_recipes.{
+    spawn_recipe_is_migrated, spawn_recipe_launch_contract_valid
+}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 
 pub(package) const AUTHENTICATED_FS_EXEC_USER_SLOT_LIMIT_V1: i64 = 128
 
@@ -47,16 +63,22 @@ pub(package) struct AuthenticatedFsExecUserSlotV1:
     state: AuthenticatedFsExecUserSlotStateV1
     submission: AuthenticatedFsExecSubmissionV1
 
+pub(package) struct AuthenticatedFsExecUserReservationV1:
+    slot_index: i64
+    generation: u64
+    submission: AuthenticatedFsExecSubmissionV1
+
 pub(package) class AuthenticatedFsExecUserServiceV1:
     """Bounded loader-owned one-shot ingress for unprivileged path+argv requests.
 
     Userland never receives an authority registry, token, load consumer, or
     entry point.  A privileged loader owner arms an exact caller/path/recipe
     tuple after catalog admission; the public-facing request can only consume
-    that tuple once.  Slots are not recycled in v1, which makes stale request
-    coordinates harmless and bounds retained authority.  The kernel service
-    loop is the sole mutable owner and must serialize `arm` and `submit`; this
-    value is never shared directly between syscall execution domains.
+    that tuple once. Slots are not recycled in v1, which makes stale request
+    coordinates harmless and bounds retained authority. The checked-mutex
+    capsule below is the sole mutable owner. A blocking handoff receives an
+    owned table move plus a generational `Consuming` reservation; it never
+    shares this service value between syscall execution domains.
 
     `AuthenticatedFsExecSubmissionV1` is a value-semantic bundle of opaque
     registry coordinates, not the mutable authority itself.  The loader
@@ -65,9 +87,11 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
     slot during submit and moves its owner-visible lifecycle to `Consuming`
     before passing those coordinates to the registry-backed handoff.
 
-    This owner currently has no boot initializer or syscall caller.  It is the
-    safe loader-side ingress contract for that later wiring, not a claim that
-    ring-3 path submission is already reachable.
+    `arm_installed_artifact_from_boot_proof_v1` is the boot/loader initializer:
+    it joins a sealed catalog record to an already signed per-open admission,
+    verifies the bytes and ELF layout through the canonical admission pipeline,
+    and retains only the resulting one-shot authority. The tagged syscall
+    caller below can consume it only after this privileged initialization.
     """
     slots: [AuthenticatedFsExecUserSlotV1]
     next_generation: u64
@@ -91,7 +115,8 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
             canonical_path, [canonical_path], [])
         if launch.is_err():
             return executable_launch_arguments_v1_errno(launch.unwrap_err())
-        if not executable_authority_owner_valid(submission.authorities) or
+        if not spawn_recipe_is_migrated(recipe) or
+            not executable_authority_owner_valid(submission.authorities) or
             submission.entry_point == 0u64 or
             submission.caller != caller or submission.recipe != recipe or
             not spawn_recipe_launch_contract_valid(
@@ -114,28 +139,97 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
             submission: submission))
         generation as i64
 
-    me submit(
-        scheduler: Scheduler,
-        table: MountTable,
+    me arm_installed_artifact_from_boot_proof_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        caller: i64,
+        canonical_path: text,
+        recipe: i64,
+        admission: ExecutableAdmissionV1,
+        proof: ExecutableLoaderCryptographicProofV1
+    ) -> i64:
+        """Pre-admit and arm one catalog artifact from complete signed material.
+
+        The sealed catalog supplies the boot-verified manifest, content digest,
+        target, signer identity, and trust-root identity.  `admission` and
+        `proof` are the distinct signed per-open domain; the canonical loader
+        verifier binds them to the exact VFS open generations and recomputes
+        the image digest, manifest identity, and ELF layout before minting.
+        Neither a pathname nor a catalog lookup alone can arm a slot.
+        """
+        if caller < 0 or not executable_authority_owner_valid(authorities):
+            return -13
+        val target = installed_artifact_active_target_v1()
+        if not target.?: return -8
+        val record = installed_artifact_catalog_lookup_target_v1(
+            canonical_path, target.unwrap())
+        if not record.?: return -13
+        val installed = record.unwrap()
+        if (installed.content_sha256 != admission.image_hash or
+            installed.expected_trust_root_sha256 != admission.trust_root_hash or
+            installed.signer_identity != proof.signer_key_id or
+            installed.target.os != admission.target.os or
+            installed.target.arch != admission.target.arch or
+            installed.target.abi != admission.target.abi):
+            return -13
+        val opened = table.open_for_execute(canonical_path, ExecuteTrust.Trusted)
+        if opened.is_err(): return -13
+        val binding = opened.unwrap()
+        val inputs = ExecutableLoaderVerificationInputsV1(
+            manifest: installed.manifest,
+            manifest_hash: admission.manifest_hash,
+            image_hash: installed.content_sha256,
+            trust_root_hash: installed.expected_trust_root_sha256,
+            target: installed.target,
+            format: installed.manifest.artifact_kind,
+            role: "installed-main-image",
+            verified_load_ranges: [],
+            manifest_verified: true,
+            signature_verified: true,
+            trust_root_verified: true,
+            target_verified: true,
+            format_verified: true,
+            ranges_verified: true,
+            image_digest_verified: true)
+        val admitted = executable_loader_admit_installed_artifact_open_binding_v1(
+            table, authorities, binding, inputs, admission, proof)
+        if admitted.is_err(): return -13
+        val prepared = admitted.unwrap()
+        val submission = AuthenticatedFsExecSubmissionV1(
+            authorities: authorities,
+            token: prepared.admission.authority_token,
+            consumer: prepared.consumer,
+            entry_point: prepared.admission.entry_point,
+            caller: caller,
+            recipe: recipe)
+        val armed = self.arm(caller, canonical_path, recipe, submission)
+        if armed < 0:
+            # Admission owns the still-open execute binding through the token.
+            # A failed bounded-slot commit must retire that authority rather
+            # than leak it or leave a second caller able to consume it.
+            if executable_loader_revoke(
+                table, authorities, prepared.admission.authority_token).is_err():
+                return -5
+        armed
+
+    me reserve(
         caller: i64,
         canonical_path: text,
         argv: [text],
         recipe: i64
-    ) -> AuthenticatedFsExecSubmissionResultV1:
+    ) -> Result<AuthenticatedFsExecUserReservationV1, i64>:
         # Validate and copy all user-controlled launch strings before changing
         # slot state, so malformed argv cannot burn loader authority.
         val checked = executable_launch_arguments_v1_validate(
             canonical_path, argv, [])
         if checked.is_err():
-            return AuthenticatedFsExecSubmissionResultV1(
-                exit_code: executable_launch_arguments_v1_errno(
-                    checked.unwrap_err()),
-                evidence: nil, cleanup_indeterminate: false)
+            return Err(executable_launch_arguments_v1_errno(
+                checked.unwrap_err()))
         val launch = checked.unwrap()
-        if not spawn_recipe_launch_contract_valid(
+        if not spawn_recipe_is_migrated(recipe) or
+            not spawn_recipe_launch_contract_valid(
             recipe, launch.path, launch.argv, launch.envp):
-            return AuthenticatedFsExecSubmissionResultV1(
-                exit_code: -13, evidence: nil, cleanup_indeterminate: false)
+            return Err(-13)
         var index: i64 = 0
         while index < self.slots.len():
             if self.slots[index].state ==
@@ -143,20 +237,206 @@ pub(package) class AuthenticatedFsExecUserServiceV1:
                 self.slots[index].caller == caller and
                 self.slots[index].canonical_path == launch.path and
                 self.slots[index].recipe == recipe:
-                # Retire before crossing into architecture handoff.  A panic,
-                # partial handoff, or indeterminate cleanup can never replay
-                # the retained token through this user ingress.
+                # Reserve before crossing into architecture handoff. A panic,
+                # partial handoff, or indeterminate cleanup leaves this slot
+                # Consuming, so the retained token cannot be replayed.
                 self.slots[index].state =
                     AuthenticatedFsExecUserSlotStateV1.Consuming
-                val result = authenticated_fs_exec_submit_v1(
-                    scheduler, table, self.slots[index].submission,
-                    launch.path, launch.argv)
-                self.slots[index].state =
-                    AuthenticatedFsExecUserSlotStateV1.Retired
-                return result
+                return Ok(AuthenticatedFsExecUserReservationV1(
+                    slot_index: index,
+                    generation: self.slots[index].generation,
+                    submission: self.slots[index].submission))
             index = index + 1
+        Err(-13)
+
+    me finish(reservation: AuthenticatedFsExecUserReservationV1) -> bool:
+        """Retire exactly the reservation moved across the blocking handoff."""
+        if reservation.slot_index < 0 or
+            reservation.slot_index >= self.slots.len():
+            return false
+        val index = reservation.slot_index
+        if self.slots[index].generation != reservation.generation or
+            self.slots[index].state !=
+                AuthenticatedFsExecUserSlotStateV1.Consuming:
+            return false
+        self.slots[index].state = AuthenticatedFsExecUserSlotStateV1.Retired
+        true
+
+    me submit(
+        scheduler: Scheduler,
+        mut table: MountTable,
+        caller: i64,
+        canonical_path: text,
+        argv: [text],
+        recipe: i64
+    ) -> AuthenticatedFsExecSubmissionResultV1:
+        val reserved = self.reserve(caller, canonical_path, argv, recipe)
+        if reserved.is_err():
+            return AuthenticatedFsExecSubmissionResultV1(
+                exit_code: reserved.unwrap_err(), evidence: nil,
+                cleanup_indeterminate: false)
+        val reservation = reserved.unwrap()
+        val result = authenticated_fs_exec_submit_v1(
+            scheduler, table, reservation.submission, canonical_path, argv)
+        val retired = self.finish(reservation)
         AuthenticatedFsExecSubmissionResultV1(
-            exit_code: -13, evidence: nil, cleanup_indeterminate: false)
+            exit_code: result.exit_code,
+            evidence: if retired: result.evidence else: nil,
+            cleanup_indeterminate: result.cleanup_indeterminate or not retired)
+
+# The checked-mutex capsule is the sole owner of these globals. No authority or
+# namespace object is constructed by module initialization: syscall submission
+# remains fail-closed until a privileged loader owner installs the live table
+# and service and arms an admitted slot.
+# Userland can neither call these owner surfaces nor obtain the retained token.
+var g_authenticated_fs_exec_user_service_v1:
+    AuthenticatedFsExecUserServiceV1? = nil
+var g_authenticated_fs_exec_user_mount_table_v1: MountTable? = nil
+var g_authenticated_fs_exec_user_mount_table_ready_v1 = false
+val g_authenticated_fs_exec_user_mutex_v1: i64 = mutex_raw_create()
+var g_authenticated_fs_exec_user_quarantined_v1 = false
+
+fn _authenticated_fs_exec_user_lock_v1() -> bool:
+    g_authenticated_fs_exec_user_mutex_v1 > 0 and
+        not g_authenticated_fs_exec_user_quarantined_v1 and
+        mutex_raw_lock(g_authenticated_fs_exec_user_mutex_v1)
+
+fn _authenticated_fs_exec_user_unlock_v1() -> bool:
+    if mutex_raw_unlock(g_authenticated_fs_exec_user_mutex_v1):
+        return true
+    # The prior mutation may already have linearized. Permanently suppress the
+    # ingress instead of guessing which owner copy is authoritative.
+    g_authenticated_fs_exec_user_quarantined_v1 = true
+    false
+
+pub(package) fn authenticated_fs_exec_user_install_mount_table_v1(
+    table: MountTable
+) -> bool:
+    """Install the loader-owned table exactly once during privileged boot.
+
+    Returning false for a second installation prevents a later subsystem from
+    replacing the namespace beneath already-armed authority coordinates.
+    """
+    if not _authenticated_fs_exec_user_lock_v1():
+        return false
+    if g_authenticated_fs_exec_user_mount_table_ready_v1:
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return false
+    g_authenticated_fs_exec_user_service_v1 =
+        Some(AuthenticatedFsExecUserServiceV1.new())
+    g_authenticated_fs_exec_user_mount_table_v1 = Some(table)
+    g_authenticated_fs_exec_user_mount_table_ready_v1 = true
+    _authenticated_fs_exec_user_unlock_v1()
+
+pub(package) fn authenticated_fs_exec_user_arm_v1(
+    caller: i64,
+    canonical_path: text,
+    recipe: i64,
+    submission: AuthenticatedFsExecSubmissionV1
+) -> i64:
+    """Privileged loader-owner surface for one exact admitted launch tuple."""
+    if not _authenticated_fs_exec_user_lock_v1():
+        return -5
+    if not g_authenticated_fs_exec_user_mount_table_ready_v1:
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return -13
+    if not g_authenticated_fs_exec_user_service_v1.? or
+        not g_authenticated_fs_exec_user_mount_table_v1.?:
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return -13
+    var service = g_authenticated_fs_exec_user_service_v1.unwrap()
+    val generation = service.arm(caller, canonical_path, recipe, submission)
+    g_authenticated_fs_exec_user_service_v1 = Some(service)
+    if not _authenticated_fs_exec_user_unlock_v1():
+        return -5
+    generation
+
+pub(package) fn authenticated_fs_exec_user_pre_admit_and_arm_v1(
+    authorities: ExecutableAuthorityRegistryV1,
+    caller: i64,
+    canonical_path: text,
+    recipe: i64,
+    admission: ExecutableAdmissionV1,
+    proof: ExecutableLoaderCryptographicProofV1
+) -> i64:
+    """Privileged boot seam from signed catalog material to one-shot ingress."""
+    if not _authenticated_fs_exec_user_lock_v1():
+        return -5
+    if not g_authenticated_fs_exec_user_mount_table_ready_v1:
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return -13
+    if not g_authenticated_fs_exec_user_service_v1.? or
+        not g_authenticated_fs_exec_user_mount_table_v1.?:
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return -13
+    var service = g_authenticated_fs_exec_user_service_v1.unwrap()
+    var table = g_authenticated_fs_exec_user_mount_table_v1.unwrap()
+    val armed = service.arm_installed_artifact_from_boot_proof_v1(
+        table, authorities,
+        caller, canonical_path, recipe, admission, proof)
+    g_authenticated_fs_exec_user_service_v1 = Some(service)
+    g_authenticated_fs_exec_user_mount_table_v1 = Some(table)
+    if not _authenticated_fs_exec_user_unlock_v1():
+        return -5
+    armed
+
+pub fn authenticated_fs_exec_user_submit_syscall_v1(
+    scheduler: Scheduler,
+    caller: i64,
+    canonical_path: text,
+    argv: [text],
+    recipe: i64
+) -> i64:
+    """Serialized syscall ingress; returns an actual exit/error code, not pid.
+
+    Authority remains in the loader globals above.  Absence of boot-owned table
+    installation or of an exact caller/path/recipe admission is EACCES.
+    """
+    # Phase 1: reserve the exact slot and move the sole table owner out while
+    # serialized. Other calls see no table and fail closed during execution.
+    if not _authenticated_fs_exec_user_lock_v1():
+        return -5
+    if not g_authenticated_fs_exec_user_mount_table_ready_v1:
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return -13
+    if not g_authenticated_fs_exec_user_service_v1.? or
+        not g_authenticated_fs_exec_user_mount_table_v1.?:
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return -13
+    var service = g_authenticated_fs_exec_user_service_v1.unwrap()
+    var table = g_authenticated_fs_exec_user_mount_table_v1.unwrap()
+    val reserved = service.reserve(caller, canonical_path, argv, recipe)
+    g_authenticated_fs_exec_user_service_v1 = Some(service)
+    if reserved.is_err():
+        g_authenticated_fs_exec_user_mount_table_v1 = Some(table)
+        val released = _authenticated_fs_exec_user_unlock_v1()
+        return if released: reserved.unwrap_err() else: -5
+    # Nil is an explicit owned move, not merely a readiness flag. No competing
+    # syscall or boot operation can copy/mutate the table during handoff.
+    g_authenticated_fs_exec_user_mount_table_v1 = nil
+    if not _authenticated_fs_exec_user_unlock_v1():
+        return -5
+
+    # Phase 2: architecture execution can block without holding a raw mutex.
+    val reservation = reserved.unwrap()
+    val result = authenticated_fs_exec_submit_v1(
+        scheduler, table, reservation.submission, canonical_path, argv)
+
+    # Phase 3: commit the mutated table and retire the exact reservation.
+    if not _authenticated_fs_exec_user_lock_v1():
+        return -5
+    if not g_authenticated_fs_exec_user_service_v1.? or
+        g_authenticated_fs_exec_user_mount_table_v1.?:
+        g_authenticated_fs_exec_user_quarantined_v1 = true
+        val _released = _authenticated_fs_exec_user_unlock_v1()
+        return -5
+    var completed_service = g_authenticated_fs_exec_user_service_v1.unwrap()
+    val retired = completed_service.finish(reservation)
+    g_authenticated_fs_exec_user_service_v1 = Some(completed_service)
+    g_authenticated_fs_exec_user_mount_table_v1 = Some(table)
+    if not retired or not _authenticated_fs_exec_user_unlock_v1():
+        return -5
+    result.exit_code
 
 @cfg(x86_64)
 use os.kernel.loader.x86_64_fs_exec_spawn.{
@@ -198,7 +478,7 @@ pub(package) struct AuthenticatedFsExecSubmissionResultV1:
 
 pub(package) fn authenticated_fs_exec_submit_with_argv_file_v1(
     scheduler: Scheduler,
-    table: MountTable,
+    mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text],
@@ -222,7 +502,7 @@ pub(package) fn authenticated_fs_exec_submit_with_argv_file_v1(
     result
 
 fn _retire_failed_submission_v1(
-    table: MountTable,
+    mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
     result: FsExecAuthenticatedRunResultV1
 ) -> AuthenticatedFsExecSubmissionResultV1:
@@ -247,7 +527,7 @@ fn _retire_failed_submission_v1(
 @cfg(x86_64)
 pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
-    table: MountTable,
+    mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
@@ -261,7 +541,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
 @cfg(arm64)
 pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
-    table: MountTable,
+    mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
@@ -275,7 +555,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
 @cfg(riscv64)
 pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
-    table: MountTable,
+    mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
@@ -292,7 +572,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
 @cfg(x86)
 pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
-    table: MountTable,
+    mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
@@ -306,7 +586,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
 @cfg(arm32)
 pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
-    table: MountTable,
+    mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]
@@ -320,7 +600,7 @@ pub(package) fn authenticated_fs_exec_submit_v1(
 @cfg(riscv32)
 pub(package) fn authenticated_fs_exec_submit_v1(
     scheduler: Scheduler,
-    table: MountTable,
+    mut table: MountTable,
     submission: AuthenticatedFsExecSubmissionV1,
     path: text,
     argv: [text]

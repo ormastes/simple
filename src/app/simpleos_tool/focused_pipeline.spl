@@ -16,10 +16,16 @@ use app.simpleos_tool.guest_target.{SimpleOsGuestTarget, simpleos_guest_target_c
 use app.io.mod.{file_hash_sha256, file_rename, file_size_raw, getpid}
 use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
 
-extern fn rt_file_read_text_rv(path: text) -> text
+@unsafe(reason: "bounded filesystem read crosses the target runtime ABI", capabilities: [ffi])
+extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
 use std.io_runtime.{file_write_bytes}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
+
+# A standalone guest compile is intentionally bounded: parsing and lowering
+# allocate from this input, and filesystem-backed callers must not be able to
+# make the tool consume all user memory with one oversized source file.
+pub const SIMPLEOS_TOOL_MAX_SOURCE_BYTES: i64 = 67108864
 
 fn publish_fresh_candidate(candidate: text, output: text, artifact_kind: text) -> bool:
     """Atomically publish and bind success to the final pathname's bytes."""
@@ -56,11 +62,25 @@ fn require_user_context(phase: text, target: SimpleOsGuestTarget) -> bool:
     true
 
 fn lower_standalone_file(path: text, target: SimpleOsGuestTarget) -> Result<HirModule, text>:
-    val source = rt_file_read_text_rv(path)
+    val source_size = file_size_raw(path)
+    if source_size <= 0:
+        return Err("cannot read source or source is empty: {path}")
+    if source_size > SIMPLEOS_TOOL_MAX_SOURCE_BYTES:
+        return Err(
+            "source exceeds SimpleOS tool limit " +
+            "({source_size} > {SIMPLEOS_TOOL_MAX_SOURCE_BYTES} bytes): {path}")
+    # Read only the admitted extent.  Unlike the whole-file runtime helper,
+    # this remains bounded if a shared filesystem grows the file after stat.
+    var source_value: text? = nil
+    unsafe(capabilities: [ffi]):
+        source_value = rt_file_read_text_at_checked(path, 0, source_size)
+    if source_value == nil:
+        return Err("cannot read source: {path}")
+    val source = source_value ?? ""
     if not require_user_context("post-read", target):
         return Err("filesystem syscall did not return to a valid user context")
-    if source == "":
-        return Err("cannot read source or source is empty: {path}")
+    if source.len() != source_size as u64:
+        return Err("source changed or was truncated during read: {path}")
     var parsed = parse_and_build_module(_pp_preprocess_conditionals(source), path)
     parsed = desugar_module(parsed)
     desugar_collections_static(0, 0)

@@ -5,13 +5,18 @@
 # _handle_poll, _handle_fcntl, _handle_getpid,
 # and copy-from-user helpers.
 
-use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.syscall_types.{
+    SyscallArgs, SyscallResult, SYSCALL13_AUTHENTICATED_RUN_ABI_V1
+}
 use os.kernel.types.task_types.{TaskId, TaskPriority, BlockReason}
 # NOTE: `spawn_full()` is no longer called directly here — every ambient grant
 # now goes through `spawn_authority_ambient_caps()`, which returns `spawn_full()`
 # for authorized callers and the pledged deny-all set for everyone else.
 use os.kernel.loader.spawn_authority.{spawn_authority_ambient_caps, spawn_authority_bootstrap_sealed, spawn_authority_check_spawn, spawn_authority_spawn_caps, spawn_authority_current_recipe}
 use os.kernel.loader.spawn_recipes.{spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps}
+use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
+    authenticated_fs_exec_user_submit_syscall_v1
+}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.scheduler.scheduler.{Scheduler, wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error}
@@ -785,6 +790,58 @@ fn _copy_user_string_vector(vec_ptr: u64, max_count: u64) -> Result<[text], text
         i = i + 1
     Err("string vector not terminated")
 
+fn _copy_authenticated_packed_argv_v1(
+    base_ptr: u64,
+    table_offset: u64
+) -> Result<[text], text>:
+    """Copy the canonical packed argv encoding without pointer alias freedom.
+
+    Every offset must exactly follow the preceding NUL-terminated string and
+    the final string must end exactly at the table. This makes the serialized
+    byte region bounded by `table_offset`; offsets cannot redirect copying to
+    unrelated user memory even though legacy packed-vector ABI permits it.
+    """
+    if base_ptr == 0 or table_offset == 0 or
+        table_offset > MAX_EXEC_TOTAL_STRING_BYTES or
+        table_offset > 0xffffffffffffffffu64 - base_ptr:
+        return Err("invalid packed argv bounds")
+    val table_ptr = base_ptr + table_offset
+    var out: [text] = []
+    var expected_offset: u64 = 0
+    var i: u64 = 0
+    while i < MAX_EXEC_ARG_COUNT:
+        if i > (0xffffffffffffffffu64 / 8u64):
+            return Err("argv table overflow")
+        val slot = table_ptr + i * 8u64
+        if slot < table_ptr:
+            return Err("argv table overflow")
+        val offset_result = _copy_user_u64(slot)
+        if offset_result.is_err():
+            return Err(offset_result.err().unwrap())
+        val offset = offset_result.unwrap()
+        if offset == 0u64 and i > 0u64:
+            if expected_offset != table_offset:
+                return Err("argv string region is not exact")
+            return Ok(out)
+        if offset != expected_offset or offset >= table_offset:
+            return Err("argv offset is not canonical")
+        val remaining = table_offset - offset
+        val string_limit = if remaining < MAX_EXEC_STRING_LEN:
+            remaining
+        else:
+            MAX_EXEC_STRING_LEN
+        val item_result = _copy_user_cstr(base_ptr + offset, string_limit)
+        if item_result.is_err():
+            return Err(item_result.err().unwrap())
+        val item = item_result.unwrap()
+        val item_bytes = item.len().to_u64() + 1u64
+        if item_bytes > remaining:
+            return Err("argv string exceeds packed region")
+        expected_offset = expected_offset + item_bytes
+        out.push(item)
+        i = i + 1u64
+    Err("argv count exceeds limit")
+
 fn _handle_spawn_binary_state(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog) -> ProcessSyscallState:
     """State-threading variant of _handle_spawn_binary (mirrors
     ProcessSyscallState and dispatch_spawn_binary_direct_state). Callers must
@@ -803,6 +860,37 @@ fn _handle_spawn_binary_state(args: SyscallArgs, scheduler: Scheduler, klog: Ker
     val grant_errno = _process_grant_errno_for_path(path, klog)
     if grant_errno < 0:
         return ProcessSyscallState(result: SyscallResult(value: grant_errno), scheduler: scheduler)
+
+    # Tagged authenticated-run ABI:
+    #   arg0 path pointer, arg1 path length, arg2 packed argv base,
+    #   arg3 recipe, arg4 argv table offset, arg5 fixed v1 tag.
+    # The caller identity is derived from scheduler state, never accepted from
+    # user memory.  There is deliberately no envp in v1.  The loader-owned
+    # service requires a pre-armed exact caller/path/recipe tuple and returns
+    # the real synchronous exit/error code rather than fabricating a pid.
+    if args.arg5 == SYSCALL13_AUTHENTICATED_RUN_ABI_V1:
+        if args.arg2 == 0 or args.arg4 == 0 or args.arg3 > 0x7fffffffffffffffu64:
+            return ProcessSyscallState(
+                result: SyscallResult(value: 0 - EINVAL as i64),
+                scheduler: scheduler)
+        val argv_result = _copy_authenticated_packed_argv_v1(
+            args.arg2, args.arg4)
+        if argv_result.is_err():
+            return ProcessSyscallState(
+                result: SyscallResult(value: 0 - EFAULT as i64),
+                scheduler: scheduler)
+        val argv = argv_result.unwrap()
+        if argv.len() == 0 or argv[0] != path:
+            return ProcessSyscallState(
+                result: SyscallResult(value: 0 - EINVAL as i64),
+                scheduler: scheduler)
+        val caller = scheduler.get_current().id.to_i64()
+        val execution_result = authenticated_fs_exec_user_submit_syscall_v1(
+            scheduler, caller, path, argv, args.arg3 as i64)
+        return ProcessSyscallState(
+            result: SyscallResult(value: execution_result),
+            scheduler: scheduler)
+
     val arch = CURRENT_EXEC_ARCH
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
     log_raw_println("[syscall13] resolve_executable_bytes returned")
@@ -875,6 +963,11 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
       arg3: envp packed-buffer base
       arg4: argv pointer-table offset
       arg5: envp pointer-table offset
+
+    When arg5 is SYSCALL13_AUTHENTICATED_RUN_ABI_V1, arg3 is instead the
+    explicit recipe and arg4 locates a single packed argv vector. That tagged
+    form is a synchronous authenticated execution request: its nonnegative
+    return is the real program exit result, not a pid.
 
     Legacy result-only wrapper: callers that need the newly created task to
     be visible afterward must use _handle_spawn_binary_state instead."""

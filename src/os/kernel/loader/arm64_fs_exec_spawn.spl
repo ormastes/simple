@@ -15,7 +15,10 @@ use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.services.netstack.netstack_init.{net_arm64_task_teardown}
 use os.kernel.types.task_types.{TaskId}
-use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
+use os.kernel.scheduler.scheduler.{
+    wait_collect_result_error, wait_collect_result_pid,
+    wait_collect_result_status
+}
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerExecutionDeliveryStatusV2,
     scheduler_execution_compare_and_deliver_reaped_v2,
@@ -32,11 +35,26 @@ fn _arm64_launch_token(kind: CapabilityKind, owner: u64, token_id: u64) -> Capab
     CapabilityToken(kind: kind, generation: token_id, owner: owner,
         token_id: token_id, parent_token_id: 0u64, depth: 0)
 
-pub fn arm64_fs_exec_launch_caps(path: text, argv: [text], owner: u64) -> CapabilitySet:
-    """Build the pledged, non-delegable authority for one payload launch."""
+pub fn arm64_fs_exec_launch_caps_with_launch_v1(
+    path: text,
+    argv: [text],
+    envp: [text],
+    owner: u64
+) -> CapabilitySet:
+    """Build the pledged, non-delegable authority for one payload launch.
+
+    The server image carries credential-file and listener authority, so bind
+    that pouch to the same canonical path/argv/environment tuple enforced by
+    its authenticated spawn recipe.  A path-only match must never confer the
+    privileged server pouch on a differently shaped launch.
+    """
     var tokens: [CapabilityToken] = []
     var next_id: u64 = 1u64
-    if path == SIMPLEOS_SERVER_EXECUTABLE_V1:
+    val canonical_server_launch =
+        path == SIMPLEOS_SERVER_EXECUTABLE_V1 and
+        argv.len() == 1 and argv[0] == SIMPLEOS_SERVER_EXECUTABLE_V1 and
+        envp.len() == 0
+    if canonical_server_launch:
         for grant in server_launch_grants_v1(path):
             tokens.push(_arm64_launch_token(grant.requested, owner, next_id))
             next_id = next_id + 1u64
@@ -56,6 +74,14 @@ pub fn arm64_fs_exec_launch_caps(path: text, argv: [text], owner: u64) -> Capabi
             tokens.push(_arm64_launch_token(CapabilityKind.FileRead(path_prefix: arg), owner, next_id))
             next_id = next_id + 1u64
     CapabilitySet(caps: tokens, is_pledged: true)
+
+pub fn arm64_fs_exec_launch_caps(
+    path: text,
+    argv: [text],
+    owner: u64
+) -> CapabilitySet:
+    """Compatibility constructor for launches with no environment."""
+    arm64_fs_exec_launch_caps_with_launch_v1(path, argv, [], owner)
 
 pub fn arm64_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     val prepared = fs_exec_prepare_spawn(path, argv, envp)
@@ -82,7 +108,8 @@ pub fn arm64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     # The shim has a fresh canonical capability owner, so explicitly install a
     # least-privilege record for the scheduler-owned task before making it live.
     launch_ipc.cap_manager.init_task(
-        launch_id, arm64_fs_exec_launch_caps(path, argv, launch_id.id))
+        launch_id, arm64_fs_exec_launch_caps_with_launch_v1(
+            path, argv, envp, launch_id.id))
     val launch_log = KernelLog.new(256)
     shim_init(prepared.scheduler, launch_ipc, launch_log)
     val rc = dispatch_fs_exec_user_handoff(Architecture.Arm64, prepared.pid as u64, prepared.scheduler)
@@ -108,7 +135,7 @@ pub fn arm64_fs_exec_spawn_authenticated_v1(
 
 pub fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
     scheduler: Scheduler,
-    table: MountTable,
+    mut table: MountTable,
     authorities: ExecutableAuthorityRegistryV1,
     token: ExecutableAuthorityTokenV1,
     consumer: ExecutableLoadConsumerV1,
@@ -135,6 +162,7 @@ pub fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
     val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
     net_arm64_task_teardown(child.id)
     if wait_collect_result_error(collected) != 0 or
+       wait_collect_result_pid(collected) != child.id or
        wait_collect_result_status(collected) != exit_code.to_i32():
         _ = scheduler_execution_discard_terminal_v2(child.id)
         return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil)

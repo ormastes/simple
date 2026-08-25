@@ -134,6 +134,7 @@ int main(int argc, char **argv)
     struct bytes crt0_payload = read_file(getenv("SIMPLEOS_CRT0_OBJECT"));
     struct bytes runtime_payload = read_file(getenv("SIMPLEOS_RUNTIME_ARCHIVE"));
     struct bytes libc_payload = read_file(getenv("SIMPLEOS_LIBC_ARCHIVE"));
+    struct bytes libm_payload = read_file(getenv("SIMPLEOS_LIBM_ARCHIVE"));
     struct bytes linker_script_payload = read_file(getenv("SIMPLEOS_LINKER_SCRIPT"));
     struct bytes simple_entry_payload = read_file(getenv("SIMPLEOS_SIMPLE_ENTRY_OBJECT"));
     struct bytes hello_object_payload = read_file(getenv("SIMPLEOS_HELLO_OBJECT"));
@@ -244,6 +245,8 @@ int main(int argc, char **argv)
     int usr_cluster = alloc_directory();
     int usr_bin_cluster = alloc_directory();
     int usr_lib_cluster = alloc_directory();
+    int usr_share_cluster = alloc_directory();
+    int usr_share_simpleos_cluster = alloc_directory();
     int bin_cluster = alloc_directory();
     int sysrt_cluster = alloc_directory();
     int tmp_cluster = alloc_directory();
@@ -416,8 +419,11 @@ int main(int argc, char **argv)
     int llvm_ar_bin_cluster = llvm_ar_payload.len ? alloc_clusters(llvm_ar_payload.data, llvm_ar_payload.len) : 0;
     int crt0_cluster = crt0_payload.len ? alloc_clusters(crt0_payload.data, crt0_payload.len) : 0;
     int runtime_cluster = runtime_payload.len ? alloc_clusters(runtime_payload.data, runtime_payload.len) : 0;
+    int runtime_canonical_cluster = runtime_payload.len ? alloc_clusters(runtime_payload.data, runtime_payload.len) : 0;
     int libc_cluster = libc_payload.len ? alloc_clusters(libc_payload.data, libc_payload.len) : 0;
+    int libm_cluster = libm_payload.len ? alloc_clusters(libm_payload.data, libm_payload.len) : 0;
     int linker_script_cluster = linker_script_payload.len ? alloc_clusters(linker_script_payload.data, linker_script_payload.len) : 0;
+    int linker_script_canonical_cluster = linker_script_payload.len ? alloc_clusters(linker_script_payload.data, linker_script_payload.len) : 0;
     int simple_entry_cluster = simple_entry_payload.len ? alloc_clusters(simple_entry_payload.data, simple_entry_payload.len) : 0;
     int hello_object_cluster = hello_object_payload.len ? alloc_clusters(hello_object_payload.data, hello_object_payload.len) : 0;
     int hello_ir_cluster = hello_ir_payload.len ? alloc_clusters(hello_ir_payload.data, hello_ir_payload.len) : 0;
@@ -529,6 +535,11 @@ int main(int argc, char **argv)
     put_dot_entries(usr, &usr_n, usr_cluster, 0);
     put_dot_entries(usr_bin, &usr_bin_n, usr_bin_cluster, usr_cluster);
     put_dot_entries(usr_lib, &usr_lib_n, usr_lib_cluster, usr_cluster);
+    unsigned char usr_share[DIR_SIZE] = {0}; size_t usr_share_n = 0;
+    unsigned char usr_share_simpleos[DIR_SIZE] = {0}; size_t usr_share_simpleos_n = 0;
+    put_dot_entries(usr_share, &usr_share_n, usr_share_cluster, usr_cluster);
+    put_dot_entries(usr_share_simpleos, &usr_share_simpleos_n,
+                    usr_share_simpleos_cluster, usr_share_cluster);
     put_dot_entries(bin, &bin_n, bin_cluster, 0);
     put_dot_entries(sysrt, &sysrt_n, sysrt_cluster, 0);
     put_dot_entries(tmp, &tmp_n, tmp_cluster, 0);
@@ -598,6 +609,9 @@ int main(int argc, char **argv)
     put_named_dir_entry(apps, &apps_n, "SIMPLSTCSMF", "simple.smf", simple_cluster, simple_cli.len, 0x20);
     put_dir_entry(usr, &usr_n, "BIN        ", usr_bin_cluster, 0, 0x10);
     put_dir_entry(usr, &usr_n, "LIB        ", usr_lib_cluster, 0, 0x10);
+    put_dir_entry(usr, &usr_n, "SHARE      ", usr_share_cluster, 0, 0x10);
+    put_named_dir_entry(usr_share, &usr_share_n, "SIMPLEOS   ", "simpleos",
+                        usr_share_simpleos_cluster, 0, 0x10);
     if (simple_usr_cluster) {
         put_dir_entry(usr_bin, &usr_bin_n, "SIMPLE     ", simple_usr_cluster, simple_payload.len, 0x20);
         put_named_dir_entry(usr_bin, &usr_bin_n, "SIMPLE  SMF", "simple.smf", simple_usr_smf_cluster, simple_cli.len, 0x20);
@@ -622,12 +636,21 @@ int main(int argc, char **argv)
         put_named_dir_entry(usr_lib, &usr_lib_n, "CRT0    O  ", "crt0.o", crt0_cluster, crt0_payload.len, 0x20);
     if (runtime_cluster)
         put_named_dir_entry(usr_lib, &usr_lib_n, "SIMPRT  A  ", "libsimpleos_runtime.a", runtime_cluster, runtime_payload.len, 0x20);
+    if (runtime_canonical_cluster)
+        put_named_dir_entry(usr_lib, &usr_lib_n, "SIMRUN  A  ", "libsimple_runtime.a", runtime_canonical_cluster, runtime_payload.len, 0x20);
     if (libc_cluster)
         put_named_dir_entry(usr_lib, &usr_lib_n, "SOSLIB  A  ", "libsimpleos_c.a", libc_cluster, libc_payload.len, 0x20);
+    if (libm_cluster)
+        put_named_dir_entry(usr_lib, &usr_lib_n, "LIBM    A  ", "libm.a", libm_cluster, libm_payload.len, 0x20);
     if (simple_entry_cluster)
         put_dir_entry(usr_lib, &usr_lib_n, "SIMAIN  O  ", simple_entry_cluster, simple_entry_payload.len, 0x20);
     if (linker_script_cluster)
         put_named_dir_entry(sysrt, &sysrt_n, "SIMPLEOSLD ", "simpleos.ld", linker_script_cluster, linker_script_payload.len, 0x20);
+    if (linker_script_canonical_cluster)
+        put_named_dir_entry(usr_share_simpleos, &usr_share_simpleos_n,
+                            "SIMPLEOSLD ", "simpleos.ld",
+                            linker_script_canonical_cluster,
+                            linker_script_payload.len, 0x20);
     put_dir_entry(apps, &apps_n, "LLVMSMF SMF", llvm_cluster, llvm_app.len, 0x20);
     put_dir_entry(apps, &apps_n, "CLANGSMFSMF", clang_cluster, clang_app.len, 0x20);
     put_dir_entry(apps, &apps_n, "RUSTSMF SMF", rust_cluster, rust_app.len, 0x20);
@@ -646,6 +669,9 @@ int main(int argc, char **argv)
     write_directory(usr_cluster, usr, usr_n);
     write_directory(usr_bin_cluster, usr_bin, usr_bin_n);
     write_directory(usr_lib_cluster, usr_lib, usr_lib_n);
+    write_directory(usr_share_cluster, usr_share, usr_share_n);
+    write_directory(usr_share_simpleos_cluster, usr_share_simpleos,
+                    usr_share_simpleos_n);
     write_directory(bin_cluster, bin, bin_n);
     write_directory(sysrt_cluster, sysrt, sysrt_n);
     write_directory(tmp_cluster, tmp, tmp_n);
