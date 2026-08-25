@@ -349,6 +349,136 @@ artifacts. MCP stdio waits indefinitely while idle; an idle server is not a
 timeout failure. Bound request execution, payloads, pagination, graph
 traversal, and query budgets separately.
 
+Qualified Wave 4 evidence is collected only through
+`examples/05_stdlib/spipe/test/perf/measure_qualified_search.mjs` with explicit absolute
+`SPIPE_SIMPLE_BIN` and `SPIPE_STAGE4_PROVENANCE` paths plus explicit profile,
+fixture, operation-plan, functional-receipt, and output arguments. Its sole
+helper contract is
+`measureQualifiedSearch(profile_path, fixture_path, operation_plan_path,
+functional_receipt_uri, output_path)`; there are no overloads or implicit
+counts. The collector admits the binary with the same
+Stage 4 verifier as provider conformance and writes a closed
+`spipe-qualified-search-receipt-v1`; failure writes no receipt. The receipt
+binds binary/provenance/profile/fixture/query-plan hashes and counts; closed
+compiler/toolchain and collector-runtime identities, versions, and hashes; the
+canonical functional-conformance receipt URI/hash; and the canonical
+`benchmark_operation_plan_v1.json` path/hash. That operation plan fixes every
+discarded warmup and measured round: verify/reset baseline `S0`, run all queries
+in plan order before mutation, alternate publish-then-rebuild and
+rebuild-then-publish order across rounds with an `S0` reset between them, and
+verify declared `S0`/`S1` hashes without restarting the provider. The receipt
+then carries one warm startup sample, raw query/update/rebuild samples,
+recomputable nearest-rank P95, process-tree peak RSS, and no-spawn/no-scan
+counters.
+
+The functional prerequisite is exactly one closed canonical-JSON object:
+
+```text
+schema = "spipe-functional-conformance-receipt-v1"
+subject = {implementation, provider_id, provider_version,
+           protocol_version, analyzer_id, score_id}
+executable = {canonical_path, sha256, stage4_provenance_sha256}
+fixture = {id, sha256, snapshot_sha256, query_plan_sha256}
+scope = {principal_scope_digest, policy_version}
+matrix = [{id, status = "passed", evidence_sha256}]
+result = {status = "passed", checker_id, checker_version,
+          checker_sha256, completed_at_utc}
+```
+
+Every leaf except `matrix` is a nonempty UTF-8 string; every SHA-256 and scope
+digest is exactly 64 lowercase hexadecimal characters. `matrix` contains each
+required `W4-SRCH-01` through `W4-SRCH-08` and `W4-SRCH-10` through
+`W4-SRCH-14` ID exactly once in ascending numeric order, with no other ID; it
+explicitly excludes performance cell `W4-SRCH-09`. Ordering is acyclic:
+functional conformance produces this receipt first, then qualified performance
+consumes it and alone evaluates `W4-SRCH-09`; cell 09 is never a prerequisite
+of the receipt it consumes. The checker requires byte-equal subject, executable,
+fixture, and scope bindings to the benchmark inputs. Unknown, missing, null,
+duplicate-normalized, wrong-typed, failed, duplicate, or out-of-order fields or
+entries are `NOT EVIDENCE`.
+
+The operation plan is exactly one closed canonical-JSON object:
+
+```text
+schema = "benchmark-operation-plan-v1"
+plan_id = nonempty ASCII identifier
+fixture = {id, sha256, query_plan_sha256}
+counts = {warmup_count, sample_count, query_count_per_sample}
+states = {s0_snapshot_sha256, s1_snapshot_sha256}
+delta = {artifact_id, delta_sha256, before_revision,
+         before_content_sha256, after_revision, after_content_sha256}
+reset = {method = "restore-canonical-s0-v1", expected_snapshot_sha256}
+queries = [{query_index, query_id, canonical_request_sha256,
+            expected_result_sha256}]
+warmup_rounds = [{round_index, operations}]
+measured_rounds = [{round_index, operations}]
+```
+
+Counts and indices are non-negative JSON safe integers; counts are positive.
+Digests are 64 lowercase hexadecimal characters and all other leaves are
+nonempty UTF-8 strings. Query indices are contiguous from zero and array order
+is execution order. Each `operations` array uses only `verify_s0`,
+`query_all`, `publish_delta`, `reset_s0`, `rebuild_s0`, and `verify_s1`.
+Warmup rounds encode the fixed discarded schedule; measured even and odd rounds
+encode the two required alternating schedules, with `query_all` before either
+mutation and an ending `reset_s0`. The arrays have exactly the declared counts,
+their indices are contiguous, and their query cardinality equals
+`query_count_per_sample`. `reset.expected_snapshot_sha256` equals
+`states.s0_snapshot_sha256`; the delta's before/after bindings produce exactly
+S0/S1. Canonicalization is `canonical-json-v1`: UTF-8 without BOM or trailing
+LF, NFC strings, unsigned decimal safe integers, lexicographically sorted NFC
+object keys, and preserved array order. Unknown, missing, null,
+duplicate-normalized, wrong-typed, inconsistent, or noncanonical input is
+`NOT EVIDENCE`; its SHA-256 covers those exact canonical bytes.
+
+Those counters are not provider telemetry. A profile-approved platform adapter
+must create sealed process containment and begin observation before provider
+launch, retain every descendant through exit and reparenting, and write a
+sequence-numbered, SHA-256-chained event journal. The checker independently
+replays its bound URI/hash to recompute membership, lifecycle, query-window
+spawns, warm workspace enumerations, repeated unchanged-source reads, and peak
+RSS. Missing/lost events, a broken chain, late attachment, an untracked
+descendant, or a platform without that fail-closed adapter is `NOT EVIDENCE`.
+A missing admitted
+binary is `NOT EVIDENCE`, so the Rust seed, source execution, or an informal
+`time` transcript cannot satisfy W4-SRCH-09.
+
+The checked-in `spipe-qualified-search-profile-v1` is authoritative for the
+exact subject, host/kernel/architecture/CPU and core policy, approved counter
+adapter, fixture, warmup/sample method, integer MAD variance limit, and
+latency/RSS/index/cache budgets. The collector observes those values rather
+than copying them. Samples cannot be discarded or retried; host, adapter, or
+variance mismatch is `NOT EVIDENCE`.
+
+Every timed query binds its duration to expected and observed SHA-256 digests
+of the canonical result and status `matched`; a fast wrong result invalidates
+the receipt. The ratio is `floor(rebuild_median_ns * 1000 /
+publish_median_ns)` with checked integers; zero is invalid and `20.0` means
+`>= 20000`.
+
+Counter evidence is canonical UTF-8 JSONL with an opened-root path identity,
+contiguous sequence and predecessor chain, kernel-level process/filesystem
+events, explicit loss reporting, and a terminal membership/hash record. Loss,
+overflow, ambiguous identity, surviving descendants, or chain failure is
+`NOT EVIDENCE`; provider logs and textual path matching are insufficient.
+
+Every closed event additionally contains `source_version`,
+`source_content_sha256`, and `source_change_witness = {kind,
+identity_generation, size_bytes, modified_time_ns, witness_sha256}`. For
+`source_open` and `source_change` events, `source_version` is a non-negative safe
+integer and `source_content_sha256` is exactly 64 lowercase hexadecimal
+characters. Non-source events use `source_version = 0`,
+`source_content_sha256 = ""`, and the typed zero/empty-string witness sentinel.
+A successful `source_open` must carry the current per-path-identity
+version, the hash of the exact bytes read, and a witness derived by the approved
+adapter from the opened handle; a `source_change` event is added to the event
+enum and must increment that identity's version and bind the new content hash
+and witness before a later open is attributed. Replay classifies a reread as
+unchanged only when path identity, version, content hash, and witness all match
+and no intervening `source_change` exists. Missing, regressing, skipped, or
+contradictory versions, hashes, or witnesses are `NOT EVIDENCE`, making an
+unchanged-source reread mechanically replayable rather than inferred from path.
+
 ## 9. Verification commands
 
 Five compile-valid executable design scaffolds and five exact-path authored
