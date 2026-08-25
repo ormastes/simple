@@ -1101,6 +1101,7 @@ int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle);
 int64_t spl_dynlib_snapshot_linux(int64_t path_value);
 int64_t spl_dlsym(int64_t handle, int64_t name_value);
 int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbol);
+int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol);
 int64_t spl_dlclose(int64_t handle);
 int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, int64_t* out);
 int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs);

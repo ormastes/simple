@@ -307,6 +307,56 @@ pub fn spl_dlsym_checked(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Interpreter implementation of checked current-process symbol resolution.
+pub fn spl_dlsym_process_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "spl_dlsym_process_checked requires 2 arguments (name, out_symbol)",
+        ));
+    }
+    let output = match &args[1] {
+        Value::BorrowMut(value) => value,
+        _ => {
+            return Err(CompileError::runtime(
+                "spl_dlsym_process_checked: output must be &mut i64",
+            ));
+        }
+    };
+    *output.inner_mut() = Value::Int(0);
+    let name = match &args[0] {
+        Value::Str(value) if !value.is_empty() => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    let c_name = match CString::new(name.as_str()) {
+        Ok(value) => value,
+        Err(_) => return Ok(Value::Int(1)),
+    };
+
+    #[cfg(unix)]
+    let symbol = unsafe { libc::dlsym(std::ptr::null_mut(), c_name.as_ptr()) };
+    #[cfg(windows)]
+    let symbol = unsafe {
+        extern "system" {
+            fn GetModuleHandleW(name: *const u16) -> isize;
+            fn GetProcAddress(module: isize, name: *const u8) -> *mut std::ffi::c_void;
+        }
+        let process = GetModuleHandleW(std::ptr::null());
+        if process == 0 {
+            std::ptr::null_mut()
+        } else {
+            GetProcAddress(process, c_name.as_ptr() as *const u8)
+        }
+    };
+    #[cfg(not(any(unix, windows)))]
+    let symbol: *mut std::ffi::c_void = std::ptr::null_mut();
+
+    if symbol.is_null() {
+        return Ok(Value::Int(3));
+    }
+    *output.inner_mut() = Value::Int(symbol as usize as i64);
+    Ok(Value::Int(0))
+}
+
 /// Close a loaded library.
 ///
 /// Callable from Simple as: `spl_dlclose(handle: i64) -> i64`

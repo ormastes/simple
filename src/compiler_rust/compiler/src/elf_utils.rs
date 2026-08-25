@@ -566,6 +566,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "spl_dlopen_checked" => value::spl_dlopen_checked as *const () as usize,
         "spl_dlsym" => value::spl_dlsym as *const () as usize,
         "spl_dlsym_checked" => value::spl_dlsym_checked as *const () as usize,
+        "spl_dlsym_process_checked" => value::spl_dlsym_process_checked as *const () as usize,
         "spl_dlclose" => value::spl_dlclose as *const () as usize,
         "spl_dynlib_snapshot_linux" => value::spl_dynlib_snapshot_linux as *const () as usize,
         "spl_wffi_call_i64" => value::spl_wffi_call_i64 as *const () as usize,
@@ -978,6 +979,7 @@ mod tests {
             "spl_wffi_call_f64_checked",
             "spl_dlopen_checked",
             "spl_dlsym_checked",
+            "spl_dlsym_process_checked",
         ] {
             assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
         }

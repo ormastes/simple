@@ -163,6 +163,25 @@ int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbo
     return 0;
 }
 
+int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol) {
+    if (!out_symbol) return 1;
+    *out_symbol = 0;
+    const char* name = rt_interp_cstr(name_value);
+    if (!name || !name[0]) return 1;
+#ifdef _WIN32
+    HMODULE process = GetModuleHandleA(NULL);
+    if (!process) return 3;
+    FARPROC symbol = GetProcAddress(process, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#else
+    void* symbol = dlsym(NULL, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#endif
+    return 0;
+}
+
 int64_t spl_dlclose(int64_t handle) {
     if (!handle) return -1;
 #ifdef _WIN32

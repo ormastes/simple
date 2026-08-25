@@ -337,6 +337,58 @@ pub extern "C" fn spl_dlsym_checked(
     }
 }
 
+/// Resolve a symbol from the current process image without overloading a null
+/// provider handle. Returns 0 only when `out_symbol` receives a non-null
+/// address.
+#[no_mangle]
+pub extern "C" fn spl_dlsym_process_checked(name_rv: RuntimeValue, out_symbol: *mut i64) -> i64 {
+    if out_symbol.is_null() {
+        return 1;
+    }
+    unsafe { out_symbol.write(0) };
+    let raw_ptr = rt_string_data(name_rv);
+    let len = rt_string_len(name_rv);
+    if raw_ptr.is_null() || len <= 0 {
+        return 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len as usize) };
+    if slice.contains(&0) {
+        return 1;
+    }
+    let mut buf = Vec::with_capacity(len as usize + 1);
+    buf.extend_from_slice(slice);
+    buf.push(0);
+
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::dlsym(std::ptr::null_mut(), buf.as_ptr() as *const libc::c_char) };
+        if result.is_null() {
+            return 3;
+        }
+        unsafe { out_symbol.write(result as i64) };
+        0
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        let process = unsafe { GetModuleHandleW(std::ptr::null()) };
+        if process == 0 {
+            return 3;
+        }
+        let result = unsafe { GetProcAddress(process, buf.as_ptr()) };
+        let Some(symbol) = result else {
+            return 3;
+        };
+        unsafe { out_symbol.write(symbol as *const () as i64) };
+        0
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = buf;
+        4
+    }
+}
+
 /// spl_dlclose(handle: i64) -> i64
 ///
 /// Closes a dynamic library handle. Returns 0 on success, non-zero on error.
@@ -793,6 +845,15 @@ mod tests {
         assert_eq!(spl_dlsym_checked(0, name, &mut symbol), 1);
         assert_eq!(symbol, 0);
         assert_eq!(spl_dlsym_checked(0, name, std::ptr::null_mut()), 1);
+    }
+
+    #[test]
+    fn checked_process_symbol_lookup_initializes_output_on_failure() {
+        let name = rt_string_new(b"simple_missing_process_symbol".as_ptr(), 29);
+        let mut symbol = 99i64;
+        assert_eq!(spl_dlsym_process_checked(name, &mut symbol), 3);
+        assert_eq!(symbol, 0);
+        assert_eq!(spl_dlsym_process_checked(name, std::ptr::null_mut()), 1);
     }
 
     #[test]
