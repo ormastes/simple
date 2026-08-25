@@ -101,6 +101,42 @@ No production self-hosted optimizer or benchmark was available, so this
 module and the wider SFFI estate are not globally verified or signed;
 verified-and-signed admission remains 0.
 
+## Minimal raw-runtime SFFI unsafe-surface checkpoint
+
+`sffi_minimal.spl` intentionally exposes integer-encoded runtime pointers and
+handles.  Because no wrapper can establish handle validity, ownership, or
+provider identity, all 41 smallest wrapper functions are now explicitly
+`unsafe(ffi)` rather than presenting a safe-looking API around a lexical raw
+call.  This is the narrowest honest unsafe boundary: each wrapper contains
+exactly one existing foreign call and no additional owner layer.
+
+Two fabricated-value contracts were corrected.  Raw environment lookup and
+deep array release now preserve `i64?` absence instead of collapsing `nil` to
+zero, and invalid negative GC allocation size returns the ABI's documented
+null-failure sentinel `0` rather than the pointer-like value `-1`.  Repository
+search found no consumers of the changed optional wrappers.
+
+Provider coverage confirms this module cannot be declared safe or verified:
+
+- typed native registry and interpreter: 14 symbols
+- typed native registry only: 3 symbols
+- interpreter only: 6 symbols
+- neither registry: 18 symbols
+
+The focused unsafe-surface ratchet passed.  The authoritative census changed:
+
+- raw call sites: unchanged at 19,048
+- missing authority: 14,848 -> 14,810
+- lexical unsafe: unchanged at 3,281
+- function unsafe: 919 -> 957
+
+This metadata-only ownership change adds no call, allocation, copy, lookup,
+lock, hash, branch, or loop.  It deliberately does not add nominal inline
+owners because each unsafe wrapper already directly invokes its raw ABI once.
+No production self-hosted optimizer or benchmark was available.  Exact
+artifact identity, ABI proof, signatures, and evidence admission remain
+absent, so verified-and-signed admission remains 0.
+
 ## LLVM-library expression translation authority checkpoint
 
 `llvm_lib_translate_expr.spl` had six local declarations; unused
