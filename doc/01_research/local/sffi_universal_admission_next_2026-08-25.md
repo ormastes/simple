@@ -925,3 +925,29 @@ untagged rows are now unsafe-tagged. An authoritative unique-symbol recount is
 required after the complete Metal pass because separating formerly colliding
 identities intentionally changes symbol cardinality. Exact-artifact signed
 admission remains zero.
+
+## Canonical Metal contract and fabricated-stub checkpoint
+
+The canonical Metal owner now has 40 raw declarations, all with adjacent,
+operation-specific `@unsafe(... capabilities: [ffi])` contracts. They cover
+runtime/device queries, resource handles, borrowed and mutable byte arrays,
+shader text, command submission, blocking completion, raw parameter pointers,
+batched compute status, and nullable error C strings. The static audit requires
+all 40 declarations to retain their tags.
+
+Three additional declarations lived under an explicit `Graphics — Missing
+Stubs` heading. Their Rust providers always returned integer zero for sampler
+creation, swapchain creation, and presentation, while the Simple facade exposed
+dummy resource objects and a boolean presentation result. No consumer existed
+outside an async compatibility re-export. The declarations, dummy wrappers,
+types, and re-exports are removed rather than converting zero to `false` or
+claiming an unsafe stub is a functional API.
+
+The change adds no provider call, dispatch, branch, allocation, copy, or GPU
+data movement. It deletes fabricated surface and adds compile-time metadata to
+the remaining direct calls. The Metal identity/contract audit and whitespace
+check passed; production Simple and optimizer verification remain unavailable.
+Relative to the last authoritative baseline plus the scoped-symbol checkpoint,
+declaration rows decrease by three and 40 additional rows become unsafe-tagged.
+An authoritative full recount remains scheduled after this lane. Exact-artifact
+verified-and-signed admission remains zero.

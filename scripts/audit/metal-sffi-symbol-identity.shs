@@ -6,8 +6,29 @@ canonical="$root/src/lib/nogc_sync_mut/io/metal_sffi.spl"
 session="$root/src/lib/gc_async_mut/gpu/session/backend_runtime_ops.spl"
 engine2d="$root/src/lib/nogc_sync_mut/gpu/engine2d/metal_session.spl"
 
-if [ "$(grep -c '^[[:space:]]*extern fn rt_metal_' "$canonical")" -ne 41 ]; then
+if [ "$(grep -c '^[[:space:]]*extern fn rt_metal_' "$canonical")" -ne 38 ]; then
     echo "canonical Metal declaration inventory changed without ABI review" >&2
+    exit 1
+fi
+canonical_declarations=$(grep -c '^[[:space:]]*extern fn ' "$canonical")
+if [ "$canonical_declarations" -ne 40 ]; then
+    echo "canonical Metal helper declaration inventory changed without ABI review" >&2
+    exit 1
+fi
+if grep -n -E 'rt_metal_(create_sampler|create_swapchain|present)|Metal(Sampler|Swapchain)' "$canonical"; then
+    echo "unimplemented Metal graphics stubs must not be exposed as values" >&2
+    exit 1
+fi
+canonical_tagged=$(awk '
+    /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+    /^[[:space:]]*extern fn / {
+        if (previous_is_ffi) tagged++
+    }
+    { previous_is_ffi = 0 }
+    END { print tagged + 0 }
+' "$canonical")
+if [ "$canonical_tagged" -ne "$canonical_declarations" ]; then
+    echo "every canonical Metal declaration must be explicitly unsafe(ffi)" >&2
     exit 1
 fi
 if grep -n -E 'extern fn rt_metal_(create_device|present)\(' "$session"; then

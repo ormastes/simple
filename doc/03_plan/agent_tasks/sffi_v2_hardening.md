@@ -498,3 +498,8 @@ passing placeholder.
     canonical `rt_metal_*` identity with a different signature. Either provide
     and admit the exact scoped ABI or remove the unsupported facade. Continue
     canonical Metal tagging without adding hot-path adapters.
+94. Keep the canonical Metal owner at 40 explicitly tagged raw declarations
+    until a reviewed provider change alters the inventory. Never restore the
+    always-zero sampler/swapchain/present facade; implement and admit a real
+    provider contract before exposing those APIs. Preserve direct batched GPU
+    submission and existing buffer-copy counts.
