@@ -439,3 +439,9 @@ passing placeholder.
     semantic boolean status, with one call and one branch on success. Next
     remove fabricated certificate/configuration handles and truthful-status
     stubs; exact-artifact admission remains zero.
+83. Do not restore the ten unimplemented TLS client/server configuration
+    symbols. A future configuration API must own real rustls state and prove
+    handle lifetime, mutation, ALPN, trust-root, verification-mode, and release
+    contracts before registry admission. The current removal adds no memory or
+    dispatch overhead. Next remove or implement the fabricated certificate and
+    connection-info providers; signed exact-artifact admission remains zero.

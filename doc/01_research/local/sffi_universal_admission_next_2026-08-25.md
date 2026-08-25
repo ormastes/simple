@@ -696,3 +696,20 @@ unavailable under policy.
 The estimate remains 11,944 declaration rows / 3,158 symbols, with 1,203 tagged
 declarations, 651 `unsafe_contract_declared`, 10,475 untouched, and zero
 exact-artifact verified-and-signed.
+
+## Fabricated TLS configuration provider removal checkpoint
+
+The six client-configuration and four server-configuration symbols had no
+callers and no provider state. Hosted implementations returned synthetic
+handles or unconditional `true`; SimpleOS exported corresponding unavailable
+stubs. All ten symbols are now removed from the canonical facade, hosted
+provider exports, compiler runtime-symbol registry, and SimpleOS.
+
+Removal is preferable to an unused compatibility subsystem: it eliminates
+advertised false capability and adds no handle table, allocation, lock, lookup,
+branch, or release path. The static absence ratchet passed, and both TLS-disabled
+and TLS-enabled runtime compile checks passed once.
+
+The estimate falls to 11,934 declaration rows / 3,148 symbols, with 1,203
+tagged declarations, 651 `unsafe_contract_declared`, 10,465 untouched, and
+zero exact-artifact verified-and-signed.

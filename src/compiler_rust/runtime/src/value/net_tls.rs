@@ -775,68 +775,6 @@ pub extern "C" fn rt_tls_free_cert(_cert: i64) -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_client_config_new() -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_add_root_cert(
-    _config: i64,
-    _cert_path: crate::value::RuntimeValue,
-) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_set_alpn(
-    _config: i64,
-    _protocols: crate::value::RuntimeValue,
-) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_enable_sni(_config: i64, _enabled: bool) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_set_verify_mode(_config: i64, _verify: bool) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_client_config_free(_config: i64) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_server_config_new(
-    _cert_path: crate::value::RuntimeValue,
-    _key_path: crate::value::RuntimeValue,
-) -> i64 {
-    next_tls_fake_handle()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_server_config_set_alpn(
-    _config: i64,
-    _protocols: crate::value::RuntimeValue,
-) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_server_config_require_client_cert(_config: i64, _require: bool) -> bool {
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn rt_tls_server_config_free(_config: i64) -> bool {
-    true
-}
-
-#[no_mangle]
 pub extern "C" fn rt_tls_get_peer_cert(_conn: i64) -> i64 {
     next_tls_fake_handle()
 }
