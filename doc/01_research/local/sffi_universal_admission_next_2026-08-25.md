@@ -877,3 +877,24 @@ symbols remain 3,135. Unsafe-tagged rows remain 1,308, untouched rows decrease
 from 10,304 to 10,256, and exact-artifact verified-and-signed admission remains
 zero. The canonical Rapier2D declarations and fallible wrapper returns still
 need contract tagging and typed-error review.
+
+## Rapier2D raw-contract ownership checkpoint
+
+All 48 declarations in the canonical Rapier2D owner now carry adjacent,
+operation-specific `@unsafe(... capabilities: [ffi])` contracts. The metadata
+identifies world, body, collider, contact-list, and joint handle families;
+tuple, tagged-tuple, array, scalar/count, boolean-status, and error-text return
+families; and the nonpositive or negative failure sentinels where applicable.
+The owner ratchet now requires all 48 declarations to remain explicitly tagged.
+
+This changes no foreign signature, wrapper, call count, dispatch, branch,
+allocation, copy, or resource layout. The physics simulation and query hot
+paths remain direct. The static owner ratchet and whitespace check passed; no
+production-runtime or optimizer claim is made while the self-hosted runtime is
+unavailable.
+
+Totals remain 11,822 `rt_*` declaration rows / 3,135 symbols. Unsafe-tagged
+rows increase from 1,308 to 1,356, untouched rows decrease from 10,256 to
+10,208, and exact-artifact verified-and-signed admission remains zero. The raw
+tags identify the unsafe boundary but do not make dummy-resource, zero-tuple,
+or boolean failure wrappers typed or verified.

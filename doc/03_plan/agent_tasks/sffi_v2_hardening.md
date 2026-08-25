@@ -488,3 +488,8 @@ passing placeholder.
     never restore its 48 declarations or `handle != 0` resource validation.
     Tag and type the canonical Rapier2D boundary next, preserving one direct
     provider call per operation and avoiding copies or generic dispatch.
+92. Keep all 48 canonical Rapier2D declarations explicitly tagged
+    `unsafe(ffi)`. Migrate dummy resource and ambiguous tuple/scalar failures to
+    typed `Result` APIs in a separately reviewed compatibility change, with one
+    direct provider call and no added array copies; exact signed admission is
+    still required.
