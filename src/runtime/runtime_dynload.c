@@ -97,12 +97,33 @@ int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
     return -1;
 #endif
 }
+#ifdef _WIN32
+static HMODULE runtime_dynload_open_utf8(const char *path) {
+    int wide_len;
+    wchar_t *wide_path;
+    HMODULE handle;
+    if (!path || !path[0]) return NULL;
+    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            path, -1, wide_path, wide_len) != wide_len) {
+        free(wide_path);
+        return NULL;
+    }
+    handle = LoadLibraryW(wide_path);
+    free(wide_path);
+    return handle;
+}
+#endif
 
 int64_t spl_dlopen(int64_t path_value) {
     const char* path = rt_interp_cstr(path_value);
     if (!path) return 0;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)LoadLibraryA(path);
+    return (int64_t)(intptr_t)runtime_dynload_open_utf8(path);
 #else
     return (int64_t)(intptr_t)dlopen(path, RTLD_NOW | RTLD_LOCAL);
 #endif

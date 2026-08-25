@@ -24,7 +24,9 @@ use os.smf.dynsmf_session.{
     dynsmf_artifact_status,
     dynsmf_dynload_setting_parse
 }
-use app.io.mod.{env_get, process_spawn_async, file_exists, file_read_text}
+use os.smf.dynsmf_lifecycle.{dynsmf_session_close}
+use app.io.mod.{env_get, process_spawn_async, file_exists, file_read_text,
+    read_file_text_result, time_now_micros}
 
 fn dynsmf_dispatch_background_compiles(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
     var out = session
@@ -304,3 +306,205 @@ pub fn dynsmf_startup_session_with_dynload_config(args: [text], session_id: text
         sdn_text,
         env_get("SIMPLE_DYNLOAD") ?? ""
     )
+
+# Product checked-dynSMF startup owner. SIMPLE_ASPECT_PACKS remains a separate
+# compatibility path owned by app.cli.startup_aspect_packs, keeping its graph
+# out of app-root when the operator knob is absent.
+val PRODUCT_DYNLOAD_CONFIG_ENV: text = "SIMPLE_DYNLOAD_CONFIG"
+
+# Platform-neutral startup extension selection. Applications only provide
+# argv/env values; host-specific discovery remains behind the dynSMF loader.
+# Precedence is CLI > env > the default path. Repeated --dynload entries retain
+# argv order, and the existing settings merger makes the last value for an id
+# win deterministically.
+class DynSmfStartupOptions:
+    ok: bool
+    reason: text
+    config_path: text
+    settings_text: text
+    explicit_config: bool
+
+pub fn dynsmf_startup_options_from_values(args: [text], env_config: text,
+        env_settings: text) -> DynSmfStartupOptions:
+    var config_path = if env_config != "": env_config else: dynsmf_dynload_config_default_path()
+    var explicit_config = env_config != ""
+    var cli_settings: [text] = []
+    var terminated = false
+    var idx = 0
+    while idx < args.len():
+        val arg = args[idx]
+        if terminated:
+            idx = idx + 1
+            continue
+        if arg == "--":
+            terminated = true
+        elif arg == "--dynload-config":
+            if idx + 1 >= args.len() or args[idx + 1] == "":
+                return DynSmfStartupOptions(ok: false, reason: "missing_dynload_config_path", config_path: "", settings_text: "", explicit_config: true)
+            config_path = args[idx + 1]
+            explicit_config = true
+            idx = idx + 1
+        elif arg.starts_with("--dynload-config="):
+            val value = arg.slice("--dynload-config=".len(), arg.len())
+            if value == "":
+                return DynSmfStartupOptions(ok: false, reason: "missing_dynload_config_path", config_path: "", settings_text: "", explicit_config: true)
+            config_path = value
+            explicit_config = true
+        elif arg == "--dynload":
+            if idx + 1 >= args.len() or args[idx + 1] == "":
+                return DynSmfStartupOptions(ok: false, reason: "missing_dynload_setting", config_path: config_path, settings_text: "", explicit_config: explicit_config)
+            cli_settings.push(args[idx + 1])
+            idx = idx + 1
+        elif arg.starts_with("--dynload="):
+            val value = arg.slice("--dynload=".len(), arg.len())
+            if value == "":
+                return DynSmfStartupOptions(ok: false, reason: "missing_dynload_setting", config_path: config_path, settings_text: "", explicit_config: explicit_config)
+            cli_settings.push(value)
+        idx = idx + 1
+    var settings_text = env_settings
+    for setting in cli_settings:
+        if settings_text != "":
+            settings_text = settings_text + ";"
+        settings_text = settings_text + setting
+    DynSmfStartupOptions(ok: true, reason: "loaded", config_path: config_path,
+        settings_text: settings_text, explicit_config: explicit_config)
+
+struct ProductDynloadStartupMetrics:
+    elapsed_us: i64
+    config_file_reads: i64
+    raw_pack_file_reads: i64
+    full_tree_scans: i64
+    child_processes: i64
+    latency_target_us: i64
+    latency_target_configured: bool
+    latency_target_source: text
+    measured_max_rss_kib: i64
+    rss_target_kib: i64
+    rss_target_configured: bool
+    rss_evidence_source: text
+    raw_apk_counter_state: text
+    raw_apk_compat_path: text
+
+class ProductDynloadStartup:
+    session: DynSmfSession
+    metrics: ProductDynloadStartupMetrics
+    config_ok: bool
+    exit_code: i64
+    error: text
+    closed: bool
+
+    # One O(libraries) reverse close. Raw APK compatibility has its own CLI
+    # owner and never shares this lifecycle.
+    me close() -> bool:
+        if self.closed:
+            return true
+        self.session = dynsmf_session_close(self.session)
+        for loaded in self.session.loaded:
+            if loaded.status == "loaded":
+                self.exit_code = 1
+                self.error = "dynSMF close refused: " + loaded.id
+                return false
+        self.closed = true
+        true
+
+fn product_dynload_config_failed(session: DynSmfSession) -> bool:
+    for row in session.evidence:
+        if row.action == "dynload_config" and row.status == "failed":
+            return true
+    false
+
+fn product_dynload_failure_reason(session: DynSmfSession) -> text:
+    for row in session.evidence:
+        if row.status == "failed":
+            return row.action + ":" + row.reason
+    ""
+
+fn product_dynload_metrics(elapsed_us: i64, config_reads: i64) -> ProductDynloadStartupMetrics:
+    ProductDynloadStartupMetrics(
+        elapsed_us: if elapsed_us >= 0: elapsed_us else: 0,
+        config_file_reads: config_reads,
+        raw_pack_file_reads: -1,
+        full_tree_scans: 0,
+        child_processes: 0,
+        latency_target_us: 0,
+        latency_target_configured: false,
+        latency_target_source: "outer-harness-required",
+        measured_max_rss_kib: 0,
+        rss_target_kib: 0,
+        rss_target_configured: false,
+        rss_evidence_source: "outer-harness-required",
+        raw_apk_counter_state: "not-owned-deferred",
+        raw_apk_compat_path: "app.cli.startup_aspect_packs")
+
+fn product_dynload_startup_from_values(args: [text], env_dynsmf: text,
+        env_disable: text, session_id: text, manifest: [DynSmfManifestEntry],
+        sdn_text: text, env_dynload: text,
+        elapsed_us: i64, config_file_reads: i64) -> ProductDynloadStartup:
+    val session = dynsmf_startup_session_with_dynload_config_values(
+        args, env_dynsmf, env_disable, session_id, manifest, sdn_text,
+        env_dynload)
+    val config_failed = product_dynload_config_failed(session)
+    val failure = product_dynload_failure_reason(session)
+    ProductDynloadStartup(
+        session: session,
+        metrics: product_dynload_metrics(elapsed_us, config_file_reads),
+        config_ok: not config_failed,
+        exit_code: if failure == "": 0 else: 1,
+        error: if failure == "": "" elif config_failed:
+            "dynload config rejected: " + failure
+        else:
+            "dynload startup rejected: " + failure,
+        closed: false)
+
+fn product_dynload_startup(args: [text], session_id: text) -> ProductDynloadStartup:
+    val started_us = time_now_micros()
+    if (env_get("SIMPLE_DYNSMF_TRACE") ?? "") == "1":
+        print "dynsmf-trace: startup_session_init session=" + session_id
+    val options = dynsmf_startup_options_from_values(
+        args,
+        env_get(PRODUCT_DYNLOAD_CONFIG_ENV) ?? "",
+        env_get("SIMPLE_DYNLOAD") ?? "")
+    val config_path = options.config_path
+    val explicit_config = options.explicit_config
+    var sdn_text = ""
+    var config_reads = 0
+    if not options.ok:
+        sdn_text = "invalid_dynload_cli:" + options.reason
+    elif config_path != "" and file_exists(config_path):
+        config_reads = 1
+        match read_file_text_result(config_path):
+            Ok(content): sdn_text = content
+            Err(_): sdn_text = "unreadable_explicit_dynload_config"
+    elif explicit_config:
+        sdn_text = "missing_explicit_dynload_config"
+    val owner = product_dynload_startup_from_values(
+        args,
+        env_get("SIMPLE_DYNSMF") ?? "",
+        env_get("SIMPLE_DYNSMF_DISABLE") ?? "",
+        session_id,
+        dynsmf_default_manifest(),
+        sdn_text,
+        options.settings_text,
+        0,
+        config_reads)
+    val finished_us = time_now_micros()
+    owner.metrics = product_dynload_metrics(
+        if finished_us >= started_us: finished_us - started_us else: 0,
+        owner.metrics.config_file_reads)
+    owner
+
+fn product_dynload_startup_metrics_line(metrics: ProductDynloadStartupMetrics) -> text:
+    "dynload_startup elapsed_us=" + metrics.elapsed_us.to_text() +
+        " latency_target_us=" + metrics.latency_target_us.to_text() +
+        " latency_target_configured=" + metrics.latency_target_configured.to_text() +
+        " latency_target_source=" + metrics.latency_target_source +
+        " config_file_reads=" + metrics.config_file_reads.to_text() +
+        " raw_pack_file_reads=" + metrics.raw_pack_file_reads.to_text() +
+        " full_tree_scans=" + metrics.full_tree_scans.to_text() +
+        " child_processes=" + metrics.child_processes.to_text() +
+        " measured_max_rss_kib=" + metrics.measured_max_rss_kib.to_text() +
+        " rss_target_kib=" + metrics.rss_target_kib.to_text() +
+        " rss_target_configured=" + metrics.rss_target_configured.to_text() +
+        " rss_evidence_source=" + metrics.rss_evidence_source +
+        " raw_apk_counter_state=" + metrics.raw_apk_counter_state +
+        " raw_apk_compat_path=" + metrics.raw_apk_compat_path

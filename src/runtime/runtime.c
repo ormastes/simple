@@ -31,6 +31,7 @@
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
 #include "runtime.h"
+#include "runtime_startup_args.h"
 #include "platform/platform.h"
 #include "runtime_memtrack.h"
 
@@ -1551,10 +1552,11 @@ int64_t rt_install_crash_handler(void);
 
 static int    g_argc = 0;
 static char** g_argv = NULL;
+static char** g_filtered_argv = NULL;
 
 void spl_init_args(int argc, char** argv) {
-    g_argc = argc;
-    g_argv = argv;
+    g_argc = simple_runtime_filter_startup_args(
+        argc, argv, &g_filtered_argv, &g_argv);
     rt_install_crash_handler();
 }
 

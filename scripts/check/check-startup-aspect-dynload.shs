@@ -10,8 +10,10 @@
 # non-zero return. Until 2026-08-24 nothing in the tree DEFINED that symbol, so
 # the weak reference resolved to NULL and the slot was permanently dead — the
 # exact silent-nil shape this repo bans. `src/runtime/runtime_native.c` now
-# defines it: it dlopen()s each path in `SIMPLE_STARTUP_ASPECTS` and calls that
-# library's `simple_aspect_pack_init()`, failing closed and loudly.
+# defines it: it dlopen()s each path in `SIMPLE_STARTUP_ASPECTS`, followed by
+# repeatable `--startup-extension[=]PATH` arguments, and calls that library's
+# `simple_aspect_pack_init()`, failing closed and loudly. This pre-main raw
+# shared-library lane is intentionally separate from app-level dynSMF config.
 #
 # Why a compiler is run rather than a text scan: "the symbol is defined" is NOT
 # the property that matters. A weak undefined reference does not pull a member
@@ -361,7 +363,61 @@ else
     esac
 fi
 
-# case 8 — drift pin. The generated entry closure this gate mirrors must still
+# case 8 — CLI supports both spellings and preserves argv order.
+CHECKED=$((CHECKED + 1))
+OUT=$("$WORK/prog" --startup-extension="$WORK/libpackA.so" \
+    --startup-extension "$WORK/libpackB.so" 2>&1)
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    fail "cli-two-packs(rc=$RC)"
+else
+    case "$OUT" in
+        *PACK_A_INIT*PACK_B_INIT*MAIN_RAN*) : ;;
+        *) fail "cli-two-packs(wrong-order-or-missing)" ;;
+    esac
+fi
+
+# case 9 — environment entries precede CLI entries deterministically.
+CHECKED=$((CHECKED + 1))
+OUT=$(SIMPLE_STARTUP_ASPECTS="$WORK/libpackA.so" "$WORK/prog" \
+    --startup-extension="$WORK/libpackB.so" 2>&1)
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    fail "env-before-cli(rc=$RC)"
+else
+    case "$OUT" in
+        *PACK_A_INIT*PACK_B_INIT*MAIN_RAN*) : ;;
+        *) fail "env-before-cli(wrong-order-or-missing)" ;;
+    esac
+fi
+
+# case 10 — the hard argv boundary keeps program arguments out of startup.
+CHECKED=$((CHECKED + 1))
+OUT=$("$WORK/prog" -- --startup-extension="$WORK/does-not-exist.so" 2>&1)
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    fail "cli-boundary(rc=$RC)"
+else
+    case "$OUT" in
+        *MAIN_RAN*) : ;;
+        *) fail "cli-boundary(main-did-not-run)" ;;
+    esac
+fi
+
+# case 11 — a missing CLI path fails closed through generated-main exit 125.
+CHECKED=$((CHECKED + 1))
+OUT=$("$WORK/prog" --startup-extension 2>&1)
+RC=$?
+if [ "$RC" -ne 125 ]; then
+    fail "cli-missing-path(rc=$RC,want-125)"
+else
+    case "$OUT" in
+        *requires*a*non-empty*PATH*) : ;;
+        *) fail "cli-missing-path(diagnostic-absent)" ;;
+    esac
+fi
+
+# case 12 — drift pin. The generated entry closure this gate mirrors must still
 # declare the weak hook and still call it. If codegen stops emitting the call,
 # every case above would keep passing while the feature was dead in real
 # binaries, so this is checked against the real source.
@@ -372,7 +428,7 @@ elif ! /usr/bin/grep -q 'extern int __simple_startup_before_main' "$HOSTED_SPL";
     fail "codegen-drift(hosted_support.spl no longer declares the hook)"
 fi
 
-# case 9 — placement pin. The definition must live in the same translation unit
+# case 13 — placement pin. The definition must live in the same translation unit
 # that owns __simple_runtime_init. A weak undefined reference does not pull an
 # archive member, so moving it to its own TU silently disables the hook.
 CHECKED=$((CHECKED + 1))

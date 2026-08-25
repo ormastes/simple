@@ -293,9 +293,10 @@ void     rt_stderr_flush(void);            /* flushes stderr */
 
 void     __simple_runtime_init(void);
 void     __simple_runtime_shutdown(void);
-/* Pre-main startup hook: loads the `SIMPLE_STARTUP_ASPECTS` shared libraries
- * and calls each pack's `simple_aspect_pack_init`. Non-zero = fail closed
- * (the generated entry point exits 125). See runtime_native.c. */
+/* Pre-main startup hook: loads `SIMPLE_STARTUP_ASPECTS`, then repeatable
+ * `--startup-extension[=]PATH` argv entries, and calls each pack's
+ * `simple_aspect_pack_init`. Non-zero = fail closed (the generated entry
+ * point exits 125). This is distinct from app-level dynSMF config. */
 int      __simple_startup_before_main(int argc, char **argv);
 int64_t  rt_value_int(int64_t value);
 int64_t  rt_value_as_int(int64_t value);

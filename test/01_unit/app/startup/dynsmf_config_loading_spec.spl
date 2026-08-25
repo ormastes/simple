@@ -33,7 +33,8 @@ use os.smf.dynsmf_session.{
 }
 use app.startup.dynsmf_autoload.{
     dynsmf_dynload_settings_from_values,
-    dynsmf_dynload_settings_load
+    dynsmf_dynload_settings_load,
+    dynsmf_startup_options_from_values
 }
 use app.io.mod.{file_write, file_delete}
 
@@ -117,3 +118,42 @@ describe "dynSMF dynload config loading":
         val config = dynsmf_dynload_settings_load(spec_manifest(), "build/definitely_missing_dynload_config.sdn")
         expect(config.ok).to_equal(true)
         expect(config.settings.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+    it "lets command args select config and deterministically override env settings":
+        step("Verify: CLI config and ordered setting overlays are reusable")
+        val options = dynsmf_startup_options_from_values(
+            ["tool", "--dynload-config", "profiles/editor.sdn",
+             "--dynload=lib_a:presence=on",
+             "--dynload", "lib_a:presence=off"],
+            "profiles/server.sdn", "lib_b:presence=on")
+        expect(options.ok).to_equal(true)
+        expect(options.config_path).to_equal("profiles/editor.sdn")
+        expect(options.explicit_config).to_equal(true)
+        expect(options.settings_text).to_equal(
+            "lib_b:presence=on;lib_a:presence=on;lib_a:presence=off")
+
+        val config = dynsmf_dynload_settings_from_values(
+            spec_manifest(), "", options.settings_text)
+        expect(config.ok).to_equal(true)
+        expect(config.settings.len()).to_equal(2)
+        expect(config.settings[1].library_id).to_equal("lib_a")
+        expect(config.settings[1].presence).to_equal(dynsmf_presence_off())
+
+    it "honors the argument boundary and rejects missing startup values":
+        step("Verify: app args after -- cannot mutate startup extensions")
+        val bounded = dynsmf_startup_options_from_values(
+            ["--", "--dynload-config=ignored.sdn",
+             "--dynload=lib_a:presence=on"], "", "")
+        expect(bounded.ok).to_equal(true)
+        expect(bounded.config_path).to_equal("simple_dynload.sdn")
+        expect(bounded.settings_text).to_equal("")
+
+        val missing_config = dynsmf_startup_options_from_values(
+            ["--dynload-config"], "", "")
+        expect(missing_config.ok).to_equal(false)
+        expect(missing_config.reason).to_equal("missing_dynload_config_path")
+
+        val missing_setting = dynsmf_startup_options_from_values(
+            ["--dynload="], "", "")
+        expect(missing_setting.ok).to_equal(false)
+        expect(missing_setting.reason).to_equal("missing_dynload_setting")

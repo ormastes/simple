@@ -18,6 +18,7 @@
 #include "runtime.h"
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
+#include "runtime_startup_args.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -6190,10 +6191,11 @@ void rt_eprintln_value(int64_t value) {
 
 static int rt_core_argc = 0;
 static char** rt_core_argv = NULL;
+static char** rt_core_filtered_argv = NULL;
 
 __attribute__((weak)) void spl_init_args(int argc, char** argv) {
-    rt_core_argc = argc;
-    rt_core_argv = argv;
+    rt_core_argc = simple_runtime_filter_startup_args(
+        argc, argv, &rt_core_filtered_argv, &rt_core_argv);
 }
 
 __attribute__((weak)) int64_t spl_arg_count(void) {
@@ -12051,6 +12053,27 @@ int32_t rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
         (uint64_t)result_ptr, (uint32_t)result_capacity);
 }
 
+#if defined(_WIN32)
+static HMODULE simple_load_library_utf8(const char *path) {
+    int wide_len;
+    wchar_t *wide_path;
+    HMODULE handle;
+    if (!path || !path[0]) return NULL;
+    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+            wide_path, wide_len) != wide_len) {
+        free(wide_path);
+        return NULL;
+    }
+    handle = LoadLibraryW(wide_path);
+    free(wide_path);
+    return handle;
+}
+#endif
+
 int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t mode) {
     if (!path_ptr || path_len <= 0 || path_len > 1048576) return 0;
     char *path = (char*)malloc((size_t)path_len + 1);
@@ -12058,20 +12081,14 @@ int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t m
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
 #if defined(_WIN32)
-    /* <dlfcn.h> is POSIX-only and is not included on Windows, so RTLD_* and
-     * dlopen were undeclared here. LoadLibraryA is the Win32 equivalent; it
-     * has no lazy/now distinction (imports are always resolved at load), so
-     * `mode` is accepted and ignored rather than silently changing meaning. */
     (void)mode;
-    HMODULE handle = LoadLibraryA(path);
-    free(path);
-    return (int64_t)(intptr_t)handle;
+    void *handle = (void*)simple_load_library_utf8(path);
 #else
     int flags = ((mode & 2) ? RTLD_NOW : RTLD_LAZY) | RTLD_LOCAL;
     void *handle = dlopen(path, flags);
+#endif
     free(path);
     return (int64_t)(intptr_t)handle;
-#endif
 }
 
 int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t name_len) {
@@ -12081,21 +12098,17 @@ int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t n
     memcpy(name, name_ptr, (size_t)name_len);
     name[name_len] = '\0';
 #if defined(_WIN32)
-    FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
-    free(name);
-    return (int64_t)(intptr_t)symbol;
+    void *symbol = (void*)(uintptr_t)GetProcAddress((HMODULE)(intptr_t)handle, name);
 #else
     void *symbol = dlsym((void*)(intptr_t)handle, name);
+#endif
     free(name);
     return (int64_t)(intptr_t)symbol;
-#endif
 }
 
 int64_t rt_host_dynlib_close(int64_t handle) {
     if (handle <= 0) return -1;
 #if defined(_WIN32)
-    /* FreeLibrary returns nonzero on SUCCESS, dlclose returns 0 on success.
-     * Normalize to dlclose's convention so callers keep one contract. */
     return FreeLibrary((HMODULE)(intptr_t)handle) ? 0 : -1;
 #else
     return (int64_t)dlclose((void*)(intptr_t)handle);
@@ -12844,7 +12857,9 @@ void __simple_runtime_init(void) {
  *
  * This defines it: at startup, load the shared libraries named by the
  * environment variable `SIMPLE_STARTUP_ASPECTS` (a `:`-separated list of
- * paths, `;` on Windows) and call each one's `simple_aspect_pack_init(void)`
+ * paths, `;` on Windows), followed by repeatable
+ * `--startup-extension=PATH` / `--startup-extension PATH` argv entries, and
+ * call each one's `simple_aspect_pack_init(void)`
  * entry. That is the runtime primitive underneath the "startup" activation
  * mode of doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
  * §9.4 ("startup — before application publication") and Phase 6 ("load startup
@@ -12890,7 +12905,7 @@ static int simple_startup_load_aspect_pack(const char *path) {
     union { void *object; int (*init)(void); } bridge;
 
 #if defined(_WIN32)
-    library = (void *)LoadLibraryA(path);
+    library = (void *)simple_load_library_utf8(path);
 #else
     library = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
 #endif
@@ -12917,6 +12932,11 @@ static int simple_startup_load_aspect_pack(const char *path) {
         fprintf(stderr,
                 "simple runtime: startup aspect pack `%s` exports no `%s`.\n",
                 path, SIMPLE_ASPECT_PACK_INIT);
+#if defined(_WIN32)
+        FreeLibrary((HMODULE)library);
+#else
+        dlclose(library);
+#endif
         return 1;
     }
 
@@ -12924,23 +12944,23 @@ static int simple_startup_load_aspect_pack(const char *path) {
         fprintf(stderr,
                 "simple runtime: startup aspect pack `%s`: %s returned non-zero.\n",
                 path, SIMPLE_ASPECT_PACK_INIT);
+#if defined(_WIN32)
+        FreeLibrary((HMODULE)library);
+#else
+        dlclose(library);
+#endif
         return 1;
     }
     return 0;
 }
 
-int __simple_startup_before_main(int argc, char **argv) {
-    const char *spec = getenv(SIMPLE_STARTUP_ASPECT_ENV);
+static int simple_startup_load_aspect_spec(const char *spec) {
     size_t start = 0;
-    size_t i = 0;
-    size_t len = 0;
-
-    (void)argc;
-    (void)argv;
+    size_t i;
+    size_t len;
 
     if (!spec || !spec[0]) return 0;
     len = strlen(spec);
-
     for (i = 0; i <= len; i++) {
         if (i != len && spec[i] != SIMPLE_STARTUP_ASPECT_SEP) continue;
         if (i > start) {
@@ -12960,6 +12980,42 @@ int __simple_startup_before_main(int argc, char **argv) {
             if (rc != 0) return rc;
         }
         start = i + 1;
+    }
+    return 0;
+}
+
+int __simple_startup_before_main(int argc, char **argv) {
+    const char *spec = getenv(SIMPLE_STARTUP_ASPECT_ENV);
+    const char *option = "--startup-extension";
+    size_t option_len = strlen(option);
+    int i;
+
+    /* Stable order: environment list first, then argv from left to right. */
+    if (simple_startup_load_aspect_spec(spec) != 0) return 1;
+    for (i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *path = NULL;
+        if (strcmp(arg, "--") == 0) break;
+        if (strcmp(arg, option) == 0) {
+            if (i + 1 >= argc || !argv[i + 1][0] ||
+                strcmp(argv[i + 1], "--") == 0) {
+                fprintf(stderr,
+                        "simple runtime: %s requires a non-empty PATH.\n",
+                        option);
+                return 1;
+            }
+            path = argv[++i];
+        } else if (strncmp(arg, option, option_len) == 0 &&
+                   arg[option_len] == '=') {
+            path = arg + option_len + 1;
+            if (!path[0]) {
+                fprintf(stderr,
+                        "simple runtime: %s requires a non-empty PATH.\n",
+                        option);
+                return 1;
+            }
+        }
+        if (path && simple_startup_load_aspect_pack(path) != 0) return 1;
     }
     return 0;
 }

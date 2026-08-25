@@ -1,14 +1,12 @@
 # OOP Dynamic Library Interface — DynLibKind enum dispatch
 #
-# Unified facade over ELF, SMF, and PE dynamic library formats.
+# Unified facade over native host libraries, SMF, and PE dynamic library formats.
 # Dispatches to the kernel dylib_async layer for actual loading.
-# PE support is stubbed (returns Invalid) until WS3 lands.
+# Native ELF, Mach-O dylibs, and PE DLLs use the hosted loader. Synthetic PE
+# image parsing remains owned by the Wine loader rather than this path.
 
 use os.posix.dylib_async.{dylib_open, dylib_symbol, dylib_symbol_is_process_callable, dylib_close}
-
-extern fn rt_host_dynlib_open(path: text, mode: i64) -> i64
-extern fn rt_host_dynlib_symbol(handle: i64, name: text) -> i64
-extern fn rt_host_dynlib_close(handle: i64) -> i64
+use os.posix.host_dynlib_sffi.{host_dynlib_open, host_dynlib_symbol, host_dynlib_close}
 
 struct ElfLibState:
     """State for a loaded ELF shared object."""
@@ -38,39 +36,48 @@ enum DynLibKind:
 
 fn _sniff_format(path: text) -> text:
     """Determine library format from file extension."""
-    if path.ends_with(".so"):
+    if path.ends_with(".so") or path.contains(".so."):
         return "elf"
+    if path.ends_with(".dylib"):
+        return "macho"
     if path.ends_with(".smf"):
         return "smf"
     if path.ends_with(".dll"):
         return "pe"
-    # Absolute paths without known extension default to ELF on POSIX
+    # Absolute paths without known extension use the POSIX host loader.
     if path.starts_with("/"):
         return "elf"
     "unknown"
+
+fn dynlib_format_for_path(path: text) -> text:
+    """Return the loader format selected for `path` without opening it."""
+    _sniff_format(path)
+
+fn dynlib_handle_is_valid(handle: i64) -> bool:
+    """Reject host-loader failure sentinels before constructing a library."""
+    handle > 0
 
 fn dynlib_open(path: text, mode: u32) -> DynLibKind:
     """Open a dynamic library, sniffing format from extension.
 
     .so  -> Elf
+    .dylib -> Elf (native-host library compatibility variant)
     .smf -> Smf
-    .dll -> Pe (returns Invalid until WS3)
+    .dll -> Pe
 
     Returns DynLibKind.Invalid on failure (bad path, unsupported format,
     or kernel ENOENT for unregistered paths).
     """
     val fmt = _sniff_format(path)
-    if fmt == "pe":
-        # PE loading not implemented yet (WS3)
-        return DynLibKind.Invalid
     if fmt == "unknown":
         return DynLibKind.Invalid
 
-    val handle = if fmt == "elf": rt_host_dynlib_open(path, mode as i64) else: dylib_open(path, mode)
-    if handle < 0:
+    val is_host = fmt == "elf" or fmt == "macho" or fmt == "pe"
+    val handle = if is_host: host_dynlib_open(path, mode as i64) else: dylib_open(path, mode)
+    if not dynlib_handle_is_valid(handle):
         return DynLibKind.Invalid
 
-    if fmt == "elf":
+    if fmt == "elf" or fmt == "macho":
         return DynLibKind.Elf(state: ElfLibState(
             handle: handle,
             base: 0,
@@ -82,17 +89,24 @@ fn dynlib_open(path: text, mode: u32) -> DynLibKind:
             path: path,
             stub_entry: 0
         ))
+    if fmt == "pe":
+        return DynLibKind.Pe(state: PeLibState(
+            handle: handle,
+            path: path,
+            base: 0,
+            image_size: 0
+        ))
     DynLibKind.Invalid
 
 fn dynlib_symbol(lib: DynLibKind, name: text) -> i64:
     """Resolve a named symbol from a loaded library."""
     match lib:
         DynLibKind.Elf(state):
-            return rt_host_dynlib_symbol(state.handle, name)
+            return host_dynlib_symbol(state.handle, name)
         DynLibKind.Smf(state):
             return dylib_symbol(state.handle, name)
         DynLibKind.Pe(state):
-            return dylib_symbol(state.handle, name)
+            return host_dynlib_symbol(state.handle, name)
         DynLibKind.Invalid:
             return -1
 
@@ -100,11 +114,11 @@ fn dynlib_symbol_is_process_callable(lib: DynLibKind, name: text) -> bool:
     """Return whether `name` resolves to a process-callable function pointer."""
     match lib:
         DynLibKind.Elf(state):
-            return rt_host_dynlib_symbol(state.handle, name) > 0
+            return host_dynlib_symbol(state.handle, name) > 0
         DynLibKind.Smf(state):
             return dylib_symbol_is_process_callable(state.handle, name)
         DynLibKind.Pe(state):
-            return dylib_symbol_is_process_callable(state.handle, name)
+            return host_dynlib_symbol(state.handle, name) > 0
         DynLibKind.Invalid:
             return false
 
@@ -112,11 +126,11 @@ fn dynlib_close(lib: DynLibKind) -> i64:
     """Close a loaded dynamic library, releasing kernel resources."""
     match lib:
         DynLibKind.Elf(state):
-            return rt_host_dynlib_close(state.handle)
+            return host_dynlib_close(state.handle)
         DynLibKind.Smf(state):
             return dylib_close(state.handle)
         DynLibKind.Pe(state):
-            return dylib_close(state.handle)
+            return host_dynlib_close(state.handle)
         DynLibKind.Invalid:
             return -1
 

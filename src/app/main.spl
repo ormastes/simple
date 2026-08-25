@@ -6,7 +6,11 @@
 use std.cli.cli_util.{get_cli_args}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
-use app.startup.dynsmf_autoload.{dynsmf_startup_session, dynsmf_startup_summary, dynsmf_startup_artifact_status_lines}
+use app.startup.dynsmf_autoload.{dynsmf_startup_summary,
+    dynsmf_startup_artifact_status_lines,
+    product_dynload_startup,
+    product_dynload_startup_metrics_line
+}
 
 fn main() -> i64:
     val raw_args = get_cli_args()
@@ -25,18 +29,34 @@ fn main() -> i64:
         return 0
 
     if args[0] == "--dynsmf-status":
-        val dynsmf_session = dynsmf_startup_session(raw_args, "app-root")
+        # The product path has one checked-dynSMF lifecycle owner and admits
+        # config through validated cached SMF artifacts. SIMPLE_ASPECT_PACKS
+        # stays on its explicit CLI compatibility path so an unset raw-pack
+        # knob cannot expand this source-run import closure.
+        val startup = product_dynload_startup(raw_args, "app-root")
+        val dynsmf_session = startup.session
         print dynsmf_startup_summary(dynsmf_session)
         var idx = 0
-        while idx < dynsmf_session.evidence.len():
+        val evidence_count = dynsmf_session.evidence.len()
+        while idx < evidence_count:
             print dynsmf_session.evidence[idx].to_text()
             idx = idx + 1
         print "dynsmf artifact status:"
         val status_lines = dynsmf_startup_artifact_status_lines()
         var status_idx = 0
-        while status_idx < status_lines.len():
+        val status_count = status_lines.len()
+        while status_idx < status_count:
             print status_lines[status_idx]
             status_idx = status_idx + 1
+        print product_dynload_startup_metrics_line(startup.metrics)
+        val startup_exit = startup.exit_code
+        val startup_error = startup.error
+        if not startup.close():
+            error("app-root", startup.error)
+            return 1
+        if startup_exit != 0:
+            error("app-root", startup_error)
+            return startup_exit
         return 0
 
     if args[0] == "--help" or args[0] == "-h" or args[0] == "help":
@@ -69,6 +89,10 @@ fn print_app_root_help():
     print "  --dynsmf-status"
     print "  --no-dynsmf"
     print "  --disable-dynsmf=<ids>"
+    print "  --dynload-config=<path>       select startup extension config"
+    print "  --dynload=<id>:<axis-spec>    override one extension setting (repeatable)"
+    print "  SIMPLE_DYNLOAD_CONFIG=<path>  checked dynSMF config"
+    print "  SIMPLE_ASPECT_PACKS=<paths>   raw APK compatibility path"
 
 fn app_root_is_log_option(arg: text) -> bool:
     arg == "--human" or arg == "--llm" or arg == "--json" or
@@ -81,6 +105,13 @@ fn app_root_is_log_option(arg: text) -> bool:
 fn app_root_is_dynsmf_option(arg: text) -> bool:
     arg == "--no-dynsmf" or arg == "--disable-dynsmf" or arg.starts_with("--disable-dynsmf=")
 
+fn app_root_is_dynload_value_option(arg: text) -> bool:
+    arg == "--dynload-config" or arg == "--dynload"
+
+fn app_root_is_dynload_option(arg: text) -> bool:
+    app_root_is_dynload_value_option(arg) or
+        arg.starts_with("--dynload-config=") or arg.starts_with("--dynload=")
+
 fn app_root_is_entry_script(arg: text) -> bool:
     # In the `simple run <abs-path>/src/app/main.spl` form, argv retains the
     # entry-script path as the first argument. Drop it like the sibling app
@@ -90,7 +121,8 @@ fn app_root_is_entry_script(arg: text) -> bool:
 fn app_root_clean_log_args(args: [text]) -> [text]:
     var cleaned: [text] = []
     var i = 0
-    while i < args.len():
+    val arg_count = args.len()
+    while i < arg_count:
         val arg = args[i]
         if app_root_is_entry_script(arg):
             i = i + 1
@@ -100,6 +132,9 @@ fn app_root_clean_log_args(args: [text]) -> [text]:
                 i = i + 1
         elif app_root_is_dynsmf_option(arg):
             if arg == "--disable-dynsmf":
+                i = i + 1
+        elif app_root_is_dynload_option(arg):
+            if app_root_is_dynload_value_option(arg):
                 i = i + 1
         else:
             cleaned.push(arg)

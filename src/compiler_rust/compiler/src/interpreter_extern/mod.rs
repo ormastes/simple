@@ -128,6 +128,7 @@ pub mod crypto;
 pub mod sha256;
 pub mod sha512;
 pub mod dynamic_sffi;
+pub mod host_dynlib;
 #[cfg(feature = "gui")]
 pub mod winit_sffi;
 pub mod rapier2d_sffi;
@@ -256,6 +257,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         };
     }
     insert_simple!("abs", math::abs);
+    insert_simple!("rt_host_dynlib_open", host_dynlib::rt_host_dynlib_open);
+    insert_simple!("rt_host_dynlib_symbol", host_dynlib::rt_host_dynlib_symbol);
+    insert_simple!("rt_host_dynlib_close", host_dynlib::rt_host_dynlib_close);
     insert_simple!("arc_box_dec_strong", rc::arc_box_dec_strong);
     insert_simple!("arc_box_dec_weak", rc::arc_box_dec_weak);
     insert_simple!("arc_box_drop_value", rc::arc_box_drop_value);
