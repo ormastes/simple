@@ -3474,36 +3474,6 @@ Estimated repository totals remain 11,639 declarations / 3,141 symbols.
 Unsafe-tagged rows increase from 2,319 to 2,343, untouched rows decrease from
 9,141 to 9,117, and exact-artifact verified-and-signed admission remains zero.
 
-## Legacy CUDA I/O raw-contract and ABI-collision checkpoint
-
-The 23-declaration CUDA I/O convenience facade is not the canonical low-level
-CUDA owner. Provider inspection found 16 declared names with no owned runtime
-definition. Of the remaining shared names, `rt_cuda_launch_kernel` collides
-with the canonical module/name/status ABI while this facade declares a function
-handle/argument-array/Boolean ABI; `rt_cuda_memset` similarly disagrees on
-Boolean versus integer status. A linker can therefore resolve the right name
-to the wrong calling contract. Unsafe metadata cannot repair that collision.
-
-All 23 raw declarations now carry operation-specific `unsafe(ffi)` metadata,
-including `raw_ptr` for memory, module, function, stream, and launch contracts.
-Every raw call is lexically scoped. Invalid release/synchronization no longer
-fabricates success. Copy wrappers check known allocation extents, allocation
-rejects non-positive sizes before entering the provider, and launch geometry
-rejects invalid dimensions. One-dimensional grid rounding no longer risks
-signed overflow or division by zero. Host-data allocation observes transfer
-failure, releases on that error path, and returns invalid.
-
-These checks are constant-time and add no provider invocation, allocation,
-copy, lookup, lock, hashing, signing, or generic dispatch. Valid transfers and
-launches gain only contract-required scalar comparisons; invalid inputs avoid
-foreign work, and failed host transfer alone gains cleanup. The facade remains
-unverified and unsafe pending removal or uniquely named generated contracts;
-exact-artifact verified-and-signed admission remains zero.
-
-Estimated repository totals remain 11,639 declarations / 3,141 symbols.
-Unsafe-tagged rows increase from 2,343 to 2,366, untouched rows decrease from
-9,117 to 9,094, and exact-artifact verified-and-signed admission remains zero.
-
 ## Engine2D CUDA dynamic-contract checkpoint
 
 The Engine2D CUDA facade owns 23 static declarations and an optional dynamic
