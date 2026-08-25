@@ -73,6 +73,21 @@ struct SshChannel:
     peer_eof: bool
     env_vars: [(text, text)]
 
+struct ChannelDataAdmissionV1:
+    admitted: bool
+    remote_id: u32
+    remote_max_packet: u32
+    window_adjustment: u32
+
+impl ChannelDataAdmissionV1:
+    static fn rejected() -> ChannelDataAdmissionV1:
+        ChannelDataAdmissionV1(
+            admitted: false,
+            remote_id: SSH_INVALID_CHANNEL_ID,
+            remote_max_packet: 0u32,
+            window_adjustment: 0u32
+        )
+
 class ChannelTable:
     """Manages all active SSH channels for one session."""
     channels: [SshChannel]
@@ -286,18 +301,42 @@ impl ChannelTable:
         The peer's string must fit both its remaining window and the maximum
         packet size that this endpoint advertised.
         """
+        self._admit_local_data(local_id, bytes, false).admitted
+
+    pub me admit_local_data(local_id: u32, bytes: u32) -> ChannelDataAdmissionV1:
+        """Atomically admit data and prepare receive-window replenishment.
+
+        ChannelTable is the sole window owner, so every protocol consumer
+        (shell, exec helpers, SCP, and SFTP) shares the same bounded policy.
+        The hot path resolves the channel once, validates lifecycle and packet
+        limits, consumes credit, snapshots peer routing limits, and restores
+        the low window. The caller advertises `window_adjustment` exactly once.
+        """
+        self._admit_local_data(local_id, bytes, true)
+
+    me _admit_local_data(
+        local_id: u32, bytes: u32, replenish: bool
+    ) -> ChannelDataAdmissionV1:
         val idx = self._find_local_index(local_id)
-        if idx >= 0:
-            if self.channels[idx as u64].state != ChannelState.Open or self.channels[idx as u64].peer_eof:
-                return false
-            if bytes > self.channels[idx as u64].local_max_packet:
-                return false
-            var lw = self.channels[idx as u64].local_window
-            if lw < bytes:
-                return false
-            self.channels[idx as u64].local_window = lw - bytes
-            return true
-        false
+        if idx < 0 or self.channels[idx as u64].state != ChannelState.Open:
+            return ChannelDataAdmissionV1.rejected()
+        val channel = self.channels[idx as u64]
+        if channel.peer_eof or bytes > channel.local_max_packet or
+            bytes > channel.local_window:
+            return ChannelDataAdmissionV1.rejected()
+        val remaining = channel.local_window - bytes
+        var adjustment = 0u32
+        if replenish and remaining < DEFAULT_WINDOW_SIZE / 2u32:
+            adjustment = DEFAULT_WINDOW_SIZE - remaining
+            self.channels[idx as u64].local_window = DEFAULT_WINDOW_SIZE
+        else:
+            self.channels[idx as u64].local_window = remaining
+        ChannelDataAdmissionV1(
+            admitted: true,
+            remote_id: channel.remote_id,
+            remote_max_packet: channel.remote_max_packet,
+            window_adjustment: adjustment
+        )
 
     pub me mark_peer_eof(local_id: u32) -> bool:
         """Record the peer's receive half-close exactly once."""
@@ -392,6 +431,8 @@ fn ssh_parse_channel_data(data: [u8]) -> Result<(u32, [u8]), text>:
     var recipient: u32 = ssh_get_u32(data, 1)
     match ssh_get_string(data, 5):
         Ok(data_pair):
+            if data_pair.next_offset != data.len():
+                return Err("CHANNEL_DATA: trailing bytes")
             Ok((recipient, data_pair.data))
         Err(_):
             Err("CHANNEL_DATA: bad data field")

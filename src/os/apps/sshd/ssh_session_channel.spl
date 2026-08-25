@@ -656,31 +656,32 @@ impl SshSession:
         val channel_data = parsed.unwrap()
         val recipient = channel_data.0
         val data = channel_data.1
-        if not self.channels.consume_local_window(recipient, data.len().to_u32()):
+        val admission = self.channels.admit_local_data(
+            recipient, data.len().to_u32())
+        if not admission.admitted:
             return
 
+        # Replenish receive credit at one canonical boundary for every channel
+        # data consumer. Previously only SFTP returned credit, so shell and SCP
+        # sessions permanently exhausted the advertised window and stalled.
+        if admission.window_adjustment > 0u32:
+            self.send_packet(ssh_build_channel_window_adjust(
+                admission.remote_id, admission.window_adjustment))
+
         if self.sftp_enabled and recipient == self.sftp_local_channel_id:
-            val channel = self.channels.find(recipient)
-            if channel == nil:
-                self.transition_closed()
-                return
             var response = self.sftp.handle_packet(data)
             # Drain every complete coalesced frame already admitted by the
             # bounded SFTP owner. Each iteration consumes at least one framed
             # request, so work remains linear in the received bytes.
             while response.len() > 0:
-                if response.len() > channel.remote_max_packet.to_u64():
+                if response.len() > admission.remote_max_packet.to_u64():
                     self.transition_closed()
                     return
                 if not self.channels.consume_remote_window(recipient, response.len().to_u32()):
                     self.transition_closed()
                     return
-                self.send_packet(_build_channel_data_stable(channel.remote_id, response))
+                self.send_packet(_build_channel_data_stable(admission.remote_id, response))
                 response = self.sftp.handle_packet([])
-            if channel.local_window < DEFAULT_WINDOW_SIZE / 2:
-                val adjustment = DEFAULT_WINDOW_SIZE - channel.local_window
-                if self.channels.adjust_window(recipient, adjustment):
-                    self.send_packet(ssh_build_channel_window_adjust(channel.remote_id, adjustment))
             return
 
         if self.scp_pending and recipient == self.scp_local_id:
