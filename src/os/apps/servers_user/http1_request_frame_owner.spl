@@ -64,6 +64,21 @@ fn _http_field_name_is_expect(line_bytes: [u8], colon: i64) -> bool:
         (line_bytes[4u64] == 67u8 or line_bytes[4u64] == 99u8) and
         (line_bytes[5u64] == 84u8 or line_bytes[5u64] == 116u8))
 
+fn _http_field_value_bytes_valid(line_bytes: [u8], colon: i64) -> bool:
+    # RFC 9110 field-content admits SP, HTAB, visible ASCII, and obs-text.
+    # Reject every other control byte before converting/slicing the value so
+    # NUL and delimiter-like controls cannot be interpreted differently by a
+    # route, logger, proxy, or cache. Scan the owner's bounded line in place;
+    # this adds no per-header allocation on the request hot path.
+    var index = (colon + 1) as u64
+    while index < line_bytes.len():
+        val byte = line_bytes[index]
+        if byte != 9u8 and byte != 32u8 and
+            (byte < 33u8 or (byte > 126u8 and byte < 128u8)):
+            return false
+        index = index + 1u64
+    true
+
 fn _http_ascii_lower(byte: u8) -> u8:
     if byte >= 65u8 and byte <= 90u8: byte + 32u8 else: byte
 
@@ -585,8 +600,7 @@ class Http1RequestFrameOwner:
             self.request_line_seen = true
             return
 
-        val line = bytes_to_string(line_bytes)
-        if line == "":
+        if line_bytes.len() == 0u64:
             # Upgrade alone is not a WebSocket handoff. RFC 6455 requires GET
             # over HTTP/1.1 and RFC 9110 requires the matching Connection
             # option so intermediaries know both fields are hop-by-hop.
@@ -636,19 +650,26 @@ class Http1RequestFrameOwner:
         if self.header_count > self.policy.max_header_count:
             self._fail("431 Too many headers")
             return
-        if line.starts_with(" ") or line.starts_with("\t"):
+        if line_bytes[0u64] == 32u8 or line_bytes[0u64] == 9u8:
             self._fail("400 Obsolete folded header is not supported")
             return
-        val colon = line.index_of(":")
-        if colon <= 0:
-            self._fail("400 Malformed header line")
-            return
+        var colon: i64 = -1
         var name_index: i64 = 0
-        while name_index < colon:
-            if not _http_field_token_byte(line_bytes[name_index as u64]):
+        while name_index < line_bytes.len() as i64 and colon < 0:
+            val byte = line_bytes[name_index as u64]
+            if byte == 58u8:
+                colon = name_index
+            elif not _http_field_token_byte(byte):
                 self._fail("400 Invalid header field name")
                 return
             name_index = name_index + 1
+        if colon <= 0:
+            self._fail("400 Malformed header line")
+            return
+        if not _http_field_value_bytes_valid(line_bytes, colon):
+            self._fail("400 Invalid header field value")
+            return
+        val line = bytes_to_string(line_bytes)
         val name = line.slice(0, colon)
         val value = line.slice(colon + 1, line.len()).trim()
         if _http_field_name_is_expect(line_bytes, colon):

@@ -12,6 +12,10 @@ use os.kernel.loader.executable_authority_registry.{
     ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
     executable_authority_snapshot_armed_preparation_v1
 }
+use os.kernel.loader.executable_admission_pipeline.{
+    executable_loader_begin_joint_reservation_v1,
+    executable_loader_abort_joint_reservation_v1
+}
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 use os.kernel.loader.executable_image_prepare.{executable_prepare_read_exact_v1}
 use os.kernel.loader.executable_launch_arguments_v1.{
@@ -102,17 +106,30 @@ pub fn x86_32_fs_exec_spawn_authenticated_with_launch_v1(
         table, preparation.image_handle)
     if source == nil:
         return FsExecAuthenticatedRunResultV1(exit_code: -5, evidence: nil)
+    val joint = executable_loader_begin_joint_reservation_v1(
+        authorities, token, consumer, entry_point, launch.path)
+    if joint.is_err():
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil)
+    val joint_reservation = joint.unwrap()
     val mapped = x86_32_authenticated_mapping_prepare_v1(
         preparation.image_handle, source.unwrap(), launch)
     if (mapped.state != X8632AuthenticatedMappingStateV1.MappedBlocked or
         mapped.error != X8632AuthenticatedMappingErrorV1.None):
+        _ = executable_loader_abort_joint_reservation_v1(
+            authorities, joint_reservation.lease)
         return FsExecAuthenticatedRunResultV1(exit_code: -8, evidence: nil)
     val caps = spawn_authority_spawn_caps(
         caller, recipe, _x86_32_parent_caps_v1(caller, recipe))
     val adopted = scheduler_x86_32_adopt_authenticated_mapping_v1(
-        scheduler, table, authorities, token, mapped,
+        scheduler, table, authorities, token, joint_reservation.lease,
+        consumer, mapped,
         preparation.image_handle, launch, caps)
     if adopted.pid <= 0:
+        # This succeeds only when adoption failed before committing the joint
+        # lease.  A post-commit failure remains consumed and therefore cannot
+        # accidentally reopen executable authority.
+        _ = executable_loader_abort_joint_reservation_v1(
+            authorities, joint_reservation.lease)
         return FsExecAuthenticatedRunResultV1(
             exit_code: adopted.pid, evidence: nil)
 
