@@ -1413,3 +1413,22 @@ Its later native enterprise-store compilation failed because 14 closure
 functions still require the interpreter. That blocker is recorded in
 `doc/08_tracking/bug/sqlite_acid_native_store_closure_blocked_2026-08-25.md`;
 the overall gate is therefore FAIL, not verified, and was not rerun.
+
+## HTTP and WebSocket legacy raw-contract checkpoint
+
+All 26 HTTP/WebSocket declarations in each of the no-GC library, application
+SFFI, and application FFI facades now carry adjacent operation-specific
+`unsafe(ffi)` metadata. The contracts cover runtime-owned response tuples,
+transport-failure status, generation-encoded client handles, raw server and
+WebSocket handles, header arrays, filesystem download/upload paths, and the
+ambiguous empty-text WebSocket receive result.
+
+This is metadata only: it adds no DNS query, connection, request, response read,
+file operation, allocation, copy, lock, handle lookup, branch, or dispatch, and
+preserves native boolean ABIs. The existing provider surface remains incomplete
+across lanes and is neither signed nor semantically verified. A static ratchet
+fixes each facade at 26 declarations.
+
+Estimated declaration totals remain 11,652 / 3,137 symbols. Unsafe-tagged rows
+increase from 2,001 to 2,079, untouched rows decrease from 9,453 to 9,375, and
+exact-artifact verified-and-signed admission remains zero.

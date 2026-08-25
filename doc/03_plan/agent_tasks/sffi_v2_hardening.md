@@ -599,3 +599,8 @@ passing placeholder.
      failure. Keep transaction control on static C strings so begin/commit/
      rollback add no temporary runtime-string allocation or copy. Full stale/
      wrong-kind handle safety still requires generation-checked typed handles.
+118. Keep all 26 HTTP/WebSocket declarations in each legacy library/application
+     facade explicitly tagged `unsafe(ffi)`. Preserve direct provider calls and
+     boolean results. Generate one authoritative owner and typed transport/
+     protocol errors without extra DNS queries, connections, requests, reads,
+     copies, allocations, locks, handle lookups, or dispatch.

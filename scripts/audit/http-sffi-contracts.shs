@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+files="
+$root/src/lib/nogc_sync_mut/io/http_sffi.spl
+$root/src/app/io/http_sffi.spl
+$root/src/app/io/http_ffi.spl
+"
+
+for file in $files; do
+    declarations=$(grep -Ec '^[[:space:]]*extern fn (rt_http_|rt_ws_)' "$file")
+    if [ "$declarations" -ne 26 ]; then
+        echo "HTTP/WebSocket SFFI inventory changed without contract review: $file" >&2
+        exit 1
+    fi
+    tagged=$(awk '
+        /^@unsafe\(.*capabilities: \[ffi\]\)$/ { previous_is_ffi = 1; next }
+        /^[[:space:]]*extern fn (rt_http_|rt_ws_)/ {
+            if (previous_is_ffi) tagged++
+        }
+        { previous_is_ffi = 0 }
+        END { print tagged + 0 }
+    ' "$file")
+    if [ "$tagged" -ne "$declarations" ]; then
+        echo "every HTTP/WebSocket declaration must be explicitly unsafe(ffi): $file" >&2
+        exit 1
+    fi
+done
+
+grep -q 'empty text is ambiguous' "$root/src/lib/nogc_sync_mut/io/http_sffi.spl" || {
+    echo "WebSocket receive ambiguity must remain explicit" >&2
+    exit 1
+}
+
+echo "HTTP/WebSocket SFFI contract audit: PASS"
