@@ -1,0 +1,51 @@
+use std.spec
+use os.installer.image_builder.{run_image_builder}
+
+fn exact_signed_clang_args() -> [text]:
+    [
+        "create", "--arch=x86_64",
+        "--signed-clang-root=build/test-artifacts/signed-clang-request",
+        "--signed-clang-sources=clang,lld,hello.elf",
+        "--signed-clang-bundle=clang-toolchain",
+        "--signed-clang-payload-leaves=clang,ld.lld,hello.elf",
+        "--signed-clang-scr1-leaves=clang.scr1,ld.lld.scr1,hello.elf.scr1",
+        "--signed-clang-sam1=clang.sam1,lld.sam1,hello.sam1",
+        "--signed-clang-seed=signer.seed",
+        "--signed-clang-trust=trust.sdn",
+        "--signed-clang-canonical-paths=/usr/bin/clang,/usr/bin/ld.lld,/work/hello.elf",
+        "--signed-clang-max-bytes=1048576,1048576,1048576",
+        "--signed-clang-target=x86_64-unknown-simpleos",
+    ]
+
+describe "image-builder signed Clang request admission":
+    it "rejects a partially specified fixed-three request":
+        step("Provide one signed-Clang field without the remaining transaction fields")
+        expect(run_image_builder([
+            "create", "--arch=x86_64", "--signed-clang-root=missing-fields",
+        ])).to_equal(1)
+
+    it "rejects a target triple that is not bound to the selected image architecture":
+        step("Change only the signed bundle target while retaining the exact role set")
+        var args = exact_signed_clang_args()
+        args[args.len() - 1] = "--signed-clang-target=aarch64-unknown-simpleos"
+        expect(run_image_builder(args)).to_equal(1)
+
+    it "rejects reordered canonical roles before reading hosted artifacts":
+        step("Substitute the linker and compiler guest destinations")
+        var args = exact_signed_clang_args()
+        args[args.len() - 3] =
+            "--signed-clang-canonical-paths=/usr/bin/ld.lld,/usr/bin/clang,/work/hello.elf"
+        expect(run_image_builder(args)).to_equal(1)
+
+    it "rejects a per-artifact bound above the retained provider ceiling":
+        step("Raise one slot one byte above the sixteen-mebibyte transfer ceiling")
+        var args = exact_signed_clang_args()
+        args[args.len() - 2] =
+            "--signed-clang-max-bytes=16777217,1048576,1048576"
+        expect(run_image_builder(args)).to_equal(1)
+
+    it "rejects simultaneous legacy and atomic signed bundle modes":
+        step("Present both mutually exclusive Clang publication interfaces")
+        var args = exact_signed_clang_args()
+        args.push("--clang-bundle-root=legacy")
+        expect(run_image_builder(args)).to_equal(1)

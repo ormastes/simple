@@ -49,6 +49,8 @@ extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (t
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_write_bytes(path: text, content: [u8]) -> bool
+extern fn rt_file_copy(src: text, dst: text) -> bool
+extern fn rt_file_hash_sha256(path: text) -> text
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_dir_exists(path: text) -> bool
@@ -113,7 +115,12 @@ struct ImageSignedCatalogMediaV1:
     toolchain_scr1_bytes: [[u8]]
     toolchain_trust_config_bytes: [u8]
     signed_clang_enabled: bool
-    signed_clang_artifact_bytes: [[u8]]
+    # Payloads remain in the atomically published signed bundle.  Retaining
+    # only their validated paths avoids holding three toolchain images in the
+    # GC heap until rootfs construction (and avoids another whole-file copy at
+    # each image destination).
+    signed_clang_artifact_paths: [text]
+    signed_clang_artifact_sha256: [text]
     signed_clang_scr1_bytes: [[u8]]
     signed_clang_trust_config_bytes: [u8]
 
@@ -122,7 +129,8 @@ fn _empty_signed_catalog_media_v1() -> ImageSignedCatalogMediaV1:
         enabled: false, scr1_bytes: [], trust_config_bytes: [],
         toolchain_enabled: false, toolchain_artifact_bytes: [],
         toolchain_scr1_bytes: [], toolchain_trust_config_bytes: [],
-        signed_clang_enabled: false, signed_clang_artifact_bytes: [],
+        signed_clang_enabled: false, signed_clang_artifact_paths: [],
+        signed_clang_artifact_sha256: [],
         signed_clang_scr1_bytes: [], signed_clang_trust_config_bytes: [])
 
 pub fn image_builder_stage_clang_signed_bundle_v1(trusted_root: text,
@@ -519,8 +527,8 @@ fn _produce_signed_clang_bundle_v1(
         _ = hosted_safe_artifact_root_close_v1(authority)
         return Err("signed Clang bundle begin rejected: " + reason)
     val bundle = begun.unwrap()
-    var artifacts: [[u8]] = []
     var receipts: [text] = []
+    var artifact_sha256: [text] = []
     var slot: i64 = 0
     while slot < 3:
         var artifact: [u8] = []
@@ -565,8 +573,14 @@ fn _produce_signed_clang_bundle_v1(
             _ = hosted_safe_artifact_root_close_v1(authority)
             return Err("signed Clang payload identity size mismatch")
         val digest = sha256_u8_hex(artifact)
+        if not image_native_executable_payload_admitted_v1(
+            artifact, image_target_architecture(arch)):
+            _ = hosted_safe_artifact_bundle3_finish_v1(bundle, false)
+            _ = hosted_safe_artifact_root_close_v1(authority)
+            return Err("signed Clang payload executable admission rejected: " +
+                request.canonical_guest_paths[slot])
         receipts.push("schema=simpleos-artifact-identity-v1\nartifact_sha256={digest}\nartifact_size={artifact.len()}\nartifact_identity=dev={identity[0]}:ino={identity[1]}:size={identity[2]}:mtime={identity[3]}.{identity[4]}\ncanonical_path={request.canonical_guest_paths[slot]}\ntarget_os=simpleos\ntarget_arch={target_arch}\ntarget_abi=simpleos\nmanifest_sam1_sha256={sha256_u8_hex(manifests[slot])}\n")
-        artifacts.push(artifact)
+        artifact_sha256.push(digest)
         slot = slot + 1
     val encoded = signed_catalog_encode_authenticated_batch3_v1(
         manifests, receipts, seed, trust, aliases, request.scr1_leaves,
@@ -596,7 +610,16 @@ fn _produce_signed_clang_bundle_v1(
         return Err("signed Clang bundle was not durably published: " + receipt.detail)
     var media = _empty_signed_catalog_media_v1()
     media.signed_clang_enabled = true
-    media.signed_clang_artifact_bytes = artifacts
+    val bundle_prefix = if request.trusted_root.ends_with("/"):
+        request.trusted_root + request.bundle_relative_path
+    else:
+        request.trusted_root + "/" + request.bundle_relative_path
+    media.signed_clang_artifact_paths = [
+        bundle_prefix + "/" + request.payload_leaves[0],
+        bundle_prefix + "/" + request.payload_leaves[1],
+        bundle_prefix + "/" + request.payload_leaves[2],
+    ]
+    media.signed_clang_artifact_sha256 = artifact_sha256
     media.signed_clang_scr1_bytes = records
     media.signed_clang_trust_config_bytes = trust
     Ok(media)
@@ -708,7 +731,8 @@ fn _produce_and_load_signed_catalog_media_v1(
             trust_config_bytes: trust.unwrap(), toolchain_enabled: false,
             toolchain_artifact_bytes: [], toolchain_scr1_bytes: [],
             toolchain_trust_config_bytes: [], signed_clang_enabled: false,
-            signed_clang_artifact_bytes: [], signed_clang_scr1_bytes: [],
+            signed_clang_artifact_paths: [], signed_clang_artifact_sha256: [],
+            signed_clang_scr1_bytes: [],
             signed_clang_trust_config_bytes: []),
         artifact_bytes: artifact_bytes, receipt: parsed_receipt))
 struct PartitionLayout:
@@ -1023,7 +1047,8 @@ impl ImageBuilder:
     fn _stage_clang_toolchain_payload(rootfs_root: text) -> Result<text, text>:
         val signed_media = self.config.signed_catalog_media
         if signed_media.signed_clang_enabled:
-            if signed_media.signed_clang_artifact_bytes.len() != 3 or
+            if signed_media.signed_clang_artifact_paths.len() != 3 or
+                signed_media.signed_clang_artifact_sha256.len() != 3 or
                 signed_media.signed_clang_scr1_bytes.len() != 3 or
                 signed_media.signed_clang_trust_config_bytes.len() == 0:
                 return Err("signed Clang media is incomplete")
@@ -1031,18 +1056,36 @@ impl ImageBuilder:
             val boot_payloads = ["/boot/bin/clang", "/boot/bin/ld.lld", "/boot/bin/hello.elf"]
             val boot_records = ["/boot/catalog/clang.scr1", "/boot/catalog/ld.lld.scr1",
                 "/boot/catalog/hello.elf.scr1"]
-            val architecture = image_target_architecture(self.config.arch)
             var manifest = ""
             var index: i64 = 0
             while index < 3:
-                val bytes = signed_media.signed_clang_artifact_bytes[index]
-                if not image_native_executable_payload_admitted_v1(bytes, architecture):
-                    return Err("signed Clang payload executable admission rejected: " + guest_paths[index])
+                val source = signed_media.signed_clang_artifact_paths[index]
+                val expected_sha256 =
+                    signed_media.signed_clang_artifact_sha256[index]
                 _ensure_parent_dirs(rootfs_root, guest_paths[index])
                 _ensure_parent_dirs(rootfs_root, boot_payloads[index])
-                if not rt_file_write_bytes(rootfs_root + guest_paths[index], bytes) or
-                    not rt_file_write_bytes(rootfs_root + boot_payloads[index], bytes):
+                # The pathname names the payload published by the retained
+                # bundle transaction, but the root owner is already closed and
+                # the namespace can change.  Stream it once, then authenticate
+                # the image-owned copy against the admitted digest below.
+                if not rt_file_copy(source, rootfs_root + guest_paths[index]):
                     return Err("signed Clang payload staging failed: " + guest_paths[index])
+                # The digest is authenticated in its SCR1 record, so a
+                # replacement or short copy after publication fails closed.
+                if rt_file_hash_sha256(rootfs_root + guest_paths[index]) !=
+                        expected_sha256:
+                    return Err("signed Clang payload copy digest mismatch: " +
+                        guest_paths[index])
+                # Consume the mutable published path once.  Derive the loader
+                # copy from the verified image-owned destination so a bundle
+                # replacement cannot split the installed pair.
+                if not rt_file_copy(
+                    rootfs_root + guest_paths[index],
+                    rootfs_root + boot_payloads[index]) or
+                    rt_file_hash_sha256(rootfs_root + boot_payloads[index]) !=
+                        expected_sha256:
+                    return Err("signed Clang boot payload staging failed: " +
+                        boot_payloads[index])
                 if not rt_file_write_bytes(
                     rootfs_root + boot_records[index],
                     signed_media.signed_clang_scr1_bytes[index]):
@@ -1061,6 +1104,7 @@ impl ImageBuilder:
             manifest = manifest + _manifest_file(
                 "/boot/catalog/clang_toolchain.trust", "boot-catalog-trust",
                 "simpleos-loader")
+
             return Ok(manifest)
         val clang_binary = image_effective_clang_binary()
         if clang_binary == "" or not rt_file_exists(clang_binary):
@@ -1674,7 +1718,8 @@ fn run_image_builder(args: [text]) -> i32:
             return 1
         val clang_media = produced_clang.unwrap()
         signed_catalog_media.signed_clang_enabled = clang_media.signed_clang_enabled
-        signed_catalog_media.signed_clang_artifact_bytes = clang_media.signed_clang_artifact_bytes
+        signed_catalog_media.signed_clang_artifact_paths = clang_media.signed_clang_artifact_paths
+        signed_catalog_media.signed_clang_artifact_sha256 = clang_media.signed_clang_artifact_sha256
         signed_catalog_media.signed_clang_scr1_bytes = clang_media.signed_clang_scr1_bytes
         signed_catalog_media.signed_clang_trust_config_bytes = clang_media.signed_clang_trust_config_bytes
 

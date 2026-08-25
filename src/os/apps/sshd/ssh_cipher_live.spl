@@ -1,7 +1,7 @@
 #![allow(unnamed_duplicate_typed_args)]
 # SSH Cipher Layer — live-safe AES-256-GCM only.
 
-use os.apps.sshd.ssh_packet.{ssh_get_u32}
+use os.apps.sshd.ssh_packet.{ssh_get_u32, SSH_MAX_PACKET}
 use os.apps.sshd.ssh_session_helpers.{_bytes_to_hex}
 use os.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResult}
 
@@ -12,6 +12,7 @@ extern fn rt_ssh_aes256_gcm_decrypt_packet(key: [u8], iv: [u8], seq: i64, packet
 extern fn serial_println(msg: text)
 
 val GCM_TAG_LEN: u64 = 16
+val SSH_GCM_MIN_PACKET_LENGTH: u64 = 12
 
 class SshCipher:
     seq_c2s: u32
@@ -39,6 +40,25 @@ fn _push_byte(arr: [u8], byte_val: u8) -> [u8]:
     var out = arr
     out.push(byte_val)
     out
+
+fn _validate_gcm_wire_packet(data: [u8]) -> Result<u64, text>:
+    """Validate the authenticated SSH AES-GCM frame before crypto dispatch.
+
+    The four-byte packet length is AAD and describes exactly the encrypted
+    body, excluding both the length field and authentication tag.  Rejecting
+    inconsistent or oversized frames here keeps every decrypt implementation,
+    including the runtime fast path, behind the same bounded admission rule.
+    """
+    if data.len() < 4u64 + SSH_GCM_MIN_PACKET_LENGTH + GCM_TAG_LEN:
+        return Err("encrypted packet too short")
+    val packet_length = ssh_get_u32(data, 0u64).to_u64()
+    if packet_length < SSH_GCM_MIN_PACKET_LENGTH or packet_length > SSH_MAX_PACKET:
+        return Err("encrypted packet length outside SSH bounds")
+    if packet_length != data.len() - 4u64 - GCM_TAG_LEN:
+        return Err("encrypted packet length mismatch")
+    if (packet_length + 4u64) % 16u64 != 0u64:
+        return Err("encrypted packet block alignment invalid")
+    Ok(packet_length)
 
 fn _make_nonce(iv: [u8], seq: u32) -> [u8]:
     # RFC 5647 increments the AES-GCM invocation counter after each packet, so
@@ -160,8 +180,7 @@ fn ssh_encrypt_packet_aes128_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8],
     result
 
 fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2s: [u8]) -> Result<[u8], text>:
-    if data.len() < 4 + GCM_TAG_LEN:
-        return Err("encrypted packet too short")
+    val packet_length = _validate_gcm_wire_packet(data)?
 
     var aad: [u8] = []
     var i: u64 = 0
@@ -169,10 +188,7 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
         aad.push(_u8_at(data, i))
         i = i + 1
 
-    val ct_with_tag_len = data.len() - 4
-    if ct_with_tag_len < GCM_TAG_LEN:
-        return Err("no ciphertext in encrypted packet")
-    val ct_len = ct_with_tag_len - GCM_TAG_LEN
+    val ct_len = packet_length
 
     var ciphertext: [u8] = []
     i = 0
@@ -200,10 +216,15 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
     if status == 0x00:
         return Err("GCM decryption failed: authentication tag mismatch")
 
+    # The runtime prepends one status byte to the authenticated plaintext.
+    # Require the exact admitted body size before observing its padding byte.
+    if result.len() != packet_length + 1u64:
+        return Err("GCM decryption failed: plaintext length mismatch")
     if result.len() < 2:
         return Err("decrypted body empty")
     val padding_len = _u8_at(result, 1).to_u64()
-    if 2 + padding_len > result.len():
+    # Every SSH transport packet carries at least its message-number byte.
+    if padding_len < 4u64 or 2u64 + padding_len >= result.len():
         return Err("invalid padding in decrypted packet")
     val payload_len = result.len() - 2 - padding_len
     serial_println("[sshd-cipher] decrypt256 padding_len={padding_len} payload_len={payload_len}")
@@ -216,15 +237,19 @@ fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2
     Ok(payload)
 
 fn ssh_decrypt_packet_aes256_gcm_payload_direct(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2s: [u8]) -> Result<[u8], text>:
+    val packet_length = _validate_gcm_wire_packet(data)?
     val payload = rt_ssh_aes256_gcm_decrypt_packet(enc_key_c2s, iv_c2s, seq_c2s.to_i64(), data)
     serial_println("[sshd-cipher] decrypt256 direct payload_len={payload.len()} seq={seq_c2s}")
-    if data.len() > 0 and payload.len() == 0:
+    if payload.len() == 0:
         return Err("GCM packet decryption failed")
+    # The authenticated body reserves one padding-length byte and at least
+    # four padding bytes, so a runtime result cannot legitimately exceed this.
+    if payload.len() > packet_length - 5u64:
+        return Err("GCM packet decryption failed: payload length invalid")
     Ok(payload)
 
 fn ssh_decrypt_packet_aes128_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2s: [u8]) -> Result<[u8], text>:
-    if data.len() < 4 + GCM_TAG_LEN:
-        return Err("encrypted packet too short")
+    val packet_length = _validate_gcm_wire_packet(data)?
 
     var aad: [u8] = []
     var i: u64 = 0
@@ -232,10 +257,7 @@ fn ssh_decrypt_packet_aes128_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv
         aad.push(_u8_at(data, i))
         i = i + 1
 
-    val ct_with_tag_len = data.len() - 4
-    if ct_with_tag_len < GCM_TAG_LEN:
-        return Err("no ciphertext in encrypted packet")
-    val ct_len = ct_with_tag_len - GCM_TAG_LEN
+    val ct_len = packet_length
 
     var ciphertext: [u8] = []
     i = 0
@@ -254,10 +276,12 @@ fn ssh_decrypt_packet_aes128_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv
     val result = aes128_gcm_decrypt(enc_key_c2s, nonce, ciphertext, aad, tag)
     match result:
         case Aes128GcmResult.Ok(data):
+            if data.len() != packet_length:
+                return Err("GCM decryption failed: plaintext length mismatch")
             if data.len() < 1:
                 return Err("decrypted body empty")
             val padding_len = _u8_at(data, 0).to_u64()
-            if 1 + padding_len > data.len():
+            if padding_len < 4u64 or 1u64 + padding_len >= data.len():
                 return Err("invalid padding in decrypted packet")
             val payload_len = data.len() - 1 - padding_len
             var payload: [u8] = []
