@@ -24,7 +24,7 @@
 # process main thread (winit requirement); the cdylib performs explicit
 # NSApplication activation so the window is frontmost and receives input.
 
-use std.sffi.dynamic.{DynLib}
+use std.sffi.dynamic.{DynLib, spl_dlclose}
 use std.diag.{dbg_stage, dbg_event_hop, dbg_events_on}
 
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
@@ -34,6 +34,13 @@ extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 @unsafe(reason: "nonnull raw store; staging buffer owner validates bounds", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 use std.io_runtime.{env_get}
+
+fn _gui_renderer_resolve(lib: DynLib, name: text) -> i64:
+    val result = unsafe(capabilities: [ffi, raw_ptr]):
+        lib.sym_checked(name)
+    match result:
+        case Ok(symbol): symbol
+        case Err(_): 0
 
 # Event kind codes — identical to the seed interpreter's winit_sffi constants.
 val GUI_EVT_NONE: i64 = 0
@@ -65,6 +72,7 @@ impl GuiEvent:
 
 class GuiRenderer:
     engine: text
+    lib_handle: i64
     el: i64
     win: i64
     width: i64
@@ -106,7 +114,7 @@ impl GuiRenderer:
     # Sentinel instance (win == 0) for non-optional storage slots.
     static fn empty() -> GuiRenderer:
         GuiRenderer(
-            engine: "", el: 0, win: 0, width: 0, height: 0,
+            engine: "", lib_handle: 0, el: 0, win: 0, width: 0, height: 0,
             fp_poll: 0, fp_type: 0,
             fp_key_scancode: 0, fp_key_keycode: 0, fp_key_pressed: 0,
             fp_mouse_button: 0, fp_mouse_pressed: 0,
@@ -133,26 +141,62 @@ impl GuiRenderer:
         var loaded: DynLib? = nil
         var i = 0
         while i < candidates.len() and loaded == nil:
-            loaded = DynLib.load(candidates[i])
+            loaded = unsafe(capabilities: [ffi]):
+                DynLib.load(candidates[i])
             i = i + 1
         if loaded == nil:
             print "GuiRenderer: cannot load build/sffi/libspl_winit.<dylib|so|dll> — build it with: sh scripts/build/build_spl_winit.shs (or set SIMPLE_SPL_WINIT_PATH)"
             dbg_stage("gui", "winit_dylib_open_failed")
             return nil
-        val l = loaded.unwrap()
+        var l = loaded.unwrap()
         dbg_stage("gui", "winit_dylib_open_done")
 
-        val fp_loop_new = l.sym("rt_winit_event_loop_new")
-        val fp_window_new = l.sym("rt_winit_window_new")
+        val fp_loop_new = _gui_renderer_resolve(l, "rt_winit_event_loop_new")
+        val fp_window_new = _gui_renderer_resolve(l, "rt_winit_window_new")
+        val fp_poll = _gui_renderer_resolve(l, "rt_winit_event_loop_poll_events")
+        val fp_type = _gui_renderer_resolve(l, "rt_winit_event_get_type")
+        val fp_key_scancode = _gui_renderer_resolve(l, "rt_winit_event_key_scancode")
+        val fp_key_keycode = _gui_renderer_resolve(l, "rt_winit_event_key_keycode")
+        val fp_key_pressed = _gui_renderer_resolve(l, "rt_winit_event_key_pressed")
+        val fp_mouse_button = _gui_renderer_resolve(l, "rt_winit_event_mouse_button")
+        val fp_mouse_pressed = _gui_renderer_resolve(l, "rt_winit_event_mouse_pressed")
+        val fp_mouse_x = _gui_renderer_resolve(l, "rt_winit_event_mouse_x_milli")
+        val fp_mouse_y = _gui_renderer_resolve(l, "rt_winit_event_mouse_y_milli")
+        val fp_wheel_x = _gui_renderer_resolve(l, "rt_winit_event_wheel_x_milli")
+        val fp_wheel_y = _gui_renderer_resolve(l, "rt_winit_event_wheel_y_milli")
+        val fp_inner_width = _gui_renderer_resolve(l, "rt_winit_window_inner_width")
+        val fp_inner_height = _gui_renderer_resolve(l, "rt_winit_window_inner_height")
+        val fp_staging = _gui_renderer_resolve(l, "rt_winit_window_staging_ptr")
+        val fp_stage_clear = _gui_renderer_resolve(l, "rt_winit_window_stage_clear")
+        val fp_stage_fill_rect = _gui_renderer_resolve(l, "rt_winit_window_stage_fill_rect")
+        val fp_present = _gui_renderer_resolve(l, "rt_winit_window_present_staged")
+        val fp_event_free = _gui_renderer_resolve(l, "rt_winit_event_free")
+        val fp_window_free = _gui_renderer_resolve(l, "rt_winit_window_free")
+        val fp_loop_free = _gui_renderer_resolve(l, "rt_winit_event_loop_free")
         if fp_loop_new == 0 or fp_window_new == 0:
             print "GuiRenderer: '{l.path}' is missing rt_winit_* exports — rebuild with scripts/build/build_spl_winit.shs"
             dbg_stage("gui", "winit_symbols_missing")
+            unsafe(capabilities: [ffi]):
+                l.close()
+            return nil
+        if fp_poll == 0 or fp_type == 0 or fp_key_scancode == 0 or
+            fp_key_keycode == 0 or fp_key_pressed == 0 or fp_mouse_button == 0 or
+            fp_mouse_pressed == 0 or fp_mouse_x == 0 or fp_mouse_y == 0 or
+            fp_wheel_x == 0 or fp_wheel_y == 0 or fp_staging == 0 or
+            fp_present == 0 or fp_event_free == 0 or fp_window_free == 0 or
+            fp_loop_free == 0:
+            print "GuiRenderer: '{l.path}' has an incomplete mandatory rt_winit_* ABI"
+            dbg_stage("gui", "winit_symbols_incomplete")
+            unsafe(capabilities: [ffi]):
+                l.close()
             return nil
         dbg_stage("gui", "winit_event_loop_create_start")
         val el = spl_wffi_call_i64(fp_loop_new, [], 0)
         if el == 0:
             print "GuiRenderer: event loop creation failed (macOS needs SIMPLE_GUI=1 for main-thread execution)"
             dbg_stage("gui", "winit_event_loop_create_failed")
+            unsafe(capabilities: [ffi]):
+                l.close()
             return nil
         dbg_stage("gui", "winit_event_loop_create_done")
         val title_ptr = spl_str_ptr(title)
@@ -161,34 +205,38 @@ impl GuiRenderer:
         if win == 0:
             print "GuiRenderer: window creation failed"
             dbg_stage("gui", "winit_window_create_failed")
+            spl_wffi_call_i64(fp_loop_free, [el], 1)
+            unsafe(capabilities: [ffi]):
+                l.close()
             return nil
         dbg_stage("gui", "winit_window_create_done")
         GuiRenderer(
             engine: "winit-dyn",
+            lib_handle: l.handle,
             el: el,
             win: win,
             width: w.to_i64(),
             height: h.to_i64(),
-            fp_poll: l.sym("rt_winit_event_loop_poll_events"),
-            fp_type: l.sym("rt_winit_event_get_type"),
-            fp_key_scancode: l.sym("rt_winit_event_key_scancode"),
-            fp_key_keycode: l.sym("rt_winit_event_key_keycode"),
-            fp_key_pressed: l.sym("rt_winit_event_key_pressed"),
-            fp_mouse_button: l.sym("rt_winit_event_mouse_button"),
-            fp_mouse_pressed: l.sym("rt_winit_event_mouse_pressed"),
-            fp_mouse_x: l.sym("rt_winit_event_mouse_x_milli"),
-            fp_mouse_y: l.sym("rt_winit_event_mouse_y_milli"),
-            fp_wheel_x: l.sym("rt_winit_event_wheel_x_milli"),
-            fp_wheel_y: l.sym("rt_winit_event_wheel_y_milli"),
-            fp_inner_width: l.sym("rt_winit_window_inner_width"),
-            fp_inner_height: l.sym("rt_winit_window_inner_height"),
-            fp_staging: l.sym("rt_winit_window_staging_ptr"),
-            fp_stage_clear: l.sym("rt_winit_window_stage_clear"),
-            fp_stage_fill_rect: l.sym("rt_winit_window_stage_fill_rect"),
-            fp_present: l.sym("rt_winit_window_present_staged"),
-            fp_event_free: l.sym("rt_winit_event_free"),
-            fp_window_free: l.sym("rt_winit_window_free"),
-            fp_loop_free: l.sym("rt_winit_event_loop_free")
+            fp_poll: fp_poll,
+            fp_type: fp_type,
+            fp_key_scancode: fp_key_scancode,
+            fp_key_keycode: fp_key_keycode,
+            fp_key_pressed: fp_key_pressed,
+            fp_mouse_button: fp_mouse_button,
+            fp_mouse_pressed: fp_mouse_pressed,
+            fp_mouse_x: fp_mouse_x,
+            fp_mouse_y: fp_mouse_y,
+            fp_wheel_x: fp_wheel_x,
+            fp_wheel_y: fp_wheel_y,
+            fp_inner_width: fp_inner_width,
+            fp_inner_height: fp_inner_height,
+            fp_staging: fp_staging,
+            fp_stage_clear: fp_stage_clear,
+            fp_stage_fill_rect: fp_stage_fill_rect,
+            fp_present: fp_present,
+            fp_event_free: fp_event_free,
+            fp_window_free: fp_window_free,
+            fp_loop_free: fp_loop_free
         )
 
     # Provenance label for honest evidence trails.
@@ -338,6 +386,10 @@ impl GuiRenderer:
         if self.el != 0:
             spl_wffi_call_i64(self.fp_loop_free, [self.el], 1)
             self.el = 0
+        if self.lib_handle != 0:
+            unsafe(capabilities: [ffi]):
+                spl_dlclose(self.lib_handle)
+            self.lib_handle = 0
 
 export GUI_EVT_NONE
 export GUI_EVT_RESIZED
