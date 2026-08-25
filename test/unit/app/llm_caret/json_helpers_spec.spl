@@ -197,25 +197,39 @@ describe "JSON Parsing":
         val json = jo1(_pair("name", _str("Alice")))
         expect(extract_json_string(json, "missing")).to_equal("")
 
-    # KNOWN RED — this example is expected to fail today and is deliberately
-    # NOT weakened. It asserts the CORRECT behaviour of the imported subject.
-    # TODO(json-extract-hijack): under `simple test`, the call below does not
-    # reach app.llm_caret.json_helpers.extract_json_string at all. The test
-    # runner co-compiles src/lib/nogc_async_mut/mcp/helpers.spl, which defines
-    # an identically-signed `extract_json_string` (-> extract_json_string_v2)
-    # with NO escape tracking, and that definition wins. No collision warning
-    # is emitted because the signatures match.
-    # Evidence: `simple run` on the same call returns the correct
-    # `say \"hi\"`; `simple test` returns `say \`. Sabotaging json_find in the
-    # shipped module moves json_find's own examples but leaves every
-    # extract_json_* example untouched — they are served by the other module.
-    # Recorded in doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md.
+    # Reproduce for doc/08_tracking/bug/llm_caret_json_helpers_escaped_quote_cross_module_2026-08-25.md:
+    # under `simple test` this call used to be served by std.mcp.helpers'
+    # same-signature `extract_json_string` (no escape tracking) because the
+    # subject module imported std.mcp.helpers and the seed keys co-compiled
+    # functions by bare name (module_loader.rs:1504). Proven by sabotage:
+    # editing that std definition changed this spec's result. Fixed by
+    # dropping the import from the subject; the seed defect itself stays open.
     it "extracts a string value containing an escaped quote":
         step("Verify: extracts a string value containing an escaped quote")
         # The shipped extractor tracks backslash escapes; this is the behaviour
         # that std.mcp.helpers' same-named function does NOT have.
         val json = jo1(_pair("name", _str("say \"hi\"")))
         expect(extract_json_string(json, "name")).to_equal("say \\\"hi\\\"")
+
+    it "extracts a string whose escaped quote is the last char (backslash before closing quote)":
+        step("Verify: escaped quote directly before the closing quote")
+        val json = jo1(_pair("name", _str("end\"")))
+        expect(extract_json_string(json, "name")).to_equal("end\\\"")
+
+    it "extracts a string ending in an escaped backslash":
+        step("Verify: backslash at end resets escape state before the closing quote")
+        val json = jo1(_pair("name", _str("dir\\")))
+        expect(extract_json_string(json, "name")).to_equal("dir\\\\")
+
+    it "extracts a string containing a double backslash":
+        step("Verify: double backslash in the middle is kept verbatim")
+        val json = jo1(_pair("name", _str("a\\b")))
+        expect(extract_json_string(json, "name")).to_equal("a\\\\b")
+
+    it "extracts a string containing a unicode escape":
+        step("Verify: \\u escape sequence is kept verbatim")
+        val json = jo1(_pair("name", "\"caf\\u00e9\""))
+        expect(extract_json_string(json, "name")).to_equal("caf\\u00e9")
 
     it "extracts numeric value":
         step("Verify: extracts numeric value")
