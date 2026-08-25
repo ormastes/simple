@@ -733,3 +733,24 @@ feature compile configurations passed once.
 The estimate falls to 11,924 declaration rows / 3,138 symbols, with 1,203
 tagged declarations, 651 `unsafe_contract_declared`, 10,455 untouched, and
 zero exact-artifact verified-and-signed.
+
+## Truthful TLS connection metadata checkpoint
+
+Protocol, cipher, ALPN, and handshake providers no longer fabricate `"tcp"`,
+empty cipher metadata, or unconditional `true`. Invalid/stale/incomplete
+connections return `nil`; ALPN uses empty text only for the valid ordinary
+"not negotiated" outcome. Handshake presence is optional while its contained
+value remains a semantic boolean. Canonical safe wrappers lift metadata and
+handshake state into typed `Result` values, and browser/interpreter callers
+handle absence explicitly.
+
+Cipher names are selected from static literals for the rustls ring-supported
+suites. The provider performs no `format!`, temporary `String`, or second text
+copy. Existing table lookup/lock count and provider-call count are unchanged;
+each returned text uses the existing single runtime text lift. The static
+ratchet, compiler check, and focused invalid-handle metadata test passed.
+
+Declaration and symbol totals remain 11,924 / 3,138. Five formerly untagged
+raw declarations are now minimally `unsafe(ffi)`: 1,208 tagged declarations,
+656 `unsafe_contract_declared`, 10,450 untouched, and zero exact-artifact
+verified-and-signed.

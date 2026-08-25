@@ -743,7 +743,7 @@ pub extern "C" fn rt_tls_get_protocol_version(conn: i64) -> crate::value::Runtim
             let s = match v {
                 rustls::ProtocolVersion::TLSv1_2 => "TLSv1.2",
                 rustls::ProtocolVersion::TLSv1_3 => "TLSv1.3",
-                _ => "TLS",
+                _ => return crate::value::RuntimeValue::NIL,
             };
             return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
         }
@@ -754,34 +754,91 @@ pub extern "C" fn rt_tls_get_protocol_version(conn: i64) -> crate::value::Runtim
             let s = match v {
                 rustls::ProtocolVersion::TLSv1_2 => "TLSv1.2",
                 rustls::ProtocolVersion::TLSv1_3 => "TLSv1.3",
-                _ => "TLS",
+                _ => return crate::value::RuntimeValue::NIL,
             };
             return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
         }
     }
-    unsafe { crate::value::collections::rt_string_new(b"tcp".as_ptr(), 3) }
+    crate::value::RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_get_cipher_suite(_conn: i64) -> crate::value::RuntimeValue {
-    empty_text()
+pub extern "C" fn rt_tls_get_cipher_suite(conn: i64) -> crate::value::RuntimeValue {
+    if let Some(arc) = TLS_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        return entry.conn.negotiated_cipher_suite()
+            .and_then(|suite| tls_cipher_suite_name(suite.suite()))
+            .map(runtime_static_text)
+            .unwrap_or(crate::value::RuntimeValue::NIL);
+    }
+    if let Some(arc) = TLS_CLIENT_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        return entry.conn.negotiated_cipher_suite()
+            .and_then(|suite| tls_cipher_suite_name(suite.suite()))
+            .map(runtime_static_text)
+            .unwrap_or(crate::value::RuntimeValue::NIL);
+    }
+    crate::value::RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_get_negotiated_alpn(_conn: i64) -> crate::value::RuntimeValue {
-    empty_text()
+pub extern "C" fn rt_tls_get_negotiated_alpn(conn: i64) -> crate::value::RuntimeValue {
+    if let Some(arc) = TLS_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        return entry.conn.alpn_protocol().map(runtime_bytes_text).unwrap_or_else(empty_text);
+    }
+    if let Some(arc) = TLS_CLIENT_CONNS.lock().unwrap().get(&conn).cloned() {
+        let entry = arc.lock().unwrap();
+        return entry.conn.alpn_protocol().map(runtime_bytes_text).unwrap_or_else(empty_text);
+    }
+    crate::value::RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls_is_handshake_complete(_conn: i64) -> bool {
-    true
+pub extern "C" fn rt_tls_is_handshake_complete(conn: i64) -> crate::value::RuntimeValue {
+    if let Some(arc) = TLS_CONNS.lock().unwrap().get(&conn).cloned() {
+        return crate::value::RuntimeValue::from_bool(!arc.lock().unwrap().conn.is_handshaking());
+    }
+    if let Some(arc) = TLS_CLIENT_CONNS.lock().unwrap().get(&conn).cloned() {
+        return crate::value::RuntimeValue::from_bool(!arc.lock().unwrap().conn.is_handshaking());
+    }
+    crate::value::RuntimeValue::NIL
+}
+
+#[inline]
+fn runtime_static_text(value: &'static str) -> crate::value::RuntimeValue {
+    runtime_bytes_text(value.as_bytes())
+}
+
+#[inline]
+fn runtime_bytes_text(value: &[u8]) -> crate::value::RuntimeValue {
+    unsafe { crate::value::collections::rt_string_new(value.as_ptr(), value.len() as u64) }
+}
+
+#[inline]
+fn tls_cipher_suite_name(suite: rustls::CipherSuite) -> Option<&'static str> {
+    use rustls::CipherSuite::*;
+    match suite {
+        TLS13_AES_128_GCM_SHA256 => Some("TLS_AES_128_GCM_SHA256"),
+        TLS13_AES_256_GCM_SHA384 => Some("TLS_AES_256_GCM_SHA384"),
+        TLS13_CHACHA20_POLY1305_SHA256 => Some("TLS_CHACHA20_POLY1305_SHA256"),
+        TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 => Some("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"),
+        TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 => Some("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"),
+        TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 => Some("TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"),
+        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 => Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+        TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 => Some("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"),
+        TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => Some("TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod platform_trust_tests {
     use super::{
         rt_tls_client_read, rt_tls_client_read_checked, rt_tls_server_read,
-        rt_tls_server_read_checked, TLS_CLIENT_CONFIG,
+        rt_tls_server_read_checked, rt_tls_get_cipher_suite,
+        rt_tls_get_negotiated_alpn, rt_tls_get_protocol_version,
+        rt_tls_is_handshake_complete, TLS_CLIENT_CONFIG,
     };
 
     #[test]
@@ -795,5 +852,13 @@ mod platform_trust_tests {
         assert!(!rt_tls_client_read(-1, 1024).is_nil());
         assert!(rt_tls_server_read_checked(-1, 1024).is_nil());
         assert!(!rt_tls_server_read(-1, 1024).is_nil());
+    }
+
+    #[test]
+    fn invalid_connection_metadata_is_absent_not_fabricated() {
+        assert!(rt_tls_get_protocol_version(-1).is_nil());
+        assert!(rt_tls_get_cipher_suite(-1).is_nil());
+        assert!(rt_tls_get_negotiated_alpn(-1).is_nil());
+        assert!(rt_tls_is_handshake_complete(-1).is_nil());
     }
 }

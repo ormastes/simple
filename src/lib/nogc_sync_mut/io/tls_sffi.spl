@@ -49,10 +49,14 @@ extern fn rt_tls_server_shutdown(server: i64) -> bool
 
 # --- Connection Info ---
 
-extern fn rt_tls_get_protocol_version(conn: i64) -> text
-extern fn rt_tls_get_cipher_suite(conn: i64) -> text
-extern fn rt_tls_get_negotiated_alpn(conn: i64) -> text
-extern fn rt_tls_is_handshake_complete(conn: i64) -> bool
+@unsafe(reason: "raw rustls optional protocol metadata ABI; nil means invalid, stale, or incomplete connection", capabilities: [ffi])
+extern fn rt_tls_get_protocol_version(conn: i64) -> text?
+@unsafe(reason: "raw rustls optional cipher metadata ABI; nil means invalid, stale, incomplete, or unsupported suite", capabilities: [ffi])
+extern fn rt_tls_get_cipher_suite(conn: i64) -> text?
+@unsafe(reason: "raw rustls optional ALPN metadata ABI; nil means invalid handle and empty text means no negotiated ALPN", capabilities: [ffi])
+extern fn rt_tls_get_negotiated_alpn(conn: i64) -> text?
+@unsafe(reason: "raw rustls optional boolean handshake ABI; nil means invalid or stale handle", capabilities: [ffi])
+extern fn rt_tls_is_handshake_complete(conn: i64) -> bool?
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -248,7 +252,7 @@ fn tls_server_shutdown(server: TlsServer) -> Result<(), text>:
 
 # --- Connection Info ---
 
-fn tls_get_connection_info(conn: TlsClientConnection) -> TlsConnectionInfo:
+fn tls_get_connection_info(conn: TlsClientConnection) -> Result<TlsConnectionInfo, text>:
     """Get TLS connection information
 
     Returns: TlsConnectionInfo with protocol, cipher, etc.
@@ -259,30 +263,30 @@ fn tls_get_connection_info(conn: TlsClientConnection) -> TlsConnectionInfo:
         print "Cipher: {info.cipher_suite}"
     """
     if is_invalid_handle(conn.handle):
-        return TlsConnectionInfo(
-            protocol_version: "",
-            cipher_suite: "",
-            alpn_protocol: "",
-            peer_cert_subject: nil
-        )
+        return Err("TLS connection info: invalid handle")
 
     val protocol = rt_tls_get_protocol_version(conn.handle)
     val cipher = rt_tls_get_cipher_suite(conn.handle)
     val alpn = rt_tls_get_negotiated_alpn(conn.handle)
 
-    TlsConnectionInfo(
-        protocol_version: protocol,
-        cipher_suite: cipher,
-        alpn_protocol: alpn,
+    if protocol == nil or cipher == nil or alpn == nil:
+        return Err("TLS connection metadata unavailable")
+    Ok(TlsConnectionInfo(
+        protocol_version: protocol!,
+        cipher_suite: cipher!,
+        alpn_protocol: alpn!,
         peer_cert_subject: nil
-    )
+    ))
 
-fn tls_is_handshake_complete(conn: TlsClientConnection) -> bool:
+fn tls_is_handshake_complete(conn: TlsClientConnection) -> Result<bool, text>:
     """Check if TLS handshake is complete"""
     if is_invalid_handle(conn.handle):
-        return false
+        return Err("TLS handshake status: invalid handle")
 
-    rt_tls_is_handshake_complete(conn.handle)
+    val complete = rt_tls_is_handshake_complete(conn.handle)
+    if complete == nil:
+        return Err("TLS handshake status unavailable")
+    Ok(complete!)
 
 # ============================================================================
 # Export Functions

@@ -191,9 +191,9 @@ pub fn rt_tls_client_close(args: &[Value]) -> Result<Value, CompileError> {
     )?)))
 }
 
-/// `rt_tls_get_protocol_version(conn) -> text`
+/// `rt_tls_get_protocol_version(conn) -> text?`
 pub fn rt_tls_get_protocol_version(args: &[Value]) -> Result<Value, CompileError> {
-    runtime_text_out(
+    runtime_optional_text_out(
         net::rt_tls_get_protocol_version(int_arg(args, 0, "rt_tls_get_protocol_version")?),
         "rt_tls_get_protocol_version",
     )

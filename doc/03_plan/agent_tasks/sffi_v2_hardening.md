@@ -451,3 +451,9 @@ passing placeholder.
     parser, validation policy, and destructor are implemented. Next make
     protocol/cipher/ALPN/handshake connection info truthful and typed; signed
     exact-artifact admission remains zero.
+85. Keep TLS protocol/cipher/ALPN/handshake metadata nullable and truthful:
+    invalid/stale/incomplete is nil, valid no-ALPN is empty text, and handshake
+    payload remains bool. Cipher names must use static literals rather than
+    formatting allocations. Safe wrappers stay Result-bearing and browser/
+    interpreter paths must handle absence. Next consolidate browser TLS raw
+    declarations and checked reads/writes; signed admission remains zero.
