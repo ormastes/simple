@@ -2557,6 +2557,40 @@ artifact ABI/proof/signature evidence, and Ed25519 is not newly verified by
 this checkpoint.  SSH and the wider SFFI surface remain not globally verified
 or signed; exact-artifact verified-and-signed admission remains 0.
 
+## SSH live cipher contract checkpoint
+
+The SSH live cipher removed eleven secret-bearing serial diagnostics and its
+raw byte accessor.  Key, IV, nonce, AAD, plaintext, ciphertext, tag, and packet
+bytes are no longer hex-formatted on encrypt/decrypt paths, and byte reads use
+an inline bounds-checked Pure Simple helper.
+
+The three AES-256 providers now carry explicit FFI metadata and are called from
+three minimal lexical scopes.  AES-256 requires a 32-byte key; AES-128 requires
+16 bytes; both require a 12-byte IV/nonce and an exact bounded SSH GCM frame.
+Encrypt output must be plaintext length plus the 16-byte tag.  The Rust decrypt
+provider's status-prefixed contract is now enforced exactly: `0x00` is tag
+mismatch, only `0x01` is success, and success length must equal ciphertext
+length plus the status byte.  The direct packet provider must return a nonempty
+payload no larger than the authenticated packet body.
+
+Malformed short IVs previously became zero-padded nonces.  They now fail before
+encryption/decryption rather than manufacturing nonce bytes.  The valid nonce
+path also removes twelve repeated IV-length branches after its single exact-
+length check.
+
+The focused Simple/provider ratchet passed.  The authoritative census changed:
+
+- raw call sites: 20,673 -> 20,661
+- missing authority: 16,773 -> 16,758
+- lexical unsafe: 2,981 -> 2,984
+- function unsafe: unchanged at 919
+
+The new validation is constant-time scalar/length comparison.  No allocation,
+copy, lookup, lock, hashing, signature operation, or generic dispatch was added.
+Exact provider artifact/proof/signature evidence remains absent, so the cipher
+and wider SFFI surface are not globally verified or signed; exact-artifact
+verified-and-signed admission remains 0.
+
 ## Synchronous SIMD SFFI facade checkpoint
 
 `src/lib/nogc_sync_mut/simd.spl` has 48 direct calls to 47 `rt_simd_*`
