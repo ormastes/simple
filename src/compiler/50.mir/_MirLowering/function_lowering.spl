@@ -53,6 +53,11 @@ use compiler.mir.mir_types.{MirConstant, mir_type_probe_text}
 # -1 on any side is itself the finding. Retained per the log-retention policy.
 var mir_rettype_probe_state: i64 = -1
 
+# Scalar/text-only receipts for the first malformed HirTypeKind transports.
+# Do not return the enum through another helper while diagnosing an enum
+# aggregate boundary: that would add the very transport under investigation.
+val MIR_TYPE_TRANSPORT_RECEIPT_LIMIT: i64 = 16
+
 fn mir_rettype_probe_on() -> bool:
     if mir_rettype_probe_state < 0:
         if rt_env_get("SIMPLE_MIR_RETTYPE_DEBUG") == "1":
@@ -209,6 +214,9 @@ impl MirLowering:
         # bootstrap_stage2_empty_mir_bodies_2026-07-05). Real HIR->MIR lowering
         # now runs for all bootstrap functions.
         self.reset_function_local_tracking()
+        self.type_transport_owner = fn_.name
+        self.type_transport_context = "signature"
+        self.type_transport_param_index = -1
         if bootstrap_trace:
             print "[mir-lower] real-lower:start {fn_.name}"
 
@@ -231,6 +239,8 @@ impl MirLowering:
             # (`rt_enum_discriminant == -1`).  The parameter-binding loop below
             # already uses this owner-local shape and preserves the enum tag.
             val signature_param = fn_.params[pmi]
+            self.type_transport_context = "signature-param"
+            self.type_transport_param_index = pmi
             val lowered_param = if gpu_kernel_target == "vulkan":
                 self.lower_vulkan_kernel_param_type(signature_param)
             elif gpu_kernel_target == "cuda":
@@ -257,6 +267,8 @@ impl MirLowering:
 
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-start {fn_.name}"
+        self.type_transport_context = "return"
+        self.type_transport_param_index = -1
         val return_type = self.lower_type(fn_.return_type)
         if mir_rettype_probe_on():
             val hir_ret_disc = rt_enum_discriminant(fn_.return_type.kind)
@@ -529,6 +541,8 @@ impl MirLowering:
             print "[mir-lower] lower_function:body-start {fn_.name}"
         if bootstrap_trace:
             print "[mir-lower] real-lower:body {fn_.name}"
+        self.type_transport_context = "body"
+        self.type_transport_param_index = -1
         # Thread the declared return type into the body ONLY for `-> bool`
         # functions, so lower_block_expected can put a bare trailing `.?` in
         # bool position (see its tail_bool_position block). Deliberately not
@@ -1070,7 +1084,13 @@ impl MirLowering:
         HirTypeKind variants. Exists only because the seed compiler demands a
         trailing match arm.
         """
-        self.error_fatal("E-MIR-TYPE-Unknown: unreachable HirTypeKind disc={rt_enum_discriminant(type_.kind)}: {type_.kind}", Some(type_.span))
+        val bad_disc = rt_enum_discriminant(type_.kind)
+        if self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT:
+            self.type_transport_receipts = self.type_transport_receipts + 1
+            eprint("[mir-type-transport] receipt=" + self.type_transport_receipts.to_text() + "/" + MIR_TYPE_TRANSPORT_RECEIPT_LIMIT.to_text() + " owner=" + self.type_transport_owner + " context=" + self.type_transport_context + " param_index=" + self.type_transport_param_index.to_text() + " disc=" + bad_disc.to_text() + " source=" + type_.span.file + ":" + type_.span.line.to_text() + ":" + type_.span.col.to_text() + "\n")
+            # One retained fatal per receipt keeps the build failed without
+            # allocating an unbounded MirError vector on systemic corruption.
+            self.error_fatal("E-MIR-TYPE-Unknown: unreachable HirTypeKind disc={bad_disc}", Some(type_.span))
         MirType.i64()
 
     me lower_block(block: HirBlock) -> LocalId?:

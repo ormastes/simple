@@ -21,6 +21,13 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+# Bound transport diagnostics independently of the invariant count. A broken
+# aggregate boundary can affect every type in a full compiler closure; emitting
+# one line/violation per node hid the first useful owner and added tens of
+# thousands of allocations to the already-failing path.
+val POST_MONO_TRANSPORT_RECEIPT_LIMIT: i64 = 16
 
 # ============================================================================
 # Report model
@@ -111,6 +118,7 @@ class PostMonoVerifier:
     # is a generic call even with EMPTY type args (the inferred-argument form
     # the mono pass failed to rewrite).
     template_syms: Dict<i64, text>
+    transport_receipts: i64
 
     static fn create() -> PostMonoVerifier:
         PostMonoVerifier(
@@ -118,7 +126,8 @@ class PostMonoVerifier:
             symbol: "",
             chain: "",
             in_specialization: false,
-            template_syms: {}
+            template_syms: {},
+            transport_receipts: 0
         )
 
     me record(counter: text, detail: text):
@@ -151,16 +160,19 @@ class PostMonoVerifier:
 
     me hit_unreachable(enum_name: text, where_: text):
         self.r.unreachable_variant = self.r.unreachable_variant + 1
-        self.record("unhandled HIR variant", unreachable_variant(enum_name, where_))
+        if self.transport_receipts < POST_MONO_TRANSPORT_RECEIPT_LIMIT:
+            self.transport_receipts = self.transport_receipts + 1
+            self.record("unhandled HIR variant", unreachable_variant(enum_name, where_))
 
     # ------------------------------------------------------------------
     # Types — every HirTypeKind variant is owner-qualified and named. Covered (27):
     # Int Float Bool Char Str Unit Tuple Array Slice Dict Ref Ptr Optional
     # Result Named TypeParam Union DynTrait Function Projection Isolated
     # Infer Error Never Any Tensor Layer
-    # Owner qualification is required here: this module imports several HIR
-    # enums with colliding variant names, and a self-compiled Stage 2 cannot
-    # reliably dispatch a bare constructor such as `Tuple` or `Error`.
+    # Keep owner qualification for source-level disambiguation: this module
+    # imports several HIR enums with colliding variant names. Qualification is
+    # not an aggregate-transport repair; a malformed value still reaches the
+    # bounded wildcard receipt below.
     # ------------------------------------------------------------------
     me walk_type(ty: HirType):
         if ty == nil:
@@ -203,7 +215,13 @@ class PostMonoVerifier:
             case HirTypeKind.Any: self.hit_any("type position")
             case HirTypeKind.Tensor(element, _, _): self.walk_type(element)
             case HirTypeKind.Layer(_, _): pass_do_nothing("layer dims carry no HirType")
-            case _: self.hit_unreachable("HirTypeKind", "walk_type")
+            case _:
+                # Keep the receipt in this frame: passing `ty` through another
+                # method would add a HirType aggregate boundary to the fault.
+                val bad_disc = rt_enum_discriminant(ty.kind)
+                if self.transport_receipts < POST_MONO_TRANSPORT_RECEIPT_LIMIT:
+                    print "[post-mono-type-transport] receipt={self.transport_receipts + 1}/{POST_MONO_TRANSPORT_RECEIPT_LIMIT} module_symbol={self.symbol} disc={bad_disc} source={ty.span.file}:{ty.span.line}:{ty.span.col}"
+                self.hit_unreachable("HirTypeKind", "walk_type")
 
     me walk_types(tys: [HirType]):
         if tys == nil:
