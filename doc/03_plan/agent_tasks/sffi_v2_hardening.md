@@ -544,3 +544,7 @@ passing placeholder.
      `unsafe(ffi)`. Enforce memory and I/O extents, parsing end-pointer validity,
      array item-pointer lifetime, and enum payload borrowing without extra
      scans, allocations, copies, syscalls, or string-registry work.
+105. Keep all 34 simple-core filesystem declarations explicitly tagged
+     `unsafe(ffi)`. Enforce partial-I/O, stdio element extents, mmap sentinels
+     and lifetimes, directory-entry borrowing, and path validity without extra
+     path copies, directory scans, allocations, or syscalls.

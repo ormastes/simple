@@ -1150,3 +1150,24 @@ Unsafe-tagged rows increase from 1,684 to 1,719, untouched rows decrease from
 9,794 to 9,759, and exact-artifact verified-and-signed admission remains zero.
 Pointer extents, parsing end-pointer validity, and borrowed payload lifetimes
 still require executable validation and exact provider admission.
+
+## Simple-core filesystem raw-contract checkpoint
+
+All 34 raw declarations in `simple-core` filesystem support now carry adjacent,
+operation-specific `@unsafe(... capabilities: [ffi])` metadata. The contracts
+cover heap ownership, NUL-terminated paths and modes, FILE/DIR/descriptor
+handles, stdio element extents, descriptor buffer extents, mmap address/length
+lifetime, borrowed `dirent` pointers, rename/remove paths, tagged string/array
+results, value transfer, and unchecked pointer/offset access.
+
+A static ratchet fixes the inventory at 34 and requires every declaration to
+retain its tag. It passed with the whitespace check. This pass changes no ABI
+signature, path copy/normalization, allocation/free, file or directory syscall,
+read/write count, mmap operation, directory scan, buffer copy, branch, or
+layout. Production Simple and optimizer verification remain unavailable.
+
+Estimated totals remain 11,736 `rt_*` declaration rows / 3,137 symbols.
+Unsafe-tagged rows increase from 1,719 to 1,753, untouched rows decrease from
+9,759 to 9,725, and exact-artifact verified-and-signed admission remains zero.
+Partial-I/O, mmap failure sentinels, directory-entry lifetime, and exact libc
+identity still require executable validation and signed admission.
