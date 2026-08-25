@@ -12,6 +12,37 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Simple-core enum authority checkpoint
+
+The pure-Simple enum provider retains six explicitly tagged raw interfaces.
+All 12 former ambient call sites are now routed through mandatory-inline
+owners.  Allocation and pointer loads/stores require `ffi, raw_ptr`; the
+fail-closed termination owner requires only `ffi`.  The focused
+`simple-core-enum-authority.shs` ratchet passed and pins the pointer intrinsics
+plus both compilers' mandatory-inline recognition.
+
+Review found that `rt_enum_new` returned tagged `nil` when its fixed 32-byte
+allocation failed, fabricating absence for a constructor that promises an enum
+value.  It now terminates through the existing abort boundary.  Successful
+construction retains one allocation, the same field stores and registry link,
+and the same representation.  No valid-path branch, allocation, copy, lookup,
+lock, hash, signature operation, or generic dispatch was added.
+
+Enum validation still performs an O(number of live enums) registry walk.  That
+pre-existing bootstrap scalability ponytail is documented in the provider;
+changing it without production profiles would add hash-table memory and
+allocation overhead, so this checkpoint does not claim to resolve it.
+
+The authoritative call census changed as follows:
+
+- raw call sites: 19,653 -> 19,647
+- lexical unsafe: 3,187 -> 3,193
+- function unsafe: unchanged at 919
+- missing authority: 15,547 -> 15,535
+
+Production execution and exact artifact evidence remain unavailable, so
+verified-and-signed admission remains 0.
+
 ## Simple-core BDD authority checkpoint
 
 The pure-Simple native-SPipe BDD subset retains four explicitly tagged raw
