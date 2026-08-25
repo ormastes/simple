@@ -1545,3 +1545,24 @@ fixes each facade at 26 declarations.
 Estimated declaration totals remain 11,652 / 3,137 symbols. Unsafe-tagged rows
 increase from 2,001 to 2,079, untouched rows decrease from 9,453 to 9,375, and
 exact-artifact verified-and-signed admission remains zero.
+
+## Compression and archive raw-contract checkpoint
+
+The no-GC compression facade owns 24 raw gzip, deflate, zip, tar, and tar.gz
+declarations. No matching non-vendored C or Rust provider exists in the
+repository. All 24 declarations now carry adjacent operation-specific
+`unsafe(ffi)` metadata. The reasons preserve the unresolved obligations:
+binary bytes are represented as `text`, allocation and output extents are
+unknown, empty text conflates valid empty output with failure, integer handles
+lack typed ownership/generation, and extraction has no reviewable traversal,
+link, overwrite, or expansion-limit policy.
+
+No public API, boolean result, call, branch, allocation, copy, lookup, lock, or
+dispatch changed. Adding speculative validation in the safe-looking facade
+would not establish provider behavior and could add hot-path work, so the lane
+remains explicitly unsafe pending a typed provider contract. A static ratchet
+requires all 24 tags and rejects the appearance of an unreviewed provider.
+
+Estimated repository totals are 11,651 declarations / 3,137 symbols.
+Unsafe-tagged rows increase from 2,202 to 2,226, untouched rows decrease from
+9,254 to 9,230, and exact-artifact verified-and-signed admission remains zero.

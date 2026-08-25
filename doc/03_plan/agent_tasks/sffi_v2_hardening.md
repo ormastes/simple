@@ -629,3 +629,10 @@ passing placeholder.
      providers. Preserve the public `f32` API and direct hardware/libm call
      shape; add no heap allocation, boxing, lookup, conversion loop, or generic
      dispatch. Bind both typed symbol sets into the ABI registry.
+124. Keep all 24 unbacked compression/archive declarations explicitly tagged
+     `unsafe(ffi)`. Do not publish the facade as verified while binary payloads
+     use `text`, failures are ambiguous, handles lack typed ownership, or
+     extraction limits/path policy are unproved. A future provider must use
+     byte spans, typed status/handles, bounded decompression, safe extraction,
+     and exact signed admission without extra hot-path lookups, copies,
+     allocations, locks, or generic dispatch.
