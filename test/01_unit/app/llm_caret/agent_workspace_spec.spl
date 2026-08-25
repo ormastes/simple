@@ -9,11 +9,12 @@ shared repository are never touched.
 """
 
 use std.spec.{describe, it, expect, step, pending}
-use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, env_get, cwd}
+use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, env_get, env_set, cwd}
 use app.llm_caret.agent_workspace.{agent_workspace, tmux_available,
     session_alive, session_ensure, session_kill, window_open, pane_split,
     list_panes, send_to_each_pane, wait_for_pane_text, worktree_add,
-    worktree_remove, worktree_list, worktree_path, agent_attach, agent_detach}
+    worktree_remove, worktree_list, worktree_path, agent_attach, agent_detach,
+    workspace_depth, depth_exceeded, with_depth, launch_caret_suite, list_panes_except}
 
 fn _scratch(name: text) -> text:
     var base = env_get("SIMPLE_TEST_SCRATCH")
@@ -116,5 +117,52 @@ describe "LLM Caret agent tmux sessions":
                 still_there = true
         expect(still_there).to_be(false)
         expect(dir_exists(worktree_path(ws, "agent-b"))).to_be(false)
+        session_kill(ws)
+        dir_remove_all(root)
+
+describe "LLM Caret workspace recursion protection":
+    it "refuses to launch a suite from inside a workspace-launched child":
+        step("A fresh process is at depth 0 and stamps depth 1 on what it spawns")
+        env_set("LLM_CARET_WORKSPACE_DEPTH", "")
+        expect(workspace_depth()).to_equal(0)
+        expect(depth_exceeded()).to_be(false)
+        expect(with_depth("echo hi")).to_equal("LLM_CARET_WORKSPACE_DEPTH=1 echo hi")
+        expect(with_depth("")).to_equal("")
+
+        step("At depth 1 the suite launch is refused before tmux is touched")
+        env_set("LLM_CARET_WORKSPACE_DEPTH", "1")
+        expect(depth_exceeded()).to_be(true)
+        val ws = agent_workspace("caret-depth", cwd(), _scratch("depth"))
+        val r = launch_caret_suite(ws, cwd(), "test/x_spec.spl")
+        expect(r.status).to_equal("error")
+        expect(r.reason).to_equal("recursion_limit")
+        expect(session_alive(ws)).to_be(false)
+        env_set("LLM_CARET_WORKSPACE_DEPTH", "")
+
+    it "never broadcasts into the pane it is running from":
+        if not tmux_available():
+            pending("BLOCKED: tmux not installed on this host")
+            return
+        val root = _scratch("ownpane")
+        dir_remove_all(root)
+        dir_create_all(root)
+        val ws = agent_workspace("caret-own", root, root + "/trees")
+        session_kill(ws)
+        expect(session_ensure(ws, root).status).to_equal("ok")
+        expect(pane_split(ws, "0", root).status).to_equal("ok")
+
+        step("Pretend this process lives in the first pane (tmux sets TMUX_PANE)")
+        val (ids, _e, _c) = process_run("tmux", ["-L", ws.socket, "list-panes", "-s",
+            "-t", ws.session, "-F", "#" + "{" + "pane_id" + "}"])
+        val own = ids.split("\n")[0].trim()
+        expect(own.starts_with("%")).to_be(true)
+        env_set("TMUX_PANE", own)
+
+        step("A broadcast reaches every OTHER pane only")
+        val reached = send_to_each_pane(ws, "echo OWN_PANE_SKIPPED")
+        expect(reached.len()).to_equal(1)
+        expect(list_panes(ws).len()).to_equal(2)
+        expect(list_panes_except(ws, own).len()).to_equal(1)
+        env_set("TMUX_PANE", "")
         session_kill(ws)
         dir_remove_all(root)
