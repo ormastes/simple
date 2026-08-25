@@ -5350,3 +5350,36 @@ marshalling, or per-cluster allocation was added. Legacy array-return lookup
 helpers still conflate not-found/read failure with valid empty data and the
 DMA/MMIO artifact chain remains unsigned and unproved, so this module is not
 globally verified or signed; verified-and-signed admission remains 0.
+
+## Legacy SQLite wrapper authority checkpoint
+
+The three legacy SQLite wrapper mirrors now expose their existing unsafe
+reality consistently: each has 27 unsafe raw declarations and 24 exact unsafe
+wrapper owners covering all 26 call sites. The wrappers retain raw integer
+handles, manual finalization, unchecked column/bind indices, and ambiguous
+empty/false/zero error conventions, so promoting them to safe `Option`/`Result`
+APIs would require a separate breaking migration. PureDatabase remains the
+preferred safe in-tree backend.
+
+The focused `sqlite-legacy-wrappers-sffi-authority.shs` audit passed. It pins
+all three mirrors, keeps the two data-only row helpers safe, and confirms that
+all 27 SQLite providers are interpreter-registered but absent from the typed
+native registry. Raw declarations remain exported for existing internal
+database layers, but their unsafe declarations and unsafe callers prevent this
+checkpoint from presenting them as verified safe.
+
+The authoritative census changed exactly by the 78 newly bounded calls:
+
+- raw call sites: unchanged at 18,592
+- distinct called symbols: unchanged at 3,257
+- caller files: unchanged at 3,088
+- missing authority: 13,673 -> 13,595
+- lexical unsafe: unchanged at 3,424
+- function unsafe: 1,495 -> 1,573
+
+Annotations add no runtime work. No allocation, copy, loop, query, lookup,
+lock, branch, hash, signature operation, generic dispatch, or forced inlining
+was added. Handle ownership, query-next done/error separation, nullable column
+text, exact SQLite artifact identity, typed-native registration, and signed
+evidence remain unresolved. Therefore these wrappers and the wider SFFI estate
+are not globally verified or signed; verified-and-signed admission remains 0.
