@@ -79,6 +79,20 @@ pub struct TaskLifecycleIdentityV1:
     task_id: u64
     lifecycle_generation: u64
 
+pub(package) struct SchedulerCurrentTaskAdmissionV1:
+    """Immutable identity receipt issued from the scheduler's current slot."""
+    _task_id: u64
+    _lifecycle_generation: u64
+
+pub(package) fn scheduler_current_task_admission_matches_v1(
+    admission: SchedulerCurrentTaskAdmissionV1,
+    task_id: u64,
+    lifecycle_generation: u64
+) -> bool:
+    task_id != 0u64 and lifecycle_generation != 0u64 and
+        admission._task_id == task_id and
+        admission._lifecycle_generation == lifecycle_generation
+
 pub fn task_lifecycle_identity_valid_v1(identity: TaskLifecycleIdentityV1) -> bool:
     identity.task_id != 0u64 and identity.lifecycle_generation != 0u64
 
@@ -699,6 +713,9 @@ pub class Scheduler:
     """Priority-based preemptive scheduler."""
     tasks: [TaskControlBlock?]
     current: TaskId
+    # Exact cache for `current`; scheduler-owned updates make current-task
+    # admission O(1) without copying or scanning the TCB array.
+    current_slot: i32
     current_by_cpu: [TaskId]
     preempt_pending_by_cpu: [TaskId?]
     ready_queues: [ReadyQueue]
@@ -728,6 +745,25 @@ pub class Scheduler:
     green_parallelism_state: GreenCarrierParallelismState
 
 impl Scheduler:
+    pub(package) fn current_task_admission_v1() -> SchedulerCurrentTaskAdmissionV1?:
+        val slot = self.current_slot
+        if slot < 0 or slot >= self.tasks.len(): return nil
+        val maybe_task = self.tasks[slot]
+        if maybe_task == nil: return nil
+        val task = maybe_task.unwrap()
+        if task.id.id != self.current.id or task.lifecycle_generation == 0u64:
+            return nil
+        val admitted = match task.state:
+            case TaskState.Ready: true
+            case TaskState.Running: true
+            case TaskState.Blocked(reason): true
+            case TaskState.PreparingExit: false
+            case TaskState.Zombie: false
+        if not admitted: return nil
+        Some(SchedulerCurrentTaskAdmissionV1(
+            _task_id: task.id.id,
+            _lifecycle_generation: task.lifecycle_generation))
+
     fn task_lifecycle_identity_v1(id: TaskId) -> TaskLifecycleIdentityV1?:
         if id.id == 0u64: return nil
         var slot = 0

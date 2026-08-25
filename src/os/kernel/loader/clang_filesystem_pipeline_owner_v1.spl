@@ -1,10 +1,10 @@
 """Bounded pre-launch owner for a guest-native Clang hello pipeline.
 
-This capsule reserves preparation only.  It binds authenticated installed
-Clang/LLD catalog rows to one declared task identity and an exact non-delegable
-capability pouch, then issues one consume-once internal dispatch. It neither
-establishes current-TCB liveness nor claims that compilation, linking, or
-execution occurred; scheduler binding and backend receipts remain separate.
+This capsule binds authenticated installed Clang/LLD catalog rows to one
+declared task identity and an exact non-delegable capability pouch.  A dispatch
+must subsequently bind to the scheduler's canonical current TCB before the
+owner emits a fixed backend command.  The backend can publish exactly one
+terminal observation, which remains owner-retained until consumed as a receipt.
 """
 
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
@@ -13,7 +13,13 @@ use std.common.contracts.execution.simpleos_target_v1.{
     simpleos_target_v1_arch_for_triple
 }
 use std.common.contracts.execution.simpleos_vfs_mutation_v1.{TaskExecutionInstanceV1}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use std.common.crypto.sha256.{sha256_u8_hex}
 use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet}
+use os.kernel.scheduler.scheduler_types.{
+    SchedulerCurrentTaskAdmissionV1,
+    scheduler_current_task_admission_matches_v1
+}
 use os.kernel.loader.installed_artifact_catalog_v1.{
     installed_artifact_catalog_lookup_target_v1
 }
@@ -30,11 +36,15 @@ pub enum ClangFilesystemPipelineStateV1:
     Free
     Reserved
     Dispatched
+    Running
+    Terminal
     Retired
 
 pub enum ClangFilesystemPipelineEventV1:
     Reserve
     Dispatch
+    Begin
+    Complete
     Cancel
     OutcomeUnknown
 
@@ -48,10 +58,17 @@ pub fn clang_filesystem_pipeline_transition_v1(
     if state == ClangFilesystemPipelineStateV1.Reserved and
        event == ClangFilesystemPipelineEventV1.Dispatch:
         return Some(ClangFilesystemPipelineStateV1.Dispatched)
+    if state == ClangFilesystemPipelineStateV1.Dispatched and
+       event == ClangFilesystemPipelineEventV1.Begin:
+        return Some(ClangFilesystemPipelineStateV1.Running)
+    if state == ClangFilesystemPipelineStateV1.Running and
+       event == ClangFilesystemPipelineEventV1.Complete:
+        return Some(ClangFilesystemPipelineStateV1.Terminal)
     if state == ClangFilesystemPipelineStateV1.Reserved and
        event == ClangFilesystemPipelineEventV1.Cancel:
         return Some(ClangFilesystemPipelineStateV1.Free)
-    if state == ClangFilesystemPipelineStateV1.Dispatched and
+    if (state == ClangFilesystemPipelineStateV1.Dispatched or
+        state == ClangFilesystemPipelineStateV1.Running) and
        event == ClangFilesystemPipelineEventV1.OutcomeUnknown:
         return Some(ClangFilesystemPipelineStateV1.Retired)
     nil
@@ -74,6 +91,7 @@ pub(package) struct ClangFilesystemPipelineDispatchV1:
     reservation: ClangFilesystemPipelineReservationV1
     actor: TaskExecutionInstanceV1
     target: ManifestTarget
+    target_triple: text
     clang_path: text
     clang_sha256: text
     lld_path: text
@@ -83,6 +101,40 @@ pub(package) struct ClangFilesystemPipelineDispatchV1:
     executable_path: text
     working_directory: text
 
+pub(package) struct ClangFilesystemBackendCommandV1:
+    dispatch: ClangFilesystemPipelineDispatchV1
+    compile_argv: [text]
+    link_argv: [text]
+    execute_argv: [text]
+
+pub struct ClangFilesystemBackendOutcomeV1:
+    actor: TaskExecutionInstanceV1
+    compile_exit_code: i32
+    link_exit_code: i32
+    execute_exit_code: i32
+    source_sha256: text
+    object_sha256: text
+    executable_sha256: text
+    stdout_sha256: text
+
+pub(package) struct ClangFilesystemTerminalHandleV1:
+    _reservation: ClangFilesystemPipelineReservationV1
+
+pub struct ClangFilesystemTerminalReceiptV1:
+    actor: TaskExecutionInstanceV1
+    target: ManifestTarget
+    source_path: text
+    object_path: text
+    executable_path: text
+    source_sha256: text
+    object_sha256: text
+    executable_sha256: text
+    stdout_sha256: text
+    compile_exit_code: i32
+    link_exit_code: i32
+    execute_exit_code: i32
+    succeeded: bool
+
 struct ClangFilesystemPipelineSlotV1:
     state: ClangFilesystemPipelineStateV1
     generation: u32
@@ -91,6 +143,7 @@ struct ClangFilesystemPipelineSlotV1:
     target: ManifestTarget
     clang_sha256: text
     lld_sha256: text
+    receipt: ClangFilesystemTerminalReceiptV1?
 
 struct ClangFilesystemPipelineOwnerV1:
     initialized: bool
@@ -118,7 +171,7 @@ fn _empty_slot_v1(generation: u32) -> ClangFilesystemPipelineSlotV1:
         state: ClangFilesystemPipelineStateV1.Free,
         generation: generation, nonce: 0u64,
         request: _empty_request_v1(), target: _empty_target_v1(),
-        clang_sha256: "", lld_sha256: "")
+        clang_sha256: "", lld_sha256: "", receipt: nil)
 
 fn _new_slots_v1() -> [ClangFilesystemPipelineSlotV1]:
     var result: [ClangFilesystemPipelineSlotV1] = []
@@ -340,7 +393,7 @@ pub(package) fn clang_filesystem_pipeline_reserve_v1(
         state: reserved_state.unwrap(),
         generation: generation, nonce: nonce, request: request,
         target: target, clang_sha256: clang_record.content_sha256,
-        lld_sha256: lld_record.content_sha256)
+        lld_sha256: lld_record.content_sha256, receipt: nil)
     val result = ClangFilesystemPipelineReservationV1(
         _slot: index, _generation: generation, _nonce: nonce)
     if not _unlock_v1(): return Err("committed-unknown")
@@ -370,6 +423,7 @@ pub(package) fn clang_filesystem_pipeline_dispatch_v1(
     _clang_pipeline_owner_v1.slots[index].state = dispatched_state.unwrap()
     val result = ClangFilesystemPipelineDispatchV1(
         reservation: reservation, actor: caller, target: slot.target,
+        target_triple: slot.request.target_triple,
         clang_path: "/usr/bin/clang", clang_sha256: slot.clang_sha256,
         lld_path: "/usr/bin/ld.lld", lld_sha256: slot.lld_sha256,
         source_path: slot.request.source_path,
@@ -400,15 +454,152 @@ pub(package) fn clang_filesystem_pipeline_cancel_v1(
     if not _unlock_v1(): return Err("committed-unknown")
     Ok(true)
 
-pub(package) fn clang_filesystem_pipeline_mark_outcome_unknown_v1(
+fn _scheduler_admission_matches_actor_v1(
+    admission: SchedulerCurrentTaskAdmissionV1,
+    actor: TaskExecutionInstanceV1
+) -> bool:
+    scheduler_current_task_admission_matches_v1(
+        admission, actor.task_id, actor.lifecycle_generation)
+
+fn _dispatch_matches_slot_v1(
+    dispatch: ClangFilesystemPipelineDispatchV1,
+    slot: ClangFilesystemPipelineSlotV1
+) -> bool:
+    slot.request.actor == dispatch.actor and slot.target == dispatch.target and
+        slot.request.target_triple == dispatch.target_triple and
+        slot.request.source_path == dispatch.source_path and
+        slot.request.object_path == dispatch.object_path and
+        slot.request.executable_path == dispatch.executable_path and
+        slot.request.working_directory == dispatch.working_directory and
+        slot.clang_sha256 == dispatch.clang_sha256 and
+        slot.lld_sha256 == dispatch.lld_sha256
+
+pub(package) fn clang_filesystem_pipeline_begin_current_v1(
+    admission: SchedulerCurrentTaskAdmissionV1,
     dispatch: ClangFilesystemPipelineDispatchV1
-) -> Result<bool, text>:
+) -> Result<ClangFilesystemBackendCommandV1, text>:
+    # The scheduler proves the task/lifecycle half of the actor identity.  The
+    # exec generation remains the one already authenticated and retained by
+    # this owner; it is never reconstructed from a PID.
+    if not _scheduler_admission_matches_actor_v1(admission, dispatch.actor):
+        return Err("scheduler-current-task-mismatch")
     if not _lock_v1(): return Err("serialization-unavailable")
     val index = _reservation_index_locked_v1(
         dispatch.reservation, ClangFilesystemPipelineStateV1.Dispatched)
     if index < 0:
         _ = _unlock_v1()
         return Err("stale-or-nondispatched-reservation")
+    val slot = _clang_pipeline_owner_v1.slots[index]
+    if not _dispatch_matches_slot_v1(dispatch, slot):
+        _ = _unlock_v1()
+        return Err("dispatch-content-mismatch")
+    val running = clang_filesystem_pipeline_transition_v1(
+        slot.state, ClangFilesystemPipelineEventV1.Begin)
+    if not running.?:
+        _clang_pipeline_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("invalid-lifecycle-transition")
+    _clang_pipeline_owner_v1.slots[index].state = running.unwrap()
+    val command = ClangFilesystemBackendCommandV1(
+        dispatch: dispatch,
+        compile_argv: [dispatch.clang_path, "-c", dispatch.source_path,
+            "-o", dispatch.object_path, "--target=" + dispatch.target_triple],
+        link_argv: [dispatch.lld_path, dispatch.object_path, "-o",
+            dispatch.executable_path],
+        execute_argv: [dispatch.executable_path])
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(command)
+
+fn _terminal_digest_valid_v1(value: text) -> bool:
+    hash256_hex_valid(value) and not hash256_is_zero(value)
+
+pub(package) fn clang_filesystem_pipeline_finish_v1(
+    command: ClangFilesystemBackendCommandV1,
+    outcome: ClangFilesystemBackendOutcomeV1
+) -> Result<ClangFilesystemTerminalHandleV1, text>:
+    if outcome.actor != command.dispatch.actor or
+       not _terminal_digest_valid_v1(outcome.source_sha256):
+        return Err("invalid-backend-outcome")
+    val succeeded = outcome.compile_exit_code == 0 and
+        outcome.link_exit_code == 0 and outcome.execute_exit_code == 0
+    if succeeded and
+       (not _terminal_digest_valid_v1(outcome.object_sha256) or
+        not _terminal_digest_valid_v1(outcome.executable_sha256) or
+        not _terminal_digest_valid_v1(outcome.stdout_sha256) or
+        outcome.stdout_sha256 != sha256_u8_hex("Hello from SimpleOS\n".bytes())):
+        return Err("successful-outcome-evidence-mismatch")
+    if not _lock_v1(): return Err("serialization-unavailable")
+    val index = _reservation_index_locked_v1(
+        command.dispatch.reservation, ClangFilesystemPipelineStateV1.Running)
+    if index < 0:
+        _ = _unlock_v1()
+        return Err("stale-or-nonrunning-reservation")
+    val slot = _clang_pipeline_owner_v1.slots[index]
+    if not _dispatch_matches_slot_v1(command.dispatch, slot) or
+       slot.request.actor != outcome.actor:
+        _ = _unlock_v1()
+        return Err("backend-actor-mismatch")
+    val terminal = clang_filesystem_pipeline_transition_v1(
+        slot.state, ClangFilesystemPipelineEventV1.Complete)
+    if not terminal.?:
+        _clang_pipeline_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("invalid-lifecycle-transition")
+    _clang_pipeline_owner_v1.slots[index].receipt =
+        Some(ClangFilesystemTerminalReceiptV1(
+            actor: outcome.actor, target: slot.target,
+            source_path: slot.request.source_path,
+            object_path: slot.request.object_path,
+            executable_path: slot.request.executable_path,
+            source_sha256: outcome.source_sha256,
+            object_sha256: outcome.object_sha256,
+            executable_sha256: outcome.executable_sha256,
+            stdout_sha256: outcome.stdout_sha256,
+            compile_exit_code: outcome.compile_exit_code,
+            link_exit_code: outcome.link_exit_code,
+            execute_exit_code: outcome.execute_exit_code,
+            succeeded: succeeded))
+    _clang_pipeline_owner_v1.slots[index].state = terminal.unwrap()
+    val handle = ClangFilesystemTerminalHandleV1(
+        _reservation: command.dispatch.reservation)
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(handle)
+
+pub(package) fn clang_filesystem_pipeline_take_terminal_v1(
+    handle: ClangFilesystemTerminalHandleV1,
+    caller: TaskExecutionInstanceV1
+) -> Result<ClangFilesystemTerminalReceiptV1, text>:
+    if not _lock_v1(): return Err("serialization-unavailable")
+    val index = _reservation_index_locked_v1(
+        handle._reservation, ClangFilesystemPipelineStateV1.Terminal)
+    if index < 0:
+        _ = _unlock_v1()
+        return Err("stale-or-nonterminal-receipt")
+    val slot = _clang_pipeline_owner_v1.slots[index]
+    if slot.request.actor != caller or not slot.receipt.?:
+        _ = _unlock_v1()
+        return Err("terminal-receipt-actor-mismatch")
+    val receipt = slot.receipt.unwrap()
+    _release_locked_v1(index)
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(receipt)
+
+pub(package) fn clang_filesystem_pipeline_mark_outcome_unknown_v1(
+    dispatch: ClangFilesystemPipelineDispatchV1
+) -> Result<bool, text>:
+    if not _lock_v1(): return Err("serialization-unavailable")
+    var index = _reservation_index_locked_v1(
+        dispatch.reservation, ClangFilesystemPipelineStateV1.Dispatched)
+    if index < 0:
+        index = _reservation_index_locked_v1(
+            dispatch.reservation, ClangFilesystemPipelineStateV1.Running)
+    if index < 0:
+        _ = _unlock_v1()
+        return Err("stale-or-nondispatched-reservation")
+    if not _dispatch_matches_slot_v1(
+        dispatch, _clang_pipeline_owner_v1.slots[index]):
+        _ = _unlock_v1()
+        return Err("dispatch-content-mismatch")
     # A backend may have mutated either output. Keep their paths unavailable
     # forever in v1 rather than retrying a committed-unknown operation.
     val retired = clang_filesystem_pipeline_transition_v1(
@@ -425,5 +616,6 @@ pub(package) fn clang_filesystem_pipeline_mark_outcome_unknown_v1(
 
 export ClangFilesystemPipelineEventV1, ClangFilesystemPipelineFilesystemV1
 export ClangFilesystemPipelineRequestV1, ClangFilesystemPipelineStateV1
+export ClangFilesystemBackendOutcomeV1, ClangFilesystemTerminalReceiptV1
 export clang_filesystem_pipeline_request_valid_v1
 export clang_filesystem_pipeline_transition_v1
