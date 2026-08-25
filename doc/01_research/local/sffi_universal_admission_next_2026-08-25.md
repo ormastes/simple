@@ -5447,3 +5447,34 @@ an all-integer ABI; this pre-existing cost and ABI unsafety remain visible and
 make them ineligible for hardened/critical hot paths. Typed cached thunks and
 signed provider admission remain unimplemented, so verified-and-signed
 admission remains 0.
+
+## Package-service logging authority checkpoint
+
+The package service already imported the canonical kernel logging API but
+duplicated an interpreter-only `serial_println` declaration and called it 25
+times directly. Those calls now use `log_raw_println`, and the redundant raw
+declaration is removed. The canonical logger's two raw calls are isolated by
+one mandatory-inline lexical `ffi` owner; the raw declaration itself now also
+records explicit authority.
+
+The focused `pkg-service-logging-sffi-authority.shs` audit passed. It pins the
+25 package-service calls, the single canonical declaration, two canonical raw
+call sites, mandatory inlining, and current provider coverage (0 typed-native,
+1 interpreter). Provider registration remains an inventory fact rather than
+proof or signed admission.
+
+The authoritative census changed as follows:
+
+- raw call sites: 18,568 -> 18,542
+- distinct called symbols: unchanged at 3,257
+- caller files: 3,088 -> 3,087
+- missing authority: 13,544 -> 13,517
+- lexical unsafe: 3,426 -> 3,427
+- function unsafe: unchanged at 1,598
+
+The routing preserves semantic `bool` and list APIs. The mandatory-inline
+owner adds no runtime allocation, copy, lookup, lock, hash, signature check,
+or dispatch; raw-line logging remains O(1) apart from the existing foreign
+output cost. Serial output is still interpreter-only and its exact artifact is
+not authenticated. The wider SFFI estate is not globally safe, verified, or
+signed; verified-and-signed admission remains 0.
