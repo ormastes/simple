@@ -40,6 +40,7 @@ use os.kernel.boot.mmio.{mmio_read64, mmio_read32, mmio_write8, mmio_read8, mmio
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.log.klog_api.{log_init_serial, log_raw, log_raw_println, LOG_INFO}
 use os.kernel.memory.pmm.{pmm_init, pmm_total_pages, pmm_free_pages, pmm_total_memory, pmm_free_memory, pmm_alloc_page, pmm_free_page}
+use os.kernel.arch.arm64.topology.{arm64_publish_limine_cpu_census_v1}
 
 # SCTLR_EL1 read-only probe, used only to log the MMU/cache-enable state that
 # Limine's protocol handoff is supposed to have already established (Limine
@@ -242,6 +243,7 @@ extern fn rt_limine_framebuffer_response() -> u64
 extern fn rt_limine_rsdp_response() -> u64
 extern fn rt_limine_hhdm_response() -> u64
 extern fn rt_limine_kernel_addr_response() -> u64
+extern fn rt_limine_smp_response() -> u64
 
 # ============================================================================
 # HHDM Offset (Higher-Half Direct Map)
@@ -644,6 +646,15 @@ fn limine_aarch64_boot_sequence():
 
     # Step 2: Parse HHDM (needed for physical-to-virtual conversions)
     _parse_hhdm()
+
+    # Publish the bootloader's complete MPIDR census before memory_init can
+    # make scheduler, interrupt, or per-CPU identity readers reachable.  A
+    # missing or malformed response stays unpublished and therefore resolves
+    # to CPU_ID_UNRESOLVED_V1 rather than silently aliasing the BSP to CPU 0.
+    if arm64_publish_limine_cpu_census_v1(rt_limine_smp_response()):
+        log_raw_println("[BOOT] AArch64 CPU identity census published")
+    else:
+        log_raw_println("[BOOT] WARNING: AArch64 CPU identity census unavailable")
 
     # Step 3: Build boot output from all Limine responses
     val boot_info = _build_boot_output()
