@@ -27,7 +27,7 @@ than copied here:
 
 The lifecycle-first canonical tree remains physical truth. This design creates
 no second writable document tree. FUSE/ProjFS remains behind a read-only
-`ProjectionAdapter` decision gate and is not an initial deliverable.
+`ProjectionProvider` decision gate and is not an initial deliverable.
 
 ## 2. Package and ownership map
 
@@ -50,7 +50,8 @@ Spipe/src/
 ```
 
 `KnowledgeCompiler` alone publishes snapshots. Parsers and analyzers return
-immutable deltas. `RefactorExecutor` alone changes canonical files.
+immutable deltas. `RefactorService` alone holds the refactor filesystem
+capability and authorizes canonical-file mutations.
 `RebalanceService` and `PromotionService` return proposals; they cannot invoke
 filesystem writes or publication directly. `AuthorizationPort` wraps all
 external reads and mutations. This is an MDSOC virtual capsule: security,
@@ -109,13 +110,22 @@ There is one public record name per concept:
   `ArtifactDelta`, `GraphDelta`, and `IndexDelta` payloads plus alias,
   projection-invalidation, and `DiagnosticRecord` changes.
 
-Internal service boundaries use `*Port` (`LexicalSearchPort`,
-`SymbolIndexPort`, `ProjectionPort`, `AuthorizationPort`). External/runtime
-implementations use `*Provider` (`SearchProvider`, `SourceSymbolProvider`,
-`ProjectionProvider`) and are adapted to exactly one corresponding internal
-port. A provider is never injected directly into domain services, and `Port`
-and `Provider` suffixes are not interchangeable in schemas, wire messages, or
-tests.
+The frozen search/symbol/projection vocabulary is closed. Internal boundaries
+are only `LexicalSearchPort`, `SemanticSearchPort`, `SymbolIndexPort`, and
+`ProjectionPort`. External/runtime implementations are only `SearchProvider`,
+`SourceSymbolProvider`, and `ProjectionProvider`. `SearchProvider` capabilities
+adapt to `LexicalSearchPort` and, when declared, `SemanticSearchPort`;
+`SourceSymbolProvider` adapts to `SymbolIndexPort`; `ProjectionProvider` adapts
+to `ProjectionPort`. Names such as `SearchProviderPort`, `JsSearchProvider`,
+`LexicalIndexPort`, `SemanticProvider`, and `ProjectionAdapter` are forbidden
+aliases. The dependency-free JavaScript implementation is a `SearchProvider`
+with implementation ID `spipe_js`, hosted behind
+`InProcessSearchProviderAdapter`. `KnowledgeCompiler` receives only the
+adapter-produced `LexicalSearchPort` and optional `SemanticSearchPort`; it never
+receives or discovers a `SearchProvider`. External providers likewise terminate
+at their adapter before domain injection. `Port`/`Provider` suffixes are not
+interchangeable in schemas, wire messages, or tests. Other domain
+ports such as `AuthorizationPort` retain their architecture-defined names.
 
 During observe-only migration, an unmarked document receives a **provisional
 identity** `P-<project-uid>-<content-hash>`, scoped to one snapshot and clearly
@@ -125,7 +135,7 @@ cross-revision identity. A proposed UID injection upgrades it through an
 explicit canonical edit; path similarity never upgrades it silently.
 
 Aggregate outputs also have identity without impersonating artifacts.
-`ProjectionUid` is exactly lowercase SHA-256 over canonical SDN
+`ProjectionUid` presents as `spkp1-<lowercase sha256>`, where the digest is over canonical SDN
 `projection_v1(workspace_uid, snapshot_id, view_kind,
 normalized_logical_path, normalized_parameters_hash,
 effective_auth_scope_hash, page_start_key)`. Generated directories, matrices,
@@ -478,6 +488,53 @@ Recovery compares each path against recorded before/after hashes:
 Rollback restores bytes, permissions, paths, aliases, graph/index manifest,
 and verifies exact pre-transaction hashes. It never infers desired state.
 
+### 7.3 Refactor filesystem capability
+
+`RefactorSafeFilesystemPort` is exposed only through the non-copyable capability
+`SafeFilesystem.Refactor`, bound to transaction, project, worktree, pinned
+snapshot, allowed canonical relative paths/operations, metadata policy, and
+expiry. Only `RefactorService` may hold it; parsers, projections, providers,
+rebalancing, promotion, and subordinate executors cannot retain or receive the
+capability. Its exact API is:
+
+```text
+open_project_root(capability) -> SafeRoot
+read_regular(root, relative_path, expected_hash) -> bytes
+capture_metadata(root, relative_path) -> FileMetadata
+stage_regular(root, transaction_id, relative_path, bytes, FileMetadata) -> StagedFile
+create_directory(root, relative_path, DirectoryMetadata) -> CreatedDirectory
+atomic_replace(root, StagedFile, destination, expected_old_hash?) -> AppliedMutation
+atomic_move(root, source, destination, expected_source_hash, expected_destination_hash?) -> AppliedMutation
+restore_metadata(root, relative_path, FileMetadata) -> AppliedMutation
+remove_empty_directory(root, relative_path, expected_metadata) -> AppliedMutation
+sync_file(root, relative_path) -> DurabilityReceipt
+sync_directory(root, relative_path) -> DurabilityReceipt
+```
+
+Paths are descriptor-relative and no-follow. There is no absolute-path, raw
+write, recursive-delete, symlink-following, or cross-device mutation. Content
+removal is an `atomic_move` into the transaction rollback area; cleanup follows
+the commit receipt. `FileMetadata` covers type, mode, owner/group, ACL, xattrs,
+platform flags, and the policy decision for each field. Compare-before-rollback
+uses `read_regular(..., applied_hash)` and `capture_metadata` to verify the
+recorded applied state before invoking `stage_regular`/`atomic_replace`,
+`atomic_move`, `restore_metadata`, or `remove_empty_directory`; receipt and
+post-operation hashes then prove restoration. A mismatch refuses rollback and
+preserves recovery evidence. Success from a mutation method means only the
+operation occurred; durability requires explicit `sync_file` and parent
+`sync_directory` receipts recorded in the journal. Platforms lacking an exact
+primitive return a typed unsupported/durability error rather than emulate
+weaker semantics silently.
+
+Materialized-view output separately uses `MaterializerSafeFilesystemPort`
+through capability `SafeFilesystem.Materializer`, restricted to the registered
+per-worktree generated-view root and generated-file replace/remove operations.
+Possession of `SafeFilesystem.Refactor` never grants materialization access,
+and possession of `SafeFilesystem.Materializer` never grants canonical read,
+move, replace, metadata-restore, rollback, or refactor access. Neither port nor
+capability implies the other; authorization, construction, audit, and negative
+tests treat them as independent capabilities.
+
 ## 8. Authorization and trust
 
 Authorization evaluates a deny-wins intersection:
@@ -614,6 +671,22 @@ Every output header contains source UID, generator version, input snapshot,
 hand-diverged output fails verification. Generated outputs are never edited as
 canonical sources.
 
+`trust_scope` is the requirements-frozen closed enum `untrusted_data`,
+`reviewed_reference`, or `executable_policy`. It is derived as the minimum trust
+permitted by every canonical source, extension, reviewer receipt, project
+registry trust, and destination policy; generation cannot request or infer a
+higher value. Only `executable_policy` may produce an active agent-policy
+surface. `reviewed_reference` may generate documentation or disabled previews;
+`untrusted_data` may only be rendered as escaped data and never as instructions.
+Project/family/common reach is separate authorization metadata
+`authorization_scope_kind` plus `authorization_scope_uid`; it is not encoded in
+or inferred from the enum. Validation rejects unknown values, executable-policy
+elevation without a separately authorized REQ-SPKC-025 review receipt, scope
+mismatch, expired/revoked review, and any source hash not covered by the
+derivation. Generated headers render the exact enum and both authorization
+scope fields; harness loaders/checkers must reject missing, unknown, stale, or
+insufficient trust or authorization before treating content as instructions.
+
 The tracked compiler manifest is concrete and exhaustive:
 
 ```sdn
@@ -632,7 +705,9 @@ skill_compiler:
       adapter: codex_skill_v1
       target: .codex/skills/example/SKILL.md
       semantic_fixture: test/fixture/skill/example.canonical.sdn
-      trust_scope: approved_project_policy
+      trust_scope: executable_policy
+      authorization_scope_kind: project
+      authorization_scope_uid: P-...
       content_hash: sha256:...
 ```
 

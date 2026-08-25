@@ -55,8 +55,8 @@ src/view/uri.js                      URI parsing and canonicalization
 src/view/projection.js               snapshot-to-view projection
 src/view/directory_index.js          bounded generated Markdown indexes
 src/view/materialize.js              safe `.spipe/view` synchronization
-src/storage/safe_filesystem.js       portable no-follow filesystem owner
-src/storage/native_safe_fs.js        optional descriptor-relative provider
+src/storage/materializer_safe_filesystem_port.js  materializer mutation port
+src/storage/native_materializer_safe_filesystem.js native port provider
 src/storage/trusted_fs_helper.js     admitted helper protocol adapter
 ```
 
@@ -66,10 +66,15 @@ ports; they do not parse or scan repositories directly:
 ```text
 WorkspaceRegistry.open(workspace_id) -> KnowledgeSnapshot
 ResourceResolver.resolve(snapshot, uri) -> ResourceTarget
-ProjectionService.list(snapshot, target, cursor, limit) -> ResourcePage
-ProjectionService.read(snapshot, target, range) -> ResourceContent
+ProjectionPort.list(snapshot, target, cursor, limit) -> ResourcePage
+ProjectionPort.read(snapshot, target, range) -> ResourceContent
 Materializer.sync(snapshot, view, output_root) -> MaterializeReceipt
 ```
+
+`ProjectionPort` is the only internal projection boundary name.
+`ProjectionProvider` is the only external/runtime implementation name and is
+adapted once to `ProjectionPort`; no alternate projection boundary name appears
+in schema, code, wire contracts, or tests.
 
 Every request receives one immutable snapshot. A request must not trigger a
 full-tree scan, reread all artifacts, or spawn a search provider. Index and
@@ -131,8 +136,9 @@ because a symlink or junction can escape them or be swapped after validation.
 Virtual paths are navigation handles. Every artifact/section virtual document
 resolves to one canonical artifact or section UID. Aggregate outputs such as a
 directory index, search result page, trace projection, and diagnostic report
-instead receive `ProjectionUid`, defined exactly as lowercase SHA-256 over
-canonical SDN `projection_v1(workspace_uid, snapshot_id, view_kind,
+instead receive `ProjectionUid`, rendered exactly as
+`spkp1-<lowercase-sha256>`, where `<lowercase-sha256>` is SHA-256 over canonical
+SDN `projection_v1(workspace_uid, snapshot_id, view_kind,
 normalized_logical_path, normalized_parameters_hash,
 effective_auth_scope_hash, page_start_key)`. There is no alternate aggregate
 identity formula. For an entirely public projection, `effective_auth_scope_hash`
@@ -279,13 +285,30 @@ File-only agents browse `.spipe/view/<view>/`. Generated documents begin with:
 
 That header is valid only for a single canonical artifact. Aggregate directory,
 trace, search, and diagnostic documents instead contain
-`<!-- projection-uid: P-... -->` plus snapshot and effective authorization-scope
-digest; they omit `canonical-uid` and `canonical-path`.
+`<!-- projection-uid: spkp1-<lowercase-sha256> -->` plus snapshot and effective
+authorization-scope digest; they omit `canonical-uid` and `canonical-path`.
 
-`SafeFilesystem` is the sole owner of materializer filesystem mutation. Its
-interface is `pinRoot`, `createExclusive`, `openNoFollow`,
-`replaceSameDirectory`, `removeVerified`, and `closeRoot`. The
-`NativeSafeFilesystem` provider pins directory handles for the authorized
+`MaterializerSafeFilesystemPort` is the sole internal boundary for
+**materialization** filesystem mutation. Only `AuthorizationPort` issues the
+non-copyable capability `SafeFilesystem.Materializer`, and only the
+`ProjectionService` materializer adapter may hold it. Filesystem providers and
+helpers supply port operations invoked by that authorized holder; they never
+receive, issue, grant, supply, or hold the capability. The exact API is:
+
+```text
+open_view_root(capability) -> SafeViewRoot
+stage_generated(root, projection_uid, relative_path, bytes) -> StagedGeneratedFile
+create_generated_directory(root, relative_path) -> CreatedDirectory
+atomic_replace_generated(root, StagedGeneratedFile, destination) -> AppliedMutation
+remove_generated(root, relative_path, expected_projection_uid) -> AppliedMutation
+sync_generated_file(root, relative_path) -> DurabilityReceipt
+sync_generated_directory(root, relative_path) -> DurabilityReceipt
+```
+
+There are no raw-write, absolute-path, recursive-delete, or symlink-following
+operations. The port cannot mutate canonical artifacts, aliases, journals, or
+refactor targets. The `NativeMaterializerSafeFilesystem` provider implements
+this port and pins directory handles for the authorized
 worktree root and `.spipe/view` root after rejecting symlink/reparse-point roots.
 Every create, inspect, replace, rename, and cleanup is descriptor-relative to
 those handles (`openat`/`renameat`/`unlinkat` semantics on Unix and equivalent
@@ -294,34 +317,44 @@ is opened without following links and its file identity is checked before use.
 
 Dependency-free `PortableNodeFilesystemVerifier` may use bounded
 `lstat`/open/`stat` checks for read-only inventory and diagnostics only. It is
-not a `SafeFilesystem`, cannot create, replace, publish, remove, refactor, or
-clean generated paths, and no check/open/recheck loop is accepted as a mutation
-security boundary.
+not a `MaterializerSafeFilesystemPort` provider, cannot create, replace,
+publish, remove, or clean generated paths, and no check/open/recheck loop is
+accepted as a mutation security boundary.
 
 When native descriptor-relative operations are unavailable, mutation may use a
 separately admitted trusted helper. `TrustedFilesystemHelper` is configured by
 an absolute executable path plus pinned executable SHA-256 digest and exact
 protocol version. Startup verifies ownership/permissions, digest, protocol,
-supported operations, descriptor-relative/no-follow guarantees, and a fresh
-challenge response before granting the capability. Requests use bounded
+the exact `MaterializerSafeFilesystemPort` operation set above,
+descriptor-relative/no-follow guarantees, and a fresh
+challenge response before admitting the helper as an operation provider.
+Requests use bounded
 length-prefixed canonical messages, workspace/view root handles or OS-equivalent
 root capabilities, request nonce, operation, relative components, expected file
 identities/hashes, and deadline. Responses bind nonce, protocol, helper build
 digest, result identities, and durable-operation receipt. Digest/protocol drift,
 unexpected output, timeout, restart, ambiguous identity, or missing guarantee
-revokes the capability and fails closed. The helper never accepts an arbitrary
-absolute mutation path.
+revokes the helper's operation-provider admission and fails closed. The helper
+never accepts an arbitrary absolute mutation path and never receives the
+authorization capability.
 
-Materialization creates a sibling staging directory through `SafeFilesystem`
-with exclusive creation, writes exclusive temporary files, fsyncs file and
-directory state according to configured durability, and publishes using the
-provider's descriptor-relative atomic replace. The manifest is written last as
-the commit marker. Content hashes prevent rewriting unchanged files, preserving
-their modification times. Provider capability probing occurs once at startup;
-materialization is enabled only when native handle-relative guarantees or an
-admitted trusted-helper capability passes. Otherwise materialization and
-refactor mutation are unavailable and fail closed while MCP read-only views
-remain usable.
+The `ProjectionService` materializer adapter opens the view root, creates
+generated directories, stages each projection-bound file, publishes it with
+`atomic_replace_generated`, and records durability through
+`sync_generated_file` and `sync_generated_directory`. The manifest is staged
+and replaced last as the commit marker. Content hashes prevent rewriting
+unchanged files, preserving their modification times.
+Operation-provider probing occurs once at startup. Materialization is enabled
+only when `AuthorizationPort` has issued `SafeFilesystem.Materializer` to the
+`ProjectionService` materializer adapter and an admitted native or trusted-helper
+provider supplies the port operations. Otherwise materialization is unavailable
+and fails closed while MCP read-only views remain usable.
+
+Transactional refactoring is outside this module and uses the separate internal
+`RefactorSafeFilesystemPort` plus capability `SafeFilesystem.Refactor`.
+Admission to `MaterializerSafeFilesystemPort` or possession of
+`SafeFilesystem.Materializer` does not authorize, implement, or imply support
+for refactor operations.
 
 Output roots must resolve below the selected worktree's `.spipe/view`; output
 symlinks, junctions, mount/reparse transitions, and changed file identities fail
@@ -389,16 +422,20 @@ operate on the originally pinned object or fail without touching the attacker
 target. Run native symlink tests on Unix and native junction/reparse tests on
 Windows CI.
 
-The same positive suite runs against `NativeSafeFilesystem` and every admitted
-`TrustedFilesystemHelper`: first publish, incremental replace, cleanup, crash
-recovery, identity preservation, and descriptor-relative race resistance must
-work on each declared supported platform. Helper tests also reject digest or
-protocol drift, replayed nonce, arbitrary absolute paths, malformed/oversized
-frames, timeout, and helper restart. `PortableNodeFilesystemVerifier` has
-read-only diagnostics tests only. A platform is not reported as supporting
-materialization if it has only portable verification or rejection tests and
-cannot safely materialize the normal fixture through an admitted mutation
-adapter.
+The same positive suite runs the `ProjectionService` materializer adapter after
+`AuthorizationPort` grants it `SafeFilesystem.Materializer`, first against
+`NativeMaterializerSafeFilesystem` and then against every admitted
+`TrustedFilesystemHelper` operation provider. First publish, incremental
+replace, cleanup, crash recovery, identity preservation, and
+descriptor-relative race resistance must work on each declared supported
+platform. Tests assert that neither provider observes or possesses the
+capability. Helper tests also reject digest or protocol drift, replayed nonce,
+arbitrary absolute paths,
+malformed/oversized frames, timeout, and helper restart.
+`PortableNodeFilesystemVerifier` has read-only diagnostics tests only. A
+platform is not reported as supporting materialization if it has only portable
+verification or rejection tests and cannot safely materialize the normal
+fixture through an admitted mutation provider.
 
 HTTP protocol tests cover issuer/audience/key-epoch/skew validation, stale key
 failure, bearer query rejection, cookie-disabled default, CSRF/origin enforcement

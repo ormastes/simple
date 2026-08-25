@@ -12,9 +12,10 @@ source-symbol export, and reusable duplicate analysis
 
 `std.common.search` owns the deterministic lexical scoring contract. Storage,
 workspace parsing, database transactions, process transport, and authorization
-remain outside that package. SPipe talks to either its dependency-free
-JavaScript implementation or a Simple provider through one versioned protocol;
-it never imports Simple implementation details.
+remain outside that package. SPipe composition wraps either its dependency-free
+JavaScript provider or a Simple provider in a `SearchProviderAdapter`;
+`KnowledgeCompiler` talks only to internal search ports and never imports or
+receives provider implementation details.
 
 The first implementation is exhaustive BM25 over immutable snapshots. WAND,
 Block-Max WAND, ANN, and sharding are later execution strategies that must
@@ -34,15 +35,20 @@ snapshot, durability, cancellation, and bounded-result contracts exist.
 
 ```text
 SPipe KnowledgeCompiler
-  -> SearchProviderPort
-       -> JsSearchProvider (in-process fallback)
-       -> SimpleProviderClient (bounded child-process protocol)
-              -> SpipeKnowledgeProvider app
-                   -> CommonLexicalSearch
-                   -> DuplicateCandidateService
-                   -> SourceSymbolService
+  -> LexicalSearchPort
+  -> SemanticSearchPort (optional)
+       ^ implemented by
+       SearchProviderAdapter
+         |- InProcessSearchProviderAdapter
+         |    -> JsFixedPointSearchProvider : SearchProvider
+         |- ProcessSearchProviderAdapter
+         |    -> SimpleProcessSearchProvider : SearchProvider
+         |         -> SpipeKnowledgeProvider executable
+         |              -> common LexicalSearchPort implementation
+         `- ServerSearchProviderAdapter
+              -> ServerSearchProvider : SearchProvider
 
-CommonLexicalSearch
+Common lexical implementation (`LexicalSearchPort`)
   <- DBFS adapter
   <- PureDatabase adapter
   <- TextualDatabase BM25 side-index
@@ -51,13 +57,53 @@ CommonLexicalSearch
 
 Parent-owned orchestration rules:
 
-- SPipe owns provider selection, health, retry policy, and query deadlines.
+- SPipe composition owns `SearchProviderAdapter` selection, health, retry policy,
+  and query deadlines. `KnowledgeCompiler` receives only `LexicalSearchPort` and
+  optional `SemanticSearchPort`; it never receives, selects, or calls a
+  `SearchProvider` directly.
 - Each database owns transaction and snapshot boundaries for its index.
 - `SpipeKnowledgeProvider` owns request validation and bounded serialization.
 - Common search code is pure algorithm/data code and performs no file, process,
   environment, network, or authorization operations.
 - Duplicate and symbol services return immutable results; they do not edit
   source or documentation.
+
+### 2.1 Frozen interface vocabulary
+
+These names are normative. Designs and implementations must not introduce
+synonymous `*Port`, `*Provider`, `*Service`, or `*Adapter` interface names.
+
+Internal module interfaces:
+
+- `LexicalSearchPort` — index delta, snapshot, lexical query, and explanation;
+- `SemanticSearchPort` — optional semantic candidate ranking;
+- `SymbolIndexPort` — compiler-owned symbol snapshot and paging;
+- `ProjectionPort` — artifact/view projection read operations.
+
+External provider interfaces:
+
+- `SearchProvider` — lexical and optional semantic source-ranking provider;
+- `SourceSymbolProvider` — revisioned source-symbol export provider;
+- `ProjectionProvider` — virtual projection provider.
+
+Boundary adapter:
+
+- `SearchProviderAdapter` — implements internal `LexicalSearchPort` and optional
+  `SemanticSearchPort` while wrapping exactly one external `SearchProvider`.
+
+Concrete adapter names are `InProcessSearchProviderAdapter`,
+`ProcessSearchProviderAdapter`, and `ServerSearchProviderAdapter`. They own
+translation, validation, deadlines, capability narrowing, cache identity, and
+provider lifecycle appropriate to their transport. They are implementations of
+the one adapter role, not additional provider or port interfaces.
+
+`JsFixedPointSearchProvider` is the dependency-free JavaScript implementation
+of external `SearchProvider`; it is not an additional interface and is always
+wrapped by `InProcessSearchProviderAdapter`. The Simple child-process provider
+implements `SearchProvider` and is wrapped by `ProcessSearchProviderAdapter`;
+server providers are wrapped by `ServerSearchProviderAdapter`. The Simple
+symbol surface separately implements `SourceSymbolProvider`.
+`SpipeKnowledgeProvider` is the executable/application name, not an interface.
 
 ## 3. Common search contract
 
@@ -246,7 +292,7 @@ server integration only add a declared candidate source.
 
 ### 3.6 Index semantics
 
-`LexicalIndexPort` supports:
+`LexicalSearchPort` supports:
 
 ```text
 create(snapshot identity, analyzer identity, score contract)
@@ -269,9 +315,11 @@ atomic.
 ### 4.1 Transport
 
 The Simple provider is a cached compiled executable at
-`src/app/spipe_knowledge_provider/main.spl`. SPipe starts at most one provider
-per workspace process and communicates over stdin/stdout framed messages. It
-must not spawn one process per request.
+`src/app/spipe_knowledge_provider/main.spl`.
+`ProcessSearchProviderAdapter` starts at most one provider per workspace process
+and communicates over stdin/stdout framed messages. `KnowledgeCompiler` neither
+starts nor communicates with the process. The adapter must not spawn one process
+per request.
 
 Each frame is:
 
@@ -387,8 +435,9 @@ from all source lists, and executes `rrf-fixed-v1` over the remaining candidates
 A provider cannot receive graph neighborhoods just to fuse them. Lexical and
 semantic results are separate typed source pages.
 
-The client treats every provider response as untrusted input even after binary
-verification. It requires exactly one outstanding request with the returned
+The wrapping `SearchProviderAdapter` treats every provider response as untrusted
+input even after binary verification. It requires exactly one outstanding
+request with the returned
 correlation ID, rejects duplicate/unknown/already-completed IDs, and verifies
 the returned workspace, snapshot, score contract, analyzer identity, and query
 receipt against the authorized request. Every hit ID must belong to the
@@ -445,16 +494,21 @@ candidate buckets and cannot request an all-pairs scan through this hot path.
 
 ### 4.5 JavaScript parity
 
-The dependency-free JavaScript fallback implements the same logical records,
-analyzer identity, `bm25-fixed-v1`, ordering, pagination, error codes, and
-explanations. It is in-process and therefore does not implement framing, but a
-protocol adapter runs the shared conformance vectors against it.
+The dependency-free `JsFixedPointSearchProvider` implementation of
+`SearchProvider` implements the same logical records, analyzer identity,
+`bm25-fixed-v1`, ordering, pagination, error codes, and explanations. It is
+in-process and therefore does not implement framing.
+`InProcessSearchProviderAdapter` translates its responses into
+`LexicalSearchPort`/`SemanticSearchPort` results and runs the shared conformance
+vectors. `KnowledgeCompiler` observes only those ports.
 
-Optional capabilities may differ. SPipe chooses features from the handshake;
-it never changes lexical semantics based on provider availability. A Simple
-provider crash degrades to the JS provider only after reopening/rebuilding the
-same logical snapshot and records a diagnostic. Results from two different
-score/analyzer contracts must never share a cache entry.
+Optional capabilities may differ. The selected `SearchProviderAdapter` narrows
+features from the provider handshake; `KnowledgeCompiler` never branches on a
+provider type and lexical semantics never change with provider availability. A
+Simple process-provider crash causes composition to replace
+`ProcessSearchProviderAdapter` with `InProcessSearchProviderAdapter` only after
+reopening/rebuilding the same logical snapshot and recording a diagnostic.
+Results from different score/analyzer contracts never share a cache entry.
 
 ## 5. Cache and snapshot identity
 
@@ -512,6 +566,13 @@ snapshots when provider and contract identities match.
 ### 6.1 DBFS
 
 Current owner: `src/lib/nogc_sync_mut/db/dbfs_engine/fts/`.
+
+Schedule/ownership is fixed: this migration completes in research-plan Wave 4.
+Lane C owns `std.common.search` and `bm25-fixed-v1`; lane E owns the DBFS facade,
+exact-statistics, and index changes; C+E jointly own golden parity and integration
+acceptance. DBFS is not deferred to, repeated in, or re-migrated during Wave 10.
+After Wave 4 its common-score facade is a stable dependency for PureDatabase,
+textual/server adapters, and provider work.
 
 Migration steps:
 
@@ -596,7 +657,7 @@ and report owner. Extract only pure reusable facilities:
 - MinHash and SimHash fingerprints;
 - sparse token-frequency vectors and cosine similarity;
 - candidate bucketing;
-- dense-vector comparison behind `SemanticProvider`.
+- dense-vector comparison behind internal `SemanticSearchPort`.
 
 Compiler-specific `DuplicationConfig`, `SimpleToken`, filesystem collection,
 incremental cache files, Ollama HTTP, formatters, and CLI parsing stay in the
@@ -684,7 +745,7 @@ One checked-in corpus and expected canonical result file drives:
 - DBFS facade;
 - PureDatabase adapter;
 - textual BM25 adapter;
-- JavaScript fallback;
+- `JsFixedPointSearchProvider`;
 - Simple provider wire adapter;
 - database server adapter.
 
@@ -780,7 +841,7 @@ Planned requirements map to these system behaviors:
 | Requirement | Scenario evidence |
 |---|---|
 | Deterministic provider parity | JS and Simple providers return identical golden ordering/scores |
-| Safe fallback | Simple provider crash resumes through JS with an explicit degradation diagnostic |
+| Safe fallback | Composition swaps process and in-process adapters after a Simple provider crash, with an explicit degradation diagnostic |
 | Incremental correctness | mixed deltas equal a clean rebuild at the published snapshot |
 | Database isolation | unauthorized fields/documents never influence hits, counts, cache, or explanations |
 | Durable server search | restart serves only a reconstructable committed snapshot |
@@ -832,11 +893,20 @@ semantics, or deterministic ordering fails verification.
    unchanged. Gate: pinned CLI/report parity and performance non-regression.
 7. **Provider executable:** bounded protocol, persistent lifecycle, search,
    duplicate, and symbol handlers. Gate: protocol/security/native entry-closure
-   smoke and JS fallback parity.
+   smoke and `JsFixedPointSearchProvider` parity.
 8. **Database server:** capability/snapshot/durability contract, exhaustive
    implementation. Gate: leakage, recovery, bounds, and concurrency tests.
 9. **Optimizations:** segments, WAND, Block-Max WAND, optional ANN/semantic and
    sharding, one at a time. Gate: exact exhaustive parity plus measured benefit.
+
+These numbered items are dependency stages inside this design, not replacements
+for the research plan's waves. Stages 1-3, including the complete DBFS migration,
+belong to Wave 4 under lane C, lane E, and the C+E integration gate described in
+Section 6.1. Research-plan Wave 10 may add database-server execution strategies
+and optional semantic sources against the frozen `LexicalSearchPort` and DBFS
+facade. It must not reopen DBFS scoring/storage migration. Any later incompatible
+change requires a new score-contract version and an explicit migration plan,
+not an implicit Wave-10 rewrite.
 
 No later wave repairs an earlier contract silently. A required contract change
 increments its version, regenerates the golden corpus explicitly, documents the
@@ -846,7 +916,8 @@ migration, and prevents mixed-version cache reuse.
 
 - One documented `bm25-fixed-v1` implementation contract governs all adapters.
 - Exact lengths and deterministic public-ID tie-breaking are used everywhere.
-- JS fallback and Simple provider pass the same conformance corpus.
+- `JsFixedPointSearchProvider` and the Simple `SearchProvider` implementation
+  pass the same conformance corpus.
 - Provider startup, hot request, cache, invalidation, bounds, and fallback paths
   have executable evidence.
 - PureDatabase cache identity includes columns, algorithm, and generation.

@@ -19,7 +19,7 @@ Wave 0 derives and publishes these names and versioned contracts from accepted r
 
 - Core: `KnowledgeCompiler`, `KnowledgeSnapshot`, `KnowledgeDelta`, `ArtifactRecord`, `SectionRecord`, `TraceEdge`, `DiagnosticRecord`. `KnowledgeDelta` is the sole incremental envelope and contains ordered `ArtifactDelta`, `GraphDelta`, and `IndexDelta` payloads; those payload types are not competing top-level update protocols.
 - Internal ports: `LexicalSearchPort`, `SemanticSearchPort`, `SymbolIndexPort`, and `ProjectionPort`. Core services depend only on these exact `*Port` contracts; no generic search or source-symbol port alias is part of the frozen interface.
-- External accelerators: `SearchProvider`, `SourceSymbolProvider`, and `ProjectionProvider`. Adapter mappings are explicit: `SearchProviderAdapter` satisfies `LexicalSearchPort` and, only when advertised, `SemanticSearchPort`; `SourceSymbolProviderAdapter` satisfies `SymbolIndexPort`; and `ProjectionProviderAdapter` satisfies `ProjectionPort`. Dependency-free in-process implementations satisfy the same ports without masquerading as external providers.
+- Provider contracts: `SearchProvider`, `SourceSymbolProvider`, and `ProjectionProvider` cover in-process, process, and server-backed implementations. Adapter mappings are explicit: every search provider is wrapped before injection; `InProcessSearchProviderAdapter` wraps the dependency-free JavaScript `SearchProvider` and satisfies `LexicalSearchPort` plus `SemanticSearchPort` only when that capability is advertised, while `SearchProviderAdapter` wraps configured process/server search providers under the same port rules. `SourceSymbolProviderAdapter` satisfies `SymbolIndexPort`, and `ProjectionProviderAdapter` satisfies `ProjectionPort`. `KnowledgeCompiler` sees only the internal ports and never a provider directly.
 - Mutations: `RefactorPlan`, `TransactionReceipt`, `RebalanceProposal`, `PromotionCandidate`. `RefactorPlan` is the only mutation-plan contract name.
 - Protocol operations: `spipe_list`, `spipe_read`, `spipe_search`, `spipe_resolve`, `spipe_trace`, `spipe_diagnostics`.
 - Phase exchange: the task/research/architecture/spec/implement/refactor/verify/ship UID input/output records used by Wave 7. Their contracts freeze in Wave 0; harness generation remains a separate Wave 9 deliverable.
@@ -35,9 +35,9 @@ Contract changes require an ADR/design update, merge-owner approval, and coordin
 |---|---|---|---|
 | A — SPipe core | SPipe `src/core`, `src/model`, `src/storage`, `src/format`, `schema` | snapshot/delta/model/storage APIs | MCP, search, rebalance internals |
 | B — Workspace/parser | SPipe `src/parser`, `src/workspace` | deterministic parse deltas and project registry | model schemas without A approval |
-| C — Search core | Simple `src/lib/common/search` | canonical scoring/provider protocol | database adapters |
+| C — Search core | Simple `src/lib/common/search` | canonical scoring/provider protocol | all DBFS/textual/embedded/server adapter paths |
 | D — SPipe search/view/MCP | SPipe `src/search`, `src/view`, `mcp` | `spipe://` resolver and read-only protocol | canonical parser/model schemas |
-| E — Database adapters | Simple textual, embedded/DBFS, server search paths | common-search adapters | scorer internals |
+| E — Database adapters | Simple textual, embedded/DBFS, server search paths | common-search adapters | common scorer internals; in Wave 4 E owns only the DBFS compatibility facade while C owns only `src/lib/common/search` |
 | F — Trace/source/SSpec | SPipe `src/graph`, `src/diagnostics`; Simple provider app/symbol export | typed trace and symbol snapshot | rebalance objective |
 | G — Refactor | SPipe `src/refactor` | plan/apply/rollback transaction API | arbitrary canonical writes elsewhere |
 | H — Rebalance | SPipe `src/rebalance` | audit/proposal only | graph model and physical moves |
@@ -75,8 +75,8 @@ Shared files are integrated only by `/root`. If a path is already dirty from an 
 
 ### Wave 4 — Canonical BM25 and provider protocol
 
-**Depends on:** Waves 2–3 contracts. **Owners:** C plus D fallback adapter.  
-**Deliverables:** shared documents/analyzer/corpus stats/scorer/top-k/explanations/provider protocol; exact + BM25 + graph candidate fusion using deterministic Reciprocal Rank Fusion as the foundation; dependency-free fixed-point JavaScript fallback; migration of the DBFS scorer compatibility facade to the canonical common scorer; golden corpus and adapter conformance kit; initial search/resolve/read commands. Remaining textual, embedded, and server database adapters consume this contract but are implemented only in Wave 10.
+**Depends on:** Waves 2–3 contracts. **Owners:** C owns only the common search/scorer paths; D owns only the dependency-free SPipe fallback provider, `InProcessSearchProviderAdapter`, and SPipe command integration; E owns only the DBFS compatibility-facade paths for this wave.
+**Deliverables:** C publishes shared documents/analyzer/corpus stats/scorer/top-k/explanations/provider protocol and exact + BM25 + graph candidate fusion using deterministic Reciprocal Rank Fusion; D implements the dependency-free fixed-point JavaScript fallback as an in-process `SearchProvider`, always wraps it with `InProcessSearchProviderAdapter` before satisfying internal search ports, and adds initial search/resolve/read commands; E migrates the DBFS scorer compatibility facade to the canonical common scorer without editing C's paths. The shared golden corpus and adapter conformance kit cross-check all three owned outputs. Remaining textual, embedded, and server database adapters consume this contract but are implemented only in Wave 10.
 **Exit gates:** provider ordering/ties and RRF explanations match golden results; real document lengths are used by the DBFS path; DBFS legacy entry points preserve compatibility while producing canonical-scorer golden parity; embeddings are optional; incremental index equals clean rebuild; the adapter conformance kit is frozen for Wave 10.
 
 ### Wave 5 — Virtual resources, tools, and materialization
@@ -112,7 +112,7 @@ Shared files are integrated only by `/root`. If a path is already dirty from an 
 ### Wave 10 — DB optimization and optional semantics
 
 **Depends on:** Wave 4 common search/provider contract; Wave 9 is required only for optional promoted-knowledge/semantic consumers, not for core database adapters. **Owners:** E with C review.  
-**Deliverables:** database work remaining after Wave 4's DBFS scorer-facade migration: textual BM25 side index; remaining embedded adapters with exhaustive/WAND paths; server segmented/Block-Max-WAND index, shard merge, capability filtering, cancellation/budgets; optional ANN/embedding providers. These adapters add textual, embedded, server, and optional semantic candidate sources to the deterministic RRF foundation already implemented and verified in Wave 4; Wave 10 neither introduces nor redefines fusion.
+**Deliverables:** optimization and adapters remaining after Wave 4: textual BM25 side index; embedded index/query optimization with exhaustive/WAND paths; server segmented/Block-Max-WAND index, shard merge, capability filtering, cancellation/budgets; optional ANN/embedding providers. The already-migrated DBFS scorer compatibility facade is excluded from Wave 10 and remains a Wave 4 artifact; Wave 10 may consume it but must not re-own or rewrite its scoring contract. These adapters add textual, embedded, server, and optional semantic candidate sources to the deterministic RRF foundation already implemented and verified in Wave 4; Wave 10 neither introduces nor redefines fusion.
 **Exit gates:** each DB kind proves transactional/snapshot consistency; deny-wins tests prevent field/document leakage; exhaustive and optimized top-k are identical; provider failure degrades to lexical/graph behavior; performance and RSS gates have named evidence.
 
 ### Wave 11 — OS virtual filesystem (explicitly deferred)
