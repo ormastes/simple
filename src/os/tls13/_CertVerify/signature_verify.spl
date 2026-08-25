@@ -283,11 +283,10 @@ fn verify_certificate_verify_msg_scheme(pubkey: [u8], sig_scheme: u16, transcrip
         if fixed64.len() != 64:
             CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_p256: DER decode failed)")
         else:
-            val ok = ecdsa_p256_verify_fixed(pubkey, content, fixed64)
-            if ok:
-                CertVerifyResult.Ok
-            else:
-                CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
+            match ecdsa_p256_verify_fixed(pubkey, content, fixed64):
+                case Ok(true): CertVerifyResult.Ok
+                case Ok(false): CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
+                case Err(error): CertVerifyResult.Err(msg: "CertificateVerify ECDSA P-256 provider error: {error}")
     elif sig_scheme == 0x0503:
         # ecdsa_secp384r1_sha384 — P-384 pure-Simple engine (os.crypto.ecdsa_p384)
         # sig is DER-encoded SEQUENCE { INTEGER r, INTEGER s } per RFC 8446 §4.2.3
@@ -428,7 +427,10 @@ fn verify_cert_chain(chain: [[u8]], root_store: [[u8]]) -> CertChainResult:
                     if not root.is_ca:
                         return CertChainResult.Err(msg: "matched trust anchor is not a CA")
                     val verify_result = _verify_cert_signature_with_issuer(current, root_cert)
-                    if val CertVerifyResult.Ok = verify_result:
+                    val root_signature_valid = match verify_result:
+                        case CertVerifyResult.Ok: true
+                        case CertVerifyResult.Err(_): false
+                    if root_signature_valid:
                         matched_root = true
                     root_idx = root_store.len()
                 else:

@@ -371,3 +371,27 @@ blocked before the target spec by the unrelated parser error in
 as the bootstrap seed. The source-only ledger is now 12,023 `rt_*` declaration
 rows / 3,172 symbols: 1,190 tagged, 638 `unsafe_contract_declared`, 10,567
 untouched, and zero exact-artifact verified-and-signed.
+
+## OS ECDSA P-256 result-propagation checkpoint
+
+`os.crypto.ecdsa_p256` no longer imports the deleted raw runtime symbols. Its
+fixed-width sign and verify APIs consume the checked facade and return
+`Result`. TLS maps provider errors separately from cryptographic mismatch, SSH
+and JWT propagate errors, and COSE sign/verify dispatch now carries typed
+`CoseError` values rather than returning an empty signature or `false` for an
+unavailable/malformed provider result.
+
+The data path still performs exactly one provider cryptographic call. The
+change adds only bounded result/status matching and removes sentinel tests; it
+adds no lookup, hashing beyond ECDSA itself, payload copy, allocation, or
+generic dispatch. The static guard and all six production-module source checks
+passed. The TLS verifier's unsupported compact unit-variant pattern was
+replaced by an explicit total match, removing that parser blocker. The
+available binary remains a bootstrap seed, not admitted self-hosted proof.
+Both P-256 spec mirrors are byte-identical; the TLS mirror's pre-existing
+placeholder assertions were replaced by the canonical real value/error checks.
+
+No declaration was added or removed in this propagation tranche, so the
+source-only ledger remains 12,023 `rt_*` rows / 3,172 symbols: 1,190 tagged,
+638 `unsafe_contract_declared`, 10,567 untouched, and zero exact-artifact
+verified-and-signed.

@@ -280,6 +280,14 @@ lookup, or hashing regression was introduced. The ledger is 12,023 `rt_*`
 rows / 3,172 symbols: 1,190 tagged, 638 contract-declared, 10,567 untouched,
 and zero exact-artifact signed/admitted.
 
+Checkpoint: `os.crypto.ecdsa_p256`, TLS, SSH, JWT, and COSE now propagate the
+checked P-256 `Result`; no production path converts bridge/provider failure to
+empty bytes or `false`. The provider call count and allocation/copy behavior
+are unchanged. Static checks and all six production source checks pass; the TLS
+unit-variant parser blocker was replaced by a total match. Census remains
+12,023 `rt_*` rows / 3,172 symbols, 1,190 tagged, 638
+contract-declared, 10,567 untouched, and zero signed/admitted.
+
 ### 7. Verify once, then stop
 
 - Run sabotage and parity across interpreter, JIT, native, sealed dynload, and

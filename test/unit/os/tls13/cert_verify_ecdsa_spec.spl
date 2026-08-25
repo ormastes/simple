@@ -144,7 +144,7 @@ fn _flip_byte_at(bytes: [u8], idx: u64) -> [u8]:
 
 # Sign the test message and produce a DER-encoded ECDSA-P256 signature
 fn _sign_msg_der() -> [u8]:
-    val fixed64 = ecdsa_p256_sign_fixed(_pkcs8(), _test_msg())
+    val fixed64 = ecdsa_p256_sign_fixed(_pkcs8(), _test_msg()).unwrap()
     _fixed64_to_der(fixed64)
 
 # ============================================================================
@@ -155,12 +155,12 @@ fn _sign_msg_der() -> [u8]:
 describe "ECDSA-P256 DER sig decode":
 
     it "fixed64_to_der produces a non-empty byte sequence":
-        val sig = ecdsa_p256_sign_fixed(_pkcs8(), _test_msg())
+        val sig = ecdsa_p256_sign_fixed(_pkcs8(), _test_msg()).unwrap()
         val der = _fixed64_to_der(sig)
         expect(der.len() > 0).to_equal(true)
 
     it "DER-encoded sig starts with SEQUENCE tag 0x30":
-        val sig = ecdsa_p256_sign_fixed(_pkcs8(), _test_msg())
+        val sig = ecdsa_p256_sign_fixed(_pkcs8(), _test_msg()).unwrap()
         val der = _fixed64_to_der(sig)
         expect(der[0u64]).to_equal(0x30u8)
 
@@ -168,15 +168,16 @@ describe "ECDSA-P256 DER sig decode":
         # Sign → DER-encode → decode back to fixed64 → verify
         # This tests the DER decoder path that cert_verify uses internally
         val msg = _test_msg()
-        val fixed64 = ecdsa_p256_sign_fixed(_pkcs8(), msg)
+        val fixed64 = ecdsa_p256_sign_fixed(_pkcs8(), msg).unwrap()
         val der = _fixed64_to_der(fixed64)
         # Decode the DER back to fixed64 via the cert_verify API
         # (We test via verify_certificate_verify_msg_scheme which uses the decoder)
         val result = verify_certificate_verify_msg_scheme(_spki(), 0x0403u16, msg, der)
         if val CertVerifyResult.Ok = result:
-            expect(true).to_equal(true)
+            expect(fixed64.len()).to_equal(64u64)
+            expect(der[0u64]).to_equal(0x30u8)
         else:
-            expect(false).to_equal(true)
+            fail("DER-encoded ECDSA-P256 signature did not verify after round-trip")
 
 # ============================================================================
 # verify_certificate_verify_msg_scheme — ECDSA-P256-SHA-256 (0x0403)
@@ -189,18 +190,20 @@ describe "verify_certificate_verify_msg_scheme ECDSA-P256-SHA-256 (0x0403)":
         val der_sig = _sign_msg_der()
         val result = verify_certificate_verify_msg_scheme(_spki(), 0x0403u16, msg, der_sig)
         if val CertVerifyResult.Ok = result:
-            expect(true).to_equal(true)
+            expect(_spki().len()).to_equal(91u64)
+            expect(der_sig[0u64]).to_equal(0x30u8)
         else:
-            expect(false).to_equal(true)
+            fail("valid ECDSA-P256 CertificateVerify message was rejected")
 
     it "rejects signature verified under a different public key":
         val msg = _test_msg()
         val der_sig = _sign_msg_der()
         val result = verify_certificate_verify_msg_scheme(_other_spki(), 0x0403u16, msg, der_sig)
         if val CertVerifyResult.Err(err_msg) = result:
-            expect(true).to_equal(true)
+            expect(_other_spki().len()).to_equal(91u64)
+            expect(err_msg).to_equal("CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
         else:
-            expect(false).to_equal(true)
+            fail("ECDSA-P256 CertificateVerify unexpectedly accepted a different public key")
 
     it "rejects a DER signature with a flipped byte":
         val msg = _test_msg()
@@ -209,9 +212,10 @@ describe "verify_certificate_verify_msg_scheme ECDSA-P256-SHA-256 (0x0403)":
         val bad_sig = _flip_byte_at(der_sig, 4u64)
         val result = verify_certificate_verify_msg_scheme(_spki(), 0x0403u16, msg, bad_sig)
         if val CertVerifyResult.Err(err_msg) = result:
-            expect(true).to_equal(true)
+            expect(bad_sig[0u64]).to_equal(0x30u8)
+            expect(err_msg).to_equal("CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
         else:
-            expect(false).to_equal(true)
+            fail("ECDSA-P256 CertificateVerify unexpectedly accepted a flipped DER signature byte")
 
 # ============================================================================
 # Unsupported ECDSA schemes — explicit error messages (no P-384 / P-521 primitive)
@@ -226,7 +230,7 @@ describe "verify_certificate_verify_msg_scheme unsupported ECDSA schemes":
         if val CertVerifyResult.Err(err_msg) = result:
             expect(err_msg.contains("P-384")).to_equal(true)
         else:
-            expect(false).to_equal(true)
+            fail("unsupported ECDSA P-384 signature scheme was accepted")
 
     it "sig_scheme 0x0603 (ecdsa_secp521r1_sha512) returns unsupported error":
         val msg = _test_msg()
@@ -235,4 +239,4 @@ describe "verify_certificate_verify_msg_scheme unsupported ECDSA schemes":
         if val CertVerifyResult.Err(err_msg) = result:
             expect(err_msg.contains("P-521")).to_equal(true)
         else:
-            expect(false).to_equal(true)
+            fail("unsupported ECDSA P-521 signature scheme was accepted")
