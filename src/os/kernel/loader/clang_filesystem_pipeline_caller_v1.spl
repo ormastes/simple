@@ -1,0 +1,44 @@
+"""Single caller seam from Clang pipeline admission to scheduler execution.
+
+The returned plan is an owned value.  A loader service must submit each exact
+path/argv pair through its existing authenticated filesystem-exec authority,
+reap the three children, and return the scheduler-issued evidence tokens to the
+backend adapter.  This module does not mint loader tokens or bypass adoption.
+"""
+
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.scheduler.scheduler_types.{SchedulerCurrentTaskAdmissionV1}
+use os.kernel.loader.clang_filesystem_pipeline_owner_v1.{
+    ClangFilesystemPipelineRequestV1,
+    clang_filesystem_pipeline_reserve_v1,
+    clang_filesystem_pipeline_dispatch_v1,
+    clang_filesystem_pipeline_cancel_v1,
+    clang_filesystem_pipeline_begin_current_v1,
+    clang_filesystem_pipeline_mark_outcome_unknown_v1
+}
+use os.kernel.loader.clang_filesystem_scheduler_backend_v1.{
+    ClangFilesystemSchedulerLaunchPlanV1,
+    clang_filesystem_scheduler_launch_plan_v1
+}
+
+pub(package) fn clang_filesystem_pipeline_prepare_scheduler_backend_v1(
+    request: ClangFilesystemPipelineRequestV1,
+    caps: CapabilitySet,
+    admission: SchedulerCurrentTaskAdmissionV1
+) -> Result<ClangFilesystemSchedulerLaunchPlanV1, text>:
+    val reservation_result = clang_filesystem_pipeline_reserve_v1(request, caps)
+    if reservation_result.is_err(): return Err(reservation_result.unwrap_err())
+    val reservation = reservation_result.unwrap()
+    val dispatch_result = clang_filesystem_pipeline_dispatch_v1(
+        reservation, request.actor)
+    if dispatch_result.is_err():
+        _ = clang_filesystem_pipeline_cancel_v1(reservation)
+        return Err(dispatch_result.unwrap_err())
+    val dispatch = dispatch_result.unwrap()
+    val command_result = clang_filesystem_pipeline_begin_current_v1(
+        admission, dispatch)
+    if command_result.is_err():
+        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        return Err(command_result.unwrap_err())
+    Ok(clang_filesystem_scheduler_launch_plan_v1(command_result.unwrap()))
+

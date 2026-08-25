@@ -1,0 +1,172 @@
+"""Scheduler/VFS adapter for the Clang filesystem pipeline.
+
+The scheduler owns process execution observations.  The VFS owns artifact
+bytes.  This adapter consumes both as evidence and is the only bridge in this
+module that may turn a running Clang pipeline command into a terminal handle.
+It never accepts caller-authored exit codes, output, or artifact digests.
+"""
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_target_v1.{
+    simpleos_target_v1_abi_for_triple, simpleos_target_v1_arch_for_triple
+}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionEvidenceTokenV1, SchedulerExecutionEvidenceV1,
+    scheduler_execution_evidence_consume_once_v2
+}
+use os.kernel.loader.clang_filesystem_pipeline_owner_v1.{
+    ClangFilesystemBackendCommandV1,
+    ClangFilesystemBackendOutcomeV1,
+    ClangFilesystemTerminalHandleV1,
+    clang_filesystem_pipeline_finish_v1,
+    clang_filesystem_pipeline_mark_outcome_unknown_v1
+}
+
+pub(package) struct ClangFilesystemSchedulerEvidenceV1:
+    compile: SchedulerExecutionEvidenceTokenV1
+    link: SchedulerExecutionEvidenceTokenV1
+    execute: SchedulerExecutionEvidenceTokenV1
+
+pub(package) struct ClangFilesystemSchedulerLaunchPlanV1:
+    command: ClangFilesystemBackendCommandV1
+    compile_path: text
+    compile_argv: [text]
+    link_path: text
+    link_argv: [text]
+    execute_path: text
+    execute_argv: [text]
+
+fn _vector_equal_v1(left: [text], right: [text]) -> bool:
+    if left.len() != right.len(): return false
+    var i: i64 = 0
+    while i < left.len():
+        if left[i] != right[i]: return false
+        i = i + 1
+    true
+
+fn _filesystem_name_for_path_v1(path: text) -> text:
+    if path.starts_with("/fat32/"): return "fat32"
+    if path.starts_with("/dbfs/"): return "dbfs"
+    if path.starts_with("/nvfs/"): return "nvfs"
+    ""
+
+fn _target_matches_v1(
+    evidence: SchedulerExecutionEvidenceV1,
+    target_triple: text
+) -> bool:
+    val arch = simpleos_target_v1_arch_for_triple(target_triple)
+    arch != "" and evidence.target_os == "simpleos" and
+        evidence.target_arch == arch and
+        evidence.target_abi == simpleos_target_v1_abi_for_triple(target_triple)
+
+fn _stage_matches_v1(
+    evidence: SchedulerExecutionEvidenceV1,
+    path: text,
+    argv: [text],
+    image_sha256: text,
+    filesystem_name: text,
+    parent_id: u64,
+    target_triple: text
+) -> bool:
+    evidence.command_observed and evidence.child_id != 0u64 and
+        evidence.parent_id == parent_id and evidence.executable_path == path and
+        evidence.canonical_source_path == path and
+        _vector_equal_v1(evidence.argv, argv) and
+        evidence.image_hash == image_sha256 and
+        evidence.filesystem_name == filesystem_name and
+        evidence.mount_id != 0u64 and evidence.mount_generation != 0u64 and
+        evidence.file_generation != 0u64 and
+        not evidence.stdout_truncated and not evidence.stderr_truncated and
+        _target_matches_v1(evidence, target_triple)
+
+pub(package) fn clang_filesystem_scheduler_launch_plan_v1(
+    command: ClangFilesystemBackendCommandV1
+) -> ClangFilesystemSchedulerLaunchPlanV1:
+    """Expose the exact commands to the authenticated filesystem-exec caller."""
+    ClangFilesystemSchedulerLaunchPlanV1(
+        command: command,
+        compile_path: command.dispatch.clang_path,
+        compile_argv: command.compile_argv,
+        link_path: command.dispatch.lld_path,
+        link_argv: command.link_argv,
+        execute_path: command.dispatch.executable_path,
+        execute_argv: command.execute_argv)
+
+pub(package) fn clang_filesystem_scheduler_finish_success_v1(
+    plan: ClangFilesystemSchedulerLaunchPlanV1,
+    evidence: ClangFilesystemSchedulerEvidenceV1
+) -> Result<ClangFilesystemTerminalHandleV1, text>:
+    """Consume three real scheduler observations and commit success once.
+
+    All tokens are consumed before validation so a malformed middle stage
+    cannot leak either of the other bounded scheduler observation slots.
+    Any ambiguous observation retires the pipeline output paths.
+    """
+    val compile_seen = scheduler_execution_evidence_consume_once_v2(evidence.compile)
+    val link_seen = scheduler_execution_evidence_consume_once_v2(evidence.link)
+    val execute_seen = scheduler_execution_evidence_consume_once_v2(evidence.execute)
+    if not compile_seen.? or not link_seen.? or not execute_seen.?:
+        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(plan.command.dispatch)
+        return Err("scheduler-execution-evidence-missing")
+
+    val compile_result = compile_seen.unwrap()
+    val link_result = link_seen.unwrap()
+    val execute_result = execute_seen.unwrap()
+    val dispatch = plan.command.dispatch
+    val filesystem_name = _filesystem_name_for_path_v1(dispatch.source_path)
+    if not _stage_matches_v1(
+        compile_result, plan.compile_path, plan.compile_argv,
+        dispatch.clang_sha256, filesystem_name, dispatch.actor.task_id,
+        dispatch.target_triple) or
+       not _stage_matches_v1(
+        link_result, plan.link_path, plan.link_argv,
+        dispatch.lld_sha256, filesystem_name, dispatch.actor.task_id,
+        dispatch.target_triple):
+        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        return Err("compiler-stage-evidence-mismatch")
+
+    val source_bytes = g_vfs_read_file_bytes(dispatch.source_path)
+    val object_bytes = g_vfs_read_file_bytes(dispatch.object_path)
+    val executable_bytes = g_vfs_read_file_bytes(dispatch.executable_path)
+    if source_bytes.len() == 0 or object_bytes.len() == 0 or
+       executable_bytes.len() == 0:
+        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        return Err("filesystem-artifact-evidence-missing")
+    val executable_sha256 = sha256_u8_hex(executable_bytes)
+    if not _stage_matches_v1(
+        execute_result, plan.execute_path, plan.execute_argv,
+        executable_sha256, filesystem_name, dispatch.actor.task_id,
+        dispatch.target_triple) or
+       compile_result.mount_id != link_result.mount_id or
+       compile_result.mount_id != execute_result.mount_id or
+       compile_result.mount_generation != link_result.mount_generation or
+       compile_result.mount_generation != execute_result.mount_generation or
+       compile_result.child_id == link_result.child_id or
+       compile_result.child_id == execute_result.child_id or
+       link_result.child_id == execute_result.child_id or
+       compile_result.exit_code != 0 or link_result.exit_code != 0 or
+       execute_result.exit_code != 0 or
+       compile_result.stdout_bytes.len() != 0 or
+       compile_result.stderr_bytes.len() != 0 or
+       link_result.stdout_bytes.len() != 0 or
+       link_result.stderr_bytes.len() != 0 or
+       execute_result.stderr_bytes.len() != 0 or
+       execute_result.stdout_bytes != "Hello from SimpleOS\n".bytes():
+        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+        return Err("terminal-execution-evidence-mismatch")
+
+    val finish_result = clang_filesystem_pipeline_finish_v1(
+        plan.command,
+        ClangFilesystemBackendOutcomeV1(
+            actor: dispatch.actor,
+            compile_exit_code: compile_result.exit_code,
+            link_exit_code: link_result.exit_code,
+            execute_exit_code: execute_result.exit_code,
+            source_sha256: sha256_u8_hex(source_bytes),
+            object_sha256: sha256_u8_hex(object_bytes),
+            executable_sha256: executable_sha256,
+            stdout_sha256: sha256_u8_hex(execute_result.stdout_bytes)))
+    if finish_result.is_err():
+        _ = clang_filesystem_pipeline_mark_outcome_unknown_v1(dispatch)
+    finish_result
