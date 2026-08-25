@@ -55,4 +55,47 @@ if ! grep -q 'foreign text contract returned null' "$interpreter" ||
 fi
 grep -q 'fn null_foreign_text_is_a_contract_error()' "$interpreter"
 
+if ! awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    /^@unsafe\(.*capabilities: \[.*ffi.*\]\)$/ {
+        next_function_unsafe = 1
+        next
+    }
+    /^fn / {
+        function_indent = indent($0)
+        function_unsafe = next_function_unsafe
+        next_function_unsafe = 0
+        inside_function = 1
+        next
+    }
+    inside_function && NF && indent($0) <= function_indent { function_unsafe = 0; inside_function = 0 }
+    /unsafe\(capabilities: \[.*ffi.*\]\):[[:space:]]*$/ {
+        unsafe_indent = indent($0)
+        inside_unsafe = 1
+        next
+    }
+    inside_unsafe && NF && indent($0) <= unsafe_indent { inside_unsafe = 0 }
+    /rt_(metal_[A-Za-z0-9_]+|is_interpreter_runtime|cstring_to_text)\(/ &&
+        !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / &&
+        !inside_unsafe && !function_unsafe {
+        print "unscoped Metal call at line " FNR ": " $0 > "/dev/stderr"
+        failed = 1
+    }
+    END { if (failed) exit 1 }
+' "$canonical"; then
+    exit 1
+fi
+if awk '/^[[:space:]]*else:/ { after_else = 1; next }
+        after_else && NF { if ($0 ~ /^[[:space:]]*true[[:space:]]*$/) found = 1; after_else = 0 }
+        END { exit !found }' "$canonical"; then
+    echo "Metal cleanup/wait wrappers must not fabricate success for invalid handles" >&2
+    exit 1
+fi
+grep -q 'data.len() > buf.size' "$canonical"
+grep -q 'size <= 0' "$canonical"
+
 echo "Metal SFFI symbol identity audit: PASS"

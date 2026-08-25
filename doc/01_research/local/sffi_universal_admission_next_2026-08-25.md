@@ -1934,6 +1934,28 @@ production missing authority fell from 10,169 to 10,140. Declaration totals
 remain 11,627, with 2,443 unsafe-tagged and 9,005 untouched declaration rows.
 Exact-artifact verified-and-signed admission remains zero.
 
+## Canonical Metal facade authority checkpoint
+
+The canonical Metal file's 40 declarations were already tagged, but its 67
+production raw calls lacked authority. Typed public wrappers now confine FFI
+to lexical blocks. The lower `metal_sffi_*` surface remains explicitly unsafe
+at function scope because it exposes generationless device, buffer, shader,
+pipeline, queue, command, encoder, and pointer-bearing frame contracts.
+
+Invalid release and wait wrappers no longer manufacture success. Allocation
+rejects non-positive extents, texture creation rejects non-positive geometry,
+and uploads/downloads reject a span larger than the recorded buffer extent.
+Quarantine cleanup preserves dependencies unless wait or registry removal
+proves terminal ownership, as before.
+
+The authority scopes and scalar guards add no provider invocation, allocation,
+copy, lookup, lock, hash, signature operation, or dispatch. Successful GPU
+operations keep their existing direct call shape. The source census measured
+missing authority decreasing by exactly 67: 18,274 to 18,207 repository-wide
+and 10,104 to 10,037 in production (35 new lexical and 32 function-scoped
+authorities). Declaration totals remain 11,627, with 2,449 tagged and 8,999
+untouched; exact-artifact verified-and-signed admission remains zero.
+
 ## TCP byte-write consumer checkpoint
 
 Two duplicate TCP consumers bypassed the canonical facade's authority: SSH
