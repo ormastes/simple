@@ -57,6 +57,11 @@ enum ChannelTerminalRequestV1:
     Exec
     Subsystem
 
+enum ChannelPeerCloseDecisionV1:
+    Invalid
+    Reply
+    Acknowledged
+
 struct SshChannel:
     """State for one SSH channel."""
     local_id: u32
@@ -175,6 +180,39 @@ impl ChannelTable:
             return true
         false
 
+    pub me begin_local_close(local_id: u32) -> bool:
+        """Commit one locally-originated CHANNEL_CLOSE without losing ownership.
+
+        RFC 4254 requires the peer to answer CHANNEL_CLOSE.  Retaining the
+        channel in Closing state lets a multiplexed connection recognize that
+        acknowledgement instead of treating it as an unknown-channel attack.
+        """
+        val idx = self._find_local_index(local_id)
+        if idx < 0 or self.channels[idx as u64].state != ChannelState.Open:
+            return false
+        self.channels[idx as u64].state = ChannelState.Closing
+        true
+
+    pub me accept_peer_close(local_id: u32) -> ChannelPeerCloseDecisionV1:
+        """Atomically consume the peer half of the close handshake.
+
+        An open channel needs one close reply.  A Closing channel is an
+        acknowledgement of our earlier close and must not be echoed again.
+        Invalid, duplicate, and already-closed identifiers leave state intact.
+        """
+        val idx = self._find_local_index(local_id)
+        if idx < 0:
+            return ChannelPeerCloseDecisionV1.Invalid
+        match self.channels[idx as u64].state:
+            ChannelState.Open:
+                self.channels[idx as u64].state = ChannelState.Closed
+                ChannelPeerCloseDecisionV1.Reply
+            ChannelState.Closing:
+                self.channels[idx as u64].state = ChannelState.Closed
+                ChannelPeerCloseDecisionV1.Acknowledged
+            _:
+                ChannelPeerCloseDecisionV1.Invalid
+
     pub fn find(local_id: u32) -> SshChannel?:
         """Find a channel by local ID. Returns nil if not found."""
         val idx = self._find_local_index(local_id)
@@ -287,7 +325,10 @@ impl ChannelTable:
         val idx = self._find_local_index(local_id)
         if idx < 0:
             return false
-        if self.channels[idx as u64].state == ChannelState.Closed:
+        # RFC 4254 forbids sending any more channel data after either side has
+        # sent CHANNEL_CLOSE.  Closing remains retained only to recognize the
+        # peer acknowledgement; it is not a writable state.
+        if self.channels[idx as u64].state != ChannelState.Open:
             return false
         var rw = self.channels[idx as u64].remote_window
         if rw < bytes:
@@ -578,4 +619,5 @@ export ssh_build_channel_eof, ssh_build_channel_close
 export ssh_build_channel_success, ssh_build_channel_failure
 export SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_OPEN_CONFIRMATION, SSH_MSG_CHANNEL_OPEN_FAILURE, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_EXTENDED_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION
 export SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST
+export ChannelPeerCloseDecisionV1
 export DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, SSH_OPEN_UNKNOWN_CHANNEL_TYPE, SSH_OPEN_RESOURCE_SHORTAGE

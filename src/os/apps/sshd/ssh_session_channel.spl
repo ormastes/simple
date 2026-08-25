@@ -7,7 +7,7 @@ use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_KEXINIT}
-use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
+use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, ChannelPeerCloseDecisionV1, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
 use os.apps.sshd.ssh_channel_open_request.{ssh_channel_open_request_classify_v1, ssh_channel_open_rejection_payload_v1, ssh_channel_open_transport_must_close_v1}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
@@ -739,7 +739,8 @@ impl SshSession:
         self._finish_exec_request(self.scp_local_id, self.scp_remote_id, 0, [])
 
     me _handle_channel_close(payload: [u8]):
-        if payload.len() < 5:
+        if payload.len() != 5:
+            self.transition_closed()
             return
         val recipient = _read_u32_stable(payload, 1)
         val channel = self.channels.find(recipient)
@@ -752,8 +753,12 @@ impl SshSession:
             self.sftp_enabled = false
             self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
         val remote_id = channel.remote_id
-        self.send_packet(_build_channel_close_stable(remote_id))
-        self.channels.close(recipient)
+        val decision = self.channels.accept_peer_close(recipient)
+        if decision == ChannelPeerCloseDecisionV1.Invalid:
+            self.transition_closed()
+            return
+        if decision == ChannelPeerCloseDecisionV1.Reply:
+            self.send_packet(_build_channel_close_stable(remote_id))
         self.channels.remove_closed()
         if self.channels.channels.len() == 0:
             self.transition_closed()
@@ -786,11 +791,8 @@ impl SshSession:
             self.send_packet(_build_channel_data_stable(remote_id, output))
         self.send_packet(_build_channel_exit_status_stable(remote_id, exit_status))
         self.send_packet(_build_channel_eof_stable(remote_id))
-        self.send_packet(_build_channel_close_stable(remote_id))
-        self.channels.close(local_id)
-        self.channels.remove_closed()
-        if self.channels.channels.len() == 0:
-            self.transition_closed()
+        if self.channels.begin_local_close(local_id):
+            self.send_packet(_build_channel_close_stable(remote_id))
 
     me _send_deferred_ring3_exec_response():
         """Send the real exit status for a deferred ring-3 execution after the spawn completes.
@@ -827,9 +829,8 @@ impl SshSession:
             serial_println("[sshd] sending deferred exit-status rc={exit_code} remote_id={remote_id}")
             self.send_packet(_build_channel_exit_status_stable(remote_id, exit_code))
             self.send_packet(_build_channel_eof_stable(remote_id))
-            self.send_packet(_build_channel_close_stable(remote_id))
-            self.channels.close(local_id)
-            self.channels.remove_closed()
+            if self.channels.begin_local_close(local_id):
+                self.send_packet(_build_channel_close_stable(remote_id))
 
     me _forward_shell_output():
         if self.shell == nil:
