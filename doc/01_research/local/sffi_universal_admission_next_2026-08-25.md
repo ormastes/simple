@@ -71,6 +71,34 @@ parity, typed ownership, bounds, exact artifact identity, signatures, and
 evidence admission remain absent, so CUDA and the wider SFFI estate are not
 globally verified or signed; verified-and-signed admission remains 0.
 
+## Curve25519 small-limb hot-path authority checkpoint
+
+`src/os/crypto/curve25519_smalllimb.spl` contained 26 unconditional foreign
+serial writes in its scalar-multiplication path plus nine calls to a no-op
+debug helper. These were stray diagnostics, not protocol receipts. Both sets
+were removed, eliminating their I/O/call overhead and the serial SFFI family
+without changing arithmetic or returned data.
+
+The remaining `rt_bytes_u8_at` declaration and direct owner are explicitly
+unsafe. The load/decode/clamp/mask helpers and public entry/probe functions
+propagate that authority because they require exact 32-byte scalar or
+u-coordinate extents. No per-byte bounds branch or fabricated zero is added.
+
+The focused authority/provider/performance ratchet passed. It preserves the
+fixed 255-step ladder (`bit_pos = 254` through zero), radix-2^25/2^26 masks,
+carry flow, and `a24 = 121665` operation. The byte accessor appears in both
+typed registries. The census changed as follows:
+
+- raw call sites: 18,770 -> 18,744
+- missing authority: 13,975 -> 13,948
+- lexical unsafe: unchanged at 3,406
+- function unsafe: 1,389 -> 1,390
+
+Exact input types, bounds proof, constant-time verification, exact artifact
+identity, trusted signatures, and proof receipts remain unresolved. This
+Curve25519 boundary and the wider estate are not globally verified or signed;
+verified-and-signed admission remains 0.
+
 ## Driver source-parsing authority checkpoint
 
 The phase-2 parsing driver now confines its seven raw process, environment,
