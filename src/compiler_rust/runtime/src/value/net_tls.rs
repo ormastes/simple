@@ -365,6 +365,16 @@ pub extern "C" fn rt_tls_client_read_timeout(
     tls_client_read_timeout_impl(conn, max_bytes, timeout_ms, false)
 }
 
+/// Checked timeout read: NIL is failure, empty text is clean EOF.
+#[no_mangle]
+pub extern "C" fn rt_tls_client_read_timeout_checked(
+    conn: i64,
+    max_bytes: i64,
+    timeout_ms: i64,
+) -> crate::value::RuntimeValue {
+    tls_client_read_timeout_impl(conn, max_bytes, timeout_ms, true)
+}
+
 #[inline]
 fn tls_client_read_timeout_impl(
     conn: i64,
@@ -836,6 +846,7 @@ fn tls_cipher_suite_name(suite: rustls::CipherSuite) -> Option<&'static str> {
 mod platform_trust_tests {
     use super::{
         rt_tls_client_read, rt_tls_client_read_checked, rt_tls_server_read,
+        rt_tls_client_read_timeout_checked,
         rt_tls_server_read_checked, rt_tls_get_cipher_suite,
         rt_tls_get_negotiated_alpn, rt_tls_get_protocol_version,
         rt_tls_is_handshake_complete, TLS_CLIENT_CONFIG,
@@ -849,6 +860,7 @@ mod platform_trust_tests {
     #[test]
     fn checked_client_and_server_reads_distinguish_failure_from_legacy_empty_text() {
         assert!(rt_tls_client_read_checked(-1, 1024).is_nil());
+        assert!(rt_tls_client_read_timeout_checked(-1, 1024, 100).is_nil());
         assert!(!rt_tls_client_read(-1, 1024).is_nil());
         assert!(rt_tls_server_read_checked(-1, 1024).is_nil());
         assert!(!rt_tls_server_read(-1, 1024).is_nil());

@@ -754,3 +754,24 @@ Declaration and symbol totals remain 11,924 / 3,138. Five formerly untagged
 raw declarations are now minimally `unsafe(ffi)`: 1,208 tagged declarations,
 656 `unsafe_contract_declared`, 10,450 untouched, and zero exact-artifact
 verified-and-signed.
+
+## Browser TLS canonical checked-owner checkpoint
+
+`browser_net_runtime` no longer redeclares TLS providers. It imports the
+canonical owner and uses checked nullable reads plus the real address-connect,
+write, and checked-read timeout ABIs. The previous branches ignored every
+timeout and called the non-timeout provider in both arms; they are removed.
+Browser transport helpers and `TlsConnection` now return typed `Result` values
+for connect/read/write/close, preserving empty text as clean EOF.
+
+Each operation performs exactly one provider call. There is no retry, timer
+task, generic lookup, second buffer, or payload copy. Checked timeout read uses
+the same internal single-read implementation as the other client reads. The
+static owner/timeout ratchet, compiler integration check, and focused checked
+read test passed.
+
+Adding three canonical timeout declarations, removing five browser-local TLS
+declarations, and adding two non-TLS raw authority tags yields an estimated
+11,922 declaration rows / 3,139 symbols, 1,212 tagged declarations, 660
+`unsafe_contract_declared`, 10,446 untouched, and zero exact-artifact
+verified-and-signed.

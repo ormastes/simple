@@ -457,3 +457,9 @@ passing placeholder.
     formatting allocations. Safe wrappers stay Result-bearing and browser/
     interpreter paths must handle absence. Next consolidate browser TLS raw
     declarations and checked reads/writes; signed admission remains zero.
+86. Keep browser TLS routed through the canonical owner with Result-bearing
+    connect/read/write/close. Address connect, write timeout, and checked read
+    timeout must call their real bounded provider exactly once; never restore
+    ignored-timeout duplicate branches or ambiguous legacy reads. Next remove
+    remaining legacy client read exports once all callers migrate; exact signed
+    artifact admission remains zero.

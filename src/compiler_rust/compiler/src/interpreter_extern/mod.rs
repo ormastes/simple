@@ -2709,6 +2709,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_tls_client_read", net_tls_client::rt_tls_client_read);
     insert_simple!("rt_tls_client_read_checked", net_tls_client::rt_tls_client_read_checked);
     insert_simple!("rt_tls_client_read_timeout", net_tls_client::rt_tls_client_read_timeout);
+    insert_simple!("rt_tls_client_read_timeout_checked", net_tls_client::rt_tls_client_read_timeout_checked);
     insert_simple!("rt_tls_client_close", net_tls_client::rt_tls_client_close);
     insert_simple!(
         "rt_tls_get_protocol_version",
