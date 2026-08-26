@@ -189,3 +189,12 @@ no read-back, extra filesystem probe, registry lookup, or generic dispatch.
 to the canonical runtime byte-write owner.  The facade still performs one
 direct byte-array write and returns the provider's boolean status, with no
 array conversion, copy, retry, lookup, or generic dispatch.
+### Launch-metadata admission follow-up
+
+The launch-metadata checker no longer declares raw text or byte readers.  A new
+canonical `file_read_bytes_result` preserves nullable provider failure without
+a second read, and metadata selection now returns `Result<LaunchMetadata,
+text>`.  Explicit sidecar, default sidecar, native trailer, and content-hash
+reads fail closed rather than parsing or hashing fabricated empty input.  Each
+selected input is still read once; no retry, read-back, lookup, or generic
+dispatch was added.

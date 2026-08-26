@@ -1773,3 +1773,10 @@ and unpromoted.
 - [x] Reuse the canonical runtime byte-write owner.
 - [x] Preserve one-call, zero-conversion byte-array behavior.
 - [x] Add a static ratchet preventing raw authority from returning.
+### Completed launch-metadata admission slice
+
+- [x] Add a canonical one-call nullable byte-read `Result` API.
+- [x] Remove local raw text/byte declarations from the metadata checker.
+- [x] Make metadata selection return a typed error on provider read failure.
+- [x] Fail closed before parsing or hashing fabricated empty input.
+- [x] Preserve one-read behavior and add a static ownership ratchet.
