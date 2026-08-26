@@ -1638,7 +1638,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cli_handle_run", &[I64, I8, I8], &[I64]),
     RuntimeFuncSpec::new("rt_compile_to_native", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_compile_to_native_with_opt", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_compile_to_llvm_ir", &[I64], &[I64]),
     // Fault detection configuration
     RuntimeFuncSpec::new("rt_fault_set_stack_overflow_detection", &[I8], &[]),
     RuntimeFuncSpec::new("rt_fault_set_max_recursion_depth", &[I64], &[]),

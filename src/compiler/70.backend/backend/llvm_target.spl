@@ -43,6 +43,27 @@ struct LlvmTargetTriple:
     os: text
     env: text?
 
+fn llvm_codegen_target_from_explicit_arch(arch: text) -> Result<CodegenTarget, text>:
+    match arch:
+        case "x86_64": Ok(CodegenTarget.X86_64)
+        case "i686": Ok(CodegenTarget.X86)
+        case "aarch64": Ok(CodegenTarget.AArch64)
+        case "armv7": Ok(CodegenTarget.Arm)
+        case "riscv64" | "riscv64gc": Ok(CodegenTarget.Riscv64)
+        case "riscv32" | "riscv32imac": Ok(CodegenTarget.Riscv32)
+        case _:
+            Err("unsupported explicit LLVM target architecture '{arch}'")
+
+pub fn llvm_explicit_codegen_target(target_triple: text) -> Result<CodegenTarget, text>:
+    val trimmed = target_triple.trim()
+    val normalized = trimmed.lower()
+    if normalized == "" or normalized == "host" or normalized == "native":
+        return Err("an explicit LLVM target triple is required; host/native aliases are not accepted")
+    val parts = normalized.split("-")
+    if parts.len() < 3 or parts.len() > 4:
+        return Err("invalid LLVM target triple '{target_triple}': expected arch-vendor-os[-environment]")
+    llvm_codegen_target_from_explicit_arch(parts[0])
+
 impl LlvmTargetTriple:
     static fn from_target(target: CodegenTarget) -> LlvmTargetTriple:
         """Create target triple from codegen target (hosted mode with OS)."""
@@ -193,9 +214,9 @@ impl LlvmTargetTriple:
                     "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
             case "armv7":
                 "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"
-            case "riscv64":
+            case "riscv64" | "riscv64gc":
                 "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
-            case "riscv32":
+            case "riscv32" | "riscv32imac":
                 "e-m:e-p:32:32-i64:64-n32-S128"
             case "wasm32":
                 "e-m:e-p:32:32-i64:64-n32:64-S128"
@@ -208,7 +229,7 @@ impl LlvmTargetTriple:
     fn is_32bit() -> bool:
         """Check if this target uses 32-bit pointers."""
         match self.arch:
-            case "i686" | "armv7" | "riscv32" | "wasm32": true
+            case "i686" | "armv7" | "riscv32" | "riscv32imac" | "wasm32": true
             case _: false
 
     fn to_text() -> text:
@@ -545,5 +566,85 @@ fn detect_host_arch() -> text:
         case "armv7l" | "armv7" | "arm": "armv7"
         case "riscv32": "riscv32"
         case _: "x86_64"
+
+pub fn llvm_explicit_target_config(
+    target_triple: text,
+    bare_metal: bool
+) -> Result<LlvmTargetConfig, text>:
+    val trimmed = target_triple.trim()
+    val normalized = trimmed.lower()
+    if normalized == "" or normalized == "host" or normalized == "native":
+        return Err("an explicit LLVM target triple is required; host/native aliases are not accepted")
+
+    val parts = normalized.split("-")
+    if parts.len() < 3 or parts.len() > 4:
+        return Err("invalid LLVM target triple '{target_triple}': expected arch-vendor-os[-environment]")
+    if parts[0] == "" or parts[1] == "" or parts[2] == "":
+        return Err("invalid LLVM target triple '{target_triple}': empty components are not allowed")
+    if parts.len() == 4 and parts[3] == "":
+        return Err("invalid LLVM target triple '{target_triple}': empty environment is not allowed")
+
+    val target = match llvm_codegen_target_from_explicit_arch(parts[0]):
+        case Ok(value): value
+        case Err(message): return Err(message)
+    val target_os = parts[2]
+    val known_os = (
+        target_os == "linux" or target_os == "freebsd" or
+        target_os == "darwin" or target_os == "windows" or
+        target_os == "none" or target_os == "simpleos")
+    if not known_os:
+        return Err("unsupported explicit LLVM target OS '{target_os}'")
+    val triple_is_bare_metal = target_os == "none" or target_os == "simpleos"
+    if bare_metal and not triple_is_bare_metal:
+        return Err("bare_metal=true requires a target triple with OS 'none' or 'simpleos'")
+    if not bare_metal and triple_is_bare_metal:
+        return Err("bare_metal=false rejects target triples with OS 'none' or 'simpleos'")
+
+    val target_env: text? = if parts.len() == 4: Some(parts[3]) else: nil
+    val explicit_triple = LlvmTargetTriple(
+        arch: parts[0],
+        vendor: parts[1],
+        os: target_os,
+        env: target_env)
+    var cpu = "generic"
+    var features: [text] = []
+    var abi: text? = nil
+    match target:
+        case CodegenTarget.X86_64:
+            cpu = "x86-64"
+        case CodegenTarget.X86:
+            cpu = "i686"
+            features = ["+sse2"]
+        case CodegenTarget.AArch64:
+            cpu = "cortex-a53"
+            features = ["+neon", "+fp-armv8"]
+        case CodegenTarget.Arm:
+            cpu = "cortex-a7"
+            features = ["+neon", "+vfp4"]
+            if parts.len() == 4:
+                abi = Some(parts[3])
+        case CodegenTarget.Riscv64:
+            val contract: RiscvTargetContract = if bare_metal and parts[0] != "riscv64gc":
+                riscv_baremetal_target_contract_portable_numeric(target)
+            else:
+                riscv_linux_target_contract_portable_numeric(target)
+            cpu = contract.cpu
+            features = contract.features
+            abi = Some(contract.abi_text())
+        case CodegenTarget.Riscv32:
+            val contract = if bare_metal:
+                riscv_baremetal_target_contract_portable_numeric(target)
+            else:
+                riscv_linux_target_contract_portable_numeric(target)
+            cpu = contract.cpu
+            features = contract.features
+            abi = Some(contract.abi_text())
+        case _:
+            ()
+    Ok(LlvmTargetConfig(
+        triple: explicit_triple,
+        cpu: cpu,
+        features: features,
+        abi: abi))
 
 export llvm_arm32_baremetal_environment

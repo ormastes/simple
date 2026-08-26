@@ -28,7 +28,6 @@ use compiler.hir.hir_lowering.module_surface.{
     module_surfaces_retained_alignment_error
 }
 use compiler.driver.driver_source_loading.{
-    _driver_is_bootstrap_entry_source,
     _driver_physical_source_key,
     _driver_text_bucket_index,
     _driver_unique_physical_sources
@@ -40,8 +39,13 @@ use compiler.driver.driver_log_helpers.{
     log_module_surface_stage,
     log_build_progress
 }
-use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
-use compiler.driver.driver_phase_gates.{bootstrap_entry_source_index}
+use compiler.driver.driver_phase_gates.{
+    driver_streaming_surface_enabled,
+    driver_source_entry_request,
+    driver_source_entry_closure_enabled,
+    driver_source_matches_entry,
+    bootstrap_entry_source_index
+}
 use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io.{file_lock, file_unlock, file_exists, file_write}
@@ -555,21 +559,20 @@ impl CompilerDriver:
         val log = self.ctx.logger
         val sources = self.ctx.sources
         log_debug("parsing sources")
-        val native_entry_closure = (
-            _sffi_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        val native_entry = _sffi_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        val native_entry_closure = driver_source_entry_closure_enabled(self.ctx)
+        val native_entry = driver_source_entry_request(self.ctx)
         if native_entry_closure or native_entry != "":
             var entry_modules: Dict<text, ParserModule> = self.ctx.modules
             var entry_sources: [SourceFile] = []
             var entry_idx = 0
             while entry_idx < sources.len():
                 val source = sources[entry_idx]
-                val requested_entry_match = native_entry != "" and (
-                    source.path == native_entry or
-                    source.path.ends_with("/" + native_entry))
+                val requested_entry_match = native_entry != "" and
+                    driver_source_matches_entry(
+                        self.ctx, source.path, source.module_name)
                 if (native_entry_closure or requested_entry_match or
-                    _driver_is_bootstrap_entry_source(
-                        source.path, source.module_name)):
+                    driver_source_matches_entry(
+                        self.ctx, source.path, source.module_name)):
                     # Refuse a stale substitute when one exact entry was requested.
                     if native_entry != "" and not native_entry_closure:
                         if not requested_entry_match:
@@ -844,8 +847,8 @@ impl CompilerDriver:
             var boot_idx = 0
             while boot_idx < sources.len():
                 val source = sources[boot_idx]
-                if _driver_is_bootstrap_entry_source(
-                    source.path, source.module_name
+                if driver_source_matches_entry(
+                    self.ctx, source.path, source.module_name
                 ):
                     val entry_module = parse_full_frontend(
                         source.content,
@@ -874,8 +877,8 @@ impl CompilerDriver:
             boot_idx = 0
             while boot_idx < sources.len():
                 val source = sources[boot_idx]
-                if not _driver_is_bootstrap_entry_source(
-                    source.path, source.module_name
+                if not driver_source_matches_entry(
+                    self.ctx, source.path, source.module_name
                 ):
                     bootstrap_modules[source.module_name] = parser_module_new(
                         name: source.module_name,

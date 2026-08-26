@@ -13,6 +13,7 @@ use compiler.driver.driver_source_loading.{
     _driver_entry_import_dirname,
     _driver_resolve_entry_import,
     _driver_collect_entry_import_source,
+    _driver_collect_explicit_compiler_source,
     _driver_physical_source_key,
     _driver_cached_entry_source_scan,
     driver_entry_scan_cache_release,
@@ -20,6 +21,7 @@ use compiler.driver.driver_source_loading.{
     _driver_text_bucket_set_new,
     _driver_unique_physical_sources
 }
+use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
@@ -118,13 +120,21 @@ impl CompilerDriver:
         else:
             driver_inputs = self.ctx.options.input_files
         val closure_source_roots = driver_inputs
+        val explicit_entry_input = driver_explicit_source_entry(self.ctx)
         val native_entry_input = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        val requested_entry_input = if explicit_entry_input != "":
+            explicit_entry_input
+        else:
+            native_entry_input
         val native_entry_closure_pre = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if native_entry_input != "" and not native_entry_closure_pre:
-            driver_inputs = [native_entry_input]
+        val explicit_entry_closure = explicit_entry_input != ""
+        val entry_closure_walk = explicit_entry_closure or (
+            native_entry_input != "" and not native_entry_closure_pre)
+        if entry_closure_walk:
+            driver_inputs = [requested_entry_input]
         elif driver_inputs.len() == 0:
-            if native_entry_input != "":
-                driver_inputs = [native_entry_input]
+            if requested_entry_input != "":
+                driver_inputs = [requested_entry_input]
         val input_len = driver_inputs.len()
         val source_trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"
         if source_trace:
@@ -150,11 +160,14 @@ impl CompilerDriver:
             # parser, treesitter, and async lowering).  Applying those filters
             # to the explicit entry makes a real, existing file disappear when
             # its canonical path names one of those lanes; the symlink spelling
-            # then works only by evading the substring filter.  Entry imports
-            # already use the dedicated collector below, which keeps repository
-            # test/doc exclusions but deliberately admits production lane files.
-            val loaded = if native_entry_input != "" and not native_entry_closure_pre and input_path == native_entry_input:
-                _driver_collect_entry_import_source(input_path)
+            # then works only by evading the substring filter. Native-build
+            # imports retain packaging exclusions; the compiler-owned explicit
+            # API admits the exact authored source graph without those filters.
+            val loaded = if entry_closure_walk and input_path == requested_entry_input:
+                if explicit_entry_closure:
+                    _driver_collect_explicit_compiler_source(input_path)
+                else:
+                    _driver_collect_entry_import_source(input_path)
             else:
                 _driver_collect_sources(input_path)
             for s in loaded:
@@ -183,8 +196,8 @@ impl CompilerDriver:
         # Gated on the exact condition that made the entry the sole seed at
         # line 116-117, so a re-entrant worker (ENTRY_CLOSURE already 1, seeds
         # taken from --source roots) keeps its old behaviour.
-        if native_entry_input != "" and not native_entry_closure_pre and all_sources.len() == 0:
-            self.ctx.add_error("native-build entry '{native_entry_input}' collected zero source files: --entry takes a path to a .spl file (e.g. 'dir/main.spl'), not a module path (e.g. 'dir.main'), and the path is resolved relative to the current working directory")
+        if entry_closure_walk and all_sources.len() == 0:
+            self.ctx.add_error("compiler entry '{requested_entry_input}' collected zero source files: the entry must be a path to a .spl file (e.g. 'dir/main.spl'), not a module path (e.g. 'dir.main'), and the path is resolved relative to the current working directory")
             driver_entry_scan_cache_release()
             return (self.ctx, false)
 
@@ -200,9 +213,7 @@ impl CompilerDriver:
         # module is parsed, lowered, and compiled into the binary. This also
         # keeps the bootstrap Stage-4 path from parsing every explicit source
         # tree before entry-closure pruning can happen.
-        val nb_entry_env = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
-        val nb_entry_closure_pre = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if nb_entry_env != "" and not nb_entry_closure_pre:
+        if entry_closure_walk:
             # Explicit --source roots are resolver fallbacks, not closure seeds.
             # This preserves custom source layouts without parsing every file in
             # each root before the entry's transitive imports are known.
@@ -285,7 +296,10 @@ impl CompilerDriver:
                         if closure_mp.contains("."):
                             self.ctx.add_error("unresolved import '{closure_mp}' (used in {closure_src.path}): no source file found for this module path relative to the working directory, src/, src/lib/, or '{closure_dir}'")
                         continue
-                    val closure_loaded = _driver_collect_entry_import_source(closure_file)
+                    val closure_loaded = if explicit_entry_closure:
+                        _driver_collect_explicit_compiler_source(closure_file)
+                    else:
+                        _driver_collect_entry_import_source(closure_file)
                     if closure_loaded.len() == 0:
                         self.ctx.add_error("import '{closure_mp}' (used in {closure_src.path}) resolved to '{closure_file}' but that file is empty or excluded from compilation")
                         continue
@@ -322,7 +336,8 @@ impl CompilerDriver:
             # An explicit-entry walk is a closure even when import resolution
             # reports an error. Keep that error bounded to the requested graph
             # instead of hiding it behind an unrelated whole-workspace failure.
-            rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+            if not explicit_entry_closure:
+                rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
 
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load
@@ -331,7 +346,8 @@ impl CompilerDriver:
         # module loader. Bulk-loading the four trees here defeats that contract:
         # even a one-file test or the native-build worker parses 600+ unrelated
         # modules before its entry can run, exceeding the normal CPU/RSS guard.
-        val nb_entry_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val nb_entry_closure = explicit_entry_closure or (
+            rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val compile_mode = self.ctx.options.mode
         val needs_bulk_project_sources = compile_mode != CompileMode.Check and compile_mode != CompileMode.Interpret
         if has_project_source and needs_bulk_project_sources and not nb_entry_closure:

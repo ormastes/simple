@@ -16,8 +16,9 @@ use compiler.common.driver_core_types (driver_core_compile_options_default, comp
 use compiler.mir_opt (mir_optimization_inventory_lines)
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use std.common.convert.{try_parse_int}
-
-extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
+use app.io._CliCompile.compile_llvm_ir_facade.{
+    cli_compile_source_llvm_artifacts
+}
 
 # Stem (filename without extension) computed with rfind + `>= 0`/`> 0`
 # checks, NOT std.path.stem/extension: those match rfind's raw i64 result
@@ -704,18 +705,9 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
         "i686"
     elif target == "baremetal-x86_64":
         "x86_64"
-    elif target == "baremetal-arm":
-        "armv7"
-    elif target == "baremetal-aarch64":
-        "aarch64"
-    elif target == "baremetal-riscv32":
-        "riscv32"
-    elif target == "baremetal-riscv64":
-        "riscv64"
     else:
         _cli_eprint("Error: Unknown bare-metal target: {target}")
-        _cli_eprint("Supported: baremetal-x86, baremetal-x86_64, baremetal-arm,")
-        _cli_eprint("           baremetal-aarch64, baremetal-riscv32, baremetal-riscv64")
+        _cli_eprint("Supported by this ELF linker facade: baremetal-x86, baremetal-x86_64")
         return 1
 
     if not _cli_dir_create_impl("build/baremetal", true):
@@ -728,25 +720,21 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
         print "Compiling Simple -> LLVM IR (pure Simple compiler)..."
         print "  Target triple: {target_triple}"
 
-    val (llvm_ir, compile_err, compile_exit) = rt_compile_to_llvm_ir(source_file, target_triple, true)
+    val artifacts = cli_compile_source_llvm_artifacts(
+        source_file, target_triple, true, "build/baremetal",
+        "baremetal", emit != "llvm-ir")
 
-    if compile_exit != 0 or llvm_ir == "":
+    if not artifacts.is_success():
         _cli_eprint("Error: LLVM IR generation failed")
-        if compile_err != "":
-            _cli_eprint(compile_err)
+        if artifacts.error != "":
+            _cli_eprint(artifacts.error)
         return 1
-
-    # Keep bootstrap-safe: avoid nested method calls on str/text
-    val base_name = "baremetal_stub"
-    val ir_file = "build/baremetal/{base_name}.ll"
-    if not _cli_file_write_impl(ir_file, llvm_ir):
-        _cli_eprint("Error: Failed to write LLVM IR to {ir_file}")
-        return 1
-
-    if verbose:
-        print "  Generated: {ir_file}"
 
     if emit == "llvm-ir":
+        if artifacts.unit_count() != 1:
+            _cli_eprint("Error: --emit=llvm-ir requires a single-module source closure; use ELF output for multi-module programs")
+            return 1
+        val ir_file = artifacts.ir_files[0]
         if output_file != "":
             if not _cli_file_copy_impl(ir_file, output_file):
                 _cli_eprint("Error: Failed to copy to {output_file}")
@@ -756,26 +744,11 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
             print "Output: {ir_file}"
         return 0
 
-    if verbose:
-        print "Compiling LLVM IR -> Object file..."
-
-    val obj_file = "build/baremetal/{base_name}.o"
-    val (llc_out, llc_err, llc_exit) = _cli_process_run("llc", [
-        "--filetype=obj",
-        "--relocation-model=static",
-        ir_file,
-        "-o", obj_file
-    ])
-
-    if llc_exit != 0:
-        _cli_eprint("Error: llc compilation failed")
-        _cli_eprint(llc_err)
-        return 1
-
-    if verbose:
-        print "  Generated: {obj_file}"
-
     if emit == "object":
+        if artifacts.unit_count() != 1:
+            _cli_eprint("Error: --emit=object requires a single-module source closure; use ELF output for multi-module programs")
+            return 1
+        val obj_file = artifacts.object_files[0]
         if output_file != "":
             if not _cli_file_copy_impl(obj_file, output_file):
                 _cli_eprint("Error: Failed to copy to {output_file}")
@@ -793,23 +766,31 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
     else:
         "build/baremetal/kernel.elf"
 
-    val linker_script = "build/baremetal/linker.ld"
-    if not _cli_file_exists_impl(linker_script):
-        val fmt = if arch == "i686": "elf32-i386" else: "elf64-x86-64"
-        val script = "OUTPUT_FORMAT(" + fmt + ")\nENTRY(_start)\nSECTIONS {\n  . = 0x00100000;\n  .text : { *(.text*) }\n  .rodata : { *(.rodata*) }\n  .data : { *(.data*) }\n  .bss : { *(.bss*) *(COMMON) }\n}\n"
-        if not _cli_file_write_impl(linker_script, script):
-            _cli_eprint("Error: Failed to write linker script {linker_script}")
-            return 1
+    if not artifacts.entry_symbol_defined:
+        _cli_eprint("Error: bare-metal ELF output requires a source-defined _start entry function")
+        return 1
 
-    val (ld_out, ld_err, ld_exit) = _cli_process_run("ld", [
-        "-T", linker_script,
-        "-nostdlib",
-        "--entry=_start",
-        # Force 32-bit output for i686 target
-        "-m", if arch == "i686": "elf_i386" else: "elf64_x86_64",
-        obj_file,
-        "-o", elf_file
-    ])
+    val linker_script = "build/baremetal/linker.ld"
+    val fmt = if arch == "i686": "elf32-i386" else: "elf64-x86-64"
+    val script = "OUTPUT_FORMAT(" + fmt + ")\nENTRY(_start)\nSECTIONS {\n  . = 0x00100000;\n  .text : { *(.text*) }\n  .rodata : { *(.rodata*) }\n  .data : { *(.data*) }\n  .bss : { *(.bss*) *(COMMON) }\n}\n"
+    if not _cli_file_write_impl(linker_script, script):
+        _cli_eprint("Error: Failed to write linker script {linker_script}")
+        return 1
+
+    var linker_args: [text] = [""; artifacts.object_files.len() + 8]
+    linker_args[0] = "-T"
+    linker_args[1] = linker_script
+    linker_args[2] = "-nostdlib"
+    linker_args[3] = "--entry=_start"
+    linker_args[4] = "-m"
+    linker_args[5] = if arch == "i686": "elf_i386" else: "elf64_x86_64"
+    var object_index = 0
+    while object_index < artifacts.object_files.len():
+        linker_args[object_index + 6] = artifacts.object_files[object_index]
+        object_index = object_index + 1
+    linker_args[artifacts.object_files.len() + 6] = "-o"
+    linker_args[artifacts.object_files.len() + 7] = elf_file
+    val (ld_out, ld_err, ld_exit) = _cli_process_run("ld", linker_args)
 
     if ld_exit != 0:
         _cli_eprint("Error: Linking failed")

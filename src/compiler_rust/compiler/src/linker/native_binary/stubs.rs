@@ -327,7 +327,6 @@ const RT_KEEP: &[&str] = &[
     "rt_file_lock",
     "rt_file_unlock",
     "rt_getpid",
-    "rt_compile_to_llvm_ir",
     "rt_file_hash_sha256",
     "rt_path_parent",
     "range",

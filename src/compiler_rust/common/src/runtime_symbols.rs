@@ -897,7 +897,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cli_run_gen_lean",
     "rt_compile_to_native",
     "rt_compile_to_native_with_opt",
-    "rt_compile_to_llvm_ir",
     "rt_decision_probe",
     "rt_condition_probe",
     "rt_path_probe",

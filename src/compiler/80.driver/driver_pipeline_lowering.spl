@@ -11,6 +11,7 @@ use compiler.driver.driver_source_loading.{
     _driver_is_bootstrap_entry_source
 }
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.common.mir_target_context.{MirTargetContext}
 use std.common.convert.{try_parse_int}
 
 extern fn rt_env_get(key: text) -> text
@@ -165,8 +166,22 @@ impl CompilerDriver:
     # --------------------------------------------------------------------------
 
     me lower_to_mir() -> bool:
-        val skip_mir_lower = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER") ?? ""
-        if skip_mir_lower == "1":
+        self.lower_to_mir_with_target_context(
+            driver_mir_target_context(self.ctx.options), false, true)
+
+    me lower_to_mir_for_explicit_target(target_context: MirTargetContext) -> bool:
+        self.lower_to_mir_with_target_context(target_context, true, false)
+
+    me lower_to_mir_with_target_context(
+        target_context: MirTargetContext,
+        force_all_sources: bool,
+        allow_bootstrap_shortcuts: bool
+    ) -> bool:
+        val skip_mir_lower = if allow_bootstrap_shortcuts:
+            rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER") ?? ""
+        else:
+            ""
+        if allow_bootstrap_shortcuts and skip_mir_lower == "1":
             print "[bootstrap] skipping MIR lowering"
             var skip_idx = 0
             while skip_idx < self.ctx.sources.len():
@@ -185,9 +200,7 @@ impl CompilerDriver:
                 skip_idx = skip_idx + 1
             return not self.ctx.has_errors()
 
-        val target_context = driver_mir_target_context(self.ctx.options)
-
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        if allow_bootstrap_shortcuts and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
             if bootstrap_hir == nil:
                 self.ctx.add_error("MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
@@ -211,7 +224,7 @@ impl CompilerDriver:
             # through to the empty MirModule stub below, producing "MIR module
             # has no functions" for the first such module the AOT backend
             # tried to compile on its own (e.g. std.io_runtime).
-            val native_entry_closure_mir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+            val native_entry_closure_mir = force_all_sources or (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
             var direct_idx = 0
             # Canonical constructor — do NOT hand-duplicate MirLowering(...) here.
             # A duplicated copy drifted 8 fields behind the class and the seed
@@ -220,6 +233,8 @@ impl CompilerDriver:
             # (native_build_entry_struct_construction_buildfail_2026-07-20).
             # Guard: test/03_system/native/struct_construct_native.spl.
             var direct_lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+            if not allow_bootstrap_shortcuts:
+                direct_lowering.use_explicit_semantic_policy()
             direct_lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx), _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576), _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864), self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
             # Crossmodule field-index prepass: the entry module is lowered
             # BEFORE the dependency modules it imports, so without this an
@@ -274,6 +289,8 @@ impl CompilerDriver:
         # native_build_entry_struct_construction_buildfail_2026-07-20, so the
         # nil-fill landmine was still live on this fallback path).
         var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+        if not allow_bootstrap_shortcuts:
+            lowering.use_explicit_semantic_policy()
         lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx), _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576), _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864), self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
 
         # BUG-001 diagnostic: log module count entering MIR lowering

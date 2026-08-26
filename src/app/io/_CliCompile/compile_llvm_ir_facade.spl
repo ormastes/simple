@@ -1,0 +1,118 @@
+# Narrow CLI adapter for the compiler-owned source -> LLVM IR API.
+#
+# Only target-specific compile code and the bootstrap diagnostic import this
+# file. Keeping the edge here prevents broad app.io exports from retaining it.
+
+use compiler.driver.driver_source_llvm_ir.{compile_source_to_llvm_ir}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+pub class CliLlvmIrArtifacts:
+    module_names: [text]
+    ir_files: [text]
+    object_files: [text]
+    entry_module_name: text
+    entry_symbol_defined: bool
+    error: text
+    exit_code: i64
+
+    static fn failure(message: text) -> CliLlvmIrArtifacts:
+        CliLlvmIrArtifacts(
+            module_names: [],
+            ir_files: [],
+            object_files: [],
+            entry_module_name: "",
+            entry_symbol_defined: false,
+            error: message,
+            exit_code: 1)
+
+    fn is_success() -> bool:
+        self.exit_code == 0 and self.error == "" and
+        self.module_names.len() > 0 and
+        self.module_names.len() == self.ir_files.len()
+
+    fn unit_count() -> i64:
+        if self.module_names.len() != self.ir_files.len():
+            return 0
+        self.module_names.len()
+
+fn cli_llvm_unit_stem(module_name: text, unit_index: i64) -> text:
+    var safe_name = module_name.replace(".", "_")
+    safe_name = safe_name.replace("/", "_")
+    safe_name = safe_name.replace("\\", "_")
+    safe_name = safe_name.replace(":", "_")
+    safe_name = safe_name.replace("-", "_")
+    if safe_name == "":
+        safe_name = "module"
+    "{unit_index}_{safe_name}"
+
+pub fn cli_compile_source_llvm_artifacts(
+    source_file: text,
+    target_triple: text,
+    bare_metal: bool,
+    build_dir: text,
+    file_prefix: text,
+    compile_objects: bool
+) -> CliLlvmIrArtifacts:
+    val bundle = compile_source_to_llvm_ir(
+        source_file, target_triple, bare_metal)
+    if not bundle.is_success():
+        val message = if bundle.error != "":
+            bundle.error
+        else:
+            "compiler returned an invalid LLVM IR bundle"
+        return CliLlvmIrArtifacts.failure(message)
+
+    val unit_count = bundle.module_count()
+    var module_names: [text] = [""; unit_count]
+    var ir_files: [text] = [""; unit_count]
+    var object_files: [text] = if compile_objects:
+        [""; unit_count]
+    else:
+        []
+    var entry_symbol_defined = false
+
+    var unit_index = 0
+    while unit_index < unit_count:
+        val module_name = bundle.module_names[unit_index]
+        val module_ir = bundle.module_irs[unit_index]
+        if (module_ir.contains("define void @_start(") or
+            module_ir.contains("define i64 @_start(") or
+            module_ir.contains("define i32 @_start(") or
+            module_ir.contains("define i16 @_start(") or
+            module_ir.contains("define i8 @_start(") or
+            module_ir.contains("define i1 @_start(") or
+            module_ir.contains("define ptr @_start(") or
+            module_ir.contains("define float @_start(") or
+            module_ir.contains("define double @_start(")):
+            entry_symbol_defined = true
+        val unit_stem = cli_llvm_unit_stem(module_name, unit_index)
+        val ir_file = "{build_dir}/{file_prefix}_{unit_stem}.ll"
+        if not file_write(ir_file, module_ir):
+            return CliLlvmIrArtifacts.failure(
+                "failed to write LLVM IR module '{module_name}' to {ir_file}")
+        module_names[unit_index] = module_name
+        ir_files[unit_index] = ir_file
+
+        if compile_objects:
+            val object_file = "{build_dir}/{file_prefix}_{unit_stem}.o"
+            val (_, llc_error, llc_exit) = process_run("llc", [
+                "--filetype=obj",
+                "--relocation-model=static",
+                ir_file,
+                "-o", object_file
+            ])
+            if llc_exit != 0:
+                return CliLlvmIrArtifacts.failure(
+                    "llc failed for module '{module_name}': {llc_error}")
+            object_files[unit_index] = object_file
+        unit_index = unit_index + 1
+
+    CliLlvmIrArtifacts(
+        module_names: module_names,
+        ir_files: ir_files,
+        object_files: object_files,
+        entry_module_name: bundle.entry_module_name,
+        entry_symbol_defined: entry_symbol_defined,
+        error: "",
+        exit_code: 0)

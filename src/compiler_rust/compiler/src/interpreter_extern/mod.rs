@@ -849,7 +849,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cli_run_verify", cli::rt_cli_run_verify);
     insert_simple!("rt_cli_version", cli::rt_cli_version);
     insert_simple!("rt_cli_watch_file", cli::rt_cli_watch_file);
-    insert_simple!("rt_compile_to_llvm_ir", native_sffi::rt_compile_to_llvm_ir);
     insert_simple!("rt_compile_to_native", native_sffi::rt_compile_to_native);
     insert_simple!("rt_compile_to_native_with_opt", native_sffi::rt_compile_to_native);
     insert_simple!("rt_constant_time_compare", crypto::rt_constant_time_compare);
@@ -2612,7 +2611,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_hosted_select_surface", hosted::select_surface);
     insert_simple!("rt_hosted_set_surface_override", hosted::set_surface_override);
     // Native compilation & execution
-    insert_simple!("rt_compile_to_llvm_ir", native_sffi::rt_compile_to_llvm_ir);
     insert_simple!("rt_compile_to_native", native_sffi::rt_compile_to_native);
     insert_simple!("rt_compile_to_native_with_opt", native_sffi::rt_compile_to_native);
     insert_simple!("rt_execute_native", native_sffi::rt_execute_native);

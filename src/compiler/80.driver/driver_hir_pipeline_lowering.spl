@@ -54,6 +54,13 @@ extern fn rt_transient_heap_promote(value: Any) -> bool
 extern fn rt_exit(code: i64)
 extern fn rt_stdout_flush()
 
+fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
+    (ctx.config["compiler_explicit_semantic_policy"] ?? "") == "1"
+
+fn driver_hir_ambient_bootstrap_enabled(ctx: CompileContext) -> bool:
+    not driver_hir_explicit_semantic_policy(ctx) and
+        (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+
 impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
         if not rt_transient_array_scope_begin():
@@ -108,6 +115,8 @@ impl CompilerDriver:
             self.ctx.add_error("Streaming module surface owner payload missing after phase 2")
             return (self.ctx, false)
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
+        if driver_hir_explicit_semantic_policy(self.ctx):
+            lowering.use_explicit_semantic_policy()
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var poisoned_by_surface: Dict<i64, bool> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
@@ -118,12 +127,13 @@ impl CompilerDriver:
         val entry_source_index = self.streaming_entry_source_index_owner
         var source_index = 0
         var progress_hir_done = 0
-        bootstrap_hir_modules_reset()
+        if driver_hir_ambient_bootstrap_enabled(self.ctx):
+            bootstrap_hir_modules_reset()
         # HIR cache + shards on the streaming path. The surfaces are FROZEN
         # in full before this loop (surface_freeze completes in phase 2), so
         # one digest over every surface is exactly what each module's
         # lowering can see, and the key stays sound.
-        val hir_closure_digest: text = if hir_cache_enabled():
+        val hir_closure_digest: text = if (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
             hir_cache_closure_digest(surfaces)
         else:
             ""
@@ -136,7 +146,7 @@ impl CompilerDriver:
             hir_level_count = hir_shard_level_count(hir_levels)
         val hir_visit_order: [i64] = hir_shard_visit_order(self.ctx.source_module_names_owner, surfaces, hir_levels)
         var hir_loop_pos: i64 = 0
-        val hir_bootstrap_mode_gate = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val hir_bootstrap_mode_gate = driver_hir_ambient_bootstrap_enabled(self.ctx)
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
             "pending", 2, 6, 0, 0, "running")
 
@@ -236,7 +246,8 @@ impl CompilerDriver:
                     hir_module_logical_name_from_path(source.path)
                 else:
                     source.module_name
-                bootstrap_hir_modules_add_from_module(hir_module, hir_registry_name, is_requested_bootstrap_entry)
+                if hir_bootstrap_mode_gate:
+                    bootstrap_hir_modules_add_from_module(hir_module, hir_registry_name, is_requested_bootstrap_entry)
                 if not hir_bootstrap_mode_gate:
                     for hir_cached_warning in hir_cache_last_warnings():
                         self.ctx.add_warning(hir_cached_warning)
@@ -263,7 +274,7 @@ impl CompilerDriver:
                 # Stage-3 native closure. Read only bounded scalar/text projections
                 # and make the poison decision from this module's fatal count.
                 val module_error_count: i64 = lowering.lowering_error_count()
-                val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+                val bootstrap_mode = hir_bootstrap_mode_gate
                 var module_error_index: i64 = 0
                 var module_fatal_error_count: i64 = 0
                 var hir_module_warnings: [text] = []
@@ -427,6 +438,8 @@ impl CompilerDriver:
             var bootstrap_lowering: HirLowering = hirlowering_for_module_with_diagnostics(
                 "", retained_module_surfaces, bootstrap_lowering_errors,
                 bootstrap_lowering_messages, bootstrap_lowering_recovered)
+            if driver_hir_explicit_semantic_policy(self.ctx):
+                bootstrap_lowering.use_explicit_semantic_policy()
             for module in self.ctx.modules.values():
                 val name = module.name
                 log_trace("processing module")
@@ -478,10 +491,14 @@ impl CompilerDriver:
             "", retained_module_surfaces, module_lowering_errors,
             module_lowering_diagnostic_messages,
             module_lowering_diagnostic_recovered)
-        bootstrap_hir_modules_reset()
+        if driver_hir_explicit_semantic_policy(self.ctx):
+            lowering.use_explicit_semantic_policy()
+        val hir_bootstrap_mode_gate = driver_hir_ambient_bootstrap_enabled(self.ctx)
+        if hir_bootstrap_mode_gate:
+            bootstrap_hir_modules_reset()
         # HIR cache (driver_hir_cache.spl): one digest of every frozen surface
         # per build; a hit below replaces lowering for that module.
-        val hir_closure_digest: text = if hir_cache_enabled():
+        val hir_closure_digest: text = if (not driver_hir_explicit_semantic_policy(self.ctx)) and hir_cache_enabled():
             hir_cache_closure_digest(retained_module_surfaces)
         else:
             ""
@@ -553,7 +570,8 @@ impl CompilerDriver:
             # Real single-file HIR lowering is the default; SIMPLE_STUB_HIR=1 is the
             # escape hatch forcing the empty-HIR stub (pre-2026-07-03 behavior) if a
             # stage4 lowering regression ever needs to be bypassed in the field.
-            val unstub_hir = (rt_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
+            val unstub_hir = driver_hir_explicit_semantic_policy(self.ctx) or
+                (rt_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
             val is_requested_bootstrap_entry = source_idx == entry_source_index
             val is_bootstrap_entry = is_requested_bootstrap_entry
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
@@ -574,11 +592,12 @@ impl CompilerDriver:
                     hir_module_logical_name_from_path(src_path ?? "")
                 else:
                     name
-                bootstrap_hir_modules_add_from_module(hir_cached.unwrap(), hir_registry_name, is_bootstrap_entry)
+                if hir_bootstrap_mode_gate:
+                    bootstrap_hir_modules_add_from_module(hir_cached.unwrap(), hir_registry_name, is_bootstrap_entry)
                 # Replay the stored warning-level diagnostics under the same
                 # gate the in-process path applies (warnings are advisory and
                 # dropped in bootstrap mode there too).
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+                if not hir_bootstrap_mode_gate:
                     for hir_cached_warning in hir_cache_last_warnings():
                         self.ctx.add_warning(hir_cached_warning)
             var hir_module: HirModule = if hir_cache_hit:
@@ -662,8 +681,9 @@ impl CompilerDriver:
             # owner methods return only scalar/text projections, avoiding the
             # stage4 array-of-struct transport failure under closure pressure.
             val module_error_count: i64 = lowering.lowering_error_count()
-            val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-            val bootstrap_diag = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+            val bootstrap_mode = hir_bootstrap_mode_gate
+            val bootstrap_diag = bootstrap_mode and
+                (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
             if bootstrap_diag and module_error_count > 0 and source_idx < 20:
                 eprint("[bootstrap-hir-module-errors] source_idx={source_idx} path={src.path} count={module_error_count}")
             var module_error_idx = 0
@@ -956,6 +976,8 @@ impl CompilerDriver:
 
         var compatibility_lowering: HirLowering = hirlowering_for_module(
             "", retained_module_surfaces)
+        if driver_hir_explicit_semantic_policy(ctx):
+            compatibility_lowering.use_explicit_semantic_policy()
         for src2 in ctx.sources:
             val name = src2.module_name
             val module = ctx.modules[name]
