@@ -2,8 +2,8 @@
 
 ## Status
 
-Open bootstrap blocker. The current no-stub pure-Simple CLI build reaches the
-source-closure inventory and then exits with only:
+Resolved on 2026-08-26. The no-stub pure-Simple CLI build reached the
+source-closure inventory and exited with only:
 
 `error: semantic: type mismatch: cannot convert array to int`
 
@@ -23,9 +23,16 @@ The shard resolves more than 320 closure files before the failure. The prior
 `mission_critical/__init__.spl` Dedent parse defect is fixed and no longer
 appears in this run.
 
-## Required fix
+## Resolution
 
-The array-to-int conversion diagnostic must carry the source path and span (or
-an interpreter call stack) so the owning Simple expression can be corrected.
-The no-stub pure-Simple CLI must then build successfully before the rendering
-guest or Vulkan capture is admissible.
+`SIMPLE_DEBUG_AS_INT_BT=1` localized the conversion to
+`interpreter_extern::sffi_array::rt_array_free_fn`. Native code passes an i64
+runtime handle, but interpreted lexer arrays are `Arc`-managed `Value::Array`
+objects. The bridge comment already promised a managed-array no-op while its
+implementation unconditionally called `as_int()`.
+
+The bridge now leaves interpreter-managed array storage to Rust ownership and
+only forwards integer handles to `rt_array_free`. The existing focused test
+`rt_array_free_leaves_interpreter_managed_arrays_to_arc` passes. A post-fix
+shard advances beyond the former failure through closure item 704/1046 without
+an array-to-int conversion.

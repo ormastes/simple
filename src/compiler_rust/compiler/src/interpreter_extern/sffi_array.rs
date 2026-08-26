@@ -668,8 +668,17 @@ pub fn rt_array_free_fn(args: &[Value]) -> Result<Value, CompileError> {
             ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
         )
     })?;
-    let raw = array.as_int()?;
-    rt_array_free(RuntimeValue::from_raw(raw as u64));
+    match array {
+        Value::Array(_)
+        | Value::FrozenArray(_)
+        | Value::FixedSizeArray { .. }
+        | Value::ByteArray(_)
+        | Value::FrozenByteArray(_) => {}
+        native_handle => {
+            let raw = native_handle.as_int()?;
+            rt_array_free(RuntimeValue::from_raw(raw as u64));
+        }
+    }
     Ok(Value::Nil)
 }
 
