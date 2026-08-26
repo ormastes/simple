@@ -26,9 +26,10 @@ pub(crate) use crate::interpreter_unit::*;
 #[path = "../interpreter_state.rs"]
 mod interpreter_state;
 pub(crate) use interpreter_state::{
-    decode_import_binding_marker, flatten_owner_mangled_name, clear_moved_vars, const_trace, const_trace_target,
-    get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
-    debug_call_stack_snapshot, field_access_debug_enabled, note_enum_payload_function, note_enum_payload_function_opt,
+    decode_import_binding_marker, flatten_owner_mangled_name,
+    clear_moved_vars, const_trace, const_trace_target, get_aop_config, get_di_config, mark_as_moved, set_aop_config,
+    set_di_config, ExecutionMode, debug_call_stack_snapshot, field_access_debug_enabled,
+    note_enum_payload_function, note_enum_payload_function_opt,
 };
 pub use interpreter_state::{
     check_execution_limit,
@@ -66,13 +67,12 @@ pub(crate) use interpreter_state::{
     EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, IMMUTABLE_VARS,
     IN_IMMUTABLE_FN_METHOD, INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
     MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER,
-    MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIXES,
-    TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
-    UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS, CLASS_OVERLOADS, FUNCTION_MODULE_OWNER,
-    CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
-    FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner, report_globals_census, owned_globals_snapshot,
-    owned_global, owned_global_present, owner_has_globals, steal_owned_global, set_owned_global, seed_owner_globals,
-    reset_owned_globals_from_initial, owner_bindings, record_owner_binding,
+    MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS,
+    UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS,
+    CLASS_OVERLOADS, FUNCTION_MODULE_OWNER, CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
+    report_globals_census, owned_globals_snapshot, owned_global, owned_global_present, owner_has_globals,
+    set_owned_global, seed_owner_globals, reset_owned_globals_from_initial, owner_bindings, record_owner_binding,
 };
 
 // Core types and utilities
@@ -93,8 +93,8 @@ mod error_macros;
 // Coverage instrumentation helpers
 mod coverage_helpers;
 pub(crate) use coverage_helpers::{
-    current_coverage_file, extract_node_location, record_node_coverage, record_decision_coverage_sffi,
-    record_decision_coverage_here, record_condition_coverage, decision_id_from_span, is_coverage_enabled,
+    current_coverage_file, extract_node_location, record_node_coverage, record_decision_coverage_sffi, record_decision_coverage_here,
+    record_condition_coverage, decision_id_from_span, is_coverage_enabled,
 };
 
 // Place (lvalue) model: identifier root + arbitrary field/index projections.
@@ -130,13 +130,15 @@ mod interpreter_control;
 use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while};
 pub(crate) use interpreter_control::{exec_if_expr, exec_if_core, exec_match_expr, exec_match_core};
 pub(crate) use interpreter_control::exec_with;
-// Restored 2026-08-22: 13d09a45d80 removed this declaration while
-// `expr.rs` still calls `crate::interpreter::dispatch_profile::record`, which
-// left the seed unbuildable (E0433).
-pub(crate) mod dispatch_profile;
-pub(crate) mod sampler;
 mod expr;
 pub(crate) use expr::evaluate_expr;
+
+// `dispatch_profile.rs` is committed and `expr.rs:292` already calls
+// `crate::interpreter::dispatch_profile::record(expr)`, but the module was
+// never declared -- so the seed did not compile at all (E0433: could not find
+// `dispatch_profile` in `interpreter`). Declaring it is the missing half, not a
+// new feature.
+pub(crate) mod dispatch_profile;
 
 mod bitfield_runtime;
 pub(crate) use bitfield_runtime::{instantiate_bitfield, register_bitfield, update_bitfield_field};
@@ -146,14 +148,13 @@ pub(crate) use bitfield_runtime::{instantiate_bitfield, register_bitfield, updat
 mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
     bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
-    create_range_object_opt, create_range_object_step, expand_range_fields, eval_arg, eval_arg_int, eval_arg_usize,
-    eval_array_all, eval_array_any, eval_array_filter, eval_array_find, eval_array_map, eval_array_reduce,
-    eval_dict_filter, eval_dict_for_each, eval_dict_map_values, eval_option_and_then, eval_option_filter,
-    eval_option_map, eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err,
-    eval_result_or_else, find_and_exec_method, handle_functional_update, handle_method_call_with_self_update,
-    iter_to_vec, message_to_value, normalize_index, slice_collection, spawn_actor_with_expr,
-    spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr, try_method_missing,
-    with_effect_context,
+    create_range_object_opt, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
+    eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter, eval_dict_for_each, eval_dict_map_values, eval_option_and_then,
+    eval_option_filter, eval_option_map, eval_option_or_else, eval_result_and_then, eval_result_map,
+    eval_result_map_err, eval_result_or_else, find_and_exec_method, handle_functional_update,
+    handle_method_call_with_self_update, iter_to_vec, message_to_value, normalize_index, slice_collection,
+    spawn_actor_with_expr, spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr,
+    try_method_missing, with_effect_context,
 };
 
 // Include the rest of the interpreter functions
@@ -162,8 +163,7 @@ mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
 pub(crate) use interpreter_call::{
-    captured_env_with_live_globals, execute_function_body, publish_and_repoint, publish_live_bound_globals,
-    sync_owned_captured_globals,
+    captured_env_with_live_globals, execute_function_body, publish_and_repoint, publish_live_bound_globals, sync_owned_captured_globals,
 };
 pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results};
 use interpreter_call::{
@@ -176,7 +176,6 @@ use interpreter_call::{
 #[path = "../module_cache.rs"]
 mod module_cache;
 pub use module_cache::clear_module_cache;
-pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::clear_module_cache_selective;
 pub(crate) use module_cache::normalize_path_key;
 

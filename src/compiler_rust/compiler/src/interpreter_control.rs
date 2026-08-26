@@ -351,28 +351,6 @@ pub(super) fn exec_if(
     Ok(Control::Next)
 }
 
-/// Store a loop fast-path result into `env`, mirroring module-level globals.
-///
-/// The tree-walk fast paths for `while`/`for` loops compute the loop's final
-/// values natively and write them back with a single `env.insert`. For a
-/// module-level `var`, `env` is NOT authoritative on read: identifier
-/// evaluation prefers `MODULE_GLOBALS` for non-local names
-/// (`interpreter/expr/literals.rs`), and the generic statement path keeps the
-/// two in sync via `interpreter/place.rs::sync_module_global`. Writing only
-/// `env` therefore left the stale pre-loop value visible, so a top-level
-/// `while i < 5: sum = sum + i; i = i + 1` evaluated to 0 instead of 10.
-fn env_insert_synced(env: &mut Env, name: String, value: Value) {
-    crate::interpreter::MODULE_GLOBALS.with(|cell| {
-        // Peek before taking the write borrow: borrow_mut() on this
-        // generation-tracked cell invalidates owned-env templates.
-        if !cell.borrow().contains_key(&name) {
-            return;
-        }
-        cell.borrow_mut().insert(name.clone(), value.clone());
-    });
-    env.insert(name, value);
-}
-
 pub(super) fn exec_while(
     while_stmt: &simple_parser::ast::WhileStmt,
     env: &mut Env,
@@ -771,8 +749,8 @@ fn try_exec_direct_float_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Re
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Float(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Float(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -901,8 +879,8 @@ fn try_exec_indexed_float_array_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Float(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Float(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1055,8 +1033,8 @@ fn try_exec_indexed_string_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1202,8 +1180,8 @@ fn try_exec_indexed_float_array_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1345,8 +1323,8 @@ fn try_exec_indexed_int_array_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1486,8 +1464,8 @@ fn try_exec_indexed_int_array_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1774,8 +1752,8 @@ fn try_exec_direct_int_match_count_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -1909,8 +1887,8 @@ fn try_exec_direct_int_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Resu
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -2035,8 +2013,8 @@ fn try_exec_one_arg_int_helper_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -2187,8 +2165,8 @@ fn try_exec_two_arg_int_helper_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.target, Value::Int(target));
-    env_insert_synced(env, loop_shape.index, Value::Int(index));
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
 }
 
@@ -3652,12 +3630,12 @@ fn try_exec_enumerated_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> 
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_index {
-        env_insert_synced(env, loop_shape.index_var, Value::Int(value));
+        env.insert(loop_shape.index_var, Value::Int(value));
     }
     if let Some(value) = last_item {
-        env_insert_synced(env, loop_shape.item_var, value);
+        env.insert(loop_shape.item_var, value);
     }
     Ok(Some(Control::Next))
 }
@@ -3807,9 +3785,9 @@ fn try_exec_string_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Re
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(ch) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::text(ch.to_string()));
+        env.insert(loop_shape.loop_var, Value::text(ch.to_string()));
     }
     Ok(Some(Control::Next))
 }
@@ -3968,9 +3946,9 @@ fn try_exec_string_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<O
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(ch) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::text(ch.to_string()));
+        env.insert(loop_shape.loop_var, Value::text(ch.to_string()));
     }
     Ok(Some(Control::Next))
 }
@@ -4092,9 +4070,9 @@ fn try_exec_float_array_match_count_for_loop(
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Float(value));
+        env.insert(loop_shape.loop_var, Value::Float(value));
     }
     Ok(Some(Control::Next))
 }
@@ -4233,9 +4211,9 @@ fn try_exec_float_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Op
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Float(target));
+    env.insert(loop_shape.assignment.target, Value::Float(target));
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Float(value));
+        env.insert(loop_shape.loop_var, Value::Float(value));
     }
     Ok(Some(Control::Next))
 }
@@ -4370,9 +4348,9 @@ fn try_exec_int_array_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) ->
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Int(value));
+        env.insert(loop_shape.loop_var, Value::Int(value));
     }
     Ok(Some(Control::Next))
 }
@@ -4532,9 +4510,9 @@ fn try_exec_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
         iterations = iterations.wrapping_add(1);
     }
 
-    env_insert_synced(env, loop_shape.assignment.target, Value::Int(target));
+    env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Int(value));
+        env.insert(loop_shape.loop_var, Value::Int(value));
     }
     Ok(Some(Control::Next))
 }
@@ -4641,9 +4619,9 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
             current = current.wrapping_add(1);
             iterations = iterations.wrapping_add(1);
         }
-        env_insert_synced(env, assignment.target.clone(), Value::Int(target));
+        env.insert(assignment.target.clone(), Value::Int(target));
         if let Some(value) = last_value {
-            env_insert_synced(env, loop_shape.loop_var, Value::Int(value));
+            env.insert(loop_shape.loop_var, Value::Int(value));
         }
         return Ok(Some(Control::Next));
     }
@@ -4695,11 +4673,11 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
 
     for assignment in &loop_shape.assignments {
         if let Some(value) = locals.get(&assignment.target) {
-            env_insert_synced(env, assignment.target.clone(), Value::Int(*value));
+            env.insert(assignment.target.clone(), Value::Int(*value));
         }
     }
     if let Some(value) = last_value {
-        env_insert_synced(env, loop_shape.loop_var, Value::Int(value));
+        env.insert(loop_shape.loop_var, Value::Int(value));
     }
     Ok(Some(Control::Next))
 }

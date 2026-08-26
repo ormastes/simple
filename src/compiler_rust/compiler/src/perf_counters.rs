@@ -37,28 +37,8 @@ counters!(
     SELF_FIELD_ARR_COW_CLONES,
     SELF_FIELD_ARR_COW_ELEMS_CLONED,
     // filter_functions_from_value: imported-module dict rebuilt vs memo hit
-    // steal_owned_global (promotion-time unique ownership of a global collection)
-    STEAL_OK,
-    STEAL_NO_BINDING,
-    STEAL_OUTER_SHARED,
-    STEAL_INNER_SHARED,
-    STEAL_MISSING,
-    STEAL_MISMATCH,
-    // park_written_back_arguments (caller handle released across a nested call)
-    PARK_ARG_OK,
-    PARK_ARG_RESTORED,
-    // f(obj.field) write-back: object field-map copy-on-write against a handle
-    // the suspended caller frame is about to overwrite (dead alias).
-    FIELD_WRITEBACK_CALLS,
-    FIELD_WRITEBACK_MAP_CLONES,
     FILTERED_DICT_BUILDS,
     FILTERED_DICT_HITS,
-    // import-resolution probe file reads (see module_cache::probe_source_cached)
-    PROBE_SOURCE_READS,
-    PROBE_SOURCE_HITS,
-    // imported-module AST memo (hir::lower::import_loader::parsed_imported_module)
-    IMPORT_AST_PARSES,
-    IMPORT_AST_HITS,
 );
 
 #[inline(always)]
@@ -74,17 +54,10 @@ pub fn enabled() -> bool {
 fn init() -> bool {
     let on = std::env::var("SIMPLE_PERF_COUNTERS").is_ok_and(|v| !v.is_empty() && v != "0");
     if on && !ATEXIT_REGISTERED.swap(true, Ordering::Relaxed) {
-        // See dispatch_profile::init -- `libc` is unix-only in Cargo.toml, so
-        // the at-exit hook is cfg-gated. Report rather than silently collect
-        // counters that would never be dumped.
-        #[cfg(unix)]
         unsafe {
-            libc::atexit(dump_at_exit);
+            unsafe extern "C" { fn atexit(callback: extern "C" fn()) -> i32; }
+            let _ = atexit(dump_at_exit);
         }
-        #[cfg(not(unix))]
-        eprintln!(
-            "[simple] SIMPLE_PERF_COUNTERS ignored: the at-exit counter dump is not wired on this platform"
-        );
     }
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on
@@ -95,30 +68,6 @@ fn init() -> bool {
 /// test already ran in the same process would be ignored).
 pub fn set_enabled(on: bool) {
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
-}
-
-/// Attribution trace for the hot counters (default OFF): with
-/// `SIMPLE_PERF_COUNTERS_TRACE=<min_len>` each COW clone or value-type scan of an
-/// array of at least `min_len` elements logs one stderr line naming the
-/// receiver/parameter, so a counter that grows quadratically can be tied to the
-/// Simple-level variable that causes it.
-pub fn trace_min_len() -> u64 {
-    static MIN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *MIN.get_or_init(|| {
-        std::env::var("SIMPLE_PERF_COUNTERS_TRACE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
-    })
-}
-
-pub fn trace_array(site: &str, name: &str, len: usize) {
-    if enabled() {
-        let min = trace_min_len();
-        if min > 0 && len as u64 >= min {
-            eprintln!("[perf-trace] {site} name={name} len={len}");
-        }
-    }
 }
 
 #[inline(always)]

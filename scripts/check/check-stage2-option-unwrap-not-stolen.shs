@@ -49,73 +49,14 @@
 #
 # `--selftest` runs FIRST, unconditionally, and is FATAL.
 #
-# STATUS: ADVISORY, honestly RED -- and as of 2026-08-25 the RED is attributed.
-#
-# Measured 2026-08-24 against a Stage 2 built from origin/main:
+# STATUS: ADVISORY, honestly RED. Measured 2026-08-24 against a Stage 2 built
+# from origin/main:
 #   FIX2_NATIVE_BUILD_RC=139, malformed signature present,
 #   4 `*_dot_unwrap` call sites inside lower_and_check_impl.
-#
-# 2026-08-25 -- READ THIS BEFORE CONCLUDING ANYTHING FROM A RED RUN.
-# This gate is red because of a SECOND, INDEPENDENT bind site, NOT because the
-# erased-receiver suffix-binder fix failed. That fix landed 2026-08-25 and is
-# measured correct: by per-function disassembly of pre-fix vs post-fix Stage 2
-# binaries built from the same base,
-#     run_named_pass_with_record   Poll_dot_unwrap 3 -> 1, rt_unwrap_or_trap 0 -> 2
-#     run_pass_on_module_checked   Poll_dot_unwrap 3 -> 1, rt_unwrap_or_trap 0 -> 2
-#     lower_and_check_impl         Poll_dot_unwrap 4 -> 4, rt_unwrap_or_trap 0 -> 0
-#     whole binary                 Poll_dot_unwrap 307 -> 272 (-35, see note)
-#                                  rt_unwrap_or_trap 117 -> 151 (+34)
-# i.e. rt_unwrap_or_trap gains exactly +34 -- 34 call sites moved to it -- in
-# precisely the functions the codegen probe named -- while THIS gate's function,
-# lower_and_check_impl, did not move by a single instruction. The remaining 4
-# sites are reached by a different mechanism and are filed as
-# doc/08_tracking/bug/poll_unwrap_second_bind_site_lower_and_check_impl_2026-08-25.md
-#
-# So: a red verdict here is now evidence about that SECOND site. Do not read it
-# as a refutation of the suffix-binder fix, and do NOT "fix" this gate by
-# flipping it green -- the defect it names is genuinely still present.
-# The SOURCE invariant of the landed fix is pinned separately and is GREEN:
-#   scripts/check/check-erased-receiver-family-not-suffix-bound.shs
-# Promote this guard to MANDATORY once the second bind site is fixed and it
-# goes green on its own.
-#
-# 2026-08-25 (LATER, SUPERSEDES THE BLOCK ABOVE) -- THE RED IS NOW A DIFFERENT
-# DEFECT. READ THIS FIRST.
-# The second bind site IS fixed. It was the cross-module resolution ladder in
-# compile_method_call_static: only the LAST of its four steps carried the
-# Option/Result-family exclusion, so the bare `use_map["unwrap"]` hit above it
-# re-stole the call onto the SAME wrong symbol. That is why the earlier
-# differential read `lower_and_check_impl 4 -> 4` and looked untouched: the first
-# fix DID change the path, and an unchanged callee count masked it. Two distinct
-# binders selecting one symbol are indistinguishable by count alone.
-#
-# Measured on a Stage 2 built from c6041e04d4e + the fix (757 compiled, 0 failed):
-#     lower_and_check_impl   Poll_dot_unwrap 4 -> 0   (rt_enum_payload x6)
-#     whole binary           Poll_dot_unwrap 272 -> 0 (rt_enum_payload x8431)
-#     E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED count = 0
-# Whole-binary 0 is CORRECT, not an over-broad guard: the tree has zero qualified
-# `Poll.unwrap` call sites, so with the thefts gone the method is uncalled and
-# dead-code-eliminated.
-#
-# CHECK 1 (SYMBOLIC / the mechanism check) IS THEREFORE GREEN.
-# CHECK 2 (BEHAVIOURAL) IS STILL RED, for an unrelated and NEWLY EXPOSED reason:
-# hello world now SEGVs in `native_compile` (step 5/6), AFTER borrow_check,
-# process_async, optimize_mir, weave_aop and native_cache all complete. No
-# pre-fix build ever reached that phase. Filed as
-#   doc/08_tracking/bug/stage2_native_compile_segv_after_unwrap_fix_2026-08-25.md
-#
-# DO NOT restart the unwrap hunt from a red verdict here. If the verdict names
-# `*_dot_unwrap` call sites, that is a regression of the fix and is real. If it
-# says only `hello world crashed the Stage-2 compiler (rc=139)` with NO call-site
-# clause, that is the downstream native_compile defect and belongs to the record
-# above. The SOURCE invariants of both fixes are pinned separately and are GREEN:
-#   scripts/check/check-erased-receiver-family-not-suffix-bound.shs      (site 1)
-#   scripts/check/check-cross-module-ladder-family-not-name-bound.shs    (site 2)
-#
-# Harness trap, recorded because it cost a lane a cycle: the bootstrap reports
-# this failure as `UNDIAGNOSABLE: the stage failed with no error message of any
-# kind`. That is the harness suppressing the smoke's stderr, not an absence of
-# evidence. Reproduce the smoke by hand and the real output is right there.
+# A first attempted fix (widening the erased-receiver refusal in
+# compiler/src/codegen/instr/closures_structs.rs) did NOT move either number
+# and was therefore NOT landed -- the actual bind site is still unidentified.
+# Promote this guard to MANDATORY once a real fix makes it green.
 #
 # See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
 # and doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md

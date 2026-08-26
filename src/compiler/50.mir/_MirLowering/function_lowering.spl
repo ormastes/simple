@@ -34,55 +34,12 @@ use compiler.common.attributes.{FunctionAttr}
 use compiler.common.assurance.policy_names.{normalize_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata, normalize_gpu_target_metadata_name}
-use compiler.mir.mir_types.{MirConstant, mir_type_probe_text}
-use compiler.mir.mir_rt_hal_boundary.{inject_rt_hal_boundary}
+use compiler.mir.mir_types.{MirConstant}
 
-# Return-type classification probe (E-SFFI-016, 2026-08-24). Default OFF.
-#
-# `E-SFFI-016: missing return in non-unit function 'main'` fires on a
-# self-compiled Stage 2 for `fn main():`, which IS unit. The guard's error
-# branch is reachable only when `return_type.kind != MirTypeKind.Unit`, so the
-# guard is correct by construction and the fault is upstream of it -- but three
-# candidates remain and nothing so far separates them:
-#   (a) the HIR return type is not Unit    -> classification is wrong in HIR
-#   (b) HIR is Unit but `lower_type` is not -> MIR lowering drops it
-#   (c) both ARE Unit but `==` answers false -> enum-identity comparison, the
-#       same family as the rest of this cluster
-# Printing the raw discriminants of both sides AND the boolean the guard
-# actually branches on separates all three in one run. Discriminants are
-# hash-derived uint32s and `rt_enum_discriminant` answers -1 for a non-enum, so
-# -1 on any side is itself the finding. Retained per the log-retention policy.
-var mir_rettype_probe_state: i64 = -1
-
-# Scalar/text-only receipts for the first malformed HirTypeKind transports.
-# Do not return the enum through another helper while diagnosing an enum
-# aggregate boundary: that would add the very transport under investigation.
-val MIR_TYPE_TRANSPORT_RECEIPT_LIMIT: i64 = 16
-
-fn mir_rettype_probe_on() -> bool:
-    if mir_rettype_probe_state < 0:
-        if (_sffi_env_get("SIMPLE_MIR_RETTYPE_DEBUG") ?? "") == "1":
-            mir_rettype_probe_state = 1
-        else:
-            mir_rettype_probe_state = 0
-    mir_rettype_probe_state == 1
-
-@unsafe(reason: "raw tagged-value discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
-
-@always_inline
-fn _sffi_enum_discriminant(value: Any) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_enum_discriminant(value)
-
-@always_inline
-fn _sffi_env_get(key: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_env_get(key)
 
 # Cached [mir-optional-inner] trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_optional_inner_trace_state: i64 = -1
-var mir_optional_inner_trace_generation: i64 = -1
 
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
@@ -93,8 +50,6 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
-use compiler.mir.mir_types.{MirType}
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 
 fn mir_type_any_requires_hard_error(strictness_name: text) -> bool:
@@ -183,7 +138,6 @@ impl MirLowering:
         self.local_map = {}
         self.local_symbol_ids = []
         self.local_symbol_values = []
-        self.local_symbol_index_slots = []
         self.local_hir_type_ids = []
         self.local_hir_type_values = []
         self.local_hir_type_isolation_states = []
@@ -210,13 +164,8 @@ impl MirLowering:
 
     me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""
-        self.unsafe_depth = 0
-        # lower_function is also a production top-level entry (JIT and
-        # bootstrap helpers bypass lower_module), so it owns the same
-        # per-session trace-policy refresh.
-        self.begin_expr_trace_session()
         val trace_enabled = mir_lower_trace_enabled()
-        val bootstrap_trace = trace_enabled and (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_trace = trace_enabled and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         if trace_enabled:
             print "[mir-lower] lower_function:start {fn_.name}"
         # NOTE: This path formerly short-circuited every bootstrap function to a
@@ -227,9 +176,6 @@ impl MirLowering:
         # bootstrap_stage2_empty_mir_bodies_2026-07-05). Real HIR->MIR lowering
         # now runs for all bootstrap functions.
         self.reset_function_local_tracking()
-        self.type_transport_owner = fn_.name
-        self.type_transport_context = "signature"
-        self.type_transport_param_index = -1
         if bootstrap_trace:
             print "[mir-lower] real-lower:start {fn_.name}"
 
@@ -245,21 +191,12 @@ impl MirLowering:
         var params: [MirType] = []
         var pmi = 0
         while pmi < fn_.params.len():
-            # Materialize the array element before reading its enum-bearing
-            # `type_` field.  A self-compiled Stage 2 cannot safely lower the
-            # chained `fn_.params[pmi].type_` aggregate projection: the nested
-            # HirTypeKind arrives at lower_type as the scalar zero
-            # (`rt_enum_discriminant == -1`).  The parameter-binding loop below
-            # already uses this owner-local shape and preserves the enum tag.
-            val signature_param = fn_.params[pmi]
-            self.type_transport_context = "signature-param"
-            self.type_transport_param_index = pmi
             val lowered_param = if gpu_kernel_target == "vulkan":
-                self.lower_vulkan_kernel_param_type(signature_param)
+                self.lower_vulkan_kernel_param_type(fn_.params[pmi])
             elif gpu_kernel_target == "cuda":
-                self.lower_cuda_kernel_param_type(signature_param)
+                self.lower_cuda_kernel_param_type(fn_.params[pmi])
             else:
-                self.lower_type(signature_param.type_)
+                self.lower_type(fn_.params[pmi].type_)
             params = params.push(lowered_param)
             pmi = pmi + 1
 
@@ -280,16 +217,7 @@ impl MirLowering:
 
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-start {fn_.name}"
-        self.type_transport_context = "return"
-        self.type_transport_param_index = -1
         val return_type = self.lower_type(fn_.return_type)
-        if mir_rettype_probe_on():
-            val hir_ret_disc = _sffi_enum_discriminant(fn_.return_type.kind)
-            val hir_unit_disc = _sffi_enum_discriminant(HirTypeKind.Unit)
-            val mir_ret_disc = _sffi_enum_discriminant(return_type.kind)
-            val mir_unit_disc = _sffi_enum_discriminant(MirTypeKind.Unit)
-            val eq_answer = if return_type.kind == MirTypeKind.Unit: "true" else: "false"
-            eprint("[mir-rettype] fn=" + fn_.name + " hir_ret=" + hir_ret_disc.to_text() + " hir_unit=" + hir_unit_disc.to_text() + " mir_ret=" + mir_ret_disc.to_text() + " mir_unit=" + mir_unit_disc.to_text() + " eq_unit=" + eq_answer + " mir_ret_text=" + mir_type_probe_text(return_type) + "\n")
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-done {fn_.name}"
         if bootstrap_trace:
@@ -330,11 +258,6 @@ impl MirLowering:
             print "[mir-lower] lower_function:begin-function-done {fn_.name}"
         self.builder = bldr
 
-        # Only an executed entrypoint allocates recorder storage. Libraries and
-        # static-off builds carry neither initialization calls nor dependencies.
-        if fn_.name == "main" and self.mcdc_mode != 0:
-            self.emit_mcdc_runtime_configuration()
-
         # Map parameters to locals
         var arg_locals: Dict<i64, LocalId> = {}
         if trace_enabled:
@@ -372,7 +295,9 @@ impl MirLowering:
             self.bind_local(param_symbol_id, local)
             # Thread the real HIR parameter name onto the (nameless) MIR arg
             # local so backends render actual port names, not arg0/arg1/arg2.
-            self.builder.set_local_name(local, param.name)
+            var name_bldr = self.builder
+            name_bldr.set_local_name(local, param.name)
+            self.builder = name_bldr
             # Preserve every parameter's declared HIR type on its MIR local.
             # Receiver expressions on the flat/full-entry path can carry a
             # missing or stale inferred type; method lowering must be able to
@@ -559,8 +484,6 @@ impl MirLowering:
             print "[mir-lower] lower_function:body-start {fn_.name}"
         if bootstrap_trace:
             print "[mir-lower] real-lower:body {fn_.name}"
-        self.type_transport_context = "body"
-        self.type_transport_param_index = -1
         # Thread the declared return type into the body ONLY for `-> bool`
         # functions, so lower_block_expected can put a bare trailing `.?` in
         # bool position (see its tail_bool_position block). Deliberately not
@@ -651,38 +574,17 @@ impl MirLowering:
                 bldr2.terminate_return(nil)
         self.builder = bldr2
 
-        # Third bracket point: pending count as the function is about to be
-        # finalised. See the wrapper probes in mir_lowering_stmts.spl.
-        if mir_rettype_probe_on():
-            var pre_fin_total = 0
-            for pre_blk in self.builder.blocks:
-                pre_fin_total = pre_fin_total + pre_blk.instructions.len()
-            eprint("[mir-emit] pre-end_function fn=" + fn_.name + " pending=" + self.builder.instructions.len().to_text() + " finalized=" + pre_fin_total.to_text() + "\n")
         var bldr3 = self.builder
         if bootstrap_trace:
             print "[mir-lower] real-lower:end {fn_.name}"
         var fn_result = bldr3.end_function()
         self.builder = bldr3
-        # Other half of the emission-loss probe (see mir_lowering_stmts.spl).
-        # Compare against the builder count printed right after `lower_expr`.
-        if mir_rettype_probe_on():
-            var fn_instr_total = 0
-            for fn_blk in fn_result.blocks:
-                fn_instr_total = fn_instr_total + fn_blk.instructions.len()
-            eprint("[mir-emit] end_function fn=" + fn_.name + " blocks=" + fn_result.blocks.len().to_text() + " instr_total=" + fn_instr_total.to_text() + "\n")
         fn_result.verification_contract = fn_.verification_contract
         if bootstrap_trace:
             print "[mir-lower] real-lower:done {fn_.name}"
 
         # Propagate function-level codegen attributes from HIR.
         fn_result = self.apply_function_attr_to_mir(fn_result, resolved_function_attr)
-        if resolved_function_attr.is_rt_hal:
-            val rt_hal_operation_id = fn_.span.file + "::" + fn_.name
-            fn_result = inject_rt_hal_boundary(
-                fn_result, rt_hal_operation_id,
-                resolved_function_attr.rt_hal_compare_c,
-                resolved_function_attr.rt_hal_compare_rust
-            )
         if is_gpu_kernel:
             val gpu_selection = parse_gpu_kernel_target(gpu_target)
             fn_result.is_kernel = true
@@ -692,20 +594,16 @@ impl MirLowering:
             else:
                 gpu_selection.backend_order
 
-        # Propagate @export("C") from HIR export_attr. Do not bind the
-        # struct payload through `case Some(ea)` here: the self-hosted native
-        # lowering can preserve the Option wrapper instead of the ExportAttr
-        # payload, then dereference an invalid field offset after HIR (bug
-        # stage3_backend_segfault_after_hir_gpu_dynload_2026_08_25). Presence
-        # plus typed coalesce is the established compiled-safe struct-optional
-        # form used by the return path above.
-        if fn_.export_attr.?:
-            val ea = fn_.export_attr ?? ExportAttr(is_export_c: false, export_name: "")
-            if ea.is_export_c:
-                fn_result.is_export_c = true
-                # Fresh copy, same MIR-owns-its-names rule as mir_fn_name
-                # above (hazard 4).
-                fn_result.export_name = ea.export_name + ""
+        # Propagate @export("C") from HIR export_attr
+        match fn_.export_attr:
+            case Some(ea):
+                if ea.is_export_c:
+                    fn_result.is_export_c = true
+                    # Fresh copy, same MIR-owns-its-names rule as mir_fn_name
+                    # above (hazard 4).
+                    fn_result.export_name = ea.export_name + ""
+            case None:
+                ()
 
         # Propagate @driver/@native_lib manifest metadata for backend registry
         # synthesis and manifest emission.
@@ -718,16 +616,15 @@ impl MirLowering:
             fn_result.has_vhdl_metadata = true
             fn_result.vhdl_metadata = fn_.vhdl_metadata
 
-        self.unsafe_depth = 0
         fn_result
 
     me lower_vulkan_kernel_param_type(param: HirParam) -> MirType:
         """Lower source array parameters to Vulkan's storage-buffer ABI."""
         val kind = param.type_.kind
-        val kind_disc = _sffi_enum_discriminant(kind)
-        val array_disc = _sffi_enum_discriminant(HirTypeKind.Array(param.type_, nil))
-        val slice_disc = _sffi_enum_discriminant(HirTypeKind.Slice(param.type_))
-        val int_disc = _sffi_enum_discriminant(HirTypeKind.Int(32, false))
+        val kind_disc = rt_enum_discriminant(kind)
+        val array_disc = rt_enum_discriminant(HirTypeKind.Array(param.type_, nil))
+        val slice_disc = rt_enum_discriminant(HirTypeKind.Slice(param.type_))
+        val int_disc = rt_enum_discriminant(HirTypeKind.Int(32, false))
         if kind_disc == array_disc or kind_disc == slice_disc:
             var element = param.type_
             if kind_disc == array_disc:
@@ -758,9 +655,9 @@ impl MirLowering:
     me lower_cuda_kernel_param_type(param: HirParam) -> MirType:
         """Lower source array parameters to CUDA's global-pointer ABI."""
         val kind = param.type_.kind
-        val kind_disc = _sffi_enum_discriminant(kind)
-        val array_disc = _sffi_enum_discriminant(HirTypeKind.Array(param.type_, nil))
-        val slice_disc = _sffi_enum_discriminant(HirTypeKind.Slice(param.type_))
+        val kind_disc = rt_enum_discriminant(kind)
+        val array_disc = rt_enum_discriminant(HirTypeKind.Array(param.type_, nil))
+        val slice_disc = rt_enum_discriminant(HirTypeKind.Slice(param.type_))
         if kind_disc == array_disc or kind_disc == slice_disc:
             var element = param.type_
             if kind_disc == array_disc:
@@ -837,7 +734,6 @@ impl MirLowering:
             var module = bldr.module
             var constants = module.constants
             constants[const_.symbol] = mir_const
-            self.global_constants_by_id[sym_id_always] = mir_const
             module.constants = constants
             bldr.module = module
             self.builder = bldr
@@ -862,37 +758,19 @@ impl MirLowering:
             # function body sees the full set.
 
     me lower_type(type_: HirType) -> MirType:
-
-        # HirTypeKind liveness probe: -1 is rt_enum_discriminant's NOT-AN-ENUM
-
-        # sentinel. `E-MIR-TYPE-Unknown: ... disc=-1` fires on a self-compiled
-
-        # Stage 2 and never interpreted, and the codec blocker `no `HirTypeKind`
-
-        # arm for tag -1` is the same enum reaching a different consumer in the
-
-        # same state. Logging the disc at EVERY lower_type entry shows whether a
-
-        # HirTypeKind arrives dead or dies partway down a nested type, which need
-
-        # different fixes. Default OFF.
-
-        if mir_rettype_probe_on():
-
-            eprint("[mir-lower-type-entry] disc=" + _sffi_enum_discriminant(type_.kind).to_text() + "\n")
         """Lower HIR type to MIR type."""
         if type_ == nil:
             self.error_fatal("missing HIR type during MIR lowering", nil)
             return MirType(kind: MirTypeKind.I64)
-        val dict_type_disc = _sffi_enum_discriminant(HirTypeKind.Dict(type_, type_))
-        if _sffi_enum_discriminant(type_.kind) == dict_type_disc:
+        val dict_type_disc = rt_enum_discriminant(HirTypeKind.Dict(type_, type_))
+        if rt_enum_discriminant(type_.kind) == dict_type_disc:
             match type_.kind:
                 case HirTypeKind.Dict(key, value):
                     return MirType(kind: MirTypeKind.Dict(self.lower_type(key), self.lower_type(value)))
                 case _:
                     self.type_payload_decode_failed("HirTypeKind.Dict", type_.span)
-        val named_type_disc = _sffi_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
-        if _sffi_enum_discriminant(type_.kind) == named_type_disc:
+        val named_type_disc = rt_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
+        if rt_enum_discriminant(type_.kind) == named_type_disc:
             match type_.kind:
                 case HirTypeKind.Named(symbol, _):
                     val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
@@ -909,23 +787,23 @@ impl MirLowering:
         # A bare flat-protocol Option has no recoverable inner tag and is
         # intentionally represented by HIR as Optional(Any). Any is the
         # compiler's existing pointer-width type-erasure slot at MIR level.
-        val any_type_disc = _sffi_enum_discriminant(HirTypeKind.Any)
-        if _sffi_enum_discriminant(type_.kind) == any_type_disc:
+        val any_type_disc = rt_enum_discriminant(HirTypeKind.Any)
+        if rt_enum_discriminant(type_.kind) == any_type_disc:
             return MirType.i64()
         # Stage3's broad HirTypeKind match can fail to recognize Optional when
         # overlapping enum variant names are present in MIR scope. Mirror the
         # proven Dict predispatch above: discriminate first, then extract the
         # payload in an isolated owner-qualified match.
-        val optional_type_disc = _sffi_enum_discriminant(HirTypeKind.Optional(type_))
-        if _sffi_enum_discriminant(type_.kind) == optional_type_disc:
+        val optional_type_disc = rt_enum_discriminant(HirTypeKind.Optional(type_))
+        if rt_enum_discriminant(type_.kind) == optional_type_disc:
             match type_.kind:
                 case HirTypeKind.Optional(inner):
-                    val inner_actual_disc = _sffi_enum_discriminant(inner.kind)
-                    val inner_named_disc = _sffi_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
-                    val inner_infer_disc = _sffi_enum_discriminant(HirTypeKind.Infer(0, 0))
-                    val inner_error_disc = _sffi_enum_discriminant(HirTypeKind.Error)
-                    val inner_str_disc = _sffi_enum_discriminant(HirTypeKind.Str)
-                    val inner_any_disc = _sffi_enum_discriminant(HirTypeKind.Any)
+                    val inner_actual_disc = rt_enum_discriminant(inner.kind)
+                    val inner_named_disc = rt_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
+                    val inner_infer_disc = rt_enum_discriminant(HirTypeKind.Infer(0, 0))
+                    val inner_error_disc = rt_enum_discriminant(HirTypeKind.Error)
+                    val inner_str_disc = rt_enum_discriminant(HirTypeKind.Str)
+                    val inner_any_disc = rt_enum_discriminant(HirTypeKind.Any)
                     var inner_symbol_id: i64 = -1
                     if inner_actual_disc == inner_named_disc:
                         match inner.kind:
@@ -933,13 +811,11 @@ impl MirLowering:
                                 inner_symbol_id = self.symbol_id_value(inner_symbol)
                             case _:
                                 self.type_payload_decode_failed("HirTypeKind.Named", inner.span)
-                    val trace_generation = mir_trace_generation()
-                    if mir_optional_inner_trace_generation != trace_generation:
+                    if mir_optional_inner_trace_state < 0:
                         if mir_trace_enabled():
                             mir_optional_inner_trace_state = 1
                         else:
                             mir_optional_inner_trace_state = 0
-                        mir_optional_inner_trace_generation = trace_generation
                     if mir_optional_inner_trace_state == 1:
                         eprint("[mir-optional-inner] actual={inner_actual_disc} named={inner_named_disc} infer={inner_infer_disc} error={inner_error_disc} str={inner_str_disc} any={inner_any_disc} symbol={inner_symbol_id}\n")
                     return MirType(kind: MirTypeKind.Tuple([
@@ -1111,15 +987,7 @@ impl MirLowering:
         HirTypeKind variants. Exists only because the seed compiler demands a
         trailing match arm.
         """
-        # This arm means the transported HirType is already malformed. Do not
-        # inspect its kind payload or span here: either projection can turn a
-        # useful fail-closed diagnostic into a null/low-tag dereference.
-        if self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT:
-            self.type_transport_receipts = self.type_transport_receipts + 1
-            eprint("[mir-type-transport] receipt=" + self.type_transport_receipts.to_text() + "/" + MIR_TYPE_TRANSPORT_RECEIPT_LIMIT.to_text() + " owner=" + self.type_transport_owner + " context=" + self.type_transport_context + " param_index=" + self.type_transport_param_index.to_text() + " malformed_hir_type\n")
-            # One retained fatal per receipt keeps the build failed without
-            # allocating an unbounded MirError vector on systemic corruption.
-            self.error_fatal("E-MIR-TYPE-Unknown: malformed HirTypeKind transport", nil)
+        self.error_fatal("E-MIR-TYPE-Unknown: unreachable HirTypeKind disc={rt_enum_discriminant(type_.kind)}: {type_.kind}", Some(type_.span))
         MirType.i64()
 
     me lower_block(block: HirBlock) -> LocalId?:
@@ -1134,7 +1002,7 @@ impl MirLowering:
         # (and the .unwrap() on a struct optional, which also fails interp-side).
         val block_stmts = block.stmts
         val trace_enabled = mir_lower_trace_enabled()
-        val bootstrap_trace = trace_enabled and (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_trace = trace_enabled and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         if trace_enabled:
             print "[mir-lower] block:start stmts={block_stmts.len()} has={block.has}"
         if bootstrap_trace:
@@ -1432,7 +1300,7 @@ impl MirLowering:
                         return named_idx
                     named_idx = named_idx + 1
 
-        if (_sffi_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+        if (rt_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
             print "[field-idx-fallback0] field={field_name} base_local={base_local.id} in_svs={self.struct_value_syms.contains(base_local.id)}"
         0  # Default fallback when type is unknown
 

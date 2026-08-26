@@ -173,16 +173,8 @@ pub(crate) fn handle_functional_update(
 
 /// Array methods that mutate and should update the binding
 /// Note: sort, sorted, reverse, reversed, concat all return NEW arrays and are NOT mutating
-const ARRAY_MUTATING_METHODS: &[&str] = &[
-    "append",
-    "push",
-    "pop",
-    "insert",
-    "remove",
-    "extend",
-    "clear",
-    "write_span",
-];
+const ARRAY_MUTATING_METHODS: &[&str] =
+    &["append", "push", "pop", "insert", "remove", "extend", "clear", "write_span"];
 
 /// Apply an array mutating method to a `&mut Vec<Value>` in place.
 ///
@@ -301,16 +293,7 @@ pub(crate) fn try_field_array_mutation_in_place(
     }
 
     let item = match method {
-        "push" | "append" => Some(eval_arg(
-            args,
-            0,
-            Value::Nil,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?),
+        "push" | "append" => Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?),
         "extend" => Some(eval_arg(
             args,
             0,
@@ -325,38 +308,11 @@ pub(crate) fn try_field_array_mutation_in_place(
     };
     let (idx, second) = match method {
         "insert" => (
-            Some(eval_arg_usize(
-                args,
-                0,
-                0,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?),
-            Some(eval_arg(
-                args,
-                1,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?),
+            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
+            Some(eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?),
         ),
         "remove" => (
-            Some(eval_arg_usize(
-                args,
-                0,
-                0,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?),
+            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
             None,
         ),
         _ => (None, None),
@@ -415,9 +371,6 @@ pub(crate) fn handle_method_call_with_self_update(
             return Ok(out);
         }
         sync_flat_global(name.as_str(), new_value);
-        if env.scope_released() {
-            env.refresh_scope(crate::interpreter::owned_globals_snapshot());
-        }
     }
     Ok(out)
 }
@@ -447,35 +400,6 @@ fn sync_flat_global(name: &str, value: &Value) {
     if let Some(owner) = owner {
         crate::interpreter::set_owned_global(&owner, name, value.clone(), false);
     }
-}
-
-/// Park the global stores' copies of a module-global array and drop the frame's
-/// store snapshot so the frame's Arc becomes uniquely owned before an in-place
-/// mutation. Returns whether anything was parked; the caller MUST follow with
-/// `sync_flat_global` + `refresh_scope` (normal path via
-/// `handle_method_call_with_self_update`, error path explicitly).
-fn release_global_aliases(name: &str, env: &mut Env) -> bool {
-    if env.is_local(name) {
-        return false;
-    }
-    let present = crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
-    if !present {
-        return false;
-    }
-    // Promote the binding into the frame overlay FIRST: once the snapshot is
-    // gone the name is no longer resolvable through the scope.
-    if env.get_mut(name).is_none() {
-        return false;
-    }
-    env.release_scope();
-    crate::interpreter::MODULE_GLOBALS.with(|cell| {
-        cell.borrow_mut().insert(name.to_string(), Value::Nil);
-    });
-    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
-    if let Some(owner) = owner {
-        crate::interpreter::set_owned_global(&owner, name, Value::Nil, false);
-    }
-    true
 }
 
 fn handle_method_call_with_self_update_inner(
@@ -621,9 +545,7 @@ fn handle_method_call_with_self_update_inner(
                 // The generic path below cloned the field, so every dict write inside
                 // the callee deep-copied that dict (linear in the symbol table).
                 let owned_field_call = match env.get(parent_name) {
-                    Some(Value::Object {
-                        fields: parent_fields, ..
-                    }) => match parent_fields.get(field) {
+                    Some(Value::Object { fields: parent_fields, .. }) => match parent_fields.get(field) {
                         Some(Value::Object { class: field_class, .. }) => {
                             object_method_exists(classes, impl_methods, field_class, method)
                         }
@@ -634,9 +556,7 @@ fn handle_method_call_with_self_update_inner(
                 if owned_field_call {
                     let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                     let taken = match env.get_mut(parent_name) {
-                        Some(Value::Object {
-                            fields: parent_fields, ..
-                        }) => Arc::make_mut(parent_fields).remove(field),
+                        Some(Value::Object { fields: parent_fields, .. }) => Arc::make_mut(parent_fields).remove(field),
                         _ => None,
                     };
                     if let Some(Value::Object {
@@ -659,10 +579,7 @@ fn handle_method_call_with_self_update_inner(
                             Some(pair) => pair,
                             None => unreachable!("object_method_exists checked before the field was taken"),
                         };
-                        if let Some(Value::Object {
-                            fields: parent_fields, ..
-                        }) = env.get_mut(parent_name)
-                        {
+                        if let Some(Value::Object { fields: parent_fields, .. }) = env.get_mut(parent_name) {
                             Arc::make_mut(parent_fields).insert(field.clone(), updated_field);
                         }
                         if let Some(updated_parent) = env.get(parent_name).cloned() {
@@ -944,14 +861,7 @@ fn handle_method_call_with_self_update_inner(
                 }
             }
             // Handle Object mutations for MODULE_GLOBALS variables (not in local env)
-            // Only an Object is used below. Cloning whatever the flat map holds
-            // kept a second reference to a global ARRAY alive across the in-place
-            // mutation branch, so `Arc::make_mut` deep-copied it on every push
-            // (doc/08_tracking/bug/seed_global_array_push_cow_per_frame_2026-08-22.md).
-            let global_obj = MODULE_GLOBALS.with(|cell| match cell.borrow().get(obj_name) {
-                Some(obj @ Value::Object { .. }) => Some(obj.clone()),
-                _ => None,
-            });
+            let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
             if let Some(Value::Object { class, fields }) = global_obj {
                 if let Some((result, updated_self)) = find_and_exec_method_with_self(
                     method,
@@ -970,25 +880,6 @@ fn handle_method_call_with_self_update_inner(
                 }
             }
             // Handle Array mutations for mutating methods
-            // A module-global array that is not yet visible through this frame's
-            // env (first mutation from a helper fn: `expr_tag.push(..)` in
-            // `expr_alloc`) used to fall through to the generic path, which
-            // clones the receiver and therefore the whole Vec on EVERY call.
-            // Promote the store's handle into the overlay (one Arc clone) so the
-            // ownership-gated in-place path below applies; the generic path's own
-            // write-back (`calls.rs`) ends in exactly this overlay state anyway.
-            if env.get(obj_name).is_none()
-                && !env.is_local(obj_name)
-                && ARRAY_MUTATING_METHODS.contains(&method.as_str())
-            {
-                let global_arr = MODULE_GLOBALS.with(|cell| match cell.borrow().get(obj_name) {
-                    Some(v @ Value::Array(_)) => Some(v.clone()),
-                    _ => None,
-                });
-                if let Some(v) = global_arr {
-                    env.insert(obj_name.clone(), v);
-                }
-            }
             if let Some(Value::Array(_)) = env.get(obj_name) {
                 if ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
                     // Check if variable is mutable
@@ -1015,7 +906,8 @@ fn handle_method_call_with_self_update_inner(
                     // gives the documented memmove-style overlap semantics (the src Value is
                     // a pre-copy snapshot). Expression result is the COUNT WRITTEN.
                     if method.as_str() == "write_span" {
-                        let src = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                        let src =
+                            eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
                         let mut ints = [-1i64, -1, 0];
                         for (slot, (arg_i, dflt)) in ints.iter_mut().zip([(1usize, -1i64), (2, -1), (3, 0)]) {
                             *slot = match args.get(arg_i) {
@@ -1151,14 +1043,6 @@ fn handle_method_call_with_self_update_inner(
                     // semantics (index and RHS operands are likewise evaluated before the ownership
                     // check there). Not a regression to fix; documented so a future reader doesn't
                     // mistake it for an oversight.
-                    // A MODULE-GLOBAL receiver is aliased by the two global stores
-                    // (`MODULE_GLOBALS` and the owner's live store), so `Arc::make_mut`
-                    // below deep-copied the whole Vec on EVERY `g.push(x)` from inside a
-                    // function. Park the stores' copies (Nil) and drop the frame snapshot
-                    // so the frame's Arc is unique; the caller's write-through
-                    // (`sync_flat_global`) re-publishes the mutated Arc. On error the
-                    // stores are restored from the frame value, so nothing is lost.
-                    let released = release_global_aliases(obj_name, env);
                     if let Some(Value::Array(arc)) = env.get_mut(obj_name) {
                         crate::perf_counters::bump(&crate::perf_counters::ARR_MUT_CALLS, 1);
                         if crate::perf_counters::enabled() && Arc::strong_count(arc) > 1 {
@@ -1167,49 +1051,10 @@ fn handle_method_call_with_self_update_inner(
                                 &crate::perf_counters::ARR_MUT_COW_ELEMS_CLONED,
                                 arc.len() as u64,
                             );
-                            crate::perf_counters::trace_array("arr_mut_cow", obj_name, arc.len());
-                            if crate::perf_counters::trace_min_len() > 0 {
-                                let mut where_ = Vec::new();
-                                crate::interpreter::MODULE_GLOBALS.with(|c| {
-                                    for (k, v) in c.borrow().iter() {
-                                        if let Value::Array(o) = v {
-                                            if Arc::ptr_eq(o, arc) {
-                                                where_.push(format!("flat:{k}"));
-                                            }
-                                        }
-                                    }
-                                });
-                                crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|c| {
-                                    for (ow, g) in c.borrow().iter() {
-                                        for (k, v) in g.iter() {
-                                            if let Value::Array(o) = v {
-                                                if Arc::ptr_eq(o, arc) {
-                                                    where_.push(format!("owned:{ow}::{k}"));
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
-                                eprintln!(
-                                    "[perf-trace] arr_mut_cow_pins name={obj_name} rc={} store_pins={:?}",
-                                    Arc::strong_count(arc),
-                                    where_
-                                );
-                            }
                         }
                         let popped = {
                             let vec = Arc::make_mut(arc);
-                            match apply_array_mutation_in_place(m, vec, item, idx, second) {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    if released {
-                                        let cur = Value::Array(Arc::clone(arc));
-                                        sync_flat_global(obj_name, &cur);
-                                        env.refresh_scope(crate::interpreter::owned_globals_snapshot());
-                                    }
-                                    return Err(e);
-                                }
-                            }
+                            apply_array_mutation_in_place(m, vec, item, idx, second)?
                         };
                         // Hand the (already-mutated) Arc back as both the binding update and, for
                         // non-`pop` methods, the expression result — an O(1) refcount bump, not a copy.
@@ -1448,8 +1293,7 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
             // Only track names that are not module globals (the collision case is
             // legitimately mutable and enforced by the compiler's semantic phase).
             if !is_mutable && !MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
-                crate::interpreter::const_trace("patterns:val-insert", name);
-                CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+                crate::interpreter::const_trace("patterns:val-insert", name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
             } else if is_mutable {
                 // CONST_NAMES has function lifetime with no block scoping, so a
                 // `val x` executed in one branch would leave `x` const-poisoned
@@ -1457,14 +1301,12 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
                 // (e.g. layout()'s absolute-child `val child_styles` vs the flex
                 // main loop's `var child_styles`). A mutable re-declaration must
                 // clear the stale entry.
-                crate::interpreter::const_trace("patterns:remove", name);
-                CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
+                crate::interpreter::const_trace("patterns:remove", name); CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
             }
         }
         Pattern::MutIdentifier(name) => {
             env.insert(name.clone(), val);
-            crate::interpreter::const_trace("patterns:remove", name);
-            CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
+            crate::interpreter::const_trace("patterns:remove", name); CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
         }
         Pattern::MoveIdentifier(name) => {
             // Move pattern - transfers ownership
@@ -1719,11 +1561,7 @@ mod cow_alias_mechanism_tests {
             generic_args: vec![],
         };
         let (result, _) = run(&pop, &mut env);
-        assert!(
-            matches!(result, Value::Int(9)),
-            "pop must return the element, got {:?}",
-            result
-        );
+        assert!(matches!(result, Value::Int(9)), "pop must return the element, got {:?}", result);
         assert_eq!(arr_len(field_of(&env, "o", "xs")), 2, "pop must shrink the field array");
     }
 }

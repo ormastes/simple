@@ -165,7 +165,7 @@ RenderExecutionReceiptV1 {
 }
 ```
 
-HTML-backed UI PASS requires a structured input/action/semantic-target/output trace correlated to the generation; a screenshot alone is never interaction evidence. Claims of exact pixels require exact readback hashes. GPU/device claims require non-synthetic physical device and driver provenance. Profiles that require RenderDoc must include a parseable capture whose frame/generation markers match the receipt.
+HTML-backed UI PASS requires a structured input/action/semantic-target/output trace correlated to the generation; a screenshot alone is never interaction evidence. Claims of exact pixels require exact readback hashes. GPU/device claims require non-synthetic physical device and driver provenance. The mission-critical rendering profile requires the fixed lane set `wm,gui,web,engine2d`. Each lane supplies a distinct hashed RDOC artifact and replay transcript; replay must open, identify the Vulkan backend, and bind the same admitted generation. A single generic capture cannot satisfy multiple lanes. Headless WM also supplies a separate live QMP screendump receipt from the digest-pinned, non-root QEMU/virgl container. That receipt binds the image ID, compatibility-module SHA-256, render node, guest pixel hash/counts, and source/configuration identity; it cannot satisfy any RDOC lane by itself.
 
 ### 2.6 `RelaxedAllocationProfileV1`
 

@@ -51,7 +51,7 @@ use os.kernel.scheduler.scheduler_types.{
     _address_space_can_map, _scheduler_uses_direct_load_arena, _scheduler_mapped_entry,
     _map_user_process_image, _initial_user_task_context,
     Scheduler, SchedulerExecutableAdoptionOwnerStateV1,
-    scheduler_next_task_lifecycle_identity_take_v1
+    scheduler_next_task_id_take
 }
 use os.kernel.scheduler.green_carrier.{green_carrier_execution_state_new, green_carrier_parallelism_new}
 use os.kernel.scheduler.scheduler_task_mgmt.{
@@ -60,21 +60,6 @@ use os.kernel.scheduler.scheduler_task_mgmt.{
 }
 
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
-use os.kernel.types.arm32_mapping_handle_v1.{
-    scheduler_arm32_mapping_handle_absent_v1,
-    scheduler_arm32_mapping_handle_present_v1
-}
-use os.kernel.types.riscv32_mapping_handle_v1.{
-    scheduler_riscv32_mapping_handle_absent_v1,
-    scheduler_riscv32_mapping_handle_present_v1
-}
-use os.kernel.types.x86_32_mapping_handle_v1.{
-    scheduler_x86_32_mapping_handle_absent_v1,
-    scheduler_x86_32_mapping_handle_present_v1
-}
-use os.kernel.scheduler.server_data_launch_grant_registry.{
-    server_data_launch_grant_revoke_task_lifecycle_v1
-}
 use os.kernel.ipc.capability.{register_task_vmspace}
 
 @cfg(arm64)
@@ -165,7 +150,6 @@ pub fn sched_new_with_topology_impl(detected_topology: SchedulerTopology) -> Sch
     Scheduler(
         tasks: tasks,
         current: TaskId(id: 0),
-        current_slot: -1,
         current_by_cpu: current_by_cpu,
         preempt_pending_by_cpu: preempt_pending_by_cpu,
         ready_queues: queues,
@@ -242,26 +226,17 @@ pub fn sched_create_user_task_pid_impl(
             destroy_user_address_space(user_as)
             return (0, tasks, -1)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
-    if maybe_identity == nil:
-        destroy_user_address_space(user_as)
-        return (0u64, tasks, -1)
-    val identity = maybe_identity.unwrap()
-    val user_next_id = identity.task_id
+    val user_next_id = scheduler_next_task_id_take()
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, lifecycle_generation: identity.lifecycle_generation, name: "user-{id.id}",
+        id: id, name: "user-{id.id}",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
         capabilities: caps, parent: Some(current),
         schedule: default_task_schedule(priority),
         isolation: default_task_isolation(user_as.id),
-        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
-        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
-        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
-        exec_generation: 1u64
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
     )
     var new_tasks = tasks
     new_tasks[slot] = tcb
@@ -338,26 +313,17 @@ pub fn sched_create_user_task_from_bytes_pid_impl(
             destroy_user_address_space(user_as)
             return (0, tasks, -1)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
-    if maybe_identity == nil:
-        destroy_user_address_space(user_as)
-        return (0u64, tasks, -1)
-    val identity = maybe_identity.unwrap()
-    val user_next_id = identity.task_id
+    val user_next_id = scheduler_next_task_id_take()
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, lifecycle_generation: identity.lifecycle_generation, name: "user-{id.id}",
+        id: id, name: "user-{id.id}",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
         capabilities: caps, parent: Some(current),
         schedule: default_task_schedule(priority),
         isolation: default_task_isolation(user_as.id),
-        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
-        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
-        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
-        exec_generation: 1u64
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
     )
     var new_tasks = tasks
     new_tasks[slot] = tcb
@@ -399,26 +365,17 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
             destroy_user_address_space(user_as)
             return (0, tasks)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
-    if maybe_identity == nil:
-        destroy_user_address_space(user_as)
-        return (0u64, tasks)
-    val identity = maybe_identity.unwrap()
-    val user_next_id = identity.task_id
+    val user_next_id = scheduler_next_task_id_take()
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, lifecycle_generation: identity.lifecycle_generation, name: "bootstrap-user",
+        id: id, name: "bootstrap-user",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
         capabilities: caps, parent: nil,
         schedule: default_task_schedule(priority),
         isolation: default_task_isolation(user_as.id),
-        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
-        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
-        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
-        exec_generation: 1u64
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
     )
     var new_tasks = tasks
     new_tasks[0] = tcb
@@ -443,14 +400,10 @@ pub fn sched_clone_task_impl(
     if parent_tcb == nil:
         return (TaskId(id: 0), tasks, -1)
     val parent = parent_tcb
+    val child_id = TaskId(id: scheduler_next_task_id_take())
     val child_slot = _find_empty_slot_in(tasks)
     if child_slot < 0:
         return (TaskId(id: 0), tasks, -1)
-    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
-    if maybe_identity == nil:
-        return (TaskId(id: 0u64), tasks, -1)
-    val identity = maybe_identity.unwrap()
-    val child_id = TaskId(id: identity.task_id)
     val child_as = if parent.address_space == 0 or parent.address_space == 1:
         parent.address_space
     else:
@@ -467,19 +420,13 @@ pub fn sched_clone_task_impl(
         user_ctx.rax = 0
         child_user_ctx = Some(user_ctx)
     val child = TaskControlBlock(
-        id: child_id, lifecycle_generation: identity.lifecycle_generation, name: "{parent.name}:fork",
+        id: child_id, name: "{parent.name}:fork",
         state: TaskState.Ready, priority: parent.priority, is_user: parent.is_user,
         entry_point: parent.entry_point, context: child_ctx, user_context: child_user_ctx,
         address_space: child_as, kernel_stack: parent.kernel_stack, user_stack: parent.user_stack,
         capabilities: parent.capabilities, parent: Some(parent_id),
         schedule: parent.schedule, isolation: default_task_isolation(child_as_id),
-        assigned_cpu: parent.assigned_cpu, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
-        # Fork cannot alias either architecture owner's destruction authority.
-        # A future 32-bit fork transaction must attach a distinct mapping.
-        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
-        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
-        exec_generation: 1u64
+        assigned_cpu: parent.assigned_cpu, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
     )
     var new_tasks = tasks
     new_tasks[child_slot] = child
@@ -506,28 +453,9 @@ pub fn sched_exec_image_impl(
     val old_task = old_tcb
     val is_zombie = match old_task.state:
         case TaskState.Zombie: true
-        case TaskState.PreparingExit: true
         case _: false
     if is_zombie:
         return (-22, tasks)
-    if old_task.exec_generation == 0u64 or
-        old_task.exec_generation == 0xFFFFFFFFFFFFFFFFu64 or
-        old_task.isolation.capability_generation == 0u64 or
-        old_task.isolation.capability_generation == 0xFFFFFFFFFFFFFFFFu64:
-        return (-75, tasks)
-    # Replacing an owned ARM32 image requires a two-mapping commit.  Reject
-    # before grant, vmspace, or address-space side effects until that owner
-    # transaction exists.
-    if scheduler_arm32_mapping_handle_present_v1(old_task.arm32_mapping_handle):
-        return (-16, tasks)
-    # The RV32 mapper and registry must replace their pinned image atomically;
-    # the legacy exec path has no such transaction and therefore fails closed.
-    if scheduler_riscv32_mapping_handle_present_v1(old_task.riscv32_mapping_handle):
-        return (-16, tasks)
-    # The authenticated x86-32 mapper must atomically replace its retained
-    # root lease. The legacy exec path cannot consume that owner transaction.
-    if scheduler_x86_32_mapping_handle_present_v1(old_task.x86_32_mapping_handle):
-        return (-16, tasks)
     val entry = user_process_image_entry(image)
     val stack_top = user_process_image_stack_top(image)
     val stack_size = user_process_image_stack_size(image)
@@ -553,17 +481,11 @@ pub fn sched_exec_image_impl(
             destroy_user_address_space(new_as)
             return (-12, tasks)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    if not server_data_launch_grant_revoke_task_lifecycle_v1(
-        old_task.id.id, old_task.lifecycle_generation):
-        destroy_user_address_space(new_as)
-        return (-5, tasks)
     sched_release_task_address_space(old_task)
     var new_isolation = old_task.isolation
     new_isolation.address_space_id = new_as.id
     new_isolation.capability_generation = new_isolation.capability_generation + 1
     var task = old_task
-    # Exec replaces the image, not the task lifetime. Keep the scheduler-owned
-    # identity stable while image-scoped grants and address-space state rotate.
     task.is_user = true
     task.entry_point = mapped_entry
     task.context = user_ctx
@@ -573,7 +495,6 @@ pub fn sched_exec_image_impl(
     task.isolation = new_isolation
     task.exit_code = 0
     task.ticks_remaining = TIME_SLICE_TICKS
-    task.exec_generation = task.exec_generation + 1u64
     var new_tasks = tasks
     new_tasks[slot] = task
     register_task_vmspace(task.id.id.to_u32(), ProcessVmSpace(pml4: new_as.phys_root, id: new_as.id, vma_count: 0, areas: []))

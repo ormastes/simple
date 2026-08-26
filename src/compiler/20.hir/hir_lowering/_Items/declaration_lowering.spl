@@ -4,7 +4,6 @@
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
-use compiler.hir.hir_lowering._Items.lowering_helpers.{bootstrap_hir_symbol_for_name, bootstrap_hir_symbol_known_name, platform_attr_fields_for, function_params}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem}
@@ -116,7 +115,7 @@ impl HirLowering:
                 self.bootstrap_hir_type_from_tag(param_types[pi])
             else:
                 HirType(kind: HirTypeKind.Infer(0, 0), span: span)
-            val p_sym = self.symbols.define(p_name, SymbolKind.Parameter, p_type, span, Visibility.Private, false, nil)
+            val p_sym = self.symbols.define(p_name, SymbolKind.Parameter, Some(p_type), span, Visibility.Private, false, nil)
             params.push(HirParam(symbol: p_sym, name: p_name, type_: p_type, has_default: false, default: HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span, is_mutable: false))
             pi = pi + 1
         val body_ids = decl_get_body(decl_idx)
@@ -215,7 +214,7 @@ impl HirLowering:
         var fn_fallback_type: HirType? = nil
         if fn_.is_static:
             if val owner_type = self.current_method_self_type:
-                fn_fallback_type = self.declared_callable_type(fn_, nil)
+                fn_fallback_type = Some(self.declared_callable_type(fn_, nil))
         # The bare-name bootstrap fast path below owns ONLY the compiler's own
         # fixed set of top-level CLI entry functions (bootstrap_version,
         # main, ...) -- bootstrap_hir_symbol_known_name is that same fixed
@@ -347,7 +346,7 @@ impl HirLowering:
                     needs_implicit_self = true
         if needs_implicit_self:
             val self_type = implicit_self_type
-            val self_symbol = self.symbols.define("self", SymbolKind.Parameter, self_type, fn_.span, Visibility.Private, false, nil)
+            val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
             params = params.push(HirParam(
                 symbol: self_symbol,
                 name: "self",
@@ -568,28 +567,18 @@ impl HirLowering:
         for tp in struct_type_params:
             type_params = type_params.push(self.lower_type_param(tp))
 
-        # #158 Phase C (extended to structs 2026-08-23): a generic struct is a
-        # non-emittable TEMPLATE, not an error at its declaration site
-        # (hardening plan 9.3 step 12) -- exactly the rule already applied to a
-        # generic CLASS in class_declaration_lowering.spl and to a generic
-        # IMPL in trait_impl_lowering. It is recorded as `is_generic_template`
-        # below and never emitted.
-        #
-        # The old Phase A fatal's reasoning (a `T`-typed field degrades to an
-        # opaque pointer-width slot at MIR, truncating a fat value) is about
-        # EMITTING an unmonomorphized template. That risk is unchanged and is
-        # still fenced -- but at the USE site, where it belongs: a reachable
-        # instantiation fails loudly as an unrewritten generic call in 40.mono
-        # (E-MONO-030/032, then E-MONO-033 refuses MIR lowering) and as
-        # HWIR-E-GENERIC in strict MIR. Declaring a template nobody
-        # instantiates is not a defect; emitting one is.
-        #
-        # Enumerated, not assumed (the 43ead88be55 precedent): `grep -rn
-        # '^struct <Name><'` over src/compiler, src/runtime and src/app/cli
-        # returns ZERO generic structs, and none of the 28 that exist under
-        # src/lib (ecs, ndarray, db, storage, tooling/ds_utils, async,
-        # common/search) is imported by anything in the stage1 closure. So no
-        # stage1 instantiation exists to be silently mislowered by this change.
+        # Phase A gate (#158): a generic struct (`struct Box<T>: v: T`) is NOT
+        # monomorphized on the native build path. Its `T`-typed field never gets
+        # a concrete layout -- at MIR the field degrades to an opaque
+        # pointer-width slot, so a fat value (e.g. `text`) stored in it is
+        # truncated and read back as a garbage integer (silent wrong answer, no
+        # diagnostic). Mirrors lower_function's gate (see :198) and
+        # trait_impl_lowering's generic-method gate: loud-fail at declaration
+        # until real monomorphization lands (#158 Phase B). The bare-generic-fn
+        # and generic-method tiers were already gated; this closes the residual
+        # plain-generic-struct hole.
+        if struct_type_params.len() > 0:
+            self.error("generic structs are not supported on the native build path yet: struct '{struct_name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", struct_span)
 
         var fields: [HirField] = []
         for f in struct_fields:
@@ -645,7 +634,7 @@ impl HirLowering:
         val fld: ParserField = f
         val fld_type: Type = fld.type_
         val type_ = self.lower_type(fld_type)
-        val symbol = self.symbols.define(fld.name, SymbolKind.Field, type_, fld.span, fld.visibility, false, nil)
+        val symbol = self.symbols.define(fld.name, SymbolKind.Field, Some(type_), fld.span, fld.visibility, false, nil)
 
         # Lower default without closures to avoid bootstrap SSA issues.
         # `ParserField.default` is a DESUGARED plain Expr field gated by `has_default`

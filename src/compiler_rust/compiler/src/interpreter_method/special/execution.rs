@@ -4,8 +4,8 @@
 
 use crate::error::CompileError;
 use crate::interpreter::{
-    bind_args, captured_env_with_live_globals, execute_function_body, publish_and_repoint, sync_owned_captured_globals,
-    Enums, ImplMethods,
+    bind_args, captured_env_with_live_globals, execute_function_body, publish_and_repoint,
+    sync_owned_captured_globals, Enums, ImplMethods,
 };
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
@@ -27,11 +27,7 @@ pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_
             let cache_ref = cache.borrow();
             if let Some(class_cache) = cache_ref.get(class_name) {
                 if let Some(idx) = class_cache.get(method_name).copied() {
-                    if class_def
-                        .methods
-                        .get(idx)
-                        .is_some_and(|method| method.name == method_name)
-                    {
+                    if class_def.methods.get(idx).is_some_and(|method| method.name == method_name) {
                         return Some(idx);
                     }
                 }
@@ -191,22 +187,6 @@ pub fn find_and_exec_method_with_self_owned(
 
 /// Execute a function and return both result and modified self
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
-/// Mirror a method-argument write-back into `MODULE_GLOBALS`.
-///
-/// Identifier evaluation prefers `MODULE_GLOBALS` for non-local names
-/// (`interpreter/expr/literals.rs`), so writing only `outer_env` left a
-/// module-level `let out = []` still empty after `obj.m(out)` pushed into it.
-fn sync_module_global_writeback(name: &str, value: &Value) {
-    crate::interpreter::MODULE_GLOBALS.with(|cell| {
-        // Peek before taking the write borrow: borrow_mut() on this
-        // generation-tracked cell invalidates owned-env templates.
-        if !cell.borrow().contains_key(name) {
-            return;
-        }
-        cell.borrow_mut().insert(name.to_string(), value.clone());
-    });
-}
-
 pub fn exec_function_with_self_return(
     func: &FunctionDef,
     args: &[Argument],
@@ -268,7 +248,6 @@ pub fn exec_function_with_self_return(
                     updated_arg,
                     Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                 ) {
-                    sync_module_global_writeback(var_name, &updated_arg);
                     outer_env.insert(var_name.clone(), updated_arg);
                 }
             }
@@ -364,12 +343,6 @@ pub fn exec_function_with_self_return_values(
         },
     );
     let self_mode = simple_parser::ast::SelfMode::SkipSelf;
-    // Named arguments must be permuted into parameter order BEFORE binding:
-    // bind_args_with_values takes bare values and binds positionally, so
-    // without this `m.subtract(subtrahend=15, minuend=50)` computed 15 - 50.
-    let reordered =
-        crate::interpreter::interpreter_call::reorder_named_arg_values(&func.params, arg_vals, arg_exprs, self_mode);
-    let arg_vals: &[Value] = reordered.as_deref().unwrap_or(arg_vals);
     let bound = crate::interpreter::interpreter_call::bind_args_with_values(
         &func.params,
         arg_vals,
@@ -403,7 +376,6 @@ pub fn exec_function_with_self_return_values(
                     updated_arg,
                     Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                 ) {
-                    sync_module_global_writeback(var_name, &updated_arg);
                     outer_env.insert(var_name.clone(), updated_arg);
                 }
             }
@@ -438,16 +410,7 @@ pub fn find_and_exec_method_with_self_owned_values(
         if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
             let func = &class_def.methods[idx];
             return exec_function_with_self_return_values(
-                func,
-                arg_vals,
-                arg_exprs,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-                class,
-                fields,
+                func, arg_vals, arg_exprs, env, functions, classes, enums, impl_methods, class, fields,
             )
             .map(Some);
         }
@@ -456,16 +419,7 @@ pub fn find_and_exec_method_with_self_owned_values(
         if let Some(idx) = lookup_impl_method_index(methods, class, method) {
             let func = &methods[idx];
             return exec_function_with_self_return_values(
-                func,
-                arg_vals,
-                arg_exprs,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-                class,
-                fields,
+                func, arg_vals, arg_exprs, env, functions, classes, enums, impl_methods, class, fields,
             )
             .map(Some);
         }
@@ -484,14 +438,7 @@ pub fn evaluate_call_args(
 ) -> Result<Vec<Value>, CompileError> {
     let mut vals = Vec::with_capacity(args.len());
     for arg in args {
-        vals.push(crate::interpreter::evaluate_expr(
-            &arg.value,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?);
+        vals.push(crate::interpreter::evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
     }
     Ok(vals)
 }
@@ -529,10 +476,9 @@ mod tests {
 
     #[test]
     fn class_method_index_rebuilds_when_methods_reorder_or_shrink() {
-        let module =
-            Parser::new("class MethodIndexClassFixture:\n    fn alpha():\n        1\n\n    fn beta():\n        2\n")
-                .parse()
-                .expect("parse method-index fixture");
+        let module = Parser::new("class MethodIndexClassFixture:\n    fn alpha():\n        1\n\n    fn beta():\n        2\n")
+            .parse()
+            .expect("parse method-index fixture");
         let mut class_def = module
             .items
             .into_iter()

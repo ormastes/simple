@@ -2502,10 +2502,9 @@ fn compile_known_enum_constructor_call<M: Module>(
     let mut hasher = DefaultHasher::new();
     variant_name.hash(&mut hasher);
     let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
-    let enum_id_val = builder.ins().iconst(
-        types::I32,
-        i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
-    );
+    let enum_id_val = builder
+        .ins()
+        .iconst(types::I32, i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
     let disc_val = builder.ins().iconst(types::I32, disc);
     let payload_val = match args {
         [] => builder.ins().iconst(types::I64, 3),
@@ -2651,6 +2650,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_is_char_device"
         | "rt_file_canonicalize"
         | "rt_file_read_text"
+        | "rt_file_read_regular_no_follow_bounded"
         | "rt_file_size"
         | "rt_file_hash_sha256"
         | "rt_file_fsync"
@@ -2675,12 +2675,9 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_wrap_smf_dynlib"
         | "rt_file_extract_smf_dynlib"
         | "rt_file_create_excl" => Some(&[0, 1]),
-        "rt_hosted_safe_artifact_root_open_v1" => Some(&[0]),
-        "rt_hosted_safe_artifact_read_v1"
-        | "rt_hosted_safe_artifact_publish_v1" => Some(&[1]),
         "rt_file_write_bytes" => Some(&[0]),
-        "rt_hosted_safe_artifact_bundle_begin_v1" => Some(&[1, 2, 3, 4]),
-        "rt_hosted_safe_artifact_bundle3_begin_v1" => Some(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+        "rt_hosted_safe_artifact_bundle_begin_v1" => Some(&[0, 1, 2, 3, 4]),
+        "rt_hosted_safe_artifact_bundle_stage_scr1_v1" => Some(&[1]),
         // rt_file_open is (path_ptr, path_len, mode: i32) — descriptor.rs:19.
         "rt_file_open" => Some(&[0]),
         // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.
@@ -2889,15 +2886,9 @@ fn box_text_args<M: Module>(
     arg_vals: &[Value],
     text_indices: &[usize],
 ) -> Vec<Value> {
-    let string_data_ref = ctx
-        .module
-        .declare_func_in_func(ctx.runtime_funcs["rt_string_data"], builder.func);
-    let string_len_ref = ctx
-        .module
-        .declare_func_in_func(ctx.runtime_funcs["rt_string_len"], builder.func);
-    let string_new_ref = ctx
-        .module
-        .declare_func_in_func(ctx.runtime_funcs["rt_string_new"], builder.func);
+    let string_data_ref = ctx.module.declare_func_in_func(ctx.runtime_funcs["rt_string_data"], builder.func);
+    let string_len_ref = ctx.module.declare_func_in_func(ctx.runtime_funcs["rt_string_len"], builder.func);
+    let string_new_ref = ctx.module.declare_func_in_func(ctx.runtime_funcs["rt_string_new"], builder.func);
     arg_vals
         .iter()
         .enumerate()
@@ -3107,7 +3098,7 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "len" | "length" => Some("rt_len"),
         "to_text" | "to_string" | "str" => Some("rt_to_string"),
         "to_int" | "to_i64" => Some("rt_string_to_int"),
-        "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
+                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
         "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
         _ => None,
     }
@@ -3166,7 +3157,9 @@ pub fn compile_call<M: Module>(
     let func_name: &str = func_name_raw;
     // Handle only the true Result/Option constructors. A custom enum may use
     // the same variant leaves and must retain its qualified custom type ID.
-    let split_variant = func_name.rsplit_once("::").or_else(|| func_name.rsplit_once('.'));
+    let split_variant = func_name
+        .rsplit_once("::")
+        .or_else(|| func_name.rsplit_once('.'));
     let (enum_owner, variant_name) = split_variant
         .map(|(owner, variant)| (Some(owner), variant))
         .unwrap_or((None, func_name));

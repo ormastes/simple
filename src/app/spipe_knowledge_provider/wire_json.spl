@@ -1,0 +1,122 @@
+# Closed canonical JSON and scalar validation shared by wire modules.
+use std.common.json.object_ops.{json_object_get, json_object_keys, json_object_has}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_string, json_to_number, json_to_boolean}
+use std.common.json.serializer.{json_escape_string}
+use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
+
+fn wire_jtext(object: any, key: text) -> text:
+    val value = json_to_string(json_object_get(object, key))
+    if value == nil: "" else: value
+
+fn wire_jint(object: any, key: text, missing: i64) -> i64:
+    val value = json_to_number(json_object_get(object, key))
+    if value == nil: missing else: value as i64
+
+fn wire_jbool(object: any, key: text, missing: bool) -> bool:
+    val value = json_to_boolean(json_object_get(object, key))
+    if value == nil: missing else: value
+
+fn wire_has_exact_keys(object: any, expected: [text]) -> bool:
+    if json_get_type(object) != "object": return false
+    val keys = json_object_keys(object)
+    if keys.len() != expected.len(): return false
+    var i = 0
+    while i < expected.len():
+        if not json_object_has(object, expected[i]): return false
+        i = i + 1
+    true
+
+fn wire_valid_id(value: text) -> bool:
+    val bytes = value.bytes()
+    if bytes.len() < 1 or bytes.len() > 128 or
+            unicode_normalize_nfc(value) != value:
+        return false
+    var i = 0
+    while i < bytes.len():
+        val byte = bytes[i] as i64
+        # IdText excludes the Unicode Cc class.  JSON parsing has already
+        # established valid UTF-8, so C1 controls have the unique C2 80..9F
+        # encoding in addition to the single-byte C0/DEL ranges.
+        if byte < 32 or byte == 127:
+            return false
+        if byte == 194 and i + 1 < bytes.len():
+            val following = bytes[i + 1] as i64
+            if following >= 128 and following <= 159:
+                return false
+        i = i + 1
+    true
+
+fn wire_valid_hash(value: text) -> bool:
+    if value.len() != 71 or not value.starts_with("sha256:"): return false
+    val hex = value.slice(7, 71)
+    var i = 0
+    while i < hex.len():
+        if not "0123456789abcdef".contains(hex.slice(i, i + 1)): return false
+        i = i + 1
+    true
+
+# Provider snapshots are knowledge-compiler snapshot identities, not content
+# hashes.  Keep this alias distinct from HashText so a scope/content digest can
+# never be substituted for the immutable snapshot partition identity.
+fn wire_valid_snapshot_id(value: text) -> bool:
+    if value.len() != 70 or not value.starts_with("spks1-"): return false
+    val hex = value.slice(6, 70)
+    var i = 0
+    while i < hex.len():
+        if not "0123456789abcdef".contains(hex.slice(i, i + 1)): return false
+        i = i + 1
+    true
+
+fn wire_valid_workspace_id(value: text) -> bool:
+    wire_valid_id(value) and value.starts_with("WS-")
+
+fn wire_json_string(value: text) -> text: "\"" + json_escape_string(value) + "\""
+
+fn wire_sorted_keys(value: any) -> [text]:
+    val source = json_object_keys(value)
+    var out: [text] = []
+    var used: [bool] = []
+    var i = 0
+    while i < source.len():
+        used.push(false)
+        i = i + 1
+    var count = 0
+    while count < source.len():
+        var best = 0 - 1
+        i = 0
+        while i < source.len():
+            if not used[i] and (best < 0 or source[i] < source[best]): best = i
+            i = i + 1
+        used[best] = true
+        out.push(source[best])
+        count = count + 1
+    out
+
+fn wire_canonical_json_value(value: any) -> Result<text, text>:
+    val kind = json_get_type(value)
+    if kind == "null": return Ok("null")
+    if kind == "string": return Ok(wire_json_string(json_to_string(value)))
+    if kind == "boolean": return Ok(if json_to_boolean(value): "true" else: "false")
+    if kind == "number":
+        val number = json_to_number(value)
+        val integer = number as i64
+        if integer as f64 != number or integer < -9007199254740991 or integer > 9007199254740991:
+            return Err("noncanonical_json")
+        return Ok(integer.to_text())
+    if kind == "array":
+        var parts: [text] = []
+        var i = 0
+        while i < json_array_length(value):
+            parts.push(wire_canonical_json_value(json_array_get(value, i))?)
+            i = i + 1
+        return Ok("[" + parts.join(",") + "]")
+    if kind == "object":
+        var parts: [text] = []
+        val keys = wire_sorted_keys(value)
+        var i = 0
+        while i < keys.len():
+            parts.push(wire_json_string(keys[i]) + ":" + wire_canonical_json_value(json_object_get(value, keys[i]))?)
+            i = i + 1
+        return Ok("{" + parts.join(",") + "}")
+    Err("noncanonical_json")

@@ -1,22 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that SimpleOS guest LLVM hello-world execution evidence.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-OS-GUEST-LLVM-001
-doc/01_research/os/REQ-OS-GUEST-LLVM-001.md
-doc/03_plan/os/REQ-OS-GUEST-LLVM-001.md
-doc/04_architecture/os/REQ-OS-GUEST-LLVM-001.md
-doc/05_design/os/REQ-OS-GUEST-LLVM-001.md
-"""
-# @req: REQ-OS-GUEST-LLVM-001
-
-
 # @tag:system
 # @tag:acceptance
 # @req REQ-009 REQ-010
@@ -44,62 +25,49 @@ fn expected_for(target: text) -> GuestToolchainHelloExpectedV1:
         source_path: "/work/hello.c", source_sha256: sha256_text("source"),
         object_path: "/work/hello.o", object_sha256: sha256_text("object"),
         executable_path: "/work/hello.elf", executable_sha256: sha256_text("elf"),
-        expected_stdout: "Hello World\n")
+        expected_stdout: "hello from SimpleOS LLVM\n")
 
 fn expected() -> GuestToolchainHelloExpectedV1:
     expected_for("x86_64-unknown-simpleos")
 
-fn result_for_target(stage: ProcessExecutionStageV1, target: text) -> ProcessExecutionResultV1:
-    val want = expected_for(target)
+fn result_for(stage: ProcessExecutionStageV1) -> ProcessExecutionResultV1:
+    val want = expected()
     if stage == ProcessExecutionStageV1.ClangCompile:
         return ProcessExecutionResultV1(
-            stage: stage, target_triple: target, child_id: 101u64, parent_id: 7u64,
+            stage: stage, child_id: 101u64, parent_id: 7u64,
             executable_path: want.clang_path, executable_sha256: want.clang_sha256,
             filesystem_name: want.filesystem_name, filesystem_generation: 42u64,
             input_sha256: want.source_sha256, result_sha256: want.object_sha256,
             exit_code: 0, captured_stdout: "", captured_stderr: "")
     if stage == ProcessExecutionStageV1.LldLink:
         return ProcessExecutionResultV1(
-            stage: stage, target_triple: target, child_id: 102u64, parent_id: 7u64,
+            stage: stage, child_id: 102u64, parent_id: 7u64,
             executable_path: want.lld_path, executable_sha256: want.lld_sha256,
             filesystem_name: want.filesystem_name, filesystem_generation: 42u64,
             input_sha256: want.object_sha256, result_sha256: want.executable_sha256,
             exit_code: 0, captured_stdout: "", captured_stderr: "")
     ProcessExecutionResultV1(
-        stage: stage, target_triple: target, child_id: 103u64, parent_id: 7u64,
+        stage: stage, child_id: 103u64, parent_id: 7u64,
         executable_path: want.executable_path, executable_sha256: want.executable_sha256,
         filesystem_name: want.filesystem_name, filesystem_generation: 42u64,
         input_sha256: want.executable_sha256, result_sha256: want.executable_sha256,
         exit_code: 0, captured_stdout: want.expected_stdout, captured_stderr: "")
 
-fn result_for(stage: ProcessExecutionStageV1) -> ProcessExecutionResultV1:
-    result_for_target(stage, "x86_64-unknown-simpleos")
-
-use std.spec.step
-
 describe "SimpleOS guest LLVM hello-world execution evidence":
-    it "admits the shared x86 ARM and RISC-V 32-bit and 64-bit guest authority contract":
-        # @req: REQ-OS-GUEST-LLVM-001 REQ-010
-        # @req: REQ-009
-        step("Verify: admits shared x86 ARM and RISC-V 32-bit and 64-bit guest authority")
+    it "admits the shared x86_64 ARM64 and RV64 guest authority contract":
         for target in [
             "x86_64-unknown-simpleos",
-            "i686-unknown-simpleos",
             "aarch64-unknown-simpleos",
-            "armv7-unknown-simpleos",
             "riscv64gc-unknown-simpleos",
-            "riscv32imac-unknown-simpleos",
         ]:
             val want = expected_for(target)
-            val clang = result_for_target(ProcessExecutionStageV1.ClangCompile, target)
-            val lld = result_for_target(ProcessExecutionStageV1.LldLink, target)
-            val hello = result_for_target(ProcessExecutionStageV1.HelloRun, target)
+            val clang = result_for(ProcessExecutionStageV1.ClangCompile)
+            val lld = result_for(ProcessExecutionStageV1.LldLink)
+            val hello = result_for(ProcessExecutionStageV1.HelloRun)
             expect(guest_toolchain_hello_execution_chain_v1_validate(
                 want, clang, lld, hello)).to_be(true)
 
     it "rejects a host Linux target on the guest authority route":
-        # @req: REQ-OS-GUEST-LLVM-001
-        step("Verify: rejects a host Linux target on the guest authority route")
         val want = expected_for("aarch64-unknown-linux-gnu")
         expect(guest_toolchain_hello_execution_chain_v1_validate(
             want,
@@ -107,30 +75,7 @@ describe "SimpleOS guest LLVM hello-world execution evidence":
             result_for(ProcessExecutionStageV1.LldLink),
             result_for(ProcessExecutionStageV1.HelloRun))).to_be(false)
 
-    it "rejects execution evidence from a different SimpleOS target":
-        # @req: REQ-OS-GUEST-LLVM-001 REQ-009 REQ-010
-        step("Verify: rejects cross-target execution evidence substitution")
-        val want = expected_for("armv7-unknown-simpleos")
-        expect(guest_toolchain_hello_execution_chain_v1_validate(
-            want,
-            result_for_target(ProcessExecutionStageV1.ClangCompile, "i686-unknown-simpleos"),
-            result_for_target(ProcessExecutionStageV1.LldLink, "armv7-unknown-simpleos"),
-            result_for_target(ProcessExecutionStageV1.HelloRun, "armv7-unknown-simpleos"))).to_be(false)
-
-    it "rejects an empty caller-supplied expected digest":
-        # @req: REQ-OS-GUEST-LLVM-001
-        step("Verify: rejects a missing expected artifact digest")
-        var want = expected()
-        want.clang_sha256 = ""
-        expect(guest_toolchain_hello_execution_chain_v1_validate(
-            want,
-            result_for(ProcessExecutionStageV1.ClangCompile),
-            result_for(ProcessExecutionStageV1.LldLink),
-            result_for(ProcessExecutionStageV1.HelloRun))).to_be(false)
-
     it "accepts an exact process-manager child chain as diagnostic input":
-        # @req: REQ-OS-GUEST-LLVM-001
-        step("Verify: accepts an exact process-manager child chain as diagnostic input")
         val clang = result_for(ProcessExecutionStageV1.ClangCompile)
         val lld = result_for(ProcessExecutionStageV1.LldLink)
         val hello = result_for(ProcessExecutionStageV1.HelloRun)
@@ -141,8 +86,6 @@ describe "SimpleOS guest LLVM hello-world execution evidence":
             expected(), clang, lld, hello)).to_be(true)
 
     it "rejects caller-substituted stdout exit and executable identity":
-        # @req: REQ-OS-GUEST-LLVM-001
-        step("Verify: rejects caller-substituted stdout exit and executable identity")
         val clang = result_for(ProcessExecutionStageV1.ClangCompile)
         val lld = result_for(ProcessExecutionStageV1.LldLink)
         var hello = result_for(ProcessExecutionStageV1.HelloRun)
@@ -158,13 +101,11 @@ describe "SimpleOS guest LLVM hello-world execution evidence":
         expect(guest_toolchain_hello_execution_chain_v1_validate(
             expected(), clang, lld, hello)).to_be(false)
 
-    it "rejects a zero filesystem generation and child substitution":
-        # @req: REQ-OS-GUEST-LLVM-001
-        step("Verify: rejects zero filesystem generation and child substitution")
+    it "rejects stale filesystem generation and child substitution":
         val clang = result_for(ProcessExecutionStageV1.ClangCompile)
         var lld = result_for(ProcessExecutionStageV1.LldLink)
         val hello = result_for(ProcessExecutionStageV1.HelloRun)
-        lld.filesystem_generation = 0u64
+        lld.filesystem_generation = 41u64
         expect(guest_toolchain_hello_execution_chain_v1_validate(
             expected(), clang, lld, hello)).to_be(false)
         lld = result_for(ProcessExecutionStageV1.LldLink)
@@ -172,24 +113,7 @@ describe "SimpleOS guest LLVM hello-world execution evidence":
         expect(guest_toolchain_hello_execution_chain_v1_validate(
             expected(), clang, lld, hello)).to_be(false)
 
-    it "accepts independent nonzero file generations across compile link and run":
-        # @req: REQ-OS-GUEST-LLVM-001
-        step("Verify: accepts independent filesystem object generations")
-        var clang = result_for(ProcessExecutionStageV1.ClangCompile)
-        var lld = result_for(ProcessExecutionStageV1.LldLink)
-        var hello = result_for(ProcessExecutionStageV1.HelloRun)
-        clang.filesystem_generation = 42u64
-        lld.filesystem_generation = 2u64
-        hello.filesystem_generation = 7u64
-        expect(guest_toolchain_hello_execution_chain_v1_validate(
-            expected(), clang, lld, hello)).to_be(true)
-        lld.filesystem_generation = 0u64
-        expect(guest_toolchain_hello_execution_chain_v1_validate(
-            expected(), clang, lld, hello)).to_be(false)
-
     it "rejects a different process tree and substituted link output":
-        # @req: REQ-OS-GUEST-LLVM-001
-        step("Verify: rejects a different process tree and substituted link output")
         val clang = result_for(ProcessExecutionStageV1.ClangCompile)
         val lld = result_for(ProcessExecutionStageV1.LldLink)
         var hello = result_for(ProcessExecutionStageV1.HelloRun)

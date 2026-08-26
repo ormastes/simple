@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 7 };
+    pub const CURRENT: Self = Self { major: 1, minor: 6 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -134,11 +134,6 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_transient_array_scope_begin",
     "rt_transient_array_scope_pause",
     "rt_transient_heap_promote",
-    "rt_transient_last_promoted_nodes",
-    "rt_transient_last_promoted_bytes",
-    "rt_transient_promotion_stats_reset",
-    "rt_transient_scope_promoted_nodes",
-    "rt_transient_scope_promoted_bytes",
     "rt_transient_array_scope_end",
     "rt_byte_array_new",
     "rt_byte_array_new_len",
@@ -395,11 +390,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_transient_array_scope_begin",
     "rt_transient_array_scope_pause",
     "rt_transient_heap_promote",
-    "rt_transient_last_promoted_nodes",
-    "rt_transient_last_promoted_bytes",
-    "rt_transient_promotion_stats_reset",
-    "rt_transient_scope_promoted_nodes",
-    "rt_transient_scope_promoted_bytes",
     "rt_transient_array_scope_end",
     // Unconditionally defined in value/heap.rs and emitted by codegen; absent
     // from this list until 2026-08-01, so any module tagging heap ownership
@@ -660,7 +650,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_enum_id",
     "rt_enum_discriminant",
     "rt_enum_payload",
-    "rt_heap_ref_wellformed",
     // Raw memory allocation
     "rt_alloc",
     "rt_free",
@@ -808,8 +797,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_is_running",
     "rt_process_wait",
     "rt_process_kill",
-    "rt_process_read_stdout_checked",
-    "rt_process_is_alive_checked",
     "rt_process_owned_cancel",
     "rt_process_owned_cancel_value",
     "rt_process_owned_terminate",
@@ -1028,6 +1015,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // File I/O operations - file ops
     "rt_file_canonicalize",
     "rt_file_read_text",
+    "rt_file_read_regular_no_follow_bounded",
     "rt_file_read_text_rv",
     "rt_file_write_text",
     "rt_file_fsync",
@@ -2087,18 +2075,14 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_unwrap_or_trap",
     "rt_expect_or_trap",
     "rt_unwrap_or_value",
-    // 2026-08-11/22: these five are EMITTED by codegen (instr/mod.rs UnboxInt,
-    // struct/global allocation, receiver-polymorphic find, the native
-    // struct-receiver guard, and dict insert) and DEFINED in the runtime, but
-    // were never listed here.
-    // `runtime/build.rs` generates
+    // 2026-08-11: these three are EMITTED by codegen (instr/mod.rs UnboxInt,
+    // the native struct-receiver guard, and dict insert) and DEFINED in the
+    // runtime, but were never listed here. `runtime/build.rs` generates
     // RUNTIME_SYMBOL_ENTRIES purely from this list, so an unlisted symbol is
     // never registered with the JIT -> "unresolved external symbol" at run
     // time and a silent fallback to the interpreter. Listing is the whole
     // registration mechanism; do not emit a call to a symbol absent here.
     "rt_dict_insert",
-    "rt_find",
-    "rt_struct_alloc",
     "rt_struct_receiver_valid",
     "rt_value_unbox_int",
     "rt_value_format_string",
@@ -2370,11 +2354,6 @@ mod tests {
             assert!(CORE_REQUIRED_RUNTIME_SYMBOLS.contains(&symbol));
             assert!(RUNTIME_SYMBOL_NAMES.contains(&symbol));
         }
-    }
-
-    #[test]
-    fn receiver_polymorphic_find_is_present_in_full_manifest() {
-        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_find"));
     }
 
     #[test]

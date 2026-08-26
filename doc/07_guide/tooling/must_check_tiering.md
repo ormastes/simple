@@ -8,9 +8,8 @@ The repository has two mandatory-check tiers:
 - `scripts/check/check-bootstrap-must-pass.shs` owns expensive compiler,
   native-build, full-test, device, QEMU, and benchmark evidence. It updates
   `doc/08_tracking/check/must_check_db.sdn` atomically. Each PASS retains its
-  own `passed_at_utc`, evidence reference, and evidence SHA-256; automated logs
-  live under `doc/08_tracking/check/evidence/<source-fingerprint>/` and are
-  committed with the ledger. TODO/blocked rows use `never`.
+  own `passed_at_utc`, evidence reference, and evidence SHA-256; automated logs live under
+  `build/must-check/<source-fingerprint>/`. TODO/blocked rows use `never`.
   Schema v3 assigns every row an owner and actionable unblock condition. PASS
   rows use `unblock_condition=none`.
 
@@ -19,14 +18,6 @@ push commands and bootstrap evidence rows. A `todo` or `blocked` row
 is visible unfinished work and is never counted as pass. Only rows explicitly
 marked `push_blocking: true` block an interactive push; all four compiler phase
 rows are push-blocking.
-The bounded push tier also materializes the exact pushed ref for the Rust
-interpreter module-owner scan. This prevents an undeclared tracked module from
-wasting a full Rust authority/bootstrap attempt while avoiding a compiler run.
-When Git invokes the canonical hook for an already-up-to-date push, its empty
-ref stream is reported as `PASS — 0 refs to push (no-op)`. Directly invoking
-the consumer with empty input still fails; only the wrapper's explicit context
-marker distinguishes a legitimate Git no-op from missing ref input. Malformed
-rows and unreadable input remain failures.
 
 ## Compiler phase admission
 
@@ -42,32 +33,8 @@ its provenance file. The completion recorder validates all four phases and then
 runs every `automated` bootstrap-tier row in that same invocation. Thus an
 ad-hoc successful full bootstrap refreshes the same evidence read by the next
 push without a second manual must-check command.
-Each automated checker is bound to that canonical validated candidate through
-`SIMPLE_BINARY` plus the established `SIMPLE_BIN` compatibility name; a stale deployed binary or conflicting shell environment cannot
-become bootstrap evidence.
-Legacy focused checkers may retain an explicit diagnostic binary argument, but
-must resolve the automated `SIMPLE_BINARY`/`SIMPLE_BIN` identity before any
-legacy Stage 2 fallback. Every successful producer must also end in a standalone
-`PASS` verdict; an exit status of zero or an intermediate marker alone is not
-accepted by the ledger.
-
-The `sdoctest-markdown-comments` automated row first runs explicit Markdown and
-source-comment fixtures, then runs `simple test test --whole --mode=interpreter`.
-The whole run must contain exactly one non-empty, zero-failure, zero-skip summary
-for each of `Sdoctest:` and `SPL Doctest:`, plus exactly one non-vacuous green
-aggregate `Results:` line. Its `--self-test` proves the command wiring and
-negative summary shapes with a fake local runner; that structural PASS does not
-promote the ledger. Only bootstrap completion with the exact admitted Stage-4
-binary may retain the full-run log and change this row from TODO.
 
 ## Operator commands
-
-For a reviewed, deliberate runtime ABI deprecation, the pre-push dispatcher
-accepts an exact one-push removal count through
-`MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS`. The value must be a non-negative
-integer and is forwarded to the existing runtime API guard's
-`--expect-removals` option. Omitting it preserves the default fail-closed
-behavior; a count smaller than the observed removal set still fails.
 
 ```sh
 sh scripts/check/check-push-must-pass.shs --self-test
@@ -75,257 +42,26 @@ sh scripts/check/check-bootstrap-must-pass.shs --self-test
 sh test/01_unit/scripts/must_check_tiering_test.shs
 ```
 
-Bootstrap automation is recorded only by the completion call made with the
-freshly admitted Stage 4 identity:
+Run the bootstrap-owned automated gates with:
 
 ```sh
-sh scripts/check/check-bootstrap-must-pass.shs \
-  --record-bootstrap-success \
-  --output-dir <bootstrap-output> \
-  --stage4-binary <exact-stage4-binary> \
-  --stage4-provenance <exact-stage4-provenance>
+sh scripts/check/check-bootstrap-must-pass.shs
 ```
 
-A bare invocation fails closed. It cannot run automated rows or mutate the
-ledger because it has no Stage 1–4 admission binding.
-
-The Caret bootstrap suite has automated fixture-backed gates for injected
-Claude/Codex/Gemini/Kimi argv/process wrapper contracts, messaging HTTP/MCP
-primitives, and a bounded injected-command batch adapter with its derived
-terminal view. These fixtures do not prove installed providers, production
-agent-runtime lifecycle, or sustained multi-provider supervision; those remain
-separate TODO rows. `caret-smux-multi-launch`
+The Caret bootstrap suite has automated gates for Claude/Codex/Gemini/Kimi
+wrappers, agent-manager messaging primitives, and the bounded parent-owned
+multi-Caret manager with its derived terminal view. `caret-smux-multi-launch`
 remains TODO until that manager is bound to real `os.apps.smux` sessions and
 PTY lifecycle evidence. `caret-local-llm-launch`
 remains TODO: Slang currently owns loader/readiness primitives but does not yet
 provide a generation endpoint that Caret can call. The independent
 `local_torch` provider is not accepted as Slang evidence.
-Actual installed-provider launches are a separate
-`caret-installed-provider-launches` TODO: `/bin/echo` proves routing and process
-lifecycle without paid calls, but does not prove an authenticated provider CLI.
-The existing interpreter/JIT/native engine differential is also an automated
-bootstrap row; it is intentionally absent from the interactive push tier.
-The exhaustive structural-tree self-test is likewise bootstrap-owned. The hook
-uses the bounded `--push-tip` path, deduplicates identical ref updates, and
-fails closed above two unique updates so operators split unusually broad
-pushes. Ledger evidence must be repository-contained and the consumer hashes at
-most 64 MiB total per validation.
-The conflict-tree gate unions those ref updates before scanning. Existing refs
-subtract their advertised old tips; a new ref subtracts all advertised refs on
-the actual push remote. More than 64 outgoing commits fails closed with a split
-instruction. Within the bound, commit tree IDs are batch-resolved and duplicate
-trees scan once, while an introduced-then-resolved conflict tree still blocks.
-If a new branch or tag targets a commit already advertised by that remote, the
-empty outgoing object set falls back to the deduplicated local destination tips,
-so their exact trees are still checked. The hook's 64-commit limit is immutable
-from the environment.
-The quick rules gate also extracts `rules.sdl` from the exact pushed ref; local
-dirty policy cannot alter commands or floors, and `rules.sdl` is included in
-the bootstrap/push source fingerprint.
-Push invokes quick rules and interpreter-module ownership in scan-only mode;
-their detector fixtures run during bootstrap. The native-array interpreter and
-native-build parity matrix is also bootstrap-only.
-
-Whole-tree use resolution, C runtime compilation, direct-runtime scanning,
-signature provenance, performance-mechanism coverage, process-wait EINTR
-coverage, guard wiring, and executable outline parsing are bootstrap-owned.
-They previously consumed about 59 seconds before the bounded range/ref work;
-moving them does not waive them—the textual ledger keeps every row TODO until
-the bootstrap recorder retains its accepted PASS log.
-Whole-tree means materialized: `check-use-target-resolves.shs` rejects sparse
-tracked inputs rather than inferring missing members from absent bytes. Run it
-from the complete bootstrap checkout. Its ratchet follows semantic import
-identity, while source lines remain diagnostics only.
-Stage 4 compiler admission and Stage 4 tooling admission are distinct. The
-compiler-stage row cannot substitute for the receipt-backed 49-row CLI/MCP/LSP
-matrix. Its generic receipt is not trusted by itself: the recorder reads the
-committed `Stage4ToolingMatrixSummaryV1` artifact and independently requires
-full scope, 49 terminal rows, no failed/blocked/remaining/required-not-pass or
-optional-failed rows, `stage4_compiler_files=0`, and `overall=PASS`. Likewise,
-server handler or GPU-admission tests cannot substitute for a
-real configurable listener port, identical CPU/device outputs with device-hit
-proof, or equivalent nginx/PostgreSQL/MySQL measurements. Binary-size and
-startup rows require native Simple artifacts where specified; Rust-seed
-interpreter measurements cannot promote them.
-The runtime-API deletion detector similarly splits fixture proof from the hot
-path: bootstrap runs `--selftest`, and push supplies an explicit committed range
-to `--scan-only`. Do not use scan-only without an explicit range or treat it as
-self-test evidence.
-
-The automated Caret suite is bootstrap-only and runs through
-`check-caret-suite-bootstrap.shs` with the exact admitted Stage 4 binary and its
-adjacent, verified provenance receipt. Each spec uses the deterministic
-interpreter test command (`--no-session-daemon --sequential --no-db --no-cache
---assert-ran --fail-fast`), requires its pinned nonzero scenario count, and
-accepts exactly one canonical `Results:` summary. Missing, duplicate,
-malformed, zero, or count-drift summaries fail closed. The provider-wrapper and
-multi-manager specs intentionally inject `/bin/echo`; they prove argv,
-spawn/poll/stop, capacity, and derived-terminal fixture contracts only. They do
-not prove that Claude, Codex, Gemini, or Kimi is installed or that sustained
-production supervision works. That live claim remains the separate
-`caret-production-multi-manager-launch` external-receipt TODO. These Caret
-commands must not be wired into a push-tier script.
 
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
-checker or a committed, semantically validated receipt:
-
-```sh
-sh scripts/check/check-bootstrap-must-pass.shs \
-  --record-gate-pass <gate-id> --evidence <repo-relative-committed-receipt>
-```
-
-`stage4-tooling-matrix` retains its dedicated summary validator. Other external
-rows use manifest mode `external-receipt` and name the registry-owned
-`check-external-must-check-receipt.shs`; the recorder executes it only after
-extracting the exact receipt and artifact blobs from `HEAD`. The validator—not
-the receipt—defines the accepted observation matrix. It requires the common
-`simple.must-check-external-evidence/v2` summary to reference separate committed
-command, target, toolchain, and observation blobs. It recomputes every declared
-SHA-256, checks their shared gate/source/run identity, and requires every exact
-gate-specific acceptance ID to appear once as PASS in the observation blob.
-The acceptance namespace is closed: any additional, duplicate, malformed,
-FAIL, or BLOCKED `acceptance.*` line rejects the artifact even when a PASS for
-the same ID is also present.
-The summary itself must have an OpenSSL SHA-256 signature from a public key
-pinned by path and hash in
-`config/check/must_check_external_reviewers.sdn`. A zero exit without a final
-PASS verdict is rejected. The production policy intentionally contains no key
-until an independent reviewer trust root is provisioned; external promotion is
-fail-closed in the meantime.
-
-The generic receipt must name the exact gate and source fingerprint, state
-`final_verdict=PASS`, and bind a separate committed artifact by
-repository-relative path and SHA-256. Arbitrary text, a receipt for another
-gate/source, a mismatched artifact, an unknown gate, an untrusted/invalid
-reviewer signature, or a
-semantically incomplete artifact is rejected. Its original PASS time carries forward across
-the same source fingerprint while the identical blob/hash remains committed.
-External and automated rows reset when their fingerprint changes; a newly
-signed external summary must bind the new fingerprint before re-promotion.
-`riscv32-riscv64-shared` also references `shared_inventory`,
-`rv32_projection`, and `rv64_projection` blobs using the standard
-`_path`/`_sha256` fields. Each uses schema
-`simple.riscv-template-ownership/v1`, its matching inventory kind, the source
-fingerprint, and sorted tab-separated `entry=<repo-path><TAB><reason>` rows.
-Their union must exactly equal every owned committed `src` path mentioning
-RISC-V/RV32/RV64. Shared reasons name existing bilateral consumers as
-`bilateral:rv32=<path>;rv64=<path>`; sibling-only rows require a nonempty
-`specialization:` reason. This proves review scope and inventory integrity, not
-runtime/FPGA readiness or completion of the broader sharing target.
-`binary-size-go-parity` adds committed `simple_compiler`, `simple_binary`, `go_binary`,
-`size_measurement`, `semantic_equivalence`, `compile_trace`, and
-`stage4_provenance` blobs. Its checker independently recomputes binary SHA-256
-and byte counts, requires matching ELF class/endianness/machine, canonical
-positive sizes, zero strip/compile/compressor failures, matching semantic
-output hashes, committed oracle/source hashes, and `simple_bytes <= go_bytes`.
-The compiler hash must match the committed compiler blob and the canonical
-21-field `simple-bootstrap-stage4-provenance-v1` receipt. The checker
-recomputes the source snapshot and repository producer/helper hashes, requires
-the committed compiler/provenance copies to match the producer host's live
-canonical files, and runs the full canonical Stage-3/Stage-4 verifier there.
-Detached or custom `admitted=true` summaries are not provenance. Rust-seed,
-Cargo, or rustc process evidence fails.
-
-Produce the reviewer-ready bundle with `sh
-scripts/check/produce-binary-size-go-parity-evidence.shs --output-dir
-doc/08_tracking/check/evidence/binary-size-go-parity/<run-id> --run-id <run-id>
---simple-compiler /absolute/path/bin/release/<triple>/simple`. The producer
-never signs or promotes evidence. It uses `env -i`, a fixed `/usr/bin:/bin`
-path, isolated Go cache, `GOENV=off`, `CGO_ENABLED=0`, and
-`SIMPLE_NO_STUB_FALLBACK=1`. Measurement v2 and compile-trace v3 retain both
-pre-strip and post-strip executables, the Go compiler, both version captures,
-absolute normalized tool/environment paths and literal recipes. The validator
-executes the retained compilers to authenticate exact version captures and
-replays the retained strip tool to prove both stripped artifacts derive from
-their retained unstripped counterparts. Import remains compatible with
-v1 and requires every new v2 attachment. A trusted independent reviewer must
-inspect the bundle, set the timestamp, sign the exact summary, and create the
-outer gate receipt; there is no production test-mode or signing-key override.
-`interpreter-startup-parity` loads committed raw samples, statistics,
-equivalence, environment, compiler, and canonical provenance blobs. Its oracle
-requires 50–1000 ordered samples per cold/warm × Simple/Python/Bun/Go cell,
-fixed-width nanoseconds, exact output and interpreter-mode receipts, and
-recomputes p50/p95 before requiring Simple to be strictly faster in all twelve
-comparisons. The outer checker also runs full live Stage 3/4 verification.
-`rust-go-benchmark-parity` similarly loads raw/statistics/equivalence/
-environment/compiler/provenance blobs. Its runtime-fed 100,000-operation
-Simple/Rust/Go fixture rotates launch order per trial, recomputes p50/p95 and
-max RSS from 50–1000 fixed-width samples, and derives equality-or-better Simple
-latency against both references before full live Stage 4 verification. Each
-measured artifact must be an ELF executable or shared-object image, not merely
-an ELF relocatable object with a matching class, endianness, and machine. This
-v1 evidence schema is Linux-only; non-Linux environment claims fail closed.
-The signed outer target must use `target_kind=native-host`, and its `target_id`
-must exactly match the closed benchmark environment's `host_id` before large
-artifacts or the live Stage 4 chain are inspected. A closed build-origin
-receipt then binds the exact committed Simple/Rust/Go sources, fixed recipe
-IDs and argv, retained outputs, nonempty version captures, and retained compiler
-blobs. Its toolchain ID is recomputed from all six compiler/version hashes.
-The independent reviewer attests that the fixed recipes ran; import recomputes
-identity and consistency but deliberately does not rebuild timed artifacts.
-
-The fixed recipe argv are:
-
-- `simple native-build test/05_perf/fixtures/rust_go_benchmark/workload.spl --backend llvm --opt-level=aggressive --strip --output benchmark_simple_executable`
-- `rustc -C opt-level=3 -C codegen-units=1 -C strip=symbols -o benchmark_rust_executable test/05_perf/fixtures/rust_go_benchmark/workload.rs`
-- `go build -trimpath -o benchmark_go_executable test/05_perf/fixtures/rust_go_benchmark/workload.go`
-
-Produce this bundle with the repository-owned producer, using a new
-repository-relative evidence directory:
-
-```sh
-sh scripts/check/produce-rust-go-benchmark-evidence.shs \
-  --output-dir doc/08_tracking/check/evidence/rust-go-<run-id> \
-  --run-id <run-id> --samples 50 \
-  --simple-compiler /absolute/bin/release/<triple>/simple
-```
-
-The producer requires the compiler's adjacent canonical Stage 4 provenance
-(or `--stage4-provenance`), builds with the literal recipes above, performs ten
-warmups, rotates Simple/Rust/Go order across every trial, and writes the common
-blobs, all fifteen original lane blobs, and four clock-authority attachments.
-Build-origin v2 binds the committed helper source, exact C compiler and version,
-and produced helper; the validator continues to admit closed 32-field v1
-receipts for already-retained bundles. It runs the production lane checker
-before reporting PASS and recomputes the source fingerprint afterward so a
-concurrent `HEAD` change fails closed. Its output summary is deliberately named
-`external-evidence.unsigned.env`: an independent trusted reviewer must inspect
-and sign it and create the separate reviewer receipt. The producer never emits
-a reviewer signature and does not promote the TODO ledger row.
-
-Timing comes from the repository-owned
-`scripts/check/lib/rust-go-benchmark-monotonic-ns.c` helper, compiled for the
-producer host and self-tested before sampling; `clock_id=clock_gettime-monotonic`
-therefore denotes `CLOCK_MONOTONIC`, not wall-clock `date`. Builds run under a
-closed environment with `LC_ALL=C`, `PATH=/usr/bin:/bin`, `SIMPLE_LIB` bound to
-the repository `src` tree, stub fallback disabled, Rust flag/wrapper variables
-absent, and Go fixed to `GOENV=off`, `GOOS=linux`, the matching `GOARCH`,
-`CGO_ENABLED=0`, an isolated cache, and no `GOFLAGS`. These values are recorded
-in and enforced by the build-origin receipt; caller overrides are not inherited.
-Independent signatures cannot substitute for either quantitative oracle.
-The push consumer reads and hashes evidence from the exact pushed revision, so
-dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
-It cross-checks registry and ledger structure in one linear parser pass. Only
-PASS rows enter the evidence-size and SHA-256 loop; TODO rows do not launch
-per-field or per-row parser processes, so keeping all unfinished work visible
-does not create hundreds of push-time subprocesses.
-Production recording also refuses to run when fingerprinted inputs differ from
-`HEAD`.
-`completed_at_utc` remains `never` while any bootstrap row is unfinished; once
-all rows pass it is the latest row's first PASS time, so replaying an unchanged
-receipt cannot invent a later completion.
-
-The signed summary is not a substitute for the raw retained command and
-observation blobs it names. The independent reviewer's signature is the
-authority boundary; repository review provisions or rotates only public trust
-roots. Private keys and test keys never enter the policy. Self-test key
-coverage copies the validator into an isolated fixture repository and commits a
-fixture-only public-key policy there. The production validator has no policy or
-key override, so a test flag cannot redirect trust while updating the real
-ledger. The recorder also canonicalizes the manifest and ledger parents and
-requires both to remain inside the same physical `MUST_CHECK_ROOT`; a disposable
-fixture root cannot target the production ledger through split environment
-overrides.
+checker or retained receipt validator. The push consumer opens and rehashes the
+recorded evidence, so a missing or modified log/receipt rejects the push. PASS may carry forward only while the
+source fingerprint is unchanged; a changed fingerprint resets unrerun rows to
+TODO instead of laundering stale evidence into the new source state.
 
 ## Local hook installation
 
@@ -336,12 +72,6 @@ sh scripts/setup/install-must-check-hooks.shs --check ||
   sh scripts/setup/install-must-check-hooks.shs --install
 ```
 
-The general `scripts/setup/setup.shs` entrypoint delegates this work to
-`scripts/setup/setup-hooks.shs`. That helper runs in primary and linked
-worktrees, leaves all `pre-push` classification and preservation to the
-dedicated installer, and fails setup if installation or wiring verification
-fails. It never overwrites an occupied `pre-push.local` preservation slot.
-
 Windows PowerShell:
 
 ```powershell
@@ -349,21 +79,13 @@ Windows PowerShell:
 if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install }
 ```
 
-The PowerShell source follows the same launcher contract, but native Windows
-linked-worktree execution is tracked as `windows-hook-installation` TODO until
-the bootstrap ledger carries retained Windows-host evidence.
-
-Linked worktrees share one Git hooks directory. Both installers therefore put
-the byte-stable `scripts/hooks/pre-push-worktree-launcher` there; it resolves
-the active worktree at invocation and enters that worktree's tracked dispatcher.
-An absolute symlink to one checkout is invalid because it breaks sibling
-worktrees. Both installers preserve an unrelated existing hook as
-`pre-push.local`. The tracked dispatcher snapshots Git's ref input and supplies
-it to both the local hook and the canonical repository guard. The verifier
-accepts only the exact canonical guard, dispatcher, launcher, or launcher copy;
-an unrelated wrapper containing a guard-name substring is not accepted.
-An exact legacy guard or dispatcher payload is canonical replacement material;
-it is not preserved as a local hook, because preserving a dispatcher would
-recursively invoke itself.
+Both installers preserve an unrelated existing hook as `pre-push.local`. The
+tracked dispatcher snapshots Git's ref input and supplies it to both the local
+hook and the canonical repository guard. The repository hook verifier accepts
+only the exact canonical guard or exact tracked dispatcher path; an unrelated
+wrapper containing a guard-name substring is not accepted.
+An exact file copy of the legacy canonical guard is treated like its symlink;
+if that same guard is already preserved as `pre-push.local`, installation may
+replace only `pre-push` with the dispatcher without overwriting either payload.
 The dispatcher detects that exact duplicate and does not execute it twice;
 non-identical local hooks remain chained and fail closed.

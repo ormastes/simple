@@ -60,29 +60,6 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
-For must-check hook work in linked Git worktrees, remember that the hooks
-directory is shared. Install the stable `scripts/hooks/pre-push-worktree-launcher`
-and let it resolve the active worktree; never bind the shared hook to one
-worktree's absolute dispatcher path.
-
-Check the canonical hook wiring before installing or repairing it. On Unix-like
-hosts, run:
-
-```sh
-sh scripts/setup/install-must-check-hooks.shs --check ||
-  sh scripts/setup/install-must-check-hooks.shs --install
-```
-
-On Windows PowerShell, run:
-
-```powershell
-& scripts/setup/install-must-check-hooks.ps1 -Check
-if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install }
-```
-
-See `doc/07_guide/tooling/must_check_tiering.md` for the tier contract and
-linked-worktree launcher details.
-
 For every acceptance criterion, record one passing result and do not rerun the
 same unchanged green command. Stop after three verify/fix cycles for one
 feature and report any remaining failure; convergence ends the lane instead of
@@ -97,8 +74,6 @@ post-bootstrap command sanity; it does not replace release `--whole` tests or
 the applicable full lint and duplication gates. If duplicate caching changed,
 the same gate must prove token/cosine create/reuse parity, changed/deleted-file
 invalidation, `--no-cache`, exit parity, and JSON stdout purity.
-The completion recorder must override ambient `SIMPLE_BINARY`/`SIMPLE_BIN` and bind every
-automated bootstrap gate to the exact validated Stage 4 candidate.
 
 For bootstrap/compiler debugging, keep normal SPipe verification on the
 default-off path. Use `--diagnostics=test` for progress and coarse phase
@@ -115,19 +90,6 @@ Use `bin/simple lint <changed .spl files>` and
 `bin/simple duplicate-check <owned-dir> --mode token --min-lines 5` for those
 pure-Simple gates. `bin/simple build lint` and `build check` are Rust workspace
 clippy/rustfmt commands, not substitutes.
-
-`bin/simple lint` also carries the PERFORMANCE rules. Treat
-`warning[PERF-COW-001]` (take/mutate/store-back round trip),
-`[PERF-COW-002]` (by-value helper store-back) and `[PERF-COW-003]`
-(`.keys()`/`.values()` on a loop-INVARIANT receiver inside a loop) as blocking
-for code you are authoring, even though the rule is warn-level for the tree's
-existing population: they mark an O(n) copy per write under copy-on-write value
-semantics, which is invisible on fixtures and catastrophic at scale. Mutate
-through the single owner and hoist `.keys()` above the loop. A receiver rebound
-each iteration is exempt by design and must not be "fixed". Rule doc
-`doc/07_guide/tooling/lint/cow_alias_hotpath_rule.md`; the push-time half is
-`sh scripts/check/check-cow-alias-hotpath.shs`, whose baseline must never be
-regenerated to get green.
 
 An explicitly admitted Stage 2 or Stage 3 Simple binary may run focused
 pure-Simple compiler/interpreter/loader work under the canonical minimal-
@@ -653,13 +615,8 @@ imports or calls outside owner modules as a fix-before-done issue.
 For process/signal hardening, also require the
 `doc/07_guide/runtime/process_kill_safety.md` rule: every kill/wait path rejects
 `pid <= 0` before signaling or reaping. Seed runtime changes to that guard need
-`scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<path>
---full-bootstrap --deploy` before they affect deployed binaries. The receipt is
-not optional: verified 2026-08-23, that command WITHOUT `--bootstrap-receipt`
-exits **64** with `bootstrap-policy-error: reason-receipt-required` and starts no
-stage. Mint one with `src/app/build/bootstrap_receipt_main.spl`. Option surface
-and the nine positional subcommands (`scripts/bootstrap/` is two files since
-`dc86db785b4`): `doc/07_guide/tooling/bootstrap_options.md`.
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` before
+they affect deployed binaries.
 
 Before touching runtime-adjacent code in an existing lane, read that lane's
 recorded `rejected_shortcuts` first; do not retry a rejected `rt_*`, fixture
@@ -1120,22 +1077,6 @@ evidence/gate script asserts on. See
 `doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md` § "Probe
 caveats".
 
-## In-development tag (`@tag:in-development`)
-
-A spec written ahead of its implementation is marked `# @tag:in-development`
-plus a MANDATORY `# Tracks: <TODO/bug/plan row>` line. Contract: expected FAIL,
-SKIPPED in whole-suite runs, COUNTED in the summary, selected by
-`simple test --tag in-development`.
-
-**Never** use it for a regression, an undiagnosed failure, an unavailable host
-(that is `skip()` / `pending()`), or to make a red suite green. Delete the tag
-in the same commit as the fix that makes the spec pass.
-
-**Not enforced at `origin/main` @ `3ccf808f6f2` (2026-08-23)** — the pure-Simple
-runner parses only `# @di_test` and `# @exec_limit`; a tagged spec still runs and
-still fails. Canonical guide: `doc/07_guide/infra/testing.md` § Tags and
-Filtering.
-
 ## SSpec documentization maintenance
 
 For SSpec authoring or cleanup, run `simple sspec-maintain scan <spec>` as the
@@ -1210,7 +1151,7 @@ must not be reported as admission or platform success.
 
 Gate order is fixed: 1) Stage 3 admission, 2) x86_64 Linux Stage 4, 3) frozen
 candidate sanity/hash, 4) four essential-tool smoke markers, 5) deployment then
-`sh scripts/bootstrap/bootstrap-from-scratch.sh rollback-deploy <canonical-triple>` with
+`sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>` with
 rollback receipt, and 6) the selected native/QEMU/target platform acceptance.
 The rollback receipt includes command, exit status, pre/post/restored hashes,
 receipt path, and arithmetic smoke output.

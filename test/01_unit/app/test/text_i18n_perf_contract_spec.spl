@@ -1,0 +1,132 @@
+# @tag: unit, text, i18n, rendering, performance, memory
+# @req NFR-004 NFR-005 NFR-006 NFR-010 NFR-014 NFR-016
+# @cover src/app/test/text_i18n_perf_contract.spl 100%
+
+use std.spec.*
+use app.test.text_i18n_perf_contract.*
+
+val HASH64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn passing_receipt(row: TextI18nPerfRow) -> TextI18nPerfReceipt:
+    TextI18nPerfReceipt(
+        schema: TEXT_I18N_PERF_SCHEMA, row_id: row.id,
+        status: "pass", reason: "none", source_revision: "test-revision",
+        baseline_source_revision: "test-revision", source_sha256: HASH64,
+        corpus_sha256: HASH64, config_sha256: HASH64, manifest_sha256: HASH64,
+        machine_id: "test-machine", toolchain_id: "test-toolchain",
+        hardware_id: "test-hardware",
+        backend: row.backend, active_backend: row.backend,
+        profile: "gc-sync-immutable", corpus: "multilingual-boundary",
+        samples: 21, input_bytes: 4096, p50_ns: 100, p95_ns: 150,
+        throughput_bytes_per_second: 40960000,
+        allocation_count: 0, allocated_bytes: 0, copied_bytes: 0,
+        transient_bytes: 1024, retained_bytes: 2048,
+        builder_capacity_bytes: 2048, builder_waste_bytes: 128,
+        checkpoint_bytes: 0, shaped_cache_bytes: 512,
+        steady_rss_bytes: 4096, peak_rss_bytes: 8192,
+        linked_data_bytes: 2048, mapped_catalog_bytes: 1024,
+        resident_catalog_bytes: 512, atlas_bytes: 4096,
+        atlas_waste_bytes: 256, atlas_dirty_bytes: 128, atlas_upload_bytes: 256,
+        transient_gpu_bytes: 1024, vram_high_water_bytes: 8192,
+        noalloc_capacity_failures: 0,
+        draw_calls: 1, queue_device_ns: 80, fence_observation_ns: 10,
+        readback_ns: 20, device_readback: true,
+        checksum: "fixture-checksum", fallback: "none")
+
+fn rows_with_first(first: TextI18nPerfRow) -> [TextI18nPerfRow]:
+    val rows = text_i18n_required_perf_rows()
+    [first, rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7],
+        rows[8], rows[9], rows[10], rows[11], rows[12], rows[13], rows[14],
+        rows[15], rows[16], rows[17]]
+
+describe "UTF-8 i18n performance evidence contract":
+    it "pins all mandatory text parser i18n 2D and 3D rows":
+        val rows = text_i18n_required_perf_rows()
+        expect(rows.len()).to_equal(TEXT_I18N_PERF_REQUIRED_ROW_COUNT)
+        expect(text_i18n_perf_rows_valid(rows)).to_be(true)
+        expect(rows[0].id).to_equal("utf8_scalar")
+        expect(rows[17].id).to_equal("engine3d_world_vulkan")
+
+    it "fails closed for missing duplicate malformed and optional rows":
+        expect(text_i18n_perf_rows_valid([])).to_be(false)
+        val rows = text_i18n_required_perf_rows()
+        expect(text_i18n_perf_rows_valid(rows_with_first(rows[1]))).to_be(false)
+        expect(text_i18n_perf_rows_valid(rows_with_first(TextI18nPerfRow(
+            id: "", operation_group: "", backend: "", evidence_class: "unknown",
+            native_host: "")))).to_be(false)
+        expect(text_i18n_perf_rows_valid(rows_with_first(TextI18nPerfRow(
+            id: "invalid-class", operation_group: "text", backend: "scalar",
+            evidence_class: "unknown", native_host: "portable")))).to_be(false)
+
+    it "validates complete portable and native-device receipts":
+        val portable = text_i18n_required_perf_rows()[0]
+        val device = text_i18n_required_perf_rows()[11]
+        expect(text_i18n_perf_check(passing_receipt(portable), portable).valid).to_be(true)
+        expect(text_i18n_perf_check(passing_receipt(device), device).valid).to_be(true)
+        expect(text_i18n_sha256_valid(HASH64)).to_be(true)
+
+    it "rejects missing provenance workload timing memory device and result evidence":
+        val row = text_i18n_required_perf_rows()[11]
+        val bad = TextI18nPerfReceipt(
+            schema: "bad", row_id: "bad", status: "unavailable", reason: "missing",
+            source_revision: "", baseline_source_revision: "", source_sha256: "xyz",
+            corpus_sha256: "", config_sha256: "", manifest_sha256: "",
+            machine_id: "", toolchain_id: "", hardware_id: "",
+            backend: "cpu", active_backend: "fallback", profile: "", corpus: "",
+            samples: 0, input_bytes: 0, p50_ns: 0, p95_ns: -1,
+            throughput_bytes_per_second: 0, allocation_count: -1,
+            allocated_bytes: -1, copied_bytes: -1, transient_bytes: -1,
+            retained_bytes: -1, builder_capacity_bytes: 1,
+            builder_waste_bytes: 2, checkpoint_bytes: -1,
+            shaped_cache_bytes: -1,
+            steady_rss_bytes: 10, peak_rss_bytes: 5, linked_data_bytes: -1,
+            mapped_catalog_bytes: 1, resident_catalog_bytes: 2,
+            atlas_bytes: 1, atlas_waste_bytes: 2, atlas_dirty_bytes: 2,
+            atlas_upload_bytes: -1, transient_gpu_bytes: -1,
+            vram_high_water_bytes: -1, noalloc_capacity_failures: -1,
+            draw_calls: -1,
+            queue_device_ns: -1, fence_observation_ns: -1, readback_ns: -1,
+            device_readback: false, checksum: "", fallback: "cpu")
+        val checked = text_i18n_perf_check(bad, row)
+        expect(checked.valid).to_be(false)
+        expect(checked.errors).to_equal([
+            "schema", "row_id", "status", "provenance", "backend", "workload",
+            "timing", "memory", "render_metrics", "device_evidence", "result"])
+        expect(text_i18n_sha256_valid("g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")).to_be(false)
+        expect(text_i18n_sha256_valid("short")).to_be(false)
+
+    it "enforces matched baseline latency and memory budgets including zero baselines":
+        val row = text_i18n_required_perf_rows()[0]
+        val baseline = passing_receipt(row)
+        val after = passing_receipt(row)
+        val budget = TextI18nPerfBudget(
+            max_p50_growth_percent: 0, max_p95_growth_percent: 0,
+            max_allocated_growth_percent: 0, max_transient_growth_percent: 0,
+            max_retained_growth_percent: 0, max_peak_rss_growth_percent: 0,
+            max_linked_data_growth_percent: 0, max_atlas_growth_percent: 0,
+            max_vram_growth_percent: 0)
+        expect(text_i18n_perf_regression_check(baseline, after, row, budget).valid).to_be(true)
+        expect(text_i18n_growth_within(0, 0, 0)).to_be(true)
+        expect(text_i18n_growth_within(1, 0, 100)).to_be(false)
+        expect(text_i18n_growth_within(-1, 1, 0)).to_be(false)
+        expect(text_i18n_growth_within(1, -1, 0)).to_be(false)
+        expect(text_i18n_growth_within(1, 1, -1)).to_be(false)
+
+    it "rejects mismatched and regressed performance evidence":
+        val row = text_i18n_required_perf_rows()[0]
+        val baseline = passing_receipt(row)
+        var after = passing_receipt(row)
+        after.baseline_source_revision = "wrong-baseline"
+        after.p50_ns = 101
+        after.allocated_bytes = 1
+        val budget = TextI18nPerfBudget(
+            max_p50_growth_percent: 0, max_p95_growth_percent: 0,
+            max_allocated_growth_percent: 0, max_transient_growth_percent: 0,
+            max_retained_growth_percent: 0, max_peak_rss_growth_percent: 0,
+            max_linked_data_growth_percent: 0, max_atlas_growth_percent: 0,
+            max_vram_growth_percent: 0)
+        expect(text_i18n_perf_regression_check(baseline, after, row, budget).errors).to_equal([
+            "baseline_identity", "latency_regression", "memory_regression"])
+        after.status = "unavailable"
+        expect(text_i18n_perf_regression_check(baseline, after, row, budget).errors).to_equal([
+            "receipt", "baseline_identity", "latency_regression", "memory_regression"])

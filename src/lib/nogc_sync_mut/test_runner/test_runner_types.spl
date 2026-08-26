@@ -2,8 +2,6 @@
 #
 # Core types used throughout the test runner.
 
-use std.common.perf.execution_metrics.{ResourceUsage}
-
 val TEST_OUTPUT_CAPTURE_BYTES: i64 = 4 * 1024 * 1024
 
 # =========================================================================
@@ -53,22 +51,6 @@ enum TestRunOutcome:
     # never a failure verdict -- but it is never a pass either. Requirement R3,
     # doc/02_requirements/infra/supervised_test_runner.md.
     Unverified
-    BlockedScenario
-    UnsupportedScenario
-
-enum TestOmissionStatus:
-    Blocked
-    Unsupported
-
-struct TestOmissionEvidence:
-    status: TestOmissionStatus
-    scenario_id: text
-    reason: text
-    prerequisite: text
-    owner: text
-    tracking_id: text
-    artifact_paths: [text]
-    resume_command: text
 
 # =========================================================================
 # Test Options
@@ -105,12 +87,6 @@ struct TestOptions:
     force_rebuild: bool
     keep_artifacts: bool
     run_all: bool
-    # True only for the release-complete `--whole` surface. Unlike `--all`,
-    # this also makes doctest discovery repository-scoped: the conventional
-    # positional spec root (`simple test test --whole`) must not accidentally
-    # narrow Markdown discovery to test/ or source-comment discovery away from
-    # the production src/ roots.
-    whole: bool = false
     # Unstable mode: run each unit in its own process and continue to the end
     # of the list, classifying outcomes. Default ON for the bootstrap path, OFF
     # for interactive runs; unstable_mode_set records an explicit --unstable /
@@ -181,24 +157,6 @@ struct TestOptions:
     batch_manifest: text
     batch_result: text
 
-fn doctest_discovery_scope_path(options: TestOptions) -> text:
-    """Return the explicit doctest target, or empty for repository scope.
-
-    The positional `test` in `simple test test --whole` is the spec root. It
-    is not provenance for either documentation lane: Markdown comes from the
-    configured sdoctest sources and comment doctests come from production
-    source roots. Keeping this decision pure makes the release-command scope
-    directly regression-testable without launching the full suite."""
-    if options.whole:
-        return ""
-    if options.path_explicit:
-        return options.path
-    ""
-
-fn production_spl_doctest_roots() -> [text]:
-    """Canonical source-comment provenance for a repository-wide run."""
-    ["src/lib/", "src/compiler/", "src/app/"]
-
 fn test_empty_selection_is_success(options: TestOptions) -> bool:
     not options.path_explicit or options.list or options.spl_doctest
 
@@ -217,35 +175,6 @@ struct TestFileResult:
     error: text
     timed_out: bool
     cached: bool
-    # Examples neutralised by `# @tag:in-development` (see
-    # src/lib/nogc_sync_mut/spec/in_development.spl).
-    #
-    # A SEPARATE bucket from `skipped`, deliberately and by user directive.
-    # `skipped` means the environment could not run it (no GPU, wrong OS,
-    # `@tag:qemu`); in-development means the spec RAN and only its verdict
-    # was neutralised because the code under test is unfinished. Merging
-    # them misdescribes the mechanism and reads as if the work is being
-    # hidden. Defaulted so none of the ~85 existing constructor sites
-    # change.
-    in_development: i64 = 0
-    # Bounded child-to-parent MC/DC protocol payload. Empty means the child
-    # supplied no evidence; a malformed carrier is retained as an invalid
-    # sentinel so report completion fails closed instead of silently dropping
-    # it. Defaulted to preserve existing constructor sites and cached records.
-    mcdc_evidence_v1: text = ""
-    blocked: i64 = 0
-    unsupported: i64 = 0
-    omission_evidence: [TestOmissionEvidence] = []
-    # Resource and abnormality evidence is additive so existing result
-    # producers remain source-compatible while they migrate to observed
-    # process scopes. `nil` is explicit unavailable evidence, never zero RSS.
-    compile_ms: i64 = 0
-    execution_ms: i64 = 0
-    resource_usage: ResourceUsage? = nil
-    resource_class: text = ""
-    cohort_id: text = ""
-    budget_status: text = "incomplete"
-    anomaly_status: text = "incomplete"
 
 impl TestFileResult:
     # Routed through the single classifier below rather than re-deriving the
@@ -299,10 +228,6 @@ fn classify_test_run_result(result: TestRunResult, empty_is_success: bool) -> Te
         # below so a contended host cannot manufacture a phantom code defect.
         if test_file_result_is_unverified(file_result):
             return TestRunOutcome.Unverified
-        if file_result.blocked > 0:
-            return TestRunOutcome.BlockedScenario
-        if file_result.unsupported > 0:
-            return TestRunOutcome.UnsupportedScenario
         if file_result.error != "" and file_result.failed == 0:
             return TestRunOutcome.InternalError
     if result.total_failed > 0:
@@ -349,10 +274,6 @@ fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
         return "TERMINATED"
     if token == "TIMEOUT":
         return "TIMEOUT"
-    if token == "BLOCKED":
-        return "BLOCKED"
-    if token == "UNSUPPORTED":
-        return "UNSUPPORTED"
     if token == "NOT EXECUTED" or token == "NOT RUN":
         return "NOT_RUN"
     if token != "":
@@ -363,13 +284,8 @@ fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
         return "TIMEOUT"
     if file_result.failed > 0:
         return "ERROR"
-    if file_result.blocked > 0:
-        return "BLOCKED"
-    if file_result.unsupported > 0:
-        return "UNSUPPORTED"
     val examples = (file_result.passed + file_result.failed +
-                    file_result.skipped + file_result.pending +
-                    file_result.in_development)
+                    file_result.skipped + file_result.pending)
     if examples == 0:
         # No error and no examples of any kind: the child produced no verdict.
         return "NOT_RUN"
@@ -392,8 +308,6 @@ fn test_run_outcome_exit_code(outcome: TestRunOutcome) -> i64:
         case EmptySelection: 4
         case TimeoutResourceFailure: 124
         case Unverified: 5
-        case BlockedScenario: 6
-        case UnsupportedScenario: 7
 
 fn test_run_outcome_name(outcome: TestRunOutcome) -> text:
     match outcome:
@@ -404,8 +318,6 @@ fn test_run_outcome_name(outcome: TestRunOutcome) -> text:
         case EmptySelection: "empty_selection"
         case TimeoutResourceFailure: "timeout_resource_failure"
         case Unverified: "unverified"
-        case BlockedScenario: "blocked"
-        case UnsupportedScenario: "unsupported"
 
 # =========================================================================
 # Skip Feature Info

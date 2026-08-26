@@ -1,6 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum}
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -10,8 +9,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
-use compiler.frontend.parser_types_expr.{StmtKind, Expr}
-use compiler.hir.hir_lowering.hir_phase_profile.{hir_ambig_dep_trace, hir_ambig_dep_trace_enabled, hir_phase_profile_count_imported_symbol, hir_phase_profile_count_imported_symbol_skip, hir_phase_profile_imported_symbol_enter, hir_phase_profile_imported_symbol_complete, hir_phase_profile_imported_symbol_exit, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE, HIR_PROF_RIS_SCAN, HIR_PROF_RIS_FIELDS, HIR_PROF_RIS_PROJECT}
+use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol, hir_phase_profile_count_imported_symbol_skip, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE, HIR_PROF_RIS_SCAN, HIR_PROF_RIS_FIELDS, HIR_PROF_RIS_PROJECT}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -21,9 +19,7 @@ use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.common.dependency.member_visibility.{aggregate_constructor_visibility_allows, member_access_scope_for_modules, member_visibility_allows}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name_from_name}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
@@ -95,9 +91,6 @@ impl HirLowering:
             return
         self.materialize_imported_field_package_dependency(
             imported_index, dependency, import_span, materialize_enum)
-        if (hir_module_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") ?? "") == "1" and
-           self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
-            eprint("[field-dep-unresolved] owner={imported_mod.module_name} dep={dependency} lowering={self.module_filename}")
 
     me register_imported_symbol(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         # Keep the recursive import/materialization boundary scalar. Passing a
@@ -142,18 +135,14 @@ impl HirLowering:
             self.registered_import_memo_owner = self.module_filename
         val registered_enum_tag = if materialize_enum: " E" else: " -"
         val registered_key = imported_mod.module_name + " " + imported_name + " " + local_name + registered_enum_tag
-        hir_phase_profile_imported_symbol_enter(registered_key.len(), local_name != imported_name)
         if self.registered_import_memo.contains_key(registered_key):
             self.registered_import_skip_count = self.registered_import_skip_count + 1
             hir_phase_profile_count_imported_symbol_skip()
-            hir_phase_profile_imported_symbol_exit()
             return
         self.register_imported_symbol_inner(
             imported_index, imported_mod_name, imported_name, local_name,
             import_span, materialize_enum)
         self.registered_import_memo[registered_key] = true
-        hir_phase_profile_imported_symbol_complete()
-        hir_phase_profile_imported_symbol_exit()
 
     me ensure_surface_name_index(imported_mod: ModuleSurface) -> text:
         """NAMEIDX: build the name -> position index of one frozen surface on
@@ -215,8 +204,6 @@ impl HirLowering:
             if already_bound and not same_owner:
                 val qualified_local = "{imported_mod.module_name}::{imported_name}"
                 if local_name == qualified_local:
-                    if hir_ambig_dep_trace_enabled():
-                        hir_ambig_dep_trace("register-return reason=already-bound-other-owner mod={imported_mod.module_name} name={imported_name} local={local_name}")
                     return
                 self.register_imported_symbol(
                     imported_mod.physical_index, imported_mod_name,
@@ -257,27 +244,6 @@ impl HirLowering:
                     self.materialize_imported_field_dependency(
                         imported_mod.physical_index, imported_mod_name, field.type_name,
                         import_span, materialize_enum)
-                    # GENERIC ARGUMENTS of a scalar head, exactly as in the
-                    # CALLABLE twin (`materialize_imported_callable_type_
-                    # dependencies_inner`). `field.type_name` is the captured
-                    # scalar head, so `verification_contract: HirContractBlock?`
-                    # captures `Option` -- a builtin that materializes to
-                    # nothing -- and this branch returned without ever binding
-                    # `HirContractBlock`. The `else` that calls the recursive
-                    # walk is skipped whenever a scalar head was captured.
-                    #
-                    # This path carries the LARGEST run15 population (
-                    # HirContractBlock 501, SymbolId 444, Span 141,
-                    # LayoutPhase 84 -- all `X?` FIELDS of
-                    # `50.mir/mir_instruction_graph.spl`), so projecting field
-                    # arguments in the owner's scope without this call would
-                    # reproduce the 3716-fatal flood on fields alone.
-                    # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-                    if parser_type_kind_named_args(field.type_.kind).len() > 0:
-                        for arg_dependency in parser_type_named_dependencies(field.type_):
-                            self.materialize_imported_field_dependency(
-                                imported_mod.physical_index, imported_mod_name,
-                                arg_dependency, import_span, materialize_enum)
                 elif field.array_element_name != "":
                     self.materialize_imported_field_dependency(
                         imported_mod.physical_index, imported_mod_name, field.array_element_name,
@@ -290,54 +256,13 @@ impl HirLowering:
             hir_phase_profile_add(HIR_PROF_RIS_FIELDS, fields_started)
             val project_started = hir_phase_profile_now()
             var imported_field_types: Dict<text, HirType> = {}
-            var imported_field_access: Dict<text, bool> = {}
-            var imported_field_visibilities: [Visibility] = []
-            val requester_package = module_surface_package_name_from_name(
-                module_logical_name_from_path(self.module_filename))
-            var member_owner = imported_mod
-            var member_owner_consistent = true
-            if composite.fields.len() > 0:
-                val declaring_index = self.surface_index_for_name(
-                    composite.fields[0].declaring_module)
-                if declaring_index >= 0 and declaring_index < self.module_surfaces.surfaces.len():
-                    member_owner = self.module_surfaces.surfaces[declaring_index]
-            # Validate the whole retained field set before publishing any
-            # decision. A corrupt mixed-owner surface must deny every field,
-            # independent of field order.
-            for retained_field in composite.fields:
-                if retained_field.declaring_module != member_owner.module_name:
-                    member_owner_consistent = false
-            var composite_internal_exported = false
-            for internal_name in member_owner.internal_exports:
-                if internal_name == imported_name or internal_name == composite.name:
-                    composite_internal_exported = true
-            val member_scope = member_access_scope_for_modules(
-                self.module_filename, requester_package,
-                member_owner.canonical_path, member_owner.package_name,
-                member_owner.friends, composite_internal_exported)
             for field in composite.fields:
                 imported_field_types[field.name] = self.imported_surface_type_projected(
-                    field.type_, field.type_name, field.array_element_name, imported_mod.module_name, [])
-                imported_field_access[field.name] = (member_owner_consistent and
-                    member_visibility_allows(field.visibility, member_scope))
-                imported_field_visibilities = imported_field_visibilities.push(field.visibility)
+                    field.type_, field.type_name, field.array_element_name, imported_mod.module_name)
             val canonical_composite_name = imported_mod.module_name + "." + imported_name
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
-            self.struct_field_access_by_name[canonical_composite_name] = imported_field_access
-            self.struct_constructor_access_by_name[canonical_composite_name] =
-                (member_owner_consistent and aggregate_constructor_visibility_allows(
-                    imported_field_visibilities, member_scope))
-            # The consumer may bind an explicit alias. Retain access under the
-            # spelling that can actually appear as an aggregate callee/base.
-            self.struct_field_access_by_name[local_name] = imported_field_access
-            self.struct_constructor_access_by_name[local_name] =
-                self.struct_constructor_access_by_name[canonical_composite_name]
             if not self.struct_field_types_by_name.has(imported_name):
                 self.struct_field_types_by_name[imported_name] = imported_field_types
-                self.struct_field_access_by_name[imported_name] = imported_field_access
-                self.struct_constructor_access_by_name[imported_name] =
-                    (member_owner_consistent and aggregate_constructor_visibility_allows(
-                        imported_field_visibilities, member_scope))
             hir_phase_profile_add(HIR_PROF_RIS_PROJECT, project_started)
             self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span, materialize_enum)
         elif enum_position >= 0:
@@ -514,10 +439,7 @@ impl HirLowering:
             hir_phase_profile_add(HIR_PROF_RIS_DEFINE, define_started)
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
         elif constant_position >= 0:
-            val imported_constant = imported_mod.constant_values[constant_position]
-            self.symbols.define(local_name, SymbolKind.Const, nil, import_span,
-                Visibility.Public, imported_constant.is_mutable,
-                Some(imported_mod.module_name))
+            self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
         else:
             # Re-export facade chase: the imported module does not declare
             # `imported_name` itself — it may re-export it (`export use
@@ -528,8 +450,6 @@ impl HirLowering:
             # entry-closure path; parity case dynload_tagged_text).
             val hop = self.find_reexport_source(
                 imported_mod.physical_index, imported_name)
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("chase mod={imported_mod.module_name} wanted={imported_name} found={hop.found} target={hop.module_name} item={hop.item_name}")
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.module_name} fns={imported_mod.callable_names.len()}")
             if hop.found:
@@ -824,44 +744,15 @@ impl HirLowering:
         env gate: the route is a user-written glob, not a bootstrap exemption."""
         if self.symbols.lookup_or_invalid(name).is_valid():
             return true
-        # GLBMEMO (2026-08-22): this runs from `lower_named_kind`'s default arm
-        # for every UNBOUND name occurrence, and the sweep below has no early
-        # exit on failure -- it must visit every glob target to prove no route
-        # exists. run12's counters put 1,251,806 of 1,496,719 qualified-type
-        # probes (84%) on the MISS path that lands here, so the unmemoized
-        # sweep ran ~1.25M times per stage-1 build at O(glob targets x 6 linear
-        # surface name scans) each, charged to whichever profile slot the
-        # caller was in (`sigtype`, `project`, `field_dep`).
-        #
-        # The importer key is derived from `self.module_filename` by three
-        # string rewrites; cache the resolved index so a repeat name in the
-        # same module does not rebuild and re-resolve it.
-        if self.glob_reachable_importer_owner != self.module_filename:
-            var derived_key = self.module_filename
-            if derived_key.ends_with(".spl"):
-                derived_key = derived_key[0:derived_key.len() - 4]
-            derived_key = derived_key.replace("/", ".")
-            if derived_key.starts_with("src."):
-                derived_key = derived_key.substring(4)
-            self.glob_reachable_importer_index = self.surface_index_for_name(derived_key)
-            self.glob_reachable_importer_owner = self.module_filename
-        val importer_index = self.glob_reachable_importer_index
+        var importer_key = self.module_filename
+        if importer_key.ends_with(".spl"):
+            importer_key = importer_key[0:importer_key.len() - 4]
+        importer_key = importer_key.replace("/", ".")
+        if importer_key.starts_with("src."):
+            importer_key = importer_key.substring(4)
+        val importer_index = self.surface_index_for_name(importer_key)
         if importer_index < 0 or importer_index >= self.module_surfaces.surfaces.len():
             return false
-        # A completed sweep that found NO route is memoized per (frozen
-        # registry, importer, name). It cannot later become a success: the two
-        # questions it asks -- `hir_module_declares_item` and
-        # `find_reexport_source` -- are pure functions of the frozen registry,
-        # and the only importer-local step, `register_imported_symbol`, is
-        # itself suppressed on a repeat by the RISDONE memo, so a second sweep
-        # is guaranteed to reach the same `false`. A name that becomes bound by
-        # some OTHER route in the meantime never reaches here at all: the
-        # `lookup_or_invalid` guard above returns first. Only the negative is
-        # recorded -- a success returns before the memo write.
-        val miss_key = "{self.module_surfaces.generation} {importer_index} {name}"
-        if self.glob_reachable_miss_memo.contains_key(miss_key):
-            return false
-        self.glob_reachable_scan_count = self.glob_reachable_scan_count + 1
         val importer = self.module_surfaces.surfaces[importer_index]
         var import_idx = 0
         while import_idx < importer.imports.len() and import_idx < importer.import_target_indices.len():
@@ -873,12 +764,7 @@ impl HirLowering:
                     val target = self.module_surfaces.surfaces[target_index]
                     var owner_index = -1
                     var owner_item = name
-                    # NAMEIDX: the same six-array declaration question
-                    # `register_imported_symbol_inner` already answers by Dict
-                    # probe. `hir_module_declares_item` runs it as six linear
-                    # `module_surface_name_position` sweeps; this call site was
-                    # never converted. Same answer, same first-occurrence-wins.
-                    if self.surface_declares_item_indexed(target, name):
+                    if hir_module_declares_item(target, name):
                         owner_index = target.physical_index
                     else:
                         val hop = self.find_reexport_source(target.physical_index, name)
@@ -897,19 +783,4 @@ impl HirLowering:
                         if self.symbols.lookup_or_invalid(name).is_valid():
                             return true
             import_idx = import_idx + 1
-        self.glob_reachable_miss_memo[miss_key] = true
         false
-
-    me surface_declares_item_indexed(target: ModuleSurface, name: text) -> bool:
-        """`hir_module_declares_item` answered from the NAMEIDX per-surface
-        index instead of six linear name-array sweeps. Identical predicate:
-        the index is built by one sweep per surface over the SAME six arrays,
-        first occurrence wins, and it is keyed on the frozen registry so the
-        answer is shared across importers."""
-        val surface_key = self.ensure_surface_name_index(target)
-        if self.surface_name_position(surface_key, "F", name) >= 0: return true
-        if self.surface_name_position(surface_key, "C", name) >= 0: return true
-        if self.surface_name_position(surface_key, "E", name) >= 0: return true
-        if self.surface_name_position(surface_key, "T", name) >= 0: return true
-        if self.surface_name_position(surface_key, "A", name) >= 0: return true
-        self.surface_name_position(surface_key, "K", name) >= 0

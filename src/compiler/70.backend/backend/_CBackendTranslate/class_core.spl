@@ -15,7 +15,7 @@ use compiler.backend.backend.c_backend_translate.*
 #   clang++ -std=c++20 -O2 generated.cpp runtime.c -o output
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBody, MirBlock, MirAsmOperand, MirOperand, MirUnaryOp, MirBinOp}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirAsmOperand}
 use compiler.backend.c_type_mapper.{CTypeMapper}
 use compiler.backend.c_ir_builder.{CIRBuilder, escape_c_string}
 use compiler.backend.backend.backend_types.{CodegenTarget, BackendCompileOptions, CompiledModule}
@@ -24,12 +24,6 @@ use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typed
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_runtime_layout_asserts}
 use compiler.hir.hir_definitions.{HirField}
 use compiler.hir.hir_types.{HirType}
-use compiler.frontend.parser_types_expr.{AsmConstraintKind}
-use compiler.frontend.parser_types_expr.{AsmLocation}
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
-
-@unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text
 
 # ============================================================================
 # Utility
@@ -84,20 +78,7 @@ impl MirToC:
         )
 
     me emit_unsupported_panic(message: text):
-        """FAIL THE BUILD on a MIR construct the C backend cannot lower.
-
-        Twin of MirToLlvm.emit_unsupported_panic (see
-        _MirToLlvm/asm_constraints_helpers.spl): emitting only an
-        `spl_panic(...)` call into the generated C left the build reporting
-        success while the produced binary was dead on the first execution of
-        that path. `SIMPLE_ALLOW_UNLOWERED_MIR=1` restores the old
-        behaviour."""
-        var allow_unlowered = ""
-        unsafe(capabilities: [ffi]):
-            allow_unlowered = rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? ""
-        if allow_unlowered != "1":
-            eprint("error: {message}")
-            panic("compile error: {message}")
+        """Emit a hard runtime panic instead of a placeholder result."""
         self.builder.emit(r"spl_panic(" + "\"" + escape_c_string(message) + "\"" + r");")
 
     me translate_module(module: MirModule) -> text:
@@ -346,8 +327,8 @@ impl MirToC:
         # original Load/Store/GEP, so dropping the hint emits identical C to flag-off.
         if name == "bulk_copy_hint" or name == "bulk_fill_hint" or name == "bulk_cmp_hint":
             return
-        # SG-1.3 dormant lowering surface. No Simple MIR pass currently emits the active
-        # intrinsic; reactivation requires the complete producer proof documented below.
+        # SG-1.3 perf-bearing form: the active `bulk_copy` intrinsic, emitted only by the
+        # C-backend MIR elision pass (which removes the element-wise ops it subsumes).
         if name == "bulk_copy":
             self.emit_bulk_copy(args)
             return
@@ -386,15 +367,11 @@ impl MirToC:
              i32/i16/bool/f32 elements;
           6. the per-unit temporaries (the element pointers and the loaded value) are DEAD
              outside the matched run — the producer deletes their defining GEP/Load, so any
-             use elsewhere is a dangling-local miscompile;
-          7. the complete source and destination byte spans are proven NON-OVERLAPPING.
-             Distinct base LocalIds are not an alias proof: with overlapping aliases a
-             forward element loop can cascade a prior write into the next load, while
-             memmove preserves the original source bytes.
+             use elsewhere is a dangling-local miscompile.
         WARNING: as of this commit NO sound producer emits `bulk_copy`. The only bulk-op
         recognizer (optimize_bulk_copy) is index-blind and emits the NO-OP `bulk_copy_hint`,
         which must NOT be renamed/lowered to `bulk_copy` without first adding ALL of the
-        guards above. Conditions 5 through 7 were surfaced by adversarial review of the
+        guards above. Conditions 5 and 6 were surfaced by an adversarial review of a draft
         elision pass. See bug doc sg13_bulk_copy_recognizer_index_blind."""
         var bc_args: [text] = []
         for arg in args:

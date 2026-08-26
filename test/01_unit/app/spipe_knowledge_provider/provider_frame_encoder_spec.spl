@@ -1,0 +1,96 @@
+use std.spec.{describe, it, expect}
+use app.spipe_knowledge_provider.transport_types.{ProviderTransportLimitsV1}
+use app.spipe_knowledge_provider.frame_encoder.{ProviderSegmentedBytesV1, ProviderFrameEncoderV1}
+
+fn encoder_limits(max_frame_bytes: i64, write_chunk_bytes: i64) -> ProviderTransportLimitsV1:
+    ProviderTransportLimitsV1(max_frame_bytes: max_frame_bytes,
+        read_chunk_bytes: 16384, write_chunk_bytes: write_chunk_bytes,
+        max_queued_requests: 16, max_pending_bytes: 2097152,
+        ingress_timeout_ms: 30000, output_timeout_ms: 30000)
+
+fn loan_text(bytes: [u8], offset: i64, count: i64) -> text:
+    var result = ""
+    var index = 0
+    while index < count:
+        result = result + bytes[offset + index].to_char().to_text()
+        index = index + 1
+    result
+
+describe "SPipe provider incremental frame encoder":
+    it "emits the exact lowercase header before segmented payload bytes":
+        val payload = ProviderSegmentedBytesV1(
+            segments: [[123u8], [125u8]], total_bytes: 2)
+        var encoder = ProviderFrameEncoderV1.configured(
+            payload, encoder_limits(1048576, 16384)).unwrap()
+        val header = encoder.next_write(64)
+        expect(loan_text(header.bytes, header.offset,
+            header.remaining_bytes)).to_equal("00000002")
+        expect(encoder.advance(8)).to_equal(Ok(()))
+        val first = encoder.next_write(64)
+        expect(first.bytes[first.offset]).to_equal(123u8)
+        expect(encoder.advance(1)).to_equal(Ok(()))
+        val second = encoder.next_write(64)
+        expect(second.bytes[second.offset]).to_equal(125u8)
+        expect(encoder.advance(1)).to_equal(Ok(()))
+        expect(encoder.complete()).to_equal(true)
+
+    it "bounds loans and supports short writes without concatenating segments":
+        val payload = ProviderSegmentedBytesV1(
+            segments: [[1u8, 2u8, 3u8], [], [4u8, 5u8]], total_bytes: 5)
+        var encoder = ProviderFrameEncoderV1.configured(
+            payload, encoder_limits(1048576, 2)).unwrap()
+        expect(encoder.next_write(99).remaining_bytes).to_equal(2)
+        expect(encoder.advance(2)).to_equal(Ok(()))
+        expect(encoder.next_write(99).remaining_bytes).to_equal(2)
+        expect(encoder.advance(2)).to_equal(Ok(()))
+        expect(encoder.next_write(99).remaining_bytes).to_equal(2)
+        expect(encoder.advance(2)).to_equal(Ok(()))
+        expect(encoder.next_write(99).remaining_bytes).to_equal(2)
+        expect(encoder.advance(2)).to_equal(Ok(()))
+        expect(encoder.next_write(99).remaining_bytes).to_equal(2)
+        expect(encoder.advance(1)).to_equal(Ok(()))
+        expect(encoder.next_write(99).remaining_bytes).to_equal(2)
+        expect(encoder.advance(2)).to_equal(Ok(()))
+        expect(encoder.next_write(99).remaining_bytes).to_equal(2)
+        expect(encoder.advance(2)).to_equal(Ok(()))
+        expect(encoder.complete()).to_equal(true)
+
+    it "rejects mismatched oversized and invalid write progress":
+        val mismatch = ProviderSegmentedBytesV1(
+            segments: [[1u8, 2u8]], total_bytes: 1)
+        expect(ProviderFrameEncoderV1.configured(
+            mismatch, encoder_limits(1048576, 16))).to_equal(
+                Err("payload_length_mismatch"))
+        val oversized = ProviderSegmentedBytesV1(
+            segments: [], total_bytes: 1048577)
+        expect(ProviderFrameEncoderV1.configured(
+            oversized, encoder_limits(1048576, 16))).to_equal(Err("frame_too_large"))
+        expect(ProviderFrameEncoderV1.configured(
+            mismatch, encoder_limits(1048576, 0))).to_equal(
+                Err("invalid_transport_limits"))
+        val valid = ProviderSegmentedBytesV1(
+            segments: [[1u8, 2u8]], total_bytes: 2)
+        var encoder = ProviderFrameEncoderV1.configured(
+            valid, encoder_limits(1048576, 16)).unwrap()
+        expect(encoder.advance(1)).to_equal(Err("invalid_write_progress"))
+        val offered = encoder.next_write(2)
+        expect(offered.remaining_bytes).to_equal(2)
+        expect(encoder.advance(3)).to_equal(Err("invalid_write_progress"))
+        expect(encoder.advance(2)).to_equal(Ok(()))
+        val next = encoder.next_write(2)
+        expect(next.remaining_bytes).to_equal(2)
+        expect(encoder.advance(9)).to_equal(Err("invalid_write_progress"))
+        expect(encoder.advance(-1)).to_equal(Err("invalid_write_progress"))
+        expect(encoder.advance(0)).to_equal(Ok(()))
+
+    it "completes an empty logical payload after its header":
+        val payload = ProviderSegmentedBytesV1(segments: [], total_bytes: 0)
+        var encoder = ProviderFrameEncoderV1.configured(
+            payload, encoder_limits(1048576, 16)).unwrap()
+        expect(encoder.complete()).to_equal(false)
+        val header = encoder.next_write(16)
+        expect(header.remaining_bytes).to_equal(8)
+        expect(encoder.advance(8)).to_equal(Ok(()))
+        expect(encoder.complete()).to_equal(true)
+        expect(encoder.next_write(16).remaining_bytes).to_equal(0)
+        expect(encoder.advance(1)).to_equal(Err("invalid_write_progress"))

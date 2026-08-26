@@ -13,7 +13,6 @@ use compiler.backend.c_type_mapper.{CTypeMapper}
 use compiler.backend.c_ir_builder.{CIRBuilder, escape_c_string}
 use compiler.backend.backend.backend_types.{CodegenTarget, BackendCompileOptions, CompiledModule}
 use compiler.backend.backend.c_backend_translate.{MirToC}
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
 # MirToC - Lower-level translation helpers (impl block continued from
@@ -105,8 +104,8 @@ impl MirToC:
         # original Load/Store/GEP, so dropping the hint emits identical C to flag-off.
         if name == "bulk_copy_hint" or name == "bulk_fill_hint" or name == "bulk_cmp_hint":
             return
-        # SG-1.3 dormant lowering surface. No Simple MIR pass currently emits the active
-        # intrinsic; reactivation requires the complete producer proof documented below.
+        # SG-1.3 perf-bearing form: the active `bulk_copy` intrinsic, emitted only by the
+        # C-backend MIR elision pass (which removes the element-wise ops it subsumes).
         if name == "bulk_copy":
             self.emit_bulk_copy(args)
             return
@@ -145,17 +144,11 @@ impl MirToC:
              i32/i16/bool/f32 elements;
           6. the per-unit temporaries (the element pointers and the loaded value) are DEAD
              outside the matched run — the producer deletes their defining GEP/Load, so any
-             use elsewhere is a dangling-local miscompile;
-          7. the complete source and destination byte spans are proven NON-OVERLAPPING.
-             Distinct base LocalIds are not an alias proof: with overlapping aliases a
-             forward element loop can cascade a prior write into the next load, while
-             memmove preserves the original source bytes.
-use compiler.frontend.parser_types_expr.{AsmConstraintKind}
-use compiler.frontend.parser_types_expr.{AsmLocation}
+             use elsewhere is a dangling-local miscompile.
         WARNING: as of this commit NO sound producer emits `bulk_copy`. The only bulk-op
         recognizer (optimize_bulk_copy) is index-blind and emits the NO-OP `bulk_copy_hint`,
         which must NOT be renamed/lowered to `bulk_copy` without first adding ALL of the
-        guards above. Conditions 5 through 7 were surfaced by adversarial review of the
+        guards above. Conditions 5 and 6 were surfaced by an adversarial review of a draft
         elision pass. See bug doc sg13_bulk_copy_recognizer_index_blind."""
         var bc_args: [text] = []
         for arg in args:

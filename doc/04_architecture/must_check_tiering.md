@@ -12,83 +12,14 @@ Trust flows in one direction:
 The push consumer recomputes a content fingerprint excluding the ledger itself,
 requires one-to-one unique registry/result IDs and exact command agreement,
 retains a per-gate PASS time, and verifies each PASS evidence file against its
-recorded SHA-256. The canonical all-TODO `unrecorded` ledger is the sole
-pre-promotion state: when its pushed predecessor is also unpromoted, bootstrap
-debt is reported and every bounded structural gate still runs. A predecessor
-with genuine promoted evidence permanently closes that exception, preventing a
-downgrade to `unrecorded`. Promoted state fails closed on malformed, stale,
-failed, missing, tampered, evidence-less, or non-passing push-blocking rows.
-Non-blocking TODOs remain visible. Push-tier commands are registry rows dispatched through a
+recorded SHA-256. It fails closed on malformed, stale, failed, missing,
+tampered, evidence-less, or non-passing push-blocking rows. Non-blocking TODOs
+remain visible. Push-tier commands are registry rows dispatched through a
 closed ID/mode/command allowlist, so a changed manifest cannot turn the hook
 into an arbitrary shell-command executor.
-The quick rules evaluator separately binds the committed `rules.sdl` blob to a
-reviewed digest in its checker. A policy edit therefore requires a matching
-checker review; committed `cmd:` text cannot change independently and execute.
-The push consumer also owns a minimum required bootstrap-ID ratchet. Manifest
-and ledger may add gates together, but deleting a required TODO from both files
-does not make the obligation disappear.
-The quick rules checker parses `rules.sdl` from the exact pushed revision, and
-that policy file participates in the producer/consumer fingerprint; dirty or
-concurrent working-tree command text is never executed.
-The consumer resolves each repository-relative evidence path as a regular blob
-in the exact pushed revision, never through the live worktree, and applies a
-64 MiB aggregate byte budget before hashing. It deduplicates identical ref
-updates and accepts at most two unique updates per invocation; larger pushes
-fail closed with an instruction to split the push. These bounds prevent
-committed policy input from turning the interactive hook into unbounded local
-file I/O.
-The bootstrap owner writes logs before the ledger under
-`doc/08_tracking/check/evidence/<source-fingerprint>/` and records
-repository-relative evidence references and hashes. Operators commit those
-logs with the ledger, avoiding a circular Git hash dependency
+The bootstrap owner writes logs before the ledger and records repository-relative
+evidence references and hashes. This avoids a circular Git hash dependency
 while binding PASS evidence to the source/config/scripts/tests/docs it qualifies.
-The producer refuses production recording if fingerprinted inputs differ from
-`HEAD`. External or hardware TODO receipts use a separate explicit import:
-their first PASS requires a regular committed blob at `HEAD`, and later source
-fingerprints carry the PASS only while that exact blob/hash remains committed.
-The external validator owns a shared signature/hash loader plus narrow
-gate-specific semantic oracles. The RISC-V sharing oracle compares three
-reviewed ownership attachments with the exhaustive committed HEAD path
-universe and rejects missing bilateral or specialization rationale; it does not
-promote runtime or board evidence.
-Performance semantic oracles remain lane-specific rather than becoming a
-configurable threshold engine. Binary-size parity loads the actual committed
-stripped artifacts and recomputes identity, size, equivalence bindings, and the
-comparison after common signature/hash validation.
-Automated source-sensitive results still invalidate on fingerprint changes.
-After Stage 1-4 admission succeeds, the bootstrap owner canonicalizes the exact
-validated Stage 4 path and injects it as `SIMPLE_BINARY` and the established
-`SIMPLE_BIN` compatibility name for every automated
-gate. Ambient or deployed `SIMPLE_BINARY` values cannot redirect that evidence
-to a stale compiler.
-Detector mutation suites are bootstrap evidence, not per-push setup. The
-runtime-API guard's push row therefore invokes `--scan-only` with an explicit
-committed range, while a separate required bootstrap row runs `--selftest`.
-The interpreter-extern registry and type-walk parity guards use the same split:
-push executes only their source scan, while bootstrap owns mutation fixtures.
-The normal standalone command keeps self-test-first behavior.
-Quick rules and interpreter-module ownership use the same scan-only push split;
-their seven- and five-fixture calibration suites stay in bootstrap. The native
-array element interpreter/native-build matrix has no honest structural
-substitute and is therefore bootstrap-only, not advisory push work.
-The exhaustive structural-tree fixture campaign is a bootstrap automated row.
-Interactive push retains the same final-tree invariants but evaluates only each
-bounded committed tip and its count-only first-parent reference.
-Conflict-tree validation is global across pushed refs: existing updates exclude
-their advertised old tips and new refs exclude every advertised ref on the
-actual push remote. The deduplicated outgoing set is capped at 64 commits, tree
-IDs are resolved in one batch, and each unique tree is scanned once. A conflict
-introduced and resolved before the final tip is still rejected; an over-limit
-history fails closed and must be split.
-When those exclusions leave an empty object set (for example, a new branch or
-tag targeting an already-advertised commit), every non-deletion local
-destination tip is deduplicated and scanned directly. The production limit is a
-fixed constant; environment variables cannot raise or lower it.
-Whole-tree semantic scans, compiler-dependent checks, C runtime compilation,
-and executable parse probes are bootstrap producers even when their gate names
-originated in the push hook. Retiering changes their execution owner, not their
-authority: each becomes a required automated manifest/result pair whose PASS
-log is fingerprinted and consumed by the next push.
 Ledger schema v3 also binds every result to a non-empty owner. A non-passing
 row must retain an actionable unblock condition; a passing row must use
 `unblock_condition=none`. The push consumer rejects unowned work, vacuous TODOs,

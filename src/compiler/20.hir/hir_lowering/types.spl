@@ -10,52 +10,17 @@ use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.io_runtime.{env_get_opt}
 
-@unsafe(reason: "raw enum discriminant bridge", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
-@unsafe(reason: "raw transient-owner promotion; false is provider failure", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
-@unsafe(reason: "raw heap-reference formation probe; false is not a liveness proof", capabilities: [ffi])
-extern fn rt_heap_ref_wellformed(value: Any) -> bool
 
-@always_inline
-fn _hir_diagnostic_promote_raw(value: Any) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_heap_promote(value)
-
-# FORMATION probe for a heap-typed field word, wrapped once here so consumers
-# in layer 20 do not each add a direct `rt_*` call site (no_direct_rt ratchet).
-# Answers 1 for a word that is a plausible object reference, i.e. outside the
-# zero page — see runtime_native.c rt_heap_ref_wellformed. It deliberately does
-# NOT require the HEAP tag: requiring it false-rejected every live class
-# instance on the native codegen lane, where a class reference is a raw
-# untagged pointer (2026-08-24). It is a formation check, NOT a liveness
-# proof, so it can never false-reject a live object; equally it cannot catch a
-# wild pointer that happens to be large.
-@always_inline
-fn hir_heap_ref_wellformed(value: Any) -> bool:
-    unsafe(capabilities: [ffi]):
-        return rt_heap_ref_wellformed(value)
-
-# DO NOT add a second-level probe that takes the struct BY VALUE. It was tried
-# (`fn hir_type_span_wellformed(t: HirType) -> bool: rt_heap_ref_wellformed(t.span)`)
-# and is actively unsafe: a struct-typed PARAMETER is deep-cloned on entry, and
-# the emitted clone recurses into the nested `span` behind nothing but the
-# tag==HEAP && !=0 test — `rt_alloc #0x30` then `ldr [x8]` on the very word the
-# probe exists to validate. The probe therefore crashes exactly where it is
-# meant to guard. Any deeper formation check must take the raw word as `Any`
-# (which is passed verbatim, no clone — verified in the disassembly of the
-# probes in _Expressions/block_and_asm_lowering.spl) and do the field read on
-# the runtime side.
-
-# The canonical environment facade yields nil for an UNSET variable, so this
-# wrapper remains OPTIONAL — every call site below already uses the optional-safe
+# `rt_env_get` yields nil for an UNSET variable, so both the extern and this
+# wrapper are OPTIONAL — every call site below already uses the optional-safe
 # `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
 # Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
-@always_inline
 fn hir_type_env_get(key: text) -> text?:
-    env_get_opt(key)
+    rt_env_get(key)
 
 # SEED-PARITY helper (2026-08-01): the seed spells this
 # `name.chars().all(|ch| ch.is_ascii_uppercase())` (type_resolver.rs:141),
@@ -66,10 +31,8 @@ fn _seed_parity_is_ascii_upper(name: text) -> bool:
     val code = name.char_code_at(0)
     code >= 65 and code <= 90
 
-@always_inline
 fn hir_type_kind_disc(k: TypeKind) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_enum_discriminant(k)
+    rt_enum_discriminant(k)
 
 # Local placeholder for the module resolver port used in FR-COMPILER-003 A2.
 # The actual 85.mdsoc implementation will be wired by the A2 agent at call sites.
@@ -86,9 +49,6 @@ type HirImportedEnumOwners = {text: text}
 type HirMaterializedPayloadOrigins = {text: bool}
 type HirMaterializedPayloadBindings = {text: text}
 type HirFieldTypesByName = {text: {text: HirType}}
-type HirFieldAccessByName = {text: {text: bool}}
-type HirConstructorAccessByName = {text: bool}
-type HirCompositeNameByOwner = {i64: text}
 type HirLocalStructTypes = {i64: text}
 type HirFieldOrderByName = {text: [text]}
 type HirLocalTupleTypes = {i64: [HirType]}
@@ -150,11 +110,6 @@ class HirLowering:
     # up, since the actual Field-expr type_ consumer lives in a file this lane
     # may not edit (see doc/... nestedfield lane notes).
     struct_field_types_by_name: HirFieldTypesByName
-    # Access decisions are computed once while declarations/import surfaces
-    # are registered. Field reads and aggregate calls remain O(1) Dict probes.
-    struct_field_access_by_name: HirFieldAccessByName
-    struct_constructor_access_by_name: HirConstructorAccessByName
-    composite_name_by_owner_symbol: HirCompositeNameByOwner
     local_struct_types: HirLocalStructTypes
     # Declared field NAME order per struct (parallels MIR's own
     # struct_field_order). CallArg.has_name/.name are not reliably populated
@@ -202,14 +157,6 @@ class HirLowering:
     # interpreter (cross-pass enum-payload landmine, observed disc
     # 2735847868), while a fresh same-pass extraction is reliable.
     fn_tuple_returns: {text: [HirType]}
-    # Payload type of a CONTAINER-returning optional signature, by function
-    # NAME, captured in the same pass and for the same reason as
-    # fn_tuple_returns above. Consumed by the `val x = f()` lowering when the
-    # binding carries NO annotation: without it the binding inherits the
-    # Option's MIR representation (a Tuple) and every container fact about it
-    # is lost. Only Dict/Array/Slice payloads are recorded -- see the comment
-    # at the consumer for why this is deliberately not every optional return.
-    fn_optional_container_returns: {text: HirType}
     # GLB2 (2026-08-01): per-ROOT memo for register_glob_imported_symbols_depth.
     # Maps a canonical module KEY -> the shallowest depth at which that key has
     # already been glob-expanded during the CURRENT root expansion. The glob
@@ -284,21 +231,6 @@ class HirLowering:
     # re-emitted per importer so diagnostics are unchanged).
     explicit_dep_target_memo: {text: i64}
     explicit_dep_item_memo: {text: text}
-    # PAYLOADMISS (2026-08-22): negative memo for
-    # `resolve_materialized_enum_payload_origin`, keyed `{owner key} {name}`.
-    # ONLY misses are cached. A HIT is never cached, so a module that really
-    # DECLARES `Result`/`Dict`/`Option` is still resolved from its own surface
-    # every time and `lower_named_kind`'s declared-type-wins precedence is
-    # untouched. The miss is the repeated cost: run14 emitted 14,847 `Dict`,
-    # 9,857 `Option` and 7,015 `Result` advisories, each a full failed origin
-    # search over the owner's declarations, re-export routes and import table.
-    # The resolve is a pure function of (owner surface, name) over the frozen
-    # `module_surfaces` set -- it reads no symbol table and mutates nothing --
-    # so replaying a cached miss is observationally identical to re-searching.
-    # The advisory is emitted once per (owner, name) rather than once per
-    # occurrence for the same reason.
-    payload_origin_miss_memo: {text: bool}
-    payload_origin_miss_skip_count: i64
     # RISDONE (2026-08-21): completed-registration memo for
     # `register_imported_symbol`, keyed on
     # `{declaring module} {imported name} {local name} {materialize_enum}`.
@@ -318,37 +250,6 @@ class HirLowering:
     # Registrations skipped by the memo. Observable mechanism counter: a spec
     # pins that repeating one (module, name, local, enum) query registers once.
     registered_import_skip_count: i64
-    # DEPTAIL (2026-08-24): completed callable-dependency TAILS, keyed on
-    # `{route} {declaring module} {dependency} {materialize_enum}` where route
-    # is `D` (declared) or `X` (explicit). Like `registered_import_memo` and
-    # UNLIKE `explicit_dep_target_memo` this is NOT phase-invariant: the tail
-    # calls `bind_qualified_type` into the IMPORTING module's symbol table, so
-    # the memo is owned by one importer and is dropped the moment
-    # `module_filename` names a different module.
-    #
-    # Why it pays: `explicit_dep_target_memo` already makes the SWEEP a
-    # one-per-phase fact, but the tail that runs after the memo hit -- a
-    # `register_imported_symbol`, a `lookup_or_invalid` and two
-    # `bind_qualified_type` calls -- still ran on every one of the repeats.
-    # The real-closure entry module issued 2,670 explicit-dependency calls
-    # against only 280 real sweeps, so ~2,390 of them re-ran a tail that had
-    # already written exactly these bindings (5.3 ms exclusive per call on the
-    # seed interpreter; explicit_dep was the single largest exclusive slot at
-    # 14,065 ms of 38,500 ms of imports). The declared-dependency route has the
-    # identical register + lookup + bind shape and was slot #2 at 7,893 ms.
-    #
-    # A key is recorded only AFTER the tail completes AND the looked-up symbol
-    # is valid -- same discipline as `registered_import_memo`. An invalid
-    # lookup binds nothing, so memoizing it would make the tuple unretryable
-    # within the importer even though a later registration could make it
-    # resolve. The ambiguity (`-2`) and unresolved (`< 0`) branches are
-    # deliberately NOT memoized, so their diagnostics keep the exact
-    # per-call multiplicity they had before.
-    dep_tail_memo: {text: bool}
-    # Importer that `dep_tail_memo` describes ("" = none yet).
-    dep_tail_memo_owner: text
-    # Dependency tails skipped by the memo. Observable mechanism counter.
-    dep_tail_skip_count: i64
     # IMPLIDX (2026-08-22): impl positions per (frozen surface, implemented
     # type name). `register_imported_type_methods_inner` swept EVERY impl of
     # the declaring module per imported composite/enum, copying each impl row
@@ -362,21 +263,6 @@ class HirLowering:
     # method registration after indexing, so a spec can pin both bounds.
     impl_index_built: {text: bool}
     impl_index_positions: {text: [i64]}
-    # IMPLROWCACHE (2026-08-23): the two projections the method-registration
-    # loop actually reads out of a `ModuleSurfaceImpl` row, captured during the
-    # SAME one-per-surface sweep that fills `impl_index_positions`, keyed
-    # `{generation} {physical_index} #{position}`. Before this, the loop did
-    # `val impl_ = imported_mod.impls[pos]`, which under value semantics
-    # deep-copies the whole row INCLUDING its `Dict<text, ModuleSurfaceCallable>`
-    # of full signatures -- once per impl row per call, and this function is
-    # re-entrancy guarded but re-entered many times per importer. Both dicts are
-    # pure functions of the frozen registry, so they are shared across importers
-    # and never cleared, exactly like `impl_index_positions`.
-    # `impl_trait_name_index` holds a row ONLY when that impl `has_trait_`, so
-    # `contains_key` is the has-trait test and a trait whose name projects to ""
-    # is still distinguished from "no trait".
-    impl_method_name_index: {text: [text]}
-    impl_trait_name_index: {text: text}
     impl_index_build_count: i64
     impl_rows_visited: i64
     # NAMEIDX (2026-08-22): name -> position per frozen surface, per
@@ -390,28 +276,6 @@ class HirLowering:
     name_index_built: {text: bool}
     name_index_positions: {text: i64}
     name_index_build_count: i64
-    # GLBMEMO (2026-08-22): negative memo for `try_register_glob_reachable_symbol`,
-    # keyed `{generation} {importer surface index} {name}`. That sweep runs from
-    # `lower_named_kind`'s default arm for every UNBOUND name occurrence and has
-    # no early exit on failure -- it must visit every glob target to prove no
-    # route exists -- so the MISS path (84% of probes in run12) re-swept per
-    # occurrence, charged to whichever slot the caller was in (`sigtype`,
-    # `project`, `field_dep`). Registry-pure per importer: both questions the
-    # sweep asks are pure functions of the frozen registry, and the one
-    # importer-local step is already suppressed on repeat by the RISDONE memo,
-    # so a recorded failure can never have become a success. Only failures are
-    # recorded; a success returns before the write. The key carries the
-    # generation, so a re-frozen registry cannot be answered from a stale entry.
-    glob_reachable_miss_memo: {text: bool}
-    # Sweeps actually performed. Observable mechanism counter, same role as
-    # `explicit_dep_scan_count`: a spec pins that repeating one unbound name
-    # sweeps exactly once.
-    glob_reachable_scan_count: i64
-    # Resolved importer surface index for `glob_reachable_importer_owner`, so a
-    # repeat name in one module does not rebuild the key by three string
-    # rewrites and re-resolve it. "" = none yet.
-    glob_reachable_importer_index: i64
-    glob_reachable_importer_owner: text
     # Sweeps actually performed. Observable mechanism counter for the memo
     # above; a spec pins that N importers of one surface cause exactly one
     # sweep per (surface, dependency) pair.
@@ -464,15 +328,11 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_materialized_payload_origins: HirMaterializedPayloadOrigins = {}
     val empty_materialized_payload_bindings: HirMaterializedPayloadBindings = {}
     val empty_struct_field_types: HirFieldTypesByName = {}
-    val empty_struct_field_access: HirFieldAccessByName = {}
-    val empty_struct_constructor_access: HirConstructorAccessByName = {}
-    val empty_composite_name_by_owner: HirCompositeNameByOwner = {}
     val empty_local_struct_types: HirLocalStructTypes = {}
     val empty_struct_field_order: HirFieldOrderByName = {}
     val empty_local_tuple_types: HirLocalTupleTypes = {}
     val empty_enum_variant_names: {text: bool} = {}
     val empty_fn_tuple_returns: {text: [HirType]} = {}
-    val empty_fn_optional_container_returns: {text: HirType} = {}
     val empty_glob_expand_memo: {text: i64} = {}
     val empty_field_package_dep_memo: {text: i64} = {}
     val empty_surface_package_name_memo: {text: text} = {}
@@ -481,17 +341,12 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_package_sibling_canons: {text: [text]} = {}
     val empty_surface_index_by_name: {text: i64} = {}
     val empty_explicit_dep_target_memo: {text: i64} = {}
-    val empty_payload_origin_miss_memo: {text: bool} = {}
     val empty_explicit_dep_item_memo: {text: text} = {}
     val empty_registered_import_memo: {text: bool} = {}
-    val empty_dep_tail_memo: {text: bool} = {}
     val empty_impl_index_built: {text: bool} = {}
     val empty_impl_index_positions: {text: [i64]} = {}
-    val empty_impl_method_name_index: {text: [text]} = {}
-    val empty_impl_trait_name_index: {text: text} = {}
     val empty_name_index_built: {text: bool} = {}
     val empty_name_index_positions: {text: i64} = {}
-    val empty_glob_reachable_miss_memo: {text: bool} = {}
     val empty_reexport_root_memo_index: {text: i64} = {}
     val empty_reexport_root_memo_item: {text: text} = {}
     val empty_imported_type_methods_in_progress: [text] = []
@@ -522,16 +377,12 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         materialized_payload_bindings: empty_materialized_payload_bindings,
         imported_type_methods_in_progress: empty_imported_type_methods_in_progress,
         struct_field_types_by_name: empty_struct_field_types,
-        struct_field_access_by_name: empty_struct_field_access,
-        struct_constructor_access_by_name: empty_struct_constructor_access,
-        composite_name_by_owner_symbol: empty_composite_name_by_owner,
         local_struct_types: empty_local_struct_types,
         struct_field_order_by_name: empty_struct_field_order,
         local_tuple_types: empty_local_tuple_types,
         enum_variant_names: empty_enum_variant_names,
         registering_import_symbols: false,
         fn_tuple_returns: empty_fn_tuple_returns,
-        fn_optional_container_returns: empty_fn_optional_container_returns,
         glob_expand_memo: empty_glob_expand_memo,
         field_package_dep_memo: empty_field_package_dep_memo,
         surface_package_name_memo: empty_surface_package_name_memo,
@@ -549,27 +400,16 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         explicit_dep_target_memo: empty_explicit_dep_target_memo,
         explicit_dep_item_memo: empty_explicit_dep_item_memo,
         explicit_dep_scan_count: 0,
-        payload_origin_miss_memo: empty_payload_origin_miss_memo,
-        payload_origin_miss_skip_count: 0,
         registered_import_memo: empty_registered_import_memo,
         registered_import_memo_owner: "",
         registered_import_skip_count: 0,
-        dep_tail_memo: empty_dep_tail_memo,
-        dep_tail_memo_owner: "",
-        dep_tail_skip_count: 0,
         impl_index_built: empty_impl_index_built,
         impl_index_positions: empty_impl_index_positions,
-        impl_method_name_index: empty_impl_method_name_index,
-        impl_trait_name_index: empty_impl_trait_name_index,
         impl_index_build_count: 0,
         impl_rows_visited: 0,
         name_index_built: empty_name_index_built,
         name_index_positions: empty_name_index_positions,
         name_index_build_count: 0,
-        glob_reachable_miss_memo: empty_glob_reachable_miss_memo,
-        glob_reachable_scan_count: 0,
-        glob_reachable_importer_index: -1,
-        glob_reachable_importer_owner: "",
         reexport_root_memo_index: empty_reexport_root_memo_index,
         reexport_root_memo_item: empty_reexport_root_memo_item,
         reexport_visit_surface_indices: empty_reexport_visit_surface_indices,
@@ -643,9 +483,9 @@ impl HirLowering:
         # These parallel owners form one diagnostic record stream. Promote all
         # three or fail closed; promoting only errors leaves scalar projections
         # dangling after the per-file lowering scope ends.
-        val errors_ok = _hir_diagnostic_promote_raw(self.errors)
-        val messages_ok = _hir_diagnostic_promote_raw(self.diagnostic_messages)
-        val recovered_ok = _hir_diagnostic_promote_raw(self.diagnostic_recovered)
+        val errors_ok = rt_transient_heap_promote(self.errors)
+        val messages_ok = rt_transient_heap_promote(self.diagnostic_messages)
+        val recovered_ok = rt_transient_heap_promote(self.diagnostic_recovered)
         errors_ok and messages_ok and recovered_ok
 
     me lower_type(t: Type) -> HirType:
@@ -1079,7 +919,7 @@ impl HirLowering:
         result
 
     me lower_type_param(tp: ParserTypeParam) -> HirTypeParam:
-        val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, nil, tp.span, Visibility.Private, false, nil)
+        val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, nil, tp.span, false, false, nil)
 
         var bounds: [HirType] = []
         for b in tp.bounds:

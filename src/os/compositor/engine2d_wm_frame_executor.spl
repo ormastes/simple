@@ -52,13 +52,7 @@ use os.lib.gpu_bridge.host_gpu_ivshmem.{
     host_gpu_ivshmem_submit_draw_ir_retained
 }
 
-@unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
 extern fn serial_println(msg: text)
-
-@always_inline
-fn _engine2d_wm_log(msg: text):
-    unsafe(capabilities: [ffi]):
-        serial_println(msg)
 
 # Level gate for the frame-executor trace receipts. DEFAULT OFF — flip to true
 # to re-arm the window-loop/composition/present bisection from the 2026-07-26
@@ -157,7 +151,7 @@ class Engine2dWmFrameExecutor:
         val unavailable_result = if backend_required: "rejected" else: "fallback"
         val unavailable_backend = if backend_required: "none" else: "software"
         if base != 0u64:
-            _engine2d_wm_log("HOST_GPU_MAP_OK scope=production isa={guest_isa} base={base}")
+            serial_println("HOST_GPU_MAP_OK scope=production isa={guest_isa} base={base}")
         val deadline_us = boot_monotonic_deadline_us(negotiation_started_us, SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US)
         var attempts = 0
         var first_generation = 0
@@ -165,20 +159,20 @@ class Engine2dWmFrameExecutor:
         var final_reason = SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST
         var decision_elapsed = 0
         if base == 0u64 or width <= 0 or height <= 0 or height > max_pixels or width > max_pixels / height:
-            _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=unavailable-or-readback-capacity width={width} height={height}")
+            serial_println("[wm-frame] {unavailable_marker} reason=unavailable-or-readback-capacity width={width} height={height}")
             val elapsed = boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
-            _engine2d_wm_log("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={unavailable_result} backend={unavailable_backend} attempts=0 first_generation=0 final_generation=0 elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
+            serial_println("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={unavailable_result} backend={unavailable_backend} attempts=0 first_generation=0 final_generation=0 elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
             return executor
         if guest_isa == "unsupported" or backend_code == 0 or simpleos_host_gpu_backend_mask(backend_code) == 0:
-            _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=invalid-session")
+            serial_println("[wm-frame] {unavailable_marker} reason=invalid-session")
             val elapsed = boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
-            _engine2d_wm_log("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={unavailable_result} backend={unavailable_backend} attempts=0 first_generation=0 final_generation=0 elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
+            serial_println("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={unavailable_result} backend={unavailable_backend} attempts=0 first_generation=0 final_generation=0 elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
             return executor
         if deadline_us <= 0:
             final_reason = SIMPLEOS_HOST_GPU_REASON_TIMEOUT
-            _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=invalid-clock")
+            serial_println("[wm-frame] {unavailable_marker} reason=invalid-clock")
             val elapsed = boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
-            _engine2d_wm_log("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={unavailable_result} backend={unavailable_backend} attempts=0 first_generation=0 final_generation=0 elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
+            serial_println("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={unavailable_result} backend={unavailable_backend} attempts=0 first_generation=0 final_generation=0 elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
             return executor
         val backend_codes = simpleos_host_gpu_render_backend_order(backend_code, backend_required)
         val expected_bytes = width * height * 4
@@ -217,7 +211,7 @@ class Engine2dWmFrameExecutor:
             val budget_failed = hello.completed and hello.status == SIMPLEOS_HOST_GPU_STATUS_PASS and hello.reason == 0 and total_elapsed > SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US
             val outcome = if hello_valid: "selected" elif retryable: "rejected" elif not hello.completed and hello.reason == SIMPLEOS_HOST_GPU_REASON_TIMEOUT: "timeout" elif not hello.completed and hello.reason == SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION: "stale" elif budget_failed: "budget" else: "invalid"
             val marker_reason = if budget_failed: SIMPLEOS_HOST_GPU_REASON_TIMEOUT elif hello.reason == 0 and not hello_valid: SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO else: hello.reason
-            _engine2d_wm_log("HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa={guest_isa} backend={candidate} generation={generation} outcome={outcome} status={hello.status} reason={marker_reason} daemon_elapsed_us={hello.elapsed_us} guest_elapsed_us={attempt_elapsed}")
+            serial_println("HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa={guest_isa} backend={candidate} generation={generation} outcome={outcome} status={hello.status} reason={marker_reason} daemon_elapsed_us={hello.elapsed_us} guest_elapsed_us={attempt_elapsed}")
             final_reason = marker_reason
             if hello_valid:
                 executor.host_gpu_base = base
@@ -228,16 +222,16 @@ class Engine2dWmFrameExecutor:
                 final_reason = 0
                 decision_elapsed = total_elapsed
                 break
-            _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=negotiation status={hello.status} detail={hello.reason}")
+            serial_println("[wm-frame] {unavailable_marker} reason=negotiation status={hello.status} detail={hello.reason}")
             if not retryable:
                 decision_elapsed = total_elapsed
                 break
         val elapsed = if decision_elapsed > 0: decision_elapsed else: boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
         val result = if executor.host_gpu_base != 0u64: "selected" else: unavailable_result
         val selected_backend = if executor.host_gpu_base != 0u64: executor.host_gpu_backend else: unavailable_backend
-        _engine2d_wm_log("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={result} backend={selected_backend} attempts={attempts} first_generation={first_generation} final_generation={final_generation} elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
+        serial_println("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={result} backend={selected_backend} attempts={attempts} first_generation={first_generation} final_generation={final_generation} elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
         if executor.host_gpu_base != 0u64:
-            _engine2d_wm_log("[wm-frame] host-gpu-ready backend={executor.host_gpu_backend} generation={executor.host_gpu_run_id_hash}")
+            serial_println("[wm-frame] host-gpu-ready backend={executor.host_gpu_backend} generation={executor.host_gpu_run_id_hash}")
         executor
 
     me _render_host_gpu(composition: DrawIrComposition, resources: [SimpleOsHostGpuImageResource], scene_revision: i64) -> bool:
@@ -259,13 +253,13 @@ class Engine2dWmFrameExecutor:
         self.image_resource_revisions = result.sent_resources
         val receipt = result.receipt
         if not host_gpu_ivshmem_device_receipt_valid(receipt, generation, self.host_gpu_run_id_hash, generation, self.host_gpu_backend_code, expected_bytes):
-            _engine2d_wm_log("[wm-frame] {failure_marker} reason=receipt status={receipt.status} detail={receipt.reason}")
+            serial_println("[wm-frame] {failure_marker} reason=receipt status={receipt.status} detail={receipt.reason}")
             return false
         if not self.framebuffer.present_argb32_from_mmio(receipt.output_addr, present_w, present_h, receipt.output_bytes, receipt.output_checksum):
-            _engine2d_wm_log("[wm-frame] {failure_marker} reason=readback-presentation")
+            serial_println("[wm-frame] {failure_marker} reason=readback-presentation")
             return false
-        _engine2d_wm_log("[wm-frame] host-gpu-presented backend={self.host_gpu_backend} generation={generation} run={self.host_gpu_run_id_hash} frame={generation} submit_id={receipt.submit_id} fence_id={receipt.fence_id} fence_completed={receipt.fence_signaled} device_frame_id={receipt.device_frame_id} checksum={receipt.output_checksum}")
-        _engine2d_wm_log("[wm-frame] host-gpu-device-evidence backend={self.host_gpu_backend} generation={generation} run={receipt.run_id_hash} frame={receipt.frame_id} submit_id={receipt.submit_id} fence_id={receipt.fence_id} fence_completed={receipt.fence_signaled} device_frame_id={receipt.device_frame_id} scene_revision={scene_revision} handle={receipt.native_handle} identity={receipt.device_identity} readback=device checksum={receipt.output_checksum} elapsed_us={receipt.elapsed_us}")
+        serial_println("[wm-frame] host-gpu-presented backend={self.host_gpu_backend} generation={generation} run={self.host_gpu_run_id_hash} frame={generation} submit_id={receipt.submit_id} fence_id={receipt.fence_id} fence_completed={receipt.fence_signaled} device_frame_id={receipt.device_frame_id} checksum={receipt.output_checksum}")
+        serial_println("[wm-frame] host-gpu-device-evidence backend={self.host_gpu_backend} generation={generation} run={receipt.run_id_hash} frame={receipt.frame_id} submit_id={receipt.submit_id} fence_id={receipt.fence_id} fence_completed={receipt.fence_signaled} device_frame_id={receipt.device_frame_id} scene_revision={scene_revision} handle={receipt.native_handle} identity={receipt.device_identity} readback=device checksum={receipt.output_checksum} elapsed_us={receipt.elapsed_us}")
         true
 
     # Retained old/new damage plan. Admission requires a successful prior
@@ -330,7 +324,7 @@ class Engine2dWmFrameExecutor:
         if scene_revision <= 0 or taskbar_revision <= 0:
             return 0
         if self.host_gpu_required and self.host_gpu_base == 0u64:
-            _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=negotiation-or-mapping")
+            serial_println("[wm-frame] host-gpu-required-rejected reason=negotiation-or-mapping")
             return 0
 
         # Per-window fail-closed degrade: a window whose content frame is
@@ -353,9 +347,9 @@ class Engine2dWmFrameExecutor:
         # hang cannot be attributed to a callee. One line per window plus four
         # phase markers is negligible beside a 4K repaint.
         val dbg_window_total = scene.windows.len()
-        if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=window-loop-begin windows={dbg_window_total} content_frames={content_frames.len()}")
+        if _WM_TRACE: serial_println("[wm-exec] at=window-loop-begin windows={dbg_window_total} content_frames={content_frames.len()}")
         for window in scene.windows:
-            if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=window-begin id={window.window_id}")
+            if _WM_TRACE: serial_println("[wm-exec] at=window-begin id={window.window_id}")
             val content = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
             val needs_surface = not window.minimized and content.width > 0 and content.height > 0
             if not needs_surface:
@@ -366,16 +360,10 @@ class Engine2dWmFrameExecutor:
                 expected_images = expected_images + 1
                 var resolved = false
                 if val frame = shared_wm_content_frame_for_window(content_frames, scene_revision, window, 28):
-                    # Provenance validation includes two complete SHA-256 text
-                    # checks.  Compute it once and use that same decision for
-                    # diagnostics and resource admission so the production
-                    # frame path cannot duplicate work or disagree between
-                    # two dispatches.
-                    val provenance_valid = wm_content_frame_web_provenance_valid(frame)
-                    if not provenance_valid:
-                        _engine2d_wm_log("[wm-frame] content-provenance-rejected window_id={window.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
+                    if not wm_content_frame_web_provenance_valid(frame):
+                        serial_println("[wm-frame] content-provenance-rejected window_id={window.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
                     val image_uri = shared_wm_content_frame_image_uri(frame)
-                    if provenance_valid and image_uri != "":
+                    if wm_content_frame_web_provenance_valid(frame) and image_uri != "":
                         var duplicate_uri = false
                         for image in images:
                             if image.image_uri == image_uri:
@@ -389,15 +377,15 @@ class Engine2dWmFrameExecutor:
                             resolved = true
                 if not resolved:
                     degraded_window_count = degraded_window_count + 1
-                    _engine2d_wm_log("[wm-frame] window-degraded window_id={window.window_id} reason=unresolved-or-duplicate-content")
+                    serial_println("[wm-frame] window-degraded window_id={window.window_id} reason=unresolved-or-duplicate-content")
 
-        if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=window-loop-end images={images.len()} good_windows={good_windows.len()} degraded={degraded_window_count}")
+        if _WM_TRACE: serial_println("[wm-exec] at=window-loop-end images={images.len()} good_windows={good_windows.len()} degraded={degraded_window_count}")
         val renderable_images = expected_images - degraded_window_count
         if images.len() != renderable_images or good_content_frames.len() != renderable_images:
-            _engine2d_wm_log("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} content_frames={content_frames.len()} reason=resource-coverage")
+            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} content_frames={content_frames.len()} reason=resource-coverage")
             return 0
         if self.host_gpu_required and degraded_window_count > 0:
-            _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=degraded-window-content count={degraded_window_count}")
+            serial_println("[wm-frame] host-gpu-required-rejected reason=degraded-window-content count={degraded_window_count}")
             return 0
         val filtered_scene = SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: good_windows, background: scene.background)
         val nested_content_frames = shared_wm_nested_content_frames(filtered_scene, content_frames, good_content_frames, scene_revision, 28)
@@ -407,19 +395,19 @@ class Engine2dWmFrameExecutor:
             if self.host_gpu_base != 0u64:
                 host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
             good_content_frames.push(frame)
-        if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=composition-begin")
+        if _WM_TRACE: serial_println("[wm-exec] at=composition-begin")
         val composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, self.draw_ir_backend_target, 1000, clock_label, 0)
-        if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=composition-end")
+        if _WM_TRACE: serial_println("[wm-exec] at=composition-end")
         if self.host_gpu_base != 0u64:
             if self._render_host_gpu(composition, host_images, scene_revision):
                 if degraded_window_count > 0:
-                    _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=host-gpu scene_revision={scene_revision}")
+                    serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=host-gpu scene_revision={scene_revision}")
                 for frame in good_content_frames:
-                    _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=host-gpu window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
+                    serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=host-gpu window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
                 self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label)
                 return scene_revision
             if self.host_gpu_required:
-                _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=device-receipt-or-readback")
+                serial_println("[wm-frame] host-gpu-required-rejected reason=device-receipt-or-readback")
                 return 0
         # The host composition is intentionally not reused after a failed
         # Metal/Vulkan request: its style metadata asks for that target's
@@ -428,7 +416,7 @@ class Engine2dWmFrameExecutor:
         var local_composition = composition
         if engine2d_wm_draw_ir_local_recompose_required(self.draw_ir_backend_target, self.local_draw_ir_backend_target):
             local_composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, self.local_draw_ir_backend_target, 1000, clock_label, 0)
-        if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=present-begin")
+        if _WM_TRACE: serial_println("[wm-exec] at=present-begin")
         # Retained old/new damage wiring (external review F2): when a prior
         # successful frame exists and the plan proves a LOCAL region, replay
         # only the damaged rects through the retained executor. Anything else
@@ -440,18 +428,18 @@ class Engine2dWmFrameExecutor:
             val outcome = engine2d_draw_ir_render_composition_damaged_with_images(self.engine, local_composition, images, retained_plan.rects, false)
             self.engine = outcome.engine
             if outcome.unsupported_kinds == "none" and outcome.ops_rendered > 0:
-                if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=retained-present rects={retained_plan.output_rect_count} ops={outcome.ops_rendered}")
+                if _WM_TRACE: serial_println("[wm-exec] at=retained-present rects={retained_plan.output_rect_count} ops={outcome.ops_rendered}")
                 if degraded_window_count > 0:
-                    _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={outcome.ops_skipped} rendered={outcome.ops_rendered} scene_revision={scene_revision} reason=retained-damage")
+                    serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={outcome.ops_skipped} rendered={outcome.ops_rendered} scene_revision={scene_revision} reason=retained-damage")
                 for frame in good_content_frames:
-                    _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=software-retained-damage window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
+                    serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=software-retained-damage window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
                 self.record_successful_scene(scene, background_key, scene_revision, taskbar_revision, clock_label)
                 return scene_revision
             # Fail closed: an unsupported or empty retained replay must not
             # be presented; repaint everything through the full lane instead.
-            _engine2d_wm_log("[wm-frame] retained-damage-fallback reason={outcome.unsupported_kinds} rendered={outcome.ops_rendered} scene_revision={scene_revision}")
+            serial_println("[wm-frame] retained-damage-fallback reason={outcome.unsupported_kinds} rendered={outcome.ops_rendered} scene_revision={scene_revision}")
         val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, local_composition, false, images)
-        if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=present-end rendered={result.rendered_command_count} skipped={result.skipped_command_count}")
+        if _WM_TRACE: serial_println("[wm-exec] at=present-end rendered={result.rendered_command_count} skipped={result.skipped_command_count}")
         # A partially-unsupported composition (e.g. one taskbar icon whose
         # image never resolved because the backing disk lease is degraded)
         # must still show the commands that DID render -- rejecting the
@@ -460,11 +448,11 @@ class Engine2dWmFrameExecutor:
         # (SimpleOS baremetal desktop, 2026-07-16). Only bail when the
         # composition produced literally nothing.
         if result.rendered_command_count <= 0:
-            _engine2d_wm_log("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} fallback_required={result.fallback_required} reason={result.fallback_reason}")
+            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} fallback_required={result.fallback_required} reason={result.fallback_reason}")
             return 0
         if degraded_window_count > 0 or result.skipped_command_count != 0:
-            _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} scene_revision={scene_revision} reason={result.fallback_reason}")
+            serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} scene_revision={scene_revision} reason={result.fallback_reason}")
         for frame in good_content_frames:
-            _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=software window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
+            serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=software window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
         self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label)
         scene_revision

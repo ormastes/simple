@@ -232,10 +232,7 @@ void     rt_dir_list_free(const char** entries, int64_t count);
 
 /* ===== File Locking ===== */
 
-/* `text` lowers to (data, len) at the emitted call site -- the old
- * `const char* path` shape here never matched any caller and nothing defined
- * it. Corrected 2026-08-23 alongside the definitions in runtime_native.c. */
-int64_t  rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
+int64_t  rt_file_lock(const char* path, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
 
 /* ===== Offset-based File I/O ===== */
@@ -250,10 +247,8 @@ int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
 
 /* ===== Memory-Mapped File I/O ===== */
 
-int64_t  rt_mmap(const uint8_t* path_ptr, uint64_t path_len, int64_t size, int64_t offset, int64_t readonly);
-bool     rt_munmap(int64_t addr, int64_t size);
-int64_t  rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len);
-int64_t  rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len);
+void*    rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly);
+bool     rt_munmap(void* addr, int64_t size);
 void     rt_invlpg(uint64_t addr);
 uint64_t unsafe_addr_of(int64_t value);
 uint64_t rt_read_cr3(void);
@@ -278,8 +273,8 @@ void     rt_volatile_write_u64(int64_t addr, int64_t value);
 void     rt_memory_barrier(void);
 void     rt_load_barrier(void);
 void     rt_store_barrier(void);
-bool     rt_madvise(int64_t addr, int64_t size, int64_t advice);
-bool     rt_msync(int64_t addr, int64_t size);
+bool     rt_madvise(void* addr, int64_t size, int64_t advice);
+bool     rt_msync(void* addr, int64_t size);
 
 /* ===== Raw mmap/mprotect Syscall Wrappers (address-based, for SMF loader) ===== */
 
@@ -374,11 +369,6 @@ int8_t rt_transient_array_scope_begin(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
 int8_t rt_transient_heap_promote(int64_t value);
-int64_t rt_transient_last_promoted_nodes(void);
-int64_t rt_transient_last_promoted_bytes(void);
-int64_t rt_transient_scope_promoted_nodes(void);
-int64_t rt_transient_scope_promoted_bytes(void);
-void rt_transient_promotion_stats_reset(void);
 int64_t  rt_time_now_unix(void);
 int64_t  rt_entropy_hardware_ready(void);
 void     rt_sleep_nanos(int64_t ns);
@@ -625,10 +615,6 @@ int64_t  rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
 int64_t  rt_enum_id(int64_t value);
 int64_t  rt_enum_discriminant(int64_t value);
 int64_t  rt_enum_payload(int64_t value);
-/* Formation probe for heap-typed enum/Option payloads at fail-closed
- * handoffs: 1 only for a heap-tagged pointer outside the zero page. This is a
- * FORMATION check, not liveness — see runtime_native.c. */
-int8_t   rt_heap_ref_wellformed(int64_t value);
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
@@ -654,7 +640,6 @@ int64_t  rt_string_to_lower(int64_t value);
 int64_t  rt_string_to_upper(int64_t value);
 int64_t  rt_string_to_float(int64_t value);
 int64_t  rt_char_from_code(int64_t code);
-int64_t  char_from_code(int64_t code);
 int64_t  text_dot_from_char_code(int64_t code);
 int64_t  rt_string_split(int64_t value, int64_t delimiter);
 int64_t  rt_string_split_limit(int64_t value, int64_t delimiter, int64_t limit);
@@ -663,7 +648,6 @@ int8_t   rt_contains(int64_t collection, int64_t value);
 int64_t  rt_unwrap_or_self(int64_t value);
 int64_t  rt_unwrap_or_value(int64_t value, int64_t default_val);
 int64_t  rt_unwrap_or_trap(int64_t value);
-int64_t  rt_expect_or_trap(int64_t value, int64_t msg);
 
 /* Codegen-emitted entry points recovered 2026-08-21 -- see
  * doc/08_tracking/bug/c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md
@@ -744,7 +728,6 @@ int64_t  rt_string_substr_from(int64_t value, int64_t start);
 int64_t  rt_reverse(int64_t receiver);
 int64_t  rt_reverse_mut(int64_t receiver);
 int64_t  rt_sort(int64_t receiver);
-int8_t   rt_array_sort(int64_t array);
 int64_t  rt_take(int64_t receiver, int64_t n);
 int64_t  rt_drop(int64_t receiver, int64_t n);
 int64_t  rt_string_sorted(int64_t value);
@@ -984,12 +967,11 @@ bool        rt_process_write_stdin(int64_t pid, const char* data);
 int64_t     rt_process_write_stdin_some(int64_t pid, const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 const char* rt_process_read_stdout(int64_t pid);
 bool        rt_process_is_alive(int64_t pid);
-/* Checked nonblocking process state: read status 1=data, 0=would-block,
- * 2=EOF, -1=null status output, -2=invalid handle, -3=OS/read failure.
- * Liveness is 1=alive, 0=exited, -2=invalid handle, -3=OS/wait failure. */
-const char* rt_process_read_stdout_checked(int64_t pid, int32_t* out_status);
-int32_t     rt_process_is_alive_checked(int64_t pid);
 bool        rt_process_close_piped(int64_t pid);
+int64_t     rt_editor_spawn_simple_dap(void);
+bool        rt_editor_start_simple_dap(int64_t pid);
+bool        rt_editor_poll_simple_dap_stopped(int64_t pid);
+bool        rt_editor_wait_simple_dap_stopped(int64_t pid);
 
 /* ===== Environment ===== */
 
@@ -1089,6 +1071,8 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1852. NOT a C string. */
 int64_t     rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len);
+int64_t     rt_file_read_regular_no_follow_bounded(
+                const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
 int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
 /* Failed-existence-probe measurement. begin returns a non-reusable monotonic

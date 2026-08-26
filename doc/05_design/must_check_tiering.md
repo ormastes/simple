@@ -1,116 +1,17 @@
 # Mandatory Check Tiering Detail Design
 
-`check-push-must-pass.shs` consumes standard pre-push ref rows, rejects malformed
-input or more than two unique updates, and deduplicates identical tip/base
-pairs. The canonical pre-push wrapper marks its invocation explicitly: an empty,
-readable stream in that context is a named `0 refs to push (no-op)` PASS, while
-direct empty input remains a failure so a missing producer cannot pass vacuously.
-For each remaining outgoing revision it loads the manifest and ledger from that committed revision,
+`check-push-must-pass.shs` consumes standard pre-push ref rows. For each unique
+outgoing revision it loads the manifest and ledger from that committed revision,
 recomputes the source fingerprint, validates ledger cardinality/status/command
 parity and evidence hashes, and runs the registry's `tier=push` range/ref rows.
-Production evidence is a regular blob loaded from the exact pushed revision;
-the live checkout is not consulted, and aggregate hashed size is limited to
-64 MiB. The tree-size range row is dispatched in `--push-tip` mode:
-it retains absolute size, duplicate entry, source shape, load-bearing path, and
-first-parent delta checks without materializing or scanning every outgoing
-commit. Exhaustive detector fixtures run in the bootstrap tier.
-Production profiling on 2026-08-24 found the former tree-mode subset alone took
-about 59 seconds. Eight whole-tree, compiler, or executable checks were moved
-to automated bootstrap rows: use-target resolution, C runtime compilation,
-direct-runtime scanning, signature provenance, performance-mechanism coverage,
-process-wait EINTR coverage, guard wiring, and outline parsing. Their ledger
-rows remain required TODO until a bound bootstrap records real PASS evidence.
-The use-target resolver requires every Git-indexed `src/` and `test/` input to
-be physically materialized; sparse/partial inputs are ERROR, not empty modules.
-Its baseline identity excludes diagnostic line numbers and binds class, source
-file, module, and member, preventing line-only edits from creating NEW/STALE
-pairs.
-The push tier retains the two measured sub-second structural tree checks plus
-the bounded committed-ref/range guards.
-The runtime-API range guard uses `--scan-only` only from its closed push
-dispatch row; that mode requires an explicit range. Its four mutation fixtures
-remain a separate automated bootstrap row, while default manual execution still
-runs them before scanning.
-An earlier committed tree measured 10.21 seconds/225,032 KiB before the fixture
-split and 9.27 seconds/223,520 KiB afterward. Current main measures 11.05
-seconds/225,736 KiB after runtime extraction optimization, so NFR-MCT-001 is
-again RED by 1.05 seconds. The focused fixture is coverage, not the production
-timing oracle; the current production row is authoritative.
-The interpreter-extern registry and type-walk constructor mutation fixtures now
-run only as distinct required bootstrap rows; their production push rows use
-`--scan-only`. The same exact committed-ref production oracle passes in 4.57
-seconds/227,920 KiB afterward: 58.6% lower elapsed time than 11.05 seconds, with
-a 0.97% peak-RSS increase. NFR-MCT-001 is GREEN.
-The broader focused tiering fixture is not the production timing oracle. On the
-same host it measured 23.70 seconds/6,656 KiB before this hardening and 18.01
-seconds/6,656 KiB after it (about 24% lower elapsed time, unchanged peak RSS).
-Those fixture totals include setup and adversarial repository construction;
-they complement, but do not replace or redefine, the retained 4.57-second
-production measurement and the approximately ten-second push target.
-Quick-rules and interpreter-module-owner push rows now also use `--scan-only`;
-their calibration fixtures remain bootstrap work. The 20-case native-array
-interpreter/native-build matrix is bootstrap-only because no bounded structural
-check proves its semantic parity.
-The driver combines pushed refs into one outgoing commit set, subtracting the
-advertised old tips and, for new refs, all refs on the actual push remote. The
-conflict guard rejects more than 64 commits, batch-resolves tree IDs, deduplicates
-equal trees, and scans every remaining tree. This catches a conflict introduced
-and removed before the tip without unbounded per-commit subprocess growth.
-If remote exclusion yields no outgoing commit, the guard falls back to the
-deduplicated non-deletion local tips and validates their trees, allowing an
-already-present commit to receive a new branch/tag safely. The driver cannot
-override the fixed 64 limit through its environment; the low-level fixture-only
-argument can only lower the limit.
-For the runtime-API range gate, Git tree equality over both runtime roots is an
-algorithmic fast path: an unchanged range extracts and counts the tip once;
-any changed runtime root performs the full base/tip removal analysis. The
-unchanged-range scan measured 7.43 seconds before and 3.89 seconds afterward,
-with non-vacuity and mutation fixtures retained.
-Committed symbol extraction is batched by implementation through one Git tree
-grep for Rust and one for C rather than one `git show` per file. Exact-set
-comparison proved 1,804/1,804 Rust and 1,504/1,504 C symbols identical; combined
-with tree equality, the unchanged-range scan reaches 0.84 seconds.
-The quick rules row extracts `rules.sdl` from the same committed ref before
-parsing its numeric commands. An explicit `--rules` path exists only for
-diagnostic and self-test fixtures.
 
 `check-bootstrap-must-pass.shs` runs expensive automated manifest rows. Its
 bootstrap-completion mode first requires the exact Stage 2/3 full-provenance
 verdict and Stage 4 `post_bootstrap_stage4_acceptance=true` oracle, records
 distinct Stage 1–4 evidence references, and then executes every automated row.
-Gate logs are retained under
-`doc/08_tracking/check/evidence/<source-fingerprint>/` and accepted only when the
+Gate logs are retained under the source fingerprint and accepted only when the
 last non-empty line is an explicit PASS verdict. Ledger replacement is atomic
 only after row evaluation completes.
-Production recording requires fingerprinted inputs to match `HEAD`. The
-`--record-gate-pass <id> --evidence <repo-relative-path>` interface applies only
-to manifest `todo` rows and accepts a committed
-`simple.must-check-gate-receipt/v1` whose gate ID, source fingerprint, final
-PASS verdict, and separate committed artifact SHA-256 all validate. Repeating
-the same receipt preserves its first PASS timestamp; later fingerprints retain
-it only while the same blob and SHA-256 remain committed.
-For `riscv32-riscv64-shared`, common signature validation is followed by the
-dedicated ownership checker over shared, RV32, and RV64 attachments. The three
-sorted inventories must form an exact disjoint partition of the committed
-RISC-V-named source universe; shared entries bind existing bilateral consumer
-paths and sibling-only entries bind explicit specialization reasons.
-The binary-size oracle receives the committed Stage 4 compiler, stripped Simple/Go artifacts, plus
-closed measurement, equivalence, compile-trace, and canonical Stage 4
-provenance blobs. It binds the compiler bytes to the canonical receipt and
-recomputes its source and repository-helper authority fields. Promotion occurs
-only on the producer host while the complete canonical Stage-3/Stage-4 tree is
-available; durable committed copies must match those live files byte-for-byte.
-It compares exact hashes and bytes, checks ELF target identity, binds committed
-semantic sources/oracle and output hashes, rejects Rust-seed/compiler-process
-contamination, and derives `Simple <= Go` rather than trusting a producer flag.
-In completion mode, automated dispatch receives the canonical validated Stage 4
-candidate as both `SIMPLE_BINARY` and `SIMPLE_BIN`; these assignments override
-any ambient value. The
-self-test supplies a conflicting ambient path and requires its fake gate runner
-to observe the admitted candidate.
-Bare run mode fails before evaluation or ledger mutation because it lacks that
-Stage 1–4 binding. The ledger completion timestamp stays `never` unless every
-bootstrap row is PASS, then equals the latest preserved row PASS timestamp.
 
 Statuses are `pass`, `todo`, `blocked`, or `fail`. TODO and blocked are never
 aliases for PASS. Only explicitly push-blocking rows prevent an interactive

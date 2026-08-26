@@ -1,161 +1,26 @@
 # @feature simplebox.dispatch
 # simplebox_dispatch — MDSOC+ busybox-style multi-call applet router.
 # The stateless router owns applet identity. Filesystem behavior is invoked by
-# simplebox_main; bounded output applets remain here to keep a compact
-# compilation closure.
-
-use os.tools.simplebox.simplebox_inventory_v1.{simplebox_inventory_applet_names_v1}
+# simplebox_main so this router keeps a compact compilation closure.
 
 extern fn stdout_write(data: text)
 
-val SIMPLEBOX_MAX_OUTPUT_BYTES: i64 = 65536
-val SIMPLEBOX_PRINTF_MAX_ARGUMENTS: u64 = 4096u64
-
-struct SimpleboxEchoPlan:
-    parts: [text]
-    output_bytes: i64
-    accepted: bool
-
-struct SimpleboxPrintfPlan:
-    parts: [text]
-    output_bytes: i64
-    accepted: bool
-    error: text
-
-fn _printf_push_bounded(
-    parts: [text], output_bytes: i64, part: text
-) -> SimpleboxPrintfPlan:
-    val part_bytes = part.len().to_i64()
-    if part_bytes > SIMPLEBOX_MAX_OUTPUT_BYTES - output_bytes:
-        return SimpleboxPrintfPlan(
-            parts: [], output_bytes: output_bytes + part_bytes,
-            accepted: false, error: "output exceeds 65536-byte limit")
-    # Empty %s substitutions contribute no output.  Do not retain one array
-    # element per empty operand: output-byte accounting alone would otherwise
-    # permit argv-sized allocation and dispatch work with zero output.
-    if part_bytes > 0:
-        parts.push(part)
-    SimpleboxPrintfPlan(
-        parts: parts, output_bytes: output_bytes + part_bytes,
-        accepted: true, error: "")
-
-fn simplebox_printf_plan(args: [text]) -> SimpleboxPrintfPlan:
-    """Expand a bounded printf format using %s, %%, and common escapes."""
-    if args.len() == 0u64:
-        return SimpleboxPrintfPlan(
-            parts: [], output_bytes: 0, accepted: false,
-            error: "missing format operand")
-    if args.len() > SIMPLEBOX_PRINTF_MAX_ARGUMENTS:
-        return SimpleboxPrintfPlan(
-            parts: [], output_bytes: 0, accepted: false,
-            error: "too many operands")
-    val format = args[0]
-    var parts: [text] = []
-    var output_bytes: i64 = 0
-    var arg_index: u64 = 1u64
-    var repeat = true
-    while repeat:
-        repeat = false
-        var consumed_argument = false
-        var index: i64 = 0
-        while index < format.len():
-            val current = format.slice(index, index + 1)
-            var part = current
-            if current == "%":
-                if index + 1 >= format.len():
-                    return SimpleboxPrintfPlan(
-                        parts: [], output_bytes: output_bytes, accepted: false,
-                        error: "incomplete format directive")
-                val directive = format.slice(index + 1, index + 2)
-                if directive == "%":
-                    part = "%"
-                elif directive == "s":
-                    part = if arg_index < args.len(): args[arg_index] else: ""
-                    if arg_index < args.len():
-                        arg_index = arg_index + 1u64
-                        consumed_argument = true
-                else:
-                    return SimpleboxPrintfPlan(
-                        parts: [], output_bytes: output_bytes, accepted: false,
-                        error: "unsupported format directive %" + directive)
-                index = index + 2
-            elif current == "\\":
-                if index + 1 >= format.len():
-                    part = "\\"
-                    index = index + 1
-                else:
-                    val escape = format.slice(index + 1, index + 2)
-                    if escape == "n":
-                        part = "\n"
-                    elif escape == "t":
-                        part = "\t"
-                    elif escape == "r":
-                        part = "\r"
-                    elif escape == "\\":
-                        part = "\\"
-                    elif escape == "c":
-                        return SimpleboxPrintfPlan(
-                            parts: parts, output_bytes: output_bytes,
-                            accepted: true, error: "")
-                    else:
-                        part = "\\" + escape
-                    index = index + 2
-            else:
-                index = index + 1
-            val appended = _printf_push_bounded(parts, output_bytes, part)
-            if not appended.accepted:
-                return appended
-            parts = appended.parts
-            output_bytes = appended.output_bytes
-        if consumed_argument and arg_index < args.len():
-            repeat = true
-    SimpleboxPrintfPlan(
-        parts: parts, output_bytes: output_bytes, accepted: true, error: "")
-
-fn simplebox_echo_plan(args: [text]) -> SimpleboxEchoPlan:
-    """Plan one bounded echo write without repeatedly copying its prefix."""
+fn _applet_echo(args: [text]) -> i32:
     var newline = true
     var start: u64 = 0u64
     if args.len() > 0u64 and args[0] == "-n":
         newline = false
         start = 1u64
-
-    var parts: [text] = []
-    var output_bytes: i64 = 0
+    var output = ""
     var index = start
     while index < args.len():
         if index > start:
-            output_bytes = output_bytes + 1
-            if output_bytes > SIMPLEBOX_MAX_OUTPUT_BYTES:
-                return SimpleboxEchoPlan(parts: [], output_bytes: output_bytes, accepted: false)
-            parts.push(" ")
-        val arg_bytes = args[index].len().to_i64()
-        if arg_bytes > SIMPLEBOX_MAX_OUTPUT_BYTES - output_bytes:
-            return SimpleboxEchoPlan(parts: [], output_bytes: output_bytes + arg_bytes, accepted: false)
-        output_bytes = output_bytes + arg_bytes
-        parts.push(args[index])
+            output = output + " "
+        output = output + args[index]
         index = index + 1u64
     if newline:
-        if output_bytes == SIMPLEBOX_MAX_OUTPUT_BYTES:
-            return SimpleboxEchoPlan(parts: [], output_bytes: output_bytes + 1, accepted: false)
-        output_bytes = output_bytes + 1
-        parts.push("\n")
-    SimpleboxEchoPlan(parts: parts, output_bytes: output_bytes, accepted: true)
-
-fn _applet_echo(args: [text]) -> i32:
-    val plan = simplebox_echo_plan(args)
-    if not plan.accepted:
-        stdout_write("echo: output exceeds 65536-byte limit\n")
-        return 1
-    stdout_write(plan.parts.join(""))
-    0
-
-fn _applet_printf(args: [text]) -> i32:
-    val plan = simplebox_printf_plan(args)
-    if not plan.accepted:
-        stdout_write("printf: " + plan.error + "\n")
-        return 1
-    stdout_write(plan.parts.join(""))
+        output = output + "\n"
+    stdout_write(output)
     0
 
 fn _applet_true(args: [text]) -> i32:
@@ -186,8 +51,6 @@ fn _basename(path: text) -> text:
 fn _run_applet(name: text, args: [text]) -> i32:
     if name == "echo":
         return _applet_echo(args)
-    elif name == "printf":
-        return _applet_printf(args)
     elif name == "true":
         return _applet_true(args)
     elif name == "false":
@@ -197,9 +60,35 @@ fn _run_applet(name: text, args: [text]) -> i32:
     127
 
 fn simplebox_applet_names() -> [text]:
-    # Keep CLI discovery and the authenticated loader catalog on one closed
-    # inventory.  Adding an applet now updates both surfaces atomically.
-    simplebox_inventory_applet_names_v1()
+    var names: [text] = []
+    names.push("echo")
+    names.push("true")
+    names.push("false")
+    names.push("pwd")
+    names.push("seq")
+    names.push("cat")
+    names.push("head")
+    names.push("wc")
+    names
+
+fn simplebox_has_applet(name: text) -> bool:
+    if name == "echo":
+        return true
+    elif name == "true":
+        return true
+    elif name == "false":
+        return true
+    elif name == "pwd":
+        return true
+    elif name == "seq":
+        return true
+    elif name == "cat":
+        return true
+    elif name == "head":
+        return true
+    elif name == "wc":
+        return true
+    false
 
 fn simplebox_dispatch(argv: [text]) -> i32:
     if argv.len() == 0:

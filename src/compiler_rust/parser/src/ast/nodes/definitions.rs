@@ -30,7 +30,7 @@ pub struct FunctionDef {
     /// Documentation comment for API doc generation
     pub doc_comment: Option<DocComment>,
     /// Contract specification (requires/ensures)
-    pub contract: Option<Box<ContractBlock>>,
+    pub contract: Option<ContractBlock>,
     /// Whether this is an abstract method (trait method without body)
     pub is_abstract: bool,
     /// Whether this function is explicitly marked as sync (non-suspending)
@@ -52,7 +52,7 @@ pub struct FunctionDef {
     /// Return type constraint for dependent function types (VER-011)
     /// Syntax: `fn f(x: T) -> U where result.len() == x.len():`
     /// The predicate can reference `result` and function parameters
-    pub return_constraint: Option<Box<Expr>>,
+    pub return_constraint: Option<Expr>,
 
     // Generic template metadata for .smf template storage
     /// True if this is an unspecialized generic template

@@ -3,45 +3,6 @@
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
-## Mandatory checks and hook setup
-
-- Keep interactive push checks bounded; compiler builds, full tests, QEMU,
-  hardware, and benchmarks belong to the bootstrap-owned evidence tier.
-- Before changing hook wiring, use the check-then-install commands in
-  `doc/07_guide/tooling/must_check_tiering.md` for the current host.
-- Linked worktrees share their hooks directory. Install the stable
-  `scripts/hooks/pre-push-worktree-launcher`; never bind the shared hook to one
-  worktree's absolute dispatcher path.
-- Start detailed work at
-  `doc/00_llm_process/feature_expert/must_check_tiering/skill.md`.
-
-## Sdoctest discovery
-
-- `simple test test --whole` is the release-wide command: positional `test`
-  scopes executable specs only, while Markdown comes from
-  `config/sdoctest.sdn` and source-comment doctests come from `src/lib`,
-  `src/compiler`, and `src/app`.
-- Use `--sdoctest <file.md>` for a focused Markdown file and
-  `--spl-doctest <file.spl>` for a focused source-comment file.
-- Runnable Markdown and comment examples use closed, non-empty
-  `simple`/`spl`/`sdoctest` fences. Use `text` for illustrative snippets.
-- Primary operator guide: `doc/07_guide/infra/testing.md`.
-
-## Compiler performance and memory diagnostics
-
-- **Canonical design:**
-  `doc/04_architecture/simple_compiler_performance_memory_efficiency.md`.
-- **Operator guide:** `doc/07_guide/compiler/performance_diagnostics.md`.
-- **Feature expert:**
-  `doc/00_llm_process/feature_expert/compiler_performance/skill.md`.
-- **MIR layer expert:**
-  `doc/00_llm_process/layer_expert/mir_optimization/skill.md`.
-- **Safety rule:** only `Active` passes may transform; analysis, remark,
-  skeleton, and disabled passes fail closed and stay out of effective pipelines.
-- **Evidence boundary:** current source hardening is integrated, but runtime
-  verification remains blocked until the admitted self-hosted Stage-4 binary is
-  restored. Never substitute the Rust seed.
-
 ## Parent-authoritative actor/process transport
 
 - **Canonical owner rule:** the scheduler owns actor registry/admission/replies;
@@ -349,70 +310,6 @@ verify that the caller actually crosses the worker/library boundary.
   `--diagnostic-child-compiler=/absolute/path/to/simple`; record that child
   identity separately from the seed/driver.
 - Guide: `doc/07_guide/compiler/build.md#bootstrap-debug-and-test-modes`.
-
-## Bootstrap native-build failure classes
-
-Ported 2026-08-23 from the macOS aarch64 lane (`c9ce33e2234`) and cross-checked
-on Linux x86_64. Platform labels are load-bearing — do not generalize a
-Darwin-only row.
-
-- **Hello-world SEGV has TWO classes; classify before diagnosing.**
-  *zeroed payload* (macOS lane): `arg == 0` into a live function —
-  `hir_cache_closure_digest+36`, `x0 == 0`, because
-  `streaming_module_surfaces_owner` read back Some-tagged with payload word 0
-  (nil is 3, so `== nil` guards pass). vs *NULL-GOT* (Linux lane, root-caused
-  `c4b84dc9aaf`): `rip == 0`, an undefined `rt_unwrap_or_trap` left a zero GOT
-  slot. Both present identically. Fixing one does not fix the other.
-- **Why compile time cannot see the zeroed-payload class.** The value is
-  well-typed (`ModuleSurfacesByName?`); store and read are in different `me`
-  methods with no cross-method definite-assignment tracking; the corruption is a
-  native aggregate-transport miscompile *below* the frontend; and
-  `rt_unwrap_or_trap` (`src/runtime/simple_core/core_values.spl:79`) gates only
-  on the discriminant and returns `rt_enum_payload` **without validating
-  payload != 0** — confirmed on Linux, platform-neutral. Lossy transport still
-  live: `module_surfaces_freeze` still returns
-  `Result<ModuleSurfacesByName, text>`
-  (`module_surface_registry_index.spl:291`).
-- **Two different `--timeout` flags.** Rust seed driver
-  (`src/compiler_rust/driver/src/cli/native_build.rs:129,229,584`):
-  `--timeout <secs>` sets **per-file** `file_timeout`, default 300 — this is the
-  path the bootstrap uses, so the per-file budget *is* overridable, contradicting
-  the macOS lane's "no override exists". Pure-Simple CLI
-  (`src/app/cli/native_build_main.spl:89`): `--timeout` is the **worker
-  subprocess** timeout, `DEFAULT_TIMEOUT_MS = 7200000`. The struct default
-  `file_timeout: 300` lives at
-  `pipeline/native_project/mod.rs:537`. That file's own comment (`:17`) and
-  `--help` (`:805`) both claim "default: 60" and are wrong.
-  `--jobs=full` on a small host can push a big file past 300 s; retry
-  `--jobs=half`, the cache resumes. Same file passing with fewer jobs =
-  contention, not a hang.
-- **`rt_heap_ref_wellformed`** — formation-only probe for heap-typed
-  enum/Option payloads at fail-closed handoffs: 1 only for a tag==1 heap pointer
-  with addr >= 4096; deliberately no registry/liveness probe, scalar payloads
-  report 0 by design. On `main` as `57271d9ba49`. Driver guard:
-  `E-DRIVER-HIR-OWNER-MALFORMED` in
-  `src/compiler/80.driver/driver_hir_pipeline_lowering.spl`.
-- **Fresh-seed requirement (portable).** Current `src/lib/**` has 2,245
-  `unsafe(` uses; any seed older than ~2026-08-19 fails `error[E1002]: function
-  'unsafe' not found`. Only a `--full-bootstrap` seed rebuild compiles current
-  source.
-- **macOS-only: Mach-O weak definitions.** Apple `llvm-nm -g -p` prints weak
-  *definitions* as `T`; only `-m` shows `weak external`. Seed parsers accepting
-  only ELF `W`/`V` misread weak C fallbacks as STRONG → "Stage4 runtime capsule
-  defines owner-provided runtime symbols STRONGLY". **Inert on Linux**; not
-  ported.
-- **Ops hygiene (mechanism platform-neutral).** Stale
-  `build/.simple-bootstrap-locks/` files → "timed out waiting for bootstrap
-  output ownership"; killing a bootstrap wrapper orphans its cargo/rustc
-  children at PPID 1 (check `ps -o pid,ppid` first); `native-build` buffers to
-  non-tty, so a 0-byte log is not a stall — judge by
-  `build/bootstrap/bootstrap-progress.log` and CPU.
-- **`jj` colocated.** `jj rebase -r X -d Y` moves X *and descendants only* and
-  silently drops ancestors — use `-s <stack-root>`. `(empty)` after rebase means
-  the diff collapsed; re-apply. `git worktree remove/prune` does not snapshot jj
-  state.
-- Detail: `doc/07_guide/tooling/bootstrap_phase_verification.md`,
-  `doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md`.
 
 ## Spec run verdict / "did the tests pass?"
 

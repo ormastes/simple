@@ -25,7 +25,6 @@ use compiler.driver.driver_hir_pipeline_support.{
     driver_stage3_surface_content_matches,
     driver_stage3_surface_identity_mismatch,
     driver_hir_mem_snapshot,
-    driver_hir_promotion_snapshot,
     driver_shown_fatal_count,
     driver_collect_hir_errors,
     driver_dict_entry_count,
@@ -39,131 +38,25 @@ use compiler.driver.driver_hir_pipeline_passes.{
     run_any_escape_pass,
     run_enum_contract_pass
 }
+use compiler.semantics.const_fold.{run_const_fold_pass}
 use compiler.semantics.resolve.{resolve_methods}
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
-use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_status_line, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
-@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text?
-@unsafe(reason: "raw deterministic text-hash ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text
 extern fn rt_hash_text(content: text) -> i64
-@unsafe(reason: "raw transient-array scope begin ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
-@unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_pause() -> bool
-@unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
-@unsafe(reason: "raw heap-reference formation probe ABI", capabilities: [ffi])
-extern fn rt_heap_ref_wellformed(value: Any) -> bool
-@unsafe(reason: "raw last-promotion node-count ABI", capabilities: [ffi])
-extern fn rt_transient_last_promoted_nodes() -> i64
-@unsafe(reason: "raw last-promotion byte-count ABI", capabilities: [ffi])
-extern fn rt_transient_last_promoted_bytes() -> i64
-@unsafe(reason: "raw transient-scope promoted-node-count ABI", capabilities: [ffi])
-extern fn rt_transient_scope_promoted_nodes() -> i64
-@unsafe(reason: "raw transient-scope promoted-byte-count ABI", capabilities: [ffi])
-extern fn rt_transient_scope_promoted_bytes() -> i64
-@unsafe(reason: "raw process termination ABI", capabilities: [ffi])
 extern fn rt_exit(code: i64)
-@unsafe(reason: "raw stdout flush ABI", capabilities: [ffi])
 extern fn rt_stdout_flush()
 
-@always_inline
-fn _sffi_env_get(key: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_env_get(key)
-
-@always_inline
-fn _sffi_hash_text(content: text) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_hash_text(content)
-
-@always_inline
-fn _sffi_transient_array_scope_begin() -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_array_scope_begin()
-
-@always_inline
-fn _sffi_transient_array_scope_pause() -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_array_scope_pause()
-
-@always_inline
-fn _sffi_transient_heap_promote(value: Any) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_heap_promote(value)
-
-@always_inline
-fn _sffi_transient_last_promoted_nodes() -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_transient_last_promoted_nodes()
-
-@always_inline
-fn _sffi_transient_last_promoted_bytes() -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_transient_last_promoted_bytes()
-
-@always_inline
-fn _sffi_transient_scope_promoted_nodes() -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_transient_scope_promoted_nodes()
-
-@always_inline
-fn _sffi_transient_scope_promoted_bytes() -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_transient_scope_promoted_bytes()
-
-@always_inline
-fn _sffi_exit(code: i64):
-    unsafe(capabilities: [ffi]):
-        rt_exit(code)
-
-@always_inline
-fn _sffi_stdout_flush():
-    unsafe(capabilities: [ffi]):
-        rt_stdout_flush()
-
-# Formation probe wrapper, deliberately shaped as a plain `fn` that returns a
-# SCALAR out of the unsafe block. Mirrors `hir_heap_ref_wellformed`
-# (20.hir/hir_lowering/types.spl:28), which is the same wrapper for layer 20.
-#
-# The shape is load-bearing, not stylistic. Two phase-3 guards used to write
-# `return (self.ctx, false)` from INSIDE an `unsafe(capabilities: [ffi])` block;
-# a tuple-shaped return in that position is lost under native codegen — control
-# falls through and the caller reads SUCCESS. Those two were the only
-# tuple-returns-inside-unsafe in the whole owned tree, against 87 scalar/enum
-# returns inside unsafe that work fine. Routing the probe through this wrapper
-# keeps the callers free of `unsafe` entirely, so their verdict `return` sits at
-# function-body level (the proven shape) and no boolean has to cross an unsafe
-# block boundary via an outer local.
-#
-# It is a formation check, never a dereference, so it cannot false-reject a live
-# owner and is safe to call from a diagnostic path.
-# See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
-fn driver_heap_ref_wellformed(value: Any) -> bool:
-    unsafe(capabilities: [ffi]):
-        return rt_heap_ref_wellformed(value)
-
-struct StreamingHirPromotion:
-    module: HirModule
-    hir_promoted_nodes: i64
-    hir_promoted_bytes: i64
-    total_promoted_nodes: i64
-    total_promoted_bytes: i64
-
-fn driver_streaming_surfaces_payload(owner: ModuleSurfacesByName?) -> ModuleSurfacesByName:
-    # Avoid `.unwrap()` at this self-host boundary. Older admitted compilers
-    # can resolve it to Poll.unwrap and return nil for an Option payload.
-    match owner:
-        case Some(surfaces): return surfaces
-        case _: return ModuleSurfacesByName.empty()
-
 impl CompilerDriver:
-    me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<StreamingHirPromotion, text>:
-        if not _sffi_transient_array_scope_begin():
+    me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
+        if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
         val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
         if par_had_error_get():
@@ -173,16 +66,14 @@ impl CompilerDriver:
         # Keep the scope active through the complete lowering. The reparsed AST
         # and all lowering scratch graphs are transient; only the canonical HIR,
         # its diagnostics, and frontend registries escape this file boundary.
-        if not _sffi_transient_array_scope_pause():
+        if not rt_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source.path}")
-        if not _sffi_transient_heap_promote(hir_module):
+        if not rt_transient_heap_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("HIR ownership promotion failed for {source.path}")
-        val hir_promoted_nodes = _sffi_transient_last_promoted_nodes()
-        val hir_promoted_bytes = _sffi_transient_last_promoted_bytes()
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
@@ -198,28 +89,12 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed during HIR reparse for {source.path}")
-        # The last-promotion counters above attribute the canonical HIR graph.
-        # Read the scope counters only after every escaping owner has promoted
-        # so diagnostics, the optional flat row, and frontend registries are
-        # included in the complete per-source attribution.
-        val total_promoted_nodes = _sffi_transient_scope_promoted_nodes()
-        val total_promoted_bytes = _sffi_transient_scope_promoted_bytes()
         if not driver_end_transient_parse_scope():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             return Err("transient parser scope end failed for {source.path}")
-        Ok(StreamingHirPromotion(
-            module: hir_module,
-            hir_promoted_nodes: hir_promoted_nodes,
-            hir_promoted_bytes: hir_promoted_bytes,
-            total_promoted_nodes: total_promoted_nodes,
-            total_promoted_bytes: total_promoted_bytes))
+        Ok(hir_module)
 
     me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
-        # UNCONDITIONAL entry receipt. A predicate cannot be trusted to report
-        # which path ran: Stage-2-compiled code has been measured misreading
-        # boolean guards (c018ee15926), so a marker that is itself behind an
-        # `if` proves nothing. This line executes or it does not.
-        log_phase("phase3:streaming:entry")
         if (not self.streaming_surface_owner_ready or
             self.streaming_module_surfaces_owner == nil):
             self.ctx.add_error("Streaming module surfaces missing after phase 2")
@@ -228,55 +103,11 @@ impl CompilerDriver:
         # can preserve the readiness scalar while losing a raw class handle;
         # validate absence first, then unwrap. Never dereference a value merely
         # because the adjacent scalar says it is ready.
-        val surfaces = driver_streaming_surfaces_payload(self.streaming_module_surfaces_owner)
-        if surfaces == nil or surfaces.surfaces.len() == 0:
+        val surfaces = self.streaming_module_surfaces_owner.unwrap()
+        if surfaces == nil:
             self.ctx.add_error("Streaming module surface owner payload missing after phase 2")
             return (self.ctx, false)
-        log_phase("phase3:streaming:r01a-past-nil-guard")
-        # Fail closed on a malformed payload, never on a valid one. A
-        # heap-typed payload must be a tagged pointer outside the zero page;
-        # the 2026-08-22 incident read back a Some-tagged Option with payload
-        # word 0 and SIGSEGV'd on the first field load below. This is a
-        # formation probe (rt_heap_ref_wellformed), not a liveness proof, so
-        # it cannot false-reject a live owner.
-        # The probe stays inside `unsafe` (the extern call needs the ffi
-        # capability), but the FAILING RETURN IS HOISTED OUT of the block.
-        # A tuple-shaped `return (self.ctx, false)` written INSIDE an unsafe
-        # block is lost under native codegen: the caller receives the success
-        # verdict and execution falls through. Measured 2026-08-24 on the
-        # legacy twin of this guard (:586) -- `add_error` ran (its message
-        # resurfaced three phases later as `[ERROR] MIR error: ...`) yet
-        # `phase3:hir_typecheck:done` still printed, i.e. `analyze_ok` was
-        # true. These two guards were the ONLY two tuple returns inside an
-        # unsafe block in the whole owned tree; the other 87 unsafe-block
-        # returns are scalar/enum shaped and demonstrably work. Keep the
-        # verdict at function-body level -- the shape that works everywhere.
-        # See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
-        # Pinned by scripts/check/check-no-tuple-return-in-unsafe.shs
-        # NOTE for anyone reading OLD logs against NEW ones: `r01c` used to sit
-        # after the malformed-payload `if` and therefore printed only on the
-        # GOOD path. It is now a plain post-probe receipt and prints on BOTH
-        # paths; `r02` is still the past-the-guard receipt. Earlier sections of
-        # the bug record reason from the old semantics.
-        log_phase("phase3:streaming:r01b-probe")
-        val streaming_owner_wellformed = driver_heap_ref_wellformed(surfaces)
-        log_phase("phase3:streaming:r01c-past-wellformed-probe")
-        if not streaming_owner_wellformed:
-            self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
-            return (self.ctx, false)
-        log_phase("phase3:streaming:r02-wellformed")
-        # Fail closed on an empty surface graph, the streaming-mode counterpart
-        # of the legacy path's zero-module guard. On this path the SURFACES are
-        # the module set (phase 2 empties ctx.modules by design), so an empty
-        # surface set with sources present means the parse result was lost and
-        # must never flow into HIR/MIR.
-        if surfaces.surfaces.len() == 0 and self.ctx.source_paths_owner.len() > 0:
-            self.ctx.add_error(
-                "error[E-DRV-PHASE3-EMPTY-SURFACES]: phase 3 (HIR typecheck, streaming) received 0 module surfaces from {self.ctx.source_paths_owner.len()} source(s) -- the phase-2 surface graph was lost across the phase boundary; refusing to type-check an empty program")
-            return (self.ctx, false)
-        log_phase("phase3:streaming:r03-past-empty-surface-guard")
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
-        log_phase("phase3:streaming:r04-lowering-built")
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var poisoned_by_surface: Dict<i64, bool> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
@@ -287,9 +118,7 @@ impl CompilerDriver:
         val entry_source_index = self.streaming_entry_source_index_owner
         var source_index = 0
         var progress_hir_done = 0
-        log_phase("phase3:streaming:r05-locals-init")
         bootstrap_hir_modules_reset()
-        log_phase("phase3:streaming:r06-hir-modules-reset")
         # HIR cache + shards on the streaming path. The surfaces are FROZEN
         # in full before this loop (surface_freeze completes in phase 2), so
         # one digest over every surface is exactly what each module's
@@ -298,41 +127,18 @@ impl CompilerDriver:
             hir_cache_closure_digest(surfaces)
         else:
             ""
-        log_phase("phase3:streaming:r07-closure-digest-bound")
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
-        log_phase("phase3:streaming:r08-shard-mode-bound")
         var hir_level_count: i64 = 0
         var hir_shard_lowered: i64 = 0
         var hir_levels: [i64] = []
-        log_phase("phase3:streaming:r09-shard-locals-init")
         if hir_shard_mode:
-            log_phase("phase3:streaming:r10a-shard-branch-taken")
             hir_levels = hir_shard_levels(surfaces)
             hir_level_count = hir_shard_level_count(hir_levels)
-            log_phase("phase3:streaming:r10b-shard-levels-done")
-        log_phase("phase3:streaming:r11-past-shard-block")
         val hir_visit_order: [i64] = hir_shard_visit_order(self.ctx.source_module_names_owner, surfaces, hir_levels)
-        log_phase("phase3:streaming:r12-visit-order-built")
-        # The loop below is driven ENTIRELY by hir_visit_order, which is built
-        # from ctx.source_module_names_owner. If that owner array is empty the
-        # loop iterates zero times, phase 3 "succeeds" over zero modules in
-        # ~0 ms, and the empty program flows on to SEGV in MIR lowering.
-        log_phase("phase3:streaming:visit order={hir_visit_order.len()} surfaces={surfaces.surfaces.len()} names={self.ctx.source_module_names_owner.len()} paths={self.ctx.source_paths_owner.len()} contents={self.ctx.source_contents_owner.len()}")
-        # Fail closed against the SURFACES, the carrier proven present -- never
-        # against the owner arrays, which are the very thing suspected of being
-        # lost (a guard conditioned on the lost carrier is vacuous exactly when
-        # the bug fires).
-        if hir_visit_order.len() == 0 and surfaces.surfaces.len() > 0:
-            self.ctx.add_error(
-                "error[E-DRV-PHASE3-EMPTY-VISIT]: phase 3 (HIR typecheck, streaming) computed an EMPTY visit order from {surfaces.surfaces.len()} module surface(s) -- ctx.source_module_names_owner is empty ({self.ctx.source_module_names_owner.len()} names, {self.ctx.source_paths_owner.len()} paths), so every module would be skipped and an empty program would flow into MIR lowering. Refusing to continue.")
-            return (self.ctx, false)
         var hir_loop_pos: i64 = 0
-        val hir_bootstrap_mode_gate = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val hir_bootstrap_mode_gate = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
             "pending", 2, 6, 0, 0, "running")
-        if mem_snapshot_begin() < 0:
-            self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
-            return (self.ctx, false)
 
         val source_count = self.ctx.source_paths_owner.len()
         while hir_loop_pos < hir_visit_order.len():
@@ -344,14 +150,12 @@ impl CompilerDriver:
                 module_name: self.ctx.source_module_names_owner[source_index])
             if not surfaces.index_by_name.contains_key(source.module_name):
                 self.ctx.add_error("Missing module surface alias for {source.module_name}")
-                mem_snapshot_abort()
                 return (self.ctx, false)
             val surface_index = surfaces.index_by_name[source.module_name]
             val is_requested_bootstrap_entry = source_index == entry_source_index
 
             if surface_index < 0 or surface_index >= surfaces.surfaces.len():
                 self.ctx.add_error("Invalid module surface index for {source.module_name}: {surface_index}")
-                mem_snapshot_abort()
                 return (self.ctx, false)
             if lowered_by_surface.contains_key(surface_index):
                 val alias_hir = lowered_by_surface[surface_index]
@@ -372,7 +176,7 @@ impl CompilerDriver:
             # stale field under the Stage-3 native backend. The non-streaming
             # validation path below already uses this scalar boundary.
             val source_content_length: i64 = source.content.len()
-            val source_content_hash: i64 = _sffi_hash_text(source.content)
+            val source_content_hash: i64 = rt_hash_text(source.content)
             val is_physical_owner = (
                 surfaces.surfaces[surface_index].source_index == source_index and
                 surfaces.surfaces[surface_index].module_name == source.module_name)
@@ -402,7 +206,6 @@ impl CompilerDriver:
                         surfaces.surfaces[surface_index].content_hash,
                         source_index, source.path, source.module_name,
                         source_content_length, source_content_hash))
-                mem_snapshot_abort()
                 return (self.ctx, false)
 
             val hir_stream_key: text = if hir_closure_digest != "":
@@ -437,16 +240,6 @@ impl CompilerDriver:
                 if not hir_bootstrap_mode_gate:
                     for hir_cached_warning in hir_cache_last_warnings():
                         self.ctx.add_warning(hir_cached_warning)
-                # A cache hit opens no transient parse/HIR scope. Explicit zero
-                # rows keep per-source attribution complete without sampling a
-                # stale scope counter from the preceding source.
-                if (not driver_hir_promotion_snapshot(
-                        "hir-promotion", source_index, source.path, 0, 0) or
-                    not driver_hir_promotion_snapshot(
-                        "hir-promotion-total", source_index, source.path, 0, 0)):
-                    self.ctx.add_error("durable cached HIR promotion snapshot write failed")
-                    mem_snapshot_abort()
-                    return (self.ctx, false)
             else:
                 val lower_result = self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
                 if lower_result.is_err():
@@ -460,31 +253,17 @@ impl CompilerDriver:
                     val poison_ctx: CompileContext = self.ctx
                     poison_ctx.mark_module_poisoned(source.module_name)
                     if poison_ctx.poison_budget_exhausted():
-                        mem_snapshot_abort()
                         return (self.ctx, false)
                     hir_loop_pos = hir_loop_pos + 1
                     continue
-                val promoted_hir = lower_result.unwrap()
-                hir_module = promoted_hir.module
-                if not driver_hir_promotion_snapshot(
-                    "hir-promotion", source_index, source.path,
-                    promoted_hir.hir_promoted_nodes, promoted_hir.hir_promoted_bytes):
-                    self.ctx.add_error("durable HIR promotion snapshot write failed")
-                    mem_snapshot_abort()
-                    return (self.ctx, false)
-                if not driver_hir_promotion_snapshot(
-                    "hir-promotion-total", source_index, source.path,
-                    promoted_hir.total_promoted_nodes, promoted_hir.total_promoted_bytes):
-                    self.ctx.add_error("durable total HIR promotion snapshot write failed")
-                    mem_snapshot_abort()
-                    return (self.ctx, false)
+                hir_module = lower_result.unwrap()
                 # Keep the aggregate diagnostic array inside its canonical
                 # HirLowering owner. Transporting `lowering.errors` or comparing a
                 # before/after CompileContext scalar both mis-lower under the
                 # Stage-3 native closure. Read only bounded scalar/text projections
                 # and make the poison decision from this module's fatal count.
                 val module_error_count: i64 = lowering.lowering_error_count()
-                val bootstrap_mode = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+                val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
                 var module_error_index: i64 = 0
                 var module_fatal_error_count: i64 = 0
                 var hir_module_warnings: [text] = []
@@ -515,11 +294,10 @@ impl CompilerDriver:
                     val poison_ctx: CompileContext = self.ctx
                     poison_ctx.mark_module_poisoned(source.module_name)
                     if poison_ctx.poison_budget_exhausted():
-                        mem_snapshot_abort()
                         return (self.ctx, false)
                     hir_loop_pos = hir_loop_pos + 1
                     continue
-                if (_sffi_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
+                if (rt_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
                     val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
                     print hir_codec_roundtrip_line(hir_round_trip, source.path)
                     hir_module = hir_round_trip.module
@@ -549,26 +327,12 @@ impl CompilerDriver:
                 2, 6, 0, 0, "running")
             hir_loop_pos = hir_loop_pos + 1
 
-        # Step-3 receipts. Everything from here to the phase-3 admission line
-        # in driver_orchestration used to be UNRECEIPTED: a 140-module closure
-        # printed `hir 140/140 step 2/6` and then died with rc=255 and not one
-        # further byte. A phase that can fail mute will fail mute again, so
-        # every sub-phase below now emits a start and a terminal receipt.
-        log_build_progress("hir_finalize", "modules", streaming_hir_module_count,
-            streaming_hir_module_count, "memory-snapshot", 2, 6, 0, 0, "running")
-        if not mem_snapshot_finish():
-            self.ctx.add_error("durable memory snapshot terminal write failed")
-            log_build_progress("hir_finalize", "modules", -1, -1,
-                "memory-snapshot", 2, 6, 1, 0, "failed")
-            return (self.ctx, false)
-        # Unconditional: an ABSENT receipt was indistinguishable from a cache
-        # that ran and stored nothing, which is exactly how zero stores went
-        # unnoticed. Disabled prints why it is disabled.
-        print hir_cache_status_line()
+        if hir_cache_enabled():
+            print hir_cache_summary()
         if hir_shard_mode:
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
-            _sffi_stdout_flush()
-            _sffi_exit(0)
+            rt_stdout_flush()
+            rt_exit(0)
         # Collect-all summary (streaming surfaces path). Same provenance marker
         # as the non-streaming loop -- see the comment there.
         val poisoned_count = self.ctx.poisoned_module_count_value
@@ -590,16 +354,11 @@ impl CompilerDriver:
         # Poisoned/error-bearing HIR is deliberately excluded from every
         # downstream aggregate pass. Validate layouts only for a clean phase.
         if self.ctx.has_errors():
-            log_build_progress("hir_finalize", "modules", -1, -1,
-                "hir-errors", 2, 6, 1, 0, "failed")
             return (self.ctx, false)
-        log_build_progress("post_hir_validate", "modules", 0,
-            validation_module_keys.len(), "value-struct-layout",
-            2, 6, 0, 0, "running")
         var validation_error_count: i64 = 0
         for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
-                self.ctx.hir_modules, self.ctx.config["rt_hal_plan"] ?? ""):
+                self.ctx.hir_modules):
             if validation_error_count < 10:
                 eprint("[post-hir-validation-fatal] {validation_error}")
             validation_error_count = validation_error_count + 1
@@ -610,15 +369,7 @@ impl CompilerDriver:
                 validation_errors_shown = 10
             eprint("[post-hir-validation-fatal-count] count={validation_error_count} shown={validation_errors_shown}")
         if self.ctx.has_errors():
-            log_build_progress("post_hir_validate", "modules", -1,
-                validation_module_keys.len(), "value-struct-layout",
-                2, 6, 1, 0, "failed")
             return (self.ctx, false)
-        log_build_progress("post_hir_validate", "modules",
-            validation_module_keys.len(), validation_module_keys.len(),
-            "value-struct-layout", 2, 6, 0, 0, "running")
-        log_build_progress("hir_reclaim", "modules", 0, -1,
-            "ast-reset", 2, 6, 0, 0, "running")
         ast_reset()
         self.ctx.modules = {}
         lexer_release_parse_source_globals()
@@ -626,48 +377,12 @@ impl CompilerDriver:
         log_phase("phase3:streaming_source_reclaim:done reclaimed={reclaimed_sources}")
         self.ctx.evict_sources()
         self.ctx.module_surfaces = nil
-        # Phase 3 is the last consumer of the frozen phase-2 surface graph.
-        # Invalidate both parts of the driver-level Option/readiness pair
-        # together so a reused CompilerDriver cannot dispatch through a stale
-        # retained owner.  Failure paths deliberately retain the graph for
-        # diagnostics; only the successful terminal path tears it down.
-        self.streaming_module_surfaces_owner = nil
-        self.streaming_surface_owner_ready = false
-        log_build_progress("hir_reclaim", "modules", -1, -1,
-            "sources-evicted", 2, 6, 0, 0, "running")
         (self.ctx, true)
 
     me lower_and_check_impl() -> (CompileContext, bool):
         dtrace("[DRV] lac-canary=entry")
-        # Route on STABLE CONFIGURATION as well as the mutable readiness
-        # scalar. driver_orchestration already derives its phase-3 routing this
-        # way ("not the adjacent mutable readiness boolean that native value
-        # semantics can lose between phase methods"); this dispatch was the one
-        # place still trusting the boolean alone, and it is where Stage 3 died.
-        # Phase 2's streaming path sets `streaming_surface_owner_ready = true`
-        # and deliberately empties `ctx.modules` (the surfaces ARE the module
-        # set). When the boolean was lost across the phase boundary, this test
-        # read false, fell into the legacy path, type-checked the empty
-        # `ctx.modules` in 1 ms, reported success with zero HIR modules, and the
-        # empty program flowed on to SEGV at `[mir-lower-free]`.
-        # Both terms are kept: configuration rescues a lost flag, and the flag
-        # serves compat callers that stage surfaces without the env gates.
-        # See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
-        val streaming_ready_flag = self.streaming_surface_owner_ready
-        val streaming_config_gate = driver_streaming_surface_enabled(self.ctx)
-        val phase3_module_count = self.ctx.modules.keys().len()
-        val phase3_source_count = self.ctx.sources.len()
-        log_phase("phase3:route ready={streaming_ready_flag} config={streaming_config_gate} n_modules={phase3_module_count} n_sources={phase3_source_count}")
-        if streaming_ready_flag or streaming_config_gate:
+        if self.streaming_surface_owner_ready:
             return self.lower_and_check_streaming_surfaces_impl()
-        log_phase("phase3:legacy:entry n_modules={phase3_module_count} n_sources={phase3_source_count}")
-        # Fail closed on the legacy path: type-checking zero modules out of a
-        # non-empty source set is never legitimate. Silently succeeding here is
-        # exactly how an emptied module set reached MIR lowering and crashed.
-        if phase3_module_count == 0 and phase3_source_count > 0:
-            self.ctx.add_error(
-                "error[E-DRV-PHASE3-EMPTY]: phase 3 (HIR typecheck) reached the legacy path with 0 parsed modules from {phase3_source_count} source(s) -- the phase-2 module set was lost across the phase boundary (streaming ready={streaming_ready_flag}, config gate={streaming_config_gate}); refusing to type-check an empty program")
-            return (self.ctx, false)
         val log = self.ctx.logger
 
         # Build module_name -> source_path map so each module gets the right
@@ -689,26 +404,6 @@ impl CompilerDriver:
         # creating a fresh array near the terminal module can fail registry
         # growth under peak AST+HIR pressure and leave `errors` invalid.
         dtrace("[DRV] lac-canary=module-surfaces-before")
-        # Same fail-closed formation probe as the streaming entry: a
-        # heap-typed owner payload must be a tagged pointer outside the zero
-        # page (2026-08-22 zeroed-payload incident class).
-        # Failing return HOISTED OUT of the unsafe block -- see the streaming
-        # twin above for the measured evidence. This is the site that was
-        # reproduced: the guard fired, `add_error` recorded the message, and
-        # the `return (self.ctx, false)` written here was lost, so phase 3
-        # reported SUCCESS and the malformed payload flowed on to SEGV in MIR
-        # lowering with the error relabelled `[ERROR] MIR error: ...`.
-        # `driver_heap_ref_wellformed` returns the probe result as a scalar out
-        # of its own unsafe block, so this method needs no `unsafe` at all and
-        # the verdict `return` below sits at function-body level. The nil case
-        # is unchanged: no owner staged means nothing to reject here.
-        val retained_surfaces_wellformed = if self.ctx.module_surfaces != nil:
-            driver_heap_ref_wellformed(self.ctx.module_surfaces.unwrap())
-        else:
-            true
-        if not retained_surfaces_wellformed:
-            self.ctx.add_error("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry (heap-typed payload word is 0 or in the zero page)")
-            return (self.ctx, false)
         val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces != nil:
             self.ctx.module_surfaces.unwrap()
         elif self.ctx.sources.len() > 0:
@@ -747,11 +442,10 @@ impl CompilerDriver:
                     val err = resolve_errors[err_idx]
                     self.ctx.add_error("Method resolution error in {name}: {err.message}")
                     err_idx = err_idx + 1
-                # Semantic HIR constant folding was a discarded no-op walk.
-                # Canonical optimization belongs to the typed MIR registry.
-                bootstrap_hir_modules[name] = resolved_module
+                val folded_module = run_const_fold_pass(resolved_module)
+                bootstrap_hir_modules[name] = folded_module
                 bootstrap_validation_module_keys.push(name)
-                bootstrap_validation_module_values.push(resolved_module)
+                bootstrap_validation_module_values.push(folded_module)
             var bootstrap_ctx: CompileContext = self.ctx
             bootstrap_ctx.hir_modules = bootstrap_hir_modules
             bootstrap_ctx.hir_module_count_value = bootstrap_validation_module_keys.len()
@@ -762,7 +456,7 @@ impl CompilerDriver:
             for validation_error in driver_validate_value_struct_layouts(
                     bootstrap_validation_module_keys,
                     bootstrap_validation_module_values,
-                    bootstrap_ctx.hir_modules, bootstrap_ctx.config["rt_hal_plan"] ?? ""):
+                    bootstrap_ctx.hir_modules):
                 bootstrap_ctx.add_error(validation_error)
             return (bootstrap_ctx, not bootstrap_ctx.has_errors())
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
@@ -859,7 +553,7 @@ impl CompilerDriver:
             # Real single-file HIR lowering is the default; SIMPLE_STUB_HIR=1 is the
             # escape hatch forcing the empty-HIR stub (pre-2026-07-03 behavior) if a
             # stage4 lowering regression ever needs to be bypassed in the field.
-            val unstub_hir = (_sffi_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
+            val unstub_hir = (rt_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
             val is_requested_bootstrap_entry = source_idx == entry_source_index
             val is_bootstrap_entry = is_requested_bootstrap_entry
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
@@ -884,7 +578,7 @@ impl CompilerDriver:
                 # Replay the stored warning-level diagnostics under the same
                 # gate the in-process path applies (warnings are advisory and
                 # dropped in bootstrap mode there too).
-                if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
                     for hir_cached_warning in hir_cache_last_warnings():
                         self.ctx.add_warning(hir_cached_warning)
             var hir_module: HirModule = if hir_cache_hit:
@@ -968,8 +662,8 @@ impl CompilerDriver:
             # owner methods return only scalar/text projections, avoiding the
             # stage4 array-of-struct transport failure under closure pressure.
             val module_error_count: i64 = lowering.lowering_error_count()
-            val bootstrap_mode = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-            val bootstrap_diag = (_sffi_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+            val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+            val bootstrap_diag = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
             if bootstrap_diag and module_error_count > 0 and source_idx < 20:
                 eprint("[bootstrap-hir-module-errors] source_idx={source_idx} path={src.path} count={module_error_count}")
             var module_error_idx = 0
@@ -1036,7 +730,7 @@ impl CompilerDriver:
             # receipt per module, and the build CONTINUES FROM THE DECODED
             # module so a lossy codec cannot pass quietly. Gate:
             # scripts/check/check-hir-codec-roundtrip.shs
-            if (_sffi_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
+            if (rt_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
                 val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
                 print hir_codec_roundtrip_line(hir_round_trip, src.path)
                 hir_module = hir_round_trip.module
@@ -1070,7 +764,7 @@ impl CompilerDriver:
             # parameter duplicates the no-GC Stage-3 ownership graph.
             var validation_surface_index: i64 = -1
             val validation_content_length: i64 = src.content.len()
-            val validation_content_hash: i64 = _sffi_hash_text(src.content)
+            val validation_content_hash: i64 = rt_hash_text(src.content)
             var validation_alias_index: i64 = 0
             while validation_alias_index < retained_module_surfaces.ordered_names.len() and
                   validation_alias_index < retained_module_surfaces.ordered_indices.len():
@@ -1150,25 +844,18 @@ impl CompilerDriver:
         # Step 2d: Effect inference pass is skipped in bootstrap empty-HIR mode.
         log_debug("effect inference done")
 
-        # Unconditional: an ABSENT receipt was indistinguishable from a cache
-        # that ran and stored nothing, which is exactly how zero stores went
-        # unnoticed. Disabled prints why it is disabled.
-        print hir_cache_status_line()
+        if hir_cache_enabled():
+            print hir_cache_summary()
         if hir_shard_mode:
             # Shard children exist only to fill the HIR cache. Everything after
             # this point is the real build's job and must not run N times.
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
-            _sffi_stdout_flush()
-            _sffi_exit(0)
+            rt_stdout_flush()
+            rt_exit(0)
         log_debug("HIR lowering complete")
 
-        # Step-3 receipts -- see the streaming path above for why.
-        log_build_progress("hir_finalize", "modules", retained_hir_module_count,
-            retained_hir_module_count, "memory-snapshot", 2, 6, 0, 0, "running")
         if not mem_snapshot_finish():
             self.ctx.add_error("durable memory snapshot terminal publication failed")
-            log_build_progress("hir_finalize", "modules", -1, -1,
-                "memory-snapshot", 2, 6, 1, 0, "failed")
             return (self.ctx, false)
 
         # Collect-all summary. This line is also the PROVENANCE MARKER for the
@@ -1194,38 +881,21 @@ impl CompilerDriver:
         phase_ctx.hir_module_count_value = retained_hir_module_count
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
         if phase_ctx.has_errors():
-            log_build_progress("hir_finalize", "modules", -1, -1,
-                "hir-errors", 2, 6, 1, 0, "failed")
             return (phase_ctx, false)
-        log_build_progress("post_hir_validate", "modules", 0,
-            validation_module_keys.len(), "value-struct-layout",
-            2, 6, 0, 0, "running")
         for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
-                phase_ctx.hir_modules, phase_ctx.config["rt_hal_plan"] ?? ""):
+                phase_ctx.hir_modules):
             phase_ctx.add_error(validation_error)
         if phase_ctx.has_errors():
-            log_build_progress("post_hir_validate", "modules", -1,
-                validation_module_keys.len(), "value-struct-layout",
-                2, 6, 1, 0, "failed")
             return (phase_ctx, false)
-        log_build_progress("post_hir_validate", "modules",
-            validation_module_keys.len(), validation_module_keys.len(),
-            "value-struct-layout", 2, 6, 0, 0, "running")
 
         # Profile-gated HM type inference and visibility diagnostics. Advisory
         # remains log-only; robust warns; critical/verified fail the build.
         val typecheck_enforcing = match typecheck_pass_severity():
             case TypecheckPassSeverity.Advisory: false
             case _: true
-        if ((_sffi_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1") or typecheck_enforcing:
-            log_build_progress("typecheck", "modules", 0,
-                phase_hir_modules.len(), "hm-infer+visibility",
-                2, 6, 0, 0, "running")
+        if ((rt_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1") or typecheck_enforcing:
             val tc_warnings = run_typecheck_warn_pass(phase_ctx, phase_hir_modules)
-            log_build_progress("typecheck", "modules",
-                phase_hir_modules.len(), phase_hir_modules.len(),
-                "diagnostics={tc_warnings.len()}", 2, 6, 0, 0, "running")
             log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
             var tcw_idx = 0
             while tcw_idx < tc_warnings.len():
@@ -1237,14 +907,8 @@ impl CompilerDriver:
         val safety_enforcing = match safety_pass_severity():
             case SafetyPassSeverity.Advisory: false
             case _: true
-        if ((_sffi_env_get("SIMPLE_SAFETY_WARN") ?? "") == "1") or safety_enforcing:
-            log_build_progress("safety", "modules", 0,
-                phase_hir_modules.len(), "unsafe-context",
-                2, 6, 0, 0, "running")
+        if ((rt_env_get("SIMPLE_SAFETY_WARN") ?? "") == "1") or safety_enforcing:
             val safety_warnings = run_safety_warn_pass(phase_ctx, phase_hir_modules)
-            log_build_progress("safety", "modules",
-                phase_hir_modules.len(), phase_hir_modules.len(),
-                "diagnostics={safety_warnings.len()}", 2, 6, 0, 0, "running")
             log_warn("safety warn-only pass: {safety_warnings.len()} diagnostic(s)")
             var sw_idx = 0
             while sw_idx < safety_warnings.len():
@@ -1257,24 +921,14 @@ impl CompilerDriver:
         # Severity is still profile-gated inside each pass -- `critical` raises
         # errors, every other profile raises warnings -- and each records a
         # receipt whether or not it found anything.
-        log_build_progress("any_escape", "modules", 0,
-            phase_hir_modules.len(), "any-escape", 2, 6, 0, 0, "running")
         val any_escape_warnings = run_any_escape_pass(phase_ctx, phase_hir_modules)
-        log_build_progress("any_escape", "modules", phase_hir_modules.len(),
-            phase_hir_modules.len(), "diagnostics={any_escape_warnings.len()}",
-            2, 6, 0, 0, "running")
         log_warn("any-escape pass: {any_escape_warnings.len()} diagnostic(s)")
         var ae_idx = 0
         while ae_idx < any_escape_warnings.len():
             log_warn(any_escape_warnings[ae_idx])
             ae_idx = ae_idx + 1
 
-        log_build_progress("enum_contract", "modules", 0,
-            phase_hir_modules.len(), "enum-contract", 2, 6, 0, 0, "running")
         val enum_contract_warnings = run_enum_contract_pass(phase_ctx, phase_hir_modules)
-        log_build_progress("enum_contract", "modules", phase_hir_modules.len(),
-            phase_hir_modules.len(), "diagnostics={enum_contract_warnings.len()}",
-            2, 6, 0, 0, "running")
         log_warn("enum-contract pass: {enum_contract_warnings.len()} diagnostic(s)")
         var ec_idx = 0
         while ec_idx < enum_contract_warnings.len():
@@ -1316,4 +970,3 @@ impl CompilerDriver:
             ctx.hir_modules[name] = hir_module
         (ctx, not ctx.has_errors())
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

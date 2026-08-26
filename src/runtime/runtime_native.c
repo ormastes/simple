@@ -27,57 +27,17 @@
 #include <errno.h>
 #include <math.h>
 #include <signal.h>
-#include <setjmp.h>
 #include <time.h>
 #include <stdatomic.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#if defined(__linux__)
-#include <linux/memfd.h>
-#include <sys/syscall.h>
-/* F_ADD_SEALS and the F_SEAL_* flags used by the artifact-sealing fcntl below
- * are Linux-specific fcntl commands that glibc's <fcntl.h> exposes only under
- * _GNU_SOURCE and only on new enough releases. <linux/fcntl.h> cannot be used
- * to get them: it pulls in asm-generic/fcntl.h, which redefines `struct flock`
- * against the glibc <fcntl.h> included above. Define them directly -- stable
- * UAPI values, each behind #ifndef so a toolchain that declares them wins. */
-#ifndef F_ADD_SEALS
-#define F_ADD_SEALS 1033
-#endif
-
-#ifndef F_SEAL_SEAL
-#define F_SEAL_SEAL 0x0001
-#endif
-
-#ifndef F_SEAL_SHRINK
-#define F_SEAL_SHRINK 0x0002
-#endif
-#ifndef F_SEAL_GROW
-#define F_SEAL_GROW 0x0004
-#endif
-#ifndef F_SEAL_WRITE
-#define F_SEAL_WRITE 0x0008
-#endif
-#endif
 #if defined(_WIN32)
+#include <direct.h>
 #include <io.h>
 #include <malloc.h>
 #include <windows.h>
-/* _mkdir / _rmdir live here, not in <sys/stat.h>. Without it both were
- * implicit declarations and this whole file failed to compile on Windows --
- * which silently dropped it from the core-C archive and left the ~68 rt_*
- * symbols it defines undefined at the Stage 2 link. */
-#include <direct.h>
-#endif
-
-/* Deprecated in C17 and REMOVED in C23; MinGW's <stdatomic.h> no longer
- * defines it, while glibc/libc++ still do. Defining it only when absent keeps
- * every existing call site and every non-Windows build byte-identical.
- * `(value)` is exactly the semantics C11 gave it for static initializers. */
-#ifndef ATOMIC_VAR_INIT
-#define ATOMIC_VAR_INIT(value) (value)
 #endif
 #if !defined(_WIN32)
 #include <dirent.h>
@@ -97,117 +57,7 @@
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #endif
-#if defined(__linux__) && !defined(O_TMPFILE)
-#define O_TMPFILE (020000000 | O_DIRECTORY)
 #endif
-#if defined(__linux__) && !defined(AT_EMPTY_PATH)
-#define AT_EMPTY_PATH 0x1000
-#endif
-#endif
-
-/* Recoverable exception transport is deliberately separate from host/C++
- * unwinding. Pure Simple MIR owns try/catch/finally semantics; this capsule
- * supplies bounded thread-local storage and non-local transfer only. */
-#define RT_EXCEPTION_FRAME_CAPACITY 64
-
-typedef struct RtExceptionFrame {
-    jmp_buf environment;
-    int64_t payload;
-    int64_t type_tag;
-} RtExceptionFrame;
-
-typedef struct RtExceptionThreadState {
-    RtExceptionFrame frames[RT_EXCEPTION_FRAME_CAPACITY];
-    uint32_t depth;
-    int64_t caught_type_tag;
-} RtExceptionThreadState;
-
-static _Thread_local RtExceptionThreadState rt_exception_state;
-
-void* rt_exception_frame_push(void) {
-    RtExceptionThreadState* state = &rt_exception_state;
-    if (state->depth >= RT_EXCEPTION_FRAME_CAPACITY) {
-        fputs("fatal: recoverable exception frame capacity exceeded\n", stderr);
-        abort();
-    }
-    RtExceptionFrame* frame = &state->frames[state->depth++];
-    frame->payload = 0;
-    frame->type_tag = 0;
-    return (void*)&frame->environment;
-}
-
-void rt_exception_frame_pop(void) {
-    RtExceptionThreadState* state = &rt_exception_state;
-    if (state->depth == 0) {
-        fputs("fatal: recoverable exception frame underflow\n", stderr);
-        abort();
-    }
-    state->depth--;
-}
-
-int64_t rt_exception_peek_payload(void) {
-    RtExceptionThreadState* state = &rt_exception_state;
-    if (state->depth == 0) return 0;
-    return state->frames[state->depth - 1].payload;
-}
-
-int64_t rt_exception_peek_type_tag(void) {
-    RtExceptionThreadState* state = &rt_exception_state;
-    if (state->depth == 0) return 0;
-    return state->frames[state->depth - 1].type_tag;
-}
-
-int64_t rt_exception_frame_finish(int64_t setjmp_status) {
-    RtExceptionThreadState* state = &rt_exception_state;
-    if (setjmp_status == 0) return 0;
-    if (state->depth == 0) {
-        fputs("fatal: recoverable exception frame finish underflow\n", stderr);
-        abort();
-    }
-    state->caught_type_tag = state->frames[state->depth - 1].type_tag;
-    state->depth--;
-    return setjmp_status;
-}
-
-RtExceptionCapture rt_exception_frame_capture(int64_t setjmp_status) {
-    RtExceptionCapture capture = {0, setjmp_status};
-    RtExceptionThreadState* state = &rt_exception_state;
-    if (setjmp_status == 0) return capture;
-    if (state->depth == 0) {
-        fputs("fatal: recoverable exception frame capture underflow\n", stderr);
-        abort();
-    }
-    RtExceptionFrame* frame = &state->frames[state->depth - 1];
-    capture.payload = frame->payload;
-    state->caught_type_tag = frame->type_tag;
-    state->depth--;
-    return capture;
-}
-
-int64_t rt_exception_caught_type_tag(void) { return rt_exception_state.caught_type_tag; }
-int64_t rt_exception_frame_depth(void) { return (int64_t)rt_exception_state.depth; }
-int64_t rt_exception_frame_capacity(void) { return RT_EXCEPTION_FRAME_CAPACITY; }
-int64_t __simple_exception_type_tag(void) { return rt_exception_state.caught_type_tag; }
-int64_t __simple_exception_set_type_tag(int64_t type_tag) {
-    rt_exception_state.caught_type_tag = type_tag;
-    return type_tag;
-}
-
-void rt_exception_throw(int64_t payload, int64_t type_tag) {
-    RtExceptionThreadState* state = &rt_exception_state;
-    if (state->depth == 0) {
-        fputs("fatal: uncaught Simple exception\n", stderr);
-        abort();
-    }
-    RtExceptionFrame* frame = &state->frames[state->depth - 1];
-    frame->payload = payload;
-    frame->type_tag = type_tag;
-    longjmp(frame->environment, 1);
-}
-
-void rt_exception_resume(int64_t payload, int64_t type_tag) {
-    rt_exception_throw(payload, type_tag);
-}
 
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
  * the workers in platform/unix_common.h and platform/platform_win.h. */
@@ -370,822 +220,38 @@ void rt_host_gpu_queue_reset(void);
 #define SPL_HOSTED_UNAVAILABLE_WEAK
 #endif
 
+#if !defined(SIMPLE_RUNTIME_DYNLOAD_OWNER)
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_available(void) { return 0; }
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_device_count(void) { return 0; }
+SPL_HOSTED_UNAVAILABLE_WEAK int32_t rt_vk_available(void) { return 0; }
+
 typedef int64_t (*spl_hosted_i64_probe_fn)(void);
-typedef int32_t (*spl_hosted_i32_probe_fn)(void);
 
-typedef struct {
-    atomic_flag lock;
-    void *handle;
-    atomic_int attempted;
-    atomic_int valid;
-    int64_t backend_bit;
-    const char *path_env;
-    char admitted_path[4096];
-    int64_t admitted_backend_bits;
-} spl_gpu_provider_slot;
-
-#define SPL_GPU_PROVIDER_ABI_V1 1
-#define SPL_GPU_PROVIDER_CUDA_BIT 1
-#define SPL_GPU_PROVIDER_VULKAN_BIT 2
-#define SPL_GPU_PROVIDER_METAL_BIT 4
-
-static spl_gpu_provider_slot spl_cuda_provider = {
-    ATOMIC_FLAG_INIT, NULL, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0), SPL_GPU_PROVIDER_CUDA_BIT,
-    "SIMPLE_CUDA_PROVIDER_PATH", {0}, 0
-};
-static spl_gpu_provider_slot spl_vulkan_provider = {
-    ATOMIC_FLAG_INIT, NULL, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0), SPL_GPU_PROVIDER_VULKAN_BIT,
-    "SIMPLE_VULKAN_PROVIDER_PATH", {0}, 0
-};
-static spl_gpu_provider_slot spl_metal_provider = {
-    ATOMIC_FLAG_INIT, NULL, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0), SPL_GPU_PROVIDER_METAL_BIT,
-    "SIMPLE_METAL_PROVIDER_PATH", {0}, 0
-};
-
-typedef int64_t (*spl_gpu_provider_metadata_fn)(void);
-static void *spl_gpu_provider_resolve(void *handle, const char *symbol);
-
-static int spl_gpu_provider_surface_complete(
-        int64_t backend_bit, void *handle) {
-    static const char *cuda_required[] = {
-        "rt_cuda_provider_available", "rt_cuda_provider_device_count",
-        "rt_cuda_init", "rt_cuda_device_get", "rt_cuda_device_name",
-        "rt_cuda_device_compute_capability", "rt_cuda_ctx_create",
-        "rt_cuda_ctx_set_current", "rt_cuda_ctx_destroy",
-        "rt_cuda_ctx_synchronize", "rt_cuda_mem_alloc", "rt_cuda_mem_free",
-        "rt_cuda_memcpy_htod", "rt_cuda_memcpy_dtoh", "rt_cuda_memcpy_dtod",
-        "rt_cuda_memset", "rt_cuda_memset_d32",
-        "rt_cuda_module_load_data_bytes", "rt_cuda_module_unload",
-        "rt_cuda_launch_kernel_name", "rt_cuda_sync", "rt_cuda_get_error_string"
-    };
-    static const char *vulkan_required[] = {
-        "rt_vulkan_provider_is_available", "rt_vulkan_provider_device_count",
-        "rt_vk_provider_available", "rt_vulkan_init", "rt_vulkan_shutdown",
-        "rt_vulkan_select_device", "rt_vulkan_alloc_buffer", "rt_vulkan_free_buffer",
-        "rt_vulkan_copy_to_buffer_raw", "rt_vulkan_copy_from_buffer_raw",
-        "rt_vulkan_copy_from_buffer_strided_raw", "rt_vulkan_copy_from_buffer_regions_raw",
-        "rt_vulkan_compile_spirv_raw", "rt_vulkan_destroy_shader",
-        "rt_vulkan_create_compute_pipeline_raw", "rt_vulkan_destroy_pipeline",
-        "rt_vulkan_create_descriptor_set", "rt_vulkan_bind_buffer",
-        "rt_vulkan_destroy_descriptor_set", "rt_vulkan_begin_compute",
-        "rt_vulkan_bind_pipeline", "rt_vulkan_bind_descriptors",
-        "rt_vulkan_push_constants_raw", "rt_vulkan_dispatch", "rt_vulkan_end_compute",
-        "rt_vulkan_discard_command", "rt_vulkan_fence_submission_supported",
-        "rt_vulkan_accepted_compute_submit_count", "rt_vulkan_submit_and_wait_fence",
-        "rt_vulkan_submit_no_wait", "rt_vulkan_wait_fence", "rt_vulkan_destroy_fence",
-        "rt_vulkan_wait_idle", "rt_vulkan_device_name", "rt_vulkan_device_type",
-        "rt_vulkan_selected_device_type", "rt_vulkan_device_driver_identity",
-        "rt_vulkan_selected_device_driver_identity",
-        "rt_vulkan_selected_device_driver_identity_hash", "rt_vulkan_get_last_error",
-        "rt_vulkan_init_headless_present", "rt_vulkan_init_window_present",
-        "rt_vulkan_init_external_window_present", "rt_vulkan_present_buffer",
-        "rt_vulkan_present_buffer_regions_raw", "rt_vulkan_last_present_copy_bytes",
-        "rt_vulkan_last_present_copy_rects", "rt_vulkan_destroy_swapchain"
-    };
-    static const char *metal_required[] = {
-        "rt_metal_init", "rt_metal_is_available", "rt_metal_device_count",
-        "rt_metal_device_name", "rt_metal_device_memory", "rt_metal_create_device",
-        "rt_metal_destroy_device", "rt_metal_alloc_buffer", "rt_metal_free_buffer",
-        "rt_metal_buffer_upload_raw", "rt_metal_buffer_download_raw",
-        "rt_metal_compile_shader_raw", "rt_metal_load_library_raw",
-        "rt_metal_destroy_shader", "rt_metal_create_compute_pipeline_raw",
-        "rt_metal_destroy_pipeline", "rt_metal_dispatch_compute",
-        "rt_metal_create_compute_encoder", "rt_metal_end_compute_encoder",
-        "rt_metal_destroy_compute_encoder", "rt_metal_set_buffer",
-        "rt_metal_set_bytes_raw", "rt_metal_get_last_error",
-        "rt_metal_create_render_pipeline", "rt_metal_destroy_render_pipeline",
-        "rt_metal_create_texture", "rt_metal_free_texture", "rt_metal_begin_render_pass",
-        "rt_metal_end_render_pass", "rt_metal_draw_indexed", "rt_metal_draw_primitives",
-        "rt_metal_create_command_queue", "rt_metal_destroy_command_queue",
-        "rt_metal_create_command_buffer", "rt_metal_commit_command_buffer",
-        "rt_metal_wait_completed", "rt_metal_destroy_command_buffer",
-        "rt_metal_create_sampler", "rt_metal_destroy_sampler", "rt_metal_set_viewport",
-        "rt_metal_set_scissor", "rt_metal_create_swapchain", "rt_metal_destroy_swapchain",
-        "rt_metal_present", "rt_metal_run_blit_frame", "rt_metal_run_compute_frame"
-    };
-    size_t i;
-    const char **required;
-    size_t required_count;
-    if (backend_bit == SPL_GPU_PROVIDER_CUDA_BIT) {
-        required = cuda_required;
-        required_count = sizeof(cuda_required) / sizeof(cuda_required[0]);
-    } else if (backend_bit == SPL_GPU_PROVIDER_VULKAN_BIT) {
-        required = vulkan_required;
-        required_count = sizeof(vulkan_required) / sizeof(vulkan_required[0]);
-    } else if (backend_bit == SPL_GPU_PROVIDER_METAL_BIT) {
-        required = metal_required;
-        required_count = sizeof(metal_required) / sizeof(metal_required[0]);
-    } else {
-        return 1;
-    }
-    for (i = 0; i < required_count; i++) {
-        if (!spl_gpu_provider_resolve(handle, required[i])) return 0;
-    }
-    return 1;
-}
-
-static spl_gpu_provider_slot *spl_gpu_provider_for_bit(int64_t backend_bit) {
-    if (backend_bit == SPL_GPU_PROVIDER_CUDA_BIT) return &spl_cuda_provider;
-    if (backend_bit == SPL_GPU_PROVIDER_VULKAN_BIT) return &spl_vulkan_provider;
-    if (backend_bit == SPL_GPU_PROVIDER_METAL_BIT) return &spl_metal_provider;
-    return NULL;
-}
-
-static void *spl_gpu_provider_open_local(const char *path) {
-#if defined(_WIN32)
-    return (void*)(intptr_t)LoadLibraryA(path);
-#else
-    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
-#endif
-}
-
-static void *spl_gpu_provider_resolve(void *handle, const char *symbol) {
-    if (!handle) return NULL;
-#if defined(_WIN32)
-    return (void*)(intptr_t)GetProcAddress((HMODULE)handle, symbol);
-#else
-    return dlsym(handle, symbol);
-#endif
-}
-
-static void spl_gpu_provider_close_invalid(void *handle) {
-    if (!handle) return;
-#if defined(_WIN32)
-    FreeLibrary((HMODULE)handle);
-#else
-    dlclose(handle);
-#endif
-}
-
-static int spl_gpu_provider_admit_locked(
-        spl_gpu_provider_slot *slot, const char *path) {
-    void *handle;
-    spl_gpu_provider_metadata_fn abi_version;
-    spl_gpu_provider_metadata_fn backend_bits;
-    if (!slot || !path || !*path || strlen(path) >= sizeof(slot->admitted_path) ||
-            atomic_load_explicit(&slot->attempted, memory_order_relaxed)) {
-        return slot && atomic_load_explicit(&slot->valid, memory_order_acquire);
-    }
-    atomic_store_explicit(&slot->attempted, 1, memory_order_relaxed);
-    handle = spl_gpu_provider_open_local(path);
-    if (!handle) return 0;
-    abi_version = (spl_gpu_provider_metadata_fn)spl_gpu_provider_resolve(
-        handle, "rt_simple_gpu_provider_abi_version");
-    backend_bits = (spl_gpu_provider_metadata_fn)spl_gpu_provider_resolve(
-        handle, "rt_simple_gpu_provider_backend_bits");
-    if (!abi_version || !backend_bits ||
-            abi_version() != SPL_GPU_PROVIDER_ABI_V1 ||
-            (backend_bits() & slot->backend_bit) == 0 ||
-            !spl_gpu_provider_surface_complete(slot->backend_bit, handle)) {
-        spl_gpu_provider_close_invalid(handle);
-        return 0;
-    }
-    /* A valid provider is process-pinned. Backend-owned opaque handles may
-     * outlive any one Simple session, so unloading here would invalidate
-     * function pointers and device resources behind the core trampolines. */
-    slot->handle = handle;
-    memcpy(slot->admitted_path, path, strlen(path) + 1);
-    slot->admitted_backend_bits = backend_bits();
-    atomic_store_explicit(&slot->valid, 1, memory_order_release);
-    return 1;
-}
-
-static int spl_gpu_provider_ensure(spl_gpu_provider_slot *slot) {
-    const char *path;
-    int ready;
-    if (!slot) return 0;
-    if (atomic_load_explicit(&slot->valid, memory_order_acquire)) return 1;
-    while (atomic_flag_test_and_set_explicit(&slot->lock, memory_order_acquire)) { }
-    path = getenv(slot->path_env);
-    ready = spl_gpu_provider_admit_locked(slot, path);
-    atomic_flag_clear_explicit(&slot->lock, memory_order_release);
-    return ready;
-}
-
-static void *spl_gpu_provider_symbol(int64_t backend_bit, const char *symbol) {
-    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
-    if (!spl_gpu_provider_ensure(slot)) return NULL;
-    return spl_gpu_provider_resolve(slot->handle, symbol);
-}
-
-int64_t rt_gpu_provider_loaded(int64_t backend_bit) {
-    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
-    return spl_gpu_provider_ensure(slot) ? 1 : 0;
-}
-
-int64_t rt_gpu_provider_abi_version(int64_t backend_bit) {
-    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
-    if (!spl_gpu_provider_ensure(slot)) return 0;
-    return SPL_GPU_PROVIDER_ABI_V1;
-}
-
-int64_t rt_gpu_provider_backend_bits(int64_t backend_bit) {
-    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
-    if (!spl_gpu_provider_ensure(slot)) return 0;
-    return slot->admitted_backend_bits;
-}
-
-const char *rt_gpu_provider_path(int64_t backend_bit) {
-    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
-    if (!spl_gpu_provider_ensure(slot)) return "";
-    return slot->admitted_path;
-}
-
-static int64_t spl_hosted_provider_i64_probe(int64_t backend_bit, const char* symbol) {
-    void* resolved = spl_gpu_provider_symbol(backend_bit, symbol);
+static int64_t spl_hosted_provider_i64_probe(const char* symbol) {
+#if !defined(_WIN32)
+    /*
+     * Use a provider-only symbol name.  Looking up the public compatibility
+     * name can return this executable's own weak definition under Mach-O's
+     * two-level namespace instead of the strong dependent-dylib definition.
+     */
+    void* resolved = dlsym(RTLD_DEFAULT, symbol);
     if (resolved != NULL) {
         return ((spl_hosted_i64_probe_fn)resolved)();
     }
+#else
+    (void)symbol;
+#endif
     return 0;
-}
-
-static int32_t spl_hosted_provider_i32_probe(int64_t backend_bit, const char* symbol) {
-    void* resolved = spl_gpu_provider_symbol(backend_bit, symbol);
-    if (resolved != NULL) {
-        return ((spl_hosted_i32_probe_fn)resolved)();
-    }
-    return 0;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_available(void) {
-    return spl_hosted_provider_i64_probe(
-        SPL_GPU_PROVIDER_CUDA_BIT, "rt_cuda_provider_available");
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_device_count(void) {
-    return spl_hosted_provider_i64_probe(
-        SPL_GPU_PROVIDER_CUDA_BIT, "rt_cuda_provider_device_count");
-}
-
-/* CUDA operations use -3 (backend unavailable) when no complete provider was
- * admitted. Returning zero here would fabricate CUDA success for status APIs. */
-#define SPL_CUDA_DISPATCH0(name, fail) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(void) { \
-        typedef int64_t (*fn_t)(void); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
-        return fn ? fn() : (fail); \
-    }
-#define SPL_CUDA_DISPATCH1(name, fail) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0) { \
-        typedef int64_t (*fn_t)(int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
-        return fn ? fn(a0) : (fail); \
-    }
-#define SPL_CUDA_DISPATCH2(name, fail) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0, int64_t a1) { \
-        typedef int64_t (*fn_t)(int64_t, int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
-        return fn ? fn(a0, a1) : (fail); \
-    }
-#define SPL_CUDA_DISPATCH3(name, fail) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0, int64_t a1, int64_t a2) { \
-        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
-        return fn ? fn(a0, a1, a2) : (fail); \
-    }
-#define SPL_CUDA_DISPATCH10(name, fail) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
-            int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, \
-            int64_t a5, int64_t a6, int64_t a7, int64_t a8, int64_t a9) { \
-        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, \
-                                int64_t, int64_t, int64_t, int64_t, int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
-        return fn ? fn(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) : (fail); \
-    }
-#define SPL_CUDA_DISPATCH_CSTR1(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK const char *name(int64_t a0) { \
-        typedef const char *(*fn_t)(int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
-        return fn ? fn(a0) : "CUDA provider unavailable"; \
-    }
-
-SPL_CUDA_DISPATCH0(rt_cuda_init, 3)
-SPL_CUDA_DISPATCH1(rt_cuda_device_get, -3)
-SPL_CUDA_DISPATCH_CSTR1(rt_cuda_device_name)
-SPL_CUDA_DISPATCH1(rt_cuda_device_compute_capability, 0)
-SPL_CUDA_DISPATCH1(rt_cuda_ctx_create, -3)
-SPL_CUDA_DISPATCH1(rt_cuda_ctx_set_current, -3)
-SPL_CUDA_DISPATCH1(rt_cuda_ctx_destroy, -3)
-SPL_CUDA_DISPATCH0(rt_cuda_ctx_synchronize, -3)
-SPL_CUDA_DISPATCH1(rt_cuda_mem_alloc, -3)
-SPL_CUDA_DISPATCH1(rt_cuda_mem_free, -3)
-SPL_CUDA_DISPATCH3(rt_cuda_memcpy_htod, -3)
-SPL_CUDA_DISPATCH3(rt_cuda_memcpy_dtoh, -3)
-SPL_CUDA_DISPATCH3(rt_cuda_memcpy_dtod, -3)
-SPL_CUDA_DISPATCH3(rt_cuda_memset, -3)
-SPL_CUDA_DISPATCH3(rt_cuda_memset_d32, -3)
-SPL_CUDA_DISPATCH2(rt_cuda_module_load_data_bytes, -3)
-SPL_CUDA_DISPATCH1(rt_cuda_module_unload, -3)
-SPL_CUDA_DISPATCH10(rt_cuda_launch_kernel_name, -3)
-SPL_CUDA_DISPATCH0(rt_cuda_sync, -3)
-SPL_CUDA_DISPATCH_CSTR1(rt_cuda_get_error_string)
-
-#undef SPL_CUDA_DISPATCH0
-#undef SPL_CUDA_DISPATCH1
-#undef SPL_CUDA_DISPATCH2
-#undef SPL_CUDA_DISPATCH3
-#undef SPL_CUDA_DISPATCH10
-#undef SPL_CUDA_DISPATCH_CSTR1
-
-SPL_HOSTED_UNAVAILABLE_WEAK int32_t rt_vk_available(void) {
-    return spl_hosted_provider_i32_probe(
-        SPL_GPU_PROVIDER_VULKAN_BIT, "rt_vk_provider_available");
 }
 
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_is_available(void) {
-    return spl_hosted_provider_i64_probe(
-        SPL_GPU_PROVIDER_VULKAN_BIT, "rt_vulkan_provider_is_available");
+    return spl_hosted_provider_i64_probe("rt_vulkan_provider_is_available");
 }
 
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
-    return spl_hosted_provider_i64_probe(
-        SPL_GPU_PROVIDER_VULKAN_BIT, "rt_vulkan_provider_device_count");
+    return spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count");
 }
-
-/* Scalar Engine2D operations keep their public ABI in core and dispatch only
- * through the admitted provider handle. Pointer/length operations are added
- * separately so RuntimeValue is never allowed to cross this boundary. */
-#define SPL_VULKAN_DISPATCH0(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(void) { \
-        typedef int64_t (*fn_t)(void); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
-            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
-        return fn ? fn() : 0; \
-    }
-#define SPL_VULKAN_DISPATCH1(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0) { \
-        typedef int64_t (*fn_t)(int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
-            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
-        return fn ? fn(a0) : 0; \
-    }
-#define SPL_VULKAN_DISPATCH2(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0, int64_t a1) { \
-        typedef int64_t (*fn_t)(int64_t, int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
-            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
-        return fn ? fn(a0, a1) : 0; \
-    }
-#define SPL_VULKAN_DISPATCH3(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
-            int64_t a0, int64_t a1, int64_t a2) { \
-        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
-            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
-        return fn ? fn(a0, a1, a2) : 0; \
-    }
-#define SPL_VULKAN_DISPATCH4(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
-            int64_t a0, int64_t a1, int64_t a2, int64_t a3) { \
-        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
-            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
-        return fn ? fn(a0, a1, a2, a3) : 0; \
-    }
-#define SPL_VULKAN_DISPATCH5(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
-            int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4) { \
-        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
-            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
-        return fn ? fn(a0, a1, a2, a3, a4) : 0; \
-    }
-#define SPL_VULKAN_DISPATCH6(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
-            int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5) { \
-        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
-            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
-        return fn ? fn(a0, a1, a2, a3, a4, a5) : 0; \
-    }
-#define SPL_VULKAN_DISPATCH_CSTR0(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK const char *name(void) { \
-        typedef const char *(*fn_t)(void); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
-            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
-        return fn ? fn() : ""; \
-    }
-#define SPL_VULKAN_DISPATCH_CSTR1(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK const char *name(int64_t a0) { \
-        typedef const char *(*fn_t)(int64_t); \
-        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
-            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
-        return fn ? fn(a0) : ""; \
-    }
-
-SPL_VULKAN_DISPATCH0(rt_vulkan_init)
-SPL_VULKAN_DISPATCH0(rt_vulkan_shutdown)
-SPL_VULKAN_DISPATCH1(rt_vulkan_select_device)
-SPL_VULKAN_DISPATCH2(rt_vulkan_alloc_buffer)
-SPL_VULKAN_DISPATCH1(rt_vulkan_free_buffer)
-SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_shader)
-SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_pipeline)
-SPL_VULKAN_DISPATCH1(rt_vulkan_create_descriptor_set)
-SPL_VULKAN_DISPATCH3(rt_vulkan_bind_buffer)
-SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_descriptor_set)
-SPL_VULKAN_DISPATCH0(rt_vulkan_begin_compute)
-SPL_VULKAN_DISPATCH2(rt_vulkan_bind_pipeline)
-SPL_VULKAN_DISPATCH2(rt_vulkan_bind_descriptors)
-SPL_VULKAN_DISPATCH4(rt_vulkan_dispatch)
-SPL_VULKAN_DISPATCH1(rt_vulkan_end_compute)
-SPL_VULKAN_DISPATCH1(rt_vulkan_discard_command)
-SPL_VULKAN_DISPATCH1(rt_vulkan_submit_and_wait)
-SPL_VULKAN_DISPATCH0(rt_vulkan_fence_submission_supported)
-SPL_VULKAN_DISPATCH0(rt_vulkan_accepted_compute_submit_count)
-SPL_VULKAN_DISPATCH1(rt_vulkan_submit_and_wait_fence)
-SPL_VULKAN_DISPATCH1(rt_vulkan_submit_no_wait)
-SPL_VULKAN_DISPATCH2(rt_vulkan_wait_fence)
-SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_fence)
-SPL_VULKAN_DISPATCH0(rt_vulkan_wait_idle)
-SPL_VULKAN_DISPATCH0(rt_vulkan_selected_device_driver_identity_hash)
-SPL_VULKAN_DISPATCH3(rt_vulkan_init_headless_present)
-SPL_VULKAN_DISPATCH3(rt_vulkan_init_window_present)
-SPL_VULKAN_DISPATCH1(rt_vulkan_last_present_copy_bytes)
-SPL_VULKAN_DISPATCH1(rt_vulkan_last_present_copy_rects)
-SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_swapchain)
-SPL_VULKAN_DISPATCH5(rt_vulkan_present_buffer)
-SPL_VULKAN_DISPATCH6(rt_vulkan_init_external_window_present)
-SPL_VULKAN_DISPATCH4(rt_vulkan_create_compute_pipeline_raw)
-SPL_VULKAN_DISPATCH_CSTR1(rt_vulkan_device_name)
-SPL_VULKAN_DISPATCH_CSTR1(rt_vulkan_device_type)
-SPL_VULKAN_DISPATCH_CSTR0(rt_vulkan_selected_device_type)
-SPL_VULKAN_DISPATCH_CSTR1(rt_vulkan_device_driver_identity)
-SPL_VULKAN_DISPATCH_CSTR0(rt_vulkan_selected_device_driver_identity)
-SPL_VULKAN_DISPATCH_CSTR0(rt_vulkan_get_last_error)
-
-#undef SPL_VULKAN_DISPATCH0
-#undef SPL_VULKAN_DISPATCH1
-#undef SPL_VULKAN_DISPATCH2
-#undef SPL_VULKAN_DISPATCH3
-#undef SPL_VULKAN_DISPATCH4
-#undef SPL_VULKAN_DISPATCH5
-#undef SPL_VULKAN_DISPATCH6
-#undef SPL_VULKAN_DISPATCH_CSTR0
-#undef SPL_VULKAN_DISPATCH_CSTR1
-
-static int64_t spl_vulkan_call_raw2(
-        const char *symbol, int64_t a0, int64_t a1) {
-    typedef int64_t (*fn_t)(int64_t, int64_t);
-    fn_t fn = (fn_t)spl_gpu_provider_symbol(
-        SPL_GPU_PROVIDER_VULKAN_BIT, symbol);
-    return fn ? fn(a0, a1) : 0;
-}
-
-static int64_t spl_vulkan_call_raw4(
-        const char *symbol, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {
-    typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t);
-    fn_t fn = (fn_t)spl_gpu_provider_symbol(
-        SPL_GPU_PROVIDER_VULKAN_BIT, symbol);
-    return fn ? fn(a0, a1, a2, a3) : 0;
-}
-
-static int64_t spl_vulkan_call_raw5(const char *symbol,
-        int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4) {
-    typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t);
-    fn_t fn = (fn_t)spl_gpu_provider_symbol(
-        SPL_GPU_PROVIDER_VULKAN_BIT, symbol);
-    return fn ? fn(a0, a1, a2, a3, a4) : 0;
-}
-
-static int64_t spl_vulkan_call_raw7(const char *symbol,
-        int64_t a0, int64_t a1, int64_t a2, int64_t a3,
-        int64_t a4, int64_t a5, int64_t a6) {
-    typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t,
-                            int64_t, int64_t, int64_t);
-    fn_t fn = (fn_t)spl_gpu_provider_symbol(
-        SPL_GPU_PROVIDER_VULKAN_BIT, symbol);
-    return fn ? fn(a0, a1, a2, a3, a4, a5, a6) : 0;
-}
-
-static uint8_t *spl_vulkan_copy_input_bytes(
-        int64_t value, int64_t byte_count) {
-    uint8_t *bytes;
-    if (byte_count <= 0 || byte_count > 268435456) return NULL;
-    bytes = (uint8_t*)malloc((size_t)byte_count);
-    if (!bytes) return NULL;
-    if (rt_array_bytes_copy_checked(value, bytes, byte_count) != byte_count) {
-        free(bytes);
-        return NULL;
-    }
-    return bytes;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_compile_spirv_array(int64_t data) {
-    int64_t byte_count = rt_array_len_safe(data);
-    uint8_t *bytes = spl_vulkan_copy_input_bytes(data, byte_count);
-    int64_t result;
-    if (!bytes) return 0;
-    result = spl_vulkan_call_raw2(
-        "rt_vulkan_compile_spirv_raw", (int64_t)(intptr_t)bytes, byte_count);
-    free(bytes);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_copy_to_buffer_array(
-        int64_t handle, int64_t data, int64_t byte_count, int64_t offset) {
-    uint8_t *bytes = spl_vulkan_copy_input_bytes(data, byte_count);
-    int64_t result;
-    if (!bytes) return 0;
-    result = spl_vulkan_call_raw4("rt_vulkan_copy_to_buffer_raw",
-        handle, (int64_t)(intptr_t)bytes, byte_count, offset);
-    free(bytes);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_push_constants_array(
-        int64_t command, int64_t pipeline, int64_t data, int64_t byte_count) {
-    uint8_t *bytes = spl_vulkan_copy_input_bytes(data, byte_count);
-    int64_t result;
-    if (!bytes) return 0;
-    result = spl_vulkan_call_raw4("rt_vulkan_push_constants_raw",
-        command, pipeline, (int64_t)(intptr_t)bytes, byte_count);
-    free(bytes);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_copy_from_buffer_array(
-        int64_t data, int64_t byte_count, int64_t handle, int64_t offset) {
-    uint8_t *bytes;
-    int64_t result;
-    if (byte_count <= 0 || byte_count > 268435456) return 0;
-    bytes = (uint8_t*)malloc((size_t)byte_count);
-    if (!bytes) return 0;
-    result = spl_vulkan_call_raw4("rt_vulkan_copy_from_buffer_raw",
-        (int64_t)(intptr_t)bytes, byte_count, handle, offset);
-    if (result && rt_array_bytes_store_checked(data, bytes, byte_count) != byte_count)
-        result = 0;
-    free(bytes);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_copy_from_buffer_strided(
-        int64_t data, int64_t handle, int64_t src_offset, int64_t row_bytes,
-        int64_t row_count, int64_t src_stride) {
-    int64_t data_len;
-    uint8_t *bytes;
-    int64_t result;
-    if (row_bytes <= 0 || row_count <= 0 || row_bytes > 268435456 / row_count)
-        return 0;
-    data_len = row_bytes * row_count;
-    bytes = (uint8_t*)malloc((size_t)data_len);
-    if (!bytes) return 0;
-    result = spl_vulkan_call_raw7("rt_vulkan_copy_from_buffer_strided_raw",
-        (int64_t)(intptr_t)bytes, data_len, handle, src_offset,
-        row_bytes, row_count, src_stride);
-    if (result && rt_array_bytes_store_checked(data, bytes, data_len) != data_len)
-        result = 0;
-    free(bytes);
-    return result;
-}
-
-static uint8_t *spl_vulkan_encode_i64_array(
-        int64_t value, int64_t *byte_count_out) {
-    int64_t count = rt_array_len_safe(value);
-    uint8_t *bytes;
-    int64_t i;
-    if (!byte_count_out || count <= 0 || count > 4096 || count > INT64_MAX / 8)
-        return NULL;
-    *byte_count_out = count * 8;
-    bytes = (uint8_t*)malloc((size_t)*byte_count_out);
-    if (!bytes) return NULL;
-    for (i = 0; i < count; i++) {
-        int64_t field = rt_array_get_i64_raw((SplArray*)(intptr_t)value, i);
-        uint64_t raw = (uint64_t)field;
-        int byte;
-        for (byte = 0; byte < 8; byte++)
-            bytes[i * 8 + byte] = (uint8_t)(raw >> (byte * 8));
-    }
-    return bytes;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_copy_from_buffer_regions(
-        int64_t data, int64_t handle, int64_t regions) {
-    int64_t data_len = rt_array_len_safe(data);
-    int64_t regions_len = 0;
-    uint8_t *region_bytes;
-    uint8_t *bytes;
-    int64_t result;
-    if (data_len <= 0 || data_len > 268435456) return 0;
-    region_bytes = spl_vulkan_encode_i64_array(regions, &regions_len);
-    if (!region_bytes) return 0;
-    bytes = (uint8_t*)malloc((size_t)data_len);
-    if (!bytes) { free(region_bytes); return 0; }
-    result = spl_vulkan_call_raw5("rt_vulkan_copy_from_buffer_regions_raw",
-        (int64_t)(intptr_t)bytes, data_len, handle,
-        (int64_t)(intptr_t)region_bytes, regions_len);
-    if (result && rt_array_bytes_store_checked(data, bytes, data_len) != data_len)
-        result = 0;
-    free(bytes);
-    free(region_bytes);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_present_buffer_regions(
-        int64_t swapchain, int64_t buffer, int64_t width, int64_t height,
-        int64_t revision, int64_t rects) {
-    int64_t rects_len = 0;
-    uint8_t *rect_bytes = spl_vulkan_encode_i64_array(rects, &rects_len);
-    int64_t result;
-    if (!rect_bytes) return 0;
-    result = spl_vulkan_call_raw7("rt_vulkan_present_buffer_regions_raw",
-        swapchain, buffer, width, height, revision,
-        (int64_t)(intptr_t)rect_bytes, rects_len);
-    free(rect_bytes);
-    return result;
-}
-
-/* Metal provider dispatch. Core owns all RuntimeValue decoding; the admitted
- * dylib sees only scalar handles, bounded raw bytes, and call-scoped loans. */
-#define SPL_METAL_DISPATCH0(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(void) { \
-        typedef int64_t (*fn_t)(void); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
-        return fn ? fn() : 0; }
-#define SPL_METAL_DISPATCH1(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0) { \
-        typedef int64_t (*fn_t)(int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
-        return fn ? fn(a0) : 0; }
-#define SPL_METAL_DISPATCH2(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1) { \
-        typedef int64_t (*fn_t)(int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
-        return fn ? fn(a0,a1) : 0; }
-#define SPL_METAL_DISPATCH3(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2) { \
-        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
-        return fn ? fn(a0,a1,a2) : 0; }
-#define SPL_METAL_DISPATCH4(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3) { \
-        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
-        return fn ? fn(a0,a1,a2,a3) : 0; }
-#define SPL_METAL_DISPATCH5(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3,int64_t a4) { \
-        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
-        return fn ? fn(a0,a1,a2,a3,a4) : 0; }
-#define SPL_METAL_DISPATCH8(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3,int64_t a4,int64_t a5,int64_t a6,int64_t a7) { \
-        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
-        return fn ? fn(a0,a1,a2,a3,a4,a5,a6,a7) : 0; }
-#define SPL_METAL_DISPATCH12(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3,int64_t a4,int64_t a5,int64_t a6,int64_t a7,int64_t a8,int64_t a9,int64_t a10,int64_t a11) { \
-        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
-        return fn ? fn(a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11) : 0; }
-#define SPL_METAL_DISPATCH13(name) \
-    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3,int64_t a4,int64_t a5,int64_t a6,int64_t a7,int64_t a8,int64_t a9,int64_t a10,int64_t a11,int64_t a12) { \
-        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
-        return fn ? fn(a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12) : 0; }
-
-SPL_METAL_DISPATCH0(rt_metal_init)
-SPL_METAL_DISPATCH0(rt_metal_is_available)
-SPL_METAL_DISPATCH0(rt_metal_device_count)
-SPL_METAL_DISPATCH1(rt_metal_device_memory)
-SPL_METAL_DISPATCH1(rt_metal_create_device)
-SPL_METAL_DISPATCH1(rt_metal_destroy_device)
-SPL_METAL_DISPATCH2(rt_metal_alloc_buffer)
-SPL_METAL_DISPATCH1(rt_metal_free_buffer)
-SPL_METAL_DISPATCH3(rt_metal_buffer_upload_raw)
-SPL_METAL_DISPATCH3(rt_metal_buffer_download_raw)
-SPL_METAL_DISPATCH3(rt_metal_compile_shader_raw)
-SPL_METAL_DISPATCH3(rt_metal_load_library_raw)
-SPL_METAL_DISPATCH1(rt_metal_destroy_shader)
-SPL_METAL_DISPATCH4(rt_metal_create_compute_pipeline_raw)
-SPL_METAL_DISPATCH1(rt_metal_destroy_pipeline)
-SPL_METAL_DISPATCH8(rt_metal_dispatch_compute)
-SPL_METAL_DISPATCH1(rt_metal_create_compute_encoder)
-SPL_METAL_DISPATCH1(rt_metal_end_compute_encoder)
-SPL_METAL_DISPATCH1(rt_metal_destroy_compute_encoder)
-SPL_METAL_DISPATCH4(rt_metal_set_buffer)
-SPL_METAL_DISPATCH4(rt_metal_set_bytes_raw)
-SPL_METAL_DISPATCH4(rt_metal_create_render_pipeline)
-SPL_METAL_DISPATCH1(rt_metal_destroy_render_pipeline)
-SPL_METAL_DISPATCH4(rt_metal_create_texture)
-SPL_METAL_DISPATCH1(rt_metal_free_texture)
-SPL_METAL_DISPATCH1(rt_metal_end_render_pass)
-SPL_METAL_DISPATCH3(rt_metal_draw_indexed)
-SPL_METAL_DISPATCH2(rt_metal_draw_primitives)
-SPL_METAL_DISPATCH1(rt_metal_create_command_queue)
-SPL_METAL_DISPATCH1(rt_metal_destroy_command_queue)
-SPL_METAL_DISPATCH1(rt_metal_create_command_buffer)
-SPL_METAL_DISPATCH1(rt_metal_commit_command_buffer)
-SPL_METAL_DISPATCH1(rt_metal_wait_completed)
-SPL_METAL_DISPATCH1(rt_metal_destroy_command_buffer)
-SPL_METAL_DISPATCH1(rt_metal_create_sampler)
-SPL_METAL_DISPATCH1(rt_metal_destroy_sampler)
-SPL_METAL_DISPATCH5(rt_metal_set_scissor)
-SPL_METAL_DISPATCH4(rt_metal_create_swapchain)
-SPL_METAL_DISPATCH1(rt_metal_destroy_swapchain)
-SPL_METAL_DISPATCH1(rt_metal_present)
-SPL_METAL_DISPATCH13(rt_metal_run_blit_frame)
-SPL_METAL_DISPATCH12(rt_metal_run_compute_frame)
-
-SPL_HOSTED_UNAVAILABLE_WEAK const char *rt_metal_device_name(int64_t device) {
-    typedef const char *(*fn_t)(int64_t);
-    fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, "rt_metal_device_name");
-    return fn ? fn(device) : "";
-}
-SPL_HOSTED_UNAVAILABLE_WEAK const char *rt_metal_get_last_error(void) {
-    typedef const char *(*fn_t)(void);
-    fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, "rt_metal_get_last_error");
-    return fn ? fn() : "";
-}
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_begin_render_pass(
-        int64_t command, int64_t texture, double r, double g, double b, double a) {
-    typedef int64_t (*fn_t)(int64_t,int64_t,double,double,double,double);
-    fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, "rt_metal_begin_render_pass");
-    return fn ? fn(command, texture, r, g, b, a) : 0;
-}
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_set_viewport(
-        int64_t encoder, double x, double y, double width, double height) {
-    typedef int64_t (*fn_t)(int64_t,double,double,double,double);
-    fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, "rt_metal_set_viewport");
-    return fn ? fn(encoder, x, y, width, height) : 0;
-}
-
-#undef SPL_METAL_DISPATCH0
-#undef SPL_METAL_DISPATCH1
-#undef SPL_METAL_DISPATCH2
-#undef SPL_METAL_DISPATCH3
-#undef SPL_METAL_DISPATCH4
-#undef SPL_METAL_DISPATCH5
-#undef SPL_METAL_DISPATCH8
-#undef SPL_METAL_DISPATCH12
-#undef SPL_METAL_DISPATCH13
-
-static uint8_t *spl_metal_copy_text(int64_t value, int64_t *length_out) {
-    int64_t length;
-    const uint8_t *data;
-    uint8_t *copy;
-    if (!length_out) return NULL;
-    length = rt_string_len(value);
-    data = rt_string_data(value);
-    if (!data || length <= 0 || length > 268435456) return NULL;
-    copy = (uint8_t*)malloc((size_t)length);
-    if (!copy) return NULL;
-    memcpy(copy, data, (size_t)length);
-    *length_out = length;
-    return copy;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_compile_shader(int64_t device, int64_t source) {
-    int64_t length = 0, result;
-    uint8_t *copy = spl_metal_copy_text(source, &length);
-    if (!copy) return 0;
-    result = rt_metal_compile_shader_raw(device, (int64_t)(intptr_t)copy, length);
-    free(copy);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_create_compute_pipeline(
-        int64_t device, int64_t shader, int64_t entry) {
-    int64_t length = 0, result;
-    uint8_t *copy = spl_metal_copy_text(entry, &length);
-    if (!copy) return 0;
-    result = rt_metal_create_compute_pipeline_raw(
-        device, shader, (int64_t)(intptr_t)copy, length);
-    free(copy);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_load_library_array(int64_t device, int64_t data) {
-    int64_t length = rt_array_len_safe(data), result;
-    uint8_t *copy = spl_vulkan_copy_input_bytes(data, length);
-    if (!copy) return 0;
-    result = rt_metal_load_library_raw(device, (int64_t)(intptr_t)copy, length);
-    free(copy);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_buffer_upload(
-        int64_t buffer, int64_t data, int64_t size) {
-    int64_t result;
-    uint8_t *copy = spl_vulkan_copy_input_bytes(data, size);
-    if (!copy) return 0;
-    result = rt_metal_buffer_upload_raw(buffer, (int64_t)(intptr_t)copy, size);
-    free(copy);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_buffer_download(
-        int64_t data, int64_t buffer, int64_t size) {
-    int64_t result;
-    uint8_t *copy;
-    if (size <= 0 || size > 268435456) return 0;
-    copy = (uint8_t*)malloc((size_t)size);
-    if (!copy) return 0;
-    result = rt_metal_buffer_download_raw((int64_t)(intptr_t)copy, buffer, size);
-    if (result && rt_array_bytes_store_checked(data, copy, size) != size) result = 0;
-    free(copy);
-    return result;
-}
-
-SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_set_bytes(
-        int64_t encoder, int64_t data, int64_t length, int64_t index) {
-    int64_t result;
-    uint8_t *copy = spl_vulkan_copy_input_bytes(data, length);
-    if (!copy) return 0;
-    result = rt_metal_set_bytes_raw(
-        encoder, (int64_t)(intptr_t)copy, length, index);
-    free(copy);
-    return result;
-}
+#endif
 
 /*
  * Core-C parity for the runtime-owned Vulkan dependency-quarantine gate.
@@ -1546,31 +612,20 @@ SPL_CORE_C_WEAK int64_t rt_atexit_check(void) {
 #undef SPL_CORE_C_WEAK
 
 static int64_t rt_host_gpu_queue_now_us(void) {
-    struct timespec ts;
 #if defined(_WIN32)
-    /* timespec_get/TIME_UTC are C11 and are not exposed by every MinGW
-     * <time.h> configuration (they were undeclared here). QueryPerformanceCounter
-     * is always available, and is a better fit anyway: this is a MONOTONIC
-     * elapsed-time source, which is what the POSIX branch below asks for --
-     * timespec_get(TIME_UTC) returned wall-clock time and would have jumped
-     * backwards across an NTP correction. */
     LARGE_INTEGER counter;
     LARGE_INTEGER frequency;
-    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart == 0) {
-        return 0;
-    }
-    if (!QueryPerformanceCounter(&counter)) {
-        return 0;
-    }
-    ts.tv_sec = (time_t)(counter.QuadPart / frequency.QuadPart);
-    ts.tv_nsec = (long)(((counter.QuadPart % frequency.QuadPart) * 1000000000LL)
-        / frequency.QuadPart);
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 ||
+            !QueryPerformanceCounter(&counter)) return 0;
+    return (int64_t)((counter.QuadPart / frequency.QuadPart) * 1000000LL +
+        ((counter.QuadPart % frequency.QuadPart) * 1000000LL) / frequency.QuadPart);
 #else
+    struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         return 0;
     }
-#endif
     return ((int64_t)ts.tv_sec * 1000000) + ((int64_t)ts.tv_nsec / 1000);
+#endif
 }
 
 int64_t rt_host_gpu_lane_event(int64_t lane_code, int64_t phase_code) {
@@ -1918,10 +973,6 @@ static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NUL
 static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
-static _Thread_local int64_t rt_core_transient_last_promoted_node_count = 0;
-static _Thread_local int64_t rt_core_transient_last_promoted_byte_count = 0;
-static _Thread_local int64_t rt_core_transient_scope_promoted_node_count = 0;
-static _Thread_local int64_t rt_core_transient_scope_promoted_byte_count = 0;
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
 static size_t rt_core_mutex_registry_cap = 0;
@@ -2154,9 +1205,6 @@ int8_t rt_transient_array_scope_begin(void) {
     rt_core_transient_array_scope_id = next_id;
     rt_core_transient_array_scope_active = 1;
     rt_core_transient_array_scope_paused = 0;
-    rt_transient_promotion_stats_reset();
-    rt_core_transient_scope_promoted_node_count = 0;
-    rt_core_transient_scope_promoted_byte_count = 0;
     return 1;
 }
 
@@ -2271,13 +1319,10 @@ static int rt_core_transient_raw_insert_raw(uintptr_t ptr, size_t bytes) {
     }
 }
 
-/* Rehash into a table of exactly `next_cap` slots. `next_cap` may EQUAL the
- * current capacity: linear probing cannot purge tombstones in place, so a
- * same-capacity rehash through a fresh table is the only way to reclaim them.
- * Live entries keep their `bytes` word verbatim, so the OWNED bit and the
- * size field survive a resize unchanged. */
-static int rt_core_transient_raw_resize(size_t next_cap) {
-    if (next_cap == 0) return 0;
+static int rt_core_transient_raw_grow(void) {
+    size_t next_cap = rt_core_transient_raw_alloc_cap == 0
+        ? 256
+        : rt_core_transient_raw_alloc_cap * 2;
     if (next_cap > SIZE_MAX / sizeof(RtCoreTransientRawAlloc)) return 0;
     RtCoreTransientRawAlloc* fresh = (RtCoreTransientRawAlloc*)calloc(
         next_cap, sizeof(RtCoreTransientRawAlloc));
@@ -2302,23 +1347,8 @@ static int rt_core_transient_raw_register_state(void* ptr, size_t bytes, int own
     if (!ptr || !rt_core_transient_array_scope_active) return ptr != NULL;
     if (bytes > RT_CORE_TRANSIENT_RAW_SIZE_MASK) return 0;
     if ((rt_core_transient_raw_alloc_len + rt_core_transient_raw_alloc_tombs + 1) * 10
-            >= rt_core_transient_raw_alloc_cap * 7) {
-        size_t next_cap = rt_core_transient_raw_alloc_cap == 0
-            ? 256
-            : rt_core_transient_raw_alloc_cap * 2;
-        /* PERF (stage3_hir_imports_memory_explosion_driver_riscv_gen2): same
-         * tombstone-driven doubling the immortal registry already guards
-         * against below (rt_core_register_immortal_ptr). A long-lived
-         * transient scope erases in place on every free/realloc, so capacity
-         * tracked CUMULATIVE churn rather than the live set. Purge the
-         * tombstones at the SAME capacity instead of doubling. */
-        if (rt_core_transient_raw_alloc_cap != 0 &&
-            rt_core_transient_raw_alloc_tombs > rt_core_transient_raw_alloc_len &&
-            (rt_core_transient_raw_alloc_len + 1) * 10
-                < rt_core_transient_raw_alloc_cap * 5) {
-            next_cap = rt_core_transient_raw_alloc_cap;
-        }
-        if (!rt_core_transient_raw_resize(next_cap)) return 0;
+            >= rt_core_transient_raw_alloc_cap * 7 && !rt_core_transient_raw_grow()) {
+        return 0;
     }
     size_t stored = bytes | (owned ? RT_CORE_TRANSIENT_RAW_OWNED_BIT : 0);
     return rt_core_transient_raw_insert_raw((uintptr_t)ptr, stored);
@@ -2351,19 +1381,7 @@ static void rt_core_transient_raw_erase(void* ptr) {
 }
 
 static void rt_core_transient_raw_clear(void) {
-    /* PERF (stage3_hir_imports_memory_explosion_driver_riscv_gen2): release a
-     * large table instead of retaining it at its high-water capacity. Scopes
-     * are per-source, so one big module otherwise charged every later module
-     * an O(cap) scan, a full memset, and a random probe into a huge sparse
-     * array on every rt_alloc. Post-clear this is observationally identical
-     * to the all-zero table: rt_core_transient_raw_lookup returns NULL for
-     * cap == 0, and the register path re-seeds at 256 through its cap == 0
-     * arm. Small tables are memset as before so no extra calloc is paid. */
-    if (rt_core_transient_raw_alloc_cap > 4096) {
-        free(rt_core_transient_raw_allocs);
-        rt_core_transient_raw_allocs = NULL;
-        rt_core_transient_raw_alloc_cap = 0;
-    } else if (rt_core_transient_raw_alloc_cap != 0) {
+    if (rt_core_transient_raw_alloc_cap != 0) {
         memset(rt_core_transient_raw_allocs, 0,
             rt_core_transient_raw_alloc_cap * sizeof(RtCoreTransientRawAlloc));
     }
@@ -2925,58 +1943,9 @@ static int rt_core_transient_add(RtCoreTransientPlan* plan, int64_t value) {
     return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
 }
 
-int64_t rt_transient_last_promoted_nodes(void) {
-    return rt_core_transient_last_promoted_node_count;
-}
-
-int64_t rt_transient_last_promoted_bytes(void) {
-    return rt_core_transient_last_promoted_byte_count;
-}
-
-int64_t rt_transient_scope_promoted_nodes(void) {
-    return rt_core_transient_scope_promoted_node_count;
-}
-
-int64_t rt_transient_scope_promoted_bytes(void) {
-    return rt_core_transient_scope_promoted_byte_count;
-}
-
-void rt_transient_promotion_stats_reset(void) {
-    rt_core_transient_last_promoted_node_count = 0;
-    rt_core_transient_last_promoted_byte_count = 0;
-}
-
-static size_t rt_core_transient_node_bytes(RtCoreTransientNode node) {
-    switch (node.kind) {
-        case RT_CORE_TRANSIENT_STRING: {
-            RtCoreString* string = (RtCoreString*)node.ptr;
-            return sizeof(*string) + (size_t)string->len + 1;
-        }
-        case RT_CORE_TRANSIENT_ARRAY: {
-            RtCoreArray* array = (RtCoreArray*)node.ptr;
-            size_t element = sizeof(int64_t);
-            if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) element = 1;
-            return sizeof(*array) + (size_t)array->cap * element;
-        }
-        case RT_CORE_TRANSIENT_DICT: {
-            RtCoreDict* dict = (RtCoreDict*)node.ptr;
-            return sizeof(*dict) + (size_t)dict->cap * sizeof(RtCoreDictEntry);
-        }
-        case RT_CORE_TRANSIENT_ENUM: return sizeof(RtCoreEnum);
-        case RT_CORE_TRANSIENT_FLOAT: return sizeof(RtCoreFloat);
-        case RT_CORE_TRANSIENT_CLOSURE: {
-            RtCoreClosure* closure = (RtCoreClosure*)node.ptr;
-            return sizeof(*closure) + (size_t)closure->capture_count * sizeof(int64_t);
-        }
-        case RT_CORE_TRANSIENT_RAW: return node.bytes;
-        default: return 0;
-    }
-}
-
 int8_t rt_transient_heap_promote(int64_t value) {
     if (!rt_core_transient_array_scope_active || !rt_core_transient_array_scope_paused) return 0;
     rt_core_heap_lifecycle_acquire();
-    rt_transient_promotion_stats_reset();
     RtCoreTransientPlan plan = {0};
     RtCoreTransientNode root;
     int ok = rt_core_transient_classify(value, &root) == 1 &&
@@ -3015,15 +1984,11 @@ int8_t rt_transient_heap_promote(int64_t value) {
     }
     if (ok) {
         const uint32_t scope_id = rt_core_transient_array_scope_id;
-        int64_t promoted_nodes = 0;
-        int64_t promoted_bytes = 0;
         for (size_t i = 0; i < plan.len; i++) {
             RtCoreTransientNode node = plan.nodes[i];
             uint32_t* object_scope = NULL;
-            int promoted = 0;
             switch (node.kind) {
                 case RT_CORE_TRANSIENT_STRING:
-                    promoted = ((((RtCoreString*)node.ptr)->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0);
                     ((RtCoreString*)node.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
                     break;
                 case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
@@ -3034,35 +1999,11 @@ int8_t rt_transient_heap_promote(int64_t value) {
                 case RT_CORE_TRANSIENT_RAW: {
                     RtCoreTransientRawAlloc* raw =
                         rt_core_transient_raw_lookup((uintptr_t)node.ptr);
-                    if (raw) {
-                        promoted = (raw->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
-                        raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
-                    }
+                    if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
                     break;
                 }
             }
-            if (object_scope && *object_scope == scope_id) {
-                promoted = 1;
-                *object_scope = 0;
-            }
-            if (promoted) {
-                size_t bytes = rt_core_transient_node_bytes(node);
-                promoted_nodes++;
-                if (bytes > (size_t)(INT64_MAX - promoted_bytes)) promoted_bytes = INT64_MAX;
-                else promoted_bytes += (int64_t)bytes;
-            }
-        }
-        rt_core_transient_last_promoted_node_count = promoted_nodes;
-        rt_core_transient_last_promoted_byte_count = promoted_bytes;
-        if (promoted_nodes > INT64_MAX - rt_core_transient_scope_promoted_node_count) {
-            rt_core_transient_scope_promoted_node_count = INT64_MAX;
-        } else {
-            rt_core_transient_scope_promoted_node_count += promoted_nodes;
-        }
-        if (promoted_bytes > INT64_MAX - rt_core_transient_scope_promoted_byte_count) {
-            rt_core_transient_scope_promoted_byte_count = INT64_MAX;
-        } else {
-            rt_core_transient_scope_promoted_byte_count += promoted_bytes;
+            if (object_scope && *object_scope == scope_id) *object_scope = 0;
         }
     }
     free(plan.nodes);
@@ -3393,16 +2334,10 @@ int64_t rt_value_as_int(int64_t value) {
      * the string registry and kind == RT_VALUE_HEAP_STRING) -- NOT a bare
      * `(value & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP` test. That distinction
      * is load-bearing: TAG_HEAP is 0x1, so every ODD value would test as "heap",
-     * and a pure-Simple call site passes a RAW, UNTAGGED i64 here and depends on
-     * the bare shift -- `rt_value_as_int(packed_return_local & 0xFFFFFFFF)` in
-     * src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl.
-     * (The former sibling call site `rt_value_as_int(load_symbol_slot >> 32)` in
-     * the same file was REMOVED 2026-08-24: its "SymbolId decays to a raw i64"
-     * premise was measured FALSE on the seed's tree-walk interpreter, where the
-     * slot is a live SymbolId Object and the shift failed the whole build with
-     * "cannot convert object to int". That site now reads the id through the
-     * typed MirInst accessor bootstrap_load_global_symbol_id. This function's
-     * own contract is unchanged.)
+     * and two pure-Simple call sites pass a RAW, UNTAGGED i64 here and depend on
+     * the bare shift -- `rt_value_as_int(load_symbol_slot >> 32)` and
+     * `rt_value_as_int(packed_return_local & 0xFFFFFFFF)`, both in
+     * src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl (:700, :1011).
      * Pinned by P4 of src/runtime/test/rt_value_as_int_text_decode_selfcheck.c.
      *
      * Text of exactly one codepoint yields THAT CODE POINT, matching the
@@ -4570,6 +3505,10 @@ int64_t rt_string_eq(int64_t left, int64_t right) {
     return a->len == 0 || memcmp(a->data, b->data, (size_t)a->len) == 0;
 }
 
+int64_t rt_text_eq_fast(int64_t left, int64_t right) {
+    return rt_string_eq(left, right);
+}
+
 /* #148: native-path `text == text` / `text != text` equality.
  *
  * On the normal native (non-bootstrap) MIR->LLVM path a "str"-typed MIR local
@@ -4802,13 +3741,6 @@ int64_t rt_char_from_code(int64_t code) {
  * Keep it as a thin ABI alias so Stage-2-produced tools link against the
  * core-C bootstrap runtime, including on macOS arm64. */
 int64_t text_dot_from_char_code(int64_t code) {
-    return rt_char_from_code(code);
-}
-
-/* Older admitted Stage-2 compilers lowered integer `.chr()` in generic
- * library modules to this bare helper name.  Keep the compatibility spelling
- * as an ABI alias; current compilers emit the canonical rt_char_from_code. */
-int64_t char_from_code(int64_t code) {
     return rt_char_from_code(code);
 }
 
@@ -5921,14 +4853,6 @@ int64_t rt_sort(int64_t receiver) {
     for (int64_t i = 0; i < n; i++) rt_array_set(arr, i, buf[i]);
     free(buf);
     return receiver;
-}
-
-/* Builtin Array.sort uses the historical boolean-returning runtime ABI while
- * method lowering uses rt_sort's receiver-returning ABI.  They share exactly
- * the same stable in-place implementation. */
-int8_t rt_array_sort(int64_t array) {
-    (void)rt_sort(array);
-    return 1;
 }
 
 /* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.
@@ -8009,139 +6933,24 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
  * missing library. Because the bundle links runtime_native.o BEFORE
  * runtime_dynload.o under -z muldefs, THIS weaker copy was the one that won.
  * rt_interp_cstr accepts both encodings and is a strict superset. */
-#ifdef _WIN32
-static HMODULE runtime_dynload_open_utf8(const char *path) {
-    int wide_len;
-    wchar_t *wide_path;
-    HMODULE handle;
-    if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
-    handle = LoadLibraryW(wide_path);
-    free(wide_path);
-    return handle;
-}
-#endif
-
-int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
-#if defined(__linux__)
-    const char* path = rt_interp_cstr(path_value);
-    if (!path) return -1;
-    int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (source < 0) return -1;
-    struct stat source_stat;
-    if (fstat(source, &source_stat) != 0 || !S_ISREG(source_stat.st_mode) ||
-        source_stat.st_size < 0 || (uint64_t)source_stat.st_size > UINT64_C(1073741824)) {
-        close(source);
-        return -1;
-    }
-    int snapshot = (int)syscall(SYS_memfd_create, "simple-sffi-provider",
-                                MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (snapshot < 0) { close(source); return -1; }
-    uint8_t buffer[65536];
-    uint64_t total = 0;
-    for (;;) {
-        ssize_t got = read(source, buffer, sizeof(buffer));
-        if (got == 0) break;
-        if (got < 0) {
-            if (errno == EINTR) continue;
-            close(source); close(snapshot); return -1;
-        }
-        if ((uint64_t)got > UINT64_C(1073741824) - total) {
-            close(source); close(snapshot); return -1;
-        }
-        total += (uint64_t)got;
-        ssize_t offset = 0;
-        while (offset < got) {
-            ssize_t put = write(snapshot, buffer + offset, (size_t)(got - offset));
-            if (put < 0 && errno == EINTR) continue;
-            if (put <= 0) { close(source); close(snapshot); return -1; }
-            offset += put;
-        }
-    }
-    if (total != (uint64_t)source_stat.st_size || close(source) != 0 ||
-        lseek(snapshot, 0, SEEK_SET) < 0 ||
-        fcntl(snapshot, F_ADD_SEALS,
-              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
-        close(snapshot);
-        return -1;
-    }
-    return (int64_t)snapshot;
-#else
-    (void)path_value;
-    return -1;
-#endif
-}
-
 int64_t spl_dlopen(int64_t path_value) {
-    int64_t handle = 0;
-    return spl_dlopen_checked(path_value, &handle) == 0 ? handle : 0;
-}
-
-int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle) {
-    if (!out_handle) return 1;
-    *out_handle = 0;
     const char* path = rt_interp_cstr(path_value);
-    if (!path || !path[0]) return 1;
+    if (!path) return 0;
 #ifdef _WIN32
-    HMODULE handle = runtime_dynload_open_utf8(path);
-    if (!handle) return 2;
-    *out_handle = (int64_t)(intptr_t)handle;
+    return (int64_t)(intptr_t)LoadLibraryA(path);
 #else
-    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!handle) return 2;
-    *out_handle = (int64_t)(intptr_t)handle;
+    return (int64_t)(intptr_t)dlopen(path, RTLD_NOW | RTLD_LOCAL);
 #endif
-    return 0;
 }
 
 int64_t spl_dlsym(int64_t handle, int64_t name_value) {
-    int64_t symbol = 0;
-    return spl_dlsym_checked(handle, name_value, &symbol) == 0 ? symbol : 0;
-}
-
-int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbol) {
-    if (!out_symbol) return 1;
-    *out_symbol = 0;
     const char* name = rt_interp_cstr(name_value);
-    if (!handle || !name || !name[0]) return 1;
+    if (!handle || !name) return 0;
 #ifdef _WIN32
-    FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
-    if (!symbol) return 3;
-    *out_symbol = (int64_t)(intptr_t)symbol;
+    return (int64_t)(intptr_t)GetProcAddress((HMODULE)(intptr_t)handle, name);
 #else
-    void* symbol = dlsym((void*)(intptr_t)handle, name);
-    if (!symbol) return 3;
-    *out_symbol = (int64_t)(intptr_t)symbol;
+    return (int64_t)(intptr_t)dlsym((void*)(intptr_t)handle, name);
 #endif
-    return 0;
-}
-
-int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol) {
-    if (!out_symbol) return 1;
-    *out_symbol = 0;
-    const char* name = rt_interp_cstr(name_value);
-    if (!name || !name[0]) return 1;
-#ifdef _WIN32
-    HMODULE process = GetModuleHandleA(NULL);
-    if (!process) return 3;
-    FARPROC symbol = GetProcAddress(process, name);
-    if (!symbol) return 3;
-    *out_symbol = (int64_t)(intptr_t)symbol;
-#else
-    void* symbol = dlsym(NULL, name);
-    if (!symbol) return 3;
-    *out_symbol = (int64_t)(intptr_t)symbol;
-#endif
-    return 0;
 }
 
 int64_t spl_dlclose(int64_t handle) {
@@ -8181,68 +6990,6 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
         case 8: return ((Fn8)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
         default: return 0;
     }
-}
-
-/* Checked integer-only WFFI transport, matching the Rust runtime and
- * interpreter contract exactly: [status, value], with value meaningful only
- * for status 0. Keep this beside the legacy dispatcher so pure-Simple native
- * binaries do not depend on a Rust runtime owner for the checked symbol. */
-#define SPL_WFFI_OK 0
-#define SPL_WFFI_INVALID_ARGUMENT 1
-#define SPL_WFFI_NULL_FUNCTION 2
-#define SPL_WFFI_UNSUPPORTED_SIGNATURE 3
-
-int64_t spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value) {
-    typedef bool (*Fn)(void);
-    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
-    *out_value = 0;
-    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
-    *out_value = ((Fn)(uintptr_t)fptr)() ? 1 : 0;
-    return SPL_WFFI_OK;
-}
-
-int64_t spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0, int8_t* out_value) {
-    typedef bool (*Fn)(int64_t);
-    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
-    *out_value = 0;
-    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
-    *out_value = ((Fn)(uintptr_t)fptr)(arg0) ? 1 : 0;
-    return SPL_WFFI_OK;
-}
-
-static int64_t spl_wffi_i64_checked_result(int64_t status, int64_t value) {
-    SplArray* result = rt_array_new(2);
-    if (!result) return rt_core_nil();
-    if (!rt_array_push(result, rt_value_int(status)) ||
-        !rt_array_push(result, rt_value_int(value))) {
-        rt_array_free(result);
-        return rt_core_nil();
-    }
-    return (int64_t)(uintptr_t)result;
-}
-
-int64_t spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value, int64_t nargs) {
-    if (fptr == 0) {
-        return spl_wffi_i64_checked_result(SPL_WFFI_NULL_FUNCTION, 0);
-    }
-    if (nargs < 0) {
-        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
-    }
-    if (nargs > 8) {
-        return spl_wffi_i64_checked_result(SPL_WFFI_UNSUPPORTED_SIGNATURE, 0);
-    }
-    RtCoreArray* args = rt_core_as_array(args_value);
-    if (!args || (args->flags & RT_CORE_ARRAY_FLAG_BYTES) || !args->data ||
-        nargs > args->len) {
-        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
-    }
-    for (int64_t i = 0; i < nargs; i++) {
-        if (!rt_core_is_int(((int64_t*)args->data)[i])) {
-            return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
-        }
-    }
-    return spl_wffi_i64_checked_result(
-        SPL_WFFI_OK, spl_wffi_call_i64(fptr, args_value, nargs));
 }
 
 int64_t rt_array_header_ptr(SplArray* a) {
@@ -8610,30 +7357,6 @@ int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
 int64_t rt_enum_payload(int64_t value) {
     RtCoreEnum* e = rt_core_as_enum(value);
     return e ? e->payload : rt_core_nil();
-}
-
-/* Formation probe for heap-typed enum/Option payloads at fail-closed
- * handoffs. The 2026-08-22 stage-3 streaming-owner incident read back a
- * Some-tagged Option whose payload word was 0: every discriminant/nil guard
- * passed and the first field load SIGSEGV'd at 0x0. This answers exactly
- * that -- is the payload word a plausible object reference rather than 0 or
- * a zero-page address -- with no registry probe: a FORMATION check, not a
- * liveness proof.
- *
- * It deliberately does NOT require the HEAP tag. Requiring it made the probe
- * false-reject every live CLASS instance on the native codegen lane, where a
- * class reference is a raw (untagged) pointer rather than a |1-tagged runtime
- * value -- measured 2026-08-24: the same live object reports wellformed on the
- * interpreter lane and malformed on the native lane. That broke the two
- * driver HIR-entry guards unconditionally at Stage 2/3
- * (E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED on a valid hello world). The
- * probe's prime directive is that it must never false-reject a live object,
- * so the tag requirement is the part that had to go; zero-page rejection --
- * which is what actually catches the incident value 0 -- is retained, and
- * every previously pinned rejection (0, nil 3, tagged scalar 24, heap-tagged
- * zero-page 2049) still masks below 4096 and is still rejected. */
-int8_t rt_heap_ref_wellformed(int64_t value) {
-    return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
 }
 
 /* Array `at`: bounds-checked element access with an Option (`T?`) result.
@@ -9640,6 +8363,74 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     return result;
 }
 
+int64_t rt_file_read_regular_no_follow_bounded(
+        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    const int64_t rt_nil = 3;
+    char path[RT_TEXT_PATH_MAX];
+    if (max_bytes < 0 || path_len == 0 ||
+        !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return rt_nil;
+    size_t capacity = (size_t)max_bytes + 1;
+    uint8_t* bytes = (uint8_t*)malloc(capacity);
+    if (!bytes) return rt_nil;
+    size_t total = 0;
+#if defined(_WIN32)
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) { free(bytes); return rt_nil; }
+    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            path, -1, wide_path, wide_len)) {
+        free(wide_path); free(bytes); return rt_nil;
+    }
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wide_path);
+    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return rt_nil; }
+    BY_HANDLE_FILE_INFORMATION info;
+    LARGE_INTEGER size;
+    if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
+        CloseHandle(handle); free(bytes); return rt_nil;
+    }
+    while (total < capacity) {
+        DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
+        DWORD read_count = 0;
+        if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
+            CloseHandle(handle); free(bytes); return rt_nil;
+        }
+        if (read_count == 0) break;
+        total += (size_t)read_count;
+    }
+    CloseHandle(handle);
+#else
+#ifndef O_NOFOLLOW
+    free(bytes);
+    return rt_nil;
+#else
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) { free(bytes); return rt_nil; }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size > (uint64_t)max_bytes) {
+        close(fd); free(bytes); return rt_nil;
+    }
+    while (total < capacity) {
+        ssize_t count = read(fd, bytes + total, capacity - total);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { close(fd); free(bytes); return rt_nil; }
+        if (count == 0) break;
+        total += (size_t)count;
+    }
+    close(fd);
+#endif
+#endif
+    if (total > (size_t)max_bytes) { free(bytes); return rt_nil; }
+    int64_t result = rt_string_new(bytes, (uint64_t)total);
+    free(bytes);
+    return result;
+}
+
 int64_t rt_file_read_text_rv(int64_t path_value) {
     char* path = rt_core_string_to_cpath(path_value);
     if (!path) return rt_string_new(NULL, 0);
@@ -9862,252 +8653,6 @@ int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
 #else
     struct stat st;
     return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode);
-#endif
-}
-
-/* Hosted safe-artifact provider v1.
- *
- * These are deliberately high-level consuming operations.  No descriptor is
- * exposed through the value-semantic Simple ABI: one C frame owns the trusted
- * root, walked directory descriptors, leaf descriptor, and close outcome.
- * Windows and POSIX hosts without O_TMPFILE + AT_EMPTY_PATH fail with the
- * documented unsupported status rather than approximating atomicity.
- */
-#if !defined(_WIN32)
-#define RT_SAFE_ARTIFACT_EINTR_LIMIT 32
-#if defined(__linux__)
-struct rt_safe_artifact_open_how {
-    uint64_t flags;
-    uint64_t mode;
-    uint64_t resolve;
-};
-#define RT_SAFE_RESOLVE_NO_XDEV 0x01u
-#define RT_SAFE_RESOLVE_NO_MAGICLINKS 0x02u
-#define RT_SAFE_RESOLVE_NO_SYMLINKS 0x04u
-#define RT_SAFE_RESOLVE_BENEATH 0x08u
-
-static int rt_safe_artifact_open_beneath(int root_fd, const char* relative,
-                                         int flags, int mode) {
-#if defined(SYS_openat2)
-    struct rt_safe_artifact_open_how how;
-    int retries = 0;
-    long result;
-    memset(&how, 0, sizeof(how));
-    how.flags = (uint64_t)flags;
-    how.mode = (uint64_t)mode;
-    how.resolve = RT_SAFE_RESOLVE_BENEATH | RT_SAFE_RESOLVE_NO_SYMLINKS |
-        RT_SAFE_RESOLVE_NO_MAGICLINKS | RT_SAFE_RESOLVE_NO_XDEV;
-    do { result = syscall(SYS_openat2, root_fd, relative, &how, sizeof(how)); }
-    while (result < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT);
-    return result >= 0 && result <= INT_MAX ? (int)result : -1;
-#else
-    (void)root_fd; (void)relative; (void)flags; (void)mode;
-    errno = ENOSYS;
-    return -1;
-#endif
-}
-#endif
-
-static int rt_safe_artifact_path_copy(const uint8_t* value, uint64_t len,
-                                      char* out, size_t capacity) {
-    if (!value || len == 0 || len >= capacity || memchr(value, '\0', (size_t)len)) return 0;
-    memcpy(out, value, (size_t)len);
-    out[len] = '\0';
-    return 1;
-}
-
-static int rt_safe_artifact_open_root(const char* root) {
-    char path[4096];
-    char* cursor;
-    int current;
-    if (!root || root[0] != '/' || strlen(root) >= sizeof(path)) return -1;
-    current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (current < 0) return -1;
-    if (root[1] == '\0') return current;
-    memcpy(path, root + 1, strlen(root));
-    cursor = path;
-    for (;;) {
-        char* slash = strchr(cursor, '/');
-        size_t len = slash ? (size_t)(slash - cursor) : strlen(cursor);
-        int next, retries = 0;
-        if (len == 0 || len >= 256 || (len == 1 && cursor[0] == '.') ||
-            (len == 2 && cursor[0] == '.' && cursor[1] == '.')) {
-            close(current);
-            return -1;
-        }
-        if (slash) *slash = '\0';
-        do { next = openat(current, cursor, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); }
-        while (next < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT);
-        if (next < 0 || close(current) != 0) {
-            if (next >= 0) close(next);
-            return -1;
-        }
-        current = next;
-        if (!slash) return current;
-        cursor = slash + 1;
-    }
-}
-
-static int rt_safe_artifact_stat_equal(const struct stat* a, const struct stat* b) {
-    int time_equal;
-#if defined(__APPLE__)
-    time_equal = a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
-        a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
-        a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
-        a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
-#else
-    time_equal = a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
-        a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
-        a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
-        a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
-#endif
-    return time_equal && a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
-        a->st_mode == b->st_mode && a->st_size == b->st_size &&
-        a->st_mtime == b->st_mtime && a->st_ctime == b->st_ctime;
-}
-#endif
-
-int64_t rt_hosted_safe_artifact_root_open_v1(
-    const uint8_t* root_ptr, uint64_t root_len) {
-#if !defined(__linux__)
-    (void)root_ptr; (void)root_len;
-    return -1;
-#else
-    char root[4096];
-    if (!rt_safe_artifact_path_copy(root_ptr, root_len, root, sizeof(root))) return -1;
-    return (int64_t)rt_safe_artifact_open_root(root);
-#endif
-}
-
-int rt_hosted_safe_artifact_root_close_v1(int64_t root_handle) {
-#if !defined(__linux__)
-    (void)root_handle;
-    return 0;
-#else
-    if (root_handle < 0 || root_handle > INT_MAX) return 0;
-    return close((int)root_handle) == 0;
-#endif
-}
-
-int64_t rt_hosted_safe_artifact_read_v1(
-    int64_t root_handle, const uint8_t* relative_ptr,
-    uint64_t relative_len, int64_t max_bytes) {
-#if !defined(__linux__)
-    (void)root_handle; (void)relative_ptr; (void)relative_len; (void)max_bytes;
-    return 0;
-#else
-    char relative[4096];
-    int root_fd, fd = -1, retries = 0, ok = 0;
-    struct stat root_identity, before, after;
-    uint8_t* bytes = NULL;
-    size_t used = 0, wanted = 0;
-    SplArray* result = NULL;
-    if (root_handle < 0 || root_handle > INT_MAX || max_bytes < 0 || max_bytes > 16777216 ||
-        !rt_safe_artifact_path_copy(relative_ptr, relative_len, relative, sizeof(relative))) return 0;
-    root_fd = (int)root_handle;
-    if (fstat(root_fd, &root_identity) != 0) goto done;
-    fd = rt_safe_artifact_open_beneath(root_fd, relative, O_RDONLY | O_CLOEXEC, 0);
-    if (fd < 0 || fstat(fd, &before) != 0 || before.st_dev != root_identity.st_dev || !S_ISREG(before.st_mode) ||
-        before.st_size < 0 || before.st_size > max_bytes ||
-        (uintmax_t)before.st_size > SIZE_MAX) goto done;
-    wanted = (size_t)before.st_size;
-    bytes = (uint8_t*)malloc(wanted > 0 ? wanted : 1);
-    if (!bytes) goto done;
-    while (used < wanted) {
-        ssize_t count = read(fd, bytes + used, wanted - used);
-        if (count > 0) { used += (size_t)count; retries = 0; continue; }
-        if (count < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT) continue;
-        goto done;
-    }
-    if (fstat(fd, &after) != 0 || !rt_safe_artifact_stat_equal(&before, &after)) goto done;
-    ok = 1;
-done:
-    if (fd >= 0 && close(fd) != 0) ok = 0;
-    if (ok) {
-        result = rt_byte_array_new_len((uint64_t)wanted);
-        {
-            RtCoreArray* array = rt_core_array_ptr(result);
-            if (!array || (wanted > 0 && !array->data)) { result = NULL; ok = 0; }
-            else if (wanted > 0) memcpy(array->data, bytes, wanted);
-        }
-    }
-    if (bytes) { memset(bytes, 0, wanted); free(bytes); }
-    return ok ? (int64_t)(uintptr_t)result : 0;
-#endif
-}
-
-int64_t rt_hosted_safe_artifact_publish_v1(
-    int64_t root_handle, const uint8_t* relative_ptr, uint64_t relative_len,
-    int64_t payload_value, int64_t max_bytes) {
-#if !defined(__linux__) || !defined(O_TMPFILE) || !defined(AT_EMPTY_PATH)
-    (void)root_handle; (void)relative_ptr; (void)relative_len;
-    (void)payload_value; (void)max_bytes;
-    return -3;
-#else
-    char relative[4096], parent_path[4096], leaf[256];
-    char* slash;
-    int root_fd, parent_fd = -1, fd = -1, retries = 0, published = 0;
-    int64_t status = -1;
-    SplArray* payload = (SplArray*)(intptr_t)payload_value;
-    int64_t count, index;
-    struct stat root_identity, parent_identity, identity;
-    if (root_handle < 0 || root_handle > INT_MAX || !payload || max_bytes < 0 || max_bytes > 16777216 ||
-        !rt_safe_artifact_path_copy(relative_ptr, relative_len, relative, sizeof(relative))) return -1;
-    count = rt_array_len(payload);
-    if (count < 0 || count > max_bytes) return -1;
-    root_fd = (int)root_handle;
-    slash = strrchr(relative, '/');
-    if (slash) {
-        size_t parent_len = (size_t)(slash - relative);
-        size_t leaf_len = strlen(slash + 1);
-        if (parent_len == 0 || parent_len >= sizeof(parent_path) || leaf_len == 0 || leaf_len >= sizeof(leaf)) goto done;
-        memcpy(parent_path, relative, parent_len); parent_path[parent_len] = '\0';
-        memcpy(leaf, slash + 1, leaf_len + 1);
-    } else {
-        strcpy(parent_path, ".");
-        if (strlen(relative) >= sizeof(leaf)) goto done;
-        strcpy(leaf, relative);
-    }
-    if (fstat(root_fd, &root_identity) != 0) goto done;
-    parent_fd = rt_safe_artifact_open_beneath(
-        root_fd, parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
-    if (parent_fd < 0 || fstat(parent_fd, &parent_identity) != 0 ||
-        parent_identity.st_dev != root_identity.st_dev) goto done;
-    retries = 0;
-    do { fd = openat(parent_fd, ".", O_TMPFILE | O_WRONLY | O_CLOEXEC, 0600); }
-    while (fd < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT);
-    if (fd < 0) { status = -3; goto done; }
-    index = 0;
-    while (index < count) {
-        uint8_t block[4096];
-        size_t block_len = (size_t)((count - index) < 4096 ? (count - index) : 4096);
-        size_t block_used = 0;
-        size_t i;
-        for (i = 0; i < block_len; i++) block[i] = (uint8_t)(rt_array_get(payload, index + (int64_t)i) & 0xff);
-        retries = 0;
-        while (block_used < block_len) {
-            ssize_t written = write(fd, block + block_used, block_len - block_used);
-            if (written > 0) { block_used += (size_t)written; retries = 0; continue; }
-            if (written < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT) continue;
-            memset(block, 0, sizeof(block));
-            goto done;
-        }
-        memset(block, 0, sizeof(block));
-        index += (int64_t)block_len;
-    }
-    if (fdatasync(fd) != 0 || fsync(fd) != 0 || fstat(fd, &identity) != 0 ||
-        identity.st_dev != root_identity.st_dev || !S_ISREG(identity.st_mode) || identity.st_size != count) goto done;
-    if (linkat(fd, "", parent_fd, leaf, AT_EMPTY_PATH) != 0) {
-        status = errno == EEXIST ? -2 : -1;
-        goto done;
-    }
-    status = 0;
-    published = 1;
-    if (fsync(parent_fd) != 0) status = -4;
-done:
-    if (fd >= 0 && close(fd) != 0) status = published ? -4 : -5;
-    if (parent_fd >= 0 && close(parent_fd) != 0) status = published ? -4 : -5;
-    return status;
 #endif
 }
 
@@ -12564,8 +11109,7 @@ static int64_t rt_make_addr_string(struct sockaddr_in* sa) {
 }
 
 int64_t rt_io_tcp_socket_create(int64_t family) {
-    if (family != 0 && family != 1) return -1;
-    int af = family == 1 ? AF_INET6 : AF_INET;
+    int af = (family == 6) ? AF_INET6 : AF_INET;
     return (int64_t)socket(af, SOCK_STREAM, 0);
 }
 
@@ -12582,7 +11126,7 @@ int64_t rt_io_tcp_bind(int64_t addr_val) {
     return (int64_t)fd;
 }
 
-bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
+int64_t rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return 0;
     struct sockaddr_in sa;
@@ -12590,8 +11134,8 @@ bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
     return bind((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
 }
 
-bool rt_io_tcp_listen(int64_t fd, int64_t backlog) {
-    return listen((int)fd, (int)backlog) == 0;
+int64_t rt_io_tcp_listen(int64_t fd, int64_t backlog) {
+    return listen((int)fd, (int)backlog) == 0 ? 1 : 0;
 }
 
 int64_t rt_io_tcp_accept(int64_t fd) {
@@ -12601,12 +11145,10 @@ int64_t rt_io_tcp_accept(int64_t fd) {
 }
 
 int64_t rt_io_tcp_accept_timeout(int64_t fd, int64_t ms) {
-    if (ms <= 0) return -1;
     struct pollfd pfd;
     memset(&pfd, 0, sizeof(pfd));
     pfd.fd = (int)fd; pfd.events = POLLIN;
-    int timeout_ms = ms > INT_MAX ? INT_MAX : (int)ms;
-    if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
+    if (poll(&pfd, 1, (int)ms) <= 0) return -1;
     return rt_io_tcp_accept(fd);
 }
 
@@ -12622,59 +11164,16 @@ int64_t rt_io_tcp_connect(int64_t addr_val) {
 }
 
 int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
-    if (ms <= 0) return -1;
-    const char* a = rt_extract_cstr(addr_val);
-    if (!a) return -1;
-    struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return -1;
-
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(fd);
-        return -1;
-    }
-
-    int connected = connect(fd, (struct sockaddr*)&sa, sizeof(sa));
-    if (connected < 0 && errno != EINPROGRESS) {
-        close(fd);
-        return -1;
-    }
-    if (connected < 0) {
-        struct pollfd pfd;
-        memset(&pfd, 0, sizeof(pfd));
-        pfd.fd = fd;
-        pfd.events = POLLOUT;
-        int timeout_ms = ms > INT_MAX ? INT_MAX : (int)ms;
-        if (poll(&pfd, 1, timeout_ms) <= 0) {
-            close(fd);
-            return -1;
-        }
-        int socket_error = 0;
-        socklen_t socket_error_len = sizeof(socket_error);
-        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_len) < 0 ||
-            socket_error != 0) {
-            close(fd);
-            return -1;
-        }
-    }
-    if (fcntl(fd, F_SETFL, flags) < 0) {
-        close(fd);
-        return -1;
-    }
-    return (int64_t)fd;
+    (void)ms;
+    return rt_io_tcp_connect(addr_val);
 }
 
 int64_t rt_io_tcp_read(int64_t fd, int64_t size) {
-    if (size < 0) return rt_core_nil();
-    if (size == 0) return (int64_t)(uintptr_t)rt_byte_array_new(0);
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || !ca->data) return rt_core_nil();
+    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
     ssize_t n = read((int)fd, ca->data, (size_t)size);
-    if (n < 0) return rt_core_nil();
-    ca->len = n;
+    ca->len = n > 0 ? n : 0;
     return (int64_t)(uintptr_t)arr;
 }
 
@@ -12707,7 +11206,7 @@ int64_t rt_io_tcp_write_bytes(int64_t fd, int64_t data_val) {
     return rt_io_tcp_write(fd, data_val);
 }
 
-bool rt_io_tcp_flush(int64_t fd) {
+int64_t rt_io_tcp_flush(int64_t fd) {
     int flag = 1;
     setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     flag = 0;
@@ -12715,8 +11214,8 @@ bool rt_io_tcp_flush(int64_t fd) {
     return 1;
 }
 
-bool rt_io_tcp_close(int64_t fd) {
-    return close((int)fd) == 0;
+int64_t rt_io_tcp_close(int64_t fd) {
+    return close((int)fd) == 0 ? 1 : 0;
 }
 
 int64_t rt_io_tcp_local_addr(int64_t fd) {
@@ -12733,19 +11232,19 @@ int64_t rt_io_tcp_peer_addr(int64_t fd) {
     return rt_make_addr_string(&sa);
 }
 
-bool rt_io_tcp_set_nonblocking(int64_t fd, bool enabled) {
+int64_t rt_io_tcp_set_nonblocking(int64_t fd, int64_t enabled) {
     int flags = fcntl((int)fd, F_GETFL, 0);
     if (flags < 0) return 0;
     if (enabled) flags |= O_NONBLOCK; else flags &= ~O_NONBLOCK;
     return fcntl((int)fd, F_SETFL, flags) == 0 ? 1 : 0;
 }
 
-bool rt_io_tcp_set_nodelay(int64_t fd, bool enabled) {
+int64_t rt_io_tcp_set_nodelay(int64_t fd, int64_t enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-bool rt_io_tcp_set_reuseport(int64_t fd, bool enabled) {
+int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
 #ifdef SO_REUSEPORT
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEPORT, &flag, sizeof(flag)) == 0 ? 1 : 0;
@@ -12754,27 +11253,25 @@ bool rt_io_tcp_set_reuseport(int64_t fd, bool enabled) {
 #endif
 }
 
-bool rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled) {
+int64_t rt_io_tcp_set_reuseaddr(int64_t fd, int64_t enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-bool rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
+int64_t rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
-    tv.tv_sec = ms < 0 ? 0 : ms / 1000;
-    tv.tv_usec = ms < 0 ? 0 : (ms % 1000) * 1000;
+    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
-bool rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
+int64_t rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
-    tv.tv_sec = ms < 0 ? 0 : ms / 1000;
-    tv.tv_usec = ms < 0 ? 0 : (ms % 1000) * 1000;
+    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
-bool rt_io_tcp_shutdown(int64_t fd, int64_t how) {
-    return shutdown((int)fd, (int)how) == 0;
+int64_t rt_io_tcp_shutdown(int64_t fd, int64_t how) {
+    return shutdown((int)fd, (int)how) == 0 ? 1 : 0;
 }
 
 /* ================================================================
@@ -12798,7 +11295,7 @@ int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return -1;
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
-    if (!ca || ca->len < 0 || (ca->len > 0 && !ca->data)) return -1;
+    if (!ca || !ca->data || ca->len <= 0) return 0;
     struct sockaddr_in sa;
     if (rt_parse_addr_port(a, &sa) < 0) return -1;
     return (int64_t)sendto((int)fd, ca->data, (size_t)ca->len, 0, (struct sockaddr*)&sa, sizeof(sa));
@@ -12806,28 +11303,20 @@ int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
 
 int64_t rt_io_udp_send(int64_t fd, int64_t data_val) {
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
-    if (!ca || ca->len < 0 || (ca->len > 0 && !ca->data)) return -1;
+    if (!ca || !ca->data || ca->len <= 0) return 0;
     return (int64_t)send((int)fd, ca->data, (size_t)ca->len, 0);
 }
 
 int64_t rt_io_udp_recv(int64_t fd, int64_t size) {
-    if (size < 0 || size > 65535) return rt_core_nil();
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || (size > 0 && !ca->data)) {
-        if (arr) rt_array_free(arr);
-        return rt_core_nil();
-    }
+    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
     ssize_t n = recv((int)fd, ca->data, (size_t)size, 0);
-    if (n < 0) {
-        rt_array_free(arr);
-        return rt_core_nil();
-    }
-    ca->len = n;
+    ca->len = n > 0 ? n : 0;
     return (int64_t)(uintptr_t)arr;
 }
 
-bool rt_io_udp_connect(int64_t fd, int64_t addr_val) {
+int64_t rt_io_udp_connect(int64_t fd, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return 0;
     struct sockaddr_in sa;
@@ -12836,82 +11325,61 @@ bool rt_io_udp_connect(int64_t fd, int64_t addr_val) {
 }
 
 int64_t rt_io_udp_local_addr(int64_t fd) { return rt_io_tcp_local_addr(fd); }
-bool rt_io_udp_set_broadcast(int64_t fd, bool e) {
+int64_t rt_io_udp_set_broadcast(int64_t fd, int64_t e) {
     int flag = e ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_BROADCAST, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
-bool rt_io_udp_set_read_timeout(int64_t fd, int64_t ms) { return rt_io_tcp_set_read_timeout(fd, ms); }
-bool rt_io_udp_close(int64_t fd) { return close((int)fd) == 0; }
-bool rt_io_udp_set_nonblocking(int64_t fd, bool e) { return rt_io_tcp_set_nonblocking(fd, e); }
+int64_t rt_io_udp_set_read_timeout(int64_t fd, int64_t ms) { return rt_io_tcp_set_read_timeout(fd, ms); }
+int64_t rt_io_udp_close(int64_t fd) { return close((int)fd) == 0 ? 1 : 0; }
+int64_t rt_io_udp_set_nonblocking(int64_t fd, int64_t e) { return rt_io_tcp_set_nonblocking(fd, e); }
 
 int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
-    if (size < 0 || size > 65535) return rt_core_nil();
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || (size > 0 && !ca->data)) {
-        if (arr) rt_array_free(arr);
-        return rt_core_nil();
-    }
+    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);
     ssize_t n = recvfrom((int)fd, ca->data, (size_t)size, 0, (struct sockaddr*)&from, &fromlen);
-    if (n < 0) {
-        rt_array_free(arr);
-        return rt_core_nil();
-    }
-    ca->len = n;
-    int64_t address = rt_make_addr_string(&from);
-    if (address == rt_core_nil()) {
-        rt_array_free(arr);
-        return rt_core_nil();
-    }
-    int64_t tuple = rt_tuple_new(2);
-    if (tuple == rt_core_nil()) {
-        rt_string_free(address);
-        rt_array_free(arr);
-        return rt_core_nil();
-    }
-    rt_tuple_set(tuple, 0, (int64_t)(uintptr_t)arr);
-    rt_tuple_set(tuple, 1, address);
-    return tuple;
+    ca->len = n > 0 ? n : 0;
+    return (int64_t)(uintptr_t)arr;
 }
 
 #else /* _WIN32 stubs */
 int64_t rt_io_tcp_socket_create(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_bind(int64_t a) { (void)a; return -1; }
-bool rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-bool rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return false; }
+int64_t rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
+int64_t rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return 0; }
 int64_t rt_io_tcp_accept(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_accept_timeout(int64_t f, int64_t m) { (void)f; (void)m; return -1; }
 int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
 int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; return -1; }
-int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
+int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
+int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return 0; }
 int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
 int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-bool rt_io_tcp_flush(int64_t f) { (void)f; return false; }
-bool rt_io_tcp_close(int64_t f) { (void)f; return false; }
-int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
-int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
-bool rt_io_tcp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_nodelay(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_reuseport(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_reuseaddr(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return false; }
+int64_t rt_io_tcp_flush(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_close(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return 0; }
+int64_t rt_io_tcp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_tcp_set_nodelay(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_tcp_set_reuseport(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_tcp_set_reuseaddr(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
+int64_t rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
+int64_t rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return 0; }
 int64_t rt_io_udp_bind(int64_t a) { (void)a; return -1; }
-int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return -1; }
-int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-bool rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
-bool rt_io_udp_set_broadcast(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_udp_close(int64_t f) { (void)f; return false; }
-bool rt_io_udp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
-int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
+int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return 0; }
+int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
+int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
+int64_t rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
+int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return 0; }
+int64_t rt_io_udp_set_broadcast(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
+int64_t rt_io_udp_close(int64_t f) { (void)f; return 0; }
+int64_t rt_io_udp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
+int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
 #endif /* !_WIN32 */
 
 /* ================================================================
@@ -13308,8 +11776,7 @@ void __simple_runtime_shutdown(void) {
  * plausible-looking value for the third case:
  *
  *   (1) Real semantics, taken from the Rust runtime (`src/compiler_rust/
- *       runtime/src/value/objects.rs`) or the `.spl` files under
- *       `src/runtime/simple_core/`.
+ *       runtime/src/value/objects.rs`) or `src/runtime/simple_core/*.spl`.
  *   (2) A NAMED LOUD TRAP -- `rt_trap_unimplemented("rt_x")` prints the symbol
  *       to stderr and aborts. This is a STUB, not an implementation. It is
  *       strictly better than address 0 (you learn WHICH call died) and strictly
@@ -13369,44 +11836,6 @@ int64_t rt_unwrap_or_trap(int64_t value) {
         abort();
     }
     return value;
-}
-
-/* `.expect(msg)` on Option/Result: same Ok/Some-payload-or-trap semantics as
- * rt_unwrap_or_trap above, but the trap prints the CALLER'S message instead of
- * the fixed ".unwrap() called on None/Err" text. Cranelift emits a call to this
- * exact name from codegen/instr/closures_structs.rs (the `"expect"` arm, which
- * declare_function()s it as Import on demand) and runtime_sffi.rs lists it as
- * RuntimeFuncSpec("rt_expect_or_trap", [I64, I64] -> [I64]) -- but the C
- * runtime, the one the bootstrap/native lane actually links, defined it
- * nowhere. That is the rt_unwrap_or_trap incident class exactly: an undefined
- * symbol the native link tolerates, leaving a NULL GOT slot that SEGVs at the
- * first `.expect(...)` call. Semantics transcribed from the Rust runtime's
- * rt_expect_or_trap (value/objects.rs), including its non-enum passthrough and
- * its arbitrary-user-enum "return self" fallback. */
-int64_t rt_expect_or_trap(int64_t value, int64_t msg) {
-    int64_t enum_id = rt_enum_id(value);
-    int64_t discriminant;
-    const uint8_t* text;
-    int64_t len;
-    if (enum_id < 0) return value;
-    discriminant = rt_enum_discriminant(value);
-    if (enum_id == SPL_OPTION_ENUM_ID) {
-        if (discriminant == 0 || discriminant == (int64_t)SPL_HASH_SOME) return rt_enum_payload(value);
-        if (discriminant != 1 && discriminant != (int64_t)SPL_HASH_NONE) return value;
-    } else if (discriminant == (int64_t)SPL_HASH_OK) {
-        return rt_enum_payload(value);
-    } else if (discriminant != (int64_t)SPL_HASH_ERR) {
-        return value;
-    }
-    text = rt_string_data(msg);
-    len = rt_string_len(msg);
-    if (text == NULL || len < 0) {
-        fprintf(stderr, "expect() called on Err/None\n");
-    } else {
-        fprintf(stderr, "%.*s\n", (int)len, (const char*)text);
-    }
-    fflush(stderr);
-    abort();
 }
 
 int64_t rt_option_some(int64_t payload) {
@@ -13745,95 +12174,117 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
 /* collections.rs:1708 -- remove by key/index from array or dict. */
 SPL_RT_TRAP2(rt_collection_remove)
 
+/* Wave17: one-owner, exact-byte artifact bundle publication.  Handles are
+ * random registry tokens, never descriptors.  The Linux implementation keeps
+ * every lookup beneath an already-open destination root and publishes the
+ * containing directory with one RENAME_NOREPLACE operation. */
 #if defined(__linux__)
-typedef struct RtArtifactBundleTxn { uint64_t token,max_bytes,bytes_read; int root_fd,parent_fd,source_fd,temp_fd,payload_fd,scr1_fd,eof_seen,scr1_staged,temp_created; char temp_leaf[40],bundle_leaf[256],payload_leaf[256],scr1_leaf[256]; struct stat identity; struct RtArtifactBundleTxn*next; } RtArtifactBundleTxn;
-static RtArtifactBundleTxn*rt_ab_txns; static pthread_mutex_t rt_ab_lock=PTHREAD_MUTEX_INITIALIZER;
-static int rt_ab_leaf(const uint8_t*p,uint64_t n,char out[256]){if(!p||!n||n>=256||(n==1&&p[0]=='.')||(n==2&&p[0]=='.'&&p[1]=='.'))return 0;for(uint64_t i=0;i<n;i++)if(p[i]=='/'||p[i]==0)return 0;memcpy(out,p,n);out[n]=0;return 1;}
-static char*rt_ab_rel(const uint8_t*p,uint64_t n){if(!p||!n||n>PATH_MAX||p[0]=='/')return NULL;char*s=malloc(n+1);if(!s)return NULL;memcpy(s,p,n);s[n]=0;for(uint64_t i=0,start=0;i<=n;i++){if(i<n&&s[i]==0){free(s);return NULL;}if(i==n||s[i]=='/'){uint64_t z=i-start;if(!z||z>255||(z==1&&s[start]=='.')||(z==2&&s[start]=='.'&&s[start+1]=='.')){free(s);return NULL;}start=i+1;}}return s;}
-/* POSIX leaves descriptor state unspecified after close() is interrupted;
- * retrying can close an unrelated descriptor that reused the number. */
-static int rt_ab_close(int fd){return fd<0?0:close(fd);} static int rt_ab_sync(int fd){int r,k=0;do r=fsync(fd);while(r<0&&errno==EINTR&&++k<8);return r;}
-static ssize_t rt_ab_read(int fd,void*p,size_t n){ssize_t r;int k=0;do r=read(fd,p,n);while(r<0&&errno==EINTR&&++k<8);return r;} static int rt_ab_write(int fd,const uint8_t*p,size_t n){size_t o=0;int k=0;while(o<n){ssize_t w=write(fd,p+o,n-o);if(w>0){o+=w;k=0;}else if(w<0&&errno==EINTR&&++k<8)continue;else return 0;}return 1;}
-static int rt_ab_same(struct stat*a,struct stat*b){return a->st_dev==b->st_dev&&a->st_ino==b->st_ino&&a->st_mode==b->st_mode&&a->st_size==b->st_size&&a->st_mtim.tv_sec==b->st_mtim.tv_sec&&a->st_mtim.tv_nsec==b->st_mtim.tv_nsec&&a->st_ctim.tv_sec==b->st_ctim.tv_sec&&a->st_ctim.tv_nsec==b->st_ctim.tv_nsec;}
-static int rt_ab_drop(RtArtifactBundleTxn*t,int clean){int ok=1;if(rt_ab_close(t->payload_fd)<0)ok=0;if(rt_ab_close(t->scr1_fd)<0)ok=0;if(rt_ab_close(t->source_fd)<0)ok=0;if(clean&&t->temp_created&&t->temp_fd>=0){if(unlinkat(t->temp_fd,t->payload_leaf,0)<0&&errno!=ENOENT)ok=0;if(unlinkat(t->temp_fd,t->scr1_leaf,0)<0&&errno!=ENOENT)ok=0;}if(rt_ab_close(t->temp_fd)<0)ok=0;if(clean&&t->temp_created&&t->parent_fd>=0){if(unlinkat(t->parent_fd,t->temp_leaf,AT_REMOVEDIR)<0&&errno!=ENOENT)ok=0;if(rt_ab_sync(t->parent_fd)<0)ok=0;}if(rt_ab_close(t->parent_fd)<0)ok=0;if(rt_ab_close(t->root_fd)<0)ok=0;free(t);return ok;}
-static RtArtifactBundleTxn*rt_ab_take(uint64_t x){RtArtifactBundleTxn**p=&rt_ab_txns;while(*p&&(*p)->token!=x)p=&(*p)->next;if(!*p)return NULL;RtArtifactBundleTxn*t=*p;*p=t->next;t->next=NULL;return t;}
-static int rt_ab_put(RtArtifactBundleTxn*t){int ok=1;pthread_mutex_lock(&rt_ab_lock);for(RtArtifactBundleTxn*q=rt_ab_txns;q;q=q->next)if(q->token==t->token){ok=0;break;}if(ok){t->next=rt_ab_txns;rt_ab_txns=t;}pthread_mutex_unlock(&rt_ab_lock);return ok;}
-int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t root_handle,const uint8_t*source,uint64_t source_len,const uint8_t*bundle,uint64_t bundle_len,const uint8_t*payload,uint64_t payload_len,const uint8_t*scr1,uint64_t scr1_len,int64_t max_bytes){
- if(root_handle<0||root_handle>INT_MAX||max_bytes<=0)return 0;RtArtifactBundleTxn*t=calloc(1,sizeof(*t));if(!t)return 0;t->root_fd=t->parent_fd=t->source_fd=t->temp_fd=t->payload_fd=t->scr1_fd=-1;t->max_bytes=max_bytes;char*src=rt_ab_rel(source,source_len),*bun=rt_ab_rel(bundle,bundle_len);if(!src||!bun||!rt_ab_leaf(payload,payload_len,t->payload_leaf)||!rt_ab_leaf(scr1,scr1_len,t->scr1_leaf)||!strcmp(t->payload_leaf,t->scr1_leaf))goto fail;
- int k=0;do t->root_fd=fcntl((int)root_handle,F_DUPFD_CLOEXEC,3);while(t->root_fd<0&&errno==EINTR&&++k<8);struct stat rs;if(t->root_fd<0||fstat(t->root_fd,&rs)<0||!S_ISDIR(rs.st_mode))goto fail;
- char*slash=strrchr(bun,'/');char*parent=".";char*leaf=bun;if(slash){*slash=0;parent=bun;leaf=slash+1;}if(!rt_ab_leaf((uint8_t*)leaf,strlen(leaf),t->bundle_leaf))goto fail;struct open_how dh={.flags=O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};t->parent_fd=syscall(SYS_openat2,t->root_fd,parent,&dh,sizeof(dh));struct stat ps;if(t->parent_fd<0||fstat(t->parent_fd,&ps)<0||ps.st_dev!=rs.st_dev)goto fail;if(faccessat(t->parent_fd,t->bundle_leaf,F_OK,AT_SYMLINK_NOFOLLOW)==0||errno!=ENOENT)goto fail;
- struct open_how sh={.flags=O_RDONLY|O_CLOEXEC|O_NOFOLLOW,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};t->source_fd=syscall(SYS_openat2,t->root_fd,src,&sh,sizeof(sh));if(t->source_fd<0||fstat(t->source_fd,&t->identity)<0||!S_ISREG(t->identity.st_mode)||t->identity.st_dev!=rs.st_dev||(uint64_t)t->identity.st_size>t->max_bytes)goto fail;
- for(int tries=0;tries<16;tries++){uint64_t x=0;if(getrandom(&x,sizeof(x),0)!=(ssize_t)sizeof(x))continue;x&=INT64_MAX;if(!x)continue;t->token=x;snprintf(t->temp_leaf,sizeof(t->temp_leaf),".simple-bundle-%016llx",(unsigned long long)x);if(mkdirat(t->parent_fd,t->temp_leaf,0700)==0){t->temp_created=1;break;}}if(!t->temp_created)goto fail;t->temp_fd=openat(t->parent_fd,t->temp_leaf,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(t->temp_fd<0)goto fail;t->payload_fd=openat(t->temp_fd,t->payload_leaf,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(t->payload_fd<0)goto fail;
- pthread_mutex_lock(&rt_ab_lock);for(RtArtifactBundleTxn*q=rt_ab_txns;q;q=q->next)if(q->token==t->token){pthread_mutex_unlock(&rt_ab_lock);goto fail;}t->next=rt_ab_txns;rt_ab_txns=t;pthread_mutex_unlock(&rt_ab_lock);free(src);free(bun);return t->token;
-fail:free(src);free(bun);rt_ab_drop(t,1);return 0;}
-int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t token,int64_t bound){if(bound<=0||bound>16777216)return 0;pthread_mutex_lock(&rt_ab_lock);RtArtifactBundleTxn*t=rt_ab_take(token);pthread_mutex_unlock(&rt_ab_lock);if(!t)return 0;if(t->eof_seen){rt_ab_drop(t,1);return 0;}size_t want=bound;if(want>t->max_bytes-t->bytes_read)want=t->max_bytes-t->bytes_read;SplArray*a=rt_byte_array_new_len(want);RtCoreArray*r=rt_core_array_ptr(a);ssize_t n=r?rt_ab_read(t->source_fd,r->data,want):-1;if(n<0||(n&&!rt_ab_write(t->payload_fd,r->data,n))){if(a)rt_array_free(a);rt_ab_drop(t,1);return 0;}r->len=n;t->bytes_read+=n;if(!n)t->eof_seen=1;if(!rt_ab_put(t)){if(a)rt_array_free(a);rt_ab_drop(t,1);return 0;}return(int64_t)(uintptr_t)a;}
-int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t token,int64_t field){pthread_mutex_lock(&rt_ab_lock);RtArtifactBundleTxn*t=rt_ab_txns;while(t&&t->token!=(uint64_t)token)t=t->next;int64_t v=t?(field==0?t->identity.st_dev:field==1?t->identity.st_ino:field==2?t->identity.st_size:field==3?t->identity.st_mtim.tv_sec:field==4?t->identity.st_mtim.tv_nsec:field==5?t->bytes_read:-1):-1;pthread_mutex_unlock(&rt_ab_lock);return v;}
-int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t token,int64_t bytes_value,int64_t max_bytes){if(max_bytes<0)return 0;RtCoreArray*a=rt_core_array_ptr((SplArray*)(uintptr_t)bytes_value);if(!a||a->len<=0||(uint64_t)a->len>(uint64_t)max_bytes)return 0;pthread_mutex_lock(&rt_ab_lock);RtArtifactBundleTxn*t=rt_ab_take(token);pthread_mutex_unlock(&rt_ab_lock);if(!t)return 0;if(!t->eof_seen||t->scr1_staged){rt_ab_drop(t,1);return 0;}t->scr1_fd=openat(t->temp_fd,t->scr1_leaf,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(t->scr1_fd<0||!rt_ab_write(t->scr1_fd,a->data,a->len)){rt_ab_drop(t,1);return 0;}t->scr1_staged=1;if(!rt_ab_put(t)){rt_ab_drop(t,1);return 0;}return 1;}
-int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t token,int64_t commit){pthread_mutex_lock(&rt_ab_lock);RtArtifactBundleTxn*t=rt_ab_take(token);pthread_mutex_unlock(&rt_ab_lock);if(!t)return 0;if(!commit)return rt_ab_drop(t,1)?1:0;struct stat now;if(!t->eof_seen||!t->scr1_staged||fstat(t->source_fd,&now)<0||!rt_ab_same(&t->identity,&now)||rt_ab_sync(t->payload_fd)<0||rt_ab_sync(t->scr1_fd)<0||rt_ab_sync(t->temp_fd)<0){rt_ab_drop(t,1);return 0;}int payload_closed=rt_ab_close(t->payload_fd),scr1_closed=rt_ab_close(t->scr1_fd);t->payload_fd=-1;t->scr1_fd=-1;if(payload_closed<0||scr1_closed<0){rt_ab_drop(t,1);return 0;}int r,k=0;do r=syscall(SYS_renameat2,t->parent_fd,t->temp_leaf,t->parent_fd,t->bundle_leaf,RENAME_NOREPLACE);while(r<0&&errno==EINTR&&++k<8);if(r<0){rt_ab_drop(t,1);return 0;}t->temp_created=0;int durable=rt_ab_sync(t->parent_fd)==0;int closed=rt_ab_drop(t,0);return durable&&closed?1:(durable?-1:-2);}
-#else
-int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t a,const uint8_t*b,uint64_t c,const uint8_t*d,uint64_t e,const uint8_t*f,uint64_t g,const uint8_t*h,uint64_t i,int64_t j){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;return 0;}int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t a,int64_t b){(void)a;(void)b;return-1;}int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t a,int64_t b,int64_t c){(void)a;(void)b;(void)c;return 0;}int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}
-#endif
+typedef struct RtArtifactBundleTxn {
+    uint64_t token;
+    int root_fd, source_fd, temp_fd, payload_fd, scr1_fd;
+    char temp_leaf[40], bundle_leaf[256], payload_leaf[256], scr1_leaf[256];
+    struct stat source_identity;
+    uint64_t max_bytes, bytes_read;
+    int eof_seen, scr1_staged;
+    struct RtArtifactBundleTxn* next;
+} RtArtifactBundleTxn;
 
-/* Mechanism-only fixed-three transaction.  Six leaves are staged beneath one
- * retained directory and become visible by the single, final rename.  Status:
- * 1 exact success; -1 rejected with complete cleanup; -2 visible but final
- * durability/close indeterminate; -3 cleanup indeterminate (quarantine). */
-#if defined(__linux__)
-typedef struct RtArtifactBundle3Txn {
- uint64_t token,limit,total,readn[3]; int root,parent,temp,src[3],payload[3],scr1[3];
- unsigned char eof[3],scr1_done[3],temp_exists; char tmp[40],bundle[256],pl[3][256],sl[3][256];
- struct stat id[3]; struct RtArtifactBundle3Txn*next;
-} RtArtifactBundle3Txn;
-static RtArtifactBundle3Txn*rt_ab3_head; static pthread_mutex_t rt_ab3_mu=PTHREAD_MUTEX_INITIALIZER; static unsigned rt_ab3_count;
-static RtArtifactBundle3Txn*rt_ab3_take(uint64_t x){RtArtifactBundle3Txn**p=&rt_ab3_head;while(*p&&(*p)->token!=x)p=&(*p)->next;if(!*p)return NULL;RtArtifactBundle3Txn*t=*p;*p=t->next;t->next=NULL;rt_ab3_count--;return t;}
-static int rt_ab3_put(RtArtifactBundle3Txn*t){int ok=1;pthread_mutex_lock(&rt_ab3_mu);if(rt_ab3_count>=16)ok=0;for(RtArtifactBundle3Txn*q=rt_ab3_head;ok&&q;q=q->next)if(q->token==t->token)ok=0;if(ok){t->next=rt_ab3_head;rt_ab3_head=t;rt_ab3_count++;}pthread_mutex_unlock(&rt_ab3_mu);return ok;}
-static int rt_ab3_clean(RtArtifactBundle3Txn*t,int remove){int ok=1;if(!t)return 1;for(int i=0;i<3;i++){if(rt_ab_close(t->payload[i])<0)ok=0;if(rt_ab_close(t->scr1[i])<0)ok=0;if(rt_ab_close(t->src[i])<0)ok=0;t->payload[i]=t->scr1[i]=t->src[i]=-1;}if(remove&&t->temp_exists&&t->temp>=0)for(int i=0;i<3;i++){if(unlinkat(t->temp,t->pl[i],0)<0&&errno!=ENOENT)ok=0;if(unlinkat(t->temp,t->sl[i],0)<0&&errno!=ENOENT)ok=0;}if(rt_ab_close(t->temp)<0)ok=0;t->temp=-1;if(remove&&t->temp_exists&&t->parent>=0){if(unlinkat(t->parent,t->tmp,AT_REMOVEDIR)<0&&errno!=ENOENT)ok=0;if(rt_ab_sync(t->parent)<0)ok=0;}if(rt_ab_close(t->parent)<0)ok=0;if(rt_ab_close(t->root)<0)ok=0;free(t);return ok;}
-static int rt_ab3_distinct(RtArtifactBundle3Txn*t){const char*x[6]={t->pl[0],t->sl[0],t->pl[1],t->sl[1],t->pl[2],t->sl[2]};for(int i=0;i<6;i++)for(int j=i+1;j<6;j++)if(!strcmp(x[i],x[j]))return 0;return 1;}
-int64_t rt_hosted_safe_artifact_bundle3_begin_v1(int64_t rh,
- const uint8_t*s0,uint64_t n0,const uint8_t*s1,uint64_t n1,const uint8_t*s2,uint64_t n2,
- const uint8_t*b,uint64_t bn,const uint8_t*p0,uint64_t p0n,const uint8_t*m0,uint64_t m0n,
- const uint8_t*p1,uint64_t p1n,const uint8_t*m1,uint64_t m1n,const uint8_t*p2,uint64_t p2n,
- const uint8_t*m2,uint64_t m2n,int64_t max){
- const uint8_t*sp[3]={s0,s1,s2},*pp[3]={p0,p1,p2},*mp[3]={m0,m1,m2};uint64_t sn[3]={n0,n1,n2},pn[3]={p0n,p1n,p2n},mn[3]={m0n,m1n,m2n};char*ss[3]={0};char*bb=NULL;struct stat rs,ps;uint64_t sum=0;RtArtifactBundle3Txn*t=NULL;
- if(rh<0||rh>INT_MAX||max<=0||max>3221225472LL)return 0;t=calloc(1,sizeof(*t));if(!t)return 0;t->root=t->parent=t->temp=-1;t->limit=max;for(int i=0;i<3;i++)t->src[i]=t->payload[i]=t->scr1[i]=-1;
- bb=rt_ab_rel(b,bn);for(int i=0;i<3;i++){ss[i]=rt_ab_rel(sp[i],sn[i]);if(!ss[i]||!rt_ab_leaf(pp[i],pn[i],t->pl[i])||!rt_ab_leaf(mp[i],mn[i],t->sl[i]))goto fail;}if(!bb||!rt_ab3_distinct(t))goto fail;
- {int k=0;do t->root=fcntl((int)rh,F_DUPFD_CLOEXEC,3);while(t->root<0&&errno==EINTR&&++k<8);}if(t->root<0||fstat(t->root,&rs)<0||!S_ISDIR(rs.st_mode))goto fail;
- {char*slash=strrchr(bb,'/'),*parent=".",*leaf=bb;if(slash){*slash=0;parent=bb;leaf=slash+1;}if(!rt_ab_leaf((uint8_t*)leaf,strlen(leaf),t->bundle))goto fail;struct open_how h={.flags=O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};t->parent=syscall(SYS_openat2,t->root,parent,&h,sizeof(h));}
- if(t->parent<0||fstat(t->parent,&ps)<0||ps.st_dev!=rs.st_dev)goto fail;if(faccessat(t->parent,t->bundle,F_OK,AT_SYMLINK_NOFOLLOW)==0||errno!=ENOENT)goto fail;
- for(int i=0;i<3;i++){struct open_how h={.flags=O_RDONLY|O_CLOEXEC|O_NOFOLLOW,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};t->src[i]=syscall(SYS_openat2,t->root,ss[i],&h,sizeof(h));if(t->src[i]<0||fstat(t->src[i],&t->id[i])<0||!S_ISREG(t->id[i].st_mode)||t->id[i].st_dev!=rs.st_dev||t->id[i].st_size<0||(uint64_t)t->id[i].st_size>1073741824ULL||(uint64_t)t->id[i].st_size>t->limit-sum)goto fail;for(int j=0;j<i;j++)if(t->id[i].st_dev==t->id[j].st_dev&&t->id[i].st_ino==t->id[j].st_ino)goto fail;sum+=(uint64_t)t->id[i].st_size;}
- for(int tries=0;tries<16;tries++){uint64_t x=0;if(getrandom(&x,sizeof(x),0)!=(ssize_t)sizeof(x))continue;x&=INT64_MAX;if(!x)continue;t->token=x;snprintf(t->tmp,sizeof(t->tmp),".simple-bundle3-%016llx",(unsigned long long)x);if(mkdirat(t->parent,t->tmp,0700)==0){t->temp_exists=1;break;}}if(!t->temp_exists)goto fail;t->temp=openat(t->parent,t->tmp,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(t->temp<0)goto fail;
- for(int i=0;i<3;i++){t->payload[i]=openat(t->temp,t->pl[i],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(t->payload[i]<0)goto fail;}if(!rt_ab3_put(t))goto fail;for(int i=0;i<3;i++)free(ss[i]);free(bb);return t->token;
-fail:for(int i=0;i<3;i++)free(ss[i]);free(bb);rt_ab3_clean(t,1);return 0;}
-int64_t rt_hosted_safe_artifact_bundle3_read_stage_v1(int64_t token,int64_t slot,int64_t bound){RtArtifactBundle3Txn*t;SplArray*a;RtCoreArray*r;size_t want;ssize_t n;if(slot<0||slot>=3||bound<=0||bound>16777216)return 0;pthread_mutex_lock(&rt_ab3_mu);t=rt_ab3_take(token);pthread_mutex_unlock(&rt_ab3_mu);if(!t)return 0;if(t->eof[slot]){rt_ab3_clean(t,1);return 0;}want=bound;uint64_t left=(uint64_t)t->id[slot].st_size-t->readn[slot],room=t->limit-t->total;if(want>left)want=left;if(want>room)want=room;a=rt_byte_array_new_len(want);r=rt_core_array_ptr(a);if(!r){if(a)rt_array_free(a);rt_ab3_clean(t,1);return 0;}n=want?rt_ab_read(t->src[slot],r->data,want):0;if(n<0||(n&&!rt_ab_write(t->payload[slot],r->data,n))){rt_array_free(a);rt_ab3_clean(t,1);return 0;}r->len=n;t->readn[slot]+=n;t->total+=n;if(t->readn[slot]==(uint64_t)t->id[slot].st_size)t->eof[slot]=1;if(!rt_ab3_put(t)){rt_array_free(a);rt_ab3_clean(t,1);return 0;}return(int64_t)(uintptr_t)a;}
-int64_t rt_hosted_safe_artifact_bundle3_identity_v1(int64_t token,int64_t slot,int64_t field){int64_t v=-1;pthread_mutex_lock(&rt_ab3_mu);RtArtifactBundle3Txn*t=rt_ab3_head;while(t&&t->token!=(uint64_t)token)t=t->next;if(t&&slot>=0&&slot<3){struct stat*s=&t->id[slot];v=field==0?s->st_dev:field==1?s->st_ino:field==2?s->st_size:field==3?s->st_mtim.tv_sec:field==4?s->st_mtim.tv_nsec:field==5?t->readn[slot]:-1;}pthread_mutex_unlock(&rt_ab3_mu);return v;}
-int64_t rt_hosted_safe_artifact_bundle3_stage_scr1_v1(int64_t token,int64_t slot,int64_t value,int64_t max){RtCoreArray*a=rt_core_array_ptr((SplArray*)(uintptr_t)value);RtArtifactBundle3Txn*t;if(slot<0||slot>=3||max<=0||max>16777216||!a||a->len<=0||(uint64_t)a->len>(uint64_t)max)return 0;pthread_mutex_lock(&rt_ab3_mu);t=rt_ab3_take(token);pthread_mutex_unlock(&rt_ab3_mu);if(!t)return 0;uint64_t reserved=t->total;for(int i=0;i<3;i++){if(t->readn[i]>(uint64_t)t->id[i].st_size){rt_ab3_clean(t,1);return 0;}reserved+=(uint64_t)t->id[i].st_size-t->readn[i];}if(!t->eof[slot]||t->scr1_done[slot]||reserved>t->limit||(uint64_t)a->len>t->limit-reserved){rt_ab3_clean(t,1);return 0;}t->scr1[slot]=openat(t->temp,t->sl[slot],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(t->scr1[slot]<0||!rt_ab_write(t->scr1[slot],a->data,a->len)){rt_ab3_clean(t,1);return 0;}t->total+=a->len;t->scr1_done[slot]=1;if(!rt_ab3_put(t)){rt_ab3_clean(t,1);return 0;}return 1;}
-int64_t rt_hosted_safe_artifact_bundle3_finish_v1(int64_t token,int64_t commit){RtArtifactBundle3Txn*t;pthread_mutex_lock(&rt_ab3_mu);t=rt_ab3_take(token);pthread_mutex_unlock(&rt_ab3_mu);if(!t)return-1;if(!commit)return rt_ab3_clean(t,1)?1:-3;for(int i=0;i<3;i++){struct stat now;if(!t->eof[i]||!t->scr1_done[i]||fstat(t->src[i],&now)<0||!rt_ab_same(&t->id[i],&now)||rt_ab_sync(t->payload[i])<0||rt_ab_sync(t->scr1[i])<0)return rt_ab3_clean(t,1)?-1:-3;}if(rt_ab_sync(t->temp)<0)return rt_ab3_clean(t,1)?-1:-3;for(int i=0;i<3;i++){int a=rt_ab_close(t->payload[i]),b=rt_ab_close(t->scr1[i]);t->payload[i]=t->scr1[i]=-1;if(a<0||b<0){(void)rt_ab3_clean(t,1);return-3;}}int r,k=0;do r=syscall(SYS_renameat2,t->parent,t->tmp,t->parent,t->bundle,RENAME_NOREPLACE);while(r<0&&errno==EINTR&&++k<8);if(r<0)return rt_ab3_clean(t,1)?-1:-3;t->temp_exists=0;int durable=rt_ab_sync(t->parent)==0,closed=rt_ab3_clean(t,0);return durable&&closed?1:-2;}
-#else
-int64_t rt_hosted_safe_artifact_bundle3_begin_v1(int64_t a,const uint8_t*b,uint64_t c,const uint8_t*d,uint64_t e,const uint8_t*f,uint64_t g,const uint8_t*h,uint64_t i,const uint8_t*j,uint64_t k,const uint8_t*l,uint64_t m,const uint8_t*n,uint64_t o,const uint8_t*p,uint64_t q,const uint8_t*r,uint64_t s,const uint8_t*t,uint64_t u,int64_t v){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;(void)m;(void)n;(void)o;(void)p;(void)q;(void)r;(void)s;(void)t;(void)u;(void)v;return 0;}
-int64_t rt_hosted_safe_artifact_bundle3_read_stage_v1(int64_t a,int64_t b,int64_t c){(void)a;(void)b;(void)c;return 0;}int64_t rt_hosted_safe_artifact_bundle3_identity_v1(int64_t a,int64_t b,int64_t c){(void)a;(void)b;(void)c;return-1;}int64_t rt_hosted_safe_artifact_bundle3_stage_scr1_v1(int64_t a,int64_t b,int64_t c,int64_t d){(void)a;(void)b;(void)c;(void)d;return 0;}int64_t rt_hosted_safe_artifact_bundle3_finish_v1(int64_t a,int64_t b){(void)a;(void)b;return-1;}
-#endif
+static RtArtifactBundleTxn* rt_artifact_bundle_txns;
+static pthread_mutex_t rt_artifact_bundle_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* Bounded bundle-N transaction.  Transactions remain registered while busy,
- * so the live bound and token uniqueness hold across every operation. */
-#if defined(__linux__)
-#define RT_ABN_SLOTS 16
-typedef struct RtArtifactBundleNTxn{uint64_t token,limit,total,readn[RT_ABN_SLOTS];int count,added,sealed,descriptor_done,busy,root,parent,temp,descriptor,src[RT_ABN_SLOTS],payload[RT_ABN_SLOTS],scr1[RT_ABN_SLOTS];unsigned char present[RT_ABN_SLOTS],eof[RT_ABN_SLOTS],scr1_done[RT_ABN_SLOTS],temp_exists;char tmp[48],bundle[256],descriptor_leaf[256],pl[RT_ABN_SLOTS][256],sl[RT_ABN_SLOTS][256];char*source[RT_ABN_SLOTS];struct stat id[RT_ABN_SLOTS];struct RtArtifactBundleNTxn*next;}RtArtifactBundleNTxn;
-static RtArtifactBundleNTxn*rt_abn_head;static pthread_mutex_t rt_abn_mu=PTHREAD_MUTEX_INITIALIZER;static unsigned rt_abn_count;
-static RtArtifactBundleNTxn*rt_abn_acquire(uint64_t x){RtArtifactBundleNTxn*t;pthread_mutex_lock(&rt_abn_mu);for(t=rt_abn_head;t&&t->token!=x;t=t->next);if(t){if(t->busy)t=NULL;else t->busy=1;}pthread_mutex_unlock(&rt_abn_mu);return t;}
-static void rt_abn_release(RtArtifactBundleNTxn*t){pthread_mutex_lock(&rt_abn_mu);t->busy=0;pthread_mutex_unlock(&rt_abn_mu);}
-static int rt_abn_insert(RtArtifactBundleNTxn*t){int ok=1;pthread_mutex_lock(&rt_abn_mu);if(rt_abn_count>=16)ok=0;for(RtArtifactBundleNTxn*q=rt_abn_head;ok&&q;q=q->next)if(q->token==t->token)ok=0;if(ok){t->next=rt_abn_head;rt_abn_head=t;rt_abn_count++;}pthread_mutex_unlock(&rt_abn_mu);return ok;}
-static void rt_abn_detach(RtArtifactBundleNTxn*t){pthread_mutex_lock(&rt_abn_mu);RtArtifactBundleNTxn**p=&rt_abn_head;while(*p&&*p!=t)p=&(*p)->next;if(*p){*p=t->next;rt_abn_count--;}pthread_mutex_unlock(&rt_abn_mu);t->next=NULL;}
-static int rt_abn_clean(RtArtifactBundleNTxn*t,int remove){int ok=1;if(!t)return 1;for(int i=0;i<t->count;i++){if(rt_ab_close(t->payload[i])<0)ok=0;if(rt_ab_close(t->scr1[i])<0)ok=0;if(rt_ab_close(t->src[i])<0)ok=0;t->payload[i]=t->scr1[i]=t->src[i]=-1;if(remove&&t->temp_exists&&t->temp>=0){if(t->pl[i][0]&&unlinkat(t->temp,t->pl[i],0)<0&&errno!=ENOENT)ok=0;if(t->sl[i][0]&&unlinkat(t->temp,t->sl[i],0)<0&&errno!=ENOENT)ok=0;}free(t->source[i]);}if(rt_ab_close(t->descriptor)<0)ok=0;if(remove&&t->temp_exists&&t->temp>=0&&unlinkat(t->temp,t->descriptor_leaf,0)<0&&errno!=ENOENT)ok=0;if(rt_ab_close(t->temp)<0)ok=0;if(remove&&t->temp_exists&&t->parent>=0){if(unlinkat(t->parent,t->tmp,AT_REMOVEDIR)<0&&errno!=ENOENT)ok=0;if(rt_ab_sync(t->parent)<0)ok=0;}if(rt_ab_close(t->parent)<0)ok=0;if(rt_ab_close(t->root)<0)ok=0;free(t);return ok;}
-static int rt_abn_abort(RtArtifactBundleNTxn*t){rt_abn_detach(t);return rt_abn_clean(t,1);}
-static int rt_abn_distinct(RtArtifactBundleNTxn*t){for(int i=0;i<t->count;i++){if(!strcmp(t->descriptor_leaf,t->pl[i])||!strcmp(t->descriptor_leaf,t->sl[i])||!strcmp(t->pl[i],t->sl[i]))return 0;for(int j=0;j<i;j++)if(!strcmp(t->pl[i],t->pl[j])||!strcmp(t->pl[i],t->sl[j])||!strcmp(t->sl[i],t->pl[j])||!strcmp(t->sl[i],t->sl[j]))return 0;}return 1;}
-int64_t rt_hosted_safe_artifact_bundle_n_begin_v1(int64_t rh,const uint8_t*b,uint64_t bn,const uint8_t*d,uint64_t dn,int64_t count,int64_t max){RtArtifactBundleNTxn*t=NULL;char*bb=NULL;struct stat rs,ps;if(rh<0||rh>INT_MAX||count<1||count>RT_ABN_SLOTS||max<=0||max>3221225472LL)return 0;t=calloc(1,sizeof(*t));if(!t)return 0;t->root=t->parent=t->temp=t->descriptor=-1;t->count=count;t->limit=max;for(int i=0;i<t->count;i++)t->src[i]=t->payload[i]=t->scr1[i]=-1;bb=rt_ab_rel(b,bn);if(!bb||!rt_ab_leaf(d,dn,t->descriptor_leaf))goto fail;{int k=0;do t->root=fcntl((int)rh,F_DUPFD_CLOEXEC,3);while(t->root<0&&errno==EINTR&&++k<8);}if(t->root<0||fstat(t->root,&rs)<0||!S_ISDIR(rs.st_mode))goto fail;{char*slash=strrchr(bb,'/'),*parent=".",*leaf=bb;if(slash){*slash=0;parent=bb;leaf=slash+1;}if(!rt_ab_leaf((uint8_t*)leaf,strlen(leaf),t->bundle))goto fail;struct open_how h={.flags=O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};t->parent=syscall(SYS_openat2,t->root,parent,&h,sizeof(h));}if(t->parent<0||fstat(t->parent,&ps)<0||ps.st_dev!=rs.st_dev)goto fail;if(faccessat(t->parent,t->bundle,F_OK,AT_SYMLINK_NOFOLLOW)==0||errno!=ENOENT)goto fail;for(int tries=0;tries<16;tries++){uint64_t x;if(getrandom(&x,sizeof(x),0)!=(ssize_t)sizeof(x))continue;x&=INT64_MAX;if(!x)continue;t->token=x;snprintf(t->tmp,sizeof(t->tmp),".simple-bundle-n-%016llx",(unsigned long long)x);if(mkdirat(t->parent,t->tmp,0700)==0){t->temp_exists=1;break;}}if(!t->temp_exists)goto fail;t->temp=openat(t->parent,t->tmp,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(t->temp<0||!rt_abn_insert(t))goto fail;free(bb);return t->token;fail:free(bb);rt_abn_clean(t,1);return 0;}
-int64_t rt_hosted_safe_artifact_bundle_n_add_slot_v1(int64_t token,int64_t slot,const uint8_t*s,uint64_t sn,const uint8_t*p,uint64_t pn,const uint8_t*m,uint64_t mn){RtArtifactBundleNTxn*t=rt_abn_acquire(token);char*source=NULL;if(!t)return 0;if(t->sealed||slot<0||slot>=t->count||t->present[slot]||(source=rt_ab_rel(s,sn))==NULL||!rt_ab_leaf(p,pn,t->pl[slot])||!rt_ab_leaf(m,mn,t->sl[slot])){free(source);rt_abn_abort(t);return 0;}t->source[slot]=source;t->present[slot]=1;t->added++;rt_abn_release(t);return 1;}
-int64_t rt_hosted_safe_artifact_bundle_n_seal_v1(int64_t token){RtArtifactBundleNTxn*t=rt_abn_acquire(token);struct stat rs;uint64_t sum=0;if(!t)return 0;if(t->sealed||t->added!=t->count||!rt_abn_distinct(t)||fstat(t->root,&rs)<0){rt_abn_abort(t);return 0;}for(int i=0;i<t->count;i++){struct open_how h={.flags=O_RDONLY|O_CLOEXEC|O_NOFOLLOW,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};t->src[i]=syscall(SYS_openat2,t->root,t->source[i],&h,sizeof(h));if(t->src[i]<0||fstat(t->src[i],&t->id[i])<0||!S_ISREG(t->id[i].st_mode)||t->id[i].st_dev!=rs.st_dev||t->id[i].st_size<0||(uint64_t)t->id[i].st_size>1073741824ULL||(uint64_t)t->id[i].st_size>t->limit-sum){rt_abn_abort(t);return 0;}for(int j=0;j<i;j++)if(t->id[i].st_dev==t->id[j].st_dev&&t->id[i].st_ino==t->id[j].st_ino){rt_abn_abort(t);return 0;}sum+=t->id[i].st_size;t->payload[i]=openat(t->temp,t->pl[i],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(t->payload[i]<0){rt_abn_abort(t);return 0;}}t->sealed=1;rt_abn_release(t);return 1;}
-int64_t rt_hosted_safe_artifact_bundle_n_read_stage_v1(int64_t token,int64_t slot,int64_t bound){if(bound<=0||bound>16777216)return 0;RtArtifactBundleNTxn*t=rt_abn_acquire(token);if(!t)return 0;if(!t->sealed||slot<0||slot>=t->count||t->eof[slot]){rt_abn_abort(t);return 0;}uint64_t left=(uint64_t)t->id[slot].st_size-t->readn[slot],room=t->limit-t->total;size_t want=bound;if(want>left)want=left;if(want>room)want=room;SplArray*a=rt_byte_array_new_len(want);RtCoreArray*r=rt_core_array_ptr(a);if(!r){if(a)rt_array_free(a);rt_abn_abort(t);return 0;}ssize_t n=want?rt_ab_read(t->src[slot],r->data,want):0;if(n<0||(n&&!rt_ab_write(t->payload[slot],r->data,n))){rt_array_free(a);rt_abn_abort(t);return 0;}r->len=n;t->readn[slot]+=n;t->total+=n;if(t->readn[slot]==(uint64_t)t->id[slot].st_size)t->eof[slot]=1;rt_abn_release(t);return(int64_t)(uintptr_t)a;}
-int64_t rt_hosted_safe_artifact_bundle_n_identity_v1(int64_t token,int64_t slot,int64_t field){RtArtifactBundleNTxn*t=rt_abn_acquire(token);if(!t)return-1;int64_t v=-1;if(t->sealed&&slot>=0&&slot<t->count){struct stat*s=&t->id[slot];v=field==0?s->st_dev:field==1?s->st_ino:field==2?s->st_size:field==3?s->st_mtim.tv_sec:field==4?s->st_mtim.tv_nsec:field==5?t->readn[slot]:-1;}rt_abn_release(t);return v;}
-int64_t rt_hosted_safe_artifact_bundle_n_stage_scr1_v1(int64_t token,int64_t slot,int64_t value,int64_t max){RtCoreArray*a=rt_core_array_ptr((SplArray*)(uintptr_t)value);if(max<=0||max>16777216||!a||a->len<=0||(uint64_t)a->len>(uint64_t)max)return 0;RtArtifactBundleNTxn*t=rt_abn_acquire(token);if(!t)return 0;uint64_t reserved=t->total;for(int i=0;i<t->count;i++){if(t->readn[i]>(uint64_t)t->id[i].st_size){rt_abn_abort(t);return 0;}reserved+=(uint64_t)t->id[i].st_size-t->readn[i];}if(!t->sealed||slot<0||slot>=t->count||!t->eof[slot]||t->scr1_done[slot]||reserved>t->limit||(uint64_t)a->len>t->limit-reserved){rt_abn_abort(t);return 0;}t->scr1[slot]=openat(t->temp,t->sl[slot],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(t->scr1[slot]<0||!rt_ab_write(t->scr1[slot],a->data,a->len)){rt_abn_abort(t);return 0;}t->total+=a->len;t->scr1_done[slot]=1;rt_abn_release(t);return 1;}
-int64_t rt_hosted_safe_artifact_bundle_n_stage_descriptor_v1(int64_t token,int64_t value,int64_t max){RtCoreArray*a=rt_core_array_ptr((SplArray*)(uintptr_t)value);if(max<=0||max>16777216||!a||a->len<=0||(uint64_t)a->len>(uint64_t)max)return 0;RtArtifactBundleNTxn*t=rt_abn_acquire(token);if(!t)return 0;int complete=t->sealed&&!t->descriptor_done;for(int i=0;i<t->count;i++)if(!t->eof[i]||!t->scr1_done[i])complete=0;if(!complete||t->total>t->limit||(uint64_t)a->len>t->limit-t->total){rt_abn_abort(t);return 0;}t->descriptor=openat(t->temp,t->descriptor_leaf,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(t->descriptor<0||!rt_ab_write(t->descriptor,a->data,a->len)){rt_abn_abort(t);return 0;}t->total+=a->len;t->descriptor_done=1;rt_abn_release(t);return 1;}
-int64_t rt_hosted_safe_artifact_bundle_n_finish_v1(int64_t token,int64_t commit){RtArtifactBundleNTxn*t=rt_abn_acquire(token);if(!t)return-1;if(!commit)return rt_abn_abort(t)?1:-3;if(!t->sealed||!t->descriptor_done)return rt_abn_abort(t)?-1:-3;for(int i=0;i<t->count;i++){struct stat now;if(!t->eof[i]||!t->scr1_done[i]||fstat(t->src[i],&now)<0||!rt_ab_same(&t->id[i],&now)||rt_ab_sync(t->payload[i])<0||rt_ab_sync(t->scr1[i])<0)return rt_abn_abort(t)?-1:-3;}if(rt_ab_sync(t->descriptor)<0||rt_ab_sync(t->temp)<0)return rt_abn_abort(t)?-1:-3;for(int i=0;i<t->count;i++){int a=rt_ab_close(t->payload[i]),b=rt_ab_close(t->scr1[i]);t->payload[i]=t->scr1[i]=-1;if(a<0||b<0){(void)rt_abn_abort(t);return-3;}}int dc=rt_ab_close(t->descriptor);t->descriptor=-1;if(dc<0){(void)rt_abn_abort(t);return-3;}int r,k=0;do r=syscall(SYS_renameat2,t->parent,t->tmp,t->parent,t->bundle,RENAME_NOREPLACE);while(r<0&&errno==EINTR&&++k<8);if(r<0)return rt_abn_abort(t)?-1:-3;t->temp_exists=0;rt_abn_detach(t);int durable=rt_ab_sync(t->parent)==0,closed=rt_abn_clean(t,0);return durable&&closed?1:-2;}
+static int rt_ab_leaf(const uint8_t* p, uint64_t n, char out[256]) {
+    if (!p || n == 0 || n >= 256 || (n == 1 && p[0] == '.') ||
+        (n == 2 && p[0] == '.' && p[1] == '.')) return 0;
+    for (uint64_t i = 0; i < n; ++i) if (p[i] == '/' || p[i] == '\0') return 0;
+    memcpy(out, p, (size_t)n); out[n] = 0; return 1;
+}
+
+static char* rt_ab_path(const uint8_t* p, uint64_t n) {
+    if (!p || n == 0 || n > (uint64_t)PATH_MAX) return NULL;
+    for (uint64_t i = 0; i < n; ++i) if (p[i] == '\0') return NULL;
+    char* s = (char*)malloc((size_t)n + 1); if (!s) return NULL;
+    memcpy(s, p, (size_t)n); s[n] = 0; return s;
+}
+
+static int rt_ab_close(int fd) { int r; if (fd < 0) return 0; do r = close(fd); while (r < 0 && errno == EINTR); return r; }
+static int rt_ab_fsync(int fd) { int r, tries = 0; do r = fsync(fd); while (r < 0 && errno == EINTR && ++tries < 8); return r; }
+static ssize_t rt_ab_read(int fd, void* p, size_t n) { ssize_t r; int tries = 0; do r = read(fd, p, n); while (r < 0 && errno == EINTR && ++tries < 8); return r; }
+static int rt_ab_write_all(int fd, const uint8_t* p, size_t n) {
+    size_t off = 0; int tries = 0;
+    while (off < n) { ssize_t w = write(fd, p + off, n - off); if (w > 0) { off += (size_t)w; tries = 0; continue; } if (w < 0 && errno == EINTR && ++tries < 8) continue; return 0; }
+    return 1;
+}
+static int rt_ab_same_stat(const struct stat* a, const struct stat* b) {
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_mode == b->st_mode &&
+           a->st_size == b->st_size && a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+}
+static void rt_ab_destroy(RtArtifactBundleTxn* t, int remove_temp) {
+    rt_ab_close(t->payload_fd); rt_ab_close(t->scr1_fd); rt_ab_close(t->source_fd);
+    if (remove_temp && t->temp_fd >= 0) { unlinkat(t->temp_fd, t->payload_leaf, 0); unlinkat(t->temp_fd, t->scr1_leaf, 0); }
+    rt_ab_close(t->temp_fd);
+    if (remove_temp && t->root_fd >= 0) unlinkat(t->root_fd, t->temp_leaf, AT_REMOVEDIR);
+    rt_ab_close(t->root_fd); free(t);
+}
+static RtArtifactBundleTxn* rt_ab_take(uint64_t token) {
+    RtArtifactBundleTxn** p = &rt_artifact_bundle_txns;
+    while (*p && (*p)->token != token) p = &(*p)->next;
+    if (!*p) return NULL; RtArtifactBundleTxn* t = *p; *p = t->next; t->next = NULL; return t;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_begin_v1(const uint8_t* root, uint64_t root_len,
+    const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len,
+    const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1, uint64_t scr1_len, int64_t max_bytes) {
+    if (max_bytes < 0) return 0;
+    RtArtifactBundleTxn* t = (RtArtifactBundleTxn*)calloc(1, sizeof(*t)); if (!t) return 0;
+    t->root_fd=t->source_fd=t->temp_fd=t->payload_fd=t->scr1_fd=-1; t->max_bytes=(uint64_t)max_bytes;
+    char* root_path = rt_ab_path(root, root_len); char* source_path = rt_ab_path(source, source_len);
+    if (!root_path || !source_path || !rt_ab_leaf(bundle,bundle_len,t->bundle_leaf) || !rt_ab_leaf(payload,payload_len,t->payload_leaf) || !rt_ab_leaf(scr1,scr1_len,t->scr1_leaf) || !strcmp(t->payload_leaf,t->scr1_leaf)) goto fail;
+    t->root_fd=open(root_path,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW); if(t->root_fd<0) goto fail;
+    if (faccessat(t->root_fd,t->bundle_leaf,F_OK,AT_SYMLINK_NOFOLLOW)==0 || errno!=ENOENT) goto fail;
+    struct open_how how={.flags=O_RDONLY|O_CLOEXEC|O_NOFOLLOW,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};
+    t->source_fd=(int)syscall(SYS_openat2,t->root_fd,source_path,&how,sizeof(how)); if(t->source_fd<0 || fstat(t->source_fd,&t->source_identity)<0 || !S_ISREG(t->source_identity.st_mode) || (uint64_t)t->source_identity.st_size>t->max_bytes) goto fail;
+    for (int tries=0;tries<16;t->token=0,++tries) { if(getrandom(&t->token,sizeof(t->token),0)!=(ssize_t)sizeof(t->token) || !t->token) continue; snprintf(t->temp_leaf,sizeof(t->temp_leaf),".simple-bundle-%016llx",(unsigned long long)t->token); if(mkdirat(t->root_fd,t->temp_leaf,0700)==0) break; }
+    if (!t->token || !t->temp_leaf[0]) goto fail;
+    t->temp_fd=openat(t->root_fd,t->temp_leaf,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW); if(t->temp_fd<0) goto fail;
+    t->payload_fd=openat(t->temp_fd,t->payload_leaf,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600); if(t->payload_fd<0) goto fail;
+    pthread_mutex_lock(&rt_artifact_bundle_lock); for(RtArtifactBundleTxn* q=rt_artifact_bundle_txns;q;q=q->next) if(q->token==t->token){pthread_mutex_unlock(&rt_artifact_bundle_lock);goto fail;} t->next=rt_artifact_bundle_txns;rt_artifact_bundle_txns=t; pthread_mutex_unlock(&rt_artifact_bundle_lock);
+    free(root_path); free(source_path); return (int64_t)t->token;
+fail: free(root_path); free(source_path); rt_ab_destroy(t,1); return 0;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t token, int64_t bound) {
+    if (bound <= 0 || bound > 16*1024*1024) return 0;
+    pthread_mutex_lock(&rt_artifact_bundle_lock); RtArtifactBundleTxn* t=rt_ab_take((uint64_t)token); pthread_mutex_unlock(&rt_artifact_bundle_lock); if(!t)return 0;
+    if(t->eof_seen){rt_ab_destroy(t,1);return 0;}
+    size_t want=(size_t)bound; if((uint64_t)want>t->max_bytes-t->bytes_read)want=(size_t)(t->max_bytes-t->bytes_read);
+    SplArray* a=rt_byte_array_new_len(want); RtCoreArray* ar=rt_core_array_ptr(a); ssize_t n=ar?rt_ab_read(t->source_fd,ar->data,want):-1;
+    if(n<0 || (n>0 && !rt_ab_write_all(t->payload_fd,ar->data,(size_t)n))){if(a)rt_array_free(a);rt_ab_destroy(t,1);return 0;}
+    ar->len=n; t->bytes_read+=(uint64_t)n; if(n==0)t->eof_seen=1;
+    pthread_mutex_lock(&rt_artifact_bundle_lock);t->next=rt_artifact_bundle_txns;rt_artifact_bundle_txns=t;pthread_mutex_unlock(&rt_artifact_bundle_lock); return (int64_t)(uintptr_t)a;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t token, int64_t field) {
+    pthread_mutex_lock(&rt_artifact_bundle_lock); RtArtifactBundleTxn* t=rt_artifact_bundle_txns;while(t&&t->token!=(uint64_t)token)t=t->next;
+    int64_t v=t?(field==0?(int64_t)t->source_identity.st_dev:field==1?(int64_t)t->source_identity.st_ino:field==2?(int64_t)t->source_identity.st_size:field==3?(int64_t)t->source_identity.st_mtim.tv_sec:field==4?(int64_t)t->source_identity.st_mtim.tv_nsec:field==5?(int64_t)t->bytes_read:-1):-1; pthread_mutex_unlock(&rt_artifact_bundle_lock);return v;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t token,const uint8_t* bytes,uint64_t len,int64_t max_bytes){
+    if(max_bytes<0||len>(uint64_t)max_bytes)return 0; pthread_mutex_lock(&rt_artifact_bundle_lock);RtArtifactBundleTxn*t=rt_ab_take((uint64_t)token);pthread_mutex_unlock(&rt_artifact_bundle_lock);if(!t)return 0;
+    if(!t->eof_seen||t->scr1_staged){rt_ab_destroy(t,1);return 0;} t->scr1_fd=openat(t->temp_fd,t->scr1_leaf,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);
+    if(t->scr1_fd<0||!rt_ab_write_all(t->scr1_fd,bytes,(size_t)len)){rt_ab_destroy(t,1);return 0;}t->scr1_staged=1;pthread_mutex_lock(&rt_artifact_bundle_lock);t->next=rt_artifact_bundle_txns;rt_artifact_bundle_txns=t;pthread_mutex_unlock(&rt_artifact_bundle_lock);return 1;
+}
+
+int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t token,int64_t commit){
+    pthread_mutex_lock(&rt_artifact_bundle_lock);RtArtifactBundleTxn*t=rt_ab_take((uint64_t)token);pthread_mutex_unlock(&rt_artifact_bundle_lock);if(!t)return 0;
+    if(!commit){rt_ab_destroy(t,1);return 1;} struct stat now; if(!t->eof_seen||!t->scr1_staged||fstat(t->source_fd,&now)<0||!rt_ab_same_stat(&t->source_identity,&now)||rt_ab_fsync(t->payload_fd)<0||rt_ab_fsync(t->scr1_fd)<0||rt_ab_fsync(t->temp_fd)<0){rt_ab_destroy(t,1);return 0;}
+    rt_ab_close(t->payload_fd);t->payload_fd=-1;rt_ab_close(t->scr1_fd);t->scr1_fd=-1;
+    int renamed, tries=0; do renamed=(int)syscall(SYS_renameat2,t->root_fd,t->temp_leaf,t->root_fd,t->bundle_leaf,RENAME_NOREPLACE);while(renamed<0&&errno==EINTR&&++tries<8);
+    if(renamed<0){rt_ab_destroy(t,1);return 0;} int durable=rt_ab_fsync(t->root_fd)==0;rt_ab_destroy(t,0);return durable?1:-2;
+}
 #else
-int64_t rt_hosted_safe_artifact_bundle_n_begin_v1(int64_t a,const uint8_t*b,uint64_t c,const uint8_t*d,uint64_t e,int64_t f,int64_t g){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;return 0;}int64_t rt_hosted_safe_artifact_bundle_n_add_slot_v1(int64_t a,int64_t b,const uint8_t*c,uint64_t d,const uint8_t*e,uint64_t f,const uint8_t*g,uint64_t h){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;return 0;}int64_t rt_hosted_safe_artifact_bundle_n_seal_v1(int64_t a){(void)a;return 0;}int64_t rt_hosted_safe_artifact_bundle_n_read_stage_v1(int64_t a,int64_t b,int64_t c){(void)a;(void)b;(void)c;return 0;}int64_t rt_hosted_safe_artifact_bundle_n_identity_v1(int64_t a,int64_t b,int64_t c){(void)a;(void)b;(void)c;return-1;}int64_t rt_hosted_safe_artifact_bundle_n_stage_scr1_v1(int64_t a,int64_t b,int64_t c,int64_t d){(void)a;(void)b;(void)c;(void)d;return 0;}int64_t rt_hosted_safe_artifact_bundle_n_stage_descriptor_v1(int64_t a,int64_t b,int64_t c){(void)a;(void)b;(void)c;return 0;}int64_t rt_hosted_safe_artifact_bundle_n_finish_v1(int64_t a,int64_t b){(void)a;(void)b;return-1;}
+int64_t rt_hosted_safe_artifact_bundle_begin_v1(const uint8_t*a,uint64_t b,const uint8_t*c,uint64_t d,const uint8_t*e,uint64_t f,const uint8_t*g,uint64_t h,const uint8_t*i,uint64_t j,int64_t k){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;return 0;}
+int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}
+int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t a,int64_t b){(void)a;(void)b;return -1;}
+int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t a,const uint8_t*b,uint64_t c,int64_t d){(void)a;(void)b;(void)c;(void)d;return 0;}
+int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}
 #endif

@@ -1,0 +1,106 @@
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
+use std.common.search.generated.unicode_17_0_0.{unicode_table_version, unicode_table_generator_sha256, unicode_is_token_code_point, unicode_normalize_nfc, unicode_default_lowercase}
+
+struct AnalyzerIdentity:
+    implementation: text
+    semantic_version: text
+    normalization: text
+    tokenizer_version: text
+    stop_words_hash: text
+    stemming: text
+    field_schema_version: text
+
+impl AnalyzerIdentity:
+    static fn spipe_v1() -> AnalyzerIdentity:
+        AnalyzerIdentity(
+            implementation: "spipe-unicode-lex-v1-verified",
+            semantic_version: unicode_table_version,
+            normalization: "nfc-default-lowercase-nfc-ucd-17.0.0",
+            tokenizer_version: "unicode-alphabetic-decimal-mark-underscore-v1",
+            stop_words_hash: "en-basic-v1",
+            stemming: "none",
+            field_schema_version: "1",
+        )
+
+    static fn simple_preview_v1() -> AnalyzerIdentity:
+        AnalyzerIdentity(
+            implementation: "simple-unicode-adapter",
+            semantic_version: "1",
+            normalization: "generated-ucd-17-present-adapter-not-active",
+            tokenizer_version: "unicode-word-position-v1",
+            stop_words_hash: "en-basic-v1-unpinned",
+            stemming: "none",
+            field_schema_version: "1",
+        )
+
+    fn claims_spipe_unicode_parity() -> bool:
+        self.implementation == "spipe-unicode-lex-v1-verified" and self.semantic_version == "17.0.0" and self.normalization == "nfc-default-lowercase-nfc-ucd-17.0.0"
+
+    fn unicode_table_binding() -> text:
+        unicode_table_version + ":sha256:" + unicode_table_generator_sha256
+
+    fn cache_key() -> text:
+        self.implementation + ":" + self.semantic_version + ":" + self.normalization + ":" + self.tokenizer_version + ":" + self.stop_words_hash + ":" + self.stemming + ":" + self.field_schema_version
+
+fn analyze_text(value: text) -> [text]:
+    var out: [text] = []
+    val positioned = analyze_positioned(value, false)
+    var i = 0
+    while i < positioned.len():
+        out.push(positioned[i].value)
+        i = i + 1
+    out
+
+fn analyze_identifier(value: text) -> [text]:
+    val exact = unicode_normalize_nfc(unicode_default_lowercase(unicode_normalize_nfc(value.trim())))
+    var out: [text] = []
+    if exact != "":
+        out.push(exact)
+    val prose = analyze_text(value.replace("-", " ").replace("_", " ").replace(".", " "))
+    var i = 0
+    while i < prose.len():
+        if prose[i] != exact:
+            out.push(prose[i])
+        i = i + 1
+    out
+
+struct AnalyzedToken:
+    value: text
+    position: i64
+    exact_identifier: bool
+
+impl AnalyzedToken:
+    static fn of(value: text, position: i64, exact_identifier: bool) -> AnalyzedToken:
+        AnalyzedToken(value: value, position: position, exact_identifier: exact_identifier)
+
+fn is_basic_stop_word(value: text) -> bool:
+    value == "a" or value == "an" or value == "and" or value == "the" or value == "of" or value == "to"
+
+fn analyze_positioned(value: text, identifier_field: bool) -> [AnalyzedToken]:
+    # This is the explicit Simple UCD adapter seam. It is intentionally
+    # identified as preview until NFC/UCD-17 golden parity is available.
+    val lowered = unicode_normalize_nfc(unicode_default_lowercase(unicode_normalize_nfc(value)))
+    val cps = text_codepoints(lowered)
+    var out: [AnalyzedToken] = []
+    var current: [text] = []
+    var position = 0
+    var i = 0
+    while i <= cps.len():
+        var word = false
+        if i < cps.len():
+            word = unicode_is_token_code_point(cps[i])
+        if word:
+            current.push(char_from_codepoint(cps[i]))
+        else:
+            if current.len() > 0:
+                val token = current.join("")
+                position = position + 1
+                if not is_basic_stop_word(token):
+                    out.push(AnalyzedToken.of(token, position, false))
+                current = []
+        i = i + 1
+    if identifier_field:
+        val exact = lowered.trim()
+        if exact != "":
+            out.push(AnalyzedToken.of(exact, 0, true))
+    out

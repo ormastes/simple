@@ -14,9 +14,7 @@ use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
-@unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 
 var _llvm_bootstrap_string_global_text: text = ""
@@ -149,31 +147,10 @@ impl MirToLlvm:
         self.builder.emit("declare void @rt_print(ptr)")
         self.builder.emit("declare void @rt_println(ptr)")
         self.builder.emit("declare void @rt_panic(ptr, i64)")
-        val exception_arch = self.config.triple.arch
-        val exception_os = self.config.triple.os
-        val exception_elf64 = exception_arch == "x86_64" or exception_arch == "aarch64" or exception_arch == "riscv64"
-        val exception_posix = exception_os == "linux" or exception_os == "freebsd"
-        if exception_elf64 and exception_posix:
-            self.builder.emit("declare ptr @rt_exception_frame_push()")
-            self.builder.emit("declare void @rt_exception_frame_pop()")
-            self.builder.emit("declare i64 @rt_exception_frame_finish(i64)")
-            self.builder.emit("declare { i64, i64 } @rt_exception_frame_capture(i64)")
-            self.builder.emit("declare i64 @rt_exception_caught_type_tag()")
-            self.builder.emit("declare i64 @rt_exception_peek_payload()")
-            self.builder.emit("declare void @rt_exception_throw(i64, i64) noreturn")
-            self.builder.emit("declare void @rt_exception_resume(i64, i64) noreturn")
-            self.builder.emit("declare i64 @__simple_exception_type_tag()")
-            self.builder.emit("declare i64 @__simple_exception_set_type_tag(i64)")
-            # Must be invoked by the generated caller itself. The returns_twice
-            # attribute keeps LLVM from treating the second return as impossible.
-            self.builder.emit("declare i32 @_setjmp(ptr) returns_twice")
         self.builder.emit("declare ptr @rt_array_new(i64)")
         self.builder.emit("declare void @rt_array_free(ptr)")
         self.builder.emit("declare i64 @rt_array_len(ptr)")
-        var bootstrap_enabled = false
-        unsafe(capabilities: [ffi]):
-            bootstrap_enabled = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-        if bootstrap_enabled:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             self.builder.emit("declare ptr @rt_array_get(ptr, i64)")
         else:
             self.builder.emit("declare i64 @rt_array_get(ptr, i64)")
@@ -424,10 +401,7 @@ impl MirToLlvm:
         val escaped = escape_llvm_string(value)
         val str_len = escaped_string_byte_len(value) + 1
         val decl = "{global_name} = private unnamed_addr constant [{str_len} x i8] c\"{escaped}\\00\""
-        var bootstrap_enabled = false
-        unsafe(capabilities: [ffi]):
-            bootstrap_enabled = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-        if bootstrap_enabled:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             llvm_bootstrap_string_globals_add(decl)
         self.string_globals = self.string_globals.push(decl)
         if self.string_global_text.len() == 0:
@@ -437,52 +411,7 @@ impl MirToLlvm:
         global_name
 
     me emit_unsupported_panic(message: text):
-        """FAIL THE BUILD on a MIR construct the LLVM backend cannot lower.
-
-        Until 2026-08-23 this only emitted an `@rt_panic` call into the
-        generated IR, so the build reported rc=0 / step 6/6 / linked and the
-        defect surfaced as a RUNTIME panic in the shipped binary -- a
-        fail-OPEN. Measured live: an ordinary `Result` + `?` program linked
-        green and then died with
-        `E-BACKEND-LLVM-INST-ResultMatchSemantic`. A code path the backend
-        cannot lower is a compile error, so it is now raised as one, naming
-        the kind and the site. Matches the pre-existing treatment of
-        DecisionProbe/ConditionProbe in core_codegen.spl, which already
-        panicked at COMPILE time.
-
-        `SIMPLE_ALLOW_UNLOWERED_MIR=1` restores the old emit-and-hope
-        behaviour for anyone deliberately exercising the runtime-panic path.
-        See doc/08_tracking/bug/llvm_backend_unlowered_mir_kind_fails_open_2026-08-23.md
-        """
-        var allow_unlowered = false
-        unsafe(capabilities: [ffi]):
-            allow_unlowered = (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") == "1"
-        if not allow_unlowered:
-            eprint("error: {message}")
-            panic("compile error: {message}")
-        self.emit_panic_trap_ir(message)
-
-    me emit_panic_trap_ir(message: text):
-        """Emit `@rt_panic(msg)` + `unreachable` -- a DIVERGING block, no build failure.
-
-        This is the correct lowering of `MirTerminator.Abort`, which is a
-        fully supported terminator deliberately emitted by MIR (see
-        50.mir/mir_data.spl `terminate_abort` and the `panic()` lowering in
-        _MirLoweringExpr/switch_operators_calls.spl). Its `message` is a
-        REASON LABEL describing why the block diverges -- it is not a
-        diagnostic and carries no file/line.
-
-        Extracted 2026-08-24. The Abort arm in core_codegen.spl used to call
-        `emit_unsupported_panic`, which was fine while that helper only
-        emitted this IR. When it was converted to FAIL THE BUILD on
-        2026-08-23 (llvm_backend_unlowered_mir_kind_fails_open), every user
-        `panic()` in any co-compiled module became a hard compile error, and
-        the abort's reason label was printed as `error: explicit panic() --
-        diverging, must not fall through`. The C backend never had this bug
-        -- its Abort arm emits `spl_panic(...)` directly -- and cranelift
-        emits a trap. See
-        doc/08_tracking/bug/native_compile_explicit_panic_diverging_process_ops_2026-08-24.md
-        """
+        """Emit a hard runtime panic instead of silently lowering unsupported ops."""
         val global_name = self.add_string_global(message)
         val msg_len = escaped_string_byte_len(message)
         val str_len = msg_len + 1

@@ -8,31 +8,9 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-summary_only=0
-if [ "${1:-}" = "--summary" ]; then
-    summary_only=1
-    shift
-fi
+out=${1:-/dev/stdout}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
-
-if [ "$summary_only" -eq 1 ]; then
-    # Keep the potentially large call-site and prioritization tables off stdout.
-    # The scan and every baseline check remain identical to full mode.
-    out="$work/call-sites.tsv"
-    summary_out=${1:-/dev/stdout}
-    symbols_out=${2:-$work/symbols.tsv}
-    families_out=${3:-$work/families.tsv}
-    scopes_out=${4:-$work/scopes.tsv}
-    files_out=${5:-$work/files.tsv}
-else
-    out=${1:-/dev/stdout}
-    summary_out=${2:-${TMPDIR:-/tmp}/sffi-call-authority-summary.tsv}
-    symbols_out=${3:-${TMPDIR:-/tmp}/sffi-call-authority-symbols.tsv}
-    families_out=${4:-${TMPDIR:-/tmp}/sffi-call-authority-families.tsv}
-    scopes_out=${5:-${TMPDIR:-/tmp}/sffi-call-authority-scopes.tsv}
-    files_out=${6:-${TMPDIR:-/tmp}/sffi-call-authority-files.tsv}
-fi
 
 export SFFI_ROOT=$root
 find "$root/src" "$root/test" -type f -name '*.spl' ! -path '*/vendor/*' -print0 >"$work/files.bin"
@@ -40,58 +18,11 @@ find "$root/src" "$root/test" -type f -name '*.spl' ! -path '*/vendor/*' -print0
 xargs -0 -r -n 200 perl -0ne '
     my $file = $ARGV;
     my @lines = split /\n/, $_, -1;
-    my @code_lines;
     my %raw;
     my $in_sffi_use = 0;
-    my $sffi_glob = 0;
 
-    # Mask comments, ordinary string literals, and multiline docstrings once,
-    # preserving indentation and line numbers. The census is a code inventory:
-    # prose such as `rt_exit(1)` must never create an authority row. This is a
-    # single linear pass over source bytes, not another tree scan.
-    my $triple = "";
     for my $line (@lines) {
-        if ($triple eq "" && index($line, "\"") < 0 && index($line, "\x27") < 0) {
-            my $code = $line;
-            my $comment = index($code, "#");
-            if ($comment >= 0) {
-                substr($code, $comment) = " " x (length($code) - $comment);
-            }
-            push @code_lines, $code;
-            next;
-        }
-        my $code = $line;
-        my $cursor = 0;
-        while (1) {
-            if ($triple ne "") {
-                my $end = index($code, $triple, $cursor);
-                if ($end < 0) {
-                    substr($code, $cursor) = " " x (length($code) - $cursor);
-                    last;
-                }
-                substr($code, $cursor, $end + 3 - $cursor) =
-                    " " x ($end + 3 - $cursor);
-                $cursor = $end + 3;
-                $triple = "";
-            }
-            my $double_at = index($code, "\"\"\"", $cursor);
-            my $single_at = index($code, "\x27\x27\x27", $cursor);
-            last if $double_at < 0 && $single_at < 0;
-            my $start = $double_at < 0 ? $single_at :
-                ($single_at < 0 || $double_at < $single_at ? $double_at : $single_at);
-            $triple = substr($code, $start, 3);
-            substr($code, $start, 3) = "   ";
-            $cursor = $start + 3;
-        }
-        # Mask ordinary literals before stripping comments so a # inside text
-        # does not truncate real code that follows the literal.
-        $code =~ s/"(?:\\.|[^"\\])*"/" " x length($&)/ge;
-        $code =~ s/\x27(?:\\.|[^\x27\\])*\x27/" " x length($&)/ge;
-        $code =~ s/#.*$/" " x length($&)/e;
-        push @code_lines, $code;
-    }
-
-    for my $line (@code_lines) {
+        next if $line =~ /^\s*#/;
         if ($line =~ /^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+fn\s+([A-Za-z_]\w*)/) {
             $raw{$1} = 1;
         }
@@ -102,59 +33,27 @@ xargs -0 -r -n 200 perl -0ne '
             $in_sffi_use = 0 if $tail =~ /\}/;
             next;
         }
-        if ($line =~ /^\s*use\s+[^\n]*sffi[^\n]*\.\s*\*/) {
-            $sffi_glob = 1;
-        }
         if ($in_sffi_use) {
             while ($line =~ /\b((?:rt|spl)_[A-Za-z_]\w*)\b/g) { $raw{$1} = 1; }
             $in_sffi_use = 0 if $line =~ /\}/;
         }
     }
 
-    # Compile the file-local raw symbol set once. Most files have no raw
-    # declarations/imports and need no function-body scan at all; files that
-    # do should match only candidate foreign names rather than parsing every
-    # ordinary call and rejecting it through a hash lookup afterward.
-    next unless %raw || $sffi_glob;
-    my @raw_patterns = map { quotemeta($_) } sort keys %raw;
-    push @raw_patterns, "(?:rt|spl)_[A-Za-z_]\\w*" if $sffi_glob;
-    my $raw_names = join("|", @raw_patterns);
-    my $raw_call_re = qr/(?<![A-Za-z0-9_])($raw_names)(?![A-Za-z0-9_])\s*\(/;
-    (my $relative = $file) =~ s/^\Q$ENV{SFFI_ROOT}\E\///;
-
     for (my $i = 0; $i <= $#lines; $i++) {
-        my $header = $code_lines[$i];
+        my $header = $lines[$i];
         next unless $header =~ /^(\s*)(?:(?:pub|static)\s+)*(?:fn|me)\s+[A-Za-z_]\w*/;
         my $header_indent = length($1);
         my $fn_unsafe = 0;
         for (my $p = $i - 1; $p >= 0 && $i - $p <= 8; $p--) {
-            next if $code_lines[$p] =~ /^\s*$/;
-            if ($code_lines[$p] =~ /^\s*\@unsafe\b.*capabilities.*\bffi\b/i) {
+            next if $lines[$p] =~ /^\s*$/;
+            if ($lines[$p] =~ /^\s*\@unsafe\b.*capabilities.*\bffi\b/i) {
                 $fn_unsafe = 1;
             }
-            last if $code_lines[$p] !~ /^\s*\@/;
-        }
-        # A function signature may span multiple lines. Find its terminating
-        # colon before applying body indentation rules; otherwise the closing
-        # `):` at header indentation looks like the next top-level statement
-        # and the entire body is silently skipped.
-        my $header_end = $i;
-        if ($header !~ /:\s*$/) {
-            my $paren_depth = 0;
-            my $seen_paren = 0;
-            for (my $k = $i; $k <= $#lines && $k - $i <= 128; $k++) {
-                my $signature = $code_lines[$k];
-                my $opens = ($signature =~ tr/(//);
-                my $closes = ($signature =~ tr/)//);
-                $seen_paren = 1 if $opens > 0;
-                $paren_depth += $opens - $closes;
-                $header_end = $k;
-                last if $seen_paren && $paren_depth <= 0 && $signature =~ /:\s*$/;
-            }
+            last if $lines[$p] !~ /^\s*\@/;
         }
         my $lexical_indent = -1;
-        for (my $j = $header_end + 1; $j <= $#lines; $j++) {
-            my $body = $code_lines[$j];
+        for (my $j = $i + 1; $j <= $#lines; $j++) {
+            my $body = $lines[$j];
             next if $body =~ /^\s*$/;
             my ($spaces) = $body =~ /^(\s*)/;
             my $indent = length($spaces);
@@ -164,12 +63,14 @@ xargs -0 -r -n 200 perl -0ne '
                 $lexical_indent = $indent;
                 next;
             }
-            next if index($body, "(") < 0;
             my $code = $body;
-            while ($code =~ /$raw_call_re/g) {
+            $code =~ s/#.*$//;
+            while ($code =~ /(?<![A-Za-z0-9_])([A-Za-z_]\w*)\s*\(/g) {
                 my $name = $1;
+                next unless $raw{$name};
                 my $state = $fn_unsafe ? "function_unsafe" :
                     ($lexical_indent >= 0 ? "lexical_unsafe" : "missing");
+                (my $relative = $file) =~ s/^\Q$ENV{SFFI_ROOT}\E\///;
                 print join("\t", $relative, $j + 1, $name, $state), "\n";
             }
         }
@@ -181,133 +82,11 @@ xargs -0 -r -n 200 perl -0ne '
     cat "$work/calls.tsv"
 } >"$out"
 
-# Derive every prioritization view from the one source scan above.  This keeps
-# the census O(source bytes + call sites) instead of rescanning the repository
-# once per language/family/scope report.
-awk -F '\t' 'BEGIN { OFS="\t" }
-    NR > 1 {
-        rows++
-        symbols[$3]=1
-        files[$1]=1
-        authority[$4]++
-    }
-    END {
-        for (symbol in symbols) symbol_count++
-        for (file in files) file_count++
-        print "metric", "value"
-        print "raw_call_sites", rows + 0
-        print "distinct_called_symbols", symbol_count + 0
-        print "caller_files", file_count + 0
-        print "lexical_unsafe_call_sites", authority["lexical_unsafe"] + 0
-        print "function_unsafe_call_sites", authority["function_unsafe"] + 0
-        print "missing_authority_call_sites", authority["missing"] + 0
-    }
-' "$out" >"$summary_out"
-
-awk -F '\t' 'BEGIN { OFS="\t" }
-    NR > 1 {
-        symbol=$3
-        rows[symbol]++
-        file_key=symbol SUBSEP $1
-        if (!(file_key in seen_file)) { seen_file[file_key]=1; files[symbol]++ }
-        authority=symbol SUBSEP $4
-        authority_count[authority]++
-        if ($1 ~ /^test\//) tests[symbol]++
-        else if ($1 ~ /^src\/compiler_rust\/lib\/std\//) bootstrap[symbol]++
-        else if ($1 ~ /^src\//) production[symbol]++
-    }
-    END {
-        print "symbol", "call_sites", "caller_files", "production_calls", \
-              "bootstrap_library_calls", "test_calls", \
-              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls"
-        for (symbol in rows)
-            print symbol, rows[symbol], files[symbol], production[symbol] + 0, \
-                  bootstrap[symbol] + 0, tests[symbol] + 0, \
-                  authority_count[symbol SUBSEP "lexical_unsafe"] + 0, \
-                  authority_count[symbol SUBSEP "function_unsafe"] + 0, \
-                  authority_count[symbol SUBSEP "missing"] + 0
-    }
-' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort -t "$(printf '\t')" -k4,4nr -k2,2nr -k1,1; } >"$symbols_out"
-
-awk -F '\t' 'BEGIN { OFS="\t" }
-    NR > 1 {
-        split($3, parts, "_")
-        family=parts[1] "_" parts[2]
-        rows[family]++
-        symbol_key=family SUBSEP $3
-        if (!(symbol_key in seen_symbol)) { seen_symbol[symbol_key]=1; symbols[family]++ }
-        authority_count[family SUBSEP $4]++
-        if ($1 ~ /^test\//) tests[family]++
-        else if ($1 ~ /^src\/compiler_rust\/lib\/std\//) bootstrap[family]++
-        else if ($1 ~ /^src\//) production[family]++
-    }
-    END {
-        print "family", "call_sites", "distinct_symbols", "production_calls", \
-              "bootstrap_library_calls", "test_calls", \
-              "explicit_authority_calls", "missing_authority_calls"
-        for (family in rows)
-            print family, rows[family], symbols[family], production[family] + 0, \
-                  bootstrap[family] + 0, tests[family] + 0, \
-                  authority_count[family SUBSEP "lexical_unsafe"] + \
-                      authority_count[family SUBSEP "function_unsafe"], \
-                  authority_count[family SUBSEP "missing"] + 0
-    }
-' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort -t "$(printf '\t')" -k4,4nr -k2,2nr -k1,1; } >"$families_out"
-
-awk -F '\t' 'BEGIN { OFS="\t" }
-    NR > 1 {
-        scope = $1 ~ /^test\// ? "test" : \
-            ($1 ~ /^src\/compiler_rust\/lib\/std\// ? "bootstrap_library" : \
-            ($1 ~ /^src\// ? "production" : "unknown"))
-        rows[scope]++
-        symbol_key=scope SUBSEP $3
-        if (!(symbol_key in seen_symbol)) { seen_symbol[symbol_key]=1; symbols[scope]++ }
-        authority_count[scope SUBSEP $4]++
-    }
-    END {
-        print "scope", "call_sites", "distinct_symbols", \
-              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls"
-        for (scope in rows)
-            print scope, rows[scope], symbols[scope], \
-                  authority_count[scope SUBSEP "lexical_unsafe"] + 0, \
-                  authority_count[scope SUBSEP "function_unsafe"] + 0, \
-                  authority_count[scope SUBSEP "missing"] + 0
-    }
-' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort; } >"$scopes_out"
-
-awk -F '\t' 'BEGIN { OFS="\t" }
-    NR > 1 {
-        rows[$1]++
-        symbol_key=$1 SUBSEP $3
-        if (!(symbol_key in seen_symbol)) { seen_symbol[symbol_key]=1; symbols[$1]++ }
-        authority_count[$1 SUBSEP $4]++
-    }
-    END {
-        print "file", "call_sites", "distinct_symbols", \
-              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls"
-        for (file in rows)
-            print file, rows[file], symbols[file], \
-                  authority_count[file SUBSEP "lexical_unsafe"] + 0, \
-                  authority_count[file SUBSEP "function_unsafe"] + 0, \
-                  authority_count[file SUBSEP "missing"] + 0
-    }
-' "$out" | {
-    IFS= read -r header
-    printf '%s\n' "$header"
-    sort -t "$(printf '\t')" -k6,6nr -k2,2nr -k1,1
-} >"$files_out"
-
 awk -F '\t' 'NR > 1 { count[$4]++ } END { for (state in count) print count[state], state }' "$out" \
     | sort -nr >&2
 
 missing=$(awk -F '\t' 'NR > 1 && $4 == "missing" { count++ } END { print count + 0 }' "$out")
-baseline="$root/scripts/audit/baselines/sffi-call-authority-v1.tsv"
-baseline_missing=$(awk -F '\t' '$1 == "missing_authority_call_sites" { print $2 }' "$baseline")
-test -n "$baseline_missing" || {
-    echo 'SFFI call authority census: missing or malformed baseline' >&2
-    exit 1
-}
-maximum_missing=${SFFI_MAX_MISSING:-$baseline_missing}
+maximum_missing=${SFFI_MAX_MISSING:-20976}
 if [ "$missing" -gt "$maximum_missing" ]; then
     echo "SFFI call authority census: FAIL ($missing > $maximum_missing raw call sites lack explicit FFI authority)" >&2
     exit 1

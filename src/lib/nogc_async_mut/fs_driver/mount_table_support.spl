@@ -3,7 +3,6 @@
 use std.fs_driver.error.{FsError}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{FileHandle}
-use std.fs_driver.bytes_util.{alloc_zeroed_bytes}
 use common.string_core.{str_char_at}
 
 val POSITIONED_DRIVER_MAX_BYTES: u64 = 0x7fffffffu64
@@ -14,7 +13,6 @@ enum PositionedDriverKind:
     Fat32
     Nvfs
     Dbfs
-    Ramfs
 
 fn mount_handle_encode(slot: i32, generation: u32) -> u64:
     (generation.to_u64() << 32) | (slot + 1).to_u64()
@@ -51,15 +49,10 @@ fn text_has_mount_prefix(source: text, prefix: text) -> bool:
     str_char_at(source, prefix.len()) == "/"
 
 fn _positioned_prefix(buf: [u8], count: i64) -> [u8]:
-    # Full reads already own exactly the requested buffer; transferring it
-    # avoids a second 64-KiB allocation and byte-for-byte copy on the common
-    # sequential snapshot path.
-    if count == buf.len() as i64:
-        return buf
-    var out = alloc_zeroed_bytes(count)
+    var out: [u8] = []
     var i: i64 = 0
     while i < count and i < buf.len() as i64:
-        out[i as i32] = buf[i as i32]
+        out.push(buf[i as i32])
         i = i + 1
     out
 
@@ -94,51 +87,6 @@ fn driver_positioned_read_bytes(driver: DriverInstance, kind: PositionedDriverKi
             match driver:
                 case DriverInstance.DbFs(d): d.pread_bytes_handle(handle, offset, length)
                 case _: Err(FsError.Unsupported)
-        case PositionedDriverKind.Ramfs:
-            match driver:
-                case DriverInstance.RamFs(d):
-                    var buf = alloc_zeroed_bytes(length)
-                    val n = d.pread(handle, offset, buf)?
-                    if n < 0 or n > length: return Err(FsError.IoError(code: 0u32))
-                    Ok(_positioned_prefix(buf, n))
-                case _: Err(FsError.Unsupported)
-
-fn driver_bounded_positioned_read_bytes(
-    driver: DriverInstance, kind: PositionedDriverKind,
-    handle: FileHandle, offset: i64, length: i64
-) -> Result<[u8], FsError>:
-    """Return one independently owned positioned chunk of at most 64 KiB."""
-    if offset < 0 or length < 0 or length > 65536 or offset + length < offset:
-        return Err(FsError.InvalidArg)
-    match kind:
-        case PositionedDriverKind.Auto:
-            driver_bounded_positioned_read_bytes(
-                driver, driver_positioned_kind(driver)?, handle, offset, length)
-        case PositionedDriverKind.Fat32:
-            match driver:
-                case DriverInstance.Fat32(d):
-                    var buf = alloc_zeroed_bytes(length)
-                    val n = d.pread(handle, offset, buf)?
-                    if n < 0 or n > length: return Err(FsError.IoError(code: 0u32))
-                    Ok(_positioned_prefix(buf, n))
-                case _: Err(FsError.Unsupported)
-        case PositionedDriverKind.Nvfs:
-            match driver:
-                case DriverInstance.Nvfs(d): d.pread_bounded_bytes_handle(handle, offset, length)
-                case DriverInstance.NvfsPosix(d): d.pread_bounded_bytes_handle(handle, offset, length)
-                case _: Err(FsError.Unsupported)
-        case PositionedDriverKind.Dbfs:
-            match driver:
-                case DriverInstance.DbFs(d): d.pread_bounded_bytes_handle(handle, offset, length)
-                case _: Err(FsError.Unsupported)
-        case PositionedDriverKind.Ramfs:
-            match driver:
-                case DriverInstance.RamFs(d):
-                    var buf = alloc_zeroed_bytes(length)
-                    val n = d.pread(handle, offset, buf)?
-                    if n < 0 or n > length: return Err(FsError.IoError(code: 0u32))
-                    Ok(_positioned_prefix(buf, n))
-                case _: Err(FsError.Unsupported)
 
 fn driver_positioned_write_bytes(driver: DriverInstance, kind: PositionedDriverKind,
                                  handle: FileHandle, offset: i64, data: [u8]) -> Result<i64, FsError>:
@@ -159,10 +107,6 @@ fn driver_positioned_write_bytes(driver: DriverInstance, kind: PositionedDriverK
             match driver:
                 case DriverInstance.DbFs(d): d.pwrite_bytes_handle(handle, offset, data)
                 case _: Err(FsError.Unsupported)
-        case PositionedDriverKind.Ramfs:
-            match driver:
-                case DriverInstance.RamFs(d): d.pwrite(handle, offset, data)
-                case _: Err(FsError.Unsupported)
 
 fn driver_positioned_kind(driver: DriverInstance) -> Result<PositionedDriverKind, FsError>:
     """Derive the positioned-I/O route from the binding's recorded mount."""
@@ -171,11 +115,10 @@ fn driver_positioned_kind(driver: DriverInstance) -> Result<PositionedDriverKind
         case DriverInstance.Nvfs(_): Ok(PositionedDriverKind.Nvfs)
         case DriverInstance.NvfsPosix(_): Ok(PositionedDriverKind.Nvfs)
         case DriverInstance.DbFs(_): Ok(PositionedDriverKind.Dbfs)
-        case DriverInstance.RamFs(_): Ok(PositionedDriverKind.Ramfs)
+        case _: Err(FsError.Unsupported)
 
 export PositionedDriverKind, POSITIONED_DRIVER_MAX_BYTES
 export mount_handle_encode, mount_handle_slot, mount_handle_generation
-export MOUNT_TABLE_MAX_PATH_BYTES, mount_path_canonical, text_has_mount_prefix
+export mount_path_canonical, text_has_mount_prefix
 export driver_positioned_read_bytes, driver_positioned_write_bytes
-export driver_bounded_positioned_read_bytes
 export driver_positioned_kind

@@ -57,7 +57,14 @@ fn _text_list_eq(a: [text], b: [text]) -> bool:
     true
 
 fn mir_lower_trace_enabled() -> bool:
-    mir_trace_enabled()
+    val trace = mir_lower_env_get("SIMPLE_COMPILER_TRACE") ?? ""
+    val phase = mir_lower_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
+    val diag = mir_lower_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
+    if trace == "1":
+        return true
+    if phase == "1":
+        return true
+    diag == "1"
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
 
@@ -99,10 +106,6 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
-use compiler.mir.mir_rt_hal_boundary.{inject_rt_hal_controller_finalize}
-use compiler.semantics.rt_hal_tag.{rt_hal_compilation_requires_finalize, rt_hal_compilation_configured_plan_path}
-use compiler.mir.mir_types.{MirType}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
 fn string_literal_has_runtime_interpolations(interps: [HirInterpolation]?) -> bool:
     if val parts = interps:
@@ -227,7 +230,6 @@ impl MirLowering:
 
     static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext) -> MirLowering:
         val empty_loop_stack: [(BlockId, BlockId)] = []
-        val empty_finally_stack: [HirBlock] = []
         val empty_errors: [MirError] = []
         MirLowering(
             builder: MirBuilder.new(),
@@ -235,7 +237,6 @@ impl MirLowering:
             local_map: {},
             local_symbol_ids: [],
             local_symbol_values: [],
-            local_symbol_index_slots: [],
             local_hir_type_ids: [],
             local_hir_type_values: [],
             local_hir_type_isolation_states: [],
@@ -244,24 +245,7 @@ impl MirLowering:
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
-            finally_stack: empty_finally_stack,
-            unsafe_depth: 0,
             errors: empty_errors,
-            type_transport_receipts: 0,
-            type_transport_owner: "",
-            type_transport_context: "",
-            type_transport_param_index: -1,
-            mcdc_mode: 0,
-            mcdc_owner_bytes: 1048576,
-            mcdc_global_bytes: 67108864,
-            mcdc_include_csv: "",
-            mcdc_exclude_csv: "",
-            mcdc_next_runtime_id: 1,
-            mcdc_active_decision_id: 0,
-            mcdc_active_decision_semantic: "",
-            mcdc_next_condition_ordinal: 0,
-            mcdc_active_dynamic_token: LocalId(id: -1),
-            mcdc_active_tokens: [],
             field_map: {},
             bitfield_map: {},
             bitfield_value_syms: {},
@@ -315,8 +299,6 @@ impl MirLowering:
             canonical_type_symbols: {},
             next_canonical_type_symbol: 1000000000,
             global_symbol_ids: {},
-            global_statics_by_id: {},
-            global_constants_by_id: {},
             global_const_exprs: {},
             array_global_mutation_warned: {},
             target_context: target_context,
@@ -342,6 +324,34 @@ impl MirLowering:
         if defining_module != "":
             return "{defining_module}::{symbol.name}"
         symbol.name
+
+    # Bare struct name for a `MirTypeKind.Struct(symbol)`.
+    #
+    # `canonical_mir_type_symbol` above MINTS ids from 1000000000 up that exist
+    # only in `canonical_type_symbols` -- `symbols.get_symbol_raw` knows nothing
+    # about them. So a consumer that only asked the symbol table got nil for
+    # every canonicalized struct type and silently fell back to "unknown type".
+    # That is what left `for f in d.values()` with no element struct name and
+    # collapsed every field read to offset 0 (see the bug comment in
+    # _MirLoweringExpr/method_calls_literals.spl's values/keys arm). Try the
+    # real symbol table first, then reverse the canonical map, returning the
+    # bare name (the segment after the last '.') because that is the form
+    # `struct_value_syms` / `resolve_field_index` are keyed on.
+    me mir_struct_symbol_name(symbol: SymbolId) -> text:
+        match self.symbols.get_symbol_raw(symbol.id):
+            case Some(info):
+                if info != nil and info.name != "": return info.name
+            case None: ()
+        val canonical_keys = self.canonical_type_symbols.keys()
+        var cki = 0
+        while cki < canonical_keys.len():
+            val canonical_key = canonical_keys[cki]
+            if self.canonical_type_symbols[canonical_key] == symbol.id:
+                val canonical_parts = canonical_key.split(".")
+                if canonical_parts.len() == 0: return canonical_key
+                return canonical_parts[canonical_parts.len() - 1]
+            cki = cki + 1
+        ""
 
     me canonical_mir_type_symbol(symbol: SymbolId) -> SymbolId:
         val symbol_info = self.symbols.get_symbol_raw(symbol.id)
@@ -664,21 +674,14 @@ impl MirLowering:
     me bootstrap_function_signature(name: text) -> MirSignature:
         MirSignature(params: [], return_type: self.bootstrap_call_return_type(name), is_variadic: false)
 
-    me bootstrap_fallthrough_return_operand(
-        function_name: text,
-        return_type: MirType,
-        span: Span?,
-    ) -> MirOperand?:
+    fn bootstrap_default_return_operand(return_type: MirType) -> MirOperand?:
         if return_type.kind == MirTypeKind.Unit:
             return nil
-        # SFFI v2 P0: bootstrap lowering must not manufacture the ABI default
-        # for a value-returning function. That would turn missing source or a
-        # lost tail expression into a valid-looking nil/zero/false result.
-        self.error_fatal(
-            "E-SFFI-016: missing return in non-unit function '" + function_name + "'",
-            span,
-        )
-        nil
+        # Explicit tail: mixed return/implicit-tail returns 0 on the stage4
+        # native lane — non-unit bootstrap stubs then fed a garbage Ret
+        # payload into the adapter (SIGILL in cl_translate_operand). The Some
+        # box itself is CORRECT here (Ret payload consumers are box-paired).
+        return Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Zero, return_type)))
 
     me lower_bootstrap_stub_function(symbol: SymbolId, name: text) -> MirFunction:
         if mir_lower_trace_enabled():
@@ -686,8 +689,7 @@ impl MirLowering:
         val signature = self.bootstrap_function_signature(name)
         var bldr = self.builder
         bldr.begin_function(symbol, name, signature, nil)
-        bldr.terminate_return(self.bootstrap_fallthrough_return_operand(
-            name, signature.return_type, nil))
+        bldr.terminate_return(self.bootstrap_default_return_operand(signature.return_type))
         val fn_result = bldr.end_function()
         self.builder = bldr
         if mir_lower_trace_enabled():
@@ -734,8 +736,7 @@ impl MirLowering:
             if result.?:
                 bldr2.terminate_return(Some(mir_operand_copy(result ?? LocalId(id: 0))))
             else:
-                bldr2.terminate_return(self.bootstrap_fallthrough_return_operand(
-                    name, signature.return_type, Some(body.span)))
+                bldr2.terminate_return(self.bootstrap_default_return_operand(signature.return_type))
         self.builder = bldr2
         var bldr3 = self.builder
         val fn_result = bldr3.end_function()
@@ -1052,11 +1053,6 @@ impl MirLowering:
 
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
-        self.unsafe_depth = 0
-        val saved_trace_scope_depth = mir_trace_scope_enter()
-        # Refresh before any expression can reach lower_expr_impl. This is a
-        # per-module lowering session, not a process-lifetime trace cache.
-        self.begin_expr_trace_session()
         self.symbols = module.symbols
         var function_names: [text] = []
         for raw_func in module.functions.values():
@@ -1096,8 +1092,6 @@ impl MirLowering:
         self.struct_method_return_is_array = {}
         self.struct_method_return_is_optional = {}
         self.global_symbol_ids = {}
-        self.global_statics_by_id = {}
-        self.global_constants_by_id = {}
         val bootstrap_mode = (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         val trace_enabled = mir_lower_trace_enabled()
         val bootstrap_trace = bootstrap_mode and trace_enabled
@@ -1194,17 +1188,7 @@ impl MirLowering:
                     case HirTypeKind.Str:
                         bootstrap_fn_ret_type_register(fn_.name, self.lower_type(fn_.return_type))
                     case _: ()
-                # #158 Phase C: a generic TEMPLATE is non-emittable (hardening
-                # plan 9.3 step 12). It carries unsubstituted TypeParams, so
-                # lowering it produces opaque pointer-width slots and silent
-                # wrong answers. 40.mono emits the specializations that ARE
-                # reachable; anything still flagged here has zero live
-                # instantiations and must simply not be emitted. A generic
-                # call that mono could NOT rewrite is still a hard error
-                # (E-MONO-030), so this skip cannot hide a real use.
-                if fn_.is_generic_template:
-                    ()
-                elif not self.hir_function_is_extern(fn_):
+                if not self.hir_function_is_extern(fn_):
                     if bootstrap_trace:
                         print "[mir-lower] function:start {fn_.name}"
                     var mir_fn = self.lower_function(fn_)
@@ -1229,9 +1213,7 @@ impl MirLowering:
             # the now-complete module so its statics and module index are
             # available to the flat bootstrap LLVM emitter.
             bootstrap_mir_modules_add(self.builder.module)
-            val bootstrap_result = self.builder.module
-            mir_trace_scope_exit(saved_trace_scope_depth)
-            return bootstrap_result
+            return self.builder.module
 
         # Build field map from struct and class definitions
         # (use while loops - for-in broken in compiled native code)
@@ -1486,29 +1468,18 @@ impl MirLowering:
 
         # Lower functions (skip extern declarations - they have no body)
         val fn_values = module.functions.values()
-        var module_has_rt_hal = false
-        for candidate in fn_values:
-            if candidate.func_attr.is_rt_hal and (candidate.func_attr.rt_hal_compare_c or candidate.func_attr.rt_hal_compare_rust):
-                module_has_rt_hal = true
         if bootstrap_trace:
             print "[mir-lower] function-keys"
         var fni = 0
         while fni < fn_values.len():
             val fn_: HirFunction = fn_values[fni]
-            if fn_.is_generic_template:
-                fni = fni + 1
-                # #158 Phase C: generic templates are non-emittable (see the
-                # function-symbol loop above for the full rationale).
-            elif self.hir_function_is_extern(fn_):
+            if self.hir_function_is_extern(fn_):
                 fni = fni + 1
                 # skip extern functions
             else:
                 if bootstrap_trace:
                     print "[mir-lower] function:start"
                 var mir_fn = self.lower_function(fn_)
-                if (module_has_rt_hal or rt_hal_compilation_requires_finalize()) and fn_.name == "main":
-                    mir_fn = inject_rt_hal_controller_finalize(
-                        mir_fn, rt_hal_compilation_configured_plan_path())
                 if fn_.has_vhdl_metadata:
                     mir_fn.has_vhdl_metadata = true
                     mir_fn.vhdl_metadata = fn_.vhdl_metadata
@@ -1531,9 +1502,7 @@ impl MirLowering:
 
         if bootstrap_trace:
             print "[mir-lower] lower_module:done"
-        val result = self.builder.module
-        mir_trace_scope_exit(saved_trace_scope_depth)
-        result
+        self.builder.module
 
     # mutglobal lane (module-level `var` mutation, see
     # scratchpad/mutglobal_plan.md): `lower_const` (function_lowering.spl,
@@ -1625,18 +1594,14 @@ impl MirLowering:
         var bldr = self.builder
         var module_ = bldr.module
         var statics = module_.statics
-        val static_ = MirStatic(
+        statics[const_.symbol] = MirStatic(
             symbol: const_.symbol,
             name: global_link_name,
             type_: static_type,
             init: init_const,
-            is_mutable: const_.is_mutable,
-            alignment: static_type.alignment(),
-            visibility: const_.visibility
+            is_mutable: const_.is_mutable
         )
-        statics[const_.symbol] = static_
         module_.statics = statics
-        self.global_statics_by_id[sym_id] = static_
         bldr.module = module_
         self.builder = bldr
 
@@ -1663,9 +1628,6 @@ impl MirLowering:
             case _: false
 
     me lower_runtime_module_initializers_named(module_name_raw: text, consts: [HirConst], bootstrap_module_index: i64 = -1):
-        # Bootstrap helpers invoke this entry before lower_function, and its
-        # initializer bodies lower expressions directly.
-        self.begin_expr_trace_session()
         var dynamic = runtime_module_initializers_in_declaration_order(consts)
         # Function-pointer slots need the same runtime-initialized global
         # storage, but cannot be recognised by the free type-driven predicate
@@ -1714,18 +1676,14 @@ impl MirLowering:
             val runtime_owner_slashes = runtime_owner_dots.replace("/", "_")
             val runtime_owner_safe = runtime_owner_slashes.replace("-", "_")
             val runtime_global_link_name = if runtime_owner_safe == "": const_.name else: "{runtime_owner_safe}__{const_.name}"
-            val runtime_static = MirStatic(
+            statics[const_.symbol] = MirStatic(
                 symbol: const_.symbol,
                 name: runtime_global_link_name,
                 type_: value_type,
                 init: nil,
-                is_mutable: const_.is_mutable,
-                alignment: value_type.alignment(),
-                visibility: const_.visibility
+                is_mutable: const_.is_mutable
             )
-            statics[const_.symbol] = runtime_static
             value_module.statics = statics
-            self.global_statics_by_id[const_.symbol.id] = runtime_static
             value_builder.module = value_module
             value_builder.emit(MirInst(kind: MirInstKind.StoreGlobal(const_.symbol, mir_operand_copy(value)), span: Some(const_.span)))
             self.builder = value_builder

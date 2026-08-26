@@ -5,7 +5,6 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -16,7 +15,6 @@ use std.string_core.{char_code}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_enum_discriminant(value: Any) -> i64
-@unsafe(reason: "raw retained-dictionary handle probe; the handle and key representation must match the active runtime", capabilities: [ffi])
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
@@ -28,43 +26,6 @@ fn hir_expr_env_get(key: text) -> text?:
 
 fn hir_expr_kind_disc(k: ExprKind) -> i64:
     rt_enum_discriminant(k)
-
-# Only a Class or a Struct declaration carries retained field metadata; any
-# other SymbolKind reaching the field-owner gate is a misresolved symbol id.
-fn hir_symbol_kind_owns_field_metadata(kind: SymbolKind) -> bool:
-    match kind:
-        case SymbolKind.Class: true
-        case SymbolKind.Struct: true
-        case _: false
-
-# Probe-only: name a SymbolKind for the level-gated field-visibility trace.
-fn hir_symbol_kind_probe_name(kind: SymbolKind) -> text:
-    match kind:
-        case SymbolKind.Class: "Class"
-        case SymbolKind.Struct: "Struct"
-        case SymbolKind.Enum: "Enum"
-        case SymbolKind.Trait: "Trait"
-        case SymbolKind.TypeAlias: "TypeAlias"
-        case SymbolKind.Function: "Function"
-        case SymbolKind.Method: "Method"
-        case SymbolKind.Variable: "Variable"
-        case SymbolKind.Parameter: "Parameter"
-        case SymbolKind.Field: "Field"
-        case SymbolKind.EnumVariant: "EnumVariant"
-        case SymbolKind.TypeParam: "TypeParam"
-        case SymbolKind.Const: "Const"
-        case SymbolKind.Module: "Module"
-        case SymbolKind.Import: "Import"
-        case _: "Other"
-
-# Level-gated field-visibility denial probe (default OFF). Flip to `true`,
-# rebuild stage 2 and run stage 3 to attribute every
-# `field \`X\` is not visible from this module` to the exact branch of
-# `field_access_for_expr` that returned 0. Kept (not deleted) per the logging
-# retention policy: this is the only discriminator between "genuine private
-# field", "composite name registered under a key the reader never builds", and
-# "retained member metadata missing entirely".
-val HIR_MEMBER_VIS_TRACE = false
 
 fn is_tuple_positional_field(name: text) -> bool:
     """True iff `name` is composed entirely of ASCII digits -- the parser's
@@ -99,16 +60,7 @@ fn is_interp_builtin_fn(name: text) -> bool:
      name == "file_read" or name == "file_write" or name == "file_delete" or
      name == "env_get" or name == "env_set" or name == "int" or
      name == "float" or name == "bool" or name == "panic" or
-     name == "str" or name == "text" or
-     # Drifted out of sync with lookup_builtin_tag: `assert cond, msg`
-     # desugars to `__assert(...)` in parser_stmts.spl, and every module
-     # containing an `assert` statement died here with
-     # "unresolved name: __assert" even though interpreter_calls.spl
-     # dispatches the tag. The three probe/stat builtins below had drifted
-     # the same way. Kept in sync by
-     # scripts/check/check-interp-builtin-list-sync.shs.
-     name == "__assert" or name == "file_is_regular_no_follow" or
-     name == "rt_file_exists_probe_begin" or name == "rt_file_exists_probe_end")
+     name == "str" or name == "text")
 
 fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
     """`i32(x)`-style primitive casts: a fixed-width numeric type name used
@@ -197,19 +149,6 @@ fn _hir_missing_field_type() -> HirType:
 # ============================================================================
 
 impl HirLowering:
-    # The `rt_dict_contains` probe lives in a STATEMENT-position `unsafe` block
-    # inside its own method, not `val x = unsafe(...):` at the use site. The
-    # seed interpreter parses the expression form as a call to a function
-    # literally named `unsafe` and dies with error[E1002]
-    # "function 'unsafe' not found" -- a diagnostic that names neither this
-    # file nor the construct. Kept as a METHOD (not a free function) so `self`
-    # stays in scope and the composite index's aliased type never has to be
-    # spelled as a parameter. See
-    # doc/08_tracking/bug/seed_val_bound_unsafe_block_parsed_as_call_2026-08-24.md
-    me _composite_metadata_missing(composite_name: text) -> bool:
-        unsafe(capabilities: [ffi]):
-            composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name)
-
     me field_module_callable(module_name: text, field_name: text) -> SymbolId?:
         # NOTE: deliberately does NOT filter candidates by `candidate.kind ==
         # SymbolKind.Function`. A same-process cross-module symbol-kind
@@ -254,11 +193,10 @@ impl HirLowering:
     me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
         val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
         if base_symbol.is_valid():
-            unsafe(capabilities: [ffi]):
-                if rt_dict_contains(self.local_tuple_types, base_symbol.id):
-                    val element_types = self.local_tuple_types[base_symbol.id]
-                    if index >= 0 and index < element_types.len():
-                        return element_types[index]
+            if rt_dict_contains(self.local_tuple_types, base_symbol.id):
+                val element_types = self.local_tuple_types[base_symbol.id]
+                if index >= 0 and index < element_types.len():
+                    return element_types[index]
         nil
 
     me field_type_for_owner(owner_symbol_id: SymbolId, field_name: text) -> HirType?:
@@ -268,25 +206,17 @@ impl HirLowering:
             case _: found
 
     me field_type_for_owner_raw(raw_owner_symbol_id: i64, field_name: text) -> HirType:
-        unsafe(capabilities: [ffi]):
-            if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
-                if val owner_module = owner_symbol.defining_module:
-                    # Interpolation, NOT a 3-operand `text` `+` chain: that form is
-                    # a known silent-operand-drop landmine on the staged native /
-                    # freestanding path (memory recipe #8 -- `a+":"+b+"\n"` came
-                    # back length 1). The canonical composite key is load-bearing:
-                    # when it comes out wrong, every field of the composite is
-                    # denied at once with `field `X` is not visible from this
-                    # module`.
-                    val canonical_name = owner_module + "." + owner_symbol.name
-                    if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
-                        val canonical_fields = self.struct_field_types_by_name[canonical_name]
-                        if rt_dict_contains(canonical_fields, field_name):
-                            return canonical_fields[field_name]
-                if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
-                    val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
-                    if rt_dict_contains(owner_fields, field_name):
-                        return owner_fields[field_name]
+        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+            if val owner_module = owner_symbol.defining_module:
+                val canonical_name = owner_module + "." + owner_symbol.name
+                if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
+                    val canonical_fields = self.struct_field_types_by_name[canonical_name]
+                    if rt_dict_contains(canonical_fields, field_name):
+                        return canonical_fields[field_name]
+            if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
+                val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
+                if rt_dict_contains(owner_fields, field_name):
+                    return owner_fields[field_name]
         _hir_missing_field_type()
 
     me field_type_for_base(base_symbol: SymbolId, field_name: text) -> HirType?:
@@ -295,333 +225,13 @@ impl HirLowering:
             case HirTypeKind.Error: nil
             case _: found
 
-    me composite_name_for_base_raw(raw_base_symbol_id: i64) -> text:
-        unsafe(capabilities: [ffi]):
-            if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
-                return self.local_struct_types[raw_base_symbol_id]
-        val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
-        if raw_owner_symbol_id >= 0:
-            return self.composite_name_for_owner_raw(raw_owner_symbol_id)
-        if self.current_method_self_symbol_id >= 0:
-            if val base_definition = self.symbols.get_symbol_raw(raw_base_symbol_id):
-                if base_definition.name == "self" or base_definition.name == "me":
-                    if val self_owner = self.symbols.get_symbol_raw(self.current_method_self_symbol_id):
-                        return self_owner.name
-        ""
-
-    me composite_name_for_owner_raw(raw_owner_symbol_id: i64) -> text:
-        # READ THIS BEFORE "SIMPLIFYING" ANYTHING HERE.
-        #
-        # Stage 3's HIR outcome on this tree is BIMODAL, and that was only
-        # established on 2026-08-24 after several conclusions had already been
-        # drawn from single runs. The two modes, same binary, same tree:
-        #   GOOD: 692/692 modules reached, `[hir-fatal-count]` sum 0.
-        #   BAD : ~390-435 reached, ~6500 fatals, with a STABLE profile --
-        #         unresolved MirFunction ~450 / MirModule ~375 / MirOperand
-        #         ~300 / MirBlock ~230 / ExportAttr ~205 / LayoutAttr ~205 /
-        #         DriverManifestAttr ~165, plus ~1600 `ambiguous explicit
-        #         callable dependency`.
-        # Observed GOOD in 5 runs across 3 different trees and BAD in 3 runs;
-        # two of those BAD runs were previously (and WRONGLY) attributed to
-        # edits made in this function -- an interpolation rewrite and removing
-        # the memo below. Their error profiles are byte-for-byte the same
-        # bimodal BAD profile, so neither was demonstrated to cause anything.
-        #
-        # Consequence: DO NOT trust any single-run verdict about this function,
-        # in either direction, and do not treat the memo or the `+` chain as
-        # proven load-bearing -- they are simply not disproven. Any change here
-        # needs >= 4 runs and must be judged on the GOOD/BAD mode RATIO, not on
-        # one number.
-        #
-        # What IS solid: with the call-site recovery in `field_access_for_expr`
-        # below, GOOD-mode runs reach 692/692 with ZERO HIR fatals, which is
-        # what this whole subsystem was blocking on.
-        unsafe(capabilities: [ffi]):
-            if rt_dict_contains(self.composite_name_by_owner_symbol, raw_owner_symbol_id):
-                return self.composite_name_by_owner_symbol[raw_owner_symbol_id]
-        var result = ""
-        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
-            if val owner_module = owner_symbol.defining_module:
-                val canonical_name = owner_module + "." + owner_symbol.name
-                unsafe(capabilities: [ffi]):
-                    if rt_dict_contains(self.struct_field_access_by_name, canonical_name):
-                        result = canonical_name
-            if result == "":
-                unsafe(capabilities: [ffi]):
-                    if rt_dict_contains(self.struct_field_access_by_name, owner_symbol.name):
-                        result = owner_symbol.name
-        # Cache POSITIVE results only. Imported composites are registered into
-        # `struct_field_access_by_name` lazily (`register_imported_symbol` /
-        # `module_import_registration`), so a lookup that happens before the
-        # owner's composite is published legitimately misses -- and memoizing
-        # that miss froze the "" answer for the whole module. Measured: error
-        # MODULES 10 -> 3 with this one line.
-        if result != "":
-            self.composite_name_by_owner_symbol[raw_owner_symbol_id] = result
-        result
-
-    me named_owner_raw_from_type(type_: HirType) -> i64:
-        match type_.kind:
-            case HirTypeKind.Named(owner, _): owner.id
-            case HirTypeKind.Ref(inner, _): self.named_owner_raw_from_type(inner)
-            case HirTypeKind.Ptr(inner, _): self.named_owner_raw_from_type(inner)
-            case HirTypeKind.Optional(inner): self.named_owner_raw_from_type(inner)
-            case HirTypeKind.Array(inner, _): self.named_owner_raw_from_type(inner)
-            case HirTypeKind.Slice(inner): self.named_owner_raw_from_type(inner)
-            case _: -1
-
-    me named_owner_raw_for_expr(expr: HirExpr) -> i64:
-        if expr.has_type_:
-            val typed_owner = self.named_owner_raw_from_type(expr.type_)
-            if typed_owner >= 0:
-                return typed_owner
-        val direct_symbol = _hir_expr_symbol_or_invalid(expr.kind)
-        if direct_symbol.is_valid():
-            return self.symbols.get_symbol_named_type_raw(direct_symbol.id)
-        match expr.kind:
-            case HirExprKind.Call(callee, _, _):
-                val callee_symbol = _hir_expr_symbol_or_invalid(callee.kind)
-                if callee_symbol.is_valid():
-                    if val definition = self.symbols.get_symbol_raw(callee_symbol.id):
-                        if definition.type_ != nil:
-                            val callable_type = definition.type_ ?? _hir_missing_field_type()
-                            match callable_type.kind:
-                                case HirTypeKind.Function(_, return_type, _):
-                                    val return_owner = self.named_owner_raw_from_type(return_type)
-                                    if return_owner >= 0:
-                                        return return_owner
-                                case _: ()
-            case _: ()
-        -1
-
-    me composite_name_for_expr(expr: HirExpr) -> text:
-        val owner = self.named_owner_raw_for_expr(expr)
-        if owner < 0:
-            return ""
-        self.composite_name_for_owner_raw(owner)
-
-    me field_access_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> i64:
-        """Return 1 allowed, 0 denied, -1 when no retained member metadata exists."""
-        val composite_name = self.composite_name_for_base_raw(raw_base_symbol_id)
-        unsafe(capabilities: [ffi]):
-            if composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name):
-                return -1
-            val fields = self.struct_field_access_by_name[composite_name]
-            if not rt_dict_contains(fields, field_name):
-                return -1
-            if fields[field_name]:
-                return 1
-        0
-
-    me field_access_for_expr(expr: HirExpr, field_name: text) -> i64:
-        val direct_symbol = _hir_expr_symbol_or_invalid(expr.kind)
-        if direct_symbol.is_valid():
-            # Use the base-symbol owner path first. Besides locals with an
-            # explicitly retained composite, it owns the staged-safe
-            # `self`/`me` recovery through current_method_self_symbol_id.
-            # Bypassing it and resolving the receiver's aliased type ID below
-            # made an impl capsule reject its defining struct's private fields
-            # (BitfieldMirLower.builder produced seven Stage-3 HIR fatals).
-            val direct_access = self.field_access_for_base_raw(direct_symbol.id, field_name)
-            if direct_access >= 0:
-                return direct_access
-            unsafe(capabilities: [ffi]):
-                if rt_dict_contains(self.local_struct_types, direct_symbol.id):
-                    val local_composite = self.local_struct_types[direct_symbol.id]
-                    if not rt_dict_contains(self.struct_field_access_by_name, local_composite):
-                        if HIR_MEMBER_VIS_TRACE:
-                            eprint("[member-vis-deny] branch=local-composite-unregistered module={self.module_filename} field={field_name} composite={local_composite}")
-                        return 0
-                    val local_fields = self.struct_field_access_by_name[local_composite]
-                    if not rt_dict_contains(local_fields, field_name):
-                        return -1
-                    if local_fields[field_name]:
-                        return 1
-                    if HIR_MEMBER_VIS_TRACE:
-                        eprint("[member-vis-deny] branch=local-field-denied module={self.module_filename} field={field_name} composite={local_composite}")
-                    return 0
-        val owner = self.named_owner_raw_for_expr(expr)
-        if owner < 0:
-            return -1
-        # An owner id that resolves to NO symbol in THIS module's table is a
-        # failed lookup, not a visibility decision, and must answer "unknown"
-        # (-1) rather than "denied" (0). `named_owner_raw_for_expr` can return a
-        # non-negative id that is not a live symbol here: its first branch reads
-        # `HirTypeKind.Named(owner, _).id` straight out of the expression's
-        # `type_`, and a type projected from an IMPORTED module surface carries a
-        # SymbolId minted in the declaring module's numbering, which need not
-        # name anything in the importer's table. Falling through to the
-        # `composite_name == ""` arm below turned every such miss into
-        # `field `X` is not visible from this module`.
-        #
-        # Measured before changing anything (stage 3, 2026-08-24, probe below
-        # flipped on): ALL 313 denials in a full 692/692-module run took that
-        # arm, and every one of them printed `composite=` EMPTY together with
-        # `owner_name=<no-symbol>` -- i.e. not one denial was a real composite
-        # with real member metadata, and `branch=retained-false` (the genuine
-        # private-field verdict) fired ZERO times. The narrow test below is
-        # therefore exactly the population and nothing else: a REAL symbol whose
-        # composite has no retained member metadata still denies, which is the
-        # malformed-boundary case the arm below was written for.
-        # `symbols.symbols.has(id)` rather than unwrapping `get_symbol_raw`'s
-        # Option: the typed-owner predicate plus bracket read is the route
-        # `claim_materialized_payload_binding` already documents as scalar-safe
-        # on the staged native ABI.
-        if not self.symbols.symbols.has(owner):
-            if HIR_MEMBER_VIS_TRACE:
-                eprint("[member-vis-unknown] branch=owner-symbol-absent module={self.module_filename} field={field_name} owner_raw={owner}")
-            return -1
-        val composite_name = self.composite_name_for_owner_raw(owner)
-        # NO retained member metadata for this owner answers "unknown" (-1), the
-        # same verdict the SIBLING `field_access_for_base_raw` above already
-        # returns for the byte-identical condition. The two disagreed, and this
-        # one's `return 0` was the aggressive reading: it treated an owner it
-        # could not describe as a denial.
-        #
-        # Measured, twice, on full 692/692-module stage-3 runs with the probe
-        # below flipped on: probe run A = 313 denials, ALL of them this arm with
-        # `composite=` empty and `owner_name=<no-symbol>`; probe run B (after the
-        # owner-symbol-absent guard above landed) = 215 correctly answered
-        # unknown plus 33 still here. Across BOTH runs, `branch=retained-false`
-        # -- the arm that fires when metadata EXISTS and the field is genuinely
-        # not accessible -- fired **0 times**. Not one field-visibility error in
-        # the whole compiler was a real private-field violation.
-        #
-        # The surviving 33 are misresolved owners, which the probe output names
-        # outright: `field=symbols` resolving to owner
-        # `hir_phase_profile_count_qtype` (a FUNCTION), `field=loops` to
-        # `HirBinOp` (an unrelated enum), `field=config` to `destination_owner`
-        # (a local). Those are symbol-id aliasing, the same family as the 78
-        # "enum payload dependency conflicts" documented in
-        # `claim_materialized_payload_binding`, and denying a field read on the
-        # strength of one is a false positive with no source-level remedy.
-        #
-        # Visibility is NOT weakened: whenever the owner's member metadata is
-        # actually retained, `fields[field_name] == false` still returns 0 and
-        # still errors.
-        #
-        # AND YET THIS ARM MUST KEEP RETURNING 0 -- measured, 3/3 runs, do not
-        # "fix" it again. Changing it to -1 to match the sibling was built and
-        # run: field-visibility errors went to **0**, and the build got much
-        # WORSE -- HIR reach 692/692 -> 395/402/395, error modules 47 -> the 200
-        # poison budget, total fatal 312 -> 6517/6515/6517, with an entirely
-        # different error profile (447 `ambiguous explicit callable dependency`,
-        # plus unresolved ExportAttr 98 / LayoutAttr 93 / MirModule 89 /
-        # FunctionAttr 70 / MirFunction 63 / MirBlock 56 / DriverManifestAttr
-        # 54). Letting the Field expression continue past this gate on an owner
-        # the lowerer cannot describe cascades into the import/materialization
-        # path. The permissive verdict costs ~20x what it saves.
-        val composite_metadata_missing = self._composite_metadata_missing(composite_name)
-        if composite_metadata_missing:
-            if HIR_MEMBER_VIS_TRACE:
-                var owner_name = "<no-symbol>"
-                var owner_module = "<no-module>"
-                var owner_kind = "<no-kind>"
-                if val owner_symbol = self.symbols.get_symbol_raw(owner):
-                    owner_name = owner_symbol.name
-                    owner_module = owner_symbol.defining_module ?? "<nil>"
-                    owner_kind = hir_symbol_kind_probe_name(owner_symbol.kind)
-                eprint("[member-vis-deny] branch=owner-metadata-missing module={self.module_filename} field={field_name} composite={composite_name} owner_name={owner_name} owner_module={owner_module} owner_kind={owner_kind}")
-            # CALL-SITE composite recovery (2026-08-24, measured, and NOT
-            # redundant with the module-qualified registration key ported from
-            # origin/main `467f8f66757`). Both were measured on this tree:
-            # qualified key alone -> 115 HIR fatals (unchanged); this recovery
-            # alone -> **0** HIR fatals with reach 692/692, twice. The reason
-            # they are complementary is that the defect here is not the KEY, it
-            # is that `composite_name_for_owner_raw` answers a value whose
-            # `.len()` is -1 -- NIL, not "" -- so its own `result == ""` guard
-            # skips its bare-name fallback and no key of any spelling is ever
-            # tried. An `rt_dict_contains(self.struct_field_access_by_name,
-            # <owner name>)` probe in a sibling `me` method on the same `self`,
-            # in the same lowering context, reported TRUE for every residual
-            # denial (`JitInstantiator`, `SymbolTable`, `HirConst`,
-            # `LlvmCapabilityReport`) while the callee answered nil for the same
-            # owner in the same call. So the metadata IS reachable from here;
-            # re-derive the key with the `var` + field-copy idiom that was
-            # measured working and run the NORMAL verdict. This is not a
-            # permissive bypass: it ends in the same `fields[field_name]` check
-            # the success path uses, so a genuinely private field still denies.
-            # Reading the possibly-colliding bare key is safe for THIS gate --
-            # the map holds name -> bool visibility, and the drifted duplicate
-            # declarations share field NAMES (they differ in field TYPES, which
-            # is what the qualified key exists to fix).
-            var owner_bare_name = "-"
-            var owner_qualified_name = "-"
-            if val owner_symbol_bare = self.symbols.get_symbol_raw(owner):
-                owner_bare_name = owner_symbol_bare.name
-                if val owner_bare_module = owner_symbol_bare.defining_module:
-                    owner_qualified_name = owner_bare_module + "." + owner_bare_name
-            unsafe(capabilities: [ffi]):
-                if rt_dict_contains(self.struct_field_access_by_name, owner_qualified_name):
-                    val qualified_fields = self.struct_field_access_by_name[owner_qualified_name]
-                    if not rt_dict_contains(qualified_fields, field_name):
-                        return -1
-                    if qualified_fields[field_name]:
-                        return 1
-                    return 0
-                if rt_dict_contains(self.struct_field_access_by_name, owner_bare_name):
-                    val bare_fields = self.struct_field_access_by_name[owner_bare_name]
-                    if not rt_dict_contains(bare_fields, field_name):
-                        return -1
-                    if bare_fields[field_name]:
-                        return 1
-                    return 0
-            # NARROW discriminator (2026-08-24, measured): only a Class or a
-            # Struct symbol can OWN retained field metadata in
-            # `struct_field_access_by_name`. An owner id that resolves to a
-            # Function, Variable, Parameter, Field or Enum symbol is symbol-id
-            # ALIASING -- the misresolution family RUN 11 named outright
-            # (`field=symbols` -> `hir_phase_profile_count_qtype`, a FUNCTION;
-            # `field=loops` -> `HirBinOp`, an unrelated enum) -- and denying a
-            # field read on the strength of one is a false positive with no
-            # source-level remedy. Answer "unknown" (-1) for those and KEEP
-            # denying for a real Class/Struct owner whose metadata is missing,
-            # which is the malformed-compiler-boundary case this arm was
-            # written for. This is deliberately NOT the blanket -1 that was
-            # tried and reverted (see the long note above): that let EVERY
-            # undescribable owner through and cost ~20x what it saved.
-            if val owner_symbol_kind = self.symbols.get_symbol_raw(owner):
-                if not hir_symbol_kind_owns_field_metadata(owner_symbol_kind.kind):
-                    return -1
-            return 0
-        val fields = self.struct_field_access_by_name[composite_name]
-        unsafe(capabilities: [ffi]):
-            if not rt_dict_contains(fields, field_name):
-                return -1
-        if fields[field_name]:
-            return 1
-        if HIR_MEMBER_VIS_TRACE:
-            eprint("[member-vis-deny] branch=retained-false module={self.module_filename} field={field_name} composite={composite_name}")
-        0
-
-    me constructor_access_for_name(name: text) -> i64:
-        """Return 1 allowed, 0 denied, -1 for a non-composite/unknown callee."""
-        unsafe(capabilities: [ffi]):
-            if not rt_dict_contains(self.struct_constructor_access_by_name, name):
-                return -1
-        if self.struct_constructor_access_by_name[name]:
-            return 1
-        0
-
-    me qualified_constructor_access(qualifier: text, name: text) -> i64:
-        val qualifier_symbol = self.symbols.lookup_or_invalid(qualifier)
-        if qualifier_symbol.is_valid():
-            if val definition = self.symbols.get_symbol_raw(qualifier_symbol.id):
-                if val owner_module = definition.defining_module:
-                    val canonical_name = owner_module + "." + name
-                    val canonical_access = self.constructor_access_for_name(canonical_name)
-                    if canonical_access >= 0:
-                        return canonical_access
-        self.constructor_access_for_name(name)
-
     me field_type_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> HirType:
-        unsafe(capabilities: [ffi]):
-            if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
-                val struct_name = self.local_struct_types[raw_base_symbol_id]
-                if rt_dict_contains(self.struct_field_types_by_name, struct_name):
-                    val struct_fields = self.struct_field_types_by_name[struct_name]
-                    if rt_dict_contains(struct_fields, field_name):
-                        return struct_fields[field_name]
+        if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
+            val struct_name = self.local_struct_types[raw_base_symbol_id]
+            if rt_dict_contains(self.struct_field_types_by_name, struct_name):
+                val struct_fields = self.struct_field_types_by_name[struct_name]
+                if rt_dict_contains(struct_fields, field_name):
+                    return struct_fields[field_name]
 
         val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
         if raw_owner_symbol_id >= 0:
@@ -788,7 +398,7 @@ impl HirLowering:
                 bootstrap_builtin_signature(name, span)
             else:
                 nil
-            val bsym = self.symbols.define(name, SymbolKind.Function, symbol_type, span, Visibility.Private, false, nil)
+            val bsym = self.symbols.define(name, SymbolKind.Function, symbol_type, span, false, false, nil)
             HirExprKind.NamedVar(bsym, name)
         else:
             if self.try_register_bootstrap_global_symbol(name, span):

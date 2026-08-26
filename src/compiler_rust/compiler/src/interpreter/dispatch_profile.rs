@@ -44,20 +44,10 @@ fn init() -> bool {
         .unwrap_or(false);
     if on {
         *COUNTS.lock().unwrap() = Some(BTreeMap::new());
-        // `libc` is a [target.'cfg(unix)'.dependencies] entry, so the at-exit
-        // hook has to be cfg-gated for the crate to build on Windows. Say so
-        // out loud instead of collecting counts that would never be printed --
-        // this path only runs when SIMPLE_INTERP_PROFILE was explicitly set,
-        // and a profiler that silently produces nothing is worse than one that
-        // reports it is unavailable.
-        #[cfg(unix)]
         unsafe {
-            libc::atexit(dump_at_exit);
+            unsafe extern "C" { fn atexit(callback: extern "C" fn()) -> i32; }
+            let _ = atexit(dump_at_exit);
         }
-        #[cfg(not(unix))]
-        eprintln!(
-            "[simple] SIMPLE_INTERP_PROFILE ignored: the at-exit dispatch dump is not wired on this platform"
-        );
     }
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on
@@ -121,7 +111,7 @@ pub fn render() -> String {
     out
 }
 
-pub(crate) fn expr_kind(expr: &Expr) -> &'static str {
+fn expr_kind(expr: &Expr) -> &'static str {
     match expr {
         Expr::Identifier(_) => "Identifier",
         Expr::Integer(_) | Expr::TypedInteger(_, _) => "Integer",

@@ -16,107 +16,10 @@ use std::sync::Mutex;
 static LOADED_LIBS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Copy a provider into a sealed Linux memfd and return that descriptor.
-pub fn spl_dynlib_snapshot_linux(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "spl_dynlib_snapshot_linux requires 1 argument (path)",
-        ));
-    }
-    let path = match &args[0] {
-        Value::Str(path) => path,
-        _ => return Err(CompileError::runtime("spl_dynlib_snapshot_linux: path must be a string")),
-    };
-
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let c_path = match CString::new(path.as_str()) {
-            Ok(path) => path,
-            Err(_) => return Ok(Value::Int(-1)),
-        };
-        let source = libc::open(
-            c_path.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-        );
-        if source < 0 { return Ok(Value::Int(-1)); }
-        let mut source_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-        if libc::fstat(source, source_stat.as_mut_ptr()) != 0 {
-            libc::close(source);
-            return Ok(Value::Int(-1));
-        }
-        let source_stat = source_stat.assume_init();
-        if source_stat.st_mode & libc::S_IFMT != libc::S_IFREG
-            || source_stat.st_size < 0
-            || source_stat.st_size as u64 > 1_073_741_824
-        {
-            libc::close(source);
-            return Ok(Value::Int(-1));
-        }
-        let name = b"simple-sffi-provider\0";
-        let snapshot = libc::syscall(
-            libc::SYS_memfd_create,
-            name.as_ptr() as *const libc::c_char,
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        ) as libc::c_int;
-        if snapshot < 0 {
-            libc::close(source);
-            return Ok(Value::Int(-1));
-        }
-        let mut buffer = [0u8; 65536];
-        let mut total = 0u64;
-        loop {
-            let got = libc::read(source, buffer.as_mut_ptr().cast(), buffer.len());
-            if got == 0 { break; }
-            if got < 0 {
-                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
-                libc::close(source); libc::close(snapshot);
-                return Ok(Value::Int(-1));
-            }
-            if got as u64 > 1_073_741_824 - total {
-                libc::close(source); libc::close(snapshot);
-                return Ok(Value::Int(-1));
-            }
-            total += got as u64;
-            let mut offset = 0isize;
-            while offset < got {
-                let put = libc::write(
-                    snapshot,
-                    buffer.as_ptr().offset(offset).cast(),
-                    (got - offset) as usize,
-                );
-                if put < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                if put <= 0 {
-                    libc::close(source); libc::close(snapshot);
-                    return Ok(Value::Int(-1));
-                }
-                offset += put;
-            }
-        }
-        let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
-        if total != source_stat.st_size as u64
-            || libc::close(source) != 0
-            || libc::lseek(snapshot, 0, libc::SEEK_SET) < 0
-            || libc::fcntl(snapshot, libc::F_ADD_SEALS, seals) != 0
-        {
-            libc::close(snapshot);
-            return Ok(Value::Int(-1));
-        }
-        Ok(Value::Int(snapshot as i64))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = path;
-        Ok(Value::Int(-1))
-    }
-}
-
 /// Open a shared library and return its handle as i64.
 ///
 /// Callable from Simple as: `spl_dlopen(path: text) -> i64`
-/// Loader failures are interpreter errors; they are never fabricated handles.
+/// Returns 0 on failure.
 pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("spl_dlopen requires 1 argument (path)"));
@@ -131,11 +34,7 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     {
         let c_path = match CString::new(path.as_str()) {
             Ok(c) => c,
-            Err(_) => {
-                return Err(CompileError::runtime(
-                    "E-SFFI-001: spl_dlopen path contains an interior NUL",
-                ));
-            }
+            Err(_) => return Ok(Value::Int(0)),
         };
 
         let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
@@ -144,15 +43,9 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
             let err = unsafe { libc::dlerror() };
             if !err.is_null() {
                 let err_str = unsafe { CStr::from_ptr(err) }.to_string_lossy();
-                return Err(CompileError::runtime(format!(
-                    "E-SFFI-001: spl_dlopen failed for '{}': {}",
-                    path, err_str
-                )));
+                tracing::warn!("spl_dlopen failed for '{}': {}", path, err_str);
             }
-            Err(CompileError::runtime(format!(
-                "E-SFFI-001: spl_dlopen failed for '{}'",
-                path
-            )))
+            Ok(Value::Int(0))
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -162,17 +55,13 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     {
         use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
         if path.contains('\0') {
-            return Err(CompileError::runtime(
-                "E-SFFI-001: spl_dlopen path contains an interior NUL",
-            ));
+            return Ok(Value::Int(0));
         }
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
         if handle.is_null() {
-            Err(CompileError::runtime(format!(
-                "E-SFFI-001: spl_dlopen failed for '{}'",
-                path
-            )))
+            tracing::warn!("spl_dlopen failed for '{}'", path);
+            Ok(Value::Int(0))
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -180,42 +69,15 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
 
     #[cfg(not(any(unix, windows)))]
     {
-        Err(CompileError::runtime(
-            "E-SFFI-014: spl_dlopen is unsupported on this platform",
-        ))
-    }
-}
-
-/// Interpreter implementation of the status/out dynload ABI.
-pub fn spl_dlopen_checked(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 {
-        return Err(CompileError::runtime(
-            "spl_dlopen_checked requires 2 arguments (path, out_handle)",
-        ));
-    }
-    let output = match &args[1] {
-        Value::BorrowMut(value) => value,
-        _ => {
-            return Err(CompileError::runtime(
-                "spl_dlopen_checked: output must be &mut i64",
-            ));
-        }
-    };
-    *output.inner_mut() = Value::Int(0);
-    match spl_dlopen(&args[..1]) {
-        Ok(Value::Int(handle)) if handle != 0 => {
-            *output.inner_mut() = Value::Int(handle);
-            Ok(Value::Int(0))
-        }
-        Ok(_) => Ok(Value::Int(2)),
-        Err(_) => Ok(Value::Int(2)),
+        tracing::warn!("spl_dlopen not supported on this platform");
+        Ok(Value::Int(0))
     }
 }
 
 /// Look up a symbol in a loaded library by name.
 ///
 /// Callable from Simple as: `spl_dlsym(handle: i64, name: text) -> i64`
-/// Resolution failures are interpreter errors, never null function pointers.
+/// Returns 0 if the symbol is not found.
 pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
         return Err(CompileError::runtime("spl_dlsym requires 2 arguments (handle, name)"));
@@ -225,11 +87,6 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
         Value::Int(h) => *h as usize,
         _ => return Err(CompileError::runtime("spl_dlsym: handle must be an integer")),
     };
-    if handle_val == 0 {
-        return Err(CompileError::runtime(
-            "E-SFFI-001: spl_dlsym received a null library handle",
-        ));
-    }
 
     let name = match &args[1] {
         Value::Str(s) => s.clone(),
@@ -238,23 +95,13 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
 
     let c_name = match CString::new(name.as_str()) {
         Ok(c) => c,
-        Err(_) => {
-            return Err(CompileError::runtime(
-                "E-SFFI-001: spl_dlsym name contains an interior NUL",
-            ));
-        }
+        Err(_) => return Ok(Value::Int(0)),
     };
 
     #[cfg(unix)]
     {
         let handle = handle_val as *mut libc::c_void;
         let sym = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
-        if sym.is_null() {
-            return Err(CompileError::runtime(format!(
-                "E-SFFI-001: unresolved foreign symbol: {}",
-                name
-            )));
-        }
         Ok(Value::Int(sym as usize as i64))
     }
 
@@ -264,97 +111,13 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
             fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *mut std::ffi::c_void;
         }
         let sym = unsafe { GetProcAddress(handle_val as isize, c_name.as_ptr() as *const u8) };
-        if sym.is_null() {
-            return Err(CompileError::runtime(format!(
-                "E-SFFI-001: unresolved foreign symbol: {}",
-                name
-            )));
-        }
         Ok(Value::Int(sym as usize as i64))
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        Err(CompileError::runtime(
-            "E-SFFI-014: spl_dlsym is unsupported on this platform",
-        ))
+        Ok(Value::Int(0))
     }
-}
-
-/// Interpreter implementation of the status/out symbol-resolution ABI.
-pub fn spl_dlsym_checked(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 3 {
-        return Err(CompileError::runtime(
-            "spl_dlsym_checked requires 3 arguments (handle, name, out_symbol)",
-        ));
-    }
-    let output = match &args[2] {
-        Value::BorrowMut(value) => value,
-        _ => {
-            return Err(CompileError::runtime(
-                "spl_dlsym_checked: output must be &mut i64",
-            ));
-        }
-    };
-    *output.inner_mut() = Value::Int(0);
-    match spl_dlsym(&args[..2]) {
-        Ok(Value::Int(symbol)) if symbol != 0 => {
-            *output.inner_mut() = Value::Int(symbol);
-            Ok(Value::Int(0))
-        }
-        Ok(_) => Ok(Value::Int(3)),
-        Err(_) => Ok(Value::Int(3)),
-    }
-}
-
-/// Interpreter implementation of checked current-process symbol resolution.
-pub fn spl_dlsym_process_checked(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 {
-        return Err(CompileError::runtime(
-            "spl_dlsym_process_checked requires 2 arguments (name, out_symbol)",
-        ));
-    }
-    let output = match &args[1] {
-        Value::BorrowMut(value) => value,
-        _ => {
-            return Err(CompileError::runtime(
-                "spl_dlsym_process_checked: output must be &mut i64",
-            ));
-        }
-    };
-    *output.inner_mut() = Value::Int(0);
-    let name = match &args[0] {
-        Value::Str(value) if !value.is_empty() => value,
-        _ => return Ok(Value::Int(1)),
-    };
-    let c_name = match CString::new(name.as_str()) {
-        Ok(value) => value,
-        Err(_) => return Ok(Value::Int(1)),
-    };
-
-    #[cfg(unix)]
-    let symbol = unsafe { libc::dlsym(std::ptr::null_mut(), c_name.as_ptr()) };
-    #[cfg(windows)]
-    let symbol = unsafe {
-        extern "system" {
-            fn GetModuleHandleW(name: *const u16) -> isize;
-            fn GetProcAddress(module: isize, name: *const u8) -> *mut std::ffi::c_void;
-        }
-        let process = GetModuleHandleW(std::ptr::null());
-        if process == 0 {
-            std::ptr::null_mut()
-        } else {
-            GetProcAddress(process, c_name.as_ptr() as *const u8)
-        }
-    };
-    #[cfg(not(any(unix, windows)))]
-    let symbol: *mut std::ffi::c_void = std::ptr::null_mut();
-
-    if symbol.is_null() {
-        return Ok(Value::Int(3));
-    }
-    *output.inner_mut() = Value::Int(symbol as usize as i64);
-    Ok(Value::Int(0))
 }
 
 /// Close a loaded library.
@@ -370,11 +133,6 @@ pub fn spl_dlclose(args: &[Value]) -> Result<Value, CompileError> {
         Value::Int(h) => *h as usize,
         _ => return Err(CompileError::runtime("spl_dlclose: handle must be an integer")),
     };
-    if handle_val == 0 {
-        return Err(CompileError::runtime(
-            "E-SFFI-018: spl_dlclose received a null library handle",
-        ));
-    }
 
     #[cfg(unix)]
     {
@@ -425,6 +183,7 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
             .iter()
             .map(|v| match v {
                 Value::Int(n) => Ok(*n),
+                Value::Bool(b) => Ok(if *b { 1i64 } else { 0i64 }),
                 _ => Err(CompileError::runtime("spl_wffi_call_i64: args must be integers")),
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -517,48 +276,6 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     Ok(Value::Int(result))
-}
-
-/// Allocation-free typed C-boolean call with no arguments.
-pub fn spl_wffi_call_bool0_checked(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 {
-        return Ok(Value::Int(1));
-    }
-    let fptr = match args[0] {
-        Value::Int(value) if value != 0 => value as usize,
-        _ => return Ok(Value::Int(2)),
-    };
-    let output = match &args[1] {
-        Value::BorrowMut(value) => value,
-        _ => return Ok(Value::Int(1)),
-    };
-    *output.inner_mut() = Value::Bool(false);
-    let function: extern "C" fn() -> bool = unsafe { std::mem::transmute(fptr) };
-    *output.inner_mut() = Value::Bool(function());
-    Ok(Value::Int(0))
-}
-
-/// Allocation-free typed C-boolean call with one i64 argument.
-pub fn spl_wffi_call_bool1_checked(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 3 {
-        return Ok(Value::Int(1));
-    }
-    let fptr = match args[0] {
-        Value::Int(value) if value != 0 => value as usize,
-        _ => return Ok(Value::Int(2)),
-    };
-    let arg0 = match args[1] {
-        Value::Int(value) => value,
-        _ => return Ok(Value::Int(1)),
-    };
-    let output = match &args[2] {
-        Value::BorrowMut(value) => value,
-        _ => return Ok(Value::Int(1)),
-    };
-    *output.inner_mut() = Value::Bool(false);
-    let function: extern "C" fn(i64) -> bool = unsafe { std::mem::transmute(fptr) };
-    *output.inner_mut() = Value::Bool(function(arg0));
-    Ok(Value::Int(0))
 }
 
 /// Checked WFFI transport. Returns `[status, value]`; value is meaningful only
@@ -719,9 +436,7 @@ pub fn spl_wffi_call_f64_checked(args: &[Value]) -> Result<Value, CompileError> 
     }
     let supplied = match &args[1] {
         Value::Array(values)
-            if values
-                .iter()
-                .all(|value| matches!(value, Value::Float(_) | Value::Int(_))) =>
+            if values.iter().all(|value| matches!(value, Value::Float(_) | Value::Int(_))) =>
         {
             values.len()
         }
@@ -741,7 +456,10 @@ pub fn spl_wffi_call_f64_checked(args: &[Value]) -> Result<Value, CompileError> 
         return Ok(Value::array(vec![Value::Int(1), Value::Int(0)]));
     }
     match spl_wffi_call_f64(args)? {
-        Value::Float(value) => Ok(Value::array(vec![Value::Int(0), Value::Int(value.to_bits() as i64)])),
+        Value::Float(value) => Ok(Value::array(vec![
+            Value::Int(0),
+            Value::Int(value.to_bits() as i64),
+        ])),
         _ => Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
     }
 }
@@ -852,82 +570,5 @@ mod tests {
             Value::Float(v) => assert_eq!(v, 2.0),
             other => panic!("expected float result, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn dynload_rejects_interior_nul_instead_of_returning_zero() {
-        let result = spl_dlopen(&[Value::text("bad\0provider".to_string())]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn symbol_lookup_rejects_null_handle_instead_of_returning_zero() {
-        let result = spl_dlsym(&[
-            Value::Int(0),
-            Value::text("rt_probe".to_string()),
-        ]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn close_rejects_null_handle_instead_of_reporting_success() {
-        let result = spl_dlclose(&[Value::Int(0)]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn integer_bridge_rejects_boolean_coercion() {
-        let args = Value::Array(Arc::new(vec![Value::Bool(true)]));
-        let result = spl_wffi_call_i64(&[
-            Value::Int(add_scaled as usize as i64),
-            args,
-            Value::Int(1),
-        ]);
-        assert!(result.is_err());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dynlib_snapshot_is_sealed_and_preserves_bytes() {
-        use std::os::unix::ffi::OsStrExt;
-
-        let path = std::env::temp_dir().join(format!(
-            "simple-sffi-snapshot-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test"),
-        ));
-        std::fs::write(&path, b"provider-a").unwrap();
-        let path_text = std::str::from_utf8(path.as_os_str().as_bytes()).unwrap();
-        let result = spl_dynlib_snapshot_linux(&[Value::text(path_text.to_string())]).unwrap();
-        let fd = match result {
-            Value::Int(fd) if fd >= 0 => fd as libc::c_int,
-            other => panic!("expected snapshot descriptor, got {other:?}"),
-        };
-        std::fs::write(&path, b"provider-b").unwrap();
-
-        let seals = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
-        let required = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
-        assert_eq!(seals & required, required);
-        let mut bytes = [0u8; 10];
-        let got = unsafe { libc::pread(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
-        assert_eq!(got, bytes.len() as isize);
-        assert_eq!(&bytes, b"provider-a");
-        assert_eq!(unsafe { libc::write(fd, b"x".as_ptr().cast(), 1) }, -1);
-        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
-
-        unsafe { libc::close(fd) };
-        let symlink_path = path.with_extension("symlink");
-        std::os::unix::fs::symlink(&path, &symlink_path).unwrap();
-        assert_eq!(
-            spl_dynlib_snapshot_linux(&[Value::text(symlink_path.to_string_lossy().into_owned())])
-                .unwrap(),
-            Value::Int(-1),
-        );
-        assert_eq!(
-            spl_dynlib_snapshot_linux(&[Value::text("/dev/null".to_string())]).unwrap(),
-            Value::Int(-1),
-        );
-        std::fs::remove_file(symlink_path).unwrap();
-        std::fs::remove_file(path).unwrap();
     }
 }

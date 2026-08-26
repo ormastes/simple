@@ -1,36 +1,20 @@
 # ARM64 filesystem-exec scheduler bridge.
 
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.arch_adapt.user_entry.{dispatch_fs_exec_user_handoff}
-use os.kernel.loader.fs_exec_spawn.{
-    fs_exec_prepare_spawn, fs_exec_adopt_authenticated_with_launch_v1,
-    FsExecAuthenticatedRunResultV1
-}
+use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_v1}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
-use os.kernel.abi.syscall_shim.{
-    shim_init, shim_server_startup_runtime_owner_enable_v1,
-    shim_server_startup_runtime_owner_disable_v1
-}
+use os.kernel.abi.syscall_shim.{shim_init}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.services.netstack.netstack_init.{net_arm64_task_teardown}
 use os.kernel.types.task_types.{TaskId}
-use os.kernel.scheduler.scheduler.{
-    wait_collect_result_error, wait_collect_result_pid,
-    wait_collect_result_status
-}
-use os.kernel.scheduler.process_execution_observation.{
-    SchedulerExecutionDeliveryStatusV2,
-    scheduler_execution_compare_and_deliver_reaped_v2,
-    scheduler_execution_discard_terminal_v2
-}
+use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
 use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet, CapabilityToken}
-use os.kernel.loader.server_launch_grants.{
-    SIMPLEOS_SERVER_EXECUTABLE_V1, server_launch_grants_v1
-}
 
 extern fn serial_println(msg: text)
 
@@ -38,30 +22,24 @@ fn _arm64_launch_token(kind: CapabilityKind, owner: u64, token_id: u64) -> Capab
     CapabilityToken(kind: kind, generation: token_id, owner: owner,
         token_id: token_id, parent_token_id: 0u64, depth: 0)
 
-pub fn arm64_fs_exec_launch_caps_with_launch_v1(
-    path: text,
-    argv: [text],
-    envp: [text],
-    owner: u64
-) -> CapabilitySet:
-    """Build the pledged, non-delegable authority for one payload launch.
+fn _arm64_add_file_token(tokens: [CapabilityToken], kind: CapabilityKind,
+        owner: u64, next_id: u64) -> ([CapabilityToken], u64):
+    tokens.push(_arm64_launch_token(kind, owner, next_id))
+    (tokens, next_id + 1u64)
 
-    The server image carries credential-file and listener authority, so bind
-    that pouch to the same canonical path/argv/environment tuple enforced by
-    its authenticated spawn recipe.  A path-only match must never confer the
-    privileged server pouch on a differently shaped launch.
-    """
+fn _arm64_add_server_persistence_path(tokens: [CapabilityToken], path: text,
+        owner: u64, next_id: u64) -> ([CapabilityToken], u64):
+    var result = _arm64_add_file_token(tokens,
+        CapabilityKind.FileRead(path_prefix: path), owner, next_id)
+    result = _arm64_add_file_token(result.0,
+        CapabilityKind.FileWrite(path_prefix: path), owner, result.1)
+    _arm64_add_file_token(result.0,
+        CapabilityKind.FileCreate(path_prefix: path), owner, result.1)
+
+pub fn arm64_fs_exec_launch_caps(path: text, argv: [text], owner: u64) -> CapabilitySet:
+    """Build the pledged, non-delegable authority for one payload launch."""
     var tokens: [CapabilityToken] = []
     var next_id: u64 = 1u64
-    val canonical_server_launch =
-        path == SIMPLEOS_SERVER_EXECUTABLE_V1 and
-        argv.len() == 1 and argv[0] == SIMPLEOS_SERVER_EXECUTABLE_V1 and
-        envp.len() == 0
-    if canonical_server_launch:
-        for grant in server_launch_grants_v1(path):
-            tokens.push(_arm64_launch_token(grant.requested, owner, next_id))
-            next_id = next_id + 1u64
-        return CapabilitySet(caps: tokens, is_pledged: true)
     tokens.push(_arm64_launch_token(CapabilityKind.NetConnect(port: 0), owner, next_id))
     next_id = next_id + 1u64
     tokens.push(_arm64_launch_token(CapabilityKind.NetListen(port: 0), owner, next_id))
@@ -76,15 +54,22 @@ pub fn arm64_fs_exec_launch_caps_with_launch_v1(
         if arg.starts_with("/") and arg != path:
             tokens.push(_arm64_launch_token(CapabilityKind.FileRead(path_prefix: arg), owner, next_id))
             next_id = next_id + 1u64
+    # The server payload consumes two immutable mounted inputs and the exact
+    # canonical database/WAL names. File capabilities use component-aware
+    # prefix matching, so granting each complete filename does not authorize a
+    # sibling or the filesystem root.
+    if path == "/SERVERS.ELF":
+        var added = _arm64_add_file_token(tokens,
+            CapabilityKind.FileRead(path_prefix: "/SYS/SERVER.HTM"), owner, next_id)
+        added = _arm64_add_file_token(added.0,
+            CapabilityKind.FileRead(path_prefix: "/SYS/SRVDB.KEY"), owner, added.1)
+        for db_path in [
+            "/SERVER.SDN", "/SERVER.SDN.lock", "/SERVER.SDN.tmp",
+            "/SERVER.SDN.wal", "/SERVER.SDN.wal.lock", "/SERVER.SDN.wal.tmp"
+        ]:
+            added = _arm64_add_server_persistence_path(added.0, db_path, owner, added.1)
+        tokens = added.0
     CapabilitySet(caps: tokens, is_pledged: true)
-
-pub fn arm64_fs_exec_launch_caps(
-    path: text,
-    argv: [text],
-    owner: u64
-) -> CapabilitySet:
-    """Compatibility constructor for launches with no environment."""
-    arm64_fs_exec_launch_caps_with_launch_v1(path, argv, [], owner)
 
 pub fn arm64_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     val prepared = fs_exec_prepare_spawn(path, argv, envp)
@@ -111,15 +96,18 @@ pub fn arm64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     # The shim has a fresh canonical capability owner, so explicitly install a
     # least-privilege record for the scheduler-owned task before making it live.
     launch_ipc.cap_manager.init_task(
-        launch_id, arm64_fs_exec_launch_caps_with_launch_v1(
-            path, argv, envp, launch_id.id))
+        launch_id, arm64_fs_exec_launch_caps(path, argv, launch_id.id))
     val launch_log = KernelLog.new(256)
     shim_init(prepared.scheduler, launch_ipc, launch_log)
-    shim_server_startup_runtime_owner_enable_v1()
     val rc = dispatch_fs_exec_user_handoff(Architecture.Arm64, prepared.pid as u64, prepared.scheduler)
+    var owner = prepared.scheduler
+    owner.exit_task_by_id(launch_id, rc.to_i32())
+    val collected = owner.wait_for_collect(TaskId(id: 0u64), launch_id, false)
     net_arm64_task_teardown(launch_id.id)
-    shim_server_startup_runtime_owner_disable_v1()
     shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(64))
+    if wait_collect_result_error(collected) != 0 or
+       wait_collect_result_status(collected) != rc.to_i32():
+        return -10
     rc
 
 pub fn arm64_fs_exec_spawn_authenticated_v1(
@@ -130,64 +118,27 @@ pub fn arm64_fs_exec_spawn_authenticated_v1(
     consumer: ExecutableLoadConsumerV1,
     entry_point: u64,
     caller: i64,
-    caller_caps: CapabilitySet,
     path: text,
     recipe: i64
 ) -> i64:
-    """Compatibility launch with path as argv[0] and no environment."""
-    arm64_fs_exec_spawn_authenticated_with_launch_v1(
+    """Consume loader authority, enter EL0, and reap the exact child once."""
+    val prepared = fs_exec_adopt_authenticated_v1(
         scheduler, table, authorities, token, consumer, entry_point,
-        caller, caller_caps, path, [path], [], recipe).exit_code
-
-pub fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
-    scheduler: Scheduler,
-    mut table: MountTable,
-    authorities: ExecutableAuthorityRegistryV1,
-    token: ExecutableAuthorityTokenV1,
-    consumer: ExecutableLoadConsumerV1,
-    entry_point: u64,
-    caller: i64,
-    caller_caps: CapabilitySet,
-    path: text,
-    argv: [text],
-    envp: [text],
-    recipe: i64
-) -> FsExecAuthenticatedRunResultV1:
-    """Consume authority, execute EL0, and return scheduler-owned evidence."""
-    val prepared = fs_exec_adopt_authenticated_with_launch_v1(
-        scheduler, table, authorities, token, consumer, entry_point,
-        caller, caller_caps, path, argv, envp, recipe)
+        caller, path, recipe)
     if prepared.pid <= 0:
-        return FsExecAuthenticatedRunResultV1(
-            exit_code: prepared.pid, evidence: nil, scheduler: prepared.scheduler)
+        return prepared.pid
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
     val child = TaskId(id: prepared.pid.to_u64())
-    var launch_ipc = IpcManager.new()
-    launch_ipc.cap_manager.init_task(
-        child, arm64_fs_exec_launch_caps_with_launch_v1(
-            path, argv, envp, child.id))
-    val launch_log = KernelLog.new(256)
-    shim_init(prepared.scheduler, launch_ipc, launch_log)
-    shim_server_startup_runtime_owner_enable_v1()
     val exit_code = dispatch_fs_exec_user_handoff(
         Architecture.Arm64, child.id, prepared.scheduler)
-    shim_server_startup_runtime_owner_disable_v1()
-    shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(64))
     var owner = prepared.scheduler
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
     net_arm64_task_teardown(child.id)
     if wait_collect_result_error(collected) != 0 or
-       wait_collect_result_pid(collected) != child.id or
        wait_collect_result_status(collected) != exit_code.to_i32():
-        _ = scheduler_execution_discard_terminal_v2(child.id)
-        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
-    val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
-        child.id, path, argv)
-    if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
-        _ = scheduler_execution_discard_terminal_v2(child.id)
-        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
-    FsExecAuthenticatedRunResultV1(exit_code: exit_code, evidence: delivered.token, scheduler: owner)
+        return -10
+    exit_code
 
 pub fn arm64_fs_exec_load_and_launch_hello_world() -> i64:
     """Load `/sys/apps/hello_world.smf` and emit genuine load + launch proofs.

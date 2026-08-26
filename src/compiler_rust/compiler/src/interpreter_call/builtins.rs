@@ -5,9 +5,9 @@ use std::sync::Arc;
 use super::core::{eval_arg, eval_arg_int};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    check_effect_violations, create_range_object, create_range_object_step, evaluate_expr, exec_block_fn,
-    message_to_value, spawn_actor_with_expr, spawn_future_with_callable_and_env, spawn_future_with_expr, ACTOR_INBOX,
-    ACTOR_OUTBOX, GENERATOR_YIELDS,
+    check_effect_violations, create_range_object, evaluate_expr, exec_block_fn, message_to_value,
+    spawn_actor_with_expr, spawn_future_with_callable_and_env, spawn_future_with_expr, ACTOR_INBOX, ACTOR_OUTBOX,
+    GENERATOR_YIELDS,
 };
 use crate::value::*;
 use simple_common::actor::Message;
@@ -121,12 +121,7 @@ pub(super) fn eval_builtin(
                 )?;
                 (start, end)
             };
-            // The third argument is a STEP when it is numeric: range(0, 10, 2).
-            // It was previously read only as an "inclusive" truthy flag, which
-            // silently turned range(0, 10, 2) into 0..=10 and range(5, 0, -1)
-            // into an empty range. A Bool third argument keeps the old
-            // inclusive-flag meaning so existing callers are unaffected.
-            let third = eval_arg(
+            let inclusive = eval_arg(
                 args,
                 2,
                 Value::Bool(false),
@@ -135,20 +130,14 @@ pub(super) fn eval_builtin(
                 classes,
                 enums,
                 impl_methods,
-            )?;
-            let (inclusive, step) = match &third {
-                Value::Bool(b) => (*b, 1),
-                other => match other.as_int() {
-                    Ok(n) => (false, n),
-                    Err(_) => (other.truthy(), 1),
-                },
-            };
+            )?
+            .truthy();
             let bound = if inclusive {
                 RangeBound::Inclusive
             } else {
                 RangeBound::Exclusive
             };
-            Ok(Some(create_range_object_step(start, end, bound, step)))
+            Ok(Some(create_range_object(start, end, bound)))
         }
         "Some" => {
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;

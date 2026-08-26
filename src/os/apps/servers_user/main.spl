@@ -5,58 +5,31 @@
 # transaction semantics, bounded responses, commit identity, and durability
 # are all delegated to their canonical Pure-Simple owners.
 
-use os.userlib.net.{IpAddr, SockAddr, Socket, socket, bind, listen, accept, socket_recv, socket_send_range}
+use os.userlib.net.{IpAddr, SockAddr, Socket, socket, bind, listen, accept, socket_send, socket_recv}
 use os.userlib.fs.{read_file_bytes_direct, read_file_bytes_direct_owned}
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.net.http_route.{http_classify_request, HttpRouteKind}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
-use std.nogc_sync_mut.http_server.response.{
-    serialize_response, serialize_response_connection,
-    serialize_response_head_for_body_length_connection,
-    bounded_response_wire,
-    response_wire_parts_fit, response_status_allows_message_body,
-    with_default_security_headers
-}
+use std.nogc_sync_mut.http_server.response.{serialize_response, with_default_security_headers}
 use std.nogc_sync_mut.http_server.mime.{mime_from_path}
-use std.nogc_sync_mut.http_server.server.{
-    SecureServerPolicy, plaintext_development_capability,
-    request_parse_error_status
-}
-use std.nogc_sync_mut.http_server.parser.{parse_request_line}
+use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, plaintext_development_capability}
+use std.nogc_sync_mut.http_server.parser.{parse_request_line, headers_decision}
 use os.apps.dbd.dbd.{DbdServer}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
 use os.apps.servers_user.database_persistence_adapter.{
     simpleos_database_dbfs_vfs_caps
 }
-use os.apps.servers_user.http1_request_frame_owner.{
-    recv_http1_request_owned_with_tail
-}
-use os.apps.servers_user.rfc6455_server_owner.{
-    Rfc6455ServerConnectionOwner, Rfc6455ServerEvent,
-    validate_rfc6455_server_handshake
-}
-use os.kernel.loader.server_launch_grants.{
-    SIMPLEOS_SERVER_EXECUTABLE_V1,
-    SIMPLEOS_SERVER_DB_KEY_V1,
-    SIMPLEOS_SERVER_DB_CERTIFICATE_V1,
-    SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1,
-    SIMPLEOS_SERVER_HTTP_PORT_V1,
-    SIMPLEOS_SERVER_DATABASE_PORT_V1,
-    simpleos_server_public_file_path_v1
-}
 
-val HTTP_PORT: u16 = SIMPLEOS_SERVER_HTTP_PORT_V1
-val DB_PORT: u16 = SIMPLEOS_SERVER_DATABASE_PORT_V1
+val HTTP_PORT: u16 = 8080u16
+val DB_PORT: u16 = 5433u16
 val MAX_IDLE_POLLS: i64 = 10000000
-val DB_CREDENTIAL_PATH: text = SIMPLEOS_SERVER_DB_KEY_V1
-val DB_CERTIFICATE_PATH: text = SIMPLEOS_SERVER_DB_CERTIFICATE_V1
-val DB_PRIVATE_KEY_PATH: text = SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1
+val DB_CREDENTIAL_PATH: text = "/SYS/SRVDB.KEY"
+val DB_CERTIFICATE_PATH: text = "/SYS/SRVDB.CRT"
+val DB_PRIVATE_KEY_PATH: text = "/SYS/SRVDB.PK8"
 val MAX_DB_CREDENTIAL_BYTES: u64 = 128u64
 val MAX_WIRE_RESPONSE: u64 = 65536
-val MAX_WEBSOCKET_NO_PROGRESS_POLLS: i32 = 200
-val MAX_WEBSOCKET_INPUT_READS: u64 = 4096u64
-val MAX_WEBSOCKET_INPUT_BYTES: u64 = 16777216u64
 
 fn debug_line(message: text):
     val bytes = text_to_bytes_pure(message + "\n")
@@ -66,128 +39,55 @@ fn debug_line(message: text):
 fn close_fd(fd: i32):
     val _ = syscall(33, fd as u64, 0, 0, 0, 0)
 
-fn http_listener_requires_partial_startup_close(
-    http_listener_ready: bool, db_listener_fd: i64
-) -> bool:
-    http_listener_ready and db_listener_fd < 0
-
-fn listener_requires_setup_failure_close(
-    socket_created: bool, bind_ready: bool, listen_ready: bool
-) -> bool:
-    socket_created and (not bind_ready or not listen_ready)
-
-fn _websocket_route_is_ws(request: text) -> bool:
-    # The RFC 6455 resource name may include a query, but the path component
-    # must remain exactly /ws. Handshake validation already constrains the
-    # origin-form target. Prefix checks avoid copying the whole request in
-    # this hot handoff path.
-    request.starts_with("GET /ws HTTP/1.1\r\n") or
-        request.starts_with("GET /ws?")
-
 fn send_all(sock: Socket, bytes: [u8]) -> bool:
     var sent: u64 = 0
     var attempts: i32 = 0
-    var send_window: u64 = 4096u64
     while sent < bytes.len() as u64 and attempts < 64:
-        match socket_send_range(sock, bytes, sent, send_window):
-            Ok(progress):
-                val count = progress.0
-                val staged = progress.1
+        val remaining = bytes.slice(sent, bytes.len() as u64)
+        match socket_send(sock, remaining):
+            Ok(count):
                 if count == 0:
                     attempts = attempts + 1
                 else:
                     sent = sent + count
-                    if count < staged:
-                        send_window = count
-                    elif send_window < 4096u64:
-                        val doubled = send_window * 2u64
-                        send_window = if doubled < 4096u64: doubled else: 4096u64
             Err(_):
                 attempts = attempts + 1
     sent == bytes.len() as u64
 
-class HttpWireParts:
-    head: [u8]
-    body: [u8]
-
-fn http_wire_parts_fit(parts: HttpWireParts, max_wire_bytes: u64) -> bool:
-    val head_len = parts.head.len().to_u64()
-    val body_len = parts.body.len().to_u64()
-    response_wire_parts_fit(head_len, body_len, max_wire_bytes)
-
-fn _text_response_parts(response: HttpResponse, close_connection: bool) -> HttpWireParts:
-    HttpWireParts(
-        head: text_to_bytes_pure(serialize_response_connection(
-            response, close_connection)), body: [])
-
-fn _text_response_parts_for_method(
-    response: HttpResponse, head_only: bool, close_connection: bool
-) -> HttpWireParts:
-    if not head_only:
-        return _text_response_parts(response, close_connection)
-    # HEAD selects exactly the same representation as GET. Preserve that
-    # representation's Content-Length while transferring no message body.
-    val head = serialize_response_head_for_body_length_connection(
-        response, response.body.len().to_i64(), close_connection)
-    HttpWireParts(head: text_to_bytes_pure(head), body: [])
-
-fn http_frame_rejection_wire(error: text, max_wire_bytes: u64) -> [u8]:
-    val rejected = HttpResponse(
-        status: request_parse_error_status(error),
-        headers: [], body: "ERR HTTP request rejected\n"
-    )
-    val wire = bounded_response_wire(
-        with_default_security_headers(rejected, false),
-        max_wire_bytes.to_i64()
-    )
-    if wire == "":
-        return []
-    text_to_bytes_pure(wire)
-
-fn _byte_response_parts(
-    response: HttpResponse, body: [u8], close_connection: bool
-) -> HttpWireParts:
-    val head = serialize_response_head_for_body_length_connection(
-        response, body.len().to_i64(), close_connection)
-    if not response_status_allows_message_body(response.status):
-        return HttpWireParts(head: text_to_bytes_pure(head), body: [])
-    HttpWireParts(head: text_to_bytes_pure(head), body: body)
-
 fn bind_listener(port: u16) -> Result<Socket, text>:
     val ip = IpAddr.from_text("0.0.0.0")?
-    match socket(2u32, 1u32):
-        case Err(message): Err(message)
-        case Ok(listener):
-            match bind(listener, SockAddr(ip: ip, port: port)):
-                case Err(message):
-                    if listener_requires_setup_failure_close(true, false, false):
-                        close_fd(listener.fd)
-                    Err(message)
-                case Ok(_):
-                    match listen(listener, 8):
-                        case Err(message):
-                            if listener_requires_setup_failure_close(true, true, false):
-                                close_fd(listener.fd)
-                            Err(message)
-                        case Ok(_): Ok(listener)
+    val listener = socket(2u32, 1u32)?
+    val _bound = bind(listener, SockAddr(ip: ip, port: port))?
+    val _listening = listen(listener, 8)?
+    Ok(listener)
 
-fn _head_routing_request(request: text) -> (bool, text):
-    # Reuse the canonical request-line parser and the canonical GET route
-    # owner. This is only a method projection for representation selection;
-    # the retained request remains authoritative for framing and upgrades.
-    val line_end = request.find("\r\n")
-    if line_end < 0:
-        return (false, request)
-    val parsed = parse_request_line(request.slice(0, line_end))
-    if parsed.0 != "HEAD":
-        return (false, request)
-    val get_line = "GET {parsed.1} {parsed.2}"
-    (true, get_line + request.slice(line_end, request.len()))
+fn bounded_http_request(request: text, policy: SecureServerPolicy) -> bool:
+    val sections = request.split("\r\n\r\n")
+    if sections.len() != 2:
+        return false
+    val lines = sections[0].split("\r\n")
+    if lines.len() < 1 or lines.len() - 1 > policy.max_header_count as i64:
+        return false
+    if lines[0].len() > policy.max_request_line:
+        return false
+    val request_parts = parse_request_line(lines[0])
+    if request_parts.0 == "" or request_parts.1 == "" or request_parts.2 == "":
+        return false
+    var headers: [(text, text)] = []
+    var index: i64 = 1
+    while index < lines.len():
+        if lines[index].len() > policy.max_header_line:
+            return false
+        val separator = lines[index].find(":")
+        if separator <= 0:
+            return false
+        headers.push((lines[index].slice(0, separator), lines[index].slice(separator + 1, lines[index].len()).trim()))
+        index = index + 1
+    val body_decision = headers_decision(headers, policy.max_body)
+    body_decision.0 == "" and sections[1].len() == body_decision.1 as i64
 
-fn http_response(request: text, close_connection: bool) -> HttpWireParts:
-    val projection = _head_routing_request(request)
-    val head_only = projection.0
-    val route = http_classify_request(projection.1)
+fn http_response(request: text) -> text:
+    val route = http_classify_request(request)
     var response = HttpResponse(
         status: HttpStatus.NotFound,
         headers: [],
@@ -211,210 +111,41 @@ fn http_response(request: text, close_connection: bool) -> HttpWireParts:
                 body: "{\"status\":\"ok\",\"server\":\"SimpleOS\"}\n"
             )
         case HttpRouteKind.File:
-            # The combined image also owns private database provisioning
-            # files. Resolve public assets through the launch grant manifest;
-            # never derive an arbitrary /SYS path from network input.
-            val public_path = simpleos_server_public_file_path_v1(route.file_path)
-            if public_path == nil:
-                return _text_response_parts_for_method(with_default_security_headers(
-                    HttpResponse(
-                        status: HttpStatus.NotFound, headers: [],
-                        body: "ERR file not found\n"), false), head_only,
-                    close_connection)
-            val mounted_path = public_path.unwrap()
+            # /files/X is the public route; the immutable system document is
+            # stored under /SYS/X on the mounted FAT32 image.
+            val mounted_path = "/SYS" + route.file_path
             match read_file_bytes_direct(mounted_path, 65536):
                 Err(_):
                     response = HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR file not found\n")
                 Ok(bytes):
-                    val file_response = with_default_security_headers(HttpResponse(
+                    response = HttpResponse(
                         status: HttpStatus.Ok,
                         headers: [("Content-Type", mime_from_path(mounted_path))],
-                        body: ""
-                    ), false)
-                    val file_parts = _byte_response_parts(
-                        file_response, bytes, close_connection)
-                    if head_only:
-                        return HttpWireParts(head: file_parts.head, body: [])
-                    return file_parts
-    _text_response_parts_for_method(
-        with_default_security_headers(response, false), head_only,
-        close_connection)
+                        body: bytes_to_string(bytes)
+                    )
+    serialize_response(with_default_security_headers(response, false))
 
-fn send_websocket_events(client: Socket, events: [Rfc6455ServerEvent]) -> bool:
-    for event in events:
-        if event.outbound.len() > 0u64 and not send_all(client, event.outbound):
-            return false
-    true
-
-class WebSocketTransportOwner:
-    active: bool
-    client: Socket
-    protocol: Rfc6455ServerConnectionOwner
-    consecutive_no_progress: i32
-    input_reads: u64
-    input_bytes: u64
-
-    static fn create() -> WebSocketTransportOwner:
-        WebSocketTransportOwner(
-            active: false,
-            client: Socket(fd: -1),
-            protocol: Rfc6455ServerConnectionOwner.create(),
-            consecutive_no_progress: 0,
-            input_reads: 0u64,
-            input_bytes: 0u64
-        )
-
-    fn can_adopt() -> bool: not self.active
-
-    me _release():
-        if self.active:
-            close_fd(self.client.fd)
-        self.active = false
-        self.client = Socket(fd: -1)
-        self.consecutive_no_progress = 0
-        self.input_reads = 0u64
-        self.input_bytes = 0u64
-
-    me _policy_close():
-        if not self.active:
-            return
-        val event = self.protocol.close_for_policy()
-        if event.outbound.len() > 0u64:
-            val _ = send_all(self.client, event.outbound)
-        self._release()
-
-    me adopt(client: Socket, tail: [u8]) -> bool:
-        if self.active:
-            return false
-        self.active = true
-        self.client = client
-        self.protocol = Rfc6455ServerConnectionOwner.create()
-        self.consecutive_no_progress = 0
-        # The HTTP receive that completed the Upgrade may already contain
-        # frame bytes. Charge that transferred tail to the same lifetime
-        # budget; ownership transfer must not create an unmetered first read.
-        self.input_reads = if tail.len() > 0u64: 1u64 else: 0u64
-        self.input_bytes = tail.len()
-        val events = self.protocol.append_tail(tail)
-        if not send_websocket_events(self.client, events):
-            self._release()
-            return true
-        if self.protocol.is_terminal():
-            self._release()
-        true
-
-    me step() -> bool:
-        # One bounded receive per outer service-loop iteration prevents a
-        # persistent WebSocket from starving HTTP accepts or DB service work.
-        if not self.active:
-            return false
-        match socket_recv(self.client, 8192u64):
-            Err(_):
-                # The syscall adapter currently reports nonblocking EAGAIN
-                # through the same Result error channel as hard errors. Keep
-                # that ambiguity bounded by the connection policy instead of
-                # dropping an otherwise healthy WebSocket on its first idle
-                # service-loop turn.
-                self.consecutive_no_progress = self.consecutive_no_progress + 1
-                if self.consecutive_no_progress >= MAX_WEBSOCKET_NO_PROGRESS_POLLS:
-                    self._policy_close()
-                false
-            Ok(input):
-                if input.len() == 0u64:
-                    # recv()==0 is an orderly TCP EOF, not temporary
-                    # backpressure. The peer has already ended the transport,
-                    # so do not retain the fd or attempt an RFC 6455 policy
-                    # Close on a connection that cannot carry it.
-                    self._release()
-                    return false
-                # An active peer can otherwise keep this single-owner service
-                # alive forever with a stream of tiny Ping or data frames,
-                # continually resetting both the idle loop and the
-                # no-progress counter. Bound successful receive work as well
-                # as retained frame/message memory. Check by subtraction so a
-                # future larger policy cannot turn the byte guard into an
-                # overflowing addition.
-                if (self.input_reads >= MAX_WEBSOCKET_INPUT_READS or
-                    self.input_bytes > MAX_WEBSOCKET_INPUT_BYTES or
-                    input.len() > MAX_WEBSOCKET_INPUT_BYTES - self.input_bytes):
-                    self._policy_close()
-                    return true
-                self.input_reads = self.input_reads + 1u64
-                self.input_bytes = self.input_bytes + input.len()
-                self.consecutive_no_progress = 0
-                val events = self.protocol.append_tail(input)
-                if not send_websocket_events(self.client, events):
-                    self._release()
-                    return false
-                if self.protocol.is_terminal():
-                    self._release()
-                true
-
-    me handle_http(listener: Socket, policy: SecureServerPolicy) -> bool:
-        # Accept/adopt is a mutation of this same authoritative owner. No fd
-        # authority is returned through or retained by a value-parameter copy.
-        match accept(listener):
-            Err(_): false
-            Ok(client):
-                var client_transferred = false
-                var connection_tail: [u8] = []
-                var served: i32 = 0
-                var connection_done = false
-                while not connection_done and
-                    served < policy.max_keep_alive_requests:
-                    val frame = recv_http1_request_owned_with_tail(
-                        client, policy, connection_tail)
-                    if not frame.complete:
-                        # EOF/no-progress after at least one complete response
-                        # is a normal keep-alive shutdown, not a second 4xx.
-                        if ((served == 0 or frame.scanned_bytes > 0) and
-                            not frame.error.starts_with("transport:")):
-                            val wire = http_frame_rejection_wire(
-                                frame.error, MAX_WIRE_RESPONSE)
-                            if wire.len() > 0u64:
-                                val _ = send_all(client, wire)
-                        break
-                    if frame.websocket_upgrade_candidate:
-                        val decision = validate_rfc6455_server_handshake(frame.request)
-                        if (decision.accepted and
-                            _websocket_route_is_ws(frame.request) and
-                            self.can_adopt()):
-                            if send_all(client, text_to_bytes_pure(decision.response)):
-                                client_transferred = self.adopt(client, frame.upgrade_tail)
-                        else:
-                            val rejected = HttpResponse(
-                                status: HttpStatus.BadRequest,
-                                headers: [], body: "ERR invalid WebSocket upgrade\n"
-                            )
-                            val wire = serialize_response(
-                                with_default_security_headers(rejected, false))
-                            val _ = send_all(client, text_to_bytes_pure(wire))
-                        connection_done = true
+fn handle_http(listener: Socket, policy: SecureServerPolicy) -> bool:
+    match accept(listener):
+        Err(_): false
+        Ok(client):
+            match socket_recv(client, 8192):
+                Err(_): debug_line("[simpleos-servers-user] http recv=fail")
+                Ok(bytes):
+                    val request = bytes_to_string(bytes)
+                    if bounded_http_request(request, policy):
+                        val response = text_to_bytes_pure(http_response(request))
+                        if response.len() <= MAX_WIRE_RESPONSE:
+                            val _sent = send_all(client, response)
                     else:
-                        val limit_reached = served + 1 >=
-                            policy.max_keep_alive_requests
-                        val close_after = frame.close_connection or limit_reached
-                        val response = http_response(frame.request, close_after)
-                        if not http_wire_parts_fit(response, MAX_WIRE_RESPONSE):
-                            connection_done = true
-                        else:
-                            val head_sent = send_all(client, response.head)
-                            var body_sent = true
-                            if head_sent and response.body.len() > 0:
-                                body_sent = send_all(client, response.body)
-                            if not head_sent or not body_sent:
-                                connection_done = true
-                            else:
-                                served = served + 1
-                                connection_tail = frame.connection_tail
-                                if close_after:
-                                    connection_done = true
-                if not client_transferred:
-                    close_fd(client.fd)
-                true
-
-    me shutdown():
-        self._policy_close()
+                        val rejected = HttpResponse(
+                            status: HttpStatus.BadRequest,
+                            headers: [], body: "ERR incomplete request\n"
+                        )
+                        val wire = serialize_response(with_default_security_headers(rejected, false))
+                        val _ = send_all(client, text_to_bytes_pure(wire))
+            close_fd(client.fd)
+            true
 
 fn publish_credential_zeroization(phase: text, report: SecureZeroReport, hash_workspace_zeroized: bool):
     val status = if report.verified(): "verified" else: "failed"
@@ -476,13 +207,7 @@ fn provision_database_service(server: DbdServer) -> bool:
                             admitted and all_wiped
 
 fn main() -> i64:
-    var db_server = DbdServer.new_filesystem_launched_v1()
-    # This is the first operation after construction. The DbdServer itself
-    # consumed the scheduler-issued one-shot receipt; fail before reading any
-    # secret, querying DBFS authority, or creating either listener.
-    if not db_server.startup_evidence_ready_v1():
-        debug_line("[simpleos-servers-user] startup-evidence=blocked")
-        return 8
+    var db_server = DbdServer.new()
     if not provision_database_service(db_server):
         debug_line("[simpleos-servers-user] credential=blocked path=" + DB_CREDENTIAL_PATH)
         return 5
@@ -497,10 +222,10 @@ fn main() -> i64:
         val _ = db_server.close_service()
         return 7
 
-    # Plaintext is explicitly a development listener on all guest interfaces.
-    # QEMU hostfwd may narrow host exposure, but the guest bind itself does not.
-    # Production TLS remains fail-closed outside this explicit capability.
-    val capability = plaintext_development_capability("QEMU guest development listener")
+    # Plaintext is narrowly authorized for loopback hostfwd acceptance. The
+    # canonical secure policy still supplies every request/connection bound;
+    # production TLS remains fail-closed outside this explicit capability.
+    val capability = plaintext_development_capability("isolated QEMU hostfwd acceptance")
     if capability.is_err():
         val _ = db_server.close_service()
         return 2
@@ -513,25 +238,19 @@ fn main() -> i64:
     val db_listener = db_server.bind_listener(DB_PORT.to_i64())
     if http_result.is_err() or db_listener < 0:
         debug_line("[simpleos-servers-user] listener bind=fail")
-        if http_listener_requires_partial_startup_close(
-            http_result.is_ok(), db_listener):
-            close_fd(http_result.unwrap().fd)
         val _ = db_server.close_service()
         return 3
     val http_listener = http_result.unwrap()
 
-    debug_line("[simpleos-servers-user] executable=" +
-        SIMPLEOS_SERVER_EXECUTABLE_V1 + " launch=ok")
+    debug_line("[simpleos-servers-user] executable=/SERVERS.ELF launch=ok")
     debug_line("[simpleos-servers-user] http=:8080 db=:5433 ready=ok")
 
     var idle_polls: i64 = 0
     var accepted_connections: i64 = 0
-    var websocket = WebSocketTransportOwner.create()
     while idle_polls < MAX_IDLE_POLLS:
         if accepted_connections >= secure_policy.max_connections:
             break
-        val websocket_work = websocket.step()
-        val http_work = websocket.handle_http(http_listener, secure_policy)
+        val http_work = handle_http(http_listener, secure_policy)
         if http_work:
             accepted_connections = accepted_connections + 1
         var db_work = false
@@ -539,18 +258,13 @@ fn main() -> i64:
             db_work = db_server.accept_and_handle_once()
             if db_work:
                 accepted_connections = accepted_connections + 1
-        if websocket_work or http_work or db_work:
+        if http_work or db_work:
             idle_polls = 0
         else:
             idle_polls = idle_polls + 1
             val _ = syscall(2, 0, 0, 0, 0, 0)
 
-    websocket.shutdown()
     close_fd(http_listener.fd)
     val _ = db_server.close_service()
     debug_line("[simpleos-servers-user] bounded idle stop")
     0
-
-export http_listener_requires_partial_startup_close
-export listener_requires_setup_failure_close
-export http_frame_rejection_wire

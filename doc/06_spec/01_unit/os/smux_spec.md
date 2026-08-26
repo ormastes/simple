@@ -20,7 +20,7 @@ Purpose: Specify the smux terminal-multiplexer value model — session identity,
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/smux_spec.spl` |
-| Updated | 2026-08-24 |
+| Updated | 2026-08-25 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience

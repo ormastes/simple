@@ -22,30 +22,20 @@ use os.kernel.types.task_types.{
     user_process_image_file_bytes, user_process_image_initial_sp,
     user_process_image_initial_stack_bytes
 }
-use os.kernel.types.capability_types.{CapabilitySet, capability_set_bind_owner}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.loader.executable_authority_registry.{
-    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
-    ExecutableAuthorityJointLeaseV1
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
 }
 use os.kernel.loader.executable_admission_pipeline.{
     executable_loader_commit, executable_loader_retrieve_once,
-    executable_loader_release_retrieved, executable_loader_revoke,
-    executable_loader_commit_joint_reservation_v1
+    executable_loader_release_retrieved, executable_loader_revoke
 }
-use os.kernel.loader.executable_image_prepare.{
-    executable_prepare_image_with_launch_v1
-}
-use os.kernel.loader.executable_launch_arguments_v1.{
-    ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
-}
+use os.kernel.loader.executable_image_prepare.{executable_prepare_image_v1}
 use os.kernel.loader.executable_load_plan_v1.{
     ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
     ExecutableLoadConsumerV1, ExecutableLoadReceiptV1,
     executable_load_consumer_receipt_v1
-}
-use os.kernel.loader.executable_target_dispatch_v1.{
-    executable_target_dispatch_consumer_matches_v1
 }
 use os.kernel.memory.user_address_space.{
     create_user_address_space, destroy_user_address_space
@@ -54,33 +44,10 @@ use os.kernel.scheduler.scheduler_types.{
     Scheduler, TaskControlBlock, TIME_SLICE_TICKS,
     SchedulerExecutableAdoptionOwnerStateV1,
     _address_space_can_map, _map_user_process_image,
-    _initial_user_task_context, scheduler_next_task_lifecycle_identity_take_v1
+    _initial_user_task_context, scheduler_next_task_id_take
 }
 use os.kernel.scheduler.scheduler_task_mgmt.{_find_empty_slot_in}
-use os.kernel.types.arm32_mapping_handle_v1.{
-    scheduler_arm32_mapping_handle_absent_v1
-}
-use os.kernel.types.riscv32_mapping_handle_v1.{
-    scheduler_riscv32_mapping_handle_absent_v1
-}
-use os.kernel.types.x86_32_mapping_handle_v1.{
-    scheduler_x86_32_mapping_handle_absent_v1
-}
-use os.kernel.scheduler.process_execution_observation.{
-    SchedulerExecutionObservationHandleV1,
-    scheduler_execution_observe_adoption_handle_with_launch_v1,
-    scheduler_execution_cancel_adoption_handle_v1
-}
-use os.kernel.scheduler.scheduler_executable_source_cleanup_owner_v1.{
-    scheduler_executable_source_cleanup_reserve_v1,
-    scheduler_executable_source_cleanup_retry_v1
-}
-use os.kernel.scheduler.server_data_launch_grant_registry.{
-    ServerDataLaunchGrantInstallStatusV1,
-    server_data_launch_grant_install_before_publication_v1,
-    server_data_launch_grant_rollback_before_publication_v1,
-    server_data_launch_grant_quarantine_before_publication_v1
-}
+use os.kernel.scheduler.process_execution_observation.{scheduler_execution_observe_adoption_v1}
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
 use os.kernel.ipc.capability.{register_task_vmspace}
 export use os.kernel.scheduler.scheduler_executable_adoption_transition.{
@@ -157,9 +124,13 @@ impl Scheduler:
     fn _authenticated_consumer_arch_matches_v1(
         consumer: ExecutableLoadConsumerV1, arch: Architecture
     ) -> bool:
-        executable_target_dispatch_consumer_matches_v1(
-            consumer.expected_os, consumer.expected_arch,
-            consumer.expected_abi, arch)
+        if arch == Architecture.X86_64:
+            return consumer.expected_arch == "x86_64"
+        if arch == Architecture.Riscv64:
+            return consumer.expected_arch == "riscv64"
+        if arch == Architecture.Arm64:
+            return consumer.expected_arch == "arm64"
+        false
 
     me _record_authenticated_executable_adoption_v1(
         state: SchedulerExecutableAdoptionOwnerStateV1,
@@ -172,13 +143,11 @@ impl Scheduler:
         self.executable_adoption_token_generation = token.generation
         self.executable_adoption_token_nonce = token.nonce
 
-    me _adopt_authenticated_executable_pid_with_launch_v1(
+    pub me adopt_authenticated_executable_pid_v1(
         mut table: MountTable,
         authorities: ExecutableAuthorityRegistryV1,
         token: ExecutableAuthorityTokenV1,
-        joint_lease: ExecutableAuthorityJointLeaseV1?,
         consumer: ExecutableLoadConsumerV1,
-        launch: ExecutableLaunchArgumentsV1,
         entry_point: u64,
         priority: TaskPriority,
         caps: CapabilitySet
@@ -190,36 +159,13 @@ impl Scheduler:
         # token.  In particular, a quarantined transaction cannot be reset by
         # presenting fresh coordinates and can never reach publication or
         # authorization through this entry point.
-        # ExecutableLaunchArgumentsV1 is a public transport record and can be
-        # constructed directly. Revalidate and copy at the scheduler boundary
-        # before touching the one-shot authority token.
-        val checked_launch = executable_launch_arguments_v1_validate(
-            launch.path, launch.argv, launch.envp)
-        if checked_launch.is_err():
-            return _scheduler_adoption_reject(
-                consumer, ExecutableLoadConsumerErrorV1.InvalidConsumer)
-        val owned_launch = checked_launch.unwrap()
-        # Target readiness and the active architecture are non-authorizing
-        # routing facts. Reject them before committing the one-shot loader
-        # token, so an unsupported 32-bit builder or wrong-kernel dispatch can
-        # never burn otherwise valid authenticated source authority.
-        val active_arch = get_arch()
-        if not self._authenticated_consumer_arch_matches_v1(consumer, active_arch):
-            return _scheduler_adoption_reject(
-                consumer, ExecutableLoadConsumerErrorV1.UnsupportedArchitecture)
         val prepared_owner = scheduler_executable_adoption_transition_v1(
             self.executable_adoption_state,
             SchedulerExecutableAdoptionOwnerEventV1.Prepare)
         if prepared_owner.state != SchedulerExecutableAdoptionOwnerStateV1.Prepared:
             return _scheduler_adoption_reject(
                 consumer, ExecutableLoadConsumerErrorV1.AuthorityRejected)
-        val committed = match joint_lease:
-            case Some(lease):
-                val joint_committed = executable_loader_commit_joint_reservation_v1(
-                    authorities, token, lease, consumer, entry_point,
-                    owned_launch.path)
-                joint_committed
-            case nil: executable_loader_commit(authorities, token)
+        val committed = executable_loader_commit(authorities, token)
         if committed.is_err():
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
@@ -235,8 +181,16 @@ impl Scheduler:
         self._record_authenticated_executable_adoption_v1(
             prepared_owner.state, 0u64, token)
         val handle = retrieved.unwrap().image_handle
-        val prepared = executable_prepare_image_with_launch_v1(
-            table, handle, consumer, entry_point, active_arch, owned_launch)
+        val active_arch = get_arch()
+        if not self._authenticated_consumer_arch_matches_v1(consumer, active_arch):
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.RollbackUnavailable)
+
+        val prepared = executable_prepare_image_v1(
+            table, handle, consumer, entry_point, active_arch)
         if prepared.is_err():
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
@@ -282,92 +236,25 @@ impl Scheduler:
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.ConsumerExhausted)
 
-        val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
-        if maybe_identity == nil:
+        val id = TaskId(id: scheduler_next_task_id_take())
+        if not scheduler_execution_observe_adoption_v1(id.id, self.current.id, handle):
             destroy_user_address_space(space)
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
             return _scheduler_adoption_fail_and_close(
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.ConsumerExhausted)
-        val identity = maybe_identity.unwrap()
-        # The capability and VM-space registries use a u32 task coordinate.
-        # Reject an invalid or non-representable task ID before installing a
-        # launch grant or observation; narrowing here would otherwise let a
-        # later 64-bit PID alias an existing process owner.  Lifecycle
-        # generations remain u64 end-to-end in the TCB, grant, observation,
-        # and cleanup owners, so do not prematurely exhaust that identity
-        # domain on the shared x86-64/ARM64/RV64 path.
-        if (identity.task_id == 0u64 or
-            identity.task_id > 0xFFFFFFFFu64 or
-            identity.lifecycle_generation == 0u64):
-            destroy_user_address_space(space)
-            self._record_authenticated_executable_adoption_v1(
-                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
-            return _scheduler_adoption_fail_and_close(
-                table, authorities, token, consumer,
-                ExecutableLoadConsumerErrorV1.ConsumerExhausted)
-        val id = TaskId(id: identity.task_id)
-        val lifecycle_generation = identity.lifecycle_generation
-        val server_data_install =
-            server_data_launch_grant_install_before_publication_v1(
-                id.id, lifecycle_generation, 1u64, handle)
-        if server_data_install.status != ServerDataLaunchGrantInstallStatusV1.NotApplicable and
-            server_data_install.status != ServerDataLaunchGrantInstallStatusV1.Installed:
-            destroy_user_address_space(space)
-            self._record_authenticated_executable_adoption_v1(
-                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
-            return _scheduler_adoption_fail_and_close(
-                table, authorities, token, consumer,
-                ExecutableLoadConsumerErrorV1.AuthorityRejected)
-        val observation = scheduler_execution_observe_adoption_handle_with_launch_v1(
-            id.id, self.current.id, handle, owned_launch)
-        if observation == nil:
-            if server_data_install.handle != nil:
-                val grant_handle = server_data_install.handle.unwrap()
-                if not server_data_launch_grant_rollback_before_publication_v1(grant_handle):
-                    _ = server_data_launch_grant_quarantine_before_publication_v1(grant_handle)
-            destroy_user_address_space(space)
-            self._record_authenticated_executable_adoption_v1(
-                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
-            return _scheduler_adoption_fail_and_close(
-                table, authorities, token, consumer,
-                ExecutableLoadConsumerErrorV1.ConsumerExhausted)
-        val observation_handle: SchedulerExecutionObservationHandleV1 =
-            observation.unwrap()
-        # Publication is irreversible. Retain the exact source-close authority
-        # under this lifecycle first, matching the hardened 32-bit lanes.
-        val cleanup_reserved = scheduler_executable_source_cleanup_reserve_v1(
-            id.id, lifecycle_generation, table, authorities, token)
-        if cleanup_reserved.indeterminate or cleanup_reserved.complete:
-            _ = scheduler_execution_cancel_adoption_handle_v1(observation_handle)
-            if server_data_install.handle != nil:
-                val grant_handle = server_data_install.handle.unwrap()
-                if not server_data_launch_grant_rollback_before_publication_v1(grant_handle):
-                    _ = server_data_launch_grant_quarantine_before_publication_v1(grant_handle)
-            destroy_user_address_space(space)
-            self._record_authenticated_executable_adoption_v1(
-                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
-            return _scheduler_adoption_fail_and_close(
-                table, authorities, token, consumer,
-                ExecutableLoadConsumerErrorV1.AuthorityRejected)
         val user_ctx = _initial_user_task_context(entry_point, user_sp)
-        val task_caps = capability_set_bind_owner(caps, id.id)
         val tcb = TaskControlBlock(
-            id: id, lifecycle_generation: lifecycle_generation,
-            name: "authenticated-user-{id.id}",
+            id: id, name: "authenticated-user-{id.id}",
             state: TaskState.Ready, priority: priority, is_user: true,
             entry_point: entry_point, context: user_ctx, user_context: Some(user_ctx),
             address_space: space.phys_root, kernel_stack: 0u64,
-            user_stack: stack_top, capabilities: task_caps, parent: Some(self.current),
+            user_stack: stack_top, capabilities: caps, parent: Some(self.current),
             schedule: default_task_schedule(priority),
             isolation: default_task_isolation(space.id),
             assigned_cpu: 0u32, exit_code: 0,
-            ticks_remaining: TIME_SLICE_TICKS,
-            arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
-            riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-            x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
-            exec_generation: 1u64)
+            ticks_remaining: TIME_SLICE_TICKS)
         self.tasks[slot] = tcb
         register_task_vmspace(
             id.id.to_u32(),
@@ -382,13 +269,12 @@ impl Scheduler:
             published_owner.state, SchedulerExecutableAdoptionOwnerEventV1.Confirm)
         self._record_authenticated_executable_adoption_v1(
             authorized_owner.state, id.id, token)
-        val closed = scheduler_executable_source_cleanup_retry_v1(
-            id.id, lifecycle_generation)
-        val final_state = if closed.complete:
+        val closed = executable_loader_release_retrieved(table, authorities, token)
+        val final_state = if closed.is_ok():
             ExecutableLoadConsumerStateV1.Adopted
         else:
             ExecutableLoadConsumerStateV1.AdoptedCloseRetryable
-        val final_error = if not closed.complete:
+        val final_error = if closed.is_err():
             ExecutableLoadConsumerErrorV1.CloseFailed
         else:
             ExecutableLoadConsumerErrorV1.None
@@ -407,55 +293,6 @@ impl Scheduler:
         self._record_authenticated_executable_adoption_v1(
             completed_owner.state, id.id, token)
         result
-
-    pub me adopt_authenticated_executable_pid_with_launch_v1(
-        mut table: MountTable,
-        authorities: ExecutableAuthorityRegistryV1,
-        token: ExecutableAuthorityTokenV1,
-        consumer: ExecutableLoadConsumerV1,
-        launch: ExecutableLaunchArgumentsV1,
-        entry_point: u64,
-        priority: TaskPriority,
-        caps: CapabilitySet
-    ) -> SchedulerExecutableAdoptionResultV1:
-        self._adopt_authenticated_executable_pid_with_launch_v1(
-            table, authorities, token, nil, consumer, launch, entry_point,
-            priority, caps)
-
-    pub me adopt_joint_reserved_executable_pid_with_launch_v1(
-        mut table: MountTable,
-        authorities: ExecutableAuthorityRegistryV1,
-        token: ExecutableAuthorityTokenV1,
-        joint_lease: ExecutableAuthorityJointLeaseV1,
-        consumer: ExecutableLoadConsumerV1,
-        launch: ExecutableLaunchArgumentsV1,
-        entry_point: u64,
-        priority: TaskPriority,
-        caps: CapabilitySet
-    ) -> SchedulerExecutableAdoptionResultV1:
-        """Adopt only through the matching loader-minted joint reservation."""
-        self._adopt_authenticated_executable_pid_with_launch_v1(
-            table, authorities, token, Some(joint_lease), consumer, launch,
-            entry_point, priority, caps)
-
-    pub me adopt_authenticated_executable_pid_v1(
-        mut table: MountTable,
-        authorities: ExecutableAuthorityRegistryV1,
-        token: ExecutableAuthorityTokenV1,
-        consumer: ExecutableLoadConsumerV1,
-        entry_point: u64,
-        priority: TaskPriority,
-        caps: CapabilitySet
-    ) -> SchedulerExecutableAdoptionResultV1:
-        """Compatibility entrypoint with the historical authority-image argv[0]."""
-        val launch = executable_launch_arguments_v1_validate(
-            "authority-image", ["authority-image"], [])
-        if launch.is_err():
-            return _scheduler_adoption_reject(
-                consumer, ExecutableLoadConsumerErrorV1.InvalidConsumer)
-        self.adopt_authenticated_executable_pid_with_launch_v1(
-            table, authorities, token, consumer, launch.unwrap(), entry_point,
-            priority, caps)
 
     pub me authenticated_executable_adoption_snapshot_v1(
     ) -> SchedulerExecutableAdoptionSnapshotV1:

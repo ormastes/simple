@@ -163,6 +163,7 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_is_char_device"
         | "rt_file_canonicalize"
         | "rt_file_read_text"
+        | "rt_file_read_regular_no_follow_bounded"
         | "rt_file_size"
         | "rt_file_hash_sha256"
         | "rt_file_fsync"

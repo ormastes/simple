@@ -194,21 +194,15 @@ main = r1 + r2 + r3
 
 #[test]
 fn runner_await_non_future() {
-    // Eager-async semantics: the interpreter evaluates async fn bodies eagerly,
-    // so `await f()` receives an already-resolved value. `await` therefore
-    // passes a non-future through unchanged rather than failing
-    // (compiler/src/interpreter/expr.rs, `Expr::Await` arm — rejecting here
-    // broke every direct `await async_fn()` call). A runtime check cannot tell
-    // a plain value from an eagerly-resolved async result.
-    // TODO: reject `await <non-future>` statically in the type checker, where
-    // the distinction still exists, and restore an error assertion here.
-    run_expect(
+    // Await on a non-future value now produces a semantic error
+    use test_helpers::run_expect_compile_error;
+    run_expect_compile_error(
         r#"
 let x = 42
-let value = await x
-main = value
+let res = await x
+main = res
 "#,
-        42,
+        "requires a Future or Actor handle",
     );
 }
 

@@ -33,15 +33,6 @@ SFTP remains unpublished even after authenticated subsystem framing because no
 per-principal atomic VFS capability is injected. HTTP/3, QUIC,
 WebTransport, generic-server WebSocket, and unknown identifiers remain absent
 and fail closed.
-
-SSH filesystem exec is currently implemented only for x86_64 and RISC-V 64.
-The x86_32, ARM64, ARM32, and RISC-V 32 daemon variants fail closed with exit
-status `126` (accepted command, target launcher unavailable); they never report
-exit `0` without running a program. The result has empty channel output and
-`truncated=false`, preserving the existing unsupported-target API. Exit `127`
-continues to mean command/PATH resolution failure on an
-implemented launcher. This source contract does not advertise target-native or
-QEMU execution for the unsupported variants.
 # Filesystem-launched database provisioning
 
 The `/SERVERS.ELF` database listener is an adapter to `DbdServer`, not a second
@@ -50,12 +41,6 @@ database implementation. It reads `/SYS/SRVDB.KEY`, `/SYS/SRVDB.CRT`, and
 `DbdServer.provision_service`, and verifies zeroization of every source buffer
 before DBFS recovery. The paths are configuration locations, never embedded
 credential values.
-
-The image owner requires all three files together. It bounds each regular-file
-read before allocation, validates DER X.509 and Ed25519 PKCS#8 types plus public
-key equality, stages an adjacent `/SYS/SRVDB.MAN` hash manifest, and compares
-the three source hashes again after construction. There is no embedded key,
-certificate, development fallback, or partial server-image mode.
 
 Startup additionally requires the mounted VFS owner to attest DBFS root,
 durable file sync, and transactional namespace replacement. A missing bit is a

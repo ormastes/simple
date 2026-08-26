@@ -153,7 +153,7 @@ fn archive_from_dir(dir: &Path, stem: &str) -> Option<PathBuf> {
     None
 }
 
-pub(crate) fn archive_from_path_or_dir(path: &Path, stem: &str) -> Option<PathBuf> {
+fn archive_from_path_or_dir(path: &Path, stem: &str) -> Option<PathBuf> {
     if path.is_dir() {
         return archive_from_dir(path, stem);
     }
@@ -362,17 +362,6 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // would create duplicate pool definitions.
         "runtime_thread.c",
         "runtime_simd_utf8.c",
-        // ASCII/case SIMD kernels backing rt_text_is_ascii (std.common.encoding
-        // simd_text_ffi). Same never-an-archive-member class as
-        // runtime_terminal.c below: the pure-Simple backend's own source list
-        // (src/compiler/70.backend/backend/runtime_compiler.spl) has always
-        // carried runtime_simd_case, but this seed-side list never did, so a
-        // core-C native link of any tool whose closure reaches std text
-        // helpers left rt_text_is_ascii undefined -- the tolerated-undefined
-        // then NULL-GOT SIGSEGV class of rt_unwrap_or_trap
-        // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
-        // Compiles with zero symbol collisions against the existing members.
-        "runtime_simd_case.c",
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
         // replaces the Rust-seed engine2d_simd_ops backing for native builds.
         "runtime_simd_dispatch.c",
@@ -931,20 +920,12 @@ fn canonical_archive_symbol(symbol: &str) -> &str {
 /// is how runtime_memtrack.c's rt_heap_* fallbacks yield to the Rust runtime
 /// accounting (93e0b028ffb). `archive_global_symbols` counts these as defined.
 pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
-    // Mach-O POSIX nm prints weak *definitions* as 'T' — the weakness only
-    // appears in the `-m` flag field as `weak external`. GNU/ELF nm prints
-    // them as 'W'/'V'. Request the Mach-O flag field on macOS hosts and
-    // accept BOTH formats below, so the stage-4 runtime capsule check does
-    // not misread Apple weak fallbacks (e.g. rt_heap_live_bytes) as STRONG.
-    let output = {
-        let mut cmd = nm_command();
-        cmd.arg("-g").arg("-p");
-        if cfg!(target_os = "macos") {
-            cmd.arg("-m");
-        }
-        cmd.arg(path).output()
-    }
-    .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
+    let output = nm_command()
+        .arg("-g")
+        .arg("-p")
+        .arg(path)
+        .output()
+        .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
     if !output.status.success() {
         return Err(format!(
             "failed to inspect archive {}: {}",
@@ -954,13 +935,6 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
     }
     let mut weak = BTreeSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        // Mach-O `-m` form: `0000000000000000 (__TEXT,__text) weak external _f`
-        if line.contains(" weak external ") || line.contains(" weak reference ") {
-            if let Some(name) = line.split_whitespace().next_back() {
-                weak.insert(name.to_string());
-            }
-            continue;
-        }
         let fields: Vec<&str> = line.split_whitespace().collect();
         let (kind, name) = match fields.as_slice() {
             [kind, name] if kind.len() == 1 => (*kind, *name),

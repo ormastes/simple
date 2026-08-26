@@ -39,15 +39,6 @@ This agent CREATES the initial state file. All subsequent agents read and append
        file:line and the unblock condition
      - Must-check ledger v3 rows with a named owner and actionable unblock
        condition for TODO/blocked work; PASS rows use `none`
-     - Must-check receipt rows earn PASS only through
-       `check-bootstrap-must-pass.shs --record-gate-pass <id> --evidence
-       <repo-relative-committed-receipt>`; automated evidence remains
-       source-fingerprint scoped and push reads evidence from the pushed ref.
-       External host/device/provider/performance rows must additionally use the
-       registry-owned `external-receipt` semantic validator; a generic receipt
-       plus arbitrary or prose-only artifact cannot earn PASS. The validator
-       recomputes hashes for separate committed evidence blobs and verifies the
-       signed summary with a repository-pinned reviewer public key.
    - If the request ALSO changes workflow, tooling, evidence wrappers,
      verification contracts, or SPipe behavior, extend that AC to cover
      `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
@@ -151,20 +142,6 @@ dev-done
 
 
 ## Bootstrap readiness handoff tasks
-
-For must-check work, acceptance criteria keep interactive push bounded: a
-guard whose default command runs mutation fixtures uses scan-only mode in push,
-with the mutation self-test retained as a required bootstrap-owned row.
-Source-decidable external gates also require a lane-specific committed-tree
-oracle after common signature/hash validation; a signed PASS label is not
-enough.
-Performance external-gate criteria require raw retained artifacts and a narrow
-numeric oracle; precomputed PASS or ratio fields are not the verdict.
-Interpreter-startup evidence is trial-interleaved process launch, not warm
-workload throughput; recompute cold/warm p50+p95 and require exact Simple
-interpreter mode plus canonical Stage 4 authority.
-Rust/Go benchmark evidence must use runtime-fed equal work, rotated launch
-order, recomputed p50/p95, and equality-or-better Simple latency against both.
 
 For ordinary feature development, first apply
 `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: name

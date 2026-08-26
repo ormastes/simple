@@ -481,29 +481,6 @@ page is worse than none.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
 
-## Signed-catalog launch boundary (2026-08-25)
-
-`simple_toolchain_signed_catalog_boot_v1.spl` is a dormant loader-private
-foundation for the Simple interpreter/compiler/loader sequence; it is not a
-boot connection until the online signer and privileged caller are wired. Treat its
-`catalog_present=false` result as an optional ordinary-boot absence only. An
-authenticated toolchain request requires three sealed target-bound rows and a
-fresh execute-open re-attestation for every stage; never substitute the app
-registry cache, resident payload bytes, or the legacy path-only spawn APIs.
-The open media, signer, and boot-caller blockers are recorded in
-`doc/08_tracking/bug/simple_toolchain_signed_catalog_media_gap_2026-08-25.md`.
-
-## Guest target authority update (2026-08-22)
-
-`src/app/simpleos_tool/guest_target.spl` is the immutable architecture/triple,
-codegen, sysroot, and compiler authority for the filesystem guest tool. The
-pipeline validates it at both interpret and compile entrypoints and the linker
-rejects mutable-environment split brain. AArch64/RV64 link through explicit
-installed userland CRT/runtime/libc/script branches, never the kernel linkers;
-RV64 binds `rv64gc/lp64d`. Builder stamps bind non-seed admission identity.
-This is implementation/static evidence only: do not promote self-host or QEMU
-hello-world rows until the admitted Stage-4 runtime executes them.
-
 ## Restart12 Stage 4 prerequisite (2026-08-14)
 
 The RV64 ordered boot gate cannot run on the Rust seed or Stage 2 compiler.

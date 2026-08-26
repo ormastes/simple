@@ -37,14 +37,10 @@ use compiler.mir_opt.mir_opt.auto_vectorize.{
     supports_elementwise_rewrite,
     run_auto_vectorize
 }
-use compiler.mir_opt.auto_vectorize_analysis.{
-    LoopBounds, DefUseChain, detect_bounds_from_block, get_inst_uses,
-    detect_dependencies, analyze_loop_dependencies
-}
+use compiler.mir_opt.auto_vectorize_analysis.{LoopBounds, detect_bounds_from_block}
 use compiler.mir_opt.mir_opt.auto_vectorize_codegen.{VectorizeContext, create_alignment_check_block, create_peeling_block, create_vector_loop_block}
 use compiler.mir_opt.mir_opt.auto_vectorize.{rewrite_elementwise_add}
-use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo}
-use compiler.mir_opt.mir_opt.perf_facts.{perf_facts_build}
+use compiler.mir_opt.auto_vectorize_types.{LoopInfo}
 
 # ============================================================================
 # Helpers — minimal MIR construction for tests
@@ -56,11 +52,8 @@ fn make_local(id: i64) -> LocalId:
 fn make_block_id(id: i64) -> BlockId:
     BlockId.new(id)
 
-fn make_int_const_op(value: i64) -> MirOperand:
-    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
-
-fn make_text_const_op(value: text) -> MirOperand:
-    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(value), MirType.text()))
+fn make_const_op(val_text: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const("i64", val_text))
 
 fn make_copy_op(local_id: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Copy(make_local(local_id)))
@@ -81,19 +74,13 @@ fn make_add_const_inst(dest_id: i64, src_id: i64) -> MirInst:
     # Represents  %dest = %src + 1  (induction variable increment)
     MirInst(kind: MirInstKind.BinOp(
         make_local(dest_id), MirBinOp.Add,
-        make_copy_op(src_id), make_int_const_op(1)
-    ))
-
-fn make_add_step_inst(dest_id: i64, src_id: i64, step_value: i64) -> MirInst:
-    MirInst(kind: MirInstKind.BinOp(
-        make_local(dest_id), MirBinOp.Add,
-        make_copy_op(src_id), make_int_const_op(step_value)
+        make_copy_op(src_id), make_const_op("1")
     ))
 
 fn make_call_inst(dest_id: i64) -> MirInst:
     MirInst(kind: MirInstKind.Call(
         Some(make_local(dest_id)),
-        make_text_const_op("extern_fn"),
+        make_const_op("extern_fn"),
         []
     ))
 
@@ -617,16 +604,6 @@ fn make_bounds_block_no_increment() -> MirBlock:
     MirBlock(id: make_block_id(103), label: nil, instructions: insts,
         terminator: make_if_terminator(20, 103, 99))
 
-fn make_bounds_block_non_unit_step() -> MirBlock:
-    """for i += 2 — must not be authorized as a unit-step vector loop."""
-    val insts = [
-        make_cmp_lt_inst(20, 4, 30),
-        make_load_inst(10, 1),
-        make_add_step_inst(5, 4, 2)
-    ]
-    MirBlock(id: make_block_id(105), label: nil, instructions: insts,
-        terminator: make_if_terminator(20, 105, 99))
-
 fn make_bounds_block_infinite() -> MirBlock:
     """Infinite loop — no BinOp(Lt) defining cond local %20 → nil"""
     val insts = [
@@ -678,11 +655,6 @@ describe "AutoVectorize W-scev — detect_bounds_from_block negative":
         val result = detect_bounds_from_block(make_bounds_block_no_increment(), make_copy_op(20), make_block_id(99))
         expect(result != nil).to_equal(false)
 
-    it "non-unit integer increment returns nil":
-        step("Reject a non-unit induction step before vector rewriting")
-        val result = detect_bounds_from_block(make_bounds_block_non_unit_step(), make_copy_op(20), make_block_id(99))
-        expect(result).to_be_nil()
-
     it "infinite loop (no cmp defining cond local) returns nil":
         step("Verify: infinite loop (no cmp defining cond local) returns nil")
         val result = detect_bounds_from_block(make_bounds_block_infinite(), make_copy_op(20), make_block_id(99))
@@ -690,7 +662,7 @@ describe "AutoVectorize W-scev — detect_bounds_from_block negative":
 
     it "Const cond operand (not a local) returns nil":
         step("Verify: Const cond operand (not a local) returns nil")
-        val result = detect_bounds_from_block(make_bounds_block_for_n(), make_int_const_op(1), make_block_id(99))
+        val result = detect_bounds_from_block(make_bounds_block_for_n(), make_const_op("1"), make_block_id(99))
         expect(result != nil).to_equal(false)
 
 # ============================================================================
@@ -726,8 +698,8 @@ describe "AutoVectorize W-fastmath — FP reduction gate":
 # W-cfg: alignment-check and peeling BBs (L3 gap §3)
 # ============================================================================
 
-fn make_test_loop_info() -> VectorLoopInfo:
-    VectorLoopInfo(
+fn make_test_loop_info() -> LoopInfo:
+    LoopInfo(
         header_block:  make_block_id(0),
         body_blocks:   [make_block_id(1)],
         exit_block:    make_block_id(2),
@@ -934,7 +906,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
     it "alignment-check block has If terminator (branches to vec_loop or peel)":
         step("Verify: alignment-check block has If terminator (branches to vec_loop or peel)")
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
-        val li  = VectorLoopInfo(
+        val li  = LoopInfo(
             header_block:  make_block_id(1),
             body_blocks:   [],
             exit_block:    make_block_id(4),
@@ -968,7 +940,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
     it "peel_loop block for trip_count=16 divisible trip has label peel_loop":
         step("Verify: peel_loop block for trip_count=16 divisible trip has label peel_loop")
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
-        val li  = VectorLoopInfo(
+        val li  = LoopInfo(
             header_block:  make_block_id(1),
             body_blocks:   [],
             exit_block:    make_block_id(4),
@@ -991,7 +963,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add dynamic trip count (0..n)
         # When trip_count = -1 (unknown), rewriter uses end_value=0 as sentinel.
         # The alignment-check block still produces a runtime If terminator.
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
-        val li  = VectorLoopInfo(
+        val li  = LoopInfo(
             header_block:  make_block_id(1),
             body_blocks:   [],
             exit_block:    make_block_id(4),
@@ -1009,7 +981,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add dynamic trip count (0..n)
     it "peel_loop block for dynamic n has Goto terminator (no body clone when body_blocks empty)":
         step("Verify: peel_loop block for dynamic n has Goto terminator (no body clone when body_blocks empty)")
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
-        val li  = VectorLoopInfo(
+        val li  = LoopInfo(
             header_block:  make_block_id(1),
             body_blocks:   [],
             exit_block:    make_block_id(4),
@@ -1174,46 +1146,3 @@ describe "AutoVectorize N1-codegen — create_vector_loop_block":
             case If(cond, then_, else_): true
             case _: false
         expect(is_if).to_equal(true)
-
-describe "AutoVectorize analysis — operand collection":
-    it "collects call operands in order without concatenation rebuilding":
-        step("Build linear vectorizer use facts")
-        var args: [MirOperand] = []
-        var index = 1
-        while index <= 32:
-            args.push(make_copy_op(index))
-            index = index + 1
-        val inst = MirInst(kind: MirInstKind.Call(nil, make_copy_op(0), args))
-        val uses = get_inst_uses(inst)
-        expect(uses.len()).to_equal(33)
-        expect(uses[0].id).to_equal(0)
-        expect(uses[32].id).to_equal(32)
-
-    it "bounds dependency records instead of multiplying definitions by uses":
-        step("Bound vectorizer dependency analysis")
-        var defs: [i64] = []
-        var uses: [i64] = []
-        var index = 0
-        while index < 256:
-            defs.push(index * 2)
-            uses.push(index * 2 + 1)
-            index = index + 1
-        val dependencies = detect_dependencies(
-            [make_elementwise_block_add(), make_elementwise_block_sub()],
-            [DefUseChain(make_local(88), defs, uses)],
-            make_local(99)
-        )
-        expect(dependencies.len()).to_be_less_than(300)
-
-    it "rejects dependency analysis when shared def-use coverage is incomplete":
-        step("Reject incomplete shared vectorizer facts")
-        val body = make_elementwise_block_add()
-        val func = make_test_mir_function([body], false)
-        val facts = perf_facts_build(func)
-        val loop_info = VectorLoopInfo(
-            body.id, [body.id], make_block_id(2), make_local(4), 0, 16, 1
-        )
-        val result = analyze_loop_dependencies(loop_info, [body], facts)
-        expect(facts.def_use_complete).to_equal(false)
-        expect(result.analysis_complete).to_equal(false)
-        expect(result.vectorizable).to_equal(false)

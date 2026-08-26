@@ -5,21 +5,51 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- **GPU/CUDA programming hardening, tutorial port, and launch expressiveness** (2026-08-25) —
-  repair the CUDA surface (`std.io` cuda_sffi phantom ABI, `gpu_ops` typed-transfer SEGV,
-  torch-gated device probe, fake Vulkan context, `cuda_jit` lane import); add real CUDA
-  streams/events/async copies and `rt_cuda_launch_kernel_ex` with `std.cuda` `CudaStream`/
-  `CudaEvent` and `std.io` `cuda_launch_on`; make `kernel<<<grid, block>>>(args)` execute in
-  the interpreter via the new 3-D `gpu_launch_emulated` instead of silently evaluating to nil;
-  mount `ormastes/simple_cuda_example` (the `cuda_exercise` workbook in Simple) under
-  `examples/08_gpu/` with per-module specs and md-embedded sdoctests; add the
-  same-code/three-config backend example (`examples/08_gpu/backends/`); add an MDSOC GPU
-  layer/facet spec and fix `85.mdsoc/cross_query.spl` imports; new guide
-  `doc/07_guide/lib/gpu_3d/cuda_gpu_programming.md`; nine new bug records.
-- **Exact-ref mandatory-check evidence** — retain bootstrap gate logs in a
-  commit-ready textual evidence tree, validate them from the exact pushed Git
-  revision, reject dirty bootstrap attribution, and allow receipt-backed TODO
-  rows to earn a durable hash-bound PASS without adding costly work to push.
+- **LLM Caret agent workspaces + `workspace` dev CLI** (2026-08-25) — give each agent
+  one detached `git worktree` (never a branch) plus one tmux window on a PRIVATE tmux
+  socket (`tmux -L caret_ws_<id>`), so the operator's own tmux server is never touched;
+  add `llm_caret workspace <id> <cmd>` (`status|attach|detach|add|remove|list|panes|
+  send|broadcast|capture|wait|suite|kill`, exit 0 ok / 1 failed / 2 usage) with
+  broadcast-to-every-pane and a `caret_suite` window that polls for the authoritative
+  `Results:` line; add two independent recursion protections
+  (`LLM_CARET_WORKSPACE_DEPTH` refusal at MAX_DEPTH, and own-pane skip via `TMUX_PANE`).
+- **LLM Caret infrastructure tools — mail, object storage, wiki** (2026-08-25) — reach
+  servers through first-class tools instead of shelling out to `curl`/`mc`: IMAP/SMTP
+  mail (`mail_list`/`mail_read`/`mail_send`), MinIO over the pure-Simple SigV4 adapter
+  (`storage_ls`/`get`/`put`), and a wiki surface with Confluence and local-markdown
+  backends (`wiki_search`/`read`/`write`). All credentials are env references only
+  (`secret_env`/`access_key_env`/`token_env`); the three mutating tools are denied by
+  default through the existing permission gate. FTP is refused honestly because
+  `rt_ftp_*` is unbacked.
+- **`caret_*` MCP tools for Claude Code / Codex** (2026-08-25) — expose all nine infra
+  tools from `bin/simple_mcp_server`, with `"confirm": true` required on the three
+  mutating calls. The server never imports the caret/devhub/imap module graph (measured
+  to double startup); each call is dispatched to a one-shot child CLI, so MCP startup
+  gains exactly one module.
+- **Live infrastructure evidence wrapper** (2026-08-25) —
+  `scripts/check/check-llm-caret-infra-live.shs` starts MinIO and greenmail in Docker on
+  free ports, runs the gated system spec, and tears its own containers down
+  (`PASS — 2 live row(s)`, ~10 s warm, `ERROR` exit 2 without Docker).
+- **Shell recursion guard** (2026-08-25) — `scripts/lib/recursion_guard.shs`, a sourced
+  POSIX-sh snippet refusing a guarded chain deeper than `SIMPLE_SHS_MAX_DEPTH`
+  (default 3) with exit **3** and an optional guard chain in the FAIL line; overhead is
+  shell builtins only (~56 us per source). Wired into `land.shs`,
+  `check-seed-builds-push.shs`, `check-stage-binaries-runnable.shs` and `lint-cached.shs`.
+- **Env-overridable bootstrap admission timeouts** (2026-08-25) — the bootstrap
+  admission waits take an environment override instead of a hardcoded bound.
+
+  Five caret specs (`cli_cached`, `cli_hidden_cached`, `native_closure`, `tui_pty`,
+  `messaging_phase_cli`) remain BLOCKED, not passing: they require a qualified cached
+  self-hosted caret artifact and `SIMPLE_STAGE3/4_BINARY` from a Stage 4 bootstrap CLI,
+  which does not yet exist. All caret evidence to date is on the Rust seed.
+- **GPU/CUDA programming hardening + tutorial** (2026-08-25) — repair the CUDA driver
+  surface (`std.io` cuda_sffi phantom ABI, `gpu_ops` typed-transfer SEGV, torch-gated
+  device probe, fake Vulkan context), mount `ormastes/simple_cuda_example` (the
+  `cuda_exercise` workbook in Simple) under `examples/08_gpu/` with per-module specs and
+  md-embedded sdoctests, add the same-code/three-config backend example
+  (`examples/08_gpu/backends/`, CUDA live, Metal honest skip, Vulkan defects filed), MDSOC
+  GPU layer/facet spec (+ `cross_query` import fix), practical guide
+  `doc/07_guide/lib/gpu_3d/cuda_gpu_programming.md`, and six new bug records.
 - **UP Squared resident RAM boot and storage evidence** — add a free GNU-EFI
   PE32+ mailbox loader with strong per-boot nonce, commit-last SHA-256/ELF64
   admission, final EFI-map/Multiboot2 construction, embedded ELF32 shim, and
@@ -77,6 +107,25 @@ All notable changes to Simple Language will be documented in this file.
   existing rendered-payload routes.
 
 ### Fixed
+- **Parser: `unsafe` / `danger` usable as identifiers** (2026-08-25) — the deployed seed
+  could not parse origin's stdlib because a value-bound `unsafe(...)` was lexed as a
+  keyword in expression position.
+- **`(module, name)`-keyed co-compiled function registry** (2026-08-25) — a registry
+  keyed by bare name let a same-named function in one module silently shadow another's
+  (`utf8.char_from_code` over `string_core`, `json_helpers` over `std.mcp.helpers`).
+  Keying by `(module, name)` in both frontends removes the silent shadowing.
+- **IMAP FETCH parsed, not line-scanned** (2026-08-25) — replace the lenient line scanner
+  with a literal-aware RFC 3501 parser and framer (`{N}` byte counts honoured on both
+  transports) plus a `UID FETCH` builder, so a message body containing `)`, CRLFs or a
+  tag-looking line can no longer truncate a reply or corrupt `mail_list` rows.
+- **Bounded reads on the mail path** (2026-08-25) — every server read carries a monotonic
+  deadline (default 15 s per reply); a server that accepts and then stalls now fails the
+  tool call with `mail server timed out after N ms` instead of hanging the caret turn.
+- **STARTTLS negotiation implemented, transport honestly refused** (2026-08-25) — the
+  RFC 3207 / RFC 3501 negotiation state machine ships and is transcript-proven, but the
+  runtime has no in-place TLS upgrade of a connected fd (`rt_tls_client_from_fd` does not
+  exist), so `smtp_port: 587` is refused before connecting with an error naming the
+  missing symbol rather than failing obscurely mid-session.
 - **Reproducible UP2 deployment image** — pin the build epoch, GPT identifiers,
   FAT identity, and copied-file timestamps, validate them structurally, and
   require two independent full images to compare byte-for-byte.

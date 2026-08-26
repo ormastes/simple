@@ -397,7 +397,14 @@ fn box_for_closure_boundary<M: Module>(
             };
             call_runtime_1(ctx, builder, "rt_value_bool", widened)
         }
-        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 => {
+        TypeId::I8
+        | TypeId::I16
+        | TypeId::I32
+        | TypeId::I64
+        | TypeId::U8
+        | TypeId::U16
+        | TypeId::U32
+        | TypeId::U64 => {
             let widened = match vt {
                 types::I8 | types::I16 | types::I32 => builder.ins().sextend(types::I64, val),
                 types::F64 => builder.ins().bitcast(types::I64, MemFlags::new(), val),
@@ -787,9 +794,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
     };
 
     let mut method_resolution_error: Option<String> = None;
-    // Candidates of an ambiguous bare method on an erased receiver, kept so
-    // the vtable-identity type switch below can dispatch them at runtime.
-    let mut vtable_switch_candidates: Option<Vec<(String, FuncId)>> = None;
     let func_id = resolve_unique_module_qualified_func(ctx, lookup_name)
         .or_else(|| resolve_unique_module_qualified_func(ctx, &sanitized_name))
         .or_else(|| ctx
@@ -970,31 +974,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 );
                 return Some(*candidates[0].1);
             }
-            // Option/Result-family names must never be bound by name-suffix
-            // alone. `func_ids` is PER-MODULE, so in a module that merely USES
-            // `.unwrap()` the only `*_dot_unwrap` symbol in scope is whichever
-            // library defined one — in the self-host closure that is
-            // `nogc_async_mut/async/poll.spl`'s `Poll.unwrap`. That leaves
-            // exactly ONE candidate, so the `> 1` form of this guard never
-            // fired and the single-candidate tail below silently emitted
-            // `call <lib__nogc_async_mut__async__poll__Poll_dot_unwrap>` for an
-            // erased optional receiver. `Poll.unwrap` tests Poll::Ready /
-            // Poll::Pending, matches neither `Some` tag, falls through and
-            // returns 0; 0 is `< 4096`, so `rt_heap_ref_wellformed` reports the
-            // payload malformed while the field still holds a real enum —
-            // E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED, Stage 2 SEGV on hello
-            // world, Stage 3 SEGV at `aot:lower_to_mir`.
-            // Returning None is a ROUTE, not a refusal: the cross-module branch
-            // below already excludes this same name family from its bare
-            // import_map fallback, so resolution reaches
-            // `try_compile_builtin_method_call`, which maps `unwrap` to the
-            // runtime builtin `rt_unwrap_or_trap` (correct Some/Ok-payload-or-trap
-            // semantics for ANY enum receiver). No raw name survives to become a
-            // link-time import, so this cannot regress into a NULL GOT.
-            // Qualified lookups are unaffected — they returned above.
-            // See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
             if type_qualifier.is_none()
-                && !candidates.is_empty()
+                && candidates.len() > 1
                 && matches!(
                     method_part,
                     "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
@@ -1014,18 +995,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     candidates.len(),
                     cand_names.join(", ")
                 );
-                // Before giving up: if every candidate's owner carries a trait
-                // vtable, the receiver's vtable pointer IS its runtime type
-                // identity, so dispatch can be decided at runtime (see
-                // `try_emit_vtable_type_switch`). Record the candidates; the
-                // diagnostic fires only if that switch cannot be built.
-                let mut uniq: Vec<(String, FuncId)> = Vec::new();
-                for (k, id) in &candidates {
-                    if !uniq.iter().any(|(_, u)| u == *id) {
-                        uniq.push(((*k).clone(), **id));
-                    }
-                }
-                vtable_switch_candidates = Some(uniq);
+                eprintln!("{message}");
                 method_resolution_error = Some(message);
                 return None;
             }
@@ -1049,13 +1019,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
         });
 
     if let Some(error) = method_resolution_error {
-        if let Some(cands) = vtable_switch_candidates.take() {
-            let method_part = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
-            if try_emit_vtable_type_switch(ctx, builder, dest, receiver, args, method_part, &cands)? {
-                return Ok(());
-            }
-        }
-        eprintln!("{error}");
         return Err(error);
     }
 
@@ -1086,54 +1049,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // Cross-module method: resolve via use_map → import_map
         // First try exact match, then check for "TypeName.method" qualified
         // entries in use_map (prefers imported types over alphabetical import_map)
-        //
-        // SECOND BIND SITE (fixed 2026-08-25). An UNQUALIFIED Option/Result-family
-        // name must not be bound by NAME alone anywhere in this cross-module
-        // ladder. `T?` lowers to `HirType::Pointer`, which has no registered type
-        // name, so `mir/lower` emits `MethodCallStatic { func_name: "unwrap" }`
-        // with the receiver type erased. `imports.rs` inserts BARE raw method
-        // names into `use_map`, so in the self-host closure `use_map["unwrap"]`
-        // is `lib__nogc_async_mut__async__poll__Poll_dot_unwrap` — the only
-        // library that defines an `unwrap` method. `Poll.unwrap` tests
-        // Poll::Ready/Poll::Pending, matches neither `Some` tag, falls through
-        // and returns 0; 0 is `< 4096`, so `rt_heap_ref_wellformed` reports the
-        // payload malformed while the field still holds a real enum —
-        // E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED, and the Stage 2/3 self-host
-        // lane dies rc=139.
-        //
-        // The family exclusion previously guarded ONLY the import_map bare
-        // fallback at the bottom of this ladder. The three steps above it — the
-        // bare `use_map` hit, and the two `".{method}"` suffix scans (both
-        // first-wins with `break` over a HashMap, i.e. NONDETERMINISTIC iteration
-        // order) — were unguarded and ran FIRST, so the exclusion never decided
-        // anything for these names. That is why fixing the name-suffix binder
-        // above left `lower_and_check_impl` bit-for-bit unchanged at 4 sites:
-        // those calls stopped being bound there and were immediately re-stolen
-        // here, by a different mechanism, onto the SAME wrong symbol.
-        //
-        // Skipping is a ROUTE, not a refusal: `resolved_name == None` falls
-        // through to `try_compile_builtin_method_call`, which maps `unwrap` to
-        // the runtime builtin `rt_unwrap_or_trap` (correct Some/Ok-payload-or-trap
-        // semantics for ANY enum receiver) and declares the symbol on demand. No
-        // raw name survives to become a link-time import, so this cannot regress
-        // into the NULL-GOT class that produces the same rc=139 by another cause.
-        //
-        // QUALIFIED spellings are deliberately unaffected: `lookup_name` is
-        // `func_name` with `_dot_` rewritten to `.`, so matching these bare
-        // spellings exactly implies there is no type qualifier. A genuine
-        // `Poll.unwrap` / `Poll_dot_unwrap` call site still resolves normally.
-        // See doc/08_tracking/bug/poll_unwrap_second_bind_site_lower_and_check_impl_2026-08-25.md
-        let is_erased_enum_helper_family = matches!(
-            lookup_name,
-            "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
-        );
-        let mut resolved_name = if is_erased_enum_helper_family {
-            None
-        } else {
-            ctx.use_map.get(func_name).map(|s| s.as_str())
-        };
+        let mut resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
-        if resolved_name.is_none() && !is_erased_enum_helper_family {
+        if resolved_name.is_none() {
             let method_suffix = format!(".{}", func_name);
             for (raw, mangled) in ctx.use_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
@@ -1143,7 +1061,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
         // Also check import_map for qualified entries where type is imported
-        if resolved_name.is_none() && !is_erased_enum_helper_family {
+        if resolved_name.is_none() {
             let method_suffix = format!(".{}", lookup_name);
             for (raw, mangled) in ctx.import_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
@@ -1156,7 +1074,12 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
         // Final fallback: import_map bare name (may pick wrong overload)
-        if resolved_name.is_none() && !is_erased_enum_helper_family {
+        if resolved_name.is_none()
+            && !matches!(
+                lookup_name,
+                "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
+            )
+        {
             resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
         }
 
@@ -1594,8 +1517,8 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
         // (`"  42  ".trim().to_i64()`) still returning the intermediate text's
         // HEAP POINTER as a "successful" integer.
         // doc/08_tracking/bug/seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
-        "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase" | "char_at"
-        | "replace" => Some(TypeId::STRING),
+        "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase"
+        | "char_at" | "replace" => Some(TypeId::STRING),
         // `slice`/`substring`/`concat` are shared with array receivers, where
         // the result is an array, not text — so they stay receiver-gated. A
         // wrong entry here could make a previously-correct call worse.
@@ -2552,174 +2475,4 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     }
 
     indirect_call_with_result(ctx, builder, sig_ref, method_ptr, &call_args, dest);
-}
-
-/// Owner struct name of a `Type_dot_method` / `Type.method` candidate key
-/// (`"mod__Type_dot_kind"` -> `"Type"`).
-fn candidate_owner_type(key: &str, method: &str) -> Option<String> {
-    let dot = format!("_dot_{method}");
-    let raw = format!(".{method}");
-    let prefix = key
-        .strip_suffix(dot.as_str())
-        .or_else(|| key.strip_suffix(raw.as_str()))?;
-    let owner = prefix.rsplit("__").next().unwrap_or(prefix);
-    if owner.is_empty() {
-        None
-    } else {
-        Some(owner.to_string())
-    }
-}
-
-/// Runtime dispatch for a bare method on an ERASED receiver (`x: Any`, a
-/// trait-typed parameter) whose candidates are ambiguous by name.
-///
-/// A struct that implements a trait carries that trait's vtable pointer at
-/// offset 0 (`compile_struct_init`, keyed on `ctx.vtable_data_ids`). That
-/// pointer is a per-struct constant address, i.e. a runtime type identity.
-/// When EVERY candidate's owner has such a vtable, emit
-///
-/// ```text
-/// vt = load [recv & !7]
-/// if vt == &__vtable__A -> A.method(recv, args)
-/// if vt == &__vtable__B -> B.method(recv, args)
-/// else                  -> rt_method_not_found (aborts, like the interpreter)
-/// ```
-///
-/// This is exactly what the interpreter does by class name, expressed on the
-/// JIT's object layout. Nothing is guessed: a receiver of an unlisted type
-/// reaches `rt_method_not_found` instead of a silently wrong candidate.
-/// Returns `Ok(false)` (emit nothing) when any candidate has no vtable, so
-/// the caller's `[CODEGEN-AMBIGUOUS-METHOD]` refusal stays in force.
-fn try_emit_vtable_type_switch<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    dest: &Option<VReg>,
-    receiver: VReg,
-    args: &[VReg],
-    method: &str,
-    candidates: &[(String, FuncId)],
-) -> InstrResult<bool> {
-    let mut arms: Vec<(cranelift_module::DataId, FuncId)> = Vec::new();
-    let dbg = std::env::var_os("SIMPLE_DEBUG_METHOD_DISPATCH").is_some();
-    if dbg {
-        eprintln!(
-            "[CODEGEN-VTABLE-SWITCH] in '{}' method '{}' candidates={:?} vtable_owners={:?}",
-            ctx.func.name,
-            method,
-            candidates.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-            ctx.vtable_data_ids.keys().collect::<Vec<_>>()
-        );
-    }
-    for (key, func_id) in candidates {
-        let Some(owner) = candidate_owner_type(key, method) else {
-            return Ok(false);
-        };
-        let Some(&data_id) = ctx.vtable_data_ids.get(&owner) else {
-            return Ok(false);
-        };
-        if arms.iter().any(|(d, _)| *d == data_id) {
-            // Two candidates stamped with the same vtable cannot be told
-            // apart at runtime; refuse rather than pick.
-            return Ok(false);
-        }
-        arms.push((data_id, *func_id));
-    }
-    if arms.is_empty() {
-        return Ok(false);
-    }
-
-    let recv = get_vreg_or_default(ctx, builder, &receiver);
-    let arg_vals: Vec<cranelift_codegen::ir::Value> =
-        args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
-
-    let untag = builder.ins().iconst(types::I64, !7i64);
-    let ptr = builder.ins().band(recv, untag);
-    let merge = builder.create_block();
-    builder.append_block_param(merge, types::I64);
-    let miss = builder.create_block();
-    let probe = builder.create_block();
-    let nonnull = builder.ins().icmp_imm(IntCC::NotEqual, ptr, 0);
-    builder.ins().brif(nonnull, probe, &[], miss, &[]);
-
-    builder.switch_to_block(probe);
-    builder.seal_block(probe);
-    let vt = builder.ins().load(types::I64, MemFlags::new(), ptr, 0);
-    for (data_id, func_id) in &arms {
-        let global = ctx.module.declare_data_in_func(*data_id, builder.func);
-        let expected = builder.ins().global_value(types::I64, global);
-        let hit = builder.ins().icmp(IntCC::Equal, vt, expected);
-        let call_block = builder.create_block();
-        let next = builder.create_block();
-        builder.ins().brif(hit, call_block, &[], next, &[]);
-
-        builder.switch_to_block(call_block);
-        builder.seal_block(call_block);
-        let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-        let sig_ref = builder.func.dfg.ext_funcs[func_ref].signature;
-        let sig_params = builder.func.dfg.signatures[sig_ref].params.len();
-        let mut call_args = if sig_params == arg_vals.len() {
-            vec![]
-        } else {
-            vec![recv]
-        };
-        call_args.extend(arg_vals.iter().copied());
-        let call_args = super::calls::adapt_args_to_signature(builder, func_ref, call_args);
-        let call = adapted_call(builder, func_ref, &call_args);
-        let results = builder.inst_results(call).to_vec();
-        let result = match results.first() {
-            None => builder.ins().iconst(types::I64, 0),
-            Some(&r) => {
-                let ty = builder.func.dfg.value_type(r);
-                if ty == types::I64 {
-                    r
-                } else if ty == types::F64 {
-                    builder.ins().bitcast(types::I64, MemFlags::new(), r)
-                } else if ty.is_int() {
-                    builder.ins().uextend(types::I64, r)
-                } else {
-                    r
-                }
-            }
-        };
-        builder.ins().jump(merge, &[result]);
-
-        builder.switch_to_block(next);
-        builder.seal_block(next);
-    }
-    // No arm matched: fall into the abort path.
-    builder.ins().jump(miss, &[]);
-
-    builder.switch_to_block(miss);
-    builder.seal_block(miss);
-    let type_bytes = b"<erased receiver>";
-    let type_data = super::helpers::declare_named_bytes(ctx, type_bytes)?;
-    let type_global = ctx.module.declare_data_in_func(type_data, builder.func);
-    let type_ptr = builder.ins().global_value(types::I64, type_global);
-    let type_len = builder.ins().iconst(types::I64, type_bytes.len() as i64);
-    let method_bytes = method.as_bytes();
-    let method_data = super::helpers::declare_named_bytes(ctx, method_bytes)?;
-    let method_global = ctx.module.declare_data_in_func(method_data, builder.func);
-    let method_ptr = builder.ins().global_value(types::I64, method_global);
-    let method_len = builder.ins().iconst(types::I64, method_bytes.len() as i64);
-    let not_found_id = ctx.runtime_funcs["rt_method_not_found"];
-    let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
-    let nf = adapted_call(builder, not_found_ref, &[type_ptr, type_len, method_ptr, method_len]);
-    let nf_val = builder.inst_results(nf)[0];
-    builder.ins().jump(merge, &[nf_val]);
-
-    builder.switch_to_block(merge);
-    builder.seal_block(merge);
-    let out = builder.block_params(merge)[0];
-    if let Some(d) = dest {
-        ctx.vreg_values.insert(*d, out);
-    }
-    if std::env::var_os("SIMPLE_DEBUG_METHOD_DISPATCH").is_some() {
-        eprintln!(
-            "[CODEGEN-VTABLE-SWITCH] in '{}' bare method '{}' dispatched at runtime over {} vtable arm(s)",
-            ctx.func.name,
-            method,
-            arms.len()
-        );
-    }
-    Ok(true)
 }

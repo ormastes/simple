@@ -9,6 +9,7 @@ use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use super::linker::{add_extra_link_objects, split_extra_link_objects, validate_extra_link_objects};
+use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
@@ -89,15 +90,11 @@ fn enum_runtime_identity_uses_unique_global_enum_suffix() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function
-        .block_mut(BlockId(0))
-        .unwrap()
-        .instructions
-        .push(MirInst::EnumUnit {
-            dest,
-            enum_name: "FixConfidence".to_string(),
-            variant_name: "Safe".to_string(),
-        });
+    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
+        dest,
+        enum_name: "FixConfidence".to_string(),
+        variant_name: "Safe".to_string(),
+    });
     mir.functions.push(function);
 
     let runtime_names = std::collections::HashMap::from([(
@@ -129,15 +126,11 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function
-        .block_mut(BlockId(0))
-        .unwrap()
-        .instructions
-        .push(MirInst::EnumUnit {
-            dest,
-            enum_name: "ByteOrder".to_string(),
-            variant_name: "LittleEndian".to_string(),
-        });
+    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
+        dest,
+        enum_name: "ByteOrder".to_string(),
+        variant_name: "LittleEndian".to_string(),
+    });
     mir.functions.push(function);
 
     super::mangle::qualify_enum_runtime_names(
@@ -321,9 +314,7 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -475,6 +466,20 @@ fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str
     archive
 }
 
+#[cfg(target_os = "linux")]
+fn build_host_gpu_runtime_authority(root: &Path) -> (PathBuf, PathBuf) {
+    std::fs::create_dir_all(root).unwrap();
+    let definitions = simple_common::RUNTIME_SYMBOL_NAMES
+        .iter()
+        .filter(|symbol| symbol.starts_with("rt_host_gpu_queue_"))
+        .map(|symbol| format!("void {symbol}(void) {{}}\n"))
+        .collect::<String>();
+    let archive = build_compiler_backfill_test_archive(root, "simple_runtime", &[definitions.as_str()]);
+    let hosted = root.join("libspl_hosted_runtime-contract.rlib");
+    std::fs::write(&hosted, b"hosted-runtime-contract").unwrap();
+    (archive, hosted)
+}
+
 /// LIM-010: every stripping failure must explain itself, tagged, in Display.
 /// The link path formats this error into a user-facing message; the old `{:?}`
 /// form printed bare variant names and never mentioned the Stage 3 segfault.
@@ -535,9 +540,7 @@ __attribute__((constructor)) static void llvm_style_ctor(void) {}
                 "expected .init_array among {sections:?}"
             );
             assert!(
-                StripError::VerificationFailed { sections }
-                    .to_string()
-                    .contains("LIM-010"),
+                StripError::VerificationFailed { sections }.to_string().contains("LIM-010"),
                 "post-condition failure is untagged"
             );
         }
@@ -1009,10 +1012,7 @@ fn test_multi_root_sibling_dirs_do_not_collide_on_module_prefix() {
     assert_eq!(compiler_root, src, "multi-root naming must use the shared ancestor");
     let app_prefix = module_prefix_from_path(&app_init, &app_root);
     let compiler_prefix = module_prefix_from_path(&compiler_init, &compiler_root);
-    assert_ne!(
-        app_prefix, compiler_prefix,
-        "sibling roots must not collide after sanitization"
-    );
+    assert_ne!(app_prefix, compiler_prefix, "sibling roots must not collide after sanitization");
     assert_eq!(app_prefix, "app____init__");
     assert_eq!(compiler_prefix, "compiler____init__");
 
@@ -1350,23 +1350,10 @@ fn test_incremental_cache_dir_default() {
     let cache_dir = builder.cache_dir().to_string_lossy().replace('\\', "/");
     // Entries are partitioned by a per-lane scope subdirectory (see
     // doc/05_design/compiler/incremental_build/per_lane_private_caches.md).
-    let parent = builder
-        .cache_dir()
-        .parent()
-        .unwrap()
-        .to_string_lossy()
-        .replace('\\', "/");
+    let parent = builder.cache_dir().parent().unwrap().to_string_lossy().replace('\\', "/");
+    assert!(parent.ends_with("/project/.simple/native_cache"), "unexpected cache dir {cache_dir}");
     assert!(
-        parent.ends_with("/project/.simple/native_cache"),
-        "unexpected cache dir {cache_dir}"
-    );
-    assert!(
-        builder
-            .cache_dir()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("scope-"),
+        builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"),
         "unexpected cache dir {cache_dir}"
     );
 }
@@ -1475,12 +1462,7 @@ fn test_incremental_cache_dir_custom() {
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
 
     assert_eq!(builder.cache_dir().parent().unwrap(), PathBuf::from("/tmp/my_cache"));
-    assert!(builder
-        .cache_dir()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .starts_with("scope-"));
+    assert!(builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"));
 }
 
 #[test]
@@ -2013,9 +1995,7 @@ void rt_process_run(void) {}
         "spl_thread_sleep",
         "rt_process_spawn_piped",
         "rt_process_read_stdout",
-        "rt_process_read_stdout_checked",
         "rt_process_is_alive",
-        "rt_process_is_alive_checked",
         "rt_process_close_piped",
     ] {
         assert!(symbols.contains(required), "missing core-C provider {required}");
@@ -2098,13 +2078,6 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(
         core_c_symbols.contains("simd_text_init"),
         "core-c runtime archive must include runtime_simd_utf8.c because runtime_native.c calls simd_text_init"
-    );
-    assert!(
-        core_c_symbols.contains("rt_text_is_ascii"),
-        "core-c runtime archive must include runtime_simd_case.c because the tool \
-         source closure (src/app/mcp/main.spl and friends) reaches std text helpers \
-         that emit rt_text_is_ascii; without it the native link leaves the symbol \
-         undefined and the binary SEGVs on first call"
     );
     assert!(
         core_c_symbols.contains("rt_thread_available_parallelism"),
@@ -3813,27 +3786,109 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
             "{symbol} must be owner-overridable (weak or undefined) in the capsule, found strong/local"
         );
     }
-    assert!(
-        unresolved_runtime.is_subset(&owner_provided),
-        "unexpected unresolved: {unresolved_runtime:?}"
-    );
+    assert!(unresolved_runtime.is_subset(&owner_provided), "unexpected unresolved: {unresolved_runtime:?}");
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn test_runtime_bundle_host_gpu_selects_only_core_c_provider_loader() {
+fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
-    let mut config = NativeBuildConfig::default();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_runtime",
+        &["void rt_host_gpu_queue_reset(void) {}\n"],
+    );
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
 
-    let (runtime, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert!(!is_native_all);
-    assert!(runtime.starts_with(temp.path().join("host_gpu_core_c_runtime")));
-    let symbols = archive_defined_symbols(&runtime).unwrap();
-    assert!(symbols.contains("rt_gpu_provider_loaded"));
-    assert!(symbols.contains("rt_vulkan_init"));
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("missing Engine2D queue symbols"));
+    assert!(error.contains("rt_host_gpu_queue_emit_payload"));
+    assert!(error.contains("rt_host_gpu_queue_emit_payload_text"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_discovers_cargo_deps_runtime_archive() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let deps = temp.path().join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    build_compiler_backfill_test_archive(&deps, "simple_runtime", &["void rt_host_gpu_queue_reset(void) {}\n"]);
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("missing Engine2D queue symbols"));
+    assert!(!error.contains("feature-built libsimple_runtime.a is missing"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_discovers_target_root_bootstrap_authority() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let target_root = temp.path().join("target");
+    let authority = target_root.join("bootstrap/deps");
+    let (runtime, hosted) = build_host_gpu_runtime_authority(&authority);
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(target_root.clone()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
+
+    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    assert_eq!(find_hosted_runtime_rlib(&target_root), Some(hosted));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_accepts_adjacent_bootstrap_root() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let bootstrap_root = temp.path().join("target/bootstrap");
+    let authority = bootstrap_root.join("deps");
+    let (runtime, hosted) = build_host_gpu_runtime_authority(&authority);
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(bootstrap_root.clone()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
+
+    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    assert_eq!(find_hosted_runtime_rlib(&bootstrap_root), Some(hosted));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("feature-built libsimple_runtime.a is missing"));
+    assert_eq!(find_hosted_runtime_rlib(temp.path()), None);
 }
 
 #[test]
@@ -4081,21 +4136,9 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let sync_platform = sync_root.join("platform.spl");
     let gc_path = gc_root.join("path.spl");
     let consumer = sync_root.join("consumer.spl");
-    std::fs::write(
-        &sync_path,
-        "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n",
-    )
-    .unwrap();
-    std::fs::write(
-        &sync_platform,
-        "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        &gc_path,
-        "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n",
-    )
-    .unwrap();
+    std::fs::write(&sync_path, "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n").unwrap();
+    std::fs::write(&sync_platform, "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n").unwrap();
+    std::fs::write(&gc_path, "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n").unwrap();
     std::fs::write(&consumer, "use std.nogc_sync_mut.platform.{normalize_path as platform_normalize, is_absolute_path as platform_is_absolute}\n").unwrap();
     let file_sources = [&sync_path, &sync_platform, &gc_path, &consumer]
         .into_iter()
@@ -4108,10 +4151,7 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
     let expected_prefix = module_prefix_from_path(&sync_path, &src_root);
 
-    assert_eq!(
-        use_map.get("platform_normalize"),
-        Some(&format!("{expected_prefix}__normalize_path"))
-    );
+    assert_eq!(use_map.get("platform_normalize"), Some(&format!("{expected_prefix}__normalize_path")));
     assert_eq!(
         use_map.get("platform_is_absolute"),
         Some(&format!("{expected_prefix}__is_absolute_path"))
@@ -5433,9 +5473,7 @@ int main(void) { app_call(); return 0; }
         unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5549,9 +5587,7 @@ void __module_init_security_registry(void) {
         unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5704,9 +5740,7 @@ int main(int argc, char** argv) {
         unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5751,7 +5785,11 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
     let main_object = builder.compile_main_stub(temp.path()).unwrap();
     let args_provider = temp.path().join("args-provider.cpp");
     let args_provider_object = temp.path().join("args-provider.o");
-    std::fs::write(&args_provider, "extern \"C\" void rt_set_args(int, char**) {}\n").unwrap();
+    std::fs::write(
+        &args_provider,
+        "extern \"C\" void rt_set_args(int, char**) {}\n",
+    )
+    .unwrap();
     assert!(std::process::Command::new("c++")
         .args(["-c"])
         .arg(&args_provider)
@@ -5770,9 +5808,9 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
             .unwrap();
         let symbols = String::from_utf8_lossy(&symbols.stdout);
         assert!(symbols.lines().any(|line| line.contains(" U _rt_set_args")));
-        assert!(!symbols
-            .lines()
-            .any(|line| { line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args") }));
+        assert!(!symbols.lines().any(|line| {
+            line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args")
+        }));
     }
 
     let linked_probe = temp.path().join("linked-probe");
@@ -5842,9 +5880,7 @@ int main(void) {
         unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5916,9 +5952,7 @@ int main(void) {
         unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5984,9 +6018,7 @@ int main(void) { return (int)run_check(); }
         unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -6432,10 +6464,7 @@ int main(void) {
     if (rt_value_bool(1) != 11) return 11;
     if (rt_value_bool(0) != 19) return 12;
     if (rt_value_nil() != 3) return 13;
-    double float_input = (double)0x123456789LL;
-    int64_t float_bits = 0;
-    memcpy(&float_bits, &float_input, sizeof(float_bits));
-    if (rt_value_float(float_input) != ((float_bits & ~7LL) | 2LL)) return 14;
+    if (rt_value_float(0x123456789LL) != ((0x123456789LL & ~7LL) | 2LL)) return 14;
 
     uint8_t* p = (uint8_t*)rt_alloc(4);
     if (!p) return 20;
@@ -6597,7 +6626,6 @@ int main(void) {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source() {
-    let _guard = no_stub_fallback_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir
         .parent()
@@ -6611,13 +6639,7 @@ fn test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source() {
     let _ = std::fs::create_dir_all(&output_dir);
     let output = output_dir.join("simple_lsp_mcp_startup");
 
-    // The entry closure is deliberately reduced: source objects still contain
-    // references from functions which the final link's section GC discards.
-    // Exercise the production strict-link policy so the linker, rather than
-    // the non-strict object-wide preflight, decides which providers are live.
-    let previous_strict = std::env::var("SIMPLE_NO_STUB_FALLBACK").ok();
-    std::env::set_var("SIMPLE_NO_STUB_FALLBACK", "1");
-    let build_result = NativeProjectBuilder::new(repo_root.clone(), output.clone())
+    let result = NativeProjectBuilder::new(repo_root.clone(), output.clone())
         .config(NativeBuildConfig {
             entry_closure: true,
             runtime_bundle: "core-c".to_string(),
@@ -6628,12 +6650,8 @@ fn test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source() {
         .source_dir(repo_root.join("src/app"))
         .source_dir(repo_root.join("src/lib"))
         .entry_file(repo_root.join("src/app/simple_lsp_mcp/main.spl"))
-        .build();
-    match previous_strict {
-        Some(value) => std::env::set_var("SIMPLE_NO_STUB_FALLBACK", value),
-        None => std::env::remove_var("SIMPLE_NO_STUB_FALLBACK"),
-    }
-    let result = build_result.unwrap();
+        .build()
+        .unwrap();
 
     assert!(
         result.binary_size < 512_000,
@@ -6738,9 +6756,7 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -6956,10 +6972,7 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .source_dir(source_dir.clone())
                 .build()
                 .unwrap();
-            assert_eq!(
-                result.cached, 1,
-                "retry did not reuse the object completed before the failed batch"
-            );
+            assert_eq!(result.cached, 1, "retry did not reuse the object completed before the failed batch");
 
             fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
             NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
@@ -7025,10 +7038,7 @@ fn test_incremental_cache_rejects_corrupt_mangled_object() {
     fs::write(source_dir.join("b.spl"), "fn cache_b() -> i64:\n    return 33\n").unwrap();
     let changed = build();
     assert_eq!(changed.cached, 1, "unchanged sibling should still hit its key");
-    assert_eq!(
-        changed.compiled, 1,
-        "changed source key must not reuse stale object bytes"
-    );
+    assert_eq!(changed.compiled, 1, "changed source key must not reuse stale object bytes");
 }
 
 #[test]
@@ -7084,10 +7094,7 @@ fn test_cache_invalid_read_never_unlinks_concurrent_publication_path() {
     let path = temp.path().join("shared.o");
     fs::write(&path, b"invalid").unwrap();
     assert!(super::read_usable_cached_object(&path).is_none());
-    assert!(
-        path.exists(),
-        "reader must not unlink a path another builder can publish"
-    );
+    assert!(path.exists(), "reader must not unlink a path another builder can publish");
 }
 
 #[test]
@@ -7797,7 +7804,7 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
     let src = temp.path().join("fixture.c");
     std::fs::write(
         &src,
-        "long rt_fixture_missing(long x);\nlong fixture_entry(long x) { return rt_fixture_missing(x); }\nint main(void) { return (int)fixture_entry(1); }\n",
+        "long rt_fixture_missing(long x);\nlong fixture_entry(long x) { return rt_fixture_missing(x); }\n",
     )
     .unwrap();
     let obj = temp.path().join("fixture.o");
@@ -7822,9 +7829,7 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
-        suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7849,181 +7854,4 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         err.contains("SIMPLE_ALLOW_UNRESOLVED_RUNTIME"),
         "the verdict must state the escape hatch; got: {err}"
     );
-
-    // In strict mode the preflight defers its object-wide result to section
-    // GC. A truly live missing provider must still fail at the final linker.
-    let prev_strict = std::env::var("SIMPLE_NO_STUB_FALLBACK").ok();
-    std::env::set_var("SIMPLE_NO_STUB_FALLBACK", "1");
-    let strict_stub = super::stubs::generate_stub_object(temp.path(), &[], &obj, &[], &imports)
-        .expect("strict final link should own the live unresolved verdict");
-    let linked = temp.path().join("strict-missing-runtime");
-    let link = std::process::Command::new(&cc)
-        .arg(&obj)
-        .arg(&strict_stub)
-        .arg("-Wl,--gc-sections")
-        .arg("-o")
-        .arg(&linked)
-        .output()
-        .unwrap();
-    if let Some(v) = prev_strict {
-        std::env::set_var("SIMPLE_NO_STUB_FALLBACK", v);
-    } else {
-        std::env::remove_var("SIMPLE_NO_STUB_FALLBACK");
-    }
-    assert!(
-        !link.status.success(),
-        "strict linker must reject a live missing runtime provider"
-    );
-    assert!(
-        String::from_utf8_lossy(&link.stderr).contains("rt_fixture_missing"),
-        "strict linker verdict must name the live missing symbol; stderr={}",
-        String::from_utf8_lossy(&link.stderr)
-    );
-}
-
-// ---------------------------------------------------------------------------
-// SimpleOS link line: the target simple-core archive and the C runtime must
-// actually reach the linker.
-//
-// Regression for
-// doc/08_tracking/bug/simpleos_target_build_link_omits_simple_core_archive_2026-08-24.md
-// -- building for aarch64/riscv64-unknown-simpleos failed with 20 distinct
-// undefined codegen-emitted rt_* symbols ("referenced 978 more times") while the
-// archive that defined them had been resolved, echoed by CI as
-// `runtime_archive=`, and then never placed on the link line.
-// ---------------------------------------------------------------------------
-
-fn simpleos_sysroot_fixture(root: &Path, with_all_archive: bool) -> PathBuf {
-    let sysroot = root.join("sysroot");
-    let lib = sysroot.join("lib");
-    std::fs::create_dir_all(&lib).unwrap();
-    std::fs::write(lib.join("crt0.o"), b"crt0").unwrap();
-    std::fs::write(lib.join("libsimpleos_c.a"), b"libc").unwrap();
-    if with_all_archive {
-        // libc + the cross-compiled src/runtime C runtime, as the real sysroot
-        // producers build it. Deliberately NO libsimple_runtime.a here: no
-        // sysroot producer installs that name, which is precisely why looking
-        // only for it found nothing.
-        std::fs::write(lib.join("libsimpleos_all.a"), b"libc+c-runtime").unwrap();
-    }
-    sysroot
-}
-
-fn simpleos_core_archive_fixture(root: &Path) -> PathBuf {
-    let dir = root.join("simple-core-simpleos");
-    std::fs::create_dir_all(&dir).unwrap();
-    let archive = dir.join("libsimple_runtime.a");
-    std::fs::write(&archive, b"target simple-core").unwrap();
-    archive
-}
-
-#[test]
-fn test_simpleos_link_uses_core_archive_from_env_and_all_libc_archive() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let temp = tempfile::tempdir().unwrap();
-    let sysroot = simpleos_sysroot_fixture(temp.path(), true);
-    let core_archive = simpleos_core_archive_fixture(temp.path());
-
-    let prev_sysroot = std::env::var("SIMPLEOS_SYSROOT").ok();
-    let prev_core = std::env::var("SIMPLE_SIMPLE_CORE_PATH").ok();
-    std::env::set_var("SIMPLEOS_SYSROOT", &sysroot);
-    // The DIRECTORY spelling; the bug record measured both spellings in use.
-    std::env::set_var("SIMPLE_SIMPLE_CORE_PATH", core_archive.parent().unwrap());
-
-    for arch in [
-        simple_common::target::TargetArch::Aarch64,
-        simple_common::target::TargetArch::Riscv64,
-        simple_common::target::TargetArch::X86_64,
-    ] {
-        let target = simple_common::target::Target::new(arch, simple_common::target::TargetOS::SimpleOS);
-        let resolved = NativeProjectBuilder::simpleos_user_runtime_paths(target);
-        let (crt0, runtime, libc) = resolved
-            .unwrap_or_else(|| panic!("{arch:?}: SimpleOS runtime paths must resolve from SIMPLE_SIMPLE_CORE_PATH"));
-
-        assert_eq!(crt0, sysroot.join("lib/crt0.o"), "{arch:?}: crt0");
-        // The core archive must come from the env var, NOT from a sysroot path
-        // that no producer writes. This is the assertion that fails pre-fix.
-        assert_eq!(
-            runtime, core_archive,
-            "{arch:?}: target simple-core archive must reach the link line"
-        );
-        // libsimpleos_all.a carries the C runtime; libsimpleos_c.a is libc alone
-        // and linking only it left every C-runtime symbol undefined.
-        assert_eq!(
-            libc,
-            sysroot.join("lib/libsimpleos_all.a"),
-            "{arch:?}: libc+runtime archive"
-        );
-    }
-
-    match prev_sysroot {
-        Some(v) => std::env::set_var("SIMPLEOS_SYSROOT", v),
-        None => std::env::remove_var("SIMPLEOS_SYSROOT"),
-    }
-    match prev_core {
-        Some(v) => std::env::set_var("SIMPLE_SIMPLE_CORE_PATH", v),
-        None => std::env::remove_var("SIMPLE_SIMPLE_CORE_PATH"),
-    }
-}
-
-#[test]
-fn test_simpleos_link_accepts_core_archive_file_spelling_and_falls_back_to_libc_only() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let temp = tempfile::tempdir().unwrap();
-    // No libsimpleos_all.a: must fall back to libsimpleos_c.a rather than bail.
-    let sysroot = simpleos_sysroot_fixture(temp.path(), false);
-    let core_archive = simpleos_core_archive_fixture(temp.path());
-
-    let prev_sysroot = std::env::var("SIMPLEOS_SYSROOT").ok();
-    let prev_core = std::env::var("SIMPLE_SIMPLE_CORE_PATH").ok();
-    std::env::set_var("SIMPLEOS_SYSROOT", &sysroot);
-    // The FILE spelling this time.
-    std::env::set_var("SIMPLE_SIMPLE_CORE_PATH", &core_archive);
-
-    let target = simple_common::target::Target::new(
-        simple_common::target::TargetArch::Riscv64,
-        simple_common::target::TargetOS::SimpleOS,
-    );
-    let (_crt0, runtime, libc) = NativeProjectBuilder::simpleos_user_runtime_paths(target)
-        .expect("riscv64 must be a supported SimpleOS user target");
-    assert_eq!(runtime, core_archive);
-    assert_eq!(libc, sysroot.join("lib/libsimpleos_c.a"));
-
-    match prev_sysroot {
-        Some(v) => std::env::set_var("SIMPLEOS_SYSROOT", v),
-        None => std::env::remove_var("SIMPLEOS_SYSROOT"),
-    }
-    match prev_core {
-        Some(v) => std::env::set_var("SIMPLE_SIMPLE_CORE_PATH", v),
-        None => std::env::remove_var("SIMPLE_SIMPLE_CORE_PATH"),
-    }
-}
-
-#[test]
-fn test_simpleos_riscv64_gets_its_own_sysroot_and_linker_script() {
-    // riscv64 previously fell through to the x86_64 unsuffixed build/os/sysroot,
-    // and resolve_freestanding_linker_script's X86_64|Aarch64 guard meant it
-    // never received the sysroot's simpleos.ld either.
-    let prev = std::env::var("SIMPLEOS_SYSROOT").ok();
-    std::env::remove_var("SIMPLEOS_SYSROOT");
-
-    let rv = NativeProjectBuilder::simpleos_sysroot_dir(simple_common::target::TargetArch::Riscv64);
-    assert_eq!(rv, PathBuf::from("build/os/sysroot-riscv64"));
-    assert_ne!(
-        rv,
-        NativeProjectBuilder::simpleos_sysroot_dir(simple_common::target::TargetArch::X86_64)
-    );
-
-    let target = simple_common::target::Target::new(
-        simple_common::target::TargetArch::Riscv64,
-        simple_common::target::TargetOS::SimpleOS,
-    );
-    assert_eq!(
-        NativeProjectBuilder::resolve_freestanding_linker_script(None, target, &rv),
-        Some(rv.join("share/simpleos/simpleos.ld"))
-    );
-
-    if let Some(v) = prev {
-        std::env::set_var("SIMPLEOS_SYSROOT", v);
-    }
 }

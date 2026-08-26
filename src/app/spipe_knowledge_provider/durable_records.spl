@@ -1,0 +1,723 @@
+use std.common.search.document.{SearchDocument, SearchField, SearchFacet}
+use std.common.search.snapshot.{SearchSnapshot}
+use std.common.search.analyzer.{AnalyzerIdentity}
+use std.common.json.serializer.{json_escape_string}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get, json_object_keys}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_string, json_to_number, json_to_boolean}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use app.spipe_knowledge_provider.wire_json.{wire_canonical_json_value, wire_json_string, wire_valid_id, wire_valid_hash}
+use app.spipe_knowledge_provider.document_binding.{scoped_fields, scoped_field_arrays_bound, scoped_facets, scoped_facets_are_canonical}
+
+struct ProviderReplayV1:
+    operation: text
+    request_id: text
+    operation_id: text
+    payload_hash: text
+    response: text
+    receipt: text
+    receipt_id: text
+    response_hash: text
+    replay_signature: text
+    candidate_uid: text
+    observed_terminal_state: text
+    observed_terminal_receipt_kind: text
+    observed_terminal_receipt_id: text
+    recorded_at_ms: i64
+
+struct ProviderCandidateV1:
+    uid: text
+    base_root: text
+    candidate_root: text
+    candidate_root_preimage: text
+    apply_operation_id: text
+    apply_payload_hash: text
+    apply_receipt: text
+    created_at_ms: i64
+    expires_at_ms: i64
+    state: text
+    terminal_operation_id: text
+    terminal_receipt_kind: text
+    terminal_receipt: text
+    terminal_result_root: text
+    terminal_at_ms: i64
+    snapshot: SearchSnapshot
+    document_hashes: [text]
+    document_hash_preimages: [text]
+
+struct PublicationRecordV1:
+    operation_id: text
+    payload_hash: text
+    candidate_uid: text
+    previous_logical_root: text
+    result_logical_root: text
+    operation_receipt_id: text
+    published_at_ms: i64
+
+fn stored_text(value: any, key: text) -> text:
+    val item = json_to_string(json_object_get(value, key))
+    if item == nil: "" else: item
+
+fn stored_int(value: any, key: text, missing: i64) -> i64:
+    val item = json_to_number(json_object_get(value, key))
+    if item == nil: missing else: item as i64
+
+fn closed_object(value: any, expected: [text]) -> bool:
+    if json_get_type(value) != "object": return false
+    val keys = json_object_keys(value)
+    if keys.len() != expected.len(): return false
+    var i = 0
+    while i < expected.len():
+        if not keys.contains(expected[i]): return false
+        i = i + 1
+    true
+
+# Durable lifecycle bytes are an owned canonical representation.  Callers may
+# use this cheap outer-envelope guard before performing the deeper reconstruction
+# and exact lifecycle_records_json equality check.
+fn lifecycle_json_bytes_canonical(serialized: text) -> bool:
+    val parsed = json_parse_with_error(serialized)
+    if parsed.1 != "" or json_get_type(parsed.0) != "object": return false
+    val canonical = wire_canonical_json_value(parsed.0)
+    canonical.is_ok() and canonical.unwrap() == serialized
+
+fn success_response_request_id(response: text) -> text:
+    val parsed = json_parse_with_error(response)
+    if parsed.1 != "" or json_get_type(parsed.0) != "object": return ""
+    stored_text(parsed.0, "request_id")
+
+fn signed_success_response_bound(response: text, request_id: text,
+                                 operation: text, receipt: text,
+                                 workspace: text, snapshot: text,
+                                 scope_digest: text) -> bool:
+    val parsed = json_parse_with_error(response)
+    if parsed.1 != "" or not closed_object(parsed.0,
+            ["ok", "operation", "operation_receipt", "protocol",
+             "provider_generation", "query_receipt", "request_id", "result",
+             "scope_digest", "snapshot", "workspace"]):
+        return false
+    val value = parsed.0
+    val protocol_value = json_object_get(value, "protocol")
+    val receipt_value = json_parse_with_error(receipt)
+    if receipt_value.1 != "" or not closed_object(protocol_value, ["major", "minor"]):
+        return false
+    val embedded = wire_canonical_json_value(json_object_get(value, "operation_receipt"))
+    val result = json_object_get(value, "result")
+    val canonical_result = wire_canonical_json_value(result)
+    if val Err(_) = embedded: return false
+    if val Err(_) = canonical_result: return false
+    val canonical_response = "{\"ok\":true,\"operation\":" +
+        wire_json_string(operation) + ",\"operation_receipt\":" + embedded.unwrap() +
+        ",\"protocol\":{\"major\":1,\"minor\":0},\"provider_generation\":" +
+        wire_json_string(stored_text(value, "provider_generation")) +
+        ",\"query_receipt\":null,\"request_id\":" + wire_json_string(request_id) +
+        ",\"result\":" + canonical_result.unwrap() +
+        ",\"scope_digest\":" + wire_json_string(scope_digest) +
+        ",\"snapshot\":" + wire_json_string(snapshot) + ",\"workspace\":" +
+        wire_json_string(workspace) + "}"
+    if embedded.unwrap() != receipt or
+            response != canonical_response or
+            json_get_type(json_object_get(value, "ok")) != "boolean" or
+            not json_to_boolean(json_object_get(value, "ok")) or
+            json_get_type(json_object_get(value, "query_receipt")) != "null" or
+            stored_int(protocol_value, "major", -1) != 1 or
+            stored_int(protocol_value, "minor", -1) != 0 or
+            stored_text(value, "provider_generation") != stored_text(receipt_value.0, "provider_generation") or
+            stored_text(value, "request_id") != request_id or request_id == "" or
+            stored_text(value, "operation") != operation or
+            stored_text(value, "workspace") != workspace or
+            stored_text(value, "snapshot") != snapshot or
+            stored_text(value, "scope_digest") != scope_digest:
+        return false
+    val outcome = stored_text(receipt_value.0, "outcome")
+    val candidate_uid = stored_text(receipt_value.0, "candidate_uid")
+    val base_root = stored_text(receipt_value.0, "base_logical_root")
+    val result_root = stored_text(receipt_value.0, "result_logical_root")
+    if operation == "index_apply":
+        return closed_object(result,
+                ["added", "base_logical_root", "candidate_expires_at_ms",
+                 "candidate_logical_root", "candidate_uid", "deleted",
+                 "replaced", "status"]) and
+            stored_int(result, "added", -1) >= 0 and
+            stored_int(result, "deleted", -1) >= 0 and
+            stored_int(result, "replaced", -1) >= 0 and
+            stored_int(result, "candidate_expires_at_ms", -1) >= 0 and
+            stored_text(result, "base_logical_root") == base_root and
+            stored_text(result, "candidate_logical_root") == result_root and
+            stored_text(result, "candidate_uid") == candidate_uid and
+            stored_text(result, "status") == outcome
+    if operation == "index_publish":
+        return closed_object(result,
+                ["candidate_uid", "logical_root", "previous_logical_root", "status"]) and
+            stored_text(result, "candidate_uid") == candidate_uid and
+            stored_text(result, "logical_root") == result_root and
+            stored_text(result, "previous_logical_root") != "" and
+            stored_text(result, "status") == outcome
+    false
+
+fn response_hash(response: text) -> text:
+    "sha256:" + sha256_u8_hex(text_to_bytes(response))
+
+fn replay_binding_domain_bytes(workspace: text, snapshot: text,
+                               scope_digest: text, operation: text,
+                               operation_id: text, payload_hash: text,
+                               request_id: text, response_hash_value: text,
+                               receipt_id_value: text) -> [u8]:
+    val canonical = "{\"operation\":" + wire_json_string(operation) +
+        ",\"operation_id\":" + wire_json_string(operation_id) +
+        ",\"payload_hash\":" + wire_json_string(payload_hash) +
+        ",\"receipt_id\":" + wire_json_string(receipt_id_value) +
+        ",\"request_id\":" + wire_json_string(request_id) +
+        ",\"response_hash\":" + wire_json_string(response_hash_value) +
+        ",\"schema\":\"spipe-durable-replay-binding-v1\",\"scope_digest\":" +
+        wire_json_string(scope_digest) + ",\"snapshot\":" +
+        wire_json_string(snapshot) + ",\"workspace\":" +
+        wire_json_string(workspace) + "}"
+    var bytes = text_to_bytes("SPKC-DURABLE-REPLAY-BINDING-V1\0")
+    val size = canonical.bytes().len()
+    var shift = 56
+    while shift >= 0:
+        bytes.push(((size >> shift) & 255) as u8)
+        shift = shift - 8
+    val payload = canonical.bytes()
+    var i = 0
+    while i < payload.len():
+        bytes.push(payload[i])
+        i = i + 1
+    bytes
+
+fn domain_hash(domain: text, canonical: text) -> text:
+    var bytes = text_to_bytes(domain)
+    val size = canonical.bytes().len()
+    var shift = 56
+    while shift >= 0:
+        bytes.push(((size >> shift) & 255) as u8)
+        shift = shift - 8
+    val payload = canonical.bytes()
+    var i = 0
+    while i < payload.len():
+        bytes.push(payload[i])
+        i = i + 1
+    "sha256:" + sha256_u8_hex(bytes)
+
+fn candidate_root_preimage_bound(base_root: text, candidate_root: text,
+                                 preimage: text) -> bool:
+    if preimage == "": return false
+    val root = candidate_document_root(preimage)
+    if val Err(_) = root: return false
+    root.unwrap() == candidate_root
+
+fn candidate_document_set_preimage(documents: [SearchDocument],
+                                   hashes: [text]) -> Result<text, text>:
+    if documents.len() != hashes.len(): return Err("snapshot_corrupt")
+    var chosen: [text] = []
+    var rows: [text] = []
+    while chosen.len() < documents.len():
+        var selected = 0 - 1
+        var i = 0
+        while i < documents.len():
+            val id = documents[i].id
+            if id == "" or chosen.contains(id):
+                i = i + 1
+                continue
+            if selected < 0 or id < documents[selected].id: selected = i
+            i = i + 1
+        if selected < 0: return Err("snapshot_corrupt")
+        val id = documents[selected].id
+        # Selecting an already emitted id means the input document set was not unique.
+        var duplicates = 0
+        i = 0
+        while i < documents.len():
+            if documents[i].id == id: duplicates = duplicates + 1
+            i = i + 1
+        if duplicates != 1 or hashes[selected] == "": return Err("snapshot_corrupt")
+        chosen.push(id)
+        rows.push("{\"id\":" + wire_json_string(id) +
+            ",\"scoped_hash\":" + wire_json_string(hashes[selected]) + "}")
+    Ok("[" + rows.join(",") + "]")
+
+fn candidate_commitment_preimage(operations_preimage: text,
+                                 documents: [SearchDocument],
+                                 hashes: [text]) -> Result<text, text>:
+    val operations = json_parse_with_error(operations_preimage)
+    if operations.1 != "" or json_get_type(operations.0) != "array" or
+            wire_canonical_json_value(operations.0)? != operations_preimage:
+        return Err("snapshot_corrupt")
+    Ok("{\"documents\":" + candidate_document_set_preimage(documents, hashes)? +
+        ",\"operations\":" + operations_preimage + "}")
+
+fn candidate_document_root(preimage: text) -> Result<text, text>:
+    val commitment = json_parse_with_error(preimage)
+    if commitment.1 != "" or not closed_object(commitment.0,
+            ["documents", "operations"]) or
+            wire_canonical_json_value(commitment.0)? != preimage:
+        return Err("snapshot_corrupt")
+    val documents = json_object_get(commitment.0, "documents")
+    if json_get_type(documents) != "array": return Err("snapshot_corrupt")
+    val canonical_documents = wire_canonical_json_value(documents)?
+    if canonical_documents == "[]": return Ok("sha256:" + "0" * 64)
+    Ok(domain_hash("SPKC-LEXICAL-SNAPSHOT-V1\0",
+        "{\"documents\":" + canonical_documents + "}"))
+
+fn candidate_root_from_commitment(base_root: text, outcome: text,
+                                  preimage: text) -> Result<text, text>:
+    if preimage == "": return Err("snapshot_corrupt")
+    if outcome != "no_op" and outcome != "applied": return Err("snapshot_corrupt")
+    val root = candidate_document_root(preimage)?
+    if outcome == "no_op" and root != base_root:
+        return Err("snapshot_corrupt")
+    Ok(root)
+
+fn receipt_id(receipt: text) -> text:
+    if receipt == "": return ""
+    val parsed = json_parse_with_error(receipt)
+    if parsed.1 != "": return ""
+    stored_text(parsed.0, "receipt_id")
+
+fn operation_receipt_bound(receipt: text, operation: text, outcome: text,
+                           operation_id: text, candidate_uid: text,
+                           workspace: text, snapshot: text, scope_digest: text,
+                           base_root: text, result_root: text,
+                           payload_hash: text) -> bool:
+    val parsed = json_parse_with_error(receipt)
+    if parsed.1 != "" or json_get_type(parsed.0) != "object": return false
+    val value = parsed.0
+    stored_text(value, "operation") == operation and
+        stored_text(value, "outcome") == outcome and
+        stored_text(value, "operation_id") == operation_id and
+        stored_text(value, "candidate_uid") == candidate_uid and
+        stored_text(value, "workspace") == workspace and
+        stored_text(value, "snapshot") == snapshot and
+        stored_text(value, "scope_digest") == scope_digest and
+        stored_text(value, "base_logical_root") == base_root and
+        stored_text(value, "result_logical_root") == result_root and
+        stored_text(value, "payload_hash") == payload_hash
+
+fn expiry_receipt_bound(receipt: text, candidate: ProviderCandidateV1,
+                        workspace: text, snapshot: text,
+                        scope_digest: text) -> bool:
+    val parsed = json_parse_with_error(receipt)
+    if parsed.1 != "" or json_get_type(parsed.0) != "object": return false
+    val value = parsed.0
+    stored_text(value, "candidate_uid") == candidate.uid and
+        stored_text(value, "candidate_logical_root") == candidate.candidate_root and
+        stored_text(value, "base_logical_root") == candidate.base_root and
+        stored_text(value, "apply_operation_id") == candidate.apply_operation_id and
+        stored_text(value, "apply_receipt_id") == receipt_id(candidate.apply_receipt) and
+        stored_text(value, "workspace") == workspace and
+        stored_text(value, "snapshot") == snapshot and
+        stored_text(value, "scope_digest") == scope_digest
+
+fn nullable_text(value: text) -> text:
+    if value == "": "null" else: "\"" + json_escape_string(value) + "\""
+
+fn document_json(document: SearchDocument, scoped_hash: text,
+                 scoped_hash_preimage: text) -> text:
+    var fields: [text] = []
+    var i = 0
+    while i < document.fields.len():
+        val field = document.fields[i]
+        fields.push("{\"name\":\"" + json_escape_string(field.name) + "\",\"value\":\"" + json_escape_string(field.value) + "\",\"weight_milli\":" + field.weight_milli.to_text() + "}")
+        i = i + 1
+    var facets: [text] = []
+    i = 0
+    while i < document.metadata.len():
+        val facet = document.metadata[i]
+        facets.push("{\"name\":\"" + json_escape_string(facet.name) + "\",\"value\":\"" + json_escape_string(facet.value) + "\"}")
+        i = i + 1
+    "{\"facets\":[" + facets.join(",") + "],\"fields\":[" + fields.join(",") + "],\"id\":\"" + json_escape_string(document.id) + "\",\"revision\":\"" + json_escape_string(document.revision) + "\",\"scoped_hash\":\"" + json_escape_string(scoped_hash) + "\",\"scoped_hash_preimage\":\"" + json_escape_string(scoped_hash_preimage) + "\"}"
+
+fn replay_json(row: ProviderReplayV1, workspace: text, snapshot: text,
+               scope_digest: text) -> text:
+    if row.receipt != "":
+        return "{\"operation\":\"" + json_escape_string(row.operation) + "\",\"operation_id\":\"" + json_escape_string(row.operation_id) + "\",\"payload_hash\":\"" + json_escape_string(row.payload_hash) + "\",\"receipt\":\"" + json_escape_string(row.receipt) + "\",\"receipt_id\":\"" + json_escape_string(row.receipt_id) + "\",\"replay_signature\":\"" + json_escape_string(row.replay_signature) + "\",\"request_id\":\"" + json_escape_string(row.request_id) + "\",\"response\":\"" + json_escape_string(row.response) + "\",\"response_hash\":\"" + json_escape_string(row.response_hash) + "\",\"schema\":\"spipe-durable-replay-v1\",\"scope_digest\":\"" + json_escape_string(scope_digest) + "\",\"snapshot\":\"" + json_escape_string(snapshot) + "\",\"workspace\":\"" + json_escape_string(workspace) + "\"}"
+    "{\"candidate_uid\":\"" + json_escape_string(row.candidate_uid) + "\",\"observed_terminal_receipt_id\":\"" + json_escape_string(row.observed_terminal_receipt_id) + "\",\"observed_terminal_receipt_kind\":\"" + json_escape_string(row.observed_terminal_receipt_kind) + "\",\"observed_terminal_state\":\"" + json_escape_string(row.observed_terminal_state) + "\",\"operation\":\"index_publish\",\"operation_id\":\"" + json_escape_string(row.operation_id) + "\",\"payload_hash\":\"" + json_escape_string(row.payload_hash) + "\",\"recorded_at_ms\":" + row.recorded_at_ms.to_text() + ",\"request_id\":\"" + json_escape_string(row.request_id) + "\",\"response\":\"" + json_escape_string(row.response) + "\",\"response_hash\":\"" + json_escape_string(row.response_hash) + "\",\"schema\":\"spipe-durable-terminal-error-v1\",\"scope_digest\":\"" + json_escape_string(scope_digest) + "\",\"snapshot\":\"" + json_escape_string(snapshot) + "\",\"workspace\":\"" + json_escape_string(workspace) + "\"}"
+
+fn candidate_json(item: ProviderCandidateV1, workspace: text, snapshot: text,
+                  scope_digest: text) -> text:
+    var documents: [text] = []
+    var i = 0
+    while i < item.snapshot.documents.len():
+        val scoped_hash = if i < item.document_hashes.len(): item.document_hashes[i] else: ""
+        val preimage = if i < item.document_hash_preimages.len(): item.document_hash_preimages[i] else: ""
+        documents.push(document_json(item.snapshot.documents[i], scoped_hash, preimage))
+        i = i + 1
+    "{\"apply_operation_id\":\"" + json_escape_string(item.apply_operation_id) + "\",\"apply_payload_hash\":\"" + json_escape_string(item.apply_payload_hash) + "\",\"apply_receipt\":\"" + json_escape_string(item.apply_receipt) + "\",\"apply_receipt_id\":\"" + json_escape_string(receipt_id(item.apply_receipt)) + "\",\"base_root\":\"" + json_escape_string(item.base_root) + "\",\"candidate_root\":\"" + json_escape_string(item.candidate_root) + "\",\"candidate_root_preimage\":\"" + json_escape_string(item.candidate_root_preimage) + "\",\"created_at_ms\":" + item.created_at_ms.to_text() + ",\"documents\":[" + documents.join(",") + "],\"expires_at_ms\":" + item.expires_at_ms.to_text() + ",\"schema\":\"spipe-candidate-record-v1\",\"scope_digest\":\"" + json_escape_string(scope_digest) + "\",\"snapshot\":\"" + json_escape_string(snapshot) + "\",\"state\":\"" + json_escape_string(item.state) + "\",\"terminal_at_ms\":" + (if item.terminal_at_ms == 0: "null" else: item.terminal_at_ms.to_text()) + ",\"terminal_operation_id\":" + nullable_text(item.terminal_operation_id) + ",\"terminal_receipt\":" + nullable_text(item.terminal_receipt) + ",\"terminal_receipt_id\":" + nullable_text(receipt_id(item.terminal_receipt)) + ",\"terminal_receipt_kind\":" + nullable_text(item.terminal_receipt_kind) + ",\"terminal_result_root\":" + nullable_text(item.terminal_result_root) + ",\"uid\":\"" + json_escape_string(item.uid) + "\",\"workspace\":\"" + json_escape_string(workspace) + "\"}"
+
+fn publication_from(item: ProviderCandidateV1) -> PublicationRecordV1:
+    PublicationRecordV1(operation_id: item.terminal_operation_id,
+        payload_hash: stored_text(json_parse_with_error(item.terminal_receipt).0, "payload_hash"),
+        candidate_uid: item.uid, previous_logical_root: item.base_root,
+        result_logical_root: item.candidate_root,
+        operation_receipt_id: receipt_id(item.terminal_receipt),
+        published_at_ms: item.terminal_at_ms)
+
+fn publication_json(item: PublicationRecordV1) -> text:
+    "{\"candidate_uid\":\"" + json_escape_string(item.candidate_uid) + "\",\"operation_id\":\"" + json_escape_string(item.operation_id) + "\",\"operation_receipt_id\":\"" + json_escape_string(item.operation_receipt_id) + "\",\"payload_hash\":\"" + json_escape_string(item.payload_hash) + "\",\"previous_logical_root\":\"" + json_escape_string(item.previous_logical_root) + "\",\"published_at_ms\":" + item.published_at_ms.to_text() + ",\"result_logical_root\":\"" + json_escape_string(item.result_logical_root) + "\",\"schema\":\"spipe-publication-v1\"}"
+
+fn validate_publications(value: any, candidates: [ProviderCandidateV1]) -> Result<(i64, text, i64), text>:
+    if json_get_type(value) != "array": return Err("snapshot_corrupt")
+    var candidate_uids: [text] = []
+    var operation_ids: [text] = []
+    var receipt_ids: [text] = []
+    var chain_root = "sha256:" + "0" * 64
+    var max_recorded_at_ms = 0
+    var i = 0
+    while i < json_array_length(value):
+        val row = json_array_get(value, i)
+        if not closed_object(row, ["candidate_uid", "operation_id", "operation_receipt_id", "payload_hash", "previous_logical_root", "published_at_ms", "result_logical_root", "schema"]): return Err("snapshot_corrupt")
+        val uid = stored_text(row, "candidate_uid")
+        val operation_id = stored_text(row, "operation_id")
+        val operation_receipt_id = stored_text(row, "operation_receipt_id")
+        val published_at_ms = stored_int(row, "published_at_ms", -1)
+        if stored_text(row, "schema") != "spipe-publication-v1" or uid == "" or
+                operation_id == "" or operation_receipt_id == "" or published_at_ms < 0 or
+                stored_text(row, "previous_logical_root") != chain_root or
+                candidate_uids.contains(uid) or operation_ids.contains(operation_id) or
+                receipt_ids.contains(operation_receipt_id): return Err("snapshot_corrupt")
+        var matched = false
+        var c = 0
+        while c < candidates.len():
+            val candidate = candidates[c]
+            if candidate.state == "published" and candidate.uid == uid and
+                    candidate.terminal_operation_id == operation_id and
+                    candidate.base_root == chain_root and
+                    candidate.candidate_root == stored_text(row, "result_logical_root") and
+                    candidate.terminal_at_ms == published_at_ms and
+                    receipt_id(candidate.terminal_receipt) == operation_receipt_id and
+                    stored_text(json_parse_with_error(candidate.terminal_receipt).0, "payload_hash") == stored_text(row, "payload_hash"):
+                matched = true
+            c = c + 1
+        if not matched: return Err("snapshot_corrupt")
+        candidate_uids.push(uid)
+        operation_ids.push(operation_id)
+        receipt_ids.push(operation_receipt_id)
+        chain_root = stored_text(row, "result_logical_root")
+        if published_at_ms > max_recorded_at_ms: max_recorded_at_ms = published_at_ms
+        i = i + 1
+    Ok((json_array_length(value), chain_root, max_recorded_at_ms))
+
+fn lifecycle_records_json(replay: [ProviderReplayV1], candidates: [ProviderCandidateV1],
+                          workspace: text, snapshot: text, scope_digest: text,
+                          provider_generation: i64,
+                          current_logical_root: text) -> text:
+    var replay_rows: [text] = []
+    var candidate_rows: [text] = []
+    var publications: [text] = []
+    var i = 0
+    while i < replay.len():
+        replay_rows.push(replay_json(replay[i], workspace, snapshot, scope_digest))
+        i = i + 1
+    i = 0
+    while i < candidates.len():
+        val candidate = candidates[i]
+        candidate_rows.push(candidate_json(candidate, workspace, snapshot, scope_digest))
+        if candidate.state == "published":
+            publications.push(publication_json(publication_from(candidate)))
+        i = i + 1
+    "{\"candidates\":[" + candidate_rows.join(",") + "],\"current_logical_root\":\"" + json_escape_string(current_logical_root) + "\",\"provider_generation\":" + provider_generation.to_text() + ",\"publications\":[" + publications.join(",") + "],\"replay\":[" + replay_rows.join(",") + "],\"schema\":\"spipe-provider-lifecycle-store-v1\",\"scope_digest\":\"" + json_escape_string(scope_digest) + "\",\"snapshot\":\"" + json_escape_string(snapshot) + "\",\"workspace\":\"" + json_escape_string(workspace) + "\"}"
+
+fn _document_index(documents: [SearchDocument], id: text) -> i64:
+    var found = 0 - 1
+    var i = 0
+    while i < documents.len():
+        if documents[i].id == id:
+            if found >= 0: return 0 - 2
+            found = i
+        i = i + 1
+    found
+
+fn _operation_after_bound(after: any, document_id: text,
+                          scope_digest: text, expected_hash: text,
+                          expected_preimage: text) -> bool:
+    if not closed_object(after, ["document_id", "facets", "fields", "revision",
+            "scope_digest", "scoped_content_hash", "visibility_digest"]):
+        return false
+    val preimage = json_parse_with_error(expected_preimage)
+    if preimage.1 != "" or not closed_object(preimage.0,
+            ["document_id", "facets", "fields", "revision", "scope_digest",
+             "visibility_digest"]):
+        return false
+    val after_facets = scoped_facets(json_object_get(after, "facets"))
+    val expected_facets = scoped_facets(json_object_get(preimage.0, "facets"))
+    if val Err(_) = after_facets: return false
+    if val Err(_) = expected_facets: return false
+    val after_fields = json_object_get(after, "fields")
+    val expected_fields = json_object_get(preimage.0, "fields")
+    if not scoped_field_arrays_bound(after_fields, expected_fields): return false
+    stored_text(after, "document_id") == document_id and
+        stored_text(after, "document_id") == stored_text(preimage.0, "document_id") and
+        stored_text(after, "revision") == stored_text(preimage.0, "revision") and
+        stored_text(after, "scope_digest") == scope_digest and
+        stored_text(after, "scope_digest") == stored_text(preimage.0, "scope_digest") and
+        stored_text(after, "visibility_digest") == stored_text(preimage.0, "visibility_digest") and
+        stored_text(after, "scoped_content_hash") == expected_hash and
+        response_hash(expected_preimage) == expected_hash and
+        after_facets.unwrap().0 == expected_facets.unwrap().0
+
+fn _document_sets_equal(left_documents: [SearchDocument], left_hashes: [text],
+                        left_preimages: [text], right_documents: [SearchDocument],
+                        right_hashes: [text], right_preimages: [text]) -> bool:
+    if left_documents.len() != left_hashes.len() or left_documents.len() != left_preimages.len() or
+            right_documents.len() != right_hashes.len() or right_documents.len() != right_preimages.len() or
+            left_documents.len() != right_documents.len():
+        return false
+    var i = 0
+    while i < left_documents.len():
+        val right = _document_index(right_documents, left_documents[i].id)
+        if right < 0 or left_hashes[i] != right_hashes[right] or
+                left_preimages[i] != right_preimages[right]:
+            return false
+        i = i + 1
+    true
+
+fn candidate_transition_bound(base_root: text, candidate_root: text,
+                              candidate_root_preimage: text,
+                              apply_operation_id: text, apply_payload_hash: text,
+                              scope_digest: text,
+                              base_documents: [SearchDocument], base_hashes: [text],
+                              base_preimages: [text],
+                              result_documents: [SearchDocument], result_hashes: [text],
+                              result_preimages: [text]) -> bool:
+    if base_documents.len() != base_hashes.len() or base_documents.len() != base_preimages.len() or
+            result_documents.len() != result_hashes.len() or result_documents.len() != result_preimages.len():
+        return false
+    var i = 0
+    while i < base_documents.len():
+        if _document_index(base_documents, base_documents[i].id) != i: return false
+        i = i + 1
+    i = 0
+    while i < result_documents.len():
+        if _document_index(result_documents, result_documents[i].id) != i: return false
+        i = i + 1
+    val commitment = json_parse_with_error(candidate_root_preimage)
+    if commitment.1 != "" or not closed_object(commitment.0, ["documents", "operations"]):
+        return false
+    val operations_value = json_object_get(commitment.0, "operations")
+    val operations_preimage = wire_canonical_json_value(operations_value)
+    if val Err(_) = operations_preimage: return false
+    val expected_commitment = candidate_commitment_preimage(
+        operations_preimage.unwrap(), result_documents, result_hashes)
+    if val Err(_) = expected_commitment: return false
+    if expected_commitment.unwrap() != candidate_root_preimage or
+            not candidate_root_preimage_bound(base_root, candidate_root,
+                candidate_root_preimage):
+        return false
+    val payload_preimage = "{\"base_logical_root\":" + wire_json_string(base_root) +
+        ",\"operation_id\":" + wire_json_string(apply_operation_id) +
+        ",\"operations\":" + operations_preimage.unwrap() + "}"
+    if domain_hash("SPKC-INDEX-APPLY-PAYLOAD-V1\0", payload_preimage) != apply_payload_hash:
+        return false
+    var current_documents: [SearchDocument] = []
+    var current_hashes: [text] = []
+    var current_preimages: [text] = []
+    i = 0
+    while i < base_documents.len():
+        current_documents.push(base_documents[i])
+        current_hashes.push(base_hashes[i])
+        current_preimages.push(base_preimages[i])
+        i = i + 1
+    var previous_id = ""
+    i = 0
+    while i < json_array_length(operations_value):
+        val operation = json_array_get(operations_value, i)
+        if not closed_object(operation,
+                ["after", "before_hash", "before_revision", "document_id", "kind"]):
+            return false
+        val id = stored_text(operation, "document_id")
+        val kind = stored_text(operation, "kind")
+        if id == "" or (previous_id != "" and id <= previous_id): return false
+        previous_id = id
+        val current = _document_index(current_documents, id)
+        val result = _document_index(result_documents, id)
+        val before_revision_type = json_get_type(json_object_get(operation, "before_revision"))
+        val before_hash_type = json_get_type(json_object_get(operation, "before_hash"))
+        val after = json_object_get(operation, "after")
+        if kind == "add":
+            if current >= 0 or result < 0 or before_revision_type != "null" or
+                    before_hash_type != "null" or
+                    not _operation_after_bound(after, id, scope_digest,
+                        result_hashes[result], result_preimages[result]):
+                return false
+        elif kind == "replace":
+            if current < 0 or result < 0 or before_revision_type != "string" or
+                    before_hash_type != "string" or
+                    stored_text(operation, "before_revision") != current_documents[current].revision or
+                    stored_text(operation, "before_hash") != current_hashes[current] or
+                    not _operation_after_bound(after, id, scope_digest,
+                        result_hashes[result], result_preimages[result]):
+                return false
+        elif kind == "delete":
+            if json_get_type(after) != "null": return false
+            if current < 0:
+                if before_revision_type != "null" or before_hash_type != "null": return false
+            elif before_revision_type != "string" or before_hash_type != "string" or
+                    stored_text(operation, "before_revision") != current_documents[current].revision or
+                    stored_text(operation, "before_hash") != current_hashes[current]:
+                return false
+        else:
+            return false
+        var next_documents: [SearchDocument] = []
+        var next_hashes: [text] = []
+        var next_preimages: [text] = []
+        var d = 0
+        while d < current_documents.len():
+            if current_documents[d].id != id:
+                next_documents.push(current_documents[d])
+                next_hashes.push(current_hashes[d])
+                next_preimages.push(current_preimages[d])
+            d = d + 1
+        if kind == "add" or kind == "replace":
+            next_documents.push(result_documents[result])
+            next_hashes.push(result_hashes[result])
+            next_preimages.push(result_preimages[result])
+        current_documents = next_documents
+        current_hashes = next_hashes
+        current_preimages = next_preimages
+        i = i + 1
+    val exact_result = _document_sets_equal(current_documents, current_hashes,
+        current_preimages, result_documents, result_hashes, result_preimages)
+    val changed = not _document_sets_equal(base_documents, base_hashes,
+        base_preimages, result_documents, result_hashes, result_preimages)
+    exact_result and ((candidate_root == base_root and not changed) or
+        (candidate_root != base_root and changed))
+
+fn _apply_result_counts(candidate: ProviderCandidateV1) -> Result<(i64, i64, i64), text>:
+    val commitment = json_parse_with_error(candidate.candidate_root_preimage)
+    if commitment.1 != "" or not closed_object(commitment.0,
+            ["documents", "operations"]):
+        return Err("snapshot_corrupt")
+    val operations = json_object_get(commitment.0, "operations")
+    if json_get_type(operations) != "array": return Err("snapshot_corrupt")
+    var added = 0
+    var replaced = 0
+    var deleted = 0
+    var i = 0
+    while i < json_array_length(operations):
+        val operation = json_array_get(operations, i)
+        val kind = stored_text(operation, "kind")
+        if kind == "add":
+            added = added + 1
+        elif kind == "replace":
+            replaced = replaced + 1
+        elif kind == "delete":
+            val before_hash = json_get_type(json_object_get(operation, "before_hash"))
+            val before_revision = json_get_type(json_object_get(operation, "before_revision"))
+            if before_hash == "string" and before_revision == "string":
+                deleted = deleted + 1
+            elif before_hash != "null" or before_revision != "null":
+                return Err("snapshot_corrupt")
+        else:
+            return Err("snapshot_corrupt")
+        i = i + 1
+    Ok((added, replaced, deleted))
+
+fn signed_success_response_candidate_bound(row: ProviderReplayV1,
+                                           candidate: ProviderCandidateV1,
+                                           workspace: text, snapshot: text,
+                                           scope_digest: text) -> bool:
+    if not signed_success_response_bound(row.response, row.request_id,
+            row.operation, row.receipt, workspace, snapshot, scope_digest):
+        return false
+    val parsed = json_parse_with_error(row.response)
+    if parsed.1 != "": return false
+    val result = json_object_get(parsed.0, "result")
+    if row.operation == "index_apply":
+        if row.operation_id != candidate.apply_operation_id or
+                row.payload_hash != candidate.apply_payload_hash or
+                row.receipt != candidate.apply_receipt:
+            return false
+        val counts = _apply_result_counts(candidate)
+        if val Err(_) = counts: return false
+        val values = counts.unwrap()
+        return stored_int(result, "added", -1) == values.0 and
+            stored_int(result, "replaced", -1) == values.1 and
+            stored_int(result, "deleted", -1) == values.2 and
+            stored_int(result, "candidate_expires_at_ms", -1) == candidate.expires_at_ms and
+            stored_text(result, "base_logical_root") == candidate.base_root and
+            stored_text(result, "candidate_logical_root") == candidate.candidate_root and
+            stored_text(result, "candidate_uid") == candidate.uid and
+            stored_text(result, "status") == stored_text(
+                json_parse_with_error(candidate.apply_receipt).0, "outcome")
+    if row.operation != "index_publish" or candidate.terminal_receipt_kind != "operation" or
+            row.operation_id != candidate.terminal_operation_id or
+            row.receipt != candidate.terminal_receipt:
+        return false
+    val previous_root = if candidate.state == "published":
+        candidate.base_root
+    else:
+        candidate.terminal_result_root
+    stored_text(result, "candidate_uid") == candidate.uid and
+        stored_text(result, "logical_root") == candidate.terminal_result_root and
+        stored_text(result, "previous_logical_root") == previous_root and
+        stored_text(result, "status") == candidate.state
+
+fn durable_success_replays_bound(replay: [ProviderReplayV1],
+                                 candidates: [ProviderCandidateV1],
+                                 workspace: text, snapshot: text,
+                                 scope_digest: text) -> bool:
+    var i = 0
+    while i < replay.len():
+        val row = replay[i]
+        if row.receipt != "":
+            val receipt_value = json_parse_with_error(row.receipt)
+            if receipt_value.1 != "": return false
+            val uid = stored_text(receipt_value.0, "candidate_uid")
+            var matches = 0
+            var c = 0
+            while c < candidates.len():
+                if candidates[c].uid == uid and
+                        signed_success_response_candidate_bound(row,
+                            candidates[c], workspace, snapshot, scope_digest):
+                    matches = matches + 1
+                c = c + 1
+            if matches != 1: return false
+        i = i + 1
+    true
+
+fn restore_document(value: any, expected_scope_digest: text) -> Result<(SearchDocument, text, text), text>:
+    if not closed_object(value, ["facets", "fields", "id", "revision", "scoped_hash", "scoped_hash_preimage"]): return Err("snapshot_corrupt")
+    val raw_fields = json_object_get(value, "fields")
+    val raw_facets = json_object_get(value, "facets")
+    val restored_fields = scoped_fields(raw_fields, true)
+    val restored_facets = scoped_facets(raw_facets)
+    if val Err(_) = restored_fields: return Err("snapshot_corrupt")
+    if val Err(_) = restored_facets: return Err("snapshot_corrupt")
+    if not scoped_facets_are_canonical(raw_facets): return Err("snapshot_corrupt")
+    val fields = restored_fields.unwrap().1
+    val facets = restored_facets.unwrap().1
+    val id = stored_text(value, "id")
+    val revision = stored_text(value, "revision")
+    val scoped_hash = stored_text(value, "scoped_hash")
+    val scoped_hash_preimage = stored_text(value, "scoped_hash_preimage")
+    if not wire_valid_id(id) or not wire_valid_id(revision) or
+            not wire_valid_hash(scoped_hash) or scoped_hash_preimage == "" or
+            "sha256:" + sha256_u8_hex(text_to_bytes(scoped_hash_preimage)) != scoped_hash:
+        return Err("snapshot_corrupt")
+    val preimage = json_parse_with_error(scoped_hash_preimage)
+    if preimage.1 != "" or not closed_object(preimage.0,
+            ["document_id", "facets", "fields", "revision", "scope_digest", "visibility_digest"]):
+        return Err("snapshot_corrupt")
+    val preimage_fields = json_object_get(preimage.0, "fields")
+    val preimage_facets = json_object_get(preimage.0, "facets")
+    val visibility_digest = stored_text(preimage.0, "visibility_digest")
+    val canonical_preimage = wire_canonical_json_value(preimage.0)
+    if val Err(_) = canonical_preimage: return Err("snapshot_corrupt")
+    if stored_text(preimage.0, "document_id") != id or stored_text(preimage.0, "revision") != revision or
+            stored_text(preimage.0, "scope_digest") != expected_scope_digest or
+            not wire_valid_hash(visibility_digest) or
+            canonical_preimage.unwrap() != scoped_hash_preimage or
+            json_get_type(preimage_fields) != "array" or json_array_length(preimage_fields) != fields.len() or
+            json_get_type(preimage_facets) != "array" or json_array_length(preimage_facets) != facets.len():
+        return Err("snapshot_corrupt")
+    val preimage_fields_bound = scoped_fields(preimage_fields, true)
+    val preimage_facets_bound = scoped_facets(preimage_facets)
+    if val Err(_) = preimage_fields_bound: return Err("snapshot_corrupt")
+    if val Err(_) = preimage_facets_bound: return Err("snapshot_corrupt")
+    if not scoped_facets_are_canonical(preimage_facets) or
+            restored_fields.unwrap().0 != preimage_fields_bound.unwrap().0 or
+            restored_facets.unwrap().0 != preimage_facets_bound.unwrap().0:
+        return Err("snapshot_corrupt")
+    Ok((SearchDocument.of(id, revision, fields, facets), scoped_hash, scoped_hash_preimage))

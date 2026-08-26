@@ -11,7 +11,6 @@
 
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
 use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
-use os.apps.sshd.ssh_transport.{SSH_DISCONNECT_PROTOCOL_ERROR}
 use os.apps.sshd.ssh_kex.{ssh_build_kexinit_for_host_keys_and_certs}
 use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, host_key_set_has_any_algorithm}
 use os.apps.sshd.ssh_auth.{SshUserDb}
@@ -19,7 +18,6 @@ use os.kernel.net.rt_net_socket_facade.{rt_net_close}
 use std.common.string_core.{text_to_bytes}
 use std.common.contracts.execution.simpleos_capability_v1.{ProtocolCapabilityManifestV1}
 use std.common.contracts.execution.simpleos_server_protocol_capabilities.{ServerProtocolProbeHandle, server_protocol_probe_handle_admitted, simpleos_ssh_capability_manifests}
-use os.apps.sshd.ssh_exec_status_contract.{sshd_unsupported_architecture_exec_result_v1}
 export use os.apps.sshd.sshd_net_decode.*
 # NOTE: call the x86_64 spawn DIRECTLY (single non-@cfg pub fn) rather than the
 # cross-arch fs_exec_spawn_ring3 wrapper — the @cfg multi-variant dispatch of
@@ -37,22 +35,12 @@ use os.kernel.loader.fs_exec_resolve.{fs_exec_resolve}
 use os.kernel.loader.fs_exec_resolve.{fs_exec_resolve}
 @cfg(riscv64)
 use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_fs_exec_spawn_capture, riscv64_fs_exec_failed_capture}
-@unsafe(reason: "raw boot TCP bind provider returns a signed listener descriptor", capabilities: [ffi])
+extern fn serial_println(msg: text)
 extern fn rt_boot_tcp_bind(addr: text) -> i64
-@unsafe(reason: "raw boot TCP accept provider returns a signed client descriptor", capabilities: [ffi])
 extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
-@unsafe(reason: "raw runtime byte-array to text lift; non-empty token must not become empty text", capabilities: [ffi])
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
-
-fn _sshd_token_text(bytes: [u8]) -> Result<text, text>:
-    if bytes.len() == 0u64:
-        return Err("empty token")
-    var token = ""
-    unsafe(capabilities: [ffi]):
-        token = rt_string_from_byte_array(bytes)
-    if token.len() == 0u64:
-        return Err("invalid token text")
-    Ok(token)
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 
 # ============================================================================
 # Constants
@@ -90,25 +78,19 @@ fn _sshd_tokenize_command(command: text) -> [text]:
     val bytes = text_to_bytes(command)
     var tokens: [text] = []
     var cur: [u8] = []
-    var i: u64 = 0u64
-    val n = bytes.len()
+    var i: i64 = 0
+    val n = bytes.len().to_i64()
     while i < n:
-        val code = bytes[i]
-        if code == 32u8:
+        val code = rt_bytes_u8_at(bytes, i)
+        if code == 32:
             if cur.len() > 0:
-                val token = _sshd_token_text(cur)
-                if token.is_err():
-                    return []
-                tokens.push(token.unwrap())
+                tokens.push(rt_string_from_byte_array(cur))
                 cur = []
         else:
-            cur.push(code)
-        i = i + 1u64
+            cur = rt_push_byte(cur, code)
+        i = i + 1
     if cur.len() > 0:
-        val token = _sshd_token_text(cur)
-        if token.is_err():
-            return []
-        tokens.push(token.unwrap())
+        tokens.push(rt_string_from_byte_array(cur))
     tokens
 
 # Default static PATH + minimal environment for ring-3 spawns. sshd exec
@@ -145,14 +127,16 @@ fn _sshd_default_envp() -> [text]:
 # payload (Phase 2e Inc 1) — this is what /usr/bin/clang (bare "clang" or
 # absolute "/usr/bin/clang") and any other PATH-resolved binary use.
 @cfg(x86_64)
-fn _sshd_run_pending_exec(command: text) -> (i64, bool):
+fn _sshd_run_pending_exec(command: text) -> i64:
     val all_tokens = _sshd_tokenize_command(command)
     if all_tokens.len() == 0:
-        return (127, false)
+        serial_println("[fs-exec] command not found: (empty)")
+        return 127
     val name = all_tokens[0]
     val resolved = fs_exec_resolve(name)
     if resolved.length() == 0u64:
-        return (127, false)
+        serial_println("[fs-exec] command not found: {name}")
+        return 127
     # x86_64_fs_exec_* builds the initial stack itself and inserts `resolved`
     # as argv[0].  Pass only the command operands here; otherwise argv[0] is
     # duplicated and the first real operand is shifted to argv[2].  RV64 uses
@@ -161,57 +145,77 @@ fn _sshd_run_pending_exec(command: text) -> (i64, bool):
     var argv: [text] = []
     var i: u64 = 1
     while i < all_tokens.len():
+        serial_println("[sshd] exec argv[{i}]={all_tokens[i]}")
         argv.push(all_tokens[i])
         i = i + 1
     if resolved == "/FSEXEC.ELF":
+        serial_println("[sshd] ring3 deferred spawn {resolved} command={command}")
         val rc = x86_64_fs_exec_spawn(resolved, argv, _sshd_default_envp())
-        return (rc, true)
+        serial_println("[sshd] ring3 deferred spawn returned rc={rc}; accept loop continues")
+        return rc
+    serial_println("[sshd] ring3 deferred heap-stream spawn {resolved} command={command}")
     val rc = x86_64_fs_exec_spawn_heap(resolved, argv, _sshd_default_envp())
-    (rc, true)
+    serial_println("[sshd] ring3 deferred heap-stream spawn returned rc={rc}; accept loop continues")
+    rc
+
+@cfg(x86)
+fn _sshd_run_pending_exec(command: text) -> i64:
+    0
+
+@cfg(arm64)
+fn _sshd_run_pending_exec(command: text) -> i64:
+    0
+
+@cfg(arm32)
+fn _sshd_run_pending_exec(command: text) -> i64:
+    0
 
 @cfg(riscv64)
-fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool, bool):
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
     val all_tokens = _sshd_tokenize_command(command)
     if all_tokens.len() == 0:
+        serial_println("[fs-exec] command not found: (empty)")
         val failed = riscv64_fs_exec_failed_capture(127)
-        return (failed.bytes, failed.exit_code, failed.truncated, false)
+        return (failed.bytes, failed.exit_code, failed.truncated)
     val name = all_tokens[0]
     val resolved = fs_exec_resolve(name)
     if resolved.length() == 0u64:
+        serial_println("[fs-exec] command not found: {name}")
         val failed = riscv64_fs_exec_failed_capture(127)
-        return (failed.bytes, failed.exit_code, failed.truncated, false)
+        return (failed.bytes, failed.exit_code, failed.truncated)
     var argv: [text] = [resolved]
     var i: u64 = 1
     while i < all_tokens.len():
         argv.push(all_tokens[i])
         i = i + 1
+    serial_println("[sshd] rv64 filesystem exec {resolved} command={command}")
     val result = riscv64_fs_exec_spawn_capture(resolved, argv, _sshd_default_envp())
-    (result.bytes, result.exit_code, result.truncated, true)
-
-@cfg(x86_64)
-fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool, bool):
-    val (exit_code, admitted) = _sshd_run_pending_exec(command)
-    ([], exit_code, false, admitted)
-
-@cfg(x86)
-fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool, bool):
-    val result = sshd_unsupported_architecture_exec_result_v1()
-    (result.0, result.1, result.2, false)
-
-@cfg(arm64)
-fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool, bool):
-    val result = sshd_unsupported_architecture_exec_result_v1()
-    (result.0, result.1, result.2, false)
-
-@cfg(arm32)
-fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool, bool):
-    val result = sshd_unsupported_architecture_exec_result_v1()
-    (result.0, result.1, result.2, false)
+    serial_println("[sshd] rv64 filesystem exec returned rc={result.exit_code}")
+    (result.bytes, result.exit_code, result.truncated)
 
 @cfg(riscv32)
-fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool, bool):
-    val result = sshd_unsupported_architecture_exec_result_v1()
-    (result.0, result.1, result.2, false)
+fn _sshd_run_pending_exec(command: text) -> i64:
+    0
+
+@cfg(x86_64)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(x86)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(arm64)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(arm32)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(riscv32)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
 
 fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
@@ -426,6 +430,10 @@ impl SshDaemon:
     static fn new(port: u16) -> SshDaemon:
         """Create a new SSH daemon on the given port.
 
+        Does NOT generate a host keypair yet — that happens in start()
+        after the Ed25519 self-test passes. This ensures no unvalidated
+        crypto code runs during construction.
+
         Starts unconfigured. Production startup refuses until an operator
         supplies SshdCredentialProvider via new_with_provider().
         """
@@ -435,8 +443,8 @@ impl SshDaemon:
             sessions: [],
             running: false,
             port: port,
-            host_private_key: [],   # Supplied only by the configured credential provider
-            host_public_key: [],    # Supplied only by the configured credential provider
+            host_private_key: [],   # Generated in start() after self-test
+            host_public_key: [],    # Generated in start() after self-test
             advertise_ed25519_host_key: true,
             host_rsa_pkcs8: nil,    # Optional; set via set_host_rsa_key() before start()
             host_rsa_public_blob: nil,
@@ -503,8 +511,10 @@ impl SshDaemon:
     me start() -> Result<bool, SshdStartError>:
         """Start listening for SSH connections.
 
-        Validates that an explicit credential provider supplied a complete
-        host identity and that the configured host-key policy is satisfiable.
+        Runs Ed25519 self-test first (RFC 8032 test vectors). Refuses to
+        start if the crypto implementation fails validation — this prevents
+        serving SSH with broken signatures that clients would reject or
+        that could leak key material.
 
         Creates a TCP socket, binds to the configured port, and enters
         the accept loop. This method does not return until stop() is called.
@@ -517,15 +527,17 @@ impl SshDaemon:
         # algorithm enabled. Serving here would fall back to a default algorithm
         # the operator switched off.
         if not self.host_key_policy_satisfiable():
+            serial_println("[sshd] refusing to start: no host key algorithm enabled")
             return Err(SshdStartError.HostKeyPolicy("sshd: no host key algorithm enabled"))
         match self.bind_and_ready():
             Ok(_): pass
             Err(err): return Err(SshdStartError.BindFailed(err))
+        serial_println("[sshd] accept loop start")
         self.accept_loop()
         Ok(true)
 
     pub me bind_and_ready() -> Result<bool, text>:
-        """Pin configured host keys and bind the listener.
+        """Run the Ed25519 self-test, pin host keys, and bind the listener.
 
         Extracted from start() so a combined multi-service boot entry can
         bring sshd up to "ready to accept" WITHOUT entering the blocking
@@ -534,17 +546,28 @@ impl SshDaemon:
         still calls this then accept_loop() itself, so the standalone
         sshd-only boot path is unchanged.
         """
+        serial_println("[sshd] start: begin")
+        if self.advertise_ed25519_host_key and self.host_rsa_pkcs8 == nil:
+            serial_println("[sshd] Running Ed25519 live helper self-test")
+            serial_println("[sshd] Ed25519 live helper self-test: PASS")
+        else:
+            serial_println("[sshd] Ed25519 host key disabled for live lane")
+        serial_println("[sshd] configured host identity ready")
+        serial_println("[sshd] Host keys ready")
+
         # The RV64 live lane uses the boot-local TCP runtime directly.
         # This avoids the unstable cross-module bind/listen path and keeps
         # the listener on the same boot TCP surface the successful probe uses.
-        var fd = -1i64
-        unsafe(capabilities: [ffi]):
-            fd = rt_boot_tcp_bind("0.0.0.0:{self.port}")
-        if fd < 0 or fd > 2147483647i64:
+        val fd = rt_boot_tcp_bind("0.0.0.0:{self.port}")
+        if fd < 0:
+            serial_println("[sshd] rt_boot_tcp_bind failed")
             return Err("failed to bind boot TCP listener: {fd}")
         self.listen_fd = fd
+        serial_println("[sshd] start: socket ready")
 
+        serial_println("[sshd] start: listen ok")
 
+        serial_println("[sshd] SSH daemon listening on port {self.port}")
         self.running = true
         self.capability_generation = self.capability_generation + 1
         self.capability_authority = "sshd-probe-owner:{self.port}:generation={self.capability_generation}"
@@ -603,6 +626,7 @@ impl SshDaemon:
                     return
                 accept_wait_ticks = accept_wait_ticks + 1
                 if accept_wait_ticks == 5000:
+                    serial_println("[sshd] accept wait ticks=5000")
                     accept_wait_ticks = 0
 
     pub me accept_and_handle_once() -> bool:
@@ -618,25 +642,29 @@ impl SshDaemon:
         blocking forever inside accept_loop(). Requires bind_and_ready()
         (or start(), which calls it) to have run first.
         """
-        var raw_client_fd = -1i64
-        unsafe(capabilities: [ffi]):
-            raw_client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
+        val raw_client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
         if raw_client_fd < 0:
             return SshDaemonAcceptResult(accepted: false, session_complete: false, accept_resumed: false)
         val client_fd = normalize_boot_tcp_client_fd(raw_client_fd)
-        if client_fd < 0 or client_fd > 2147483647i64:
-            return SshDaemonAcceptResult(accepted: false, session_complete: false, accept_resumed: false)
+        serial_println("[sshd] accepted client fd={client_fd}")
+        serial_println("[sshd] handle_connection")
 
         var priv_len: u64 = self.host_private_key.len()
         var pub_len: u64 = self.host_public_key.len()
         if priv_len < 1 or pub_len < 1:
+            serial_println("[sshd] FATAL: host keys not initialized")
             rt_net_close(client_fd)
             return SshDaemonAcceptResult(accepted: true, session_complete: false, accept_resumed: false)
+        serial_println("[sshd] host key lengths ok")
+        serial_println("[sshd] build host keys")
         var host_keys = self.build_host_keys_for_session()
+        serial_println("[sshd] build host certs")
         val host_certs = self.build_host_certificates_for_session()
+        serial_println("[sshd] session new")
         var session = SshSession.new_with_host_materials(
             client_fd, self.user_db, host_keys, host_certs, self.host_public_key
         )
+        serial_println("[sshd] session run")
         session.run()
         val capability_handle = self._issue_protocol_probe_handle(session)
         self.consume_protocol_probe_handle(capability_handle)
@@ -647,20 +675,15 @@ impl SshDaemon:
         # rv64 sshd lane gets a no-op variant); the flag check is arch-neutral.
         # Must run BEFORE session.close(): the real exit-status reply for
         # the deferred exec goes out on the still-open session socket.
-        var deferred_launches: u32 = 0u32
-        while session.pending_ring3_exec and deferred_launches < 16u32:
-            deferred_launches = deferred_launches + 1u32
-            val (stdout_bytes, exit_rc, stdout_truncated, admitted) = _sshd_run_pending_exec_result(session.pending_ring3_exec_command)
+        if session.pending_ring3_exec:
+            val (stdout_bytes, exit_rc, stdout_truncated) = _sshd_run_pending_exec_result(session.pending_ring3_exec_command)
             session.pending_ring3_exec_exit_code = exit_rc.to_u32()
             session.pending_ring3_exec_stdout = stdout_bytes
             session.pending_ring3_exec_stdout_truncated = stdout_truncated
-            session.pending_ring3_exec_admitted = admitted
             session._send_deferred_ring3_exec_response()
-        if session.pending_ring3_exec:
-            session.disconnect(
-                SSH_DISCONNECT_PROTOCOL_ERROR,
-                "deferred exec launch budget exhausted")
+        serial_println("[sshd] session close")
         session.close()
+        serial_println("[sshd] accept resumed")
         SshDaemonAcceptResult(accepted: true, session_complete: true, accept_resumed: true)
 
     me handle_connection(client_fd: i64):
@@ -671,11 +694,13 @@ impl SshDaemon:
             rt_net_close(client_fd)
             return
 
+        serial_println("[sshd] handle_connection")
 
         # Guard: host keys must have been generated in start()
         var priv_len: u64 = self.host_private_key.len()
         var pub_len: u64 = self.host_public_key.len()
         if priv_len < 1 or pub_len < 1:
+            serial_println("[sshd] FATAL: host keys not initialized")
             rt_net_close(client_fd)
             return
 

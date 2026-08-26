@@ -23,6 +23,27 @@ snapshot() { s=$1 d=$2; regular "$s" || return 1; b=$(stat -c '%d:%i:%s:%y:%z' "
 dec_le() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";exit !((length(a)<length(b))||(length(a)==length(b)&&a<=b))}'; }
 age_day() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";if(length(b)<length(a)||(length(b)==length(a)&&b<a))exit 1;borrow=0;out="";i=length(b);j=length(a);while(i>0){x=substr(b,i,1)+0-borrow;y=(j>0?substr(a,j,1)+0:0);if(x<y){x+=10;borrow=1}else borrow=0;out=(x-y)out;i--;j--}sub(/^0+/,"",out);if(out=="")out="0";lim="86400000000000";exit !((length(out)<length(lim))||(length(out)==length(lim)&&out<=lim))}'; }
 window_ok() { uint "$1" && uint "$2" && uint "$3" && dec_le "$1" "$2" && dec_le "$2" "$3" && age_day "$1" "$2" && age_day "$1" "$3"; }
+validate_renderdoc_showcases() {
+ [ "$(field capture_lanes "$artifact")" = wm,gui,web,engine2d ] || return 1
+ for lane in wm gui web engine2d; do
+  rdc=$(field "${lane}_rdc_path" "$artifact") || return 1
+  replay=$(field "${lane}_replay_transcript_path" "$artifact") || return 1
+  rdc_hash=$(field "${lane}_rdc_sha256" "$m") || return 1
+  replay_hash=$(field "${lane}_replay_sha256" "$m") || return 1
+  sha "$rdc_hash" && sha "$replay_hash" || return 1
+  case "$rdc:$replay" in *..*|/*) return 1;; esac
+  snapshot "$manifest_dir/$rdc" "$work/$lane.rdc" || return 1
+  snapshot "$manifest_dir/$replay" "$work/$lane-replay.log" || return 1
+  [ "$(hash_file "$work/$lane.rdc")" = "$rdc_hash" ] || return 1
+  [ "$(hash_file "$work/$lane-replay.log")" = "$replay_hash" ] || return 1
+  [ "$(dd if="$work/$lane.rdc" bs=4 count=1 2>/dev/null)" = RDOC ] || return 1
+  grep -Fqx 'replay_open=pass' "$work/$lane-replay.log" || return 1
+  grep -Fqx 'backend=vulkan' "$work/$lane-replay.log" || return 1
+  grep -Fqx "generation=$generation" "$work/$lane-replay.log" || return 1
+  secure_publish "$out/artifacts" "$work/$lane.rdc" "rendering-renderdoc-$lane.rdc" || return 1
+  secure_publish "$out/artifacts" "$work/$lane-replay.log" "rendering-renderdoc-$lane-replay.log" || return 1
+ done
+}
 
 [ -n "$evidence" ] && regular "$manifest" && regular "$signature" && regular "$key" && regular "$policy" && token "$key_id" && token "$run_id" && sha "$source_hash" && sha "$config_hash" && uint "$captured" && uint "$valid" && uint "$now" || usage
 window_ok "$captured" "$now" "$valid" || blocked 'stale or invalid lifetime'
@@ -74,7 +95,7 @@ for id in $ids; do
   device_readback) device_pixels=$(field pixel_sha256 "$artifact"); sha "$device_pixels" && [ "$device_pixels" = "${cpu_pixels:-}" ] && grep -Fqx 'matches_cpu_exact=true' "$artifact";;
   backend_device) grep -Fqx "device_identity=$device" "$artifact" && grep -Fqx 'synthetic=false' "$artifact";;
   queue_submit_fence) [ "$(field generation "$artifact")" = "$generation" ] && token "$(field queue_id "$artifact")" && token "$(field submit_id "$artifact")" && token "$(field fence_id "$artifact")" && grep -Fqx 'fence_signaled=true' "$artifact";;
-  renderdoc) rdc=$(field rdc_path "$artifact"); replay=$(field replay_transcript_path "$artifact"); rdc_hash=$(field rdc_sha256 "$m"); replay_hash=$(field replay_sha256 "$m"); sha "$rdc_hash" && sha "$replay_hash" && case "$rdc:$replay" in *..*|/*) false;; *) snapshot "$manifest_dir/$rdc" "$work/frame.rdc" && snapshot "$manifest_dir/$replay" "$work/replay.log" && [ "$(hash_file "$work/frame.rdc")" = "$rdc_hash" ] && [ "$(hash_file "$work/replay.log")" = "$replay_hash" ] && [ "$(dd if="$work/frame.rdc" bs=4 count=1 2>/dev/null)" = RDOC ] && grep -Fqx 'replay_open=pass' "$work/replay.log" && grep -Fqx "generation=$generation" "$work/replay.log" && secure_publish "$out/artifacts" "$work/frame.rdc" rendering-renderdoc.rdc && secure_publish "$out/artifacts" "$work/replay.log" rendering-renderdoc-replay.log;; esac;;
+  renderdoc) validate_renderdoc_showcases;;
   allocation_bounds|queue_bounds|inflight_bounds) used=$(field used "$artifact"); dimension=${id%_bounds}; [ "$dimension" = allocation ] && policy_limit=$(field command_limit "$work/trust.env") || policy_limit=$(field "${dimension}_limit" "$work/trust.env"); [ "$(field limit "$artifact")" = "$policy_limit" ] && uint "$used" && dec_le "$used" "$policy_limit" && grep -Fqx "negative_used=$((policy_limit+1))" "$artifact" && grep -Fqx 'negative_rejected=true' "$artifact";;
   overflow_rejection) before=$(field active_state_before_sha256 "$artifact"); after=$(field active_state_after_sha256 "$artifact"); sha "$before" && [ "$before" = "$after" ] && grep -Fqx 'publication_count=0' "$artifact";;
   fallback_absence) grep -Fqx 'fallback_count=0' "$artifact";; atlas_absence) grep -Fqx 'drawir_atlas_entry_count=0' "$artifact" && grep -Fqx 'drawir_cache_entry_count=0' "$artifact";;

@@ -381,35 +381,6 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
     value
 }
 
-/// Formation probe for heap-typed enum/Option payloads at fail-closed
-/// handoffs (2026-08-22 stage-3 streaming-owner incident: a Some-tagged
-/// Option read back with payload word 0 passed every discriminant/nil guard
-/// and SIGSEGV'd on the first field load — see
-/// doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md).
-/// Answers FORMATION ONLY — is the payload a plausible object reference
-/// rather than 0 or a zero-page address — with no registry probe, so it can
-/// never false-reject a live object. Mirrors `rt_heap_ref_wellformed` in
-/// src/runtime/runtime_native.c and src/runtime/simple_core/core_enum.spl.
-/// Those two lanes had to drop their HEAP-tag requirement because a class
-/// reference on the native codegen lane is a raw untagged pointer; on THIS
-/// lane every live object is a heap value, so `is_heap()` false-rejects
-/// nothing and the check below is already contract-correct as written.
-#[no_mangle]
-pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
-    // Masked address only -- deliberately NOT gated on `is_heap()`. See the
-    // contract note above: a class reference on the native codegen lane is a
-    // raw UNTAGGED pointer, and this is the body the NATIVE lane links (the
-    // Stage-2/3 compiler binary resolves rt_heap_ref_wellformed here, not to
-    // runtime_native.c). Gating on the tag made it answer 0 for every live
-    // class instance and fired the driver HIR-entry guards unconditionally.
-    let addr = (value.0 & !super::tags::TAG_MASK) as usize;
-    if addr < 4096 {
-        0
-    } else {
-        1
-    }
-}
-
 /// Unwrap the payload of a present `Result.Ok`/`Option.Some` value; return
 /// `default` (never trap) if the receiver is a genuine `Result.Err`/
 /// `Option.None`. This is `.unwrap_or(default)` METHOD-CALL semantics —

@@ -19,14 +19,20 @@ cat >"$TMP/provider.c" <<'EOF'
 #ifndef PROVIDER_ABI
 #define PROVIDER_ABI 1
 #endif
+#ifndef PROVIDER_DEVICE_COUNT
+#define PROVIDER_DEVICE_COUNT 7
+#endif
+#ifndef PROVIDER_BUFFER_HANDLE
+#define PROVIDER_BUFFER_HANDLE 73
+#endif
 int64_t rt_simple_gpu_provider_abi_version(void) { return PROVIDER_ABI; }
 int64_t rt_simple_gpu_provider_backend_bits(void) { return 2; }
 int64_t rt_vulkan_provider_is_available(void) { return 1; }
-int64_t rt_vulkan_provider_device_count(void) { return 7; }
+int64_t rt_vulkan_provider_device_count(void) { return PROVIDER_DEVICE_COUNT; }
 int32_t rt_vk_provider_available(void) { return 1; }
 int64_t rt_vulkan_init(void) { return 1; }
 int64_t rt_vulkan_alloc_buffer(int64_t size, int64_t usage) {
-    return size == 4096 && usage == 3 ? 73 : 0;
+    return size == 4096 && usage == 3 ? PROVIDER_BUFFER_HANDLE : 0;
 }
 #define STUB(name) int64_t name(void) { return 1; }
 STUB(rt_vulkan_shutdown)
@@ -146,17 +152,35 @@ cat >"$TMP/harness.c" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <stdatomic.h>
 int64_t rt_gpu_provider_loaded(int64_t backend_bit);
 int64_t rt_gpu_provider_abi_version(int64_t backend_bit);
 int64_t rt_gpu_provider_backend_bits(int64_t backend_bit);
 const char *rt_gpu_provider_path(int64_t backend_bit);
+int64_t rt_gpu_provider_unload(int64_t backend_bit);
 int64_t rt_vulkan_is_available(void);
 int64_t rt_vulkan_device_count(void);
 int32_t rt_vk_available(void);
 int64_t rt_vulkan_init(void);
 int64_t rt_vulkan_alloc_buffer(int64_t size, int64_t usage);
+static atomic_int concurrent_failures = 0;
+static void *exercise_provider(void *unused) {
+    int i;
+    (void)unused;
+    for (i = 0; i < 100; i++) {
+        if (rt_gpu_provider_loaded(2) != 1 || rt_vulkan_device_count() != 7 ||
+                rt_vulkan_alloc_buffer(4096, 3) != 73) {
+            atomic_fetch_add_explicit(&concurrent_failures, 1, memory_order_relaxed);
+        }
+    }
+    return NULL;
+}
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    int64_t unloaded;
+    pthread_t threads[8];
+    int i;
+    if (argc != 3) return 2;
     if (setenv("SIMPLE_VULKAN_PROVIDER_PATH", argv[1], 1) != 0) return 3;
     printf("loaded=%lld abi=%lld bits=%lld path=%d available=%lld count=%lld vk=%d init=%lld buffer=%lld\n",
         (long long)rt_gpu_provider_loaded(2),
@@ -167,33 +191,53 @@ int main(int argc, char **argv) {
         (long long)rt_vulkan_device_count(), (int)rt_vk_available(),
         (long long)rt_vulkan_init(),
         (long long)rt_vulkan_alloc_buffer(4096, 3));
+    for (i = 0; i < 8; i++) if (pthread_create(&threads[i], NULL, exercise_provider, NULL) != 0) return 5;
+    for (i = 0; i < 8; i++) if (pthread_join(threads[i], NULL) != 0) return 6;
+    printf("concurrent=%d\n", atomic_load_explicit(&concurrent_failures, memory_order_relaxed) == 0);
+    unloaded = rt_gpu_provider_unload(2);
+    if (setenv("SIMPLE_VULKAN_PROVIDER_PATH", argv[2], 1) != 0) return 4;
+    printf("unloaded=%lld reloaded=%lld count=%lld buffer=%lld path=%d\n",
+        (long long)unloaded, (long long)rt_gpu_provider_loaded(2),
+        (long long)rt_vulkan_device_count(),
+        (long long)rt_vulkan_alloc_buffer(4096, 3),
+        strcmp(rt_gpu_provider_path(2), argv[2]) == 0);
     return 0;
 }
 EOF
 
 cc -shared -fPIC "$TMP/provider.c" -o "$TMP/provider.so"
+cc -shared -fPIC -DPROVIDER_DEVICE_COUNT=9 -DPROVIDER_BUFFER_HANDLE=88 \
+    "$TMP/provider.c" -o "$TMP/replacement.so"
 cc -shared -fPIC -DPROVIDER_ABI=99 "$TMP/provider.c" -o "$TMP/wrong.so"
 cc -shared -fPIC -DOMIT_PIPELINE_RAW "$TMP/provider.c" -o "$TMP/incomplete.so"
 cc -shared -fPIC "$TMP/cuda_provider.c" -o "$TMP/cuda_provider.so"
 cc -shared -fPIC -DOMIT_CUDA_DTOD "$TMP/cuda_provider.c" -o "$TMP/cuda_incomplete.so"
 cc -D_GNU_SOURCE -std=gnu11 -O0 -ffunction-sections -fdata-sections \
+    -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 \
     -I"$ROOT/src/runtime" -I"$ROOT/src/runtime/platform" \
     -c "$ROOT/src/runtime/runtime_native.c" -o "$TMP/runtime_native.o"
+cc -D_GNU_SOURCE -std=gnu11 -O0 -ffunction-sections -fdata-sections \
+    -I"$ROOT/src/runtime" -I"$ROOT/src/runtime/platform" \
+    -c "$ROOT/src/runtime/runtime_dynload.c" -o "$TMP/runtime_dynload.o"
 cc -Wl,--gc-sections "$TMP/harness.c" "$TMP/runtime_native.o" \
-    -ldl -lm -o "$TMP/harness"
+    "$TMP/runtime_dynload.o" -ldl -lm -pthread -o "$TMP/harness"
 cc -Wl,--gc-sections "$TMP/cuda_harness.c" "$TMP/runtime_native.o" \
-    -ldl -lm -o "$TMP/cuda_harness"
+    "$TMP/runtime_dynload.o" -ldl -lm -o "$TMP/cuda_harness"
 
-good="$($TMP/harness "$TMP/provider.so")"
-bad="$($TMP/harness "$TMP/wrong.so")"
-missing="$($TMP/harness "$TMP/missing.so")"
-incomplete="$($TMP/harness "$TMP/incomplete.so")"
+good="$($TMP/harness "$TMP/provider.so" "$TMP/replacement.so")"
+bad="$($TMP/harness "$TMP/wrong.so" "$TMP/wrong.so")"
+missing="$($TMP/harness "$TMP/missing.so" "$TMP/missing.so")"
+incomplete="$($TMP/harness "$TMP/incomplete.so" "$TMP/incomplete.so")"
 cuda_good="$($TMP/cuda_harness "$TMP/cuda_provider.so")"
 cuda_incomplete="$($TMP/cuda_harness "$TMP/cuda_incomplete.so")"
-[ "$good" = "loaded=1 abi=1 bits=2 path=1 available=1 count=7 vk=1 init=1 buffer=73" ]
-[ "$bad" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0" ]
-[ "$missing" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0" ]
-[ "$incomplete" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0" ]
+[ "$good" = "loaded=1 abi=1 bits=2 path=1 available=1 count=7 vk=1 init=1 buffer=73
+concurrent=1
+unloaded=1 reloaded=1 count=9 buffer=88 path=1" ]
+[ "$bad" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0
+concurrent=0
+unloaded=1 reloaded=0 count=0 buffer=0 path=0" ]
+[ "$missing" = "$bad" ]
+[ "$incomplete" = "$bad" ]
 [ "$cuda_good" = "loaded=1 available=1 init=0 ptr=91 fill=0 dtoh=0 word=5a5a5a5a" ]
 [ "$cuda_incomplete" = "loaded=0 available=0 init=3 ptr=-3 fill=-3 dtoh=-3 word=00000000" ]
 
@@ -212,6 +256,9 @@ printf '%s\n' \
     "gpu_provider_wrong_abi_rejected=true" \
     "gpu_provider_incomplete_surface_rejected=true" \
     "gpu_provider_provenance_reported=true" \
+    "gpu_provider_unload_reload=true" \
+    "gpu_provider_replacement_without_host_rebuild=true" \
+    "gpu_provider_concurrent_registry_access=true" \
     "cuda_provider_operation_dispatch=true" \
     "cuda_provider_incomplete_surface_rejected=true" \
     "cuda_provider_missing_operation_fails_closed=true" \

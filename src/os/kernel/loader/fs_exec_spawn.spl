@@ -6,22 +6,15 @@
 # optional live handoff hook.
 
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.loader.cap_exec_gate.{exec_cap_check, exec_cap_check_caps}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check}
 use os.kernel.loader.byte_utils.{byte_len}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{
     ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
 }
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
-use os.kernel.loader.executable_launch_arguments_v1.{
-    executable_launch_arguments_v1_errno,
-    executable_launch_arguments_v1_validate
-}
 use os.kernel.scheduler.scheduler_executable_adoption.{
     SchedulerExecutableAdoptionResultV1
-}
-use os.kernel.scheduler.process_execution_observation.{
-    SchedulerExecutionEvidenceTokenV1
 }
 use os.kernel.scheduler.scheduler_types.{
     Scheduler,
@@ -36,8 +29,7 @@ use os.kernel.loader.spawn_authority.{
     spawn_authority_spawn_caps
 }
 use os.kernel.loader.spawn_recipes.{
-    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps,
-    spawn_recipe_launch_contract_valid
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps
 }
 use os.kernel.types.task_types.{TaskId, TaskPriority, scheduler_flat_topology}
 use os.kernel.types.capability_types.{CapabilitySet}
@@ -51,9 +43,23 @@ extern fn serial_println(msg: text)
 # process_image.spl's `_pi_byte_len`) — reuse it here instead of
 # re-duplicating the six @cfg arms.
 
-use os.services.vfs.executable_read_v1.{
-    vfs_read_executable_bytes_v1
-}
+@cfg(arm64)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+@cfg(arm32)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+@cfg(x86_64)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(x86)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(riscv64)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(riscv32)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
 
 @cfg(x86_64)
 fn _fs_exec_active_arch() -> Architecture:
@@ -79,16 +85,34 @@ fn _fs_exec_active_arch() -> Architecture:
 fn _fs_exec_active_arch() -> Architecture:
     Architecture.Riscv32
 
+@cfg(arm64)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    arm_fs_exec_read_file_bytes(path)
+
+@cfg(arm32)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    arm_fs_exec_read_file_bytes(path)
+
+@cfg(x86_64)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(x86)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(riscv64)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(riscv32)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
 pub struct FsExecPrepareResult:
     scheduler: Scheduler
     pid: i64
     entry: i64
-
-pub struct FsExecAuthenticatedRunResultV1:
-    """Terminal status plus one generation-bound scheduler evidence lease."""
-    exit_code: i64
-    evidence: SchedulerExecutionEvidenceTokenV1?
-    scheduler: Scheduler
 
 fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
     """Create the one-CPU scheduler state fs-exec needs without importing the full scheduler hub."""
@@ -113,7 +137,6 @@ fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
     Scheduler(
         tasks: tasks,
         current: TaskId(id: 0),
-        current_slot: -1,
         current_by_cpu: [TaskId(id: 0)],
         preempt_pending_by_cpu: [nil],
         ready_queues: queues,
@@ -145,7 +168,7 @@ fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
 
 pub fn fs_exec_read_executable_bytes(path: text) -> [u8]:
     """Read executable bytes through the active target's filesystem bridge."""
-    vfs_read_executable_bytes_v1(path)
+    _fs_exec_read_bytes(path)
 
 pub(package) fn fs_exec_prepare_spawn_from_bytes(path: text, bytes: [u8], arch: Architecture, argv: [text], envp: [text]) -> FsExecPrepareResult:
     """Legacy byte-only bridge retained as a fail-closed compatibility seam."""
@@ -165,7 +188,7 @@ pub(package) fn fs_exec_prepare_spawn_from_bytes(path: text, bytes: [u8], arch: 
 pub(package) fn fs_exec_prepare_spawn(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
     """Resolve bytes for diagnostics, then reject without loader authority."""
     serial_println("[fs-exec] spawn:resolve path={path}")
-    val bytes = vfs_read_executable_bytes_v1(path)
+    val bytes = _fs_exec_read_bytes(path)
     fs_exec_prepare_spawn_from_bytes(path, bytes, _fs_exec_active_arch(), argv, envp)
 
 pub fn fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
@@ -176,66 +199,6 @@ pub fn fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     A pathname and bytes are never sufficient execution authority.
     """
     fs_exec_spawn_as(0, path, argv, envp)
-
-pub fn fs_exec_adopt_authenticated_with_launch_v1(
-    scheduler: Scheduler,
-    mut table: MountTable,
-    authorities: ExecutableAuthorityRegistryV1,
-    token: ExecutableAuthorityTokenV1,
-    consumer: ExecutableLoadConsumerV1,
-    entry_point: u64,
-    caller: i64,
-    caller_caps: CapabilitySet,
-    path: text,
-    argv: [text],
-    envp: [text],
-    recipe: i64
-) -> FsExecPrepareResult:
-    """Consume one loader-issued authority and publish through Scheduler.
-
-    This bridge cannot issue or reconstruct a token. The loader registry owns
-    replay defense, while the returned Scheduler owns the newly published task.
-    """
-    # A null entry is never a valid x86_64, arm64, or riscv64 filesystem
-    # launch target. Reject it at the loader boundary, before capability policy
-    # or scheduler adoption can consume the one-shot executable authority.
-    if entry_point == 0u64:
-        return FsExecPrepareResult(scheduler: scheduler, pid: -8, entry: 0)
-    # Validate and take independent copies before the scheduler can consume the
-    # one-shot loader authority or reach path/capability policy. A malformed
-    # vector therefore cannot burn a valid token or leave a partially prepared
-    # process image behind.
-    val launch_result = executable_launch_arguments_v1_validate(path, argv, envp)
-    if launch_result.is_err():
-        return FsExecPrepareResult(
-            scheduler: scheduler,
-            pid: executable_launch_arguments_v1_errno(launch_result.unwrap_err()),
-            entry: 0)
-    val launch = launch_result.unwrap()
-    # A recipe can carry materially more authority than an executable path.
-    # Bind privilege-bearing recipe identity to the loader-owned launch copy
-    # before consuming its one-shot executable authority.  In particular, the
-    # authenticated server's credential and listener grants must never be
-    # inherited by a sibling artifact or through injected argv/environment.
-    if not spawn_recipe_launch_contract_valid(
-        recipe, launch.path, launch.argv, launch.envp):
-        return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
-    val gate = exec_cap_check_caps(caller_caps, launch.path)
-    if gate != 0:
-        return FsExecPrepareResult(scheduler: scheduler, pid: gate as i64, entry: 0)
-    val allowed = spawn_authority_check_spawn(caller, recipe)
-    if allowed != 0:
-        return FsExecPrepareResult(scheduler: scheduler, pid: allowed as i64, entry: 0)
-    val caps = spawn_authority_spawn_caps(caller, recipe, caller_caps)
-    var owner = scheduler
-    val adopted: SchedulerExecutableAdoptionResultV1 =
-        owner.adopt_authenticated_executable_pid_with_launch_v1(
-            table, authorities, token, consumer, launch, entry_point,
-            TaskPriority.Normal, caps)
-    if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
-        return FsExecPrepareResult(scheduler: owner, pid: -13, entry: 0)
-    FsExecPrepareResult(
-        scheduler: owner, pid: adopted.pid as i64, entry: entry_point as i64)
 
 pub fn fs_exec_adopt_authenticated_v1(
     scheduler: Scheduler,
@@ -248,10 +211,28 @@ pub fn fs_exec_adopt_authenticated_v1(
     path: text,
     recipe: i64
 ) -> FsExecPrepareResult:
-    """Compatibility entrypoint with path as argv[0] and an empty environment."""
-    fs_exec_adopt_authenticated_with_launch_v1(
-        scheduler, table, authorities, token, consumer, entry_point,
-        caller, _fs_exec_parent_caps(caller, recipe), path, [path], [], recipe)
+    """Consume one loader-issued authority and publish through Scheduler.
+
+    This bridge cannot issue or reconstruct a token. The loader registry owns
+    replay defense, while the returned Scheduler owns the newly published task.
+    """
+    val gate = exec_cap_check(caller, path)
+    if gate != 0:
+        return FsExecPrepareResult(scheduler: scheduler, pid: gate as i64, entry: 0)
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0:
+        return FsExecPrepareResult(scheduler: scheduler, pid: allowed as i64, entry: 0)
+    val caps = spawn_authority_spawn_caps(
+        caller, recipe, _fs_exec_parent_caps(caller, recipe))
+    var owner = scheduler
+    val adopted: SchedulerExecutableAdoptionResultV1 =
+        owner.adopt_authenticated_executable_pid_v1(
+            table, authorities, token, consumer, entry_point,
+            TaskPriority.Normal, caps)
+    if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
+        return FsExecPrepareResult(scheduler: owner, pid: -13, entry: 0)
+    FsExecPrepareResult(
+        scheduler: owner, pid: adopted.pid as i64, entry: entry_point as i64)
 
 pub fn fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     """Reject unauthenticated live handoff through the same canonical gate."""
@@ -294,7 +275,8 @@ fn _fs_exec_parent_caps(caller: i64, recipe: i64) -> CapabilitySet:
     bound rather than the recipe's own declaration. Must land with the boot-side
     seeder in the arming session; the seal is safe to arm either way (the child is
     attenuated in both cases), but the parent bound is only real afterwards."""
-    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.empty()
+    if not spawn_recipe_is_migrated(recipe):
+        return CapabilitySet.full()
     val owner = if caller < 0: 0u64 else: caller.to_u64()
     spawn_recipe_seed_parent_caps(recipe, owner)
 
