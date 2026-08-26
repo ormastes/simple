@@ -6341,3 +6341,18 @@ This reduces unsafe surface duplication, not the remaining unsafe contract:
 ptrace memory/register containers and DWARF strings/arrays have no verified
 ownership/nullability/provider-admission evidence, and the family remains
 unsigned and critical-ineligible.
+
+### Providerless legacy CUDA-session removal (2026-08-26)
+
+The legacy no-GC engine2d `CudaComputeSession` had nine raw CUDA declarations
+with no provider, including signatures incompatible with the canonical typed
+CUDA owner. It had no production import; its only consumer exercised bounded
+module-cache bookkeeping. The execution façade is removed rather than mapping
+foreign failure to `0`, `false`, or empty text. The module now contains only
+the four-slot pure cache and rejection accounting used by that contract.
+
+The cache spec passes 2/2 before and after the change, source check passes,
+and the providerless guard confirms no raw CUDA extern/call can return. The
+flat four-slot layout, O(1) lookup, and allocation behavior are unchanged;
+the deleted SFFI call paths reduce code and runtime risk. This does not verify
+or sign the still-active typed CUDA providers.

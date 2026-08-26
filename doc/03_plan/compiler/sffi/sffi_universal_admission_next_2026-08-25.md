@@ -684,3 +684,14 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   with no wrapper call, allocation, copy, lookup, or dynamic dispatch.
 - [ ] Replace raw ptrace arrays/register maps and DWARF text/array returns with
   typed owned/status contracts, then admit an exact signed provider artifact.
+
+### Providerless legacy CUDA session
+
+- [x] Confirm the legacy engine2d CUDA-session façade has no production import
+  and nine providerless/conflicting raw declarations.
+- [x] Remove its execution façade instead of synthesizing scalar/text results;
+  preserve only the pure bounded cache bookkeeping used by its real contract.
+- [x] Pass the same 2/2 cache spec, source check, optimizer analysis, and a
+  guard that rejects raw CUDA externs/calls returning to that module.
+- [ ] Migrate any future engine2d CUDA execution through the existing typed
+  CUDA owner with versioned ABI/evidence admission, never this cache module.

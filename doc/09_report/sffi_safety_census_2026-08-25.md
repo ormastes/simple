@@ -2176,3 +2176,12 @@ rows. The owner audit passes and all four files pass source checking. This
 changes no hot-call instructions or memory behavior. It does not verify the
 ptrace/DWARF ABI or provider: raw container/string ownership and signed
 admission remain absent.
+
+### Providerless legacy CUDA-session removal (2026-08-26)
+
+The no-GC engine2d legacy CUDA session no longer declares or calls its nine
+providerless/conflicting CUDA ABI functions. It retains only the allocation-free
+four-slot cache/rejection bookkeeping, covered by the same 2/2 spec before and
+after the change; source check and the providerless guard pass. No hot-path
+work was added. This removes a false CUDA execution surface, not the need for
+signed and typed contracts on active CUDA providers.
