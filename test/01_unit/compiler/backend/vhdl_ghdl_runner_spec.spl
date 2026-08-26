@@ -13,7 +13,29 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 use compiler.backend.vhdl.vhdl_testbench_render.{GhdlResult, CombinationalBench, ClockedBench, RenderOutput, run_vhdl_testbench_with_ghdl, run_vhdl_testbench_artifact_with_ghdl}
 
+use std.io_runtime.{read_file_text}
 use std.spec.step
+
+describe "VHDL GHDL runner runtime facade ownership":
+    it "uses exact canonical process and file-write facades":
+        step("Load the production VHDL testbench runner source")
+        val source = read_file_text("src/compiler/70.backend/backend/vhdl/vhdl_testbench_render.spl")
+
+        step("Pin canonical ownership and reject duplicate raw runtime declarations")
+        expect(source).to_contain("use std.nogc_sync_mut.sffi.system.{process_run}")
+        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{file_write_exact}")
+        expect(source).to_not_contain("extern fn rt_process_run")
+        expect(source).to_not_contain("extern fn rt_file_write_text")
+        expect(source).to_not_contain("rt_process_run(")
+        expect(source).to_not_contain("rt_file_write_text(")
+
+        step("Preserve one exact process call per probe or phase and one status-bearing write")
+        expect(source.split("process_run(").len()).to_equal(3)
+        expect(source.split("file_write_exact(").len()).to_equal(2)
+        expect(source).to_contain("val (out, err, code) = process_run(\"/bin/sh\", [\"-c\", \"command -v ghdl 2>/dev/null\"])")
+        expect(source).to_contain("val (stdout, stderr, code) = process_run(\"ghdl\", phase_args)")
+        expect(source).to_contain("val wrote = file_write_exact(vhdl_path, vhdl_text)\n    if not wrote:")
+        expect(source).to_not_contain("dir_create_all(")
 
 describe "GhdlResult model":
     """Unit coverage for the GhdlResult class factory methods and accessors."""
