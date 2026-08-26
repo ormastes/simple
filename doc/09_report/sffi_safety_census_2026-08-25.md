@@ -316,3 +316,12 @@ path; an unreadable manifest is skipped, while a valid empty manifest remains
 a successful empty input rather than a fabricated provider result.  Discovery
 retains one home lookup and one read per candidate manifest, with no added
 probe, retry, allocation, copy, lookup, lock, or generic dispatch.
+
+### Compiler MDSOC-config authority follow-up
+
+The MDSOC manifest loader now declares its raw file-read result as nullable and
+confines the call to one always-inlined lexical `unsafe(ffi)` owner.  Provider
+failure remains a typed absence at the boundary and is mapped to the loader's
+existing `nil` result; a valid empty manifest follows the same documented empty
+configuration path.  The loader retains exactly one read with no extra probe,
+retry, allocation, copy, lookup, lock, hash, or generic dispatch.

@@ -1886,3 +1886,11 @@ and unpromoted.
 - [x] Confine both raw calls to always-inlined lexical owners.
 - [x] Preserve empty manifest data separately from provider failure.
 - [x] Preserve discovery call counts and add a static ratchet.
+
+### Completed compiler MDSOC-config authority slice
+
+- [x] Tag the manifest-read declaration `unsafe(ffi)`.
+- [x] Correct its result type to nullable text.
+- [x] Confine the raw call to one always-inlined lexical owner.
+- [x] Preserve the loader's documented nil/empty behavior.
+- [x] Preserve one-read complexity and add a static ratchet.
