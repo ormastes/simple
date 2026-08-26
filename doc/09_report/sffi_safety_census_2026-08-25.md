@@ -306,3 +306,13 @@ owners.  A nullable source-provider failure produces a conservative cache miss
 before interface/hash comparison, while valid empty source remains distinct.
 Cache admission retains one existence query and one source read, with no retry,
 copy, lookup, hash duplication, or generic dispatch added.
+
+### Compiler plugin-startup authority follow-up
+
+Plugin startup now represents manifest-read and home-directory provider failure
+as nullable text and confines both raw runtime calls to always-inlined lexical
+owners.  An unavailable home directory omits only the user-global discovery
+path; an unreadable manifest is skipped, while a valid empty manifest remains
+a successful empty input rather than a fabricated provider result.  Discovery
+retains one home lookup and one read per candidate manifest, with no added
+probe, retry, allocation, copy, lookup, lock, or generic dispatch.

@@ -1878,3 +1878,11 @@ and unpromoted.
 - [x] Correct live-source reads to nullable text.
 - [x] Convert provider failure to a conservative cache miss.
 - [x] Preserve one-query/one-read admission and add a static ratchet.
+
+### Completed compiler plugin-startup authority slice
+
+- [x] Keep manifest-read and home-directory declarations tagged `unsafe(ffi)`.
+- [x] Correct both raw result types to nullable text.
+- [x] Confine both raw calls to always-inlined lexical owners.
+- [x] Preserve empty manifest data separately from provider failure.
+- [x] Preserve discovery call counts and add a static ratchet.

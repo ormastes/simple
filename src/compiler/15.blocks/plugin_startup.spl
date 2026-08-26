@@ -27,16 +27,26 @@ use std.io_runtime.{dir_list, file_exists}
 # ============================================================================
 # Extern declarations (no new rt_* — all already whitelisted)
 # ============================================================================
-@unsafe(reason: "raw manifest file read; empty text conflates empty data with provider failure", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text
-@unsafe(reason: "raw home-directory lookup; empty text conflates absence with provider failure", capabilities: [ffi])
-extern fn rt_env_home() -> text
+@unsafe(reason: "raw nullable manifest file read", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+@unsafe(reason: "raw nullable home-directory lookup", capabilities: [ffi])
+extern fn rt_env_home() -> text?
 @unsafe(reason: "status/out dynamic loader ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64
 @unsafe(reason: "status/out dynamic symbol resolver ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_dlsym_checked(handle: i64, name: text, out_symbol: *mut i64) -> i64
 @unsafe(reason: "untyped integer-only foreign call ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+
+@always_inline
+fn _plugin_manifest_read_raw(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
+
+@always_inline
+fn _plugin_home_raw() -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_home()
 
 # ============================================================================
 # _SoBlockProxy — BlockDefinition adapter for C-side (.so) block plugins
@@ -214,8 +224,7 @@ fn _plugin_dirs() -> [text]:
     # last win at lookup time because project dir is appended second)
     dirs.push(".simple-plugins")
     # User-global plugins
-    val home_dir = unsafe(capabilities: [ffi]):
-        rt_env_home() ?? ""
+    val home_dir = _plugin_home_raw() ?? ""
     if home_dir != "":
         dirs.push(home_dir + "/.simple/plugins")
     dirs
@@ -228,9 +237,9 @@ fn _scan_dir(dir_path: text) -> [StartupPluginEntry]:
     for filename in entries:
         if filename.ends_with(".sdn"):
             val full_path = dir_path + "/" + filename
-            val content = unsafe(capabilities: [ffi]):
-                rt_file_read_text(full_path) ?? ""
-            if content != "":
+            val content_raw = _plugin_manifest_read_raw(full_path)
+            if content_raw != nil:
+                val content = content_raw ?? ""
                 val parsed = _parse_manifest(content)
                 for entry in parsed:
                     found.push(entry)
