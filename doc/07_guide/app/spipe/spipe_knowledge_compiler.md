@@ -1313,3 +1313,22 @@ Never let the executor reserve or tombstone. Replay follows the same
 post-reservation cursor checks and performs no issuer/provider/sign/commit
 work. This remains a contract candidate pending fresh static and independent
 review; it does not admit the provider, Wave 4, AC-4, or pipeline.
+
+#### Provider implementation non-admission handoff (2026-08-26)
+
+Do not resume from `/tmp/spkc-provider-admission4-kVaqO2/repo` or copy its
+code/contract text. The candidate was based on
+`f7ec2dc1b0c0de4b42bb97940b17bec9db29e5a1`, stopped before runtime work after
+two immutable xhigh pre-runtime `FAIL` reviews. The final review attempt added
+no edit to its exact ten-file scope and ran no runtime test, commit, or push;
+the forensic candidate itself has an existing dirty diff.
+
+The bridge contract is presently contradictory: Section 17.14.3 requires
+post-reservation cursor identity/decode/verify at the bridge, while the frozen
+seven-field bridge factory has no cursor-authority port. Start with a fresh
+design session that resolves this configuration ABI. Do not begin implementation
+until that decision has fresh implementation-readiness and independent
+highest-capability review. Tombstones, exact executor-error discrimination,
+full replay verification, cursor digest, store accounting/idempotency,
+closed-object accessors, and oracle vectors remain unimplemented. Keep provider
+admission, Wave 4, AC-4, and the integrated pipeline open.

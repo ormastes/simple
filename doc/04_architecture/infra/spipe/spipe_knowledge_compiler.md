@@ -1215,3 +1215,23 @@ bind its per-page value.
 This candidate retains bounded-store and public-error contracts and is not
 provider implementation/admission evidence. Wave 4, AC-4, and pipeline
 admission remain open pending static and independent high-capability review.
+
+### 17.12 Provider implementation non-admission: configuration ABI conflict (2026-08-26)
+
+The provider implementation attempt at
+`/tmp/spkc-provider-admission4-kVaqO2/repo`, based on
+`f7ec2dc1b0c0de4b42bb97940b17bec9db29e5a1`, stopped before runtime work after
+two immutable xhigh pre-runtime `FAIL` reviews. The final review attempt added
+no edit to its exact ten-file scope and ran no runtime test, commit, or push.
+The forensic candidate itself has an existing dirty diff. It is forensic
+context only; do not reuse its code or contract wording.
+
+The decisive architecture contradiction is that Section 17.14.3 requires the
+bridge to own post-reservation cursor identity, decode, and verification, but
+the frozen seven-field bridge factory configuration provides no cursor-authority
+port. Therefore no implementation can conform without a fresh configuration-ABI
+decision. Mandatory tombstones, exact executor-error discrimination, full
+replay verification, cursor digest, store accounting/idempotency, closed-object
+accessors, and oracle vectors remain unimplemented. A fresh design session must
+resolve that configuration ABI before a new implementation lane begins. Provider
+admission, Wave 4, AC-4, and pipeline admission remain open.

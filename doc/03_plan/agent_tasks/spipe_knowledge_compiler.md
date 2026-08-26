@@ -1051,3 +1051,29 @@ normal/highest-capability reviewer.
 
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
+
+### 10.21 Provider implementation non-admission and fresh-design gate (2026-08-26)
+
+1. **Attempt closed before runtime.** The provider implementation candidate at
+   `/tmp/spkc-provider-admission4-kVaqO2/repo`, based on
+   `f7ec2dc1b0c0de4b42bb97940b17bec9db29e5a1`, stopped after two immutable xhigh
+   pre-runtime `FAIL` reviews. The final review attempt added no edit to its
+   exact ten-file scope and ran no runtime test, commit, or push. The forensic
+   candidate itself has an existing dirty diff; treat its code and contract
+   prose as forensic material only.
+2. **Decisive blocker.** Section 17.14.3 assigns post-reservation cursor
+   identity/decode/verify to the bridge, but the frozen seven-field bridge
+   factory configuration has no cursor-authority port. This is a configuration
+   ABI contradiction, not an implementation choice.
+3. **Non-admitted behavior.** Mandatory tombstones, the exact executor-error
+   union, full replay verification, cursor digest, store
+   accounting/idempotency, closed-object accessors, and oracle vectors remain
+   unimplemented and are not evidence.
+4. **Fresh-session task.** A new design owner must resolve the factory/config
+   ABI before assigning any implementation work. Then require fresh
+   implementation-readiness and independent highest-capability review.
+5. **Downstream lanes — waiting.** Provider admission, Wave 4, AC-4, and the
+   integrated pipeline remain open.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.

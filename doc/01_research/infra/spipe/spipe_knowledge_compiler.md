@@ -2814,3 +2814,23 @@ translation. The candidate retains the existing exact seven-reason precedence,
 canonical-byte caps, and public redaction boundary. It requires fresh static,
 implementation-readiness, and independent highest-capability review; provider
 implementation/admission, Wave 4, AC-4, and pipeline integration remain open.
+
+### 39.10 Provider implementation non-admission handoff (2026-08-26)
+
+The final provider implementation attempt stopped before runtime work. It made
+no product or oracle edit, ran no runtime test, produced no commit, and pushed
+ nothing. The final review attempt added no new edits to its exact ten-file
+implementation scope. Its candidate is
+`/tmp/spkc-provider-admission4-kVaqO2/repo`, based on immutable commit
+`f7ec2dc1b0c0de4b42bb97940b17bec9db29e5a1`; it is forensic context only and
+neither its code nor its contract text may be copied into a new lane.
+
+Two immutable xhigh pre-runtime reviews failed on the decisive ABI
+contradiction: Section 17.14.3 requires the bridge to own post-reservation
+cursor identity, decode, and verification, while the frozen seven-field bridge
+factory configuration supplies no cursor-authority port. The attempt also did
+not implement the required tombstone behavior, exact executor-error union,
+full replay verification, cursor digest, store accounting/idempotency,
+closed-object accessors, or oracle vectors. A fresh design session must first
+resolve the configuration ABI; only then may a fresh implementation lane start.
+Provider admission, Wave 4, AC-4, and the integrated pipeline remain open.

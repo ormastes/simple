@@ -2517,3 +2517,27 @@ pre-reservation malformed/oversize cursor with no reserve; valid cursor failure
 after reserve with exactly one tombstone; replay cursor failure after reserve;
 and fresh/replay call counts proving `Cidentity`/`Cverify` follow reserve.
 These tests are required before implementation readiness can become PASS.
+
+### 17.15 Provider implementation non-admission: resolve the factory ABI first (2026-08-26)
+
+The attempted implementation in `/tmp/spkc-provider-admission4-kVaqO2/repo`
+(base `f7ec2dc1b0c0de4b42bb97940b17bec9db29e5a1`) stopped before runtime work
+after two immutable xhigh pre-runtime `FAIL` reviews. The final review attempt
+added no edit to its exact ten-file scope and ran no runtime test, commit, or
+push. The forensic candidate itself has an existing dirty diff. Never
+transplant its code or wording.
+
+The failure is structural. Section 17.14.3 requires bridge-owned
+post-reservation cursor `identity`, decode, and `verify`, while the frozen
+seven-field bridge factory configuration has no cursor-authority port. This
+document does not silently widen that closed factory. A fresh design session
+must explicitly choose and fully specify a compatible configuration ABI first,
+including capability ownership and construction-time validation; a new
+implementation lane may begin only after that design receives fresh
+implementation-readiness and independent highest-capability review.
+
+No provider behavior is admitted from the stopped candidate: mandatory
+tombstones, the exact executor-error union, full replay verification, cursor
+digest, store accounting/idempotency, closed-object accessors, and all required
+oracle vectors remain unimplemented. Provider admission, Wave 4, AC-4, and the
+integrated pipeline remain open.
