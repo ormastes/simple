@@ -2774,3 +2774,22 @@ and exhaustive error precedence. A fresh session must restate those definitions
 inside Section 17.11 rather than inherit excluded control prose. Provider
 readiness, implementation/admission, Wave 4, AC-4, and the integrated pipeline
 remain open.
+
+### 39.8 Self-containment repair stop (2026-08-26)
+
+The fresh self-containment repair stopped `FAIL` at the mandatory third
+review/fix cycle. It made no authoritative contract or product edit, ran no
+product test, and pushed nothing. Failed immutable snapshot
+`e77cb713d5703d864f32d16ab3abab0afb5d3215` remains at
+`/tmp/spkc-provider-self-contained-JdUR6t/repo` for forensic comparison only;
+none of its rejected contract clauses may be copied into canonical documents.
+
+Implementation-readiness review passed, but independent highest-capability
+review found three exact blockers: a generic code-only unauthorized arm
+overlaps the provenance arm; the pre-reserve binding/cursor statement
+contradicts traces that reserve before `Cidentity`/`Cverify`; and the exact
+`requestedLimit` range is omitted despite the candidate cap. The next fresh
+session must make the executor-error union structurally disjoint, freeze one
+reserve/cursor order with unambiguous tombstone ownership, and state
+`requestedLimit` as `1..1000`. Provider readiness and admission, Wave 4, AC-4,
+and the integrated pipeline remain open.

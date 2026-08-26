@@ -2306,3 +2306,22 @@ design session must restate all of those definitions directly in Section 17.11
 instead of inheriting excluded control prose. This is a failed handoff, not a
 readiness claim: provider readiness/implementation/admission, Wave 4, AC-4, and
 the integrated pipeline remain open.
+
+### 17.13 Self-containment repair review stop (2026-08-26)
+
+The fresh repair stopped `FAIL` after its mandatory third review/fix cycle. No
+authoritative contract or product file was edited, no product test ran, and
+nothing was pushed. Preserve immutable failed snapshot
+`e77cb713d5703d864f32d16ab3abab0afb5d3215` at
+`/tmp/spkc-provider-self-contained-JdUR6t/repo` only as forensic evidence; do
+not copy its rejected clauses.
+
+Implementation-readiness review passed, but independent highest-capability
+review found three exact design blockers: the generic code-only unauthorized
+arm overlaps the provenance arm; the pre-reserve binding/cursor rule conflicts
+with traces reserving before `Cidentity`/`Cverify`; and the exact
+`requestedLimit` range is absent despite the candidate cap. The next fresh
+design session must make the executor-error union structurally disjoint,
+choose one reserve/cursor order and tombstone owner, and specify
+`requestedLimit` as `1..1000`. Provider readiness/implementation/admission,
+Wave 4, AC-4, and the integrated pipeline remain open.

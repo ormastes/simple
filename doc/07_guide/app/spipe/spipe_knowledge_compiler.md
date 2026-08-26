@@ -1274,3 +1274,21 @@ public error record/field shapes and exhaustive precedence. Start a fresh
 bounded session and restate those definitions inside Section 17.11; do not
 inherit excluded control prose. Keep provider readiness/implementation/
 admission, Wave 4, AC-4, and the integrated pipeline open.
+
+#### Self-containment repair operator handoff (2026-08-26)
+
+Do not use the fresh self-containment repair draft. It stopped `FAIL` at the
+mandatory third review/fix cycle, without authoritative contract or product
+edits, product tests, or a push. Snapshot
+`e77cb713d5703d864f32d16ab3abab0afb5d3215` at
+`/tmp/spkc-provider-self-contained-JdUR6t/repo` is immutable forensic material
+only; never copy its rejected clauses into an implementation prompt.
+
+Implementation-readiness review passed, but independent highest-capability
+review found three exact blockers: overlapping generic code-only unauthorized
+and provenance arms, contradictory reserve ordering around binding/cursor
+checks and `Cidentity`/`Cverify`, and no exact `requestedLimit` range despite
+the candidate cap. In a fresh bounded session, make the executor-error union
+structurally disjoint, freeze one reserve/cursor order and tombstone owner, and
+state `requestedLimit` as `1..1000`. Keep provider readiness/implementation/
+admission, Wave 4, AC-4, and the integrated pipeline open.

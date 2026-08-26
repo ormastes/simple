@@ -1004,3 +1004,27 @@ still required for the next frozen contract and implementation.
 
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
+
+### 10.19 Self-containment repair stop and next owner (2026-08-26)
+
+1. **Repair attempt — `FAIL`.** The self-containment repair exhausted the
+   mandatory three review/fix cycles. It made no authoritative contract or
+   product edit, ran no product test, and pushed nothing. Retain
+   `e77cb713d5703d864f32d16ab3abab0afb5d3215` at
+   `/tmp/spkc-provider-self-contained-JdUR6t/repo` as immutable forensic
+   evidence only; do not copy its rejected clauses.
+2. **Review split.** Implementation-readiness review passed. Independent
+   highest-capability review failed on three exact blockers: the generic
+   code-only unauthorized arm overlaps the provenance arm; pre-reserve
+   binding/cursor prose conflicts with traces reserving before
+   `Cidentity`/`Cverify`; and `requestedLimit` lacks its exact range despite the
+   candidate cap.
+3. **Fresh-session task.** Make the executor-error union structurally disjoint,
+   freeze one reserve/cursor order and tombstone owner, and specify
+   `requestedLimit` as `1..1000`. Require fresh static checks and independent
+   highest-capability admission before implementation.
+4. **Downstream lanes — waiting.** Provider readiness/implementation/admission,
+   Wave 4, AC-4, and the integrated pipeline remain open.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.

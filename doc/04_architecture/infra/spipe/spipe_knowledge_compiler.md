@@ -1174,3 +1174,20 @@ precedence. The next fresh architecture session must restate those definitions
 inside Section 17.11 and must not inherit excluded control prose. Provider
 readiness/implementation/admission, Wave 4, AC-4, and pipeline admission remain
 open.
+
+### 17.10 Self-containment repair status (2026-08-26)
+
+The fresh repair stopped `FAIL` at the mandatory third review/fix cycle. It
+produced no authoritative contract or product edit, product test, or push.
+Snapshot `e77cb713d5703d864f32d16ab3abab0afb5d3215` at
+`/tmp/spkc-provider-self-contained-JdUR6t/repo` is immutable forensic evidence,
+not architecture authority; its rejected clauses must not be copied.
+
+Implementation-readiness review passed, while independent highest-capability
+review found three blockers: overlapping generic code-only unauthorized and
+provenance arms; contradictory reserve ordering around binding/cursor checks
+and `Cidentity`/`Cverify`; and no exact `requestedLimit` range despite the
+candidate cap. A fresh architecture session must define a structurally
+disjoint executor-error union, one reserve/cursor order with a single
+tombstone owner, and `requestedLimit` in `1..1000`. Provider readiness,
+implementation/admission, Wave 4, AC-4, and pipeline admission remain open.
