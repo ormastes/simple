@@ -2541,3 +2541,50 @@ tombstones, the exact executor-error union, full replay verification, cursor
 digest, store accounting/idempotency, closed-object accessors, and all required
 oracle vectors remain unimplemented. Provider admission, Wave 4, AC-4, and the
 integrated pipeline remain open.
+
+## 18. Wave 5 Readiness: Resource, Tool, and Materialized-View Slice (2026-08-26)
+
+<!-- codex-design -->
+
+This slice implements the normative MCP-view design without changing the
+provider/cursor sections above. Its frozen internal calls are:
+
+```text
+WorkspaceRegistry.open(workspaceId) -> KnowledgeSnapshot
+ResourceResolver.resolve(snapshot, uri) -> ResourceTarget
+ProjectionPort.list(snapshot, target, cursor, limit) -> ResourcePage
+ProjectionPort.read(snapshot, target, range) -> ResourceContent
+Materializer.sync(snapshot, view, outputRoot) -> MaterializeReceipt
+```
+
+`mcp/protocol/resources.js` and `mcp/protocol/tools.js` adapt those calls to
+MCP only. Their request sequence is validate bounded input; select/open one
+workspace; authorize; resolve one URI; use one immutable snapshot; render a
+bounded result; attach snapshot/cursor/cache metadata. They must not walk the
+host tree, call a search executable, or refresh an index. `spipe_search` may
+initially use the admitted exact/lexical snapshot indexes only; optional
+provider/semantic enhancement is an independently gated dependency.
+
+Implement URI and projection first, then legacy-compatible stdio resource/tool
+routing, then `.spipe/view` materialization. The resolver has one exact
+canonicalization path: UTF-8/NFC validation, one percent decode, rejection of
+remaining dangerous percent escapes and all traversal/Windows unsafe segments,
+then workspace/revision authorization. `ProjectionUid` identifies every
+aggregate; artifact/section UIDs identify only canonical targets. Directory
+ordering is normalized display key, kind, UID, and every cursor binds the
+effective authorization scope as well as its snapshot and page state.
+
+Materialization is unavailable rather than emulated unsafely when an admitted
+descriptor-relative native provider or pinned trusted helper is absent.
+Publication stages projection-bound bytes, atomically replaces generated files,
+syncs durability, and publishes a manifest last. Cleanup consults the previous
+manifest and preserves unknown/user-modified/reparse/hard-linked entries.
+Generated aggregates use `projection-uid`; only single canonical projections
+may show `canonical-uid`/`canonical-path` headers.
+
+Admission requires one successful evidence run each: exact legacy transcript
+compatibility; URI negative matrix; deterministic list/read/cursor fixture;
+public versus private cache/ETag fixture; materializer no-op/delta/recovery
+fixture; Unix symlink and Windows reparse race tests for every claimed native
+provider; and the focused SSpec/manual. No notification, HTTP-2026, editor,
+FUSE/ProjFS, or refactor claim is admitted by these tests.

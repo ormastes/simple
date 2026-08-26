@@ -2834,3 +2834,42 @@ full replay verification, cursor digest, store accounting/idempotency,
 closed-object accessors, or oracle vectors. A fresh design session must first
 resolve the configuration ABI; only then may a fresh implementation lane start.
 Provider admission, Wave 4, AC-4, and the integrated pipeline remain open.
+
+## 40. 2026-08-26 Wave 5 Virtual-View Readiness Audit
+
+<!-- codex-design -->
+
+The independent virtual-view audit confirms that the MCP/view work can proceed
+without waiting for the capped lexical-provider ABI lane: it consumes immutable
+knowledge snapshots through `WorkspaceRegistry`, `ResourceResolver`, and the
+single internal `ProjectionPort`; it neither invokes a provider nor scans a
+repository on a request path. The normative detail contract is
+`doc/05_design/infra/spipe/spipe_knowledge_compiler_mcp_views.md`; this section
+records the evidence boundary for an implementation slice, not a replacement
+for that contract.
+
+The viable first slice is deliberately read-only: deterministic
+`resources/list`, `resources/templates/list`, `resources/read`, and equivalent
+`spipe_list`, `spipe_read`, `spipe_search`, `spipe_resolve`, `spipe_trace`, and
+`spipe_diagnostics` tools over a snapshot-pinned URI resolver. It must preserve
+all six legacy tools and `spipe://skill`, paginate before the 100-entry,
+200-line/~6,000-token bounds, and make a cursor bind snapshot, view, filters,
+authorization scope, sort key, and limit. The `spipe://` URI families and
+single-decode traversal/NFC/Windows-path rejection matrix are part of the
+security boundary, not presentation polish.
+
+Materialization is a separately admitted capability: `.spipe/view` is
+generated, read-only ownership, never a canonical write target. Only the
+ProjectionService materializer adapter may obtain the non-copyable
+`SafeFilesystem.Materializer`; it derives a bounded non-authorizing root grant
+and uses `MaterializerSafeFilesystemPort`. Portable Node checks are diagnostics
+only. If no native descriptor-relative provider or admitted pinned trusted
+helper exists, materialization fails closed while MCP reads continue.
+
+Readiness evidence is therefore concrete: golden legacy/target protocol
+transcripts; URI and authorization-negative matrices; deterministic projection
+and cursor fixtures; snapshot cache/ETag visibility cases; native materializer
+race/fault/recovery fixtures on every claimed platform; and the focused system
+scenario/manual. The audit leaves notifications, subscriptions, HTTP 2026,
+editor VFS, FUSE/ProjFS, and provider-backed semantic work outside the first
+admission unless their own invalidation, security, and release evidence exists.

@@ -1332,3 +1332,29 @@ highest-capability review. Tombstones, exact executor-error discrimination,
 full replay verification, cursor digest, store accounting/idempotency,
 closed-object accessors, and oracle vectors remain unimplemented. Keep provider
 admission, Wave 4, AC-4, and the integrated pipeline open.
+
+## 14. Wave 5 Virtual Knowledge Views: Operator Boundary (2026-08-26)
+
+Virtual knowledge is read from `spipe://workspace/<workspace>/view/...` or
+from model-callable `spipe_list`/`spipe_read`/`spipe_search`/`spipe_resolve`/
+`spipe_trace`/`spipe_diagnostics`; it is not a writable alternate document
+tree. Directory pages are bounded and cursor-paginated. Preserve the supplied
+cursor unchanged for the same workspace, authorization scope, and snapshot;
+on `stale_cursor`, restart the listing rather than guessing a physical path.
+
+For file-only clients, `.spipe/view/` is generated output. Never edit it. A
+single canonical artifact header contains `canonical-uid` and `canonical-path`;
+directory, trace, search, and diagnostic pages instead carry a `projection-uid`
+and have no canonical edit target. Use a transactional refactor command for
+canonical changes once that separate capability is admitted.
+
+Operators configure named workspaces at startup. A request does not infer the
+current directory or perform a full scan. Hidden and absent resources return
+the same bounded external class; private/mixed results are never placed in a
+shared cache. If safe materialization is unavailable on a platform, retain MCP
+read-only views and treat the materializer diagnostic as a capability absence,
+not permission to use raw filesystem writes.
+
+The first slice remains legacy-stdio compatible and preserves the six existing
+tools plus `spipe://skill`. HTTP 2026, subscriptions, editor VFS, and OS mounts
+are later adapters and must not be enabled merely because a virtual URI works.

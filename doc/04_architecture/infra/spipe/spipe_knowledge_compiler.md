@@ -1235,3 +1235,38 @@ replay verification, cursor digest, store accounting/idempotency, closed-object
 accessors, and oracle vectors remain unimplemented. A fresh design session must
 resolve that configuration ABI before a new implementation lane begins. Provider
 admission, Wave 4, AC-4, and pipeline admission remain open.
+
+## 18. Wave 5 Read-Only Virtual-View Capsule (2026-08-26)
+
+<!-- codex-design -->
+
+Wave 5 is a separate read-only capsule and may be implemented independently of
+the provider bridge. `KnowledgeCompiler` publishes immutable snapshots;
+`WorkspaceRegistry` opens a named workspace; `ResourceResolver` turns a
+validated URI into a target; and `ProjectionPort` alone lists or renders that
+target. MCP transports and the CLI are adapters only: they cannot parse a
+repository, mutate canonical files, or cause an index/provider refresh during a
+request. A snapshot ID is carried through every page, resource, tool result,
+and cache identity.
+
+`ProjectionService` owns virtual projection and has two one-way outputs:
+protocol read adapters and the optional materializer adapter. The former emits
+the deterministic resource/tool envelope. The latter is the sole holder of
+`SafeFilesystem.Materializer`, converts it once into a projection- and
+snapshot-bound `MaterializerRootGrant`, and calls only
+`MaterializerSafeFilesystemPort`. Neither native/worker filesystem providers
+nor a trusted helper receive authorization authority. RefactorService is a
+separate writer capsule with no materializer capability.
+
+The initial composition deliberately includes legacy stdio and protocol-neutral
+resource/tool services before stateless HTTP, notifications, editor VFS, or OS
+mount adapters. A failed optional materializer admission leaves read-only MCP
+views available; a URI, snapshot, authorization, or projection ambiguity fails
+closed. Public cacheability is allowed only for wholly public snapshot output;
+private/mixed output remains private/no-store and authorization precedes any
+conditional-cache decision.
+
+The capsule is admitted only when the focused protocol, URI security,
+projection determinism, cache-visibility, and materializer fault/race evidence
+listed in the Wave 5 detail contract passes. It is not evidence that the
+unresolved provider protocol or any write/refactor capability is admitted.

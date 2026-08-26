@@ -965,6 +965,40 @@ normal/highest-capability model. AC-4 remains open.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### 10.22 Wave 5 virtual-view implementation-readiness lane (2026-08-26)
+
+**Scope and non-overlap.** This lane owns read-only virtual MCP resources,
+equivalent model tools, and optional safe materialization. It must not modify
+the capped cursor/provider ABI or claim Wave 4/provider admission. It begins
+from the normative `spipe_knowledge_compiler_mcp_views.md` contract and appends
+only compatible evidence to the five knowledge-compiler companion documents.
+
+1. **Primary owner — core/read adapters.** Define `WorkspaceRegistry`,
+   `ResourceResolver`, `ProjectionPort`, snapshot-carrying resource/tool
+   envelopes, and legacy transcript fixtures. Freeze URI, pagination, error,
+   authorization, and cache interfaces before parallel work.
+2. **Sidecar A — projection safety (N/A until interfaces freeze).** Independently
+   review URI normalization, virtual-path collisions, UID/projection-UID
+   distinction, deterministic ordering, visibility/cache partitioning, and
+   bounded request behavior. It may add only tests after the frozen names land.
+3. **Sidecar B — materializer safety (N/A until port interfaces freeze).** Build
+   `MaterializerSafeFilesystemPort` provider evidence and race/fault fixtures;
+   it may not add a raw Node mutation fallback or touch refactor ownership.
+4. **Integration owner.** Assemble in the fixed order: resolver/projection;
+   legacy stdio resources/tools; materializer; optional HTTP 2026 only after its
+   separate authorization/invalidation evidence. Rebase exact-scope changes
+   onto current main and preserve six legacy tools plus `spipe://skill`.
+5. **Evidence and review.** Run each focused fixture once, inspect generated
+   MCP manual quality, and obtain independent normal/highest-capability review
+   of authority, cache, cursor, and filesystem claims. Required acceptance is
+   the explicit Wave 5 evidence set in detail design §18; failures fail closed,
+   with no widened scope.
+
+Merge owner remains `/root`; final reviewer is an independent
+normal/highest-capability agent. Notifications, subscriptions, editor VFS,
+FUSE/ProjFS, and provider-backed semantics are explicitly `N/A` for first-slice
+admission.
+
 ### 10.20 Fresh three-blocker ABI repair lane (2026-08-26)
 
 **Scope:** exactly the five canonical knowledge-compiler documents; no product
