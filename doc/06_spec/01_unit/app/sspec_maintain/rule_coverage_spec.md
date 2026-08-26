@@ -17,14 +17,21 @@
 
 #### covers every stable rule with an executable witness
 
+- Collect the union of rule ids witnessed by fixtures
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
+   - Expected: observed equals `_catalog_ids()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSDOC-003
+step("Collect the union of rule ids witnessed by fixtures")
 # @req REQ-DANGLING-001
 # @req REQ-IMPLEMENTED-001
 # @req REQ-DANGLING-001
@@ -54,33 +61,50 @@ expect(observed).to_equal(_catalog_ids())
 
 #### accepts professional source and manual facts without false positives
 
+- Analyze a fully professional source and manual pair
+   - Text capture: after_step
+   - Evidence: text output verified by 2 expected checks
+   - Expected: report.mirror_state equals `current`
+   - Expected: report.findings.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Analyze a fully professional source and manual pair")
 val source = _professional_source()
 val report = analyze_sspec_pair_text("test/professional_spec.spl",
     source, Some(_professional_manual(source)))
 expect(report.mirror_state).to_equal("current")
+# 0 findings: a professional pair must yield a clean report.
 expect(report.findings.len()).to_equal(0)
 for rule in sspec_rule_definitions():
+    # 8 = documented minimum of false-positive controls per stable rule.
     expect(rule.false_positive_limits.len()).to_be_greater_than(8)
 ```
 
 </details>
 
-#### flags a structurally incomplete manual even when its source hash is current
+#### rejects a structurally incomplete manual even when its source hash is current
+
+- Analyze a hash-current but structurally incomplete manual
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
+   - Expected: report.mirror_state equals `current`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Analyze a hash-current but structurally incomplete manual")
 val source = _professional_source()
 val manual = "# Minimal mirror\nSource SHA-256: {sha256_text(source)}\n"
 val report = analyze_sspec_pair_text("test/incomplete_spec.spl",
@@ -94,13 +118,23 @@ expect(_rule_ids(report).contains("SSDOC-MNT-002")).to_be(false)
 
 #### orders findings by normalized path line and rule identity
 
+- Append findings and read back their normalized order
+   - Text capture: after_step
+   - Evidence: text output verified by 4 expected checks
+   - Expected: ordered.findings[0].rule_id equals `SSDOC-BEH-001`
+   - Expected: ordered.findings[1].rule_id equals `SSDOC-NAR-001`
+   - Expected: ordered.findings[2].line equals `3`
+   - Expected: ordered.findings[3].path equals `test/z_spec.spl`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Append findings and read back their normalized order")
 val base = analyze_sspec_pair_text("test/order_spec.spl",
     _professional_source(), Some(_professional_manual(_professional_source())))
 val ordered = append_sspec_findings(base, [
@@ -122,13 +156,20 @@ expect(ordered.findings[3].path).to_equal("test/z_spec.spl")
 
 #### keeps fingerprints stable across normal evidence whitespace
 
+- Compare fingerprints of whitespace-varied findings
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
+   - Expected: spaced.fingerprint equals `compact.fingerprint`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Compare fingerprints of whitespace-varied findings")
 val compact = make_sspec_finding("./test/stable_spec.spl",
     "SSDOC-NAR-001", 1, "Missing authored purpose and audience",
     "Add purpose.", 20)
@@ -183,24 +224,24 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `6fc40262a5b1c9f3822eb85268cd2fc81809b4875527b8e2348a3d692d8d7c37`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `475ed364c566ae08917955fb8a1d85f14424e57b4aadd42bff10cb326d9501bf`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `6fc40262a5b1c9f3822eb85268cd2fc81809b4875527b8e2348a3d692d8d7c37`.
+Source SHA-256: `475ed364c566ae08917955fb8a1d85f14424e57b4aadd42bff10cb326d9501bf`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `6fc40262a5b1c9f3822eb85268cd2fc81809b4875527b8e2348a3d692d8d7c37`  
+Source SHA-256: `475ed364c566ae08917955fb8a1d85f14424e57b4aadd42bff10cb326d9501bf`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **79/100**; effective score: **79/100**; blockers: **0**.
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
 
-SSpec documentization score: 79/100
+SSpec documentization score: 87/100
 source: test/01_unit/app/sspec_maintain/rule_coverage_spec.spl
 mirror: doc/06_spec/01_unit/app/sspec_maintain/rule_coverage_spec.md (current)
-findings: 12 blockers: 0
-  narrative=80 structure=60 oracle=80
-  traceability=100 evidence=100 coverage=80 maintainability=40
+findings: 7 blockers: 0
+  narrative=80 structure=100 oracle=80
+  traceability=100 evidence=100 coverage=100 maintainability=40
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
 doc/06_spec/01_unit/app/sspec_maintain/rule_coverage_spec.md:1:1: warning SSDOC-MNT-004 [maintainability] (-10): internal execution tags are visible in the generated manual
@@ -212,9 +253,6 @@ doc/06_spec/01_unit/app/sspec_maintain/rule_coverage_spec.md:1:1: advice SSDOC-M
 doc/06_spec/01_unit/app/sspec_maintain/rule_coverage_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: advice SSDOC-COV-001 [coverage] (-20): the authored requirement defines adverse behavior but no adverse scenario is named
-  why: Specifications should explain behavior outside the happy path.
-  improve: Add adverse-path scenarios required by the source, or record a reasoned suppression.
 test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: warning SSDOC-MNT-004 [maintainability] (-10): internal execution tags can leak into reader-facing output
   why: Reader manuals should expose outcomes, not harness routing.
   improve: Hide harness routing metadata from the user manual.
@@ -227,16 +265,4 @@ test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: warning SSDOC-NAR-00
 test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:64:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'covers every stable rule with an executable witness' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:90:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'accepts professional source and manual facts without false positives' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:99:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'flags a structurally incomplete manual even when its source hash is current' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:108:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'orders findings by normalized path line and rule identity' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->
