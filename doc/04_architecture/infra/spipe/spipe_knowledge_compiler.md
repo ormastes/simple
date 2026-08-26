@@ -1747,3 +1747,43 @@ all object hashes, both manifests, project/aggregate roots, exact binding, and
 sealed page roots before returning. Once a head exists, reads return only its
 complete predecessor or its complete successor—never `null`, staging, or a
 partially checked record.
+
+### 21.7 Wave 5 sealed-boundary re-admission order
+
+`KnowledgeCompilerCommitPublisherV1` P2 is the first unresolved authority
+boundary. Its closure permit and canonical replay envelope are necessary but
+not sufficient: the current candidate is non-admitted because first-use nested
+ledger creation can race with `EEXIST`. `AuthorityPublicationJournalV1` must
+therefore create/fsync every new ancestor, publish a durable owner receipt,
+compare/revalidate the observed stale owner before unlink, and demonstrate
+competing-process and SIGKILL recovery. An in-process lock, path-blind unlink,
+or test-only scheduler is forbidden evidence.
+
+Only P2's independently reviewed production oracle may feed the second
+boundary: `SnapshotAuthorityPortV1.openBoundSnapshot(binding)` creates an opaque
+`SnapshotAuthorityViewV1` and closed `ExpectedReadBindingV1` from the exact
+published dual-snapshot tuple. It uses real registry/snapshot owners and the
+branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1` boundary,
+deep-verifies roots and manifests, and rejects swapped worktree,
+revision, snapshot, instance, manifest, target, or brand before authorization
+or `ProjectionPortV1`. A raw manifest, cache, caller map, or structural object
+cannot implement this port.
+
+The third boundary is URI/projection: the resolver returns a canonical target
+*candidate* only; after sealed membership and real `AuthorizationPortV1`
+verification, the composition root compares the entire frozen
+`CanonicalReadReceiptV1`/`ExpectedReadBindingV1` before ProjectionPort. Legacy
+aliases, including `spipe://skill`, never confer authority. The rejected URI
+candidate is not reusable; raw path resolution, local signing, duck-typed
+grants, and alias-only output are forbidden.
+
+Cursor, MCP, and materializer adapters are fourth and read-only. They consume
+only the admitted closed binding, preserve the sealed bounded directory domain,
+and make zero projection calls before admission. Each boundary needs real
+production tests, exact-scope review, and an independent highest-capability
+PASS; failure leaves all successors `NON-ADMITTED`.
+
+This is an additive boundary order, not a replacement of §21's normative
+authority/cursor ABI, raw snapshot APIs, or the exact
+`spipe-markdown-token-v1@1` <=6,000 token gate. Rejected cursor work is
+forensic evidence only and cannot weaken or delete those contracts.

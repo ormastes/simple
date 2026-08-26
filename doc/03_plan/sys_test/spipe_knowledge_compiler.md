@@ -1659,3 +1659,19 @@ journal, and filesystem owners. They gate W5A-18..24, W5C, URI, MCP, and
 materializer re-attempts.
 W5A-31..35 are additional non-admission gates for the rejected publisher
 implementation; focused or in-memory substitutes do not satisfy them.
+
+### 22.4 Ordered remediation gates (blocking test execution)
+
+| Gate | Must pass before next gate | Mandatory added/retained proof | Explicit non-evidence |
+|---|---|---|---|
+| P2 durable publisher | W5A-25..35 foundation | Same canonical envelope replays; changed revision/expected IDs/deltas deny; independently launched writer race and SIGKILL/recovery prove old-or-new complete state. First-use nested ledger ancestors are all durable; stale unlock revalidates exact observed owner/lock identity before removal. | In-process-only lock/race, timer-only stale detection, path-blind unlink, public permit/journal, or focused unit success. The known `EEXIST` first-use race is a FAIL. |
+| A read authority | P2 PASS | Real `SnapshotAuthorityPortV1.openBoundSnapshot` opens production registry/snapshot state through branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1` and rejects every dual-snapshot, manifest, instance, worktree, revision, target, and brand substitution before AuthorizationPort/ProjectionPort. | Fixture manifests, caches, maps, structural views, mocked stores, or public journal access. |
+| U URI/projection | A PASS | Resolver candidate undergoes sealed target proof plus real receipt signature/window/revocation and full receipt/binding comparison; URI hostile matrix and canonical-positive families prove zero pre-admission projection calls and one public denial. | Raw paths, local signers, duck-typed grants, alias-only output, or old rejected URI code. |
+| C cursor/adapters | U PASS | W5C plus bounded-page/cache/materialization cases prove authenticated domain/position/limit and read-only adapters. | Mock ProjectionPort, synthetic cursor state, or adapter-only fixture. |
+
+Every gate additionally requires an exact-scope diff inspection and independent
+highest-capability review PASS. Any failure marks the gate and all successors
+`NON-ADMITTED`; no successor test may be counted as substitute evidence.
+The gates are additive to the normative authority/cursor and raw-snapshot
+contracts, including exact `spipe-markdown-token-v1@1` <=6,000 testing;
+rejected cursor code cannot remove or relax any of those cases.

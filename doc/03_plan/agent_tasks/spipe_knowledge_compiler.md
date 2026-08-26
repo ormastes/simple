@@ -988,6 +988,46 @@ tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### Wave 5 admission-remediation execution order (2026-08-26)
+
+This is a serial authority chain. No agent may implement a successor against a
+mock, fixture, cache, URI, or structural substitute for its predecessor.
+
+1. **P2 publisher repair owner.** Starting from P1 only, repair the
+   `AuthorityPublicationJournalV1` first-use directory race (`EEXIST`): fsync
+   every created ancestor, use a durable owner receipt, and compare/revalidate
+   the exact observed stale owner/lock before unlink. Prove canonical-envelope
+   replay/altered-input denial, real competing processes, and SIGKILL recovery.
+   Public journals, `instanceof`, in-memory locks, path-blind recovery, and
+   process-free tests are prohibited. P2 remains `NON-ADMITTED` until an
+   independent highest-capability review PASS.
+2. **Read-authority owner (blocked on P2).** Freeze only
+   `SnapshotAuthorityPortV1`, opaque authority view, canonical target, and
+   closed expected-read binding. `openBoundSnapshot` uses production registry/
+   snapshot state through branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1`,
+   and rejects every swapped dual snapshot, manifest, instance,
+   worktree, revision, target, and brand before authorization/projection.
+   No raw manifest/map/cache, public journal, or duck-typed view is admissible.
+3. **URI/projection owner (blocked on read authority).** Resolve URI and legacy
+   alias to a candidate, prove sealed membership, verify the real branded
+   receipt, compare every frozen receipt/binding field, then call ProjectionPort.
+   Run hostile URI/Unicode/path/receipt/visibility matrices and canonical
+   positives; raw filesystem paths, alias-only success, local signing, and the
+   rejected URI candidate are forbidden.
+4. **Cursor/MCP/materializer owner (blocked on URI).** Consume only the admitted
+   binding; prove zero pre-admission projection calls, sealed continuation
+   domain/position/limit, bounded pages, cache partitioning, and read-only
+   materialization. Mock projection or synthetic cursor tests cannot advance
+   admission.
+
+For each owner: focused production oracle once, exact-scope diff inspection,
+then independent normal/highest-capability review. A FAIL does not transfer
+authority or scope to the next owner; it reopens only its sealed boundary.
+This additive sequence preserves the existing normative authority/cursor ABI,
+raw snapshot APIs, and exact `spipe-markdown-token-v1@1` <=6,000-token gate.
+Rejected cursor code is forensic evidence only; no owner may delete or weaken
+those contracts.
+
 ### 10.24 Wave 5a commit-publisher prerequisite (2026-08-26)
 
 **Status: W5A authority primitive is `NON-ADMITTED`.** Existing stores persist

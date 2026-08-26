@@ -3297,3 +3297,27 @@ publisher path and canonical replay envelope; then journal-owned durable object
 publication and deep current/recovery validation; then real cross-process crash
 and concurrent-reader evidence. W5A-18..30, cursor, URI, projection, MCP, and
 materialization remain blocked until an independent review passes this sequence.
+
+### 43.5 Wave 5 implementation-admission remediation matrix (2026-08-26)
+
+This is an ordered seal, not three parallel substitutes. A later boundary may
+consume only an opaque value from the immediately preceding admitted boundary;
+it may never reconstruct that value from a path, URI, fixture, cache, or object
+shape.
+
+| Order | Boundary and frozen prerequisite | Current non-admission blocker | Admission proof; prohibited shortcut |
+|---|---|---|---|
+| P2 | `KnowledgeCompilerCommitPublisherV1` durable replay/publication, after the P1 closure permit and recursive NFC normalization | The P2 candidate still races on first-use nested ledger creation (`EEXIST`), so independent-process locking/recovery is not proven. | Canonical envelope binds commit and the full workspace/project/worktree/revision/expected-ID/delta tuple; altered bytes deny. Competing processes and SIGKILL recovery prove old-or-new complete visibility, stale-owner compare/revalidate before unlink, and file plus every newly-created-ancestor fsync. In-memory locks, a process-free race, path-blind stale unlink, or focused tests alone are not evidence. |
+| A | Production `SnapshotAuthorityPortV1` / `SnapshotAuthorityViewV1` | No reader may claim authority until P2 publishes and deep-validates the real dual-snapshot inventory/manifest record. | `openBoundSnapshot` uses real registry/snapshot owners and the branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1` boundary to prove exact workspace/project/worktree/revision, `baseSnapshotUid`, `authoritySnapshotUid`, instance, manifest digest, and target membership before authorization/projection. Cross-brand, swapped UID/root/revision and clean/incremental parity cases deny/pass as specified. A fixture manifest, map, cache, or structural authority object is not evidence. |
+| U | Canonical URI resolver and `CanonicalReadReceiptV1` / `ExpectedReadBindingV1` | The prior URI foundation exhausted review cycles and is uncommitted; URI text and legacy aliases remain candidates only. | After A, resolve once, prove sealed membership, then verify the real branded `AuthorizationPortV1` receipt and compare every frozen binding field before projection. Table-drive hostile URI/Unicode/path/receipt/visibility cases and canonical positive families with one public denial class. Raw filesystem paths, alias-only success, local signers, duck-typed grants, or reusing the rejected URI code are prohibited. |
+| C | Cursor, MCP resources/tools, materialization | Dependent adapters have no independent authority and cannot start admission while P2/A/U is open. | Only the admitted URI/projection read binding issues/verifies the signed bounded continuation; projection has zero calls on every pre-projection failure. Verify sealed order, `1..100`, <=100 entries, <=200 lines, <=6,000 specified tokens, cross-directory non-reuse, cache visibility partitioning, and read-only materialization. Mock projection, synthetic cursor table, or adapter-only tests are not evidence. |
+
+An implementation is admitted only after the row's production oracle, exact-scope
+diff inspection, and an independent highest-capability review PASS. A failure
+reopens that row and keeps every later row non-admitted; it does not authorize a
+compatibility fallback or a broader implementation slice.
+
+This matrix is additive: it preserves the existing normative sealed
+authority/cursor contracts, raw snapshot APIs, and exact
+`spipe-markdown-token-v1@1` <=6,000 gate. Rejected cursor implementations are
+forensic evidence only and may not weaken, delete, or replace those contracts.
