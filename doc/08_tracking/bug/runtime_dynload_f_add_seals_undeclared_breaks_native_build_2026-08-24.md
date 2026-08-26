@@ -81,3 +81,46 @@ after:  PASS — 118 file(s) compiled, 0 errors
 command. Note the before-run: fixing only `runtime_dynload.c` moved the failure
 to `runtime_native.c`, which carries the identical defect — a reminder that the
 first green file is not a green tree.
+
+## RESOLVED 2026-08-26
+
+`F_ADD_SEALS` / `F_SEAL_WRITE` / `F_SEAL_GROW` are glibc `__USE_GNU` symbols, so
+`<fcntl.h>` alone does not declare them. Both owners called `fcntl(snapshot,
+F_ADD_SEALS, ...)` beside a `syscall(SYS_memfd_create, ...)` — Linux-only code
+that had never been given the Linux-only feature macro.
+
+Fixed by prepending the guard `src/runtime/runtime_thread.c:1-3` already
+established, rather than inventing a new idiom:
+
+    #if defined(__linux__) && !defined(_GNU_SOURCE)
+    #define _GNU_SOURCE
+    #endif
+
+Applied to `src/runtime/runtime_native.c` and `src/runtime/runtime_dynload.c`.
+`<linux/fcntl.h>` was considered and rejected — it conflicts with `<fcntl.h>`
+and would not match the existing convention.
+
+`clang -fsyntax-only` on both owners: **rc=0** (one pre-existing
+`ATOMIC_VAR_INIT` deprecation warning in `runtime_native.c`, untouched and
+unrelated).
+
+## Gate evidence
+
+    sh scripts/check/check-c-runtime-compiles-push.shs
+
+| when | verdict |
+|---|---|
+| before | `FAIL — 2 file(s) failed to compile: src/runtime/runtime_dynload.c src/runtime/runtime_native.c (115 compiled clean, 2 skipped)` rc=1 |
+| after | `PASS — 117 file(s) compiled, 0 errors (2 skipped for unavailable external dependencies)` rc=0 |
+
+## Prevention
+
+No new gate is needed and none should be added: `check-c-runtime-compiles-push.shs`
+is MANDATORY per `.claude/rules/vcs.md` and it caught both of these correctly —
+it was honestly RED the whole time. The failure was process, not coverage: a
+mandatory gate was left red across sessions instead of blocking. The durable fix
+is that a red mandatory gate blocks a push, which is already the stated rule.
+
+Note for the next reader: `-fsyntax-only` does not link, so a
+declared-but-never-defined symbol still passes this gate. That limit is real and
+is why the unresolved-runtime-symbols guard exists separately.

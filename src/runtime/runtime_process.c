@@ -1733,7 +1733,7 @@ int64_t rt_editor_spawn_simple_dap(void) {
         "src/app/dap/simple_dap_main.spl",
         NULL
     };
-    return rt_process_spawn_piped_argv(argv[0], argv, false);
+    return rt_process_spawn_piped_argv(argv[0], argv, false, -1);
 }
 
 bool rt_editor_start_simple_dap(int64_t pid) {

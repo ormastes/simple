@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 /* Hosted dynamic loading for pure-Simple native binaries. */
 
 #ifdef _WIN32
