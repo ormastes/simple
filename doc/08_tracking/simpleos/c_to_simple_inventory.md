@@ -18,6 +18,21 @@ Priority port targets:
 | 3 | `src/os/libc/simpleos_crt0.S` | Replace with `HalCstart` implementation per target. | `src/os/kernel/arch/*/cstart.spl` |
 | 4 | `src/os/libc/simpleos_setjmp.S` | Replace with `HalCstart.setjmp/longjmp` implementation per target. | `src/os/kernel/arch/*/cstart.spl` |
 
+### RV32 kernel boot slice
+
+`src/os/kernel/arch/riscv32/boot/baremetal_stubs.c` is reduced to one include
+of the shared RISC-V freestanding runtime. The RV32 linker-counter accessor is
+now a naked Simple assembly boundary in `smp_provider.spl`; its polling decision
+is in `smp_policy.spl`. Optional NVMe firmware selection is a Pure-Simple
+composition provider, not a weak C hook. The include wrapper remains in a
+separate foreign-runtime denominator because minimal native-build currently
+discovers the conventional `boot/baremetal_stubs.c` filename; removing it
+without changing that manifest would drop the shared runtime ABI closure.
+
+Exact authored-but-unexecuted coverage scope is recorded in
+`test/fixtures/os/kernel/arch/riscv32/rv32_hal_coverage_scope.sdn`. It does not
+claim coverage for the retained shared C runtime.
+
 ## Residual allow-list
 
 The production gate for owned C is zero residual owned `.c` files in the

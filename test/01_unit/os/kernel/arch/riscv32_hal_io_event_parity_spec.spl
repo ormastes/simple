@@ -1,0 +1,30 @@
+use std.spec
+use std.io_runtime.{process_run}
+use os.kernel.arch.riscv32.smp_policy.{hal_rv32_smp_should_wait}
+use os.kernel.arch.riscv32.optional_firmware_provider.{hal_rv32_boot_optional_nvme_fw_selftest}
+
+val RV32_HAL_COVERAGE_RUNNER = "test/fixtures/os/kernel/arch/riscv32/run_rv32_hal_io_event_coverage.shs"
+
+fn simple_wait_event(case_name: text, online_harts: u32, spins: u32) -> text:
+    val wait = if hal_rv32_smp_should_wait(online_harts, spins, 3, 100): 1 else: 0
+    "event|case={case_name}|wait={wait}"
+
+fn expected_parity_output() -> text:
+    simple_wait_event("both-open", 2, 10) + "\n" +
+        simple_wait_event("target-reached", 3, 10) + "\n" +
+        simple_wait_event("budget-exhausted", 2, 100) + "\n" +
+        "event|case=optional-firmware-default|result={hal_rv32_boot_optional_nvme_fw_selftest()}\n" +
+        "coverage|scope=test-only-c-oracle|branches=4/4|mcdc_conditions=2/2\n"
+
+describe "RV32 Pure-Simple HAL C-oracle I/O event parity":
+    it "matches all removed C events and measures the exact C oracle denominator once":
+        val (c_output, c_error, c_code) = process_run("sh", [RV32_HAL_COVERAGE_RUNNER])
+        expect(c_code).to_equal(0)
+        expect(c_error).to_equal("")
+        expect(hal_rv32_boot_optional_nvme_fw_selftest()).to_equal(0)
+        expect(c_output).to_equal(expected_parity_output())
+
+    it "provides the three independent Simple MC/DC vectors without claiming an unrun result":
+        expect(hal_rv32_smp_should_wait(2, 10, 3, 100)).to_equal(true)
+        expect(hal_rv32_smp_should_wait(3, 10, 3, 100)).to_equal(false)
+        expect(hal_rv32_smp_should_wait(2, 100, 3, 100)).to_equal(false)
