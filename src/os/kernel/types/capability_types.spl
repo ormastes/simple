@@ -139,6 +139,36 @@ impl CapabilitySet:
         self.caps = new_caps
         self.is_pledged = true
 
+pub fn capability_set_bind_owner(caps: CapabilitySet, owner: u64) -> CapabilitySet:
+    """Bind an already-minted child pouch to its published scheduler task.
+
+    C-space minting happens before a scheduler allocates the final task id, so
+    the minted tokens initially name the requesting task.  Publication must
+    rebind those exact tokens to the allocated child without changing their
+    kind, generation, provenance, or delegation depth.  Ambient capability
+    sets are intentionally rejected: an unpledged empty set represents root
+    authority, not transferable concrete authority.
+    """
+    if owner == 0u64 or not caps.is_pledged:
+        return CapabilitySet.empty()
+    var rebound: [CapabilityToken] = []
+    var index: i64 = 0
+    while index < caps.caps.len():
+        val cap = caps.caps[index]
+        if cap.generation == 0u64 or cap.token_id == 0u64 or cap.depth < 0:
+            return CapabilitySet.empty()
+        var prior: i64 = 0
+        while prior < index:
+            if caps.caps[prior].token_id == cap.token_id:
+                return CapabilitySet.empty()
+            prior = prior + 1
+        rebound.push(CapabilityToken(
+            kind: cap.kind, generation: cap.generation, owner: owner,
+            token_id: cap.token_id, parent_token_id: cap.parent_token_id,
+            depth: cap.depth))
+        index = index + 1
+    CapabilitySet(caps: rebound, is_pledged: true)
+
 fn capability_kind_allows(held: CapabilityKind, required: CapabilityKind) -> bool:
     """Return true when `held` authorizes `required`.
 

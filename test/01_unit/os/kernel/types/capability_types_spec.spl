@@ -36,7 +36,7 @@ and the `full()` static constructor.
 """
 
 use std.spec.{describe, it, expect}
-use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, capability_kind_allows, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_MOUNT, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, capability_kind_allows, capability_set_bind_owner, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_MOUNT, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_ADMIN_QUEUE_ID, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
 
 
 # ============================================================================
@@ -77,6 +77,30 @@ describe "CapabilityToken":
             owner: 7
         )
         expect(token.generation).to_equal(2)  # oracle: 2 — named expected value from the requirement
+
+describe "capability_set_bind_owner":
+    it "rebinds only concrete pledged tokens without changing provenance":
+        val token = CapabilityToken(
+            kind: CapabilityKind.ProcessSpawn, generation: 7u64, owner: 41u64,
+            token_id: 99u64, parent_token_id: 13u64, depth: 1)
+        val rebound = capability_set_bind_owner(
+            CapabilitySet(caps: [token], is_pledged: true), 77u64)
+        expect(rebound.is_pledged).to_equal(true)
+        expect(rebound.caps.len()).to_equal(1)
+        expect(rebound.caps[0].owner).to_equal(77u64)
+        expect(rebound.caps[0].token_id).to_equal(99u64)
+        expect(rebound.caps[0].parent_token_id).to_equal(13u64)
+
+    it "rejects ambient or malformed transferable authority":
+        val ambient = capability_set_bind_owner(CapabilitySet.full(), 77u64)
+        val malformed = capability_set_bind_owner(CapabilitySet(
+            caps: [CapabilityToken(
+                kind: CapabilityKind.ProcessSpawn, generation: 0u64, owner: 41u64,
+                token_id: 99u64, parent_token_id: 13u64, depth: 1)],
+            is_pledged: true), 77u64)
+        expect(ambient.caps.len()).to_equal(0)
+        expect(ambient.is_pledged).to_equal(true)
+        expect(malformed.caps.len()).to_equal(0)
 
 
 # ============================================================================
