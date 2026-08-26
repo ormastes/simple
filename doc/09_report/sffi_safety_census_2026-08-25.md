@@ -282,3 +282,11 @@ owner.  Source reads are nullable, boolean and exit statuses remain checked,
 and empty joined-path sentinels fail before writes.  The hot path retains the
 same foreign-call count and adds no lookup, allocation, copy, hash, or generic
 dispatch.
+### Compiler public-process authority follow-up
+
+The lightweight public compile-process facade now tags its three raw process,
+existence, and read declarations `unsafe(ffi)` and confines them to three
+always-inlined lexical owners.  SDN reads are nullable; subprocess exit codes
+and generated-output presence remain mandatory checks.  Raw calls remain
+one-for-one, with no extra process, filesystem probe, allocation, copy, lookup,
+or generic dispatch.

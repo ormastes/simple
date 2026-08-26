@@ -1857,3 +1857,10 @@ and unpromoted.
 - [x] Correct source reads to nullable and reject empty joined paths.
 - [x] Preserve existing write/existence/process status validation.
 - [x] Preserve foreign-call counts and add a static ownership ratchet.
+### Completed compiler public-process authority slice
+
+- [x] Tag all three external compile-process dependencies `unsafe(ffi)`.
+- [x] Confine them to three always-inlined lexical owners.
+- [x] Correct SDN source reads to nullable text.
+- [x] Preserve exit-code and output-presence checks.
+- [x] Preserve foreign-call counts and add a static ownership ratchet.
