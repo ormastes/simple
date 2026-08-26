@@ -1240,6 +1240,16 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Preserve one path call, one walk, and existing filtering on success.
 - [x] Add a static nullable-contract and call-count ratchet.
 
+### Completed tiered-JIT authority slice
+
+- [x] Remove the unused raw `rt_jit_call_i64_i64` declaration.
+- [x] Tag the remaining seven raw JIT/clock declarations `unsafe(ffi)`.
+- [x] Confine each primitive to one always-inline lexical owner.
+- [x] Preserve lazy creation, two compile clock reads, and direct native calls.
+- [x] Distinguish null compile transport from empty-text success and report
+  `E-SFFI-017` on the cold promotion path.
+- [x] Keep provider admission off hot paths and add a static call-count ratchet.
+
 ### Completed compiler performance CLI authority slice
 
 - [x] Remove both duplicate raw `rt_get_args` declarations and calls.

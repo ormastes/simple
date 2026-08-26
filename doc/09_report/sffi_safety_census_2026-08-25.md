@@ -580,6 +580,20 @@ becoming a fabricated path.  Successful directory discovery retains one path
 call and one walk with unchanged filtering; no retry, extra traversal,
 allocation, copy, cache, lock, hash, lookup, boxing, or dispatch was added.
 
+### Tiered-JIT authority follow-up
+
+Tiered JIT management removed one unused raw call-signature declaration and
+now confines its seven live JIT/clock primitives to always-inlined lexical
+`unsafe(ffi)` owners.  Lazy creation, two compile timing reads, compilation,
+native calls, presence checks, and cleanup retain their exact provider-call
+counts.  No per-call admission, signature, hash, lookup, allocation, copy,
+cache, lock, boxing, generic marshalling, or additional dispatch was added.
+Compile error text is now nullable at the raw boundary; null becomes an
+explicit `E-SFFI-017` error on the cold promotion path, while empty text remains
+the provider's valid success result.
+The provider remains unsigned and unverified, so this is unsafe minimization,
+not safe promotion.
+
 The feature-vector builder no longer imports or calls the raw square-root
 symbol from `math_utils`; it consumes the confined always-inline owner.  Its
 shape remains one root after one O(n) frequency-weight accumulation, with no
