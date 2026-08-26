@@ -353,3 +353,12 @@ nullable `std.io_runtime.env_get_opt` facade, eliminating local unsafe
 authority.  Short-circuit behavior is unchanged: the DI bypass variable is
 queried only when system-test mode is enabled, so there is no added environment
 lookup, allocation, copy, cache, lock, or dispatch table.
+
+### Shared compiler-config authority follow-up
+
+The shared low-layer compiler configuration module retains its single required
+raw environment declaration, now tagged `unsafe(ffi)` and reachable only
+through one always-inlined lexical owner.  Its nullable result contract already
+matches provider absence.  All configuration consumers keep the same one-call
+lookup behavior, with no added allocation, copy, cache, lock, hash, or dispatch
+table.

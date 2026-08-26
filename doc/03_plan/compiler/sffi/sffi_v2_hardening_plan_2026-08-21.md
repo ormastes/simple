@@ -1912,6 +1912,14 @@ and unpromoted.
 - [x] Preserve one-lookup startup complexity and parse/default behavior.
 - [x] Add a static ratchet preventing raw SFFI from returning to the module.
 
+### Completed shared compiler-config authority slice
+
+- [x] Tag the sole nullable `rt_env_get` declaration `unsafe(ffi)`.
+- [x] Confine it to one lexical owner.
+- [x] Mark the owner always-inline to preserve direct lookup cost.
+- [x] Keep raw symbol references limited to declaration plus owner.
+- [x] Add a static authority/count ratchet.
+
 ### Completed compiler DI authority slice
 
 - [x] Remove the module-local raw `rt_env_get` declaration and calls.
