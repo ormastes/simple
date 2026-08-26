@@ -50,6 +50,7 @@ fn incremental_hash_text(content: text) -> i64:
     rt_hash_text(content)
 
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
+var _frontend_src_fingerprint_memo: text = "@@unset@@"
 
 fn incremental_sift_down(mut values: [text], root_index: i64, heap_len: i64):
     var root = root_index
@@ -140,6 +141,43 @@ fn native_build_compiler_source_fingerprint() -> text:
     _compiler_src_fingerprint_memo = fp
     fp
 
+fn native_build_frontend_source_fingerprint() -> text:
+    """Fingerprint only parser/cache sources for front-end cache admission.
+
+    Parsed modules are independent of HIR, MIR, and backend implementation
+    edits. Binding their cache to the whole compiler tree caused every unrelated
+    rendering or codegen change to force a cold multi-thousand-file parse.
+    """
+    if _frontend_src_fingerprint_memo != "@@unset@@":
+        return _frontend_src_fingerprint_memo
+    val root = "src/compiler/10.frontend"
+    if not rt_dir_exists(root):
+        _frontend_src_fingerprint_memo = ""
+        return ""
+    var lines: [text] = []
+    var dirs: [text] = [root]
+    var i = 0
+    while i < dirs.len():
+        val dir = dirs[i]
+        i = i + 1
+        val entries = incremental_sorted_text(dir_list(dir) ?? [])
+        for entry in entries:
+            val full = dir + "/" + entry
+            if rt_dir_exists(full):
+                dirs = dirs.push(full)
+            elif entry.ends_with(".spl"):
+                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+    var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    dir_create_all("build")
+    val tmp = "build/.frontend_src_fp.{rt_getpid()}.tmp"
+    if rt_file_write_text(tmp, lines.join("\n")):
+        val digest = rt_file_hash_sha256(tmp)
+        rt_file_delete(tmp)
+        if digest.len() == 64:
+            fp = "{digest.substring(0, 16)}n{lines.len()}"
+    _frontend_src_fingerprint_memo = fp
+    fp
+
 fn native_build_compiler_executable_hash() -> text:
     # Under `simple run <script>` rt_cli_get_args()[0] is the SCRIPT, not the
     # compiler, so each entrypoint script hashed to a different "exe=" identity:
@@ -223,6 +261,14 @@ fn native_build_compiler_identity() -> text:
         val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)
         return native_build_producer_identity(hash, compiler_fp, runtime_fp, runtime_bundle)
     # Fail closed: an unknown compiler must not reuse another compiler's cache.
+    "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+
+pub fn native_build_frontend_identity() -> text:
+    """Identity of the interpreter and front-end sources that create .fpc data."""
+    val frontend_fp = native_build_frontend_source_fingerprint()
+    val hash = native_build_compiler_executable_hash()
+    if hash != "" and frontend_fp != "":
+        return "frontend-exe={hash};sources={frontend_fp}"
     "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
 pub fn native_build_cache_lane() -> text:
@@ -977,7 +1023,7 @@ pub fn build_cache_persist(cache: BuildCache):
 
 
 
-export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_compiler_executable_hash, native_build_producer_identity
+export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_compiler_executable_hash, native_build_producer_identity
 # Path-based entry points: the BuildCache instance never crosses a module
 # boundary (the current self-hosted child binary erases class values that do,
 # losing both methods and fields). All parameters and results are plain data.
