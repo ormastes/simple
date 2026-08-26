@@ -647,3 +647,16 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   current annotations do not prove null/ownership safety or provider admission.
 - [ ] Execute the capability-gap fixture using a current admitted Simple runtime;
   the installed compatibility runner predates this Rust dispatch.
+
+### Owned SimpleOS C-provider census coverage
+
+- [x] Scan both `src/runtime` and `src/os` owned C/C++ trees when identifying
+  source-backed foreign providers; retain vendor exclusions.
+- [x] Reclassify 68 symbols (including PCI, network, and raw memory helpers)
+  from false missing states to `c_runtime_source_only`.
+- [x] Remove the 60 correspondingly stale entries from the frozen unbacked
+  baseline; this is a reviewed classification correction, not admission.
+- [ ] Reconcile the global unbacked ratchet's unrelated 46 new / 370 stale
+  entries without regenerating its baseline blindly.
+- [ ] Bind each source-backed provider to exact ABI, artifact, and signature
+  evidence before treating it as safe or critical-admissible.

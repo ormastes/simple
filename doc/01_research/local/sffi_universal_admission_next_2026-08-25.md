@@ -6293,3 +6293,20 @@ This is classification and fail-closed error routing, not a provider
 implementation, nullability proof, cryptographic admission, or full lexical
 call-site proof. It changes only the unknown-extern error path: normal provider
 dispatch, allocation, copying, and hot-call complexity are unchanged.
+
+### Owned SimpleOS C providers in the backing census (2026-08-26)
+
+The backing census previously scanned C/C++ only below `src/runtime`, although
+the owned SimpleOS runtime also exports `rt_*` providers below `src/os`. That
+made real target-gated C functions such as `rt_mem_read_u8`, `rt_pci_get_field`,
+and `rt_net_init` appear genuinely missing. The source scanner now covers both
+owned roots while retaining vendor exclusion. It reclassifies 68 symbols as
+`c_runtime_source_only`; the published unbacked baseline deliberately removes
+the 60 affected unbacked entries.
+
+This corrects inventory provenance only. `c_runtime_source_only` means source
+evidence exists but the deployed host binary, ABI contract, safety proof, and
+signature admission are still absent. The one-shot shell audit has no compiled
+runtime hot path, allocations, or dispatch change. The global unbacked ratchet
+is currently blocked by concurrent baseline drift (46 new and 370 stale rows),
+which is recorded rather than silently regenerated.

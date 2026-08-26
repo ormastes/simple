@@ -2146,3 +2146,14 @@ classifies an unresolved hook as a typed capability gap; the Rust unit suite
 passes 3/3. This remains unsafe and unverified: no provider, artifact signature,
 or null/ownership validation exists, and the installed compatibility runner is
 too old to count as runtime evidence for this new dispatch.
+
+### Owned SimpleOS C-provider census correction (2026-08-26)
+
+The backing census now scans owned C/C++ source under both `src/runtime` and
+`src/os`, still excluding vendor trees. It changes 68 false-missing identities
+to `c_runtime_source_only`, including `rt_mem_read_u8`, `rt_pci_get_field`, and
+`rt_net_init`; 60 corresponding stale baseline entries were removed. This is
+source provenance only—not deployed-binary evidence, ABI/null/ownership
+verification, or signature admission. It changes no compiled or hot runtime
+path. The current global unbacked ratchet remains intentionally red because it
+reports 46 new and 370 stale entries outside this focused correction.
