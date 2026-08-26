@@ -6391,3 +6391,18 @@ use it; its eleven declarations are now explicit `unsafe(ffi)`. The direct call
 shape and buffer behavior are unchanged. Source checks, pure cache spec, owner
 audit, and optimizer analysis pass. This is not ABI, null/ownership, artifact,
 or signature verification of the active WebGPU provider.
+
+### Providerless legacy Metal-session removal (2026-08-26)
+
+The no-GC `MetalComputeSession` declared ten `rt_engine2d_metal_session_*`
+functions, but no owned C/C++/Rust provider or production import was found.
+Those declarations are removed rather than allowing a missing provider to be
+represented as a handle or text value.  The distinct active GC Metal backend is
+unchanged; it remains an unsafe, unsigned, unverified SFFI owner.
+
+The retained no-GC module is only its fixed four-slot, allocation-free pipeline
+cache and rejection accounting.  Its existing two-example cache spec passes,
+the providerless guard prevents raw declarations/calls from returning, and the
+optimizer reports only existing local dead-code observations.  This deletes a
+dead unsafe execution surface without adding a loop, allocation, copy, lookup,
+or dispatch to the cache path.

@@ -2216,3 +2216,20 @@ declarations; its rendering call shape is unchanged. The pure cache spec passes
 existing low-level opportunities. The current source-only census is 12,794
 SFFI rows and 11,170 `rt_*` rows, with zero signed-admitted declarations.
 Active WebGPU remains unsafe, unsigned, and unverified.
+
+### Providerless legacy Metal-session removal (2026-08-26)
+
+The no-GC `MetalComputeSession` had ten raw `rt_engine2d_metal_session_*`
+declarations without an owned C/C++/Rust provider or production import.  They
+are removed, leaving only the fixed four-slot pure pipeline cache and its
+rejection accounting; the separate active GC Metal backend is deliberately
+untouched.  The cache spec passes 2/2, source check and providerless guard
+pass, and optimizer output contains only existing local dead-code observations.
+No loop, allocation, copy, lookup, or dispatch is added to the retained cache
+path.  This is boundary removal, not ABI/null/ownership verification or signed
+admission of the active Metal provider.
+
+The post-change source-only census is 12,784 SFFI declaration rows and 11,160
+`rt_*` rows; it reports zero signed-admitted rows or symbols.  The removed
+legacy façade lowers the raw declaration count, but 8,034 `rt_*` declaration
+rows remain untouched and the broader estate is not safe or verified.

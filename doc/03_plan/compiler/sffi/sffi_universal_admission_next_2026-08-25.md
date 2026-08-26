@@ -719,3 +719,15 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   without adding rendering-loop work, copies, or dispatch.
 - [ ] Replace active WebGPU bool/handle/text contracts with versioned typed
   status/out contracts and admit the exact C/Rust provider artifact.
+
+### Providerless legacy Metal session
+
+- [x] Confirm the no-GC engine2d Metal-session façade has no production import
+  and ten providerless raw declarations.
+- [x] Remove its execution façade and preserve only the fixed pure pipeline
+  cache/rejection bookkeeping used by its real contract.
+- [x] Pass the existing 2/2 cache spec, source check, optimizer analysis, and
+  a guard that rejects raw Metal declarations/calls returning to this module.
+- [ ] Migrate any future engine2d Metal compute execution through an admitted
+  typed owner with versioned ABI and artifact/signature evidence; do not revive
+  this cache module as an execution boundary.
