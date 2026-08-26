@@ -46,33 +46,25 @@ fn frontend_domain_kind_for_line(line: text) -> text:
             return kind
     ""
 
-fn frontend_line_is_domain_block(line: text) -> bool:
-    frontend_domain_kind_for_line(line) != ""
-
 fn frontend_may_have_domain_block(source: text) -> bool:
     (source.contains("schema{") or source.contains("style{") or
         source.contains("ui{") or source.contains("music{") or
         source.contains("bim{") or source.contains("cad{") or
         source.contains("city{") or source.contains("rtl{"))
 
-fn frontend_collect_domain_blocks(source: text) -> [DomainBlock]:
+fn frontend_extract_domain_blocks(source: text) -> ([DomainBlock], text):
     var blocks: [DomainBlock] = []
+    var lines: [text] = []
     for raw_line in source.split("\n"):
         val line = raw_line.trim()
         val kind = frontend_domain_kind_for_line(line)
         if kind != "":
             val payload = line.substring(kind.len() + 1, line.len() - 1).trim()
             blocks.push(DomainBlock(kind, payload, "module", Span.empty()))
-    blocks
-
-fn frontend_strip_domain_block_lines(source: text) -> text:
-    var lines: [text] = []
-    for raw_line in source.split("\n"):
-        if frontend_line_is_domain_block(raw_line.trim()):
             lines.push("")
         else:
             lines.push(raw_line)
-    lines.join("\n")
+    (blocks, lines.join("\n"))
 
 
 # Front-end cache boundary. A HIT restores the flat pools and runs the same
@@ -104,8 +96,9 @@ fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: te
     var domain_blocks: [DomainBlock] = []
     var parse_source = preprocessed
     if frontend_may_have_domain_block(preprocessed):
-        domain_blocks = frontend_collect_domain_blocks(preprocessed)
-        parse_source = frontend_strip_domain_block_lines(preprocessed)
+        val (found_blocks, stripped_source) = frontend_extract_domain_blocks(preprocessed)
+        domain_blocks = found_blocks
+        parse_source = stripped_source
 
     frontend_log_trace(log, "2: core parser bridge...")
     if frontend_phase_trace_enabled():
