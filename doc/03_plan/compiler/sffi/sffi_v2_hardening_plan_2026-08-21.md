@@ -1949,6 +1949,15 @@ and unpromoted.
 - [x] Preserve lookup/call counts without caching or dispatch machinery.
 - [x] Add a static authority and performance-shape ratchet.
 
+### Completed LLVM IR-builder environment authority slice
+
+- [x] Remove the raw target environment declaration and calls.
+- [x] Route both explicit target reads through canonical `env_get_opt`.
+- [x] Preserve fresh-read header lifetime behavior and lookup count.
+- [x] Keep all four unresolved string-builder contracts tagged unsafe.
+- [x] Avoid adding unchecked or unmeasured per-line validation overhead.
+- [x] Add a ratchet separating removed environment authority from unsafe builder authority.
+
 ### Completed MIR target-context authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.

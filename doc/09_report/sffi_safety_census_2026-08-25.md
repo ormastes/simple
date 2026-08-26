@@ -421,3 +421,13 @@ SFFI.  Both target reads use the canonical nullable, always-inlined
 provider's uncached semantics.  Each entrypoint keeps one lookup and the same
 trim/lower normalization, with no allocation beyond the existing normalized
 text, extra host/tool probe, cache, lock, hash, boxing, or dispatch table.
+
+### LLVM IR-builder environment authority follow-up
+
+The LLVM IR builder no longer declares or calls raw environment SFFI.  Its
+target reads use the canonical nullable, always-inlined `env_get_opt` facade,
+preserving the existing fresh-read target-header behavior and lookup count.
+The four opaque string-builder declarations remain explicitly tagged unsafe:
+provider inspection confirms zero/new, zero/push, nil/finish, and negative/len
+failure contracts that are not yet fully checked.  No per-line branch,
+allocation, copy, cache, lock, hash, boxing, or dispatch was added in this slice.
