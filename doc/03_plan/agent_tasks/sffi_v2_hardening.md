@@ -222,3 +222,14 @@ passing placeholder.
     deferred by a documented JIT deoptimization bug, not silently accepted.
     Continue the remaining 999 untouched process rows and fix alias lowering
     before removing these direct declarations. Signed admission remains zero.
+42. Audit the duplicated interpreter-debug facades against the Rust runtime
+    before consolidating them: retain only used raw declarations, require
+    lexical `unsafe(ffi)`, and convert the provider's negative status returns
+    into `Result.Err` rather than a fabricated success. Keep the two facades
+    byte-equivalent apart from coordinator ownership, and protect that rule with
+    a static audit. This is a cold debugger-control boundary: do not introduce
+    call-time registry work, allocations, copies, or loops. The focused source
+    check and both authority audits pass under the bootstrap seed, while signed
+    provider admission remains zero. Next, migrate another ranked provider
+    family or implement exact artifact-bound admission; do not call the global
+    SFFI inventory safe or verified.

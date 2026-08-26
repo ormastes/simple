@@ -34,3 +34,20 @@ and P2-P6 remain planned and are not claimed complete.
 **STATUS: FAIL** — the bounded Rust-backed P0 unit tests pass, but this remains
 an explicitly partial hardening and design checkpoint, not release evidence or
 a claim that SFFI v2 is complete.
+
+## Follow-up: interpreter debug raw boundary (2026-08-26)
+
+- PASS (static): both interpreter-debug facades retain 12 used raw declarations,
+  each explicitly `unsafe(ffi)` and each call lexically scoped. Their parity
+  audit passes, as does the canonical debug authority audit.
+- PASS (source check): `bin/simple check` accepts both changed files. The tool
+  identifies itself as the Rust bootstrap seed, so this is not a self-hosted
+  production-verification result.
+- PASS (optimizer review): each mirror reports the same 55 pre-existing
+  opportunities, including two collection-capacity suggestions; the status
+  repair adds no normal-path loop, allocation, copy, lookup, hash, or dispatch.
+- PASS (contract): provider `-1` failures for breakpoint add/remove and nonzero
+  CLI-run status now become `Result.Err`; ordinary boolean behavior is unchanged.
+- FAIL (global admission): no signed artifact-bound provider admission is
+  established by this work. This follow-up does not change the overall FAIL
+  status above.

@@ -1521,3 +1521,21 @@ census is 12,296 declaration rows and 3,170 distinct symbols: 808 unsafe-tagged,
 Implementations found are C++ 219, C 2,323, Rust 2,161, and Simple 558.
 `rt_torch` remains 162 unsafe rows, 35 minimized, zero untouched, and zero
 verified/signed. Therefore Torch and SFFI globally are not yet verified safe.
+
+### Interpreter debug boundary audit (2026-08-26)
+
+`src/lib/nogc_sync_mut/debug/interpreter_backend.spl` and its app mirror used
+15 direct raw declarations. The repository-owned Rust provider proves that
+`rt_debug_add_breakpoint` returns `-1` for a null/invalid UTF-8/negative input,
+and `rt_debug_remove_breakpoint` returns `-1` for the same rejected contract,
+but each facade previously converted those failures into `Result.Ok`. The
+facades now retain only their twelve used declarations, label each
+`unsafe(ffi)`, use minimal lexical scopes, and map run/non-positive add/negative
+remove statuses to `Result.Err`. The normal activation, stack, locals, and
+successful-breakpoint paths retain the same direct calls, data layout, loops,
+and public boolean API; there is no per-call allocation, registry lookup,
+hashing, or generic dispatch. The bootstrap source check and new static
+authority audit pass. Both optimizer reports identify only two pre-existing
+collection-capacity opportunities in conversion loops; no unsupported
+micro-optimization was applied. This is source-level containment and contract
+repair, not provider verification or signed admission.
