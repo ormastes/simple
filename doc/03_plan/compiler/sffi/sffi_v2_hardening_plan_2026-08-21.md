@@ -1558,3 +1558,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Valid parse-boundary calls add one arity branch and retain one provider call;
   no allocation, copy, lookup, hash, lock, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 interpreter heap-metric contract follow-up
+
+- Enforced exact arity for six interpreter heap metric handlers.
+- Replaced two missing/wrong-kind fabricated zeros with typed errors while
+  preserving genuine out-of-range provider zero.
+- Added a static interpreter registration and contract ratchet.
+- Valid diagnostic paths retain one arity/type decision and one provider read;
+  no allocation, copy, lookup, hash, lock, retry, or traversal was added.
+- Native typed-registry coverage remains absent, so these stay unverified and
+  unsigned rather than being promoted as cross-lane safe.

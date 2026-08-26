@@ -272,28 +272,48 @@ pub fn memory_usage(_args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Return the hosted runtime's live heap-registry entry count.
-pub fn rt_heap_registry_count(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_heap_registry_count(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_heap_registry_count requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_registry_count()))
 }
 
 /// Return live heap-object header bytes.
 ///
 /// Callable from Simple as: `rt_heap_live_bytes() -> i64`
-pub fn rt_heap_live_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_heap_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_heap_live_bytes requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes()))
 }
 
 /// Return live container backing-buffer bytes.
 ///
 /// Callable from Simple as: `rt_heap_aux_live_bytes() -> i64`
-pub fn rt_heap_aux_live_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_heap_aux_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_heap_aux_live_bytes requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_aux_live_bytes()))
 }
 
 /// Return live array element-buffer capacity bytes.
 ///
 /// Callable from Simple as: `rt_heap_array_capacity_bytes() -> i64`
-pub fn rt_heap_array_capacity_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_heap_array_capacity_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_heap_array_capacity_bytes requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_array_capacity_bytes()))
 }
 
@@ -301,10 +321,12 @@ pub fn rt_heap_array_capacity_bytes(_args: &[Value]) -> Result<Value, CompileErr
 ///
 /// Callable from Simple as: `rt_heap_live_bytes_by_kind(kind: i64) -> i64`
 pub fn rt_heap_live_bytes_by_kind(args: &[Value]) -> Result<Value, CompileError> {
-    let kind = match args.first() {
-        Some(Value::Int(k)) => *k,
-        _ => return Ok(Value::Int(0)),
-    };
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_heap_live_bytes_by_kind requires 1 argument (kind)",
+        ));
+    }
+    let kind = args[0].as_int()?;
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes_by_kind(
         kind,
     )))
@@ -314,10 +336,12 @@ pub fn rt_heap_live_bytes_by_kind(args: &[Value]) -> Result<Value, CompileError>
 ///
 /// Callable from Simple as: `rt_heap_live_count_by_kind(kind: i64) -> i64`
 pub fn rt_heap_live_count_by_kind(args: &[Value]) -> Result<Value, CompileError> {
-    let kind = match args.first() {
-        Some(Value::Int(k)) => *k,
-        _ => return Ok(Value::Int(0)),
-    };
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_heap_live_count_by_kind requires 1 argument (kind)",
+        ));
+    }
+    let kind = args[0].as_int()?;
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_count_by_kind(
         kind,
     )))
@@ -1651,6 +1675,21 @@ mod tests {
         assert!(rt_transient_array_scope_begin(&extra).is_err());
         assert!(rt_transient_array_scope_pause(&extra).is_err());
         assert!(rt_transient_array_scope_end(&extra).is_err());
+    }
+
+    #[test]
+    fn heap_metrics_reject_abi_misuse_without_hiding_genuine_zero() {
+        let extra = [Value::Int(1)];
+        assert!(rt_heap_registry_count(&extra).is_err());
+        assert!(rt_heap_live_bytes(&extra).is_err());
+        assert!(rt_heap_aux_live_bytes(&extra).is_err());
+        assert!(rt_heap_array_capacity_bytes(&extra).is_err());
+        assert!(rt_heap_live_bytes_by_kind(&[]).is_err());
+        assert!(rt_heap_live_count_by_kind(&[Value::Bool(false)]).is_err());
+        assert!(matches!(
+            rt_heap_live_count_by_kind(&[Value::Int(i64::MAX)]),
+            Ok(Value::Int(0))
+        ));
     }
 
     // ========================================================================

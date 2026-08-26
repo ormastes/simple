@@ -943,3 +943,11 @@ arguments before mutating scope state. Valid zero-argument calls still lift the
 provider boolean directly through the registered `() -> i8` ABI. These are
 parse-boundary calls, not token-loop calls. Source-reviewed but unverified and
 unsigned.
+## 2026-08-26 interpreter heap-metric contract follow-up
+
+Six interpreter-only heap metric SFFI handlers now enforce declared arity. The
+two by-kind handlers return typed conversion errors for missing/wrong values
+instead of fabricated zero; genuine provider zero for out-of-range kinds is
+unchanged. Four zero-argument metrics reject extras. These diagnostic calls add
+no allocation or provider dispatch on valid paths. Source-reviewed but
+unverified, unsigned, and lacking native registry coverage.
