@@ -40,6 +40,13 @@ is retained as an append-only audit log and must not be read as current truth.
   Exact three-file commit pushed as `44e65a6713`. Exact identity dominance,
   graph candidate production, exposed search/provider integration, global pool
   completeness, and AC-4 remain open.
+- implementation-wave4-complete-pool-v2-accepted: Added additive complete-pool
+  fusion/rerank v2 while preserving v1. Complete source/count/digest envelopes
+  admit up to 3,000 internal hits; reranking precedes the 1,000 public cap.
+  Evidence: syntax PASS, focused 38/38, full SPipe suite PASS, independent xhigh
+  PASS, including raw-rank-1001 to final-rank-793 promotion. Exact four-file
+  commit pushed as `32574ab884`. Identity/graph/provider integration and AC-4
+  remain open.
 
 ## Raw Request
 `$sp_dev imlldoc/01_research/infra/spipe/spipe_knowledge_compiler.md with pherallel agents with detail guide and higher model review. make design plan details. sync push often gh main`

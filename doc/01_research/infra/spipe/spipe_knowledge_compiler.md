@@ -2397,3 +2397,24 @@ slice was pushed as `44e65a6713`.
 This remains page-local and authority-bound. Exact identity dominance, graph
 candidate production, provider/search integration, and global candidate-pool
 completeness remain open, so AC-4 is not complete.
+
+## 35. 2026-08-26 Complete-Pool RRF V2 Admission
+
+Identity/graph integration exposed a completeness defect in the v1 composition:
+truncating raw fusion to 1,000 before bounded reranking can discard a candidate
+that should enter the public top 1,000. The additive v2 contracts preserve all
+v1 behavior while separating a complete internal union of up to 3,000 from the
+public result cap of 1,000.
+
+V2 source pages carry complete/count/digest evidence, raw fusion returns the
+entire unique union with domain-separated source-pool and output digests, and
+reranking validates/sorts the whole attested pool before applying `outputLimit`.
+Evidence: both syntax checks `PASS`; focused `38/38`; full SPipe suite `PASS`;
+independent highest-capability review `PASS`. The hardcoded oracle proves raw
+rank 1,001 (`g0501`, score `1782531`) is adjusted to `2192512`, becomes final
+rank 793, and remains in the public top 1,000. The exact four-file slice was
+pushed as `32574ab884`.
+
+This closes the internal-pool prerequisite only. Producer receipt binding,
+exact identity dominance, accepted graph candidate generation, and exposed
+search/provider orchestration remain open.

@@ -620,3 +620,17 @@ produce the full authorized candidate pool, apply upstream exact identity
 dominance and graph candidate construction, rerank the attested page, and only
 then apply the user result limit. AC-4 remains open until that pipeline and its
 explanations are verified end to end.
+
+### 10.9 Complete-pool RRF v2 admission
+
+The additive v2 fusion/rerank prerequisite is accepted and pushed as
+`32574ab884`. It preserves v1, requires complete source/count/digest envelopes,
+returns the declared complete, digest-bound union up to 3,000, reranks the complete pool, and
+only then applies the public 1,000-hit cap. Syntax, focused 38/38, full package,
+and independent highest-capability gates passed; the rank-1,001 promotion oracle
+proves premature truncation is removed.
+
+The identity/graph orchestration owner may now depend on v2, but must bind each
+source completeness digest into the search receipt, perform exact identity
+dominance before fusion, fail closed on incomplete accepted-edge traversal, and
+apply the user limit last. This checkpoint alone does not close AC-4.
