@@ -461,3 +461,13 @@ native+SMF output path now returns a compile error instead of hashing fabricated
 empty text into a successful manifest.  The successful path retains nine
 environment lookups, one source read, and one hash; failure adds no retry or
 extra I/O, and no cache, lock, boxing, or dispatch table was introduced.
+
+### AOT VHDL-output authority follow-up
+
+AOT VHDL output no longer declares raw environment SFFI; trace policy uses the
+canonical nullable, always-inlined facade.  Discriminant and payload calls are
+confined to two always-inlined lexical owners, and payload lifting now occurs
+only after the result tag is proven `Ok` or `Err`.  Canonical tags are computed
+once and reused, so the entry and catalog checks retain four total discriminant
+calls while corrupt tags fail with `E-SFFI-017`.  No allocation, copy, cache,
+lock, hash, boxing, extra payload call, or dispatch table was added.

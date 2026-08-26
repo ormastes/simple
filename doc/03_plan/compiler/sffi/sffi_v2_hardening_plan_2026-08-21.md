@@ -1984,6 +1984,15 @@ and unpromoted.
 - [x] Keep hash ownership always-inline and add no retry/extra I/O.
 - [x] Add a static authority, fail-closed, and call-count ratchet.
 
+### Completed AOT VHDL-output authority slice
+
+- [x] Remove raw environment authority and use canonical `env_get_opt`.
+- [x] Confine discriminant/payload bridges to two always-inline owners.
+- [x] Validate both entry and catalog tags before payload lifting.
+- [x] Reject corrupt tags with `E-SFFI-017`.
+- [x] Reuse canonical tags and preserve four discriminant calls.
+- [x] Add a static authority, validation, and call-count ratchet.
+
 ### Completed MIR target-context authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.
