@@ -1,6 +1,6 @@
 # Stage 2 driver const-fold import resolves relative to `80.driver`
 
-**Status:** Fixed on isolated branch; protected `main` integration pending in PR #25
+**Status:** Initial fix submitted as PR #25; dependent Stage 2 closure admitted locally
 **Observed:** 2026-08-26  
 **Affected revision:** `67fac9ed179` (also present on fetched `origin/main` at `e35d34f9eeda1b899abd439c56aa8ecec674a1cf`)
 
@@ -33,9 +33,12 @@ work branch. Do not merge or repoint either protected branch.
   correct resolver or restoring the deleted no-op HIR pass.
 - [x] Focused quarantine regression test passes 2/2.
 - [x] One receipt-free Stage 2 retry passes the former E1034 boundary.
-- [ ] Stage 2 admits a compiler. The retry later failed at link on independent
-  unresolved symbols: `aspect_module_identity_index`,
-  `safetychecker_flag_static_reference`, `mir_type_probe_text`,
-  `MirToLlvm.emit_panic_trap_ir`, and `interp_enum_discriminant_raw`.
+- [x] A private integration stack repairs the subsequently exposed snapshot
+  regressions and admits Stage 2 at exact commit `9c0e666fc9c`. Provenance and
+  sanity receipts passed; admitted artifact SHA-256 is
+  `7e2ee2daa645306cd2ce6636a62cecc4d280afb6efe98897b90da115b0f68e8e`.
+- [ ] Publish the dependent stack after PR #26 restores the clean-tree
+  pre-push gate. The first publication attempt was correctly blocked because
+  current `main` could not parse multiline lint conditions; bypass was refused.
 - [ ] PR #25 lands on protected `main` through integration authority and is
   backported only when the release-line comparison proves it is required.

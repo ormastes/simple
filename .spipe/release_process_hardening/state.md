@@ -109,7 +109,12 @@ verify-evidence-required
   normal isolated `main` fix lane then removed the accidentally resurrected HIR
   fold references; focused evidence passes 2/2, two independent reviews agree,
   and exact branch commit `36f0aeb00c9` is submitted to protected `main` as PR
-  #25. A single Stage 2 retry cleared E1034 but later failed on independent
-  unresolved link symbols, so no compiler was admitted and no release-line
+  #25. Parallel isolated fixes repaired the independently exposed snapshot
+  clobbers. Their xhigh-reviewed integration stack at `9c0e666fc9c` admits
+  Stage 2; provenance/sanity pass and the artifact SHA-256 is
+  `7e2ee2daa645306cd2ce6636a62cecc4d280afb6efe98897b90da115b0f68e8e`.
+  Stack publication was fail-closed by `main`'s multiline lint parse defect;
+  the separate grammar fix passed the complete pre-push chain and is PR #26.
+  Restack/publish waits for protected integration of #25/#26. No release-line
   backport is yet eligible. Live GitHub
   policy/signing/immutable-publication/npm receipts are also still required.
