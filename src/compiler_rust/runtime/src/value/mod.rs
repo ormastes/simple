@@ -281,7 +281,6 @@ pub use sync::{
     rt_atomic_new,
     rt_atomic_store,
     rt_atomic_swap,
-    rt_spin_loop_hint,
     // Barrier
     rt_barrier_free,
     rt_barrier_new,
@@ -311,6 +310,8 @@ pub use sync::{
     rt_semaphore_release,
     rt_semaphore_try_acquire,
 };
+
+pub use sffi::sync::rt_spin_loop_hint;
 
 // Re-export synchronization types
 pub use sync::{RuntimeAtomic, RuntimeBarrier, RuntimeMutex, RuntimeRwLock, RuntimeSemaphore};
@@ -894,47 +895,6 @@ pub use net::{
     rt_io_tcp_write,
     rt_io_tcp_write_text,
     rt_io_tcp_write_text_read_exact_len,
-    rt_tls_client_close,
-    rt_tls_client_config_add_root_cert,
-    rt_tls_client_config_enable_sni,
-    rt_tls_client_config_free,
-    rt_tls_client_config_new,
-    rt_tls_client_config_set_alpn,
-    rt_tls_client_config_set_verify_mode,
-    rt_tls_client_connect,
-    rt_tls_client_connect_with_sni,
-    rt_tls_client_connect_address_with_sni_timeout,
-    rt_tls_client_read,
-    rt_tls_client_write,
-    rt_tls_client_read_timeout,
-    rt_tls_client_write_timeout,
-    rt_tls_free_cert,
-    rt_tls_generate_self_signed_cert,
-    rt_tls_get_cert_expiry,
-    rt_tls_get_cert_issuer,
-    rt_tls_get_cert_subject,
-    rt_tls_get_cipher_suite,
-    rt_tls_get_negotiated_alpn,
-    rt_tls_get_peer_cert,
-    rt_tls_get_protocol_version,
-    rt_tls_hash_cert,
-    rt_tls_is_handshake_complete,
-    rt_tls_load_cert,
-    rt_tls_load_key,
-    rt_tls_server_accept,
-    rt_tls_server_close_connection,
-    rt_tls_server_config_free,
-    rt_tls_server_config_new,
-    rt_tls_server_config_require_client_cert,
-    rt_tls_server_config_set_alpn,
-    rt_tls_server_create,
-    rt_tls_server_create_on,
-    rt_tls_server_create_from_der,
-    rt_tls_server_read,
-    rt_tls_server_shutdown,
-    rt_tls_server_write,
-    rt_tls_server_write_bytes,
-    rt_tls_verify_cert,
     // UDP functions
     native_udp_bind,
     native_udp_close,
@@ -958,8 +918,34 @@ pub use net::{
     native_udp_set_read_timeout,
     native_udp_set_ttl,
     native_udp_set_write_timeout,
+    rt_io_udp_bind,
+    rt_io_udp_close,
+    rt_io_udp_connect,
+    rt_io_udp_join_multicast,
+    rt_io_udp_leave_multicast,
+    rt_io_udp_local_addr,
+    rt_io_udp_recv,
+    rt_io_udp_recv_from,
+    rt_io_udp_send,
+    rt_io_udp_send_to,
+    rt_io_udp_set_broadcast,
+    rt_io_udp_set_multicast_loop,
+    rt_io_udp_set_nonblocking,
+    rt_io_udp_set_read_timeout,
     // Error types
     NetError,
+};
+
+#[cfg(feature = "runtime-tls")]
+pub use net::{
+    rt_tls_client_close, rt_tls_client_connect,
+    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_connect_with_sni,
+    rt_tls_client_read_checked, rt_tls_client_read_timeout_checked, rt_tls_client_write,
+    rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
+    rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept,
+    rt_tls_server_close_connection, rt_tls_server_create, rt_tls_server_create_from_der,
+    rt_tls_server_create_on, rt_tls_server_read_checked, rt_tls_server_shutdown,
+    rt_tls_server_write, rt_tls_server_write_bytes,
 };
 
 // Re-export file I/O SFFI functions - Mold-inspired optimizations
