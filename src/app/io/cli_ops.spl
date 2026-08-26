@@ -2,7 +2,7 @@
 # Extracted from mod.spl for modularity
 
 use app.io.env_ops.{cwd}
-use app.io.process_ops.{process_run_inherit}
+use app.io.process_ops.{process_run_direct, process_run_inherit}
 
 # Extern fn declarations (runtime resolves at file level)
 
@@ -14,7 +14,6 @@ extern fn sys_get_args() -> [text]
 # bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21).
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_exit(code: i64)
-use std.io_runtime.{process_run}
 extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
 extern fn rt_cli_run_tests_process_args(gc_log: bool, gc_off: bool) -> i64
 extern fn rt_cli_handle_compile(args: [text]) -> i64
@@ -65,7 +64,7 @@ pub fn _cli_shell(command: text) -> _CliProcessResult:
         ("cmd.exe", ["/c", command])
     else:
         ("/bin/sh", ["-c", command])
-    val (stdout, stderr, code) = process_run(shell_path, shell_args)
+    val (stdout, stderr, code) = process_run_direct(shell_path, shell_args)
     _CliProcessResult(stdout: stdout, stderr: stderr, exit_code: code)
 
 fn _cli_shell_bool(command: text) -> bool:
@@ -135,7 +134,7 @@ pub fn _cli_resolve_argv0(cwd_path: text, argv0: text) -> text:
 
 fn _cli_find_on_path(argv0: text) -> text:
     val command = if _cli_is_windows_platform(): "where" else: "which"
-    val (stdout, _stderr, code) = process_run(command, [argv0])
+    val (stdout, _stderr, code) = process_run_direct(command, [argv0])
     if code != 0:
         return ""
     stdout.split("\n")[0].trim()
@@ -226,15 +225,15 @@ pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
     var resolved_cmd = cmd
     if _cli_is_windows_platform():
         if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
-            val (_stdout, _stderr, code) = process_run("where", [cmd + ".exe"])
+            val (_stdout, _stderr, code) = process_run_direct("where", [cmd + ".exe"])
             if code == 0:
                 resolved_cmd = cmd + ".exe"
     else:
         if not cmd.contains("/"):
-            val (stdout, _stderr, code) = process_run("which", [cmd])
+            val (stdout, _stderr, code) = process_run_direct("which", [cmd])
             if code == 0 and stdout.trim().len() > 0:
                 resolved_cmd = stdout.trim()
-    process_run(resolved_cmd, args)
+    process_run_direct(resolved_cmd, args)
 
 pub fn _cli_run_workspace_root_guard() -> i64:
     val (stdout, stderr, code) = _cli_process_run("sh", ["scripts/check-workspace-root-guard.shs", "audit", "--staged"])

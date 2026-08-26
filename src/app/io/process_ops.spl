@@ -31,6 +31,8 @@ extern fn rt_process_spawn_inherit() -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
+@unsafe(reason: "raw arbitrary-PID existence probe; false means absent, invalid, or provider failure", capabilities: [ffi])
+extern fn rt_process_exists(pid: i64) -> bool
 @unsafe(reason: "raw owned-child termination status; false sentinel means absent or termination failure", capabilities: [ffi])
 extern fn rt_process_kill(pid: i64) -> bool
 @unsafe(reason: "raw stdout flush ABI; native provider status is discarded", capabilities: [ffi])
@@ -69,6 +71,10 @@ fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
 fn _process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_is_running(pid)
+
+fn _process_exists_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_exists(pid)
 
 fn _process_kill_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -127,6 +133,13 @@ fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     val result = _process_run_raw(resolved_cmd, args)
     proc_slot_release()
     result
+
+@always_inline
+fn process_run_direct(cmd: text, args: [text]) -> (text, text, i64):
+    # Exact raw-command facade for callers that already own command lookup.
+    # Unlike process_run, this deliberately performs no PATH preflight and
+    # does not acquire the global process governor slot.
+    _process_run_raw(cmd, args)
 
 fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
     val resolved_cmd = _resolve_process_cmd(cmd)
@@ -572,6 +585,13 @@ fn process_wait(pid: i64, timeout_ms: i64) -> i64:
 fn process_is_running(pid: i64) -> bool:
     # Check if a process is still running.
     _process_is_running_raw(pid)
+
+fn process_exists(pid: i64) -> bool:
+    # Arbitrary-PID probe. This is intentionally distinct from
+    # process_is_running, whose provider contract is owned-child liveness.
+    if pid <= 0:
+        return false
+    _process_exists_raw(pid)
 
 fn process_kill(pid: i64) -> bool:
     # Terminate a running process.
