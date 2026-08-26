@@ -16,6 +16,7 @@ operator instructions.
 | Typed graph and diagnostics foundation | Accepted (Wave 3) | Commit `5e2a049eb89`; graph publication and diagnostic APIs are library surfaces. Later lifecycle/run/result trace nodes remain Wave 7. |
 | Checked common BM25 scorer | Accepted foundation | Commit `2b9f25f8604`; this does not prove SPipe search, RRF, provider, JavaScript fallback, or DBFS parity. |
 | Dependency-free raw RRF kernel | Accepted foundation | Commit `595ba6e449`; deterministic fusion only, without identity dominance, graph candidate construction, post-fusion adjustments, or an exposed search command. |
+| Authority-bound bounded reranker | Accepted foundation | Commit `44e65a6713`; page-local fixed-policy adjustments with verified raw/evidence digests, but no exposed search command or proof of global candidate-pool completeness. |
 | Wave 4 provider/search integration | In progress | JSON, Unicode/analyzer, provider, DBFS, and parity candidates are rejected, blocked, or unverified unless a later accepted commit says otherwise. |
 | Virtual views/MCP 2026/refactor/rebalance/promotion/skill compiler/DB adapters | Planned | Waves 5–11; the corresponding commands in this guide are unavailable. |
 | Five system SSpecs and manuals | RED design scaffolds | Their fail-fast helpers are intentional. They are not runtime or release evidence. |

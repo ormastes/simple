@@ -33,6 +33,13 @@ is retained as an append-only audit log and must not be read as current truth.
   PASS. Exact two-file commit pushed as `595ba6e449`. This admits raw fusion
   only; identity dominance, graph candidates/proximity, bounded adjustments,
   integrated explanations, and AC-4 remain open.
+- implementation-wave4-rerank-accepted: Added the authority-bound page-local
+  fixed-policy reranker and root-level fusion unit-test discovery bridge. Evidence:
+  syntax PASS, focused 13/13, full SPipe suite PASS (117/117 unit; Wave 2 9/9;
+  Wave 3 25/25; Wave 4 9/9; legacy/perf PASS), and pre-runtime/final xhigh PASS.
+  Exact three-file commit pushed as `44e65a6713`. Exact identity dominance,
+  graph candidate production, exposed search/provider integration, global pool
+  completeness, and AC-4 remain open.
 
 ## Raw Request
 `$sp_dev imlldoc/01_research/infra/spipe/spipe_knowledge_compiler.md with pherallel agents with detail guide and higher model review. make design plan details. sync push often gh main`

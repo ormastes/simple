@@ -606,3 +606,17 @@ Do not expand its claim: it advances only the raw-fusion portion of
 REQ-SPKC-012/013. AC-4 still requires exact identity dominance, accepted graph
 candidate production/proximity, bounded adjustments, and integrated
 stale/deprecated explanations.
+
+### 10.8 Authority-bound RRF reranker admission
+
+The dependency-free page-local reranker is accepted and pushed as
+`44e65a6713`. It binds raw-fusion and evidence digests to one verified receipt,
+validates the raw page defensively, preserves raw explanations, and applies the
+fixed integer adjustment policy. Evidence is syntax `PASS`, focused `13/13`,
+full SPipe suite `PASS`, and independent pre-runtime/final high reviews `PASS`.
+
+The next owner must not call this global top-k evidence. Integrated search must
+produce the full authorized candidate pool, apply upstream exact identity
+dominance and graph candidate construction, rerank the attested page, and only
+then apply the user result limit. AC-4 remains open until that pipeline and its
+explanations are verified end to end.

@@ -2378,3 +2378,22 @@ was pushed as `595ba6e449`.
 This admits raw deterministic RRF only. Exact identity dominance, accepted graph
 candidate construction/proximity, bounded post-fusion adjustments, integrated
 stale/deprecated explanations, and full AC-4 remain open.
+
+## 34. 2026-08-26 Authority-Bound RRF Reranking Admission
+
+The next dependency-free slice admits a page-local, fixed-policy reranker over
+the raw RRF result. Only a captured verification capability may attest the
+combined raw-fusion digest, evidence digest, authorization receipt, graph
+snapshot/policy, query, analyzer, and scope. The reranker validates and freezes
+all locally provable structure, calls the verifier exactly once, and applies
+integer trace, feature, component, recency, stale, and deprecated adjustments
+without mutating raw hits or explanations.
+
+Evidence: syntax `PASS`; focused `13/13`; full SPipe suite `PASS` (`117/117`
+unit, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4 `9/9`, legacy and performance gates);
+pre-runtime and final highest-capability reviews `PASS`. The exact three-file
+slice was pushed as `44e65a6713`.
+
+This remains page-local and authority-bound. Exact identity dominance, graph
+candidate production, provider/search integration, and global candidate-pool
+completeness remain open, so AC-4 is not complete.
