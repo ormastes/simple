@@ -1358,3 +1358,40 @@ not permission to use raw filesystem writes.
 The first slice remains legacy-stdio compatible and preserves the six existing
 tools plus `spipe://skill`. HTTP 2026, subscriptions, editor VFS, and OS mounts
 are later adapters and must not be enabled merely because a virtual URI works.
+
+### Wave 5 URI-foundation non-admission (2026-08-26)
+
+The URI-foundation candidate exhausted its three review/fix cycles, is
+uncommitted, and is not admitted. Wave 5 URI execution remains pending. Do not
+reuse the candidate code.
+
+For a legacy URI such as `spipe://skill`, resolve its canonical target first;
+then authorize that canonical target. The receipt must bind normalized alias
+URI, canonical URI, workspace/project, target kind/UID, snapshot/revision,
+principal-scope hash, policy version, decision, issued/expiry times, and
+receipt UID, issuer key ID, revocation epoch, and signature. Before reads
+compare fields, `AuthorizationPort` verifies the signed `D-` receipt using its
+supported version/key allowlist, canonical `spipe-uri-read-v1\0` payload,
+allow decision, live clock window, and current revocation epoch. Reads compare every receipt
+field to the direct immutable-snapshot lookup and resolved target; mismatch
+reauthorizes or fails closed. URI/query text cannot assert a snapshot, revision,
+or target: the service validates existence, ownership, revision, and membership.
+
+`CanonicalReadReceiptV1` has exactly `{receiptVersion, normalizedAliasUri,
+canonicalUri, workspaceUid, projectUid, targetKind, targetUid, snapshotUid,
+revisionId, principalScopeHash, policyVersion, decision, issuedAtMs, expiresAtMs,
+receiptUid, issuerKeyId, revocationEpoch, signature}`.
+
+The fresh admission suite covers workspace roots/views, artifacts, sections,
+trace, diagnostics, and legacy aliases (search is a tool input), including
+malformed/overlong or unsupported URI; fragment/empty identity, query,
+percent/double-decode, traversal/slash/backslash/encoded separator/dot,
+drive/UNC/Windows device/reparse/ADS/trailing-dot-space,
+Unicode-control/NFC-NFD-collision/mixed-case, cursor,
+forged/expired/signature-invalid/revoked/mismatched receipt, and hidden/absent-target
+cases. Public failures are bounded and never disclose a canonical path.
+
+The fresh suite also asserts canonical list/read/render success for workspace
+root/view, artifacts, sections, trace, diagnostics, legacy aliases after
+canonical reauthorization, and `spipe_search`. A successful alias must render
+the authorized canonical target rather than echoing an alias-only result.

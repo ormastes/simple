@@ -2559,8 +2559,9 @@ Materializer.sync(snapshot, view, outputRoot) -> MaterializeReceipt
 
 `mcp/protocol/resources.js` and `mcp/protocol/tools.js` adapt those calls to
 MCP only. Their request sequence is validate bounded input; select/open one
-workspace; authorize; resolve one URI; use one immutable snapshot; render a
-bounded result; attach snapshot/cursor/cache metadata. They must not walk the
+workspace; perform only workspace-level request admission; resolve one URI to
+a canonical target; authorize that canonical target; use one immutable snapshot;
+render a bounded result; attach snapshot/cursor/cache metadata. They must not walk the
 host tree, call a search executable, or refresh an index. `spipe_search` may
 initially use the admitted exact/lexical snapshot indexes only; optional
 provider/semantic enhancement is an independently gated dependency.
@@ -2588,3 +2589,51 @@ public versus private cache/ETag fixture; materializer no-op/delta/recovery
 fixture; Unix symlink and Windows reparse race tests for every claimed native
 provider; and the focused SSpec/manual. No notification, HTTP-2026, editor,
 FUSE/ProjFS, or refactor claim is admitted by these tests.
+
+## 19. Wave 5 URI foundation: non-admission and replacement test contract (2026-08-26)
+
+<!-- codex-design -->
+
+The three-cycle URI-foundation candidate is uncommitted and not admitted; Wave
+5 URI execution remains pending. Do not import its code. The next implementation
+must expose `authorizeCanonicalTarget(resolved, principal, snapshot)` only after
+canonical alias resolution. A resulting receipt contains exactly:
+
+```text
+CanonicalReadReceiptV1{
+receiptVersion, normalizedAliasUri, canonicalUri, workspaceUid, projectUid,
+targetKind, targetUid, snapshotUid, revisionId, principalScopeHash,
+policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid, issuerKeyId,
+revocationEpoch, signature
+}
+```
+
+`spipe://skill` follows that path. On every list/read/tool call, resolve then
+verify the signed `D-` record through
+`AuthorizationPort.verifyCanonicalTargetReceiptV1`: it allowlists the receipt
+version and issuer key, verifies the signature over
+`spipe-uri-read-v1\0` plus canonical JSON of every preceding binding field,
+checks `decision == allow`, `issuedAtMs <= clockNowMs < expiresAtMs`, and checks
+the current revocation epoch. Then compare every binding field against the
+direct snapshot lookup and resolved target; mismatch triggers reauthorization
+or a redacted closed error. Validate
+the snapshot's existence, immutability, workspace/project ownership, revision,
+and target-kind/UID membership directly—never by a URI/query assertion.
+
+The replacement suite must table-drive every URI family (workspace root,
+workspace view, project artifact, project section, trace, diagnostics, and
+legacy alias) against: malformed/overlong or unsupported URI; fragment or empty
+identity segment; empty/duplicate/unknown bounded query field; bad/double
+percent decode; traversal, slash/backslash, encoded separator/dot, drive/UNC,
+Windows device/reparse, ADS colon, trailing dot/space; controls or malformed
+Unicode; NFC/NFD collision and mixed-case identity; bad/stale/foreign cursor;
+forged/expired/signature-invalid/revoked receipt; every alias/canonical, scope/policy,
+snapshot/revision, or kind/UID receipt mismatch; and hidden versus absent
+target. `spipe_search` is a tool-input contract, not a URI family. Assert
+fail-closed, bounded, path-redacted public results.
+
+For positive evidence, assert canonical list/read/render behavior for each
+accepted surface: workspace root/view, artifact, section, trace, diagnostics,
+legacy alias after canonical reauthorization, and the `spipe_search` tool. A
+positive alias case must render only the canonical authorized target; it cannot
+prove success by returning legacy-alias text or an unbound URI echo.

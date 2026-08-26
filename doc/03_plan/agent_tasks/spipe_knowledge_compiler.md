@@ -965,6 +965,44 @@ normal/highest-capability model. AC-4 remains open.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### 10.23 Wave 5 URI-foundation non-admission and fresh lane (2026-08-26)
+
+1. **Attempt closed.** The Wave 5 URI-foundation candidate exhausted three
+   independent review/fix cycles. It is uncommitted and not admitted; do not
+   reuse its code. Wave 5 URI execution remains pending.
+2. **Canonical alias gate.** The fresh owner resolves every legacy alias,
+   including `spipe://skill`, then issues a receipt bound to normalized alias
+   URI, canonical URI, workspace/project, kind/UID, snapshot/revision,
+   principal-scope hash, policy version, decision, issued/expiry times,
+   receipt UID, issuer key ID, revocation epoch, and signature. Verify the
+   signed `D-` receipt through `AuthorizationPort` (supported version/key,
+   canonical `spipe-uri-read-v1\0` payload, allow decision, live window,
+   revocation epoch) before every call compares all
+   fields against its direct resolved target or reauthorizes/fails closed.
+   Freeze exactly `CanonicalReadReceiptV1{receiptVersion, normalizedAliasUri,
+   canonicalUri, workspaceUid, projectUid, targetKind, targetUid, snapshotUid,
+   revisionId, principalScopeHash, policyVersion, decision, issuedAtMs,
+   expiresAtMs, receiptUid, issuerKeyId, revocationEpoch, signature}`.
+3. **Snapshot gate.** Directly validate immutable snapshot existence,
+   workspace/project ownership, revision, and target membership; URI/query text
+   is never authority.
+4. **Evidence gate.** Table-drive workspace-root/view, artifact, section,
+   trace, diagnostics, and legacy-alias URI families (search is a tool input)
+   through malformed/overlong or unsupported URI; fragment/empty identity,
+   query, percent/decode, traversal/slash/backslash/encoded separator/dot,
+   drive/UNC/Windows-device/reparse/ADS/trailing-dot-space,
+   Unicode-control/NFC-NFD-collision/mixed-case, cursor, forged/expired/
+   signature-invalid/revoked or mismatched receipt, and hidden/absent matrices. Require
+   bounded redacted failure evidence and independent highest-capability review
+   before commit.
+5. **Positive gate.** Assert canonical list/read/render success for workspace
+   root/view, artifact, section, trace, diagnostics, legacy alias after
+   canonical reauthorization, and `spipe_search`; alias success must return the
+   authorized canonical target, not an alias-only echo.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.
+
 ### 10.22 Wave 5 virtual-view implementation-readiness lane (2026-08-26)
 
 **Scope and non-overlap.** This lane owns read-only virtual MCP resources,

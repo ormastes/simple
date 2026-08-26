@@ -1270,3 +1270,50 @@ The capsule is admitted only when the focused protocol, URI security,
 projection determinism, cache-visibility, and materializer fault/race evidence
 listed in the Wave 5 detail contract passes. It is not evidence that the
 unresolved provider protocol or any write/refactor capability is admitted.
+
+## 19. Wave 5 URI-foundation non-admission boundary (2026-08-26)
+
+<!-- codex-design -->
+
+The URI-foundation candidate exhausted three independent review/fix cycles and
+is uncommitted and not admitted. Wave 5 URI execution remains pending. A new
+implementation starts from this architecture, not from the rejected code.
+
+`ResourceResolver` canonicalizes a legacy alias before authorization. Its
+receipt is bound to: receipt version, normalized alias URI, canonical URI,
+workspace UID, project UID, target kind, target UID, snapshot UID, revision ID,
+principal-scope hash, policy version, decision, issued/expiry times, and
+receipt UID, issuer key ID, revocation epoch, and signature. The internal
+`AuthorizationPort.verifyCanonicalTargetReceiptV1` allowlists version/key,
+verifies the signed `D-` payload (`spipe-uri-read-v1\0` plus canonical JSON),
+requires `decision=allow`, a live clock window, and the current revocation
+epoch before `ProjectionPort` compares
+all receipt fields with its resolved target and pinned `KnowledgeSnapshot`;
+any difference causes fresh authorization or a closed failure. Thus
+`spipe://skill` cannot be read under an alias-only grant.
+
+`CanonicalReadReceiptV1` has exactly `{receiptVersion, normalizedAliasUri,
+canonicalUri, workspaceUid, projectUid, targetKind, targetUid, snapshotUid,
+revisionId, principalScopeHash, policyVersion, decision, issuedAtMs, expiresAtMs,
+receiptUid, issuerKeyId, revocationEpoch, signature}`.
+
+Before authorization and rendering, the resolver directly verifies that the
+snapshot exists, is immutable, belongs to the selected workspace/project, has
+the stated revision, and contains the canonical target kind/UID. URI components
+and query values are selectors subject to validation, never authority claims.
+
+Admission evidence must run all URI families—workspace root/view, project
+artifact/section, trace, diagnostics, and legacy alias; search is a tool
+input—through the hostile matrix: malformed/overlong and unsupported URI;
+fragment/empty identity; empty/duplicate/unknown bounded query fields;
+percent/double-decode; traversal, slash/backslash, encoded separator/dot,
+drive/UNC, Windows device/reparse, ADS colon, trailing dot/space;
+control/malformed Unicode, NFC/NFD collision, mixed-case identity; cursor
+mismatch; receipt forgery/expiry/signature/revocation failure and every alias, scope,
+policy, snapshot, revision, kind, or UID mismatch; plus indistinguishable
+hidden/absent targets. Every rejection is fail-closed and path-redacting.
+
+The same table includes a positive canonical list/read/render assertion for
+workspace root/view, artifact, section, trace, diagnostics, legacy alias after
+canonical reauthorization, and `spipe_search`. Legacy success is evidence only
+when the rendered target is the freshly authorized canonical target.

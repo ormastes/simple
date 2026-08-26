@@ -2873,3 +2873,52 @@ race/fault/recovery fixtures on every claimed platform; and the focused system
 scenario/manual. The audit leaves notifications, subscriptions, HTTP 2026,
 editor VFS, FUSE/ProjFS, and provider-backed semantic work outside the first
 admission unless their own invalidation, security, and release evidence exists.
+
+## 41. Wave 5 URI foundation non-admission handoff (2026-08-26)
+
+<!-- codex-design -->
+
+The Wave 5 URI-foundation code candidate exhausted its three independent
+review/fix cycles. It is uncommitted and **not admitted**: do not copy it into a
+new lane. Wave 5 URI execution remains pending; this records the residual
+contract a fresh implementation must satisfy.
+
+Legacy aliases, including `spipe://skill`, are never authorization evidence.
+Resolve an alias to its canonical target first, then obtain a fresh canonical
+authorization receipt with exactly receipt version, normalized alias URI,
+canonical URI, workspace UID, project UID, target kind, target UID, snapshot
+UID, revision ID, principal-scope hash, policy version, decision, issued/expiry
+times, receipt UID, issuer key ID, revocation epoch, and signature. The read
+adapter verifies the signed `D-` record through `AuthorizationPort` (supported
+version/key, `spipe-uri-read-v1\0` canonical payload, `decision=allow`, live
+time window, and current revocation epoch) before it accepts a
+receipt only when every field equals the resolved target and pinned snapshot;
+it must reauthorize rather than reuse an alias receipt after any mismatch.
+
+`CanonicalReadReceiptV1` has exactly `{receiptVersion, normalizedAliasUri,
+canonicalUri, workspaceUid, projectUid, targetKind, targetUid, snapshotUid,
+revisionId, principalScopeHash, policyVersion, decision, issuedAtMs, expiresAtMs,
+receiptUid, issuerKeyId, revocationEpoch, signature}`.
+
+The resolver directly validates that the selected immutable snapshot exists,
+belongs to the requested workspace/project, carries the stated revision, and
+contains the canonical kind/UID before rendering. URI or query text cannot
+select a snapshot, revision, principal, or target by assertion alone.
+
+Fresh evidence must cover every accepted URI family (workspace root/view,
+project artifact/section, trace, diagnostics, and legacy alias; search is a
+tool input, not a URI family) and the complete hostile matrix:
+malformed/overlong URI; unsupported scheme/host; fragment or empty identity
+segment; empty, duplicate, or unknown bounded query fields; bad percent or
+double decode; traversal, slash/backslash, encoded separator/dot, drive/UNC,
+Windows device/reparse, ADS colon, trailing dot/space; control or malformed
+Unicode, NFC/NFD collision, and mixed-case identity; invalid/stale/foreign
+cursor; forged, expired, signature-invalid/revoked, alias-to-canonical-mismatched,
+scope/policy-mismatched, snapshot/revision-mismatched, kind/UID-mismatched
+receipts; and hidden versus absent targets. Each case must fail closed with the
+specified bounded public error and no canonical-path disclosure.
+
+The suite also proves a positive canonical list/read/render for workspace
+root/view, artifact, section, trace, diagnostics, legacy alias after canonical
+reauthorization, and the `spipe_search` tool. Alias success renders only its
+authorized canonical target, never an alias-only echo.
