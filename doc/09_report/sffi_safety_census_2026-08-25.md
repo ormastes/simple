@@ -561,3 +561,12 @@ retains its two mutation-visible debug checks on the multi-block materialization
 path, while AOP retains two boolean and two level reads per weave.  No caching,
 allocation, copy, lock, hash, boxing, extra provider call, or dispatch table was
 introduced.
+
+### Duplicate-check scalar math authority follow-up
+
+Duplicate-check math now tags raw square root `unsafe(ffi)` and confines it to
+the existing `math_sqrt` helper, which is always-inlined.  Dense cosine
+similarity routes both magnitude roots through that owner and still performs
+exactly two scalar provider calls after its single O(n) accumulation loop.  No
+validation branch, allocation, copy, cache, lock, hash, lookup, boxing, or
+dispatch table was added.

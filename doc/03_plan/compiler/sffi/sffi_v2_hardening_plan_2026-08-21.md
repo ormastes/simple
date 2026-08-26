@@ -1198,6 +1198,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
   process-probe behavior.
 - [x] Add a static authority and call-count ratchet.
 
+### Completed duplicate-check scalar math authority slice
+
+- [x] Tag the raw square-root declaration explicitly `unsafe(ffi)`.
+- [x] Confine all calls to the existing always-inline scalar owner.
+- [x] Preserve one O(n) accumulation and exactly two roots per dense cosine.
+- [x] Add no hot-path work and add a static call-count ratchet.
+
 ### Completed compiler performance CLI authority slice
 
 - [x] Remove both duplicate raw `rt_get_args` declarations and calls.
