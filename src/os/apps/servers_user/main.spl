@@ -14,7 +14,7 @@ use std.nogc_sync_mut.http_server.response.{serialize_response, with_default_sec
 use std.nogc_sync_mut.http_server.mime.{mime_from_path}
 use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, plaintext_development_capability}
 use std.nogc_sync_mut.http_server.parser.{parse_request_line, headers_decision}
-use os.apps.dbd.dbd.{DbdServer}
+use os.apps.dbd.dbd.{DbdServer, DBD_PORT}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
@@ -23,7 +23,6 @@ use os.apps.servers_user.database_persistence_adapter.{
 }
 
 val HTTP_PORT: u16 = 8080u16
-val DB_PORT: u16 = 5433u16
 val MAX_IDLE_POLLS: i64 = 10000000
 val DB_CREDENTIAL_PATH: text = "/SYS/SRVDB.KEY"
 val DB_CERTIFICATE_PATH: text = "/SYS/SRVDB.CRT"
@@ -207,7 +206,13 @@ fn provision_database_service(server: DbdServer) -> bool:
                             admitted and all_wiped
 
 fn main() -> i64:
-    var db_server = DbdServer.new()
+    # DBD owns its endpoint and persistence namespace.  This filesystem
+    # launcher only consumes the one-shot startup receipt before handing off
+    # to that canonical owner; it must not recreate either authority locally.
+    var db_server = DbdServer.new_filesystem_launched_v1()
+    if not db_server.startup_evidence_ready_v1():
+        debug_line("[simpleos-servers-user] startup-evidence=blocked")
+        return 8
     if not provision_database_service(db_server):
         debug_line("[simpleos-servers-user] credential=blocked path=" + DB_CREDENTIAL_PATH)
         return 5
@@ -235,7 +240,7 @@ fn main() -> i64:
         return 2
 
     val http_result = bind_listener(HTTP_PORT)
-    val db_listener = db_server.bind_listener(DB_PORT.to_i64())
+    val db_listener = db_server.bind_listener(DBD_PORT)
     if http_result.is_err() or db_listener < 0:
         debug_line("[simpleos-servers-user] listener bind=fail")
         val _ = db_server.close_service()
@@ -243,7 +248,7 @@ fn main() -> i64:
     val http_listener = http_result.unwrap()
 
     debug_line("[simpleos-servers-user] executable=/SERVERS.ELF launch=ok")
-    debug_line("[simpleos-servers-user] http=:8080 db=:5433 ready=ok")
+    debug_line("[simpleos-servers-user] http=:8080 db=:" + DBD_PORT.to_text() + " ready=ok")
 
     var idle_polls: i64 = 0
     var accepted_connections: i64 = 0
