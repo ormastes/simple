@@ -2,10 +2,10 @@
 
 # Simple + Spipe Release, Branch/Tag, Test-Repair, and Bootstrap Scheduling Hardening Plan
 
-**Status:** Proposed architecture and implementation plan  
-**Audit date:** 2026-08-26  
-**Simple snapshot last observed:** `78e803b12aa00ae59e0d40630c8b3ab2fa63f4f3`  
-**Spipe snapshot last observed:** `4527ac41dee1774820605dde10d0f209fa5eb608`  
+**Status:** Proposed architecture and implementation plan
+**Audit date:** 2026-08-26
+**Simple snapshot last observed:** `78e803b12aa00ae59e0d40630c8b3ab2fa63f4f3`
+**Spipe snapshot last observed:** `4527ac41dee1774820605dde10d0f209fa5eb608`
 **Scope:** `ormastes/simple`, `ormastes/Spipe`, their generated LLM skills, VCS/release policy, GitHub configuration, release CI, compiler/bootstrap orchestration, build diagnostics, and focused test-repair loops.
 
 > This is a static source/configuration audit and design plan. It does not claim that the repositories build or that their test suites pass at the snapshots above; no local build or test execution was performed for this report. Simple's `main` advanced while the audit was in progress, so the SHA above is the latest observed head and individual file evidence was fetched from `main` during the same audit window.

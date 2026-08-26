@@ -23,4 +23,3 @@ Apply this skill to any software repository, adapting provider commands while pr
 ## Verification
 
 Trace requirements to real tests, run focused repair until clean, then run one clean whole-suite confirmation. Generated/manual operator docs and model skills must agree before release. A local dry-run is not live server, signing, or publication proof.
-

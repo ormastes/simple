@@ -2,8 +2,8 @@
 
 # Release Process Hardening Requirements
 
-**Status:** Selected  
-**Selection source:** User-supplied research document and its “Executive decision”  
+**Status:** Selected
+**Selection source:** User-supplied research document and its “Executive decision”
 **Research:** `doc/01_research/infra/release/simple_spipe_release_branch_tag_test_repair_bootstrap_scheduling_hardening_2026-08-26.md`
 
 ## Goal

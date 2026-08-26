@@ -2,7 +2,7 @@
 
 # Release Process Hardening NFRs
 
-**Status:** Selected  
+**Status:** Selected
 **Selection source:** User-supplied research document and its “Executive decision”
 
 - **NFR-001 — Fail-closed safety:** Missing, malformed, stale, ambiguous, unsupported, unsigned, unreviewed, or unadmitted input shall produce a non-success result. No warning/fallback path may satisfy a required release gate.

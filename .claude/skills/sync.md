@@ -10,4 +10,3 @@ Sync only the current session-owned `work/*` branch from its declared protected 
 6. Submit through the integration authority. This skill never moves `main`, `release/*`, a candidate ref, or a release tag.
 
 Reject main-worktree mutation, stale target SHA, branch/workspace ownership mismatch, unconditional force, and broad ref pushes.
-
