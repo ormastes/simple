@@ -385,3 +385,13 @@ retains the same process invocations.  It probes the fixed path first, avoiding
 a temporary candidate array and skipping the environment lookup and derived
 probe when the fixed path exists; no cache, lock, hash, or dispatch table was
 added.
+
+### Backend interpreter authority follow-up
+
+The tree-walking backend interpreter no longer declares raw environment SFFI;
+its trace and strict-memory checks use the canonical nullable `env_get_opt`
+facade, now always-inlined to preserve hot trace-probe cost.  Its three enum
+discriminant sites share one always-inlined lexical `unsafe(ffi)` owner while
+preserving the existing declaration type and runtime ABI.  Environment lookup
+frequency and discriminant call counts remain unchanged, with no cache,
+allocation, copy, lock, hash, boxing, or dispatch table added.

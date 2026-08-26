@@ -1940,6 +1940,15 @@ and unpromoted.
 - [x] Preserve process-call counts and reduce discovery work.
 - [x] Add a static ratchet preventing raw SFFI from returning.
 
+### Completed backend interpreter authority slice
+
+- [x] Remove the raw environment declaration and use nullable `env_get_opt`.
+- [x] Make the canonical environment facade always-inline for hot trace probes.
+- [x] Preserve the existing discriminant declaration type and ABI.
+- [x] Confine all three discriminant sites to one always-inline unsafe owner.
+- [x] Preserve lookup/call counts without caching or dispatch machinery.
+- [x] Add a static authority and performance-shape ratchet.
+
 ### Completed compiler DI authority slice
 
 - [x] Remove the module-local raw `rt_env_get` declaration and calls.
