@@ -24,12 +24,12 @@ extern fn rt_untouched() -> i64
 extern fn rt_rust_claimed() -> i64
 EOF
 cat >"$work/backing.tsv" <<'EOF'
-symbol	class	scoped_callsites	first_declaring_file
-rt_c_checked	c_runtime_source_only	1	fixture/provider.spl
-rt_c_multiline	c_runtime_source_only	1	fixture/provider.spl
-rt_false_status	c_runtime_source_only	1	fixture/provider.spl
-rt_rust_claimed	rust_source_feature_gated	1	fixture/provider.spl
-rt_untouched	GENUINELY_MISSING	1	fixture/provider.spl
+symbol	class	scoped_callsites	first_declaring_file	source_languages
+rt_c_checked	c_runtime_source_only	1	fixture/provider.spl	c,rust_export
+rt_c_multiline	c_runtime_source_only	1	fixture/provider.spl	cxx
+rt_false_status	c_runtime_source_only	1	fixture/provider.spl	c_or_cxx_header
+rt_rust_claimed	rust_source_feature_gated	1	fixture/provider.spl	rust_export,rust_interpreter
+rt_untouched	GENUINELY_MISSING	1	fixture/provider.spl	none_observed
 EOF
 printf '%s\n' "$work/provider.spl" >"$work/files.txt"
 
@@ -46,14 +46,14 @@ head -n 1 "$work/declarations.tsv" | grep -Fq 'cryptographic_admission'
 # Admission must use the canonical ABI signature as part of its identity.
 grep -Fq 'admitted[$1 SUBSEP $2]' "$root/scripts/audit/sffi-contract-inventory.shs"
 grep -Fq 'cut -f1,2 "$work/contracts.tsv"' "$root/scripts/audit/sffi-contract-inventory.shs"
-awk -F '\t' '$1 == "rt_c_checked" && $3 == "c_or_cpp" && $7 == "tagged" && $9 == "not_admitted" { found=1 } END { exit !found }' "$work/declarations.tsv"
-awk -F '\t' '$1 == "rt_c_multiline" && $3 == "c_or_cpp" && $7 == "tagged" && $9 == "not_admitted" { found=1 } END { exit !found }' "$work/declarations.tsv"
-awk -F '\t' '$1 == "rt_false_status" && $7 == "tagged" && $8 == "documented" && $9 == "not_admitted" && $10 == "missing" { found=1 } END { exit !found }' "$work/declarations.tsv"
-awk -F '\t' '$1 == "rt_rust_claimed" && $3 == "rust" && $8 == "sffi_metadata" && $9 == "not_admitted" { found=1 } END { exit !found }' "$work/declarations.tsv"
-awk -F '\t' '$1 == "rt_untouched" && $10 == "untouched" && $8 == 0 { found=1 } END { exit !found }' "$work/symbols.tsv"
+awk -F '\t' '$1 == "rt_c_checked" && $3 == "c,rust_export" && $8 == "tagged" && $10 == "not_admitted" { found=1 } END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_c_multiline" && $3 == "cxx" && $8 == "tagged" && $10 == "not_admitted" { found=1 } END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_false_status" && $3 == "c_or_cxx_header" && $8 == "tagged" && $9 == "documented" && $10 == "not_admitted" && $11 == "missing" { found=1 } END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_rust_claimed" && $3 == "rust_export,rust_interpreter" && $9 == "sffi_metadata" && $10 == "not_admitted" { found=1 } END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_untouched" && $3 == "none_observed" && $10 == "untouched" && $6 == 1 { found=1 } END { exit !found }' "$work/symbols.tsv"
 grep -Fq 'signed_admitted=0' "$work/stderr"
 grep -Fq 'untouched=1' "$work/stderr"
-grep -Fq 'SFFI rt_symbol stats: total=5 unsafe_tagged=3 signed_admitted=0 untouched=1' "$work/stderr"
+grep -Fq 'SFFI rt_symbol stats: total=5 unsafe_tagged=3 all_declarations_admitted=0 partially_admitted=0 untouched=1' "$work/stderr"
 
 if SFFI_CENSUS_INPUT="$work/backing.tsv" \
     SFFI_SOURCE_FILE_LIST="$work/files.txt" \
@@ -64,9 +64,9 @@ if SFFI_CENSUS_INPUT="$work/backing.tsv" \
     echo 'FAIL: untouched debt bypassed the migration ratchet' >&2
     exit 1
 fi
-grep -Fq 'migration=3/0' "$work/ratchet-stderr" || {
+grep -Fq 'migration=4/0' "$work/ratchet-stderr" || {
     cat "$work/ratchet-stderr" >&2
     exit 1
 }
 
-echo 'PASS: SFFI inventory reports provider language, unsafe, signed/admitted, and untouched state'
+echo 'PASS: SFFI inventory reports all observed provider languages, unsafe, signed/admitted, and untouched state'

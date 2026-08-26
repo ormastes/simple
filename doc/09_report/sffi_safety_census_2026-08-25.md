@@ -1238,6 +1238,21 @@ operation. Raw addresses remain caller-trusted, so the family is
 unsafe-minimized rather than memory-safe; providers remain unsigned and
 unverified. Source-reviewed only; checks were not executed.
 
+## 2026-08-26 provider-language census correction
+
+The backing census no longer reduces implementation provenance to one
+priority-selected language. It records every source language observed for each
+symbol, distinguishing C definitions, C++ definitions, header-owned C/C++,
+Rust exports, Rust interpreter handlers, system C, external C ABI, freestanding
+providers, and unknown linked-native providers. The SFFI contract inventory
+uses this multi-language field while retaining its existing backing class and
+fail-closed signed-admission join. This is static tooling only and adds no
+runtime scan, provider lookup, allocation, copy, hash, or dispatch. Existing
+global totals were not regenerated in this no-verification slice; zero symbols
+remain safe merely because source implementations were observed, and signed
+admission still requires fresh cryptographic evidence. Source-reviewed only;
+checks were not executed.
+
 ## 2026-08-26 HTTP/WebSocket duplicate-boundary removal
 
 Both app HTTP modules are now export-only facades over the canonical

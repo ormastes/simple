@@ -1541,6 +1541,22 @@ Torch SFFI nor all SFFI may be described as verified safe.
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
 
+## 2026-08-26 provider-language census correction
+
+- Report every observed implementation language per extern symbol instead of
+  selecting only the first backing class in priority order.
+- Distinguish C, C++, header-owned C/C++, Rust exports, Rust interpreter
+  handlers, system C, external C ABI, freestanding, and unknown linked-native
+  provenance while preserving the existing backing/admission schema.
+- Keep implementation presence separate from safe or signed admission; only a
+  freshly reverified provider/signature/ABI identity may populate the admitted
+  count.
+- Add no production runtime work; the change is confined to offline census
+  scripts and their fixture.
+- Next regenerate the global ledger only under an authorized verification pass,
+  then prioritize multi-language signature variants and untouched live calls.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
 ## 2026-08-26 provider-scoped census admission follow-up
 
 - Added declaration provider identity to the SFFI inventory schema.
