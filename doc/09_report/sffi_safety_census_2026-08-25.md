@@ -226,3 +226,11 @@ raw text reader or existence-then-read pairs.  Each path performs one typed
 read, distinguishes provider failure from a valid empty file, and returns
 before parsing or mutation on failure.  This removes filesystem probes rather
 than adding retries, copies, registry lookups, or generic dispatch.
+### Package-resolver authority follow-up
+
+The dependency resolver no longer declares or calls a raw manifest reader.
+Absent optional dependency manifests retain the `0.0.0` default, but a present
+manifest now uses one typed read and propagates empty, unreadable, or malformed
+metadata as a resolution error instead of silently installing with fabricated
+version data.  Dependency traversal remains linear and adds no retry, second
+read, registry lookup, or generic dispatch.

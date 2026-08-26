@@ -1808,3 +1808,10 @@ and unpromoted.
 - [x] Distinguish provider read failure from a valid empty manifest.
 - [x] Fail before add/remove parsing or mutation on read errors.
 - [x] Remove existence/read double syscalls and add a static ratchet.
+### Completed package-resolver authority slice
+
+- [x] Remove the resolver's local raw manifest reader.
+- [x] Preserve the default only for genuinely absent optional manifests.
+- [x] Propagate present-manifest read and parse failures.
+- [x] Keep one probe plus one read and linear dependency traversal.
+- [x] Add a static authority and I/O-shape ratchet.
