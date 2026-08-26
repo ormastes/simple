@@ -1327,6 +1327,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Record repeated file I/O on `jit_record_call` as open measured-design debt.
 - [x] Add a static authority and operation-shape ratchet.
 
+### Completed core interpreter module-loader authority slice
+
+- [x] Remove raw environment/file declarations and unused path-join authority.
+- [x] Make the private module-source contract `Result<text,text>`.
+- [x] Preserve one read, empty rejection, depth restoration, and parse per entry.
+- [x] Cache GC-warning tracing once between existing loader resets.
+- [x] Add no path normalization, search, scan, allocation, lock, or dispatch.
+- [x] Add a static typed-contract, call-count, and cache-reset ratchet.
+
 ### Completed MIR bulk-ops flag spec authority slice
 
 - [x] Remove the spec-local raw environment setter declaration and calls.

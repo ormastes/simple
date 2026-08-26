@@ -873,3 +873,15 @@ probe, allocation, copy, cache, hash, lock, lookup, boxing, marshalling, or
 dynamic dispatch was added. Source inspection also exposed pre-existing
 multiple state-file reads/writes during `jit_record_call`; that hot-path design
 debt is recorded separately and was not hidden behind an unmeasured cache.
+
+### Core interpreter module-loader authority follow-up
+
+The core interpreter module loader removed raw environment and file-read
+declarations plus an unused raw path-join declaration. Its three parse/register/
+load entrypoints now perform one typed `file_read_result` each and retain the
+same empty-source rejection, depth restoration, and parse path. GC-family
+warning tracing now uses one always-inlined tri-state environment gate reset by
+the existing `module_loader_init`, reducing repeated provider reads without
+changing warning behavior. No extra path normalization, candidate search, file
+read, source scan, allocation, copy, hash, signature check, lock, lookup,
+boxing, marshalling, or dynamic dispatch was added.
