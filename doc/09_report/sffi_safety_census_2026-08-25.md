@@ -1269,6 +1269,29 @@ facades. Provider coverage remains incomplete and WebSocket empty/failure
 ambiguity remains explicit, so the family is unsafe, unsigned, and unverified.
 Source-reviewed only; checks were not executed.
 
+## 2026-08-26 providerless no-GC API removal
+
+The no-GC runtime is reference-counted and has no `rt_gc_init`,
+`rt_gc_malloc`, or `rt_gc_collect` implementation in C, Rust, or the
+interpreter. The similarly named pure-runtime collector is a documented
+zero-return placeholder without shared allocator state, so it is not a valid
+replacement. The three providerless declarations, wrappers, exports, and
+public interning specs were removed instead of fabricating successful GC.
+
+Three MCP loops had periodic collection hooks; one declared the missing symbol
+directly and two imported the missing canonical wrapper. They could not collect
+anything and would attempt resolution on request 100. Those hooks, counters,
+increments, modulo operations, and branches were removed. This does not worsen
+actual memory reclamation because no collector existed; it removes per-request
+work and a delayed unresolved call. Long-session memory behavior still needs
+measurement against the real reference-count owner before adding any policy.
+
+The canonical RuntimeValue owner now has 14 declarations: 11 in both registry
+lanes, 3 one-lane, and zero providerless. Compiler-minimal now has 23: 20 both,
+3 native-only, and zero missing/interpreter-only. This is closure progress, not
+signed admission or semantic verification; all remaining wrappers are unsafe
+and unsigned. Source-reviewed only; checks were not executed.
+
 ## 2026-08-26 providerless pointer-era value API retirement
 
 Eight more active declarations—raw string creation, type projection, release,

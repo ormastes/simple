@@ -1541,6 +1541,24 @@ Torch SFFI nor all SFFI may be described as verified safe.
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
 
+## 2026-08-26 providerless no-GC API removal
+
+- Remove `rt_gc_init`, `rt_gc_malloc`, and `rt_gc_collect` from the no-GC and
+  compiler-minimal owners because the reference-count runtime has no provider.
+- Reject the pure-runtime zero-return placeholder as a replacement; it has no
+  shared allocator state and cannot establish collection.
+- Remove three MCP periodic hooks and their now-dead counters. This eliminates
+  one increment, modulo, and branch per request plus a delayed unresolved call
+  every 100 requests.
+- Reach zero providerless declarations in both scoped owners: canonical 11
+  both/3 one-lane; compiler-minimal 20 both/3 native-only.
+- Measure long-session MCP RSS/allocation behavior only when verification is
+  authorized, then fix the actual reference-count owner if retention remains;
+  never restore a no-op GC hook.
+- Continue closing the three one-lane/native-only functions and require signed
+  exact-artifact admission before any safe promotion.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
 ## 2026-08-26 providerless pointer-era value API retirement
 
 - Remove active raw string/type/free/arithmetic/less-than declarations and
