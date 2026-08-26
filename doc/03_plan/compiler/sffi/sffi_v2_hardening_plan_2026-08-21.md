@@ -2170,3 +2170,21 @@ Torch SFFI nor all SFFI may be described as verified safe.
   Remaining production debt: 4,268 unsafe-tag gaps, 6,072 contract gaps, and
   zero signed-admitted declarations.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+### Canonical UDP contract-closure follow-up
+
+- Close all eleven `rt_io_udp_*` identities across the C provider, Rust
+  provider, interpreter registry, runtime-symbol manifest, and typed JIT
+  registry before rerouting the legacy network API.
+- Preserve semantic booleans with exact i8 ABI instead of widening the public
+  API to integer status workarounds.
+- Bound receive allocations to the UDP payload limit, return nil on provider
+  failure, and make C `recv_from` return the declared `(bytes,address)` tuple.
+- Use packed interpreter byte arrays, avoiding one generic value per received
+  byte and matching the native lanes' data layout.
+- Retain one socket operation and one required bounded receive allocation; add
+  no registry lookup, signature verification, hash, retry, copy, or generic
+  dispatch to the hot path.
+- Next migrate/remove the fourteen providerless `udp_socket_*` identities,
+  then address multicast API compatibility without duplicating raw owners.
+- Status: source-reviewed, deliberately unverified and unsigned.

@@ -1119,9 +1119,7 @@ pub fn rt_io_udp_recv_interp(args: &[Value]) -> Result<Value, CompileError> {
     match with_udp_socket(handle, |socket| socket.recv(&mut bytes)) {
         Ok(received) => {
             bytes.truncate(received);
-            Ok(Value::array(
-                bytes.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
-            ))
+            Ok(Value::byte_array(bytes))
         }
         Err(_) => Ok(Value::Nil),
     }
@@ -1136,9 +1134,7 @@ pub fn rt_io_udp_recv_from_interp(args: &[Value]) -> Result<Value, CompileError>
     match with_udp_socket(handle, |socket| socket.recv_from(&mut bytes)) {
         Ok((received, peer)) => {
             bytes.truncate(received);
-            let data = Value::array(
-                bytes.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
-            );
+            let data = Value::byte_array(bytes);
             Ok(Value::Tuple(vec![data, Value::text(peer.to_string())]))
         }
         Err(_) => Ok(Value::Nil),

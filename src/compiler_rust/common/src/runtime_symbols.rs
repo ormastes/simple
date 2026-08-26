@@ -2339,6 +2339,17 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "native_udp_set_read_timeout",
     "native_udp_set_ttl",
     "native_udp_set_write_timeout",
+    "rt_io_udp_bind",
+    "rt_io_udp_close",
+    "rt_io_udp_connect",
+    "rt_io_udp_local_addr",
+    "rt_io_udp_recv",
+    "rt_io_udp_recv_from",
+    "rt_io_udp_send",
+    "rt_io_udp_send_to",
+    "rt_io_udp_set_broadcast",
+    "rt_io_udp_set_nonblocking",
+    "rt_io_udp_set_read_timeout",
     "sys_get_args", // -> rt_get_args
     "sys_exit",     // -> rt_exit
 ];

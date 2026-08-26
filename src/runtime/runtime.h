@@ -604,6 +604,17 @@ int64_t  rt_path_extension(int64_t path_value);
 int64_t  rt_http_get(int64_t url);
 int64_t  rt_http_request(int64_t method, int64_t url, int64_t headers, int64_t body);
 int64_t  rt_http_download(int64_t url, int64_t output_path);
+int64_t  rt_io_udp_bind(int64_t addr);
+int64_t  rt_io_udp_recv_from(int64_t fd, int64_t size);
+int64_t  rt_io_udp_send_to(int64_t fd, int64_t data, int64_t addr);
+int8_t   rt_io_udp_connect(int64_t fd, int64_t addr);
+int64_t  rt_io_udp_send(int64_t fd, int64_t data);
+int64_t  rt_io_udp_recv(int64_t fd, int64_t size);
+int64_t  rt_io_udp_local_addr(int64_t fd);
+int8_t   rt_io_udp_set_broadcast(int64_t fd, int8_t enabled);
+int8_t   rt_io_udp_set_read_timeout(int64_t fd, int64_t timeout_ms);
+int8_t   rt_io_udp_set_nonblocking(int64_t fd, int8_t enabled);
+int8_t   rt_io_udp_close(int64_t fd);
 int64_t  rt_http_client_create(void);
 bool     rt_http_client_set_timeout(int64_t client, int64_t timeout_ms);
 int64_t  rt_http_client_request(int64_t client, int64_t method, int64_t url,

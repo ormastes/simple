@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+# Source-only cross-lane UDP contract ratchet. This proves declaration/provider
+# shape, not semantic verification or signed artifact admission.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/io/udp.spl"
+c_provider="$root/src/runtime/runtime_native.c"
+c_header="$root/src/runtime/runtime.h"
+rust_provider="$root/src/compiler_rust/runtime/src/value/net_udp.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+interpreter_provider="$root/src/compiler_rust/compiler/src/interpreter_native_net.rs"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+symbols="$root/src/compiler_rust/common/src/runtime_symbols.rs"
+
+[ "$(grep -c '^extern fn rt_io_udp_' "$owner")" -eq 11 ]
+[ "$(grep -c '@unsafe(reason: .*UDP' "$owner")" -eq 11 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$owner")" -eq 11 ]
+
+symbols_list='rt_io_udp_bind rt_io_udp_recv_from rt_io_udp_send_to
+rt_io_udp_connect rt_io_udp_send rt_io_udp_recv rt_io_udp_local_addr
+rt_io_udp_set_broadcast rt_io_udp_set_read_timeout rt_io_udp_set_nonblocking
+rt_io_udp_close'
+for symbol in $symbols_list; do
+    grep -q "\"$symbol\"" "$symbols"
+    grep -q "\"$symbol\"" "$registry"
+    grep -q "\"$symbol\"" "$interpreter"
+    grep -q "fn $symbol" "$rust_provider"
+    grep -q "$symbol(" "$c_provider"
+    grep -q "$symbol(" "$c_header"
+done
+
+grep -q 'if (size < 0 || size > 65535) return rt_core_nil();' "$c_provider"
+grep -q 'ca->flags & RT_CORE_ARRAY_FLAG_BYTES' "$c_provider"
+grep -q 'ca->len > 65535' "$c_provider"
+grep -q 'int8_t rt_io_udp_connect' "$c_provider"
+grep -q 'int8_t rt_io_udp_set_broadcast' "$c_provider"
+grep -q 'int8_t rt_io_udp_set_nonblocking' "$c_provider"
+grep -q 'int8_t rt_io_udp_set_read_timeout' "$c_provider"
+grep -q 'struct timeval timeout = {0, 0};' "$c_provider"
+grep -q 'int8_t rt_io_udp_close' "$c_provider"
+grep -q 'int64_t tuple = rt_tuple_new(2);' "$c_provider"
+grep -q 'rt_tuple_set(tuple, 1, address);' "$c_provider"
+grep -q 'rt_io_udp_send_to.*return -1;' "$c_provider"
+grep -q 'rt_io_udp_recv.*return rt_core_nil();' "$c_provider"
+recv_section=$(sed -n '/pub fn rt_io_udp_recv_interp/,/pub fn rt_io_udp_recv_from_interp/p' "$interpreter_provider")
+recv_from_section=$(sed -n '/pub fn rt_io_udp_recv_from_interp/,/pub fn rt_io_udp_send_interp/p' "$interpreter_provider")
+printf '%s\n' "$recv_section" | grep -q 'Value::byte_array(bytes)'
+printf '%s\n' "$recv_from_section" | grep -q 'Value::byte_array(bytes)'
+! printf '%s\n%s\n' "$recv_section" "$recv_from_section" | grep -q 'Value::array('
+! sed -n '/int64_t rt_io_udp_send_to/,/int64_t rt_io_udp_recv/p' "$c_provider" |
+    grep -q 'ca->len <= 0'
+
+echo 'UDP SFFI contracts: PASS (11 tagged/confined contracts; C/Rust/interpreter/JIT identities present; unsigned/unverified)'

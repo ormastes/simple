@@ -1615,3 +1615,30 @@ Production falls to 7,132 declarations, 4,268 unsafe-tag gaps, 6,072 contract
 gaps, and zero signed-admitted declarations. Fifteen providerless network
 identities remain: fourteen UDP operations and `http_request`. Source-reviewed
 only; checks were not executed.
+
+### Canonical UDP contract-closure follow-up
+
+The canonical no-GC sync UDP owner now has eleven explicitly unsafe, lexically
+confined scalar-handle contracts, including non-blocking mode. All eleven
+identities are present in the runtime-symbol manifest, typed native registry,
+and interpreter registry. The C provider now matches the Rust/Simple boolean
+ABI, rejects receive sizes outside `0..65535`, returns nil on receive failure,
+and returns the declared `(bytes, peer_address)` tuple from `recv_from` instead
+of bytes alone. Interpreter receive paths now use packed byte arrays instead of
+allocating one generic `Value` per byte.
+The C send paths now reject non-packed or oversized payloads while still
+issuing the required syscall for a valid zero-length datagram, matching Rust.
+Non-positive receive timeouts now consistently clear the timeout in both
+providers instead of constructing an invalid negative C `timeval`.
+Unavailable Windows C stubs return negative send status or typed nil receive/
+address results rather than fabricated successful zero values.
+
+Successful send/receive paths still perform one socket operation. Receive
+allocates the one required bounded result buffer; `recv_from` additionally
+constructs its required address and tuple. No per-call registry lookup,
+signature verification, hashing, retry, extra copy, or generic dispatch is
+added. Production rises by one declared, tagged contract to 7,133 declarations
+and 2,865 unsafe-tagged declarations; unsafe-tag gaps remain 4,268, contract
+gaps remain 6,072, and signed admission remains zero. The older fourteen
+providerless `udp_socket_*` identities are not yet removed by this closure.
+Source-reviewed only; checks were not executed.

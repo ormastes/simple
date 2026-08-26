@@ -1399,6 +1399,19 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("native_udp_leave_multicast_v6", &[I64, I64, I64], &[I64]),
     // native_udp_close(handle: i64) -> error_code: i64
     RuntimeFuncSpec::new("native_udp_close", &[I64], &[I64]),
+    // Simple-facing UDP RuntimeValue contracts. Complex results are one
+    // RuntimeValue handle; boolean providers use the exact i8 ABI.
+    RuntimeFuncSpec::new("rt_io_udp_bind", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_close", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_udp_connect", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_udp_local_addr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_recv", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_recv_from", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_send", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_send_to", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_udp_set_broadcast", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_udp_set_nonblocking", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_udp_set_read_timeout", &[I64, I64], &[I8]),
     // =========================================================================
     // HTTP networking operations
     // =========================================================================

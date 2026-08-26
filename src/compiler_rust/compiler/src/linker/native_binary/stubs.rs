@@ -258,6 +258,7 @@ const RT_KEEP: &[&str] = &[
     "rt_io_udp_recv",
     "rt_io_udp_local_addr",
     "rt_io_udp_set_broadcast",
+    "rt_io_udp_set_nonblocking",
     "rt_io_udp_set_read_timeout",
     "rt_io_udp_close",
     "rt_epoll_create",
