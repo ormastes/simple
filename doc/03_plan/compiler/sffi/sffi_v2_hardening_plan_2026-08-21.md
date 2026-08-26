@@ -1313,3 +1313,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Preserve exactly one direct provider call per query.
 - [x] Add no hot-path admission, hash, lookup, allocation, lock, or dispatch.
 - [x] Record absence/provider-failure ambiguity as unverified and unsigned.
+
+### Completed SIMD capability authority slice
+
+- [x] Tag ten host/device capability primitives `unsafe(ffi)`.
+- [x] Confine every primitive to an always-inline direct lexical owner.
+- [x] Preserve architecture, CPUID, HWCAP, sysctl, RISC-V, and CUDA call counts.
+- [x] Remove two raw file-read declarations and use one typed read per path.
+- [x] Preserve empty/zero scalar fallback without fabricating successful data.
+- [x] Add no vector-loop work, admission, hashing, cache, lock, or dispatch.
+- [x] Record sentinel-bearing providers as unsafe, unsigned, and unverified.

@@ -658,3 +658,17 @@ call and adds no hashing, signature check, map, cache, lock, allocation, copy,
 boxing, generic marshalling, or dynamic dispatch. Because nil/false still
 cannot distinguish ordinary absence from provider failure, the provider remains
 unsafe, unsigned, and unverified rather than being promoted as safe.
+
+### SIMD capability authority follow-up
+
+SIMD target detection now tags ten CPUID, auxiliary-vector, sysctl, RISC-V,
+architecture-gate, and CUDA primitives `unsafe(ffi)` and confines each to an
+always-inlined direct owner. The architecture dispatch, three x86 CPUID reads,
+two Linux HWCAP reads, two Apple sysctl reads, conditional RISC-V reads, and
+single CUDA query retain their existing call counts and scalar sentinel
+semantics. The two raw file-read declarations were removed; SVE length and
+`/proc/cpuinfo` now use one typed read each and preserve the existing empty or
+zero capability fallback on provider failure. These are detection-time paths,
+not vector inner loops, and no retry, extra scan, hash, signature check, cache,
+lock, generic marshalling, or dynamic dispatch was added. Sentinel-bearing
+providers remain explicitly unsafe, unsigned, and unverified.
