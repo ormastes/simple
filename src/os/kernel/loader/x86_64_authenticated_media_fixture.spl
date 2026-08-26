@@ -13,8 +13,10 @@ use os.kernel.loader.executable_admission_pipeline.{ExecutableLoaderVerification
 use os.kernel.loader.executable_crypto_authority.{ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize}
 use os.kernel.loader.executable_load_plan_v1.{executable_load_consumer_new_v1}
 use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn_authenticated_v1}
+use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn_authenticated_with_launch_v1}
 use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.x86_64_authenticated_media_policy.{x86_64_authenticated_media_root_matches_pin_v1}
 use x86_64_auth_trust_config.{x86_64_authenticated_pinned_key_id_v1, x86_64_authenticated_pinned_public_key_hex_v1, x86_64_authenticated_pinned_public_key_hash_v1}
 
@@ -33,11 +35,12 @@ fn _canonical_media_sidecar_set_v1(
             proof_path == "/SERVER.SIG" and root_path == "/SERVER.PUB"
     false
 
-pub fn x86_64_authenticated_media_execute_path_v1(
+fn _x86_64_authenticated_media_execute_path_v1(
     scheduler: Scheduler, table: MountTable, executable_path: text,
-    manifest_path: text, admission_path: text, proof_path: text, root_path: text
+    manifest_path: text, admission_path: text, proof_path: text, root_path: text,
+    caller: i64, caller_caps: CapabilitySet?, argv: [text], envp: [text]
 ) -> i64:
-    """Admit and execute one named media image using its bound sidecar set."""
+    """Admit one bound media image; only a real caller pouch may launch it."""
     if not _canonical_media_sidecar_set_v1(
         executable_path, manifest_path, admission_path, proof_path, root_path):
         return -13
@@ -119,10 +122,39 @@ pub fn x86_64_authenticated_media_execute_path_v1(
         owner, authorities.unwrap(), binding, inputs, admission,
         ExecutableLoaderCryptographicProofV1(signer_key_id: key_id, signature: signature_bytes))
     if admitted.is_err(): return -13
+    # Compatibility callers have no real capability pouch.  Keep their old
+    # route so the retired ABI consumes and revokes the admission token rather
+    # than leaving a live authority behind.  The capability-carrying public
+    # entrypoint below is the only route that may enter CPL3.
+    if caller_caps.?:
+        return x86_64_fs_exec_spawn_authenticated_with_launch_v1(
+            scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
+            executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
+            admitted.unwrap().entry_point, caller, caller_caps.unwrap(), executable_path,
+            argv, envp, SPAWN_RECIPE_APP_LAUNCHER).exit_code
     x86_64_fs_exec_spawn_authenticated_v1(
         scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
         executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
-        admitted.unwrap().entry_point, 0, executable_path, SPAWN_RECIPE_APP_LAUNCHER)
+        admitted.unwrap().entry_point, caller, executable_path, SPAWN_RECIPE_APP_LAUNCHER)
+
+pub fn x86_64_authenticated_media_execute_path_v1(
+    scheduler: Scheduler, table: MountTable, executable_path: text,
+    manifest_path: text, admission_path: text, proof_path: text, root_path: text
+) -> i64:
+    """Legacy cap-less fixture: fail closed and revoke its admitted token."""
+    _x86_64_authenticated_media_execute_path_v1(
+        scheduler, table, executable_path, manifest_path, admission_path,
+        proof_path, root_path, 0, nil, [], [])
+
+pub fn x86_64_authenticated_media_execute_path_with_caps_v1(
+    scheduler: Scheduler, table: MountTable, executable_path: text,
+    manifest_path: text, admission_path: text, proof_path: text, root_path: text,
+    caller: i64, caller_caps: CapabilitySet, argv: [text], envp: [text]
+) -> i64:
+    """Launch a bound x86_64 media image with caller-owned capabilities only."""
+    _x86_64_authenticated_media_execute_path_v1(
+        scheduler, table, executable_path, manifest_path, admission_path,
+        proof_path, root_path, caller, caller_caps, argv, envp)
 
 pub fn x86_64_authenticated_media_execute_v1(scheduler: Scheduler, table: MountTable) -> i64:
     x86_64_authenticated_media_execute_path_v1(
@@ -130,3 +162,4 @@ pub fn x86_64_authenticated_media_execute_v1(scheduler: Scheduler, table: MountT
         "/AUTHHEL.SIG", "/AUTHHEL.PUB")
 
 export x86_64_authenticated_media_execute_v1, x86_64_authenticated_media_execute_path_v1
+export x86_64_authenticated_media_execute_path_with_caps_v1
