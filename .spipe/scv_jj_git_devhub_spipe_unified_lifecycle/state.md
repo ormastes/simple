@@ -60,7 +60,7 @@ Implement the complete agent-owned, pure-Simple base for the unified SCV/Jujutsu
 
 ## Phase
 
-dev-done
+agent-base-delivered-unverified
 
 ## Log
 
@@ -80,14 +80,16 @@ dev-done
 - version-audit: Found and declared the previously omitted `src/compiler/00.common/simple.sdn` plus five product-version `.spl` projections. `version-check` discovers current product-version declarations and parses each declared `.spl` version location for drift rather than accepting a whole-file substring.
 - independent-manual-review: operator-manual content is adequate for the observe-only scenario; exact command, seed/provenance warning, five frozen steps, and troubleshooting are present. Authoritative seven-dimension `sspec-maintain` remains blocked by the seed CLI.
 - verification-cap: Three diagnostic verify/fix cycles were consumed. The final executed typed-codec cycle passed; subsequent source remediations received source-only independent review and scoped `git diff --check`, but were not re-executed to comply with the mandatory hard cap. They require one authoritative run in a fresh admitted-CLI session.
+- delivery: The agent-owned base was committed and pushed to public `main` as `5cd33eca7717a7b87856a001fdb4f72deacfe00d`.
+- delivery-waiver: The user explicitly directed publication with `--no-verify`. This closes the agent-base delivery request but creates no PASS receipt and does not promote any mutation, provider, release, or content authority.
 
 ## Implementation Handoff
 
-The agent-owned observe-only base is implemented, but the umbrella feature and
-goal remain active. Later plan stages still require live protected integration,
-provider projection, policy compilation across Spipe rule surfaces, signed tag
-publication, fault injection, performance evidence, and SCV content-authority
-promotion.
+The agent-owned observe-only base is implemented and its delivery request is
+closed. Later authority-promotion work remains separate: live protected
+integration, provider projection, policy compilation across Spipe rule
+surfaces, signed tag publication, fault injection, performance evidence, and
+SCV content-authority promotion.
 
 Current-host verification prerequisite: deploy an admitted pure-Simple Stage 4
 CLI at `bin/release/x86_64-unknown-linux-gnu/simple`, retain its provenance and
@@ -112,9 +114,13 @@ Todo DB prerequisite: existing TODO 270 (`hardening_resume_after_seed_redeploy_2
 ## Process Documentation Applicability
 
 - `doc/06_spec`: updated with the mirrored operator scenario manual.
-- `.codex/skills`: N/A; the base adds no new Codex skill or changes an existing invocation contract.
+- `.codex/skills`: N/A; the base adds no new Codex invocation contract.
 - `.agents/skills`: N/A; the base adds no alternate agent skill surface.
-- `.claude/skills` and `.claude/agents/spipe`: N/A; current `$sp_dev`/SPipe contracts already require exact evidence, thin orchestration, and generated manuals; no behavior is weakened or renamed.
+- Spipe knowledge skills: feature- and layer-expert entries now record the
+  delivered-unverified baseline, no-verify waiver semantics, and promotion
+  boundary. The shared `.claude/skills/spipe.md` remains untouched because it
+  is concurrently modified by another lane and its generic contract is not
+  changed.
 - `.claude/commands`: N/A; DevHub lifecycle is a product CLI subcommand, not a Claude command.
 - `.gemini/commands`: N/A; no Gemini command consumes the observe-only base.
 - Generated-manual independent review remains open until the admitted Stage 4 docgen/`sspec-maintain` pass and final independent reviewer are available.

@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # Unified lifecycle implementation plan
 
-**Status:** Staged plan; no implementation started  
+**Status:** Agent-base implementation delivered; authority-promotion stages remain gated  
 **Design:** `doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md`
 
 ## Delivery rule
@@ -146,11 +146,28 @@ under `doc/06_spec`, direct environment/runtime audits, all affected compiler,
 library, MCP/LSP checks, structured performance evidence for hot tooling paths,
 and a full `$verify` `STATUS: PASS`.
 
-## Immediate next change
+## Delivered baseline
 
-Implement Stage 0 as five small dependent changes, beginning with the protected
-ref classes and observe-only `vcs.sdn`. Do not enable a new mutation path in the
-same change that introduces its policy parser.
+The agent-owned observe-only baseline was published to public `main` on
+2026-08-25 as Git commit `5cd33eca7717a7b87856a001fdb4f72deacfe00d`.
+It includes the lifecycle schema/store, exact-revision review and gate models,
+typed dry-run SJ integration planning, protected-ref policy parsing, DevHub
+lifecycle inspection, provider capability contracts, version-manifest checks,
+release/work/sync records, documentation, and focused specifications.
+
+The publication used an explicit user-authorized `--no-verify` push. That
+waiver is a publication fact, not a `STATUS: PASS`, a reusable gate receipt, or
+permission to promote protected mutation, provider publication, release-tag
+creation, or SCV content authority. Those capabilities remain governed by the
+stage exit gates above.
+
+## Next change
+
+Resume with a separately reviewed authority-promotion change. First obtain an
+admitted pure-Simple CLI, run the recorded base evidence once, and then select
+one bounded promotion target (normally live `integration/main` CAS or the
+experimental GitHub projection). Do not combine evidence recovery, public-ref
+mutation, and release publication in one change.
 
 ## 2026-08-25 agent-base implementation handoff
 
@@ -160,10 +177,11 @@ gate admission, three-way sync conflict planning, immutable release
 transitions, typed SJ operation/integration planning, VCS policy validation,
 canonical version-manifest validation, and DevHub `devhub/v1` inspection.
 
-Focused unit/system evidence is diagnostically green, but final verification is
-open: the deployed `bin/simple` is the Rust bootstrap seed, so its test/docgen
-results are not production evidence and it cannot execute `sspec-maintain` or
-`duplicate-check`. Resume with the exact commands recorded in
-`.spipe/scv_jj_git_devhub_spipe_unified_lifecycle/state.md` after an admitted
-Stage 4 deployment. Unrelated working-tree guard failures remain with their
-owning lanes and must not be folded into this implementation.
+Focused unit/system evidence was diagnostically green, but authoritative
+verification was explicitly waived for the base publication: the deployed
+`bin/simple` was the Rust bootstrap seed, so its test/docgen results were not
+production evidence and it could not execute `sspec-maintain` or
+`duplicate-check`. The agent-base delivery is closed; the missing evidence is a
+hard prerequisite for any later authority promotion. The exact commands remain
+recorded in `.spipe/scv_jj_git_devhub_spipe_unified_lifecycle/state.md`.
+Unrelated working-tree guard failures remain with their owning lanes.
