@@ -14,7 +14,7 @@ use std.nogc_sync_mut.http_server.types.{
 # constants and content_length_from_text at their historical path.
 export use std.common.net.http_core.{
     MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE,
-    content_length_from_text, body_decision
+    content_length_from_text, header_field_name_is_token, body_decision
 }
 
 # The native `read_line` API uses a 4096-byte buffer (4095 payload bytes plus
@@ -110,19 +110,19 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
                             break
                         if header_payload.starts_with(" ") or header_payload.starts_with("\t"):
                             return Err("400 Obsolete folded header is not supported")
-                        val hl = header_payload.trim()
-                        if hl == "":
-                            return Err("400 Malformed whitespace-only header line")
                         # AC-1 / finding 2: header count limit
                         header_count = header_count + 1
                         if header_count > max_header_count:
                             return Err("431 Too many headers: {header_count}")
-                        val colon = hl.index_of(":")
+                        val colon = header_payload.index_of(":")
                         if colon <= 0:
                             return Err("400 Malformed header line")
-                        val name = hl.slice(0, colon).trim()
-                        val value = hl.slice(colon + 1, hl.len()).trim()
-                        if name == "" or name.contains(" ") or name.contains("\t"):
+                        # Whitespace before the colon is invalid wire syntax;
+                        # trimming it would make this parser disagree with a
+                        # downstream that rejects or interprets it differently.
+                        val name = header_payload.slice(0, colon)
+                        val value = header_payload.slice(colon + 1, header_payload.len()).trim()
+                        if not header_field_name_is_token(name):
                             return Err("400 Invalid header name")
                         headers.push((name, value))
                     Err(_):
