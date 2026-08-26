@@ -605,6 +605,15 @@ The dispatcher still returns legacy integer zero for malformed spawn/send
 argument lists, so it remains explicitly unsafe pending a `Result` migration
 through MIR instruction execution and is not verified or signed.
 
+### MIR interpreter core authority follow-up
+
+The core MIR interpreter no longer declares or calls raw environment lookup;
+strict and ExecIR policy retain one canonical nullable read each during
+interpreter construction.  Its three unknown-value diagnostic probes now use
+one always-inlined lexical discriminant owner.  Normal instruction, constant,
+and binary-operation dispatch gains no call, branch, allocation, copy, cache,
+lock, hash, lookup, boxing, marshalling, or dynamic dispatch work.
+
 The feature-vector builder no longer imports or calls the raw square-root
 symbol from `math_utils`; it consumes the confined always-inline owner.  Its
 shape remains one root after one O(n) frequency-weight accumulation, with no

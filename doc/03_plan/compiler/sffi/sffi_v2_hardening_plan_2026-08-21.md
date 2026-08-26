@@ -1258,6 +1258,14 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Record the legacy malformed-argument zero as an open `Result` migration.
 - [x] Add no scheduler hot-path work and add a static call-count ratchet.
 
+### Completed MIR interpreter core authority slice
+
+- [x] Remove raw environment declaration/calls and retain two startup reads via
+  canonical nullable `env_get_opt`.
+- [x] Tag and confine enum discriminant to one always-inline lexical owner.
+- [x] Keep all three discriminant calls on unknown-value error paths only.
+- [x] Add no normal dispatch work and add a static call-count ratchet.
+
 ### Completed compiler performance CLI authority slice
 
 - [x] Remove both duplicate raw `rt_get_args` declarations and calls.

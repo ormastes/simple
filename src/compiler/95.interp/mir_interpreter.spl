@@ -18,7 +18,15 @@ use std.log.{debug, log_get_level, LOG_DEBUG}
 use compiler.mir.mir_data.*
 use compiler.interp.execir.{ExecIrModule, ExecIrArenaCtx, execir_encode_call, execir_binop_code}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{env_get_opt}
+
+@unsafe(reason: "raw enum discriminant used only for corrupt-value diagnostics", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
+
+@always_inline
+fn _mir_interp_enum_discriminant_raw(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
 
 # Cohesion split (2026-08-18): class-independent pieces live in sibling
 # modules; re-exported here so the public surface of this module is unchanged.
@@ -28,8 +36,6 @@ export use compiler.interp.mir_interp_runtime.{mir_interp_call_runtime_fn, f64_t
 # Miri-mode: dynamic UB checks too expensive for normal runs, gated behind
 # SIMPLE_STRICT_INTERP=1 so default interpreter perf/behavior is untouched.
 # Read once at interpreter creation (see MirInterpreter.strict_mode).
-extern fn rt_env_get(key: text) -> text
-
 
 # ============================================================================
 # MIR Interpreter
@@ -119,7 +125,7 @@ impl MirInterpreter:
             next_string_id: -1,
             # Read once at startup so default (unset) perf/behavior is untouched;
             # never re-read per instruction.
-            strict_mode: (rt_env_get("SIMPLE_STRICT_INTERP") ?? "") == "1",
+            strict_mode: (env_get_opt("SIMPLE_STRICT_INTERP") ?? "") == "1",
             current_function: "<toplevel>",
             error_frames: [],
             debug_enabled: dbg,
@@ -128,7 +134,7 @@ impl MirInterpreter:
             frame_locals_pool: [],
             frame_blocks_pool: [],
             # Read once at startup (default ON); never re-read per call.
-            execir_enabled: (rt_env_get("SIMPLE_EXECIR") ?? "") != "0",
+            execir_enabled: (env_get_opt("SIMPLE_EXECIR") ?? "") != "0",
             execir_modules: {},
             execir_arenas: {},
             execir_verdicts: {},
@@ -767,7 +773,7 @@ impl MirInterpreter:
                 # Not a variant: every MirInstKind has an arm above, so this is
                 # reachable only by a NEW upstream variant with no arm here, or a
                 # mis-decoded enum handle. Either way it is named and spanned.
-                val unknown_inst_disc = rt_enum_discriminant(inst.kind)
+                val unknown_inst_disc = _mir_interp_enum_discriminant_raw(inst.kind)
                 eprint("[mir-interp] E-INTERP-INST-Unknown disc={unknown_inst_disc} at={self._format_span(inst.span)}\n")
                 Some(InterpError.UnsupportedOperation(op: "E-INTERP-INST-Unknown: no interpreter arm for MIR instruction kind (discriminant {unknown_inst_disc}) at {self._format_span(inst.span)}"))
 
@@ -823,7 +829,7 @@ impl MirInterpreter:
                 # Lane C8: all eight MirConstValue variants have arms above; this
                 # is reachable only by a new upstream variant or a mis-decoded
                 # handle. It used to yield 0 silently.
-                val unknown_const_disc = rt_enum_discriminant(value)
+                val unknown_const_disc = _mir_interp_enum_discriminant_raw(value)
                 eprint("[mir-interp] E-INTERP-CONST-Unknown disc={unknown_const_disc}\n")
                 self.last_error = Some(InterpError.UnsupportedOperation(op: "E-INTERP-CONST-Unknown: no interpreter arm for MIR constant kind (discriminant {unknown_const_disc})"))
                 0
@@ -902,7 +908,7 @@ impl MirInterpreter:
             case _:
                 # Lane C8: all 23 MirBinOp variants have arms above; reachable
                 # only by a new upstream variant or a mis-decoded handle.
-                val unknown_binop_disc = rt_enum_discriminant(op)
+                val unknown_binop_disc = _mir_interp_enum_discriminant_raw(op)
                 eprint("[mir-interp] E-INTERP-BINOP-Unknown disc={unknown_binop_disc}\n")
                 return Some(InterpError.UnsupportedOperation(op: "E-INTERP-BINOP-Unknown: no interpreter arm for MIR binop (discriminant {unknown_binop_disc})"))
 
