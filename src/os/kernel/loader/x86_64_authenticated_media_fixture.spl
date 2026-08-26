@@ -9,14 +9,15 @@ use os.kernel.loader.authenticated_media_parser.{
 }
 use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget, ManifestResourceLimits, SimpleArtifactManifest}
 use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableAdmissionDecisionV1, ExecutableAdmissionV1}
-use os.kernel.loader.executable_admission_pipeline.{ExecutableLoaderVerificationInputsV1, ExecutableLoaderCryptographicProofV1, executable_loader_admit_authenticated_open_binding_v1, executable_loader_authority_owner_initialize}
+use os.kernel.loader.executable_admission_pipeline.{ExecutableLoaderVerificationInputsV1, ExecutableLoaderCryptographicProofV1, executable_loader_admit_authenticated_open_binding_v1, executable_loader_authority_owner_initialize, executable_loader_revoke}
 use os.kernel.loader.executable_crypto_authority.{ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize}
 use os.kernel.loader.executable_load_plan_v1.{executable_load_consumer_new_v1}
 use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn_authenticated_v1}
 use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn_authenticated_with_launch_v1}
-use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_AUTH_MEDIA_HELLO, SPAWN_RECIPE_AUTH_MEDIA_SERVER}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.boot_authenticated_launch_lease_v1.{BootAuthenticatedLaunchCoordinatesV1, boot_authenticated_launch_lease_issue_current_v1, boot_authenticated_launch_lease_consume_once_v1}
 use os.kernel.loader.x86_64_authenticated_media_policy.{x86_64_authenticated_media_root_matches_pin_v1}
 use x86_64_auth_trust_config.{x86_64_authenticated_pinned_key_id_v1, x86_64_authenticated_pinned_public_key_hex_v1, x86_64_authenticated_pinned_public_key_hash_v1}
 
@@ -44,6 +45,10 @@ fn _x86_64_authenticated_media_execute_path_v1(
     if not _canonical_media_sidecar_set_v1(
         executable_path, manifest_path, admission_path, proof_path, root_path):
         return -13
+    val recipe = if executable_path == "/FSEXEC.ELF":
+        SPAWN_RECIPE_AUTH_MEDIA_HELLO
+    else:
+        SPAWN_RECIPE_AUTH_MEDIA_SERVER
     var owner = table
     val binding_result = owner.open_for_execute(executable_path, ExecuteTrust.Trusted)
     if binding_result.is_err(): return -13
@@ -122,20 +127,30 @@ fn _x86_64_authenticated_media_execute_path_v1(
         owner, authorities.unwrap(), binding, inputs, admission,
         ExecutableLoaderCryptographicProofV1(signer_key_id: key_id, signature: signature_bytes))
     if admitted.is_err(): return -13
-    # Compatibility callers have no real capability pouch.  Keep their old
-    # route so the retired ABI consumes and revokes the admission token rather
-    # than leaving a live authority behind.  The capability-carrying public
-    # entrypoint below is the only route that may enter CPL3.
-    if caller_caps.?:
+    # Boot callers obtain a finite pouch only from a live scheduler service
+    # task.  The one-shot lease is bound to this exact signed open/admission.
+    var launch_caller = caller
+    var launch_caps = caller_caps
+    if not launch_caps.?:
+        val coordinates = BootAuthenticatedLaunchCoordinatesV1(canonical_path: executable_path, image_hash: image_hash.unwrap(), manifest_hash: manifest_hash.unwrap(), kernel_hash: kernel_hash.unwrap(), trust_root_hash: trust_hash.unwrap(), mount_id: mount_id.unwrap(), mount_generation: mount_generation.unwrap(), file_id: file_id.unwrap(), file_generation: file_generation.unwrap(), recipe: recipe)
+        val lease = boot_authenticated_launch_lease_issue_current_v1(scheduler, coordinates)
+        if not lease.?:
+            _ = executable_loader_revoke(owner, authorities.unwrap(), admitted.unwrap().authority_token)
+            return -13
+        val grant = boot_authenticated_launch_lease_consume_once_v1(lease.unwrap(), coordinates)
+        if not grant.?:
+            _ = executable_loader_revoke(owner, authorities.unwrap(), admitted.unwrap().authority_token)
+            return -13
+        launch_caller = grant.unwrap().caller
+        launch_caps = Some(grant.unwrap().caller_caps)
+    if launch_caps.?:
         return x86_64_fs_exec_spawn_authenticated_with_launch_v1(
             scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
             executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
-            admitted.unwrap().entry_point, caller, caller_caps.unwrap(), executable_path,
-            argv, envp, SPAWN_RECIPE_APP_LAUNCHER).exit_code
-    x86_64_fs_exec_spawn_authenticated_v1(
-        scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
-        executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
-        admitted.unwrap().entry_point, caller, executable_path, SPAWN_RECIPE_APP_LAUNCHER)
+            admitted.unwrap().entry_point, launch_caller, launch_caps.unwrap(), executable_path,
+            argv, envp, recipe).exit_code
+    _ = executable_loader_revoke(owner, authorities.unwrap(), admitted.unwrap().authority_token)
+    -13
 
 pub fn x86_64_authenticated_media_execute_path_v1(
     scheduler: Scheduler, table: MountTable, executable_path: text,

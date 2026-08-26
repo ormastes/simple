@@ -16,7 +16,7 @@ use std.common.contracts.execution.simpleos_executable_admission_v1.{
 use os.kernel.loader.executable_admission_pipeline.{
     ExecutableLoaderVerificationInputsV1, ExecutableLoaderCryptographicProofV1,
     executable_loader_admit_authenticated_open_binding_v1,
-    executable_loader_authority_owner_initialize
+    executable_loader_authority_owner_initialize, executable_loader_revoke
 }
 use os.kernel.loader.executable_crypto_authority.{
     ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize
@@ -26,9 +26,10 @@ use os.kernel.loader.arm64_fs_exec_spawn.{
     arm64_fs_exec_spawn_authenticated_v1,
     arm64_fs_exec_spawn_authenticated_with_launch_v1
 }
-use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_AUTH_MEDIA_SERVER}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.boot_authenticated_launch_lease_v1.{BootAuthenticatedLaunchCoordinatesV1, boot_authenticated_launch_lease_issue_current_v1, boot_authenticated_launch_lease_consume_once_v1}
 use os.kernel.loader.arm64_authenticated_media_policy.{arm64_authenticated_media_root_matches_pin_v1}
 use arm64_auth_trust_config.{
     arm64_authenticated_pinned_key_id_v1,
@@ -129,18 +130,30 @@ fn _arm64_authenticated_media_execute_server_v1(
         ExecutableLoaderCryptographicProofV1(
             signer_key_id: key_id, signature: signature_bytes))
     if admitted.is_err(): return -13
-    # A cap-less compatibility caller cannot prove its launch ceiling.  Let
-    # the retired ABI revoke the opaque token; never reconstruct a pouch here.
-    if caller_caps.?:
+    # A boot launch may use only a one-shot snapshot of the live scheduler
+    # service task, bound to the signed sidecar/open coordinates above.
+    var launch_caller = caller
+    var launch_caps = caller_caps
+    if not launch_caps.?:
+        val coordinates = BootAuthenticatedLaunchCoordinatesV1(canonical_path: "/SERVERS.ELF", image_hash: image_hash.unwrap(), manifest_hash: manifest_hash.unwrap(), kernel_hash: kernel_hash.unwrap(), trust_root_hash: trust_hash.unwrap(), mount_id: mount_id.unwrap(), mount_generation: mount_generation.unwrap(), file_id: file_id.unwrap(), file_generation: file_generation.unwrap(), recipe: SPAWN_RECIPE_AUTH_MEDIA_SERVER)
+        val lease = boot_authenticated_launch_lease_issue_current_v1(scheduler, coordinates)
+        if not lease.?:
+            _ = executable_loader_revoke(owner, authorities.unwrap(), admitted.unwrap().authority_token)
+            return -13
+        val grant = boot_authenticated_launch_lease_consume_once_v1(lease.unwrap(), coordinates)
+        if not grant.?:
+            _ = executable_loader_revoke(owner, authorities.unwrap(), admitted.unwrap().authority_token)
+            return -13
+        launch_caller = grant.unwrap().caller
+        launch_caps = Some(grant.unwrap().caller_caps)
+    if launch_caps.?:
         return arm64_fs_exec_spawn_authenticated_with_launch_v1(
             scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
             executable_load_consumer_new_v1("simpleos", "aarch64", "simpleos"),
-            admitted.unwrap().entry_point, caller, caller_caps.unwrap(), "/SERVERS.ELF",
-            argv, envp, SPAWN_RECIPE_APP_LAUNCHER).exit_code
-    arm64_fs_exec_spawn_authenticated_v1(
-        scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
-        executable_load_consumer_new_v1("simpleos", "aarch64", "simpleos"),
-        admitted.unwrap().entry_point, caller, "/SERVERS.ELF", SPAWN_RECIPE_APP_LAUNCHER)
+            admitted.unwrap().entry_point, launch_caller, launch_caps.unwrap(), "/SERVERS.ELF",
+            argv, envp, SPAWN_RECIPE_AUTH_MEDIA_SERVER).exit_code
+    _ = executable_loader_revoke(owner, authorities.unwrap(), admitted.unwrap().authority_token)
+    -13
 
 pub fn arm64_authenticated_media_execute_server_v1(
     scheduler: Scheduler, table: MountTable
