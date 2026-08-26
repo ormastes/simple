@@ -571,6 +571,15 @@ exactly two scalar provider calls after its single O(n) accumulation loop.  No
 validation branch, allocation, copy, cache, lock, hash, lookup, boxing, or
 dispatch table was added.
 
+### Duplicate-check detector-path authority follow-up
+
+Duplicate-check file discovery now declares path canonicalization nullable,
+tags it `unsafe(ffi)`, and confines its sole call to an always-inlined owner.
+Null or empty canonicalization fails closed before directory walking instead of
+becoming a fabricated path.  Successful directory discovery retains one path
+call and one walk with unchanged filtering; no retry, extra traversal,
+allocation, copy, cache, lock, hash, lookup, boxing, or dispatch was added.
+
 The feature-vector builder no longer imports or calls the raw square-root
 symbol from `math_utils`; it consumes the confined always-inline owner.  Its
 shape remains one root after one O(n) frequency-weight accumulation, with no

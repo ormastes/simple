@@ -1232,6 +1232,14 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Preserve boolean failure reporting without retry or metadata probes.
 - [x] Add a static authority and one-write-shape ratchet.
 
+### Completed duplicate-check detector-path authority slice
+
+- [x] Correct raw path canonicalization from non-null text to `text?`.
+- [x] Tag and confine the single provider call to an always-inline owner.
+- [x] Reject null/empty canonicalization before directory walking.
+- [x] Preserve one path call, one walk, and existing filtering on success.
+- [x] Add a static nullable-contract and call-count ratchet.
+
 ### Completed compiler performance CLI authority slice
 
 - [x] Remove both duplicate raw `rt_get_args` declarations and calls.
