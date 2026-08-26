@@ -775,3 +775,14 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   analysis on every canonical owner without changing runtime dispatch.
 - [ ] Replace the providerless/legacy 3D ABI names with versioned typed
   contracts and exact signed provider admission.
+
+### OpenGL raw-boundary classification
+
+- [x] Mark all nineteen raw OpenGL declarations `unsafe(ffi)` in the sole
+  no-GC owner and make each direct wrapper call lexical-unsafe.
+- [x] Preserve boolean operation results and change only nullable provider
+  error text to `text?`, preventing a null message from claiming non-null text.
+- [x] Add a single-owner authority audit; run source checks, the existing
+  fallback spec, and optimizer analysis without adding render-path work.
+- [ ] Replace legacy OpenGL handles/buffers with versioned typed contracts,
+  prove buffer extent/ownership, and admit an exact signed provider artifact.

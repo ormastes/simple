@@ -2291,3 +2291,17 @@ The source-only census is 12,761 SFFI rows / 11,137 `rt_*` rows, with
 3,298 / 2,977 explicitly unsafe-tagged declarations and zero signed admission.
 This reduces unsafe surface duplication; it does not verify an ABI/provider or
 authorize critical use.
+
+### OpenGL raw-boundary classification (2026-08-26)
+
+The sole active OpenGL raw owner now has nineteen explicit `unsafe(ffi)`
+declarations and lexical unsafe calls. Its nullable provider-error text is
+represented as `text?`; all public drawing-operation booleans retain their
+existing boolean semantics. The owner audit, four-module source check, and
+two-case fallback spec pass. Optimizer analysis reports 42 low-level
+bounds-check opportunities but no general-pattern finding; this tranche adds
+no loop, allocation, copy, lookup, retry, or dispatch to the rendering path.
+
+The OpenGL provider remains unsigned and unverified. This classification does
+not establish typed buffer extent, handle ownership, ABI conformance, artifact
+identity, or cryptographic admission.

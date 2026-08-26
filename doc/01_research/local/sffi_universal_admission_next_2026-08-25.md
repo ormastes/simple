@@ -6462,3 +6462,20 @@ adding a render-path branch, allocation, copy, lookup, or dispatch. All eight
 modules source-check, and optimizer analysis reports no general-pattern finding
 for the four canonical owners. The provider identities remain unverified and
 unsigned.
+
+### OpenGL raw-boundary classification (2026-08-26)
+
+The active OpenGL owner is `std.nogc_sync_mut.io.opengl_sffi`; every one of
+its nineteen raw declarations now explicitly requires `unsafe(ffi)`, and every
+wrapper contains the lexical unsafe boundary at the direct call. The public
+API stays boolean for operations whose provider ABI is boolean; this does not
+substitute numeric truth values. The one error-text ABI that may return no
+provider message is now `text?`, so nil is represented explicitly rather than
+as a non-null text value.
+
+The source authority guard confirms a single raw owner. The source check and
+existing OpenGL fallback spec pass. This is annotation/return-shape work only:
+no render-loop allocation, copy, lookup, dispatch, or retry was added, and the
+optimizer found no general source-pattern regression. The OpenGL provider is
+still unsafe, unsigned, and unverified; these changes do not prove buffer
+extent, handle ownership, ABI identity, or artifact admission.
