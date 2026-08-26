@@ -1731,3 +1731,10 @@ and unpromoted.
   offset zero and potentially overwriting existing content.
 - [x] Preserve exactly one always-inline direct owner per provider and add no
   lookup, allocation, lock, hash-on-call, or conversion layer.
+### Completed directory-operation authority slice
+
+- [x] Mark all four canonical directory extern declarations `unsafe(ffi)`.
+- [x] Route calls through four direct, always-inlined lexical owners.
+- [x] Preserve boolean status behavior without adding hot-path work.
+- [x] Tag the ambiguous native directory-walk compatibility API unsafe.
+- [x] Add a static source-shape ratchet for raw-call ownership.

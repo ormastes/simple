@@ -138,3 +138,12 @@ size lookup (`-1`) to offset zero and overwrites from the beginning; it returns
 false before issuing a write. Each of the three providers has one direct
 always-inline owner. The checked success paths add only sentinel/length/null
 checks and no lookup or allocation.
+### Directory-operation authority follow-up
+
+The canonical `nogc_sync_mut.io.dir_ops` boundary now confines its four raw
+directory calls to `@always_inline` lexical `unsafe(ffi)` owners.  Create and
+remove operations retain their direct boolean status ABI with no new lookup,
+allocation, copy, or dispatch.  The native walk compatibility API is tagged
+unsafe because its current array-only return cannot distinguish provider
+failure from a legitimate empty directory.  A static ratchet pins the owner
+count and prevents raw calls from spreading outside those owners.
