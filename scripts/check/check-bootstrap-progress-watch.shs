@@ -40,6 +40,10 @@ set -u
 # detect anything.
 watcher=${BOOTSTRAP_WATCH_SCRIPT:-scripts/bootstrap/bootstrap-from-scratch.sh}
 wrapper=scripts/bootstrap/bootstrap-from-scratch.sh
+# The canonical wrapper owns dispatch and lifecycle wiring; the sibling helper
+# owns the watcher implementation. Runtime fixtures always enter through the
+# wrapper, while source-level statistic fences inspect the implementation file.
+watcher_impl=scripts/bootstrap/bootstrap-progress-watch.shs
 
 CHECKED=0
 FAILURES=""
@@ -139,6 +143,7 @@ selftest
 # --------------------------------------------------------------- contract ----
 [ -f "$watcher" ] || { echo "ERROR — nothing was checked ($watcher missing)"; exit 2; }
 [ -f "$wrapper" ] || { echo "ERROR — nothing was checked ($wrapper missing)"; exit 2; }
+[ -f "$watcher_impl" ] || { echo "ERROR — nothing was checked ($watcher_impl missing)"; exit 2; }
 
 help=$(sh "$watcher" progress-watch --help)
 printf '%s\n' "$help" | grep -Fq -- '--expected-start=TEXT'
@@ -160,7 +165,7 @@ expect "wrapper progress option missing" $?
 # watcher running.
 grep -q "^[[:space:]]*trap .*bootstrap_cleanup" "$wrapper"
 expect "wrapper installs no bootstrap_cleanup trap" $?
-grep -Fq 'bootstrap-from-scratch.sh progress-watch' "$wrapper"
+grep -Eq 'bootstrap-from-scratch\.sh"?[[:space:]]+progress-watch' "$wrapper"
 expect "wrapper watcher launch missing" $?
 grep -Fq 'bootstrap_progress_mark stage4 ' "$wrapper"
 expect "Stage 4 milestone missing" $?
@@ -169,13 +174,13 @@ expect "Stage 4 milestone missing" $?
 # EXPLAINS why the lifetime-average column is wrong, and a naive scan flags that
 # prose as the defect it warns about -- the same false-positive class the
 # conflict-marker guard documents.
-sed 's/#.*$//' "$watcher" | grep -Eq 'ps[^|]*(-o[[:space:]]*)?(%cpu|pcpu)'
+sed 's/#.*$//' "$watcher_impl" | grep -Eq 'ps[^|]*(-o[[:space:]]*)?(%cpu|pcpu)'
 lifetime_avg_present=$?
 [ "$lifetime_avg_present" -ne 0 ]
 expect "watcher samples CPU via a ps lifetime-average column (poll-timing dependent)" $?
-grep -Fq '/proc/' "$watcher"
+grep -Fq '/proc/' "$watcher_impl"
 expect "watcher does not read /proc for CPU ticks" $?
-grep -Fq 'starttime' "$watcher"
+grep -Fq 'starttime' "$watcher_impl"
 expect "watcher does not check starttime (a recycled pid could inherit a sample)" $?
 
 # ------------------------------------------------------- live/exited/stale ----
