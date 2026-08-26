@@ -1760,3 +1760,10 @@ and unpromoted.
 - [x] Preserve single-read behavior for captured output files.
 - [x] Preserve incremental O(new-bytes) live output relay behavior.
 - [x] Add a static ratchet preventing local raw file declarations/calls.
+### Completed CLI file/path authority slice
+
+- [x] Remove three duplicate raw path/file declarations from `app.io.cli_ops`.
+- [x] Reuse canonical nullable-result, positional-write, and path owners.
+- [x] Keep unavoidable raw ownership inside minimal lexical unsafe scopes.
+- [x] Preserve one-read/one-write CLI copy behavior.
+- [x] Add a static ratchet preventing local raw declarations and calls.

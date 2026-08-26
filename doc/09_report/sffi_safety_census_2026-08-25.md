@@ -175,3 +175,11 @@ one size query per stream per poll and reads only the newly appended suffix, so
 the prior O(total-output) quadratic regression remains excluded.  The change
 adds no extra existence probe, second read, registry lookup, or generic
 dispatch.
+### CLI file/path authority follow-up
+
+`app.io.cli_ops` no longer declares raw absolute-path, file-read, or positional
+write symbols.  File reads use the canonical nullable-result owner, writes use
+the shared positional owner in a lexical unsafe scope, and path resolution uses
+the shared path owner while retaining the legacy empty failure sentinel
+internally.  CLI copy remains one source read and one destination write, with
+no read-back, extra filesystem probe, registry lookup, or generic dispatch.
