@@ -1579,3 +1579,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Valid paths add only arity/type decisions before existing work; no provider
   lookup, hash, lock, retry, or extra report traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 memory-profile arity follow-up
+
+- Enforced exact zero-argument contracts for four interpreter profiling APIs.
+- Preserved genuine harden, guard, ABI-version, and feature results.
+- Added source coverage and a static ratchet that refuses to equate interpreter
+  registration with missing typed native registry/header coverage.
+- Valid diagnostic calls add one arity branch before unchanged provider work;
+  no allocation, copy, lookup, hash, lock, retry, or traversal was added.
+- Status: source-reviewed, deliberately unverified and unsigned.

@@ -146,7 +146,12 @@ fn harden_quarantine_free(ptr: usize, size: usize) {
 /// = clean). Always 0 when harden is off.
 ///
 /// Callable from Simple as: `rt_mem_harden_check() -> i64`
-pub fn rt_mem_harden_check(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_harden_check(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_harden_check requires 0 arguments",
+        ));
+    }
     if !harden_enabled() {
         return Ok(Value::Int(0));
     }
@@ -173,7 +178,12 @@ pub fn rt_mem_harden_check(_args: &[Value]) -> Result<Value, CompileError> {
 /// `SIMPLE_MEM_GUARD_RATE` is unset — the zero-overhead-off default.
 ///
 /// Callable from Simple as: `rt_mem_guard_stats() -> i64`
-pub fn rt_mem_guard_stats(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_guard_stats(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_guard_stats requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(mem_guard::guard_sampled_count()))
 }
 
@@ -195,7 +205,12 @@ pub const MEM_PROFILE_FEATURE_OWNER_ATTRIBUTION: i64 = 1 << 3;
 /// Memory-profiling ABI version.
 ///
 /// Callable from Simple as: `rt_mem_profile_abi_version() -> i64`
-pub fn rt_mem_profile_abi_version(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_profile_abi_version(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_profile_abi_version requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(MEM_PROFILE_ABI_VERSION))
 }
 
@@ -203,7 +218,12 @@ pub fn rt_mem_profile_abi_version(_args: &[Value]) -> Result<Value, CompileError
 ///
 /// Callable from Simple as: `rt_mem_profile_features() -> i64`
 /// bit0 = header-bytes, bit1 = hosted-alloc-metadata, bit2 = real-memory-usage.
-pub fn rt_mem_profile_features(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_profile_features(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_profile_features requires 0 arguments",
+        ));
+    }
     let mut features = MEM_PROFILE_FEATURE_HEADER_BYTES | MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA;
     if process_rss_bytes().is_some() {
         features |= MEM_PROFILE_FEATURE_REAL_MEMORY_USAGE;
@@ -1717,6 +1737,15 @@ mod tests {
         assert!(rt_mem_attr_report(&[]).is_err());
         assert!(rt_mem_attr_report(&[Value::Bool(false)]).is_err());
         assert!(rt_mem_attr_report_print(&[]).is_err());
+    }
+
+    #[test]
+    fn memory_profile_handlers_reject_extra_arguments() {
+        let extra = [Value::Int(1)];
+        assert!(rt_mem_harden_check(&extra).is_err());
+        assert!(rt_mem_guard_stats(&extra).is_err());
+        assert!(rt_mem_profile_abi_version(&extra).is_err());
+        assert!(rt_mem_profile_features(&extra).is_err());
     }
 
     // ========================================================================

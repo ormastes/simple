@@ -959,3 +959,10 @@ turns missing/wrong values into a successful no-op; enabled rejects extras.
 Valid reporting allocation/sort behavior is unchanged. Native set-owner uses a
 separate `(ptr,len)` text ABI, while report functions still lack typed native
 registry coverage. Source-reviewed but unverified and unsigned.
+## 2026-08-26 memory-profile arity follow-up
+
+Four zero-argument Rust interpreter profiling handlers now reject extra ABI
+arguments: harden-check, guard-stats, profile ABI version, and feature bits.
+Valid paths retain their genuine results and provider work. None has typed
+native registry/header coverage, so interpreter registration is not treated as
+cross-lane verification. Source-reviewed but unverified and unsigned.
