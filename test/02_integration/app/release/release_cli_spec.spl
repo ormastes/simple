@@ -148,6 +148,40 @@ describe "release CLI boundary":
         expect(code).to_equal(1)
         expect(out).to_contain("mutation is forbidden in the main worktree")
 
+    it "renders beta support from the canonical support manifest":
+        # @req: REQ-004
+        step("Load policy-required beta targets")
+        val (out, err, code) = _run_release(["support-check", "--channel=beta", "--json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"command\":\"release support-check\"")
+        expect(out).to_contain("\"required_support\":[{")
+        expect(out).to_contain("x86_64-unknown-linux-gnu")
+        expect(out).to_contain("\"bootstrap\":\"full\"")
+        expect(out).to_contain("\"whole_tests\":\"required\"")
+
+    it "fails convergence admission on an unselected shared fix":
+        # @req: REQ-006
+        step("Validate protected-integration convergence decisions before candidate admission")
+        val (out, err, code) = _run_release([
+            "convergence-admission", "--json",
+            "--candidate-commit-sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--receipt-candidate-commit-sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--release-ref=release/1.0",
+            "--main-head-sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--release-head-sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--receipt-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--review-summary-sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--integration-receipt-sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--inventory-origin=protected_integration",
+            "--main-inventory=cccccccccccccccccccccccccccccccccccccccc",
+            "--main-shared=cccccccccccccccccccccccccccccccccccccccc",
+            "--main-selected=", "--release-inventory=", "--release-shared=",
+            "--release-forward-ported=", "--forward-port-receipts="
+        ])
+        expect(code).to_equal(1)
+        expect(out).to_contain("every main shared fix must be explicitly selected for backport")
+        expect(out).to_contain("\"mutation\":\"none\"")
+
     it "routes backport and promotion hazards to fail-closed checks":
         # @req: REQ-007
         # @req: REQ-009
@@ -165,10 +199,19 @@ describe "release CLI boundary":
         ])
         expect(backport_code).to_equal(1)
         expect(backport_out).to_contain("bug fixes only")
-        step("Reject promotion that rebuilds admitted artifacts")
+        step("Reject caller-supplied admission strings at the persisted promotion boundary")
         val (promote_out, promote_err, promote_code) = _run_release([
-            "promote-check", "--json", "--candidate-version=1.0.0-beta.1", "--candidate-identity=candidate",
+            "promote-check", "--json", "--candidate-version=1.0.0-beta.1", "--candidate-attempt=1",
+            "--candidate-ref=candidate/v1.0.0-beta.1/a001",
+            "--candidate-identity=1e369bb3125e647b458214d7a2f4b0641b5bbb02e93fa6bb18863084cb1c28b3",
             "--candidate-commit-sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--source-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--policy-sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--version-sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--toolchain-sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "--support-sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "--build-graph-sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "--creator-identity=github:ormastes/simple/actions/runs/42/attempts/1",
             "--target-sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--tag=v1.0.0-beta.1",
             "--artifact-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--admitted-artifact-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -178,4 +221,4 @@ describe "release CLI boundary":
             "--signed", "--annotated", "--exact-push", "--rebuild"
         ])
         expect(promote_code).to_equal(1)
-        expect(promote_out).to_contain("must not rebuild")
+        expect(promote_out).to_contain("unknown or malformed option: --candidate-version")

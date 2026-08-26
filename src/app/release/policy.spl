@@ -1,6 +1,8 @@
 # codex-impl
 # Pure release policy: validates plans before any VCS, build, signing, or hosting adapter runs.
 
+use std.nogc_sync_mut.io.crypto_sffi.{hash_sha256}
+
 struct ReleaseCheck:
     valid: bool
     reason: text
@@ -51,12 +53,32 @@ struct CandidateManifest:
     version_manifest_sha256: text
     toolchain_manifest_sha256: text
     support_manifest_sha256: text
+    build_graph_sha256: text
+    creator_identity: text
     evidence_manifest_sha256: text
+
+struct QualificationReceipt:
+    candidate_identity: text
+    candidate_commit_sha: text
+    build_graph_sha256: text
+    artifact_manifest_sha256: text
+    evidence_manifest_sha256: text
+    required_support_sha256: text
+    required_support_passed: bool
 
 struct ReleaseAdmission:
     candidate_version: text
+    candidate_attempt: i64
+    candidate_ref: text
     candidate_identity: text
     candidate_commit_sha: text
+    source_tree_sha256: text
+    policy_sha256: text
+    version_manifest_sha256: text
+    toolchain_manifest_sha256: text
+    support_manifest_sha256: text
+    build_graph_sha256: text
+    creator_identity: text
     artifact_manifest_sha256: text
     evidence_manifest_sha256: text
     qualification_receipt_sha256: text
@@ -280,6 +302,10 @@ fn check_candidate_manifest(candidate: CandidateManifest) -> ReleaseCheck:
         return release_fail("candidate requires policy and version manifest identities")
     if not _sha256_valid(candidate.toolchain_manifest_sha256) or not _sha256_valid(candidate.support_manifest_sha256):
         return release_fail("candidate requires toolchain and support manifest identities")
+    if not _sha256_valid(candidate.build_graph_sha256):
+        return release_fail("candidate requires an exact build graph identity")
+    if candidate.creator_identity == "" or candidate.creator_identity.contains("\n") or candidate.creator_identity.contains("\r"):
+        return release_fail("candidate requires one safe creator identity")
     if not _sha256_valid(candidate.evidence_manifest_sha256):
         return release_fail("candidate requires an evidence manifest identity")
     release_pass()
@@ -291,12 +317,29 @@ fn candidate_identity(candidate: CandidateManifest) -> text:
         candidate.version, candidate.attempt.to_text(), candidate.candidate_ref,
         candidate.commit_sha, candidate.source_tree_sha256, candidate.policy_sha256,
         candidate.version_manifest_sha256, candidate.toolchain_manifest_sha256,
-        candidate.support_manifest_sha256, candidate.evidence_manifest_sha256
+        candidate.support_manifest_sha256, candidate.build_graph_sha256,
+        candidate.creator_identity, candidate.evidence_manifest_sha256
     ]
     var identity = ""
     for field in fields:
         identity = identity + field.len().to_text() + ":" + field
-    identity
+    hash_sha256(identity)
+
+fn check_qualification_receipt(candidate: CandidateManifest, receipt: QualificationReceipt) -> ReleaseCheck:
+    val manifest_check = check_candidate_manifest(candidate)
+    if not manifest_check.valid:
+        return manifest_check
+    if receipt.candidate_identity != candidate_identity(candidate):
+        return release_fail("qualification receipt does not bind the canonical candidate identity")
+    if receipt.candidate_commit_sha != candidate.commit_sha:
+        return release_fail("qualification receipt does not bind the candidate commit")
+    if receipt.build_graph_sha256 != candidate.build_graph_sha256:
+        return release_fail("qualification receipt does not bind the admitted build graph")
+    if not _sha256_valid(receipt.artifact_manifest_sha256) or not _sha256_valid(receipt.evidence_manifest_sha256):
+        return release_fail("qualification receipt requires artifact and evidence identities")
+    if not _sha256_valid(receipt.required_support_sha256) or not receipt.required_support_passed:
+        return release_fail("qualification receipt does not prove all policy-required support")
+    release_pass()
 
 fn check_candidate_create_once(existing_identity: text, candidate: CandidateManifest) -> ReleaseCheck:
     val candidate_check = check_candidate_manifest(candidate)
@@ -306,12 +349,53 @@ fn check_candidate_create_once(existing_identity: text, candidate: CandidateMani
         return release_fail("candidate identity is create-once and cannot be mutated")
     release_pass()
 
+fn check_candidate_authority_binding(session: ReleaseSession, candidate: CandidateManifest, observed_head: text) -> ReleaseCheck:
+    val candidate_check = check_candidate_manifest(candidate)
+    if not candidate_check.valid:
+        return candidate_check
+    if session.target_ref != "main" and not _release_line_valid(session.target_ref):
+        return release_fail("candidate creation target must be protected main or a release line")
+    if candidate.commit_sha != observed_head:
+        return release_fail("candidate commit must equal the registered session HEAD")
+    if candidate.policy_sha256 != session.policy_sha256:
+        return release_fail("candidate policy identity must equal the registered session policy")
+    if candidate.creator_identity != session.session_id:
+        return release_fail("candidate creator identity must equal the registered session owner")
+    release_pass()
+
 fn check_promotion_plan(admission: ReleaseAdmission, plan: PromotionPlan) -> ReleaseCheck:
     val admitted_version = parse_release_version(admission.candidate_version)
     if admitted_version.channel == "invalid":
         return release_fail("release admission candidate version is invalid")
-    if not _commit_sha_valid(admission.candidate_commit_sha) or admission.candidate_identity == "":
+    if admission.candidate_attempt <= 0 or admission.candidate_ref != expected_candidate_ref(admitted_version.canonical, admission.candidate_attempt):
+        return release_fail("release admission candidate ref or attempt is invalid")
+    if not _commit_sha_valid(admission.candidate_commit_sha) or not _sha256_valid(admission.candidate_identity):
         return release_fail("release admission identity is incomplete")
+    if not _sha256_valid(admission.source_tree_sha256) or not _sha256_valid(admission.policy_sha256) or not _sha256_valid(admission.version_manifest_sha256):
+        return release_fail("release admission source, policy, or version identity is incomplete")
+    if not _sha256_valid(admission.toolchain_manifest_sha256) or not _sha256_valid(admission.support_manifest_sha256) or not _sha256_valid(admission.build_graph_sha256):
+        return release_fail("release admission toolchain, support, or build graph identity is incomplete")
+    if admission.creator_identity == "" or admission.creator_identity.contains("\n") or admission.creator_identity.contains("\r"):
+        return release_fail("release admission creator identity is incomplete")
+    val admitted_candidate = CandidateManifest(
+        version: admission.candidate_version,
+        attempt: admission.candidate_attempt,
+        candidate_ref: admission.candidate_ref,
+        commit_sha: admission.candidate_commit_sha,
+        source_tree_sha256: admission.source_tree_sha256,
+        policy_sha256: admission.policy_sha256,
+        version_manifest_sha256: admission.version_manifest_sha256,
+        toolchain_manifest_sha256: admission.toolchain_manifest_sha256,
+        support_manifest_sha256: admission.support_manifest_sha256,
+        build_graph_sha256: admission.build_graph_sha256,
+        creator_identity: admission.creator_identity,
+        evidence_manifest_sha256: admission.evidence_manifest_sha256
+    )
+    val candidate_check = check_candidate_manifest(admitted_candidate)
+    if not candidate_check.valid:
+        return candidate_check
+    if admission.candidate_identity != candidate_identity(admitted_candidate):
+        return release_fail("release admission does not bind the canonical candidate identity")
     if not _sha256_valid(admission.artifact_manifest_sha256) or not _sha256_valid(admission.evidence_manifest_sha256):
         return release_fail("release admission evidence identity is incomplete")
     if not _sha256_valid(admission.qualification_receipt_sha256) or not _sha256_valid(admission.admission_receipt_sha256):
@@ -349,8 +433,10 @@ fn check_withdrawal_plan(delete_tag: bool, move_tag: bool, reuse_version: bool, 
     release_pass()
 
 export ReleaseCheck, ReleaseVersion, ReleaseSession, BackportRequest
-export CandidateManifest, ReleaseAdmission, PromotionPlan
+export CandidateManifest, QualificationReceipt, ReleaseAdmission, PromotionPlan
 export parse_release_version, check_version_channel, check_version_projection
 export validate_release_session, check_beta_preparation, check_backport_admission
 export expected_candidate_ref, check_candidate_manifest, candidate_identity
-export check_candidate_create_once, check_promotion_plan, check_withdrawal_plan
+export check_candidate_create_once, check_qualification_receipt
+export check_candidate_authority_binding
+export check_promotion_plan, check_withdrawal_plan

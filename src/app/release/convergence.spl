@@ -1,5 +1,10 @@
 # codex-impl
-# Deterministic release/main convergence planning. This module never invokes VCS.
+# Deterministic release/main convergence planning plus a bounded, read-only Git
+# observation boundary. Neither surface selects, applies, integrates, or pushes.
+
+use app.io.mod.{process_run_bounded}
+use app.release.policy.{ReleaseSession}
+use app.release.session_authority.{verify_release_session}
 
 struct ReviewedBugFix:
     commit_sha: text
@@ -41,6 +46,163 @@ struct ConvergenceReceipt:
     forward_port_required: bool
     forward_port_target_ref: text
     main_remains_independent: bool
+
+struct GitConvergenceObservation:
+    valid: bool
+    reason: text
+    mutation: text
+    fetched_main_sha: text
+    fetched_release_sha: text
+    source_sha: text
+    target_sha: text
+    source_only_commit_shas: [text]
+    selected_bug_fix_shas: [text]
+    selected_exactly_reviewed: bool
+    selected_reachable_from_source: bool
+    selected_absent_from_target: bool
+    main_remains_independent: bool
+    plan: ConvergenceReceipt
+
+struct PostIntegrationDivergenceRequest:
+    direction: text
+    release_ref: text
+    source_head_before: text
+    target_head_before: text
+    result_commit_sha: text
+    selected_bug_fix_shas: [text]
+    review_receipt_sha256: text
+    evidence_receipt_sha256: text
+    integration_receipt_sha256: text
+
+struct PostIntegrationDivergenceReceipt:
+    valid: bool
+    reason: text
+    mutation: text
+    direction: text
+    source_head_before: text
+    source_head_after: text
+    target_head_before: text
+    target_head_after: text
+    result_commit_sha: text
+    selected_bug_fix_shas: [text]
+    review_receipt_sha256: text
+    evidence_receipt_sha256: text
+    integration_receipt_sha256: text
+    source_unchanged: bool
+    target_equals_result: bool
+    main_remains_independent: bool
+
+# Immutable decision produced by protected integration and consumed by candidate
+# admission.  Inventory arrays contain every source-only commit observed in each
+# direction; the shared-fix arrays are the reviewed subset that policy says must
+# converge.  Candidate CI independently recomputes the inventories before
+# calling this validator, so an invented empty receipt cannot hide divergence.
+struct ConvergenceAdmissionRequest:
+    candidate_commit_sha: text
+    receipt_candidate_commit_sha: text
+    release_ref: text
+    main_head_sha: text
+    release_head_sha: text
+    receipt_sha256: text
+    review_summary_sha256: text
+    evidence_receipt_sha256: text
+    integration_receipt_sha256: text
+    inventory_origin: text
+    main_to_release_inventory_shas: [text]
+    main_to_release_shared_fix_shas: [text]
+    main_to_release_selected_shas: [text]
+    release_to_main_inventory_shas: [text]
+    release_to_main_shared_fix_shas: [text]
+    release_to_main_forward_ported_shas: [text]
+    forward_port_receipt_sha256s: [text]
+
+struct ConvergenceAdmissionReceipt:
+    valid: bool
+    reason: text
+    mutation: text
+    candidate_commit_sha: text
+    release_ref: text
+    main_head_sha: text
+    release_head_sha: text
+    receipt_sha256: text
+    main_to_release_inventory_count: i64
+    main_to_release_selected_count: i64
+    release_to_main_inventory_count: i64
+    release_to_main_forward_ported_count: i64
+    main_remains_independent: bool
+
+fn _empty_plan() -> ConvergenceReceipt:
+    ConvergenceReceipt(
+        valid: false, ready: false, reason: "observation did not reach planning",
+        mutation: "none", last_scanned_main_sha: "", current_main_sha: "",
+        release_ref: "", release_head_sha: "", scan_interval_seconds: 0,
+        scan_due: false, eligible_reviewed_bug_fix_shas: [], selected_bug_fix_shas: [],
+        caller_selection_required: false, direction: "", forward_port_required: false,
+        forward_port_target_ref: "", main_remains_independent: true
+    )
+
+fn _observation_rejected(reason: text) -> GitConvergenceObservation:
+    GitConvergenceObservation(
+        valid: false, reason: reason, mutation: "none", fetched_main_sha: "",
+        fetched_release_sha: "", source_sha: "", target_sha: "",
+        source_only_commit_shas: [],
+        selected_bug_fix_shas: [], selected_exactly_reviewed: false,
+        selected_reachable_from_source: false, selected_absent_from_target: false,
+        main_remains_independent: true, plan: _empty_plan()
+    )
+
+fn _convergence_git(root: text, arguments: [text], timeout_ms: i64) -> (text, text, i64):
+    process_run_bounded("git", ["-C", root] + arguments, timeout_ms, 1048576)
+
+fn _git_value(root: text, arguments: [text]) -> text:
+    val (stdout, _stderr, code) = _convergence_git(root, arguments, 10000)
+    if code != 0:
+        return ""
+    stdout.trim()
+
+fn _refresh_convergence_refs(root: text, release_ref: text) -> text:
+    if not _release_ref_valid(release_ref):
+        return "release convergence requires a valid release/X.Y ref"
+    val main_spec = "+refs/heads/main:refs/remotes/origin/main"
+    val release_spec = "+refs/heads/" + release_ref + ":refs/remotes/origin/" + release_ref
+    val (_stdout, stderr, code) = _convergence_git(root, ["fetch", "--no-tags", "--prune", "origin", main_spec, release_spec], 30000)
+    if code != 0:
+        val detail = stderr.trim()
+        if detail != "":
+            return "bounded convergence fetch failed: " + detail
+        return "bounded convergence fetch failed"
+    ""
+
+fn _is_ancestor(root: text, ancestor: text, descendant: text) -> bool:
+    val (_stdout, _stderr, code) = _convergence_git(root, ["merge-base", "--is-ancestor", ancestor, descendant], 10000)
+    code == 0
+
+fn _patch_absent_from_target(root: text, commit_sha: text, target_sha: text) -> bool:
+    # `git cherry <target> <commit>^..<commit>` emits `+` only when the exact
+    # selected patch is not already represented in the target history.
+    val (stdout, _stderr, code) = _convergence_git(
+        root, ["cherry", target_sha, commit_sha, commit_sha + "^"], 10000
+    )
+    code == 0 and stdout.trim().starts_with("+ ")
+
+fn _patch_present_in_target(root: text, commit_sha: text, target_sha: text) -> bool:
+    val (stdout, _stderr, code) = _convergence_git(
+        root, ["cherry", target_sha, commit_sha, commit_sha + "^"], 10000
+    )
+    code == 0 and stdout.trim().starts_with("- ")
+
+fn _source_only_commits(root: text, source_sha: text, target_sha: text) -> [text]:
+    val (stdout, _stderr, code) = _convergence_git(
+        root, ["rev-list", "--topo-order", "--max-count=257", target_sha + ".." + source_sha], 10000
+    )
+    if code != 0:
+        return []
+    var commits: [text] = []
+    for raw in stdout.split("\n"):
+        val commit_sha = raw.trim()
+        if commit_sha != "":
+            commits.push(commit_sha)
+    commits
 
 fn _hex_identity_valid(value: text, expected_len: i64) -> bool:
     if value.len() != expected_len:
@@ -95,6 +257,91 @@ fn _has_duplicates(values: [text]) -> bool:
             j = j + 1
         i = i + 1
     false
+
+fn _same_set(left: [text], right: [text]) -> bool:
+    if left.len() != right.len():
+        return false
+    for value in left:
+        if not _contains(right, value):
+            return false
+    true
+
+fn _all_exact_commits(values: [text]) -> bool:
+    for value in values:
+        if not _commit_sha_valid(value):
+            return false
+    true
+
+fn _all_exact_receipts(values: [text]) -> bool:
+    for value in values:
+        if not _sha256_valid(value):
+            return false
+    true
+
+fn _admission(request: ConvergenceAdmissionRequest, valid: bool,
+              reason: text) -> ConvergenceAdmissionReceipt:
+    ConvergenceAdmissionReceipt(
+        valid: valid, reason: reason, mutation: "none",
+        candidate_commit_sha: request.candidate_commit_sha,
+        release_ref: request.release_ref, main_head_sha: request.main_head_sha,
+        release_head_sha: request.release_head_sha,
+        receipt_sha256: request.receipt_sha256,
+        main_to_release_inventory_count: request.main_to_release_inventory_shas.len(),
+        main_to_release_selected_count: request.main_to_release_selected_shas.len(),
+        release_to_main_inventory_count: request.release_to_main_inventory_shas.len(),
+        release_to_main_forward_ported_count: request.release_to_main_forward_ported_shas.len(),
+        main_remains_independent: request.main_head_sha != request.release_head_sha
+    )
+
+fn check_convergence_admission(request: ConvergenceAdmissionRequest) -> ConvergenceAdmissionReceipt:
+    if (not _commit_sha_valid(request.candidate_commit_sha) or
+        not _commit_sha_valid(request.receipt_candidate_commit_sha) or
+        not _commit_sha_valid(request.main_head_sha) or
+        not _commit_sha_valid(request.release_head_sha)):
+        return _admission(request, false, "convergence admission requires exact commit identities")
+    if request.candidate_commit_sha != request.receipt_candidate_commit_sha:
+        return _admission(request, false, "convergence receipt is not bound to the candidate commit")
+    if request.candidate_commit_sha != request.release_head_sha:
+        return _admission(request, false, "candidate commit must equal the protected release integration head")
+    if not _release_ref_valid(request.release_ref):
+        return _admission(request, false, "convergence receipt requires a valid release line")
+    if request.main_head_sha == request.release_head_sha:
+        return _admission(request, false, "main must remain an independent trunk")
+    if (not _sha256_valid(request.receipt_sha256) or
+        not _sha256_valid(request.review_summary_sha256) or
+        not _sha256_valid(request.evidence_receipt_sha256) or
+        not _sha256_valid(request.integration_receipt_sha256)):
+        return _admission(request, false, "convergence receipt requires exact receipt identities")
+    if request.inventory_origin != "protected_integration":
+        return _admission(request, false, "convergence inventory must originate from protected integration")
+    val all_commits = (request.main_to_release_inventory_shas +
+        request.main_to_release_shared_fix_shas + request.main_to_release_selected_shas +
+        request.release_to_main_inventory_shas + request.release_to_main_shared_fix_shas +
+        request.release_to_main_forward_ported_shas)
+    if not _all_exact_commits(all_commits):
+        return _admission(request, false, "convergence inventory contains a non-exact commit identity")
+    if (_has_duplicates(request.main_to_release_inventory_shas) or
+        _has_duplicates(request.main_to_release_shared_fix_shas) or
+        _has_duplicates(request.main_to_release_selected_shas) or
+        _has_duplicates(request.release_to_main_inventory_shas) or
+        _has_duplicates(request.release_to_main_shared_fix_shas) or
+        _has_duplicates(request.release_to_main_forward_ported_shas)):
+        return _admission(request, false, "convergence inventory and decisions must be unique")
+    for shared in request.main_to_release_shared_fix_shas:
+        if not _contains(request.main_to_release_inventory_shas, shared):
+            return _admission(request, false, "main-to-release shared fix is absent from the reviewed inventory")
+    if not _same_set(request.main_to_release_shared_fix_shas, request.main_to_release_selected_shas):
+        return _admission(request, false, "every main shared fix must be explicitly selected for backport")
+    for shared in request.release_to_main_shared_fix_shas:
+        if not _contains(request.release_to_main_inventory_shas, shared):
+            return _admission(request, false, "release-to-main shared fix is absent from the reviewed inventory")
+    if not _same_set(request.release_to_main_shared_fix_shas, request.release_to_main_forward_ported_shas):
+        return _admission(request, false, "every release-first shared fix requires a completed forward port to main")
+    if request.forward_port_receipt_sha256s.len() != request.release_to_main_forward_ported_shas.len():
+        return _admission(request, false, "every completed forward port requires one exact receipt")
+    if not _all_exact_receipts(request.forward_port_receipt_sha256s):
+        return _admission(request, false, "forward-port receipt identity is invalid")
+    _admission(request, true, "reviewed bidirectional convergence is admitted")
 
 fn _receipt(request: ConvergenceRequest, valid: bool, ready: bool, reason: text,
             due: bool, eligible_shas: [text]) -> ConvergenceReceipt:
@@ -167,5 +414,138 @@ fn plan_release_main_convergence(request: ConvergenceRequest) -> ConvergenceRece
 
     _receipt(request, true, true, "convergence plan is ready for an external guarded VCS adapter", true, eligible_shas)
 
-export ReviewedBugFix, ConvergenceRequest, ConvergenceReceipt
-export plan_release_main_convergence
+fn inspect_release_main_convergence(root: text, session: ReleaseSession,
+                                    request: ConvergenceRequest) -> GitConvergenceObservation:
+    val verified = verify_release_session(root, session)
+    if not verified.valid:
+        return _observation_rejected("trusted release session rejected convergence observation: " + verified.reason)
+    val expected_session_target = if request.direction == "main_to_release": request.release_ref else: "main"
+    if session.target_ref != expected_session_target:
+        return _observation_rejected("convergence direction does not match the trusted session target")
+
+    val fetch_error = _refresh_convergence_refs(verified.canonical_root, request.release_ref)
+    if fetch_error != "":
+        return _observation_rejected(fetch_error)
+    val main_sha = _git_value(verified.canonical_root, ["rev-parse", "--verify", "refs/remotes/origin/main"])
+    val release_sha = _git_value(verified.canonical_root, ["rev-parse", "--verify", "refs/remotes/origin/" + request.release_ref])
+    if not _commit_sha_valid(main_sha) or not _commit_sha_valid(release_sha):
+        return _observation_rejected("convergence fetch did not resolve exact main and release heads")
+    if request.current_main_sha != main_sha or request.release_head_sha != release_sha:
+        return _observation_rejected("caller convergence heads do not match freshly fetched Git refs")
+    val target_sha_for_session = if request.direction == "main_to_release": release_sha else: main_sha
+    if session.expected_target_sha != target_sha_for_session:
+        return _observation_rejected("trusted session target changed during convergence fetch")
+
+    val plan = plan_release_main_convergence(request)
+    if not plan.valid or not plan.ready:
+        return GitConvergenceObservation(
+            valid: plan.valid, reason: plan.reason, mutation: "none",
+            fetched_main_sha: main_sha, fetched_release_sha: release_sha,
+            source_sha: if request.direction == "main_to_release": main_sha else: release_sha,
+            target_sha: if request.direction == "main_to_release": release_sha else: main_sha,
+            source_only_commit_shas: [],
+            selected_bug_fix_shas: request.selected_bug_fix_shas,
+            selected_exactly_reviewed: false, selected_reachable_from_source: false,
+            selected_absent_from_target: false, main_remains_independent: true,
+            plan: plan
+        )
+
+    val source_sha = if request.direction == "main_to_release": main_sha else: release_sha
+    val target_sha = if request.direction == "main_to_release": release_sha else: main_sha
+    val source_only = _source_only_commits(verified.canonical_root, source_sha, target_sha)
+    if source_only.len() > 256:
+        return _observation_rejected("convergence comparison exceeds the bounded 256-commit review window")
+    for selected in request.selected_bug_fix_shas:
+        if not _contains(plan.eligible_reviewed_bug_fix_shas, selected):
+            return _observation_rejected("selected convergence commit is not bound to an exact review receipt")
+        if not _is_ancestor(verified.canonical_root, selected, source_sha):
+            return _observation_rejected("selected convergence commit is not reachable from the fetched source ref")
+        if _is_ancestor(verified.canonical_root, selected, target_sha):
+            return _observation_rejected("selected convergence commit is already in the target history")
+        if not _patch_absent_from_target(verified.canonical_root, selected, target_sha):
+            return _observation_rejected("selected convergence patch is already represented in the target history")
+
+    GitConvergenceObservation(
+        valid: true, reason: "exact reviewed convergence selection observed; external guarded integration is still required",
+        mutation: "fetch-only", fetched_main_sha: main_sha, fetched_release_sha: release_sha,
+        source_sha: source_sha, target_sha: target_sha,
+        source_only_commit_shas: source_only,
+        selected_bug_fix_shas: request.selected_bug_fix_shas,
+        selected_exactly_reviewed: true, selected_reachable_from_source: true,
+        selected_absent_from_target: true, main_remains_independent: true,
+        plan: plan
+    )
+
+fn record_post_integration_divergence(root: text, session: ReleaseSession,
+                                      request: PostIntegrationDivergenceRequest) -> PostIntegrationDivergenceReceipt:
+    val rejected = \reason: PostIntegrationDivergenceReceipt(
+        valid: false, reason: reason, mutation: "none", direction: request.direction,
+        source_head_before: request.source_head_before, source_head_after: "",
+        target_head_before: request.target_head_before, target_head_after: "",
+        result_commit_sha: request.result_commit_sha,
+        selected_bug_fix_shas: request.selected_bug_fix_shas,
+        review_receipt_sha256: request.review_receipt_sha256,
+        evidence_receipt_sha256: request.evidence_receipt_sha256,
+        integration_receipt_sha256: request.integration_receipt_sha256,
+        source_unchanged: false, target_equals_result: false,
+        main_remains_independent: true
+    )
+    val verified = verify_release_session(root, session)
+    if not verified.valid:
+        return rejected("trusted release session rejected divergence observation: " + verified.reason)
+    if request.direction != "main_to_release" and request.direction != "release_to_main":
+        return rejected("post-integration divergence direction is invalid")
+    if (not _commit_sha_valid(request.source_head_before) or
+        not _commit_sha_valid(request.target_head_before) or
+        not _commit_sha_valid(request.result_commit_sha)):
+        return rejected("post-integration divergence requires exact commit identities")
+    if (not _sha256_valid(request.review_receipt_sha256) or
+        not _sha256_valid(request.evidence_receipt_sha256) or
+        not _sha256_valid(request.integration_receipt_sha256)):
+        return rejected("post-integration divergence requires review, evidence, and integration receipts")
+    if request.selected_bug_fix_shas.len() == 0 or _has_duplicates(request.selected_bug_fix_shas):
+        return rejected("post-integration divergence requires unique selected bug-fix commits")
+    for selected in request.selected_bug_fix_shas:
+        if not _commit_sha_valid(selected):
+            return rejected("post-integration divergence contains an invalid selected commit")
+
+    val fetch_error = _refresh_convergence_refs(verified.canonical_root, request.release_ref)
+    if fetch_error != "":
+        return rejected(fetch_error)
+    val main_after = _git_value(verified.canonical_root, ["rev-parse", "--verify", "refs/remotes/origin/main"])
+    val release_after = _git_value(verified.canonical_root, ["rev-parse", "--verify", "refs/remotes/origin/" + request.release_ref])
+    val source_after = if request.direction == "main_to_release": main_after else: release_after
+    val target_after = if request.direction == "main_to_release": release_after else: main_after
+    if source_after != request.source_head_before:
+        return rejected("convergence source changed before the post-integration receipt was recorded")
+    if target_after != request.result_commit_sha or session.expected_target_sha != target_after:
+        return rejected("convergence target does not equal the reviewed integration result")
+    if target_after == request.target_head_before or not _is_ancestor(verified.canonical_root, request.target_head_before, target_after):
+        return rejected("convergence result is not an append-only descendant of the observed target")
+    if target_after == source_after:
+        return rejected("main and release line must remain independent after convergence")
+    for selected in request.selected_bug_fix_shas:
+        if (not _is_ancestor(verified.canonical_root, selected, target_after) and
+            not _patch_present_in_target(verified.canonical_root, selected, target_after)):
+            return rejected("selected bug fix is not represented in the integrated target")
+
+    PostIntegrationDivergenceReceipt(
+        valid: true, reason: "post-integration divergence recorded",
+        mutation: "fetch-only", direction: request.direction,
+        source_head_before: request.source_head_before, source_head_after: source_after,
+        target_head_before: request.target_head_before, target_head_after: target_after,
+        result_commit_sha: request.result_commit_sha,
+        selected_bug_fix_shas: request.selected_bug_fix_shas,
+        review_receipt_sha256: request.review_receipt_sha256,
+        evidence_receipt_sha256: request.evidence_receipt_sha256,
+        integration_receipt_sha256: request.integration_receipt_sha256,
+        source_unchanged: true, target_equals_result: true,
+        main_remains_independent: true
+    )
+
+export ReviewedBugFix, ConvergenceRequest, ConvergenceReceipt, GitConvergenceObservation
+export PostIntegrationDivergenceRequest, PostIntegrationDivergenceReceipt
+export ConvergenceAdmissionRequest, ConvergenceAdmissionReceipt
+export plan_release_main_convergence, inspect_release_main_convergence
+export record_post_integration_divergence
+export check_convergence_admission

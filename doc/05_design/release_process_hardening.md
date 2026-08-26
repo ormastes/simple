@@ -12,6 +12,12 @@
 
 `ReleaseSession` contains session ID, workspace path, main-worktree path, work branch, target ref, base SHA, expected target SHA, and policy hash. `validate_release_session` rejects empty identities, equal workspace/main paths, non-`work/` authoring refs, direct protected targets, and missing exact hashes.
 
+`verify_release_session` checks those claims against canonical Git state.
+`register_release_session` serializes ownership through a repository-wide locked
+registry and rejects duplicate session, workspace, or branch ownership.
+`verify_registered_release_session` is the mutation precondition. Private
+output and writable cache-overlay paths are derived from the registered session.
+
 ### Backport admission
 
 `BackportRequest` fields:
@@ -33,34 +39,71 @@ result_commit_sha
 
 ### Convergence discovery and forward-port
 
-`ConvergenceSnapshot` records exact fetched `main` and `release/X.Y` SHAs, policy digest, discovery timestamp/cadence identity, and reviewed fix metadata. `discover_convergence` is read-only and returns candidate proposals; it cannot select, apply, or push them. Each proposal names one exact commit and direction (`main_to_release` or `release_to_main`).
+`ConvergenceRequest` records exact fetched `main` and `release/X.Y` SHAs, policy digest, discovery timestamp/cadence identity, reviewed fix metadata, and explicit caller selection. `inspect_release_main_convergence` performs bounded Git fetch/ref/ancestry/patch-equivalence checks and returns a fetch-only observation; it cannot apply or push. Each proposal names one exact commit and direction (`main_to_release` or `release_to_main`).
 
-`DivergenceReceipt` records source/target refs and before SHAs, selected source commit, result SHA, review and renewed-evidence digests, integration receipt, omitted proposals/reasons, and the remaining ahead/behind sets. For `release_to_main`, the target is always `main`, but application occurs on an isolated `work/fix/...` or `work/backport/...` branch. Only integration authority may CAS-update `main`. The design forbids changing `main`'s upstream to `release/X.Y`, resetting trunk to the release head, merging the whole release line as a substitute for an exact forward-port, or allowing a bootstrap task to hold write credentials.
+`PostIntegrationDivergenceReceipt` records direction, exact before/after heads,
+selected commits, result SHA, and review, renewed-evidence, and integration
+digests. It is emitted only after a fresh fetch proves the source unchanged,
+the target append-only and equal to the result, and every selected patch present.
+For `release_to_main`, the target is always `main`, but application occurs on an
+isolated `work/fix/...` or `work/backport/...` branch. Only integration authority
+may CAS-update `main`.
 
 ### Candidate
 
-`CandidateManifest` includes canonical version, attempt, ref, commit and source/policy/version/toolchain/support digests. `candidate_identity()` creates canonical length-delimited text for hashing by an outer facade. `check_candidate_manifest` validates ref/version/attempt agreement and all required facts. `check_candidate_create_once(existing_identity, proposed_identity)` accepts absence or exact idempotent equality and rejects mutation.
+`CandidateManifest` includes canonical version, attempt, ref, commit,
+source/policy/version/toolchain/support/build-graph/evidence digests, and creator
+identity. `candidate_identity()` returns its SHA-256 canonical identity.
+`QualificationReceipt` adds exact artifact, required-support, evidence, and
+build-graph identities. CI serializes these as the
+`simple-release-candidate/1`, `simple-release-qualification/1`, and
+`simple-release-admission/1` schemas; admission carries the same bound fields
+plus the qualification and convergence receipt digests.
 
 ### Promotion
 
-`ReleaseAdmission` binds candidate identity, commit, artifact manifest digest, evidence manifest digest, and admitted flag. `PromotionPlan` includes exact tag, commit, signed/annotated flags, exact-push flag, rebuild flag, fallback flag, and artifact digest. `check_promotion_plan` requires admission and exact equality, `signed && annotated && exact_push`, and `!rebuild && !fallback`.
+`ReleaseAdmission` binds the complete candidate identity, qualification receipt,
+commit, artifact/evidence manifests, and admitted flag. `PromotionPlan` includes
+exact tag, commit, signed/annotated flags, exact-push flag, rebuild flag,
+fallback flag, and artifact digest. Provider retries verify an existing signed
+tag and remote assets rather than recreating or overwriting them. Candidate CI
+packs npm tarballs; publish CI only verifies and publishes those admitted bytes.
 
 `withdrawal_plan(version, redeploy_version, delete_tag, move_tag, reuse_version)` rejects destructive identity changes and otherwise returns an auditable non-mutating plan.
 
 ## CLI
 
-Extend `simple release` with pure commands first:
+The `simple release` surface provides:
 
 ```text
-version-check --version=... --channel=...
+version-check --root=...
+version-render-plan --root=... --version=... --channel=...
+version-bump-plan --root=... --version=... --channel=... <compatibility counters>
+version-bump --root=... --manifest-sha256=... <session facts> <compatibility counters>
+session-register|session-status|session-cleanup-check|session-close <session facts>
 beta-prepare --version=... --target=release/X.Y --target-sha=... --session=...
 backport-check --source-sha=... --change-id=... --work-id=... --kind=fix ...
+convergence-discover --root=... <session and reviewed selection facts>
+convergence-receipt --root=... <post-integration receipt facts>
 candidate-check --version=... --attempt=N --commit=... <digest flags>
+support-check --root=...
 promote-check --tag=v... --commit=... --candidate-commit=... --signed --annotated --exact-push --no-rebuild --no-fallback
 withdraw-check --version=... --redeploy=...
 ```
 
-Human output is concise. `--json` uses stable status/reason keys. Commands check/plan only; they do not invoke Git/GitHub/signing/build.
+`support-check` reads `simple-release-support/2`, separates channel-required
+rows from the complete declared matrix, and emits both arrays. A candidate job
+may mark only its observed target `passed`; non-required supported rows are
+`not_executed`, unavailable rows are `unsupported`, and experimental rows stay
+`experimental`. If one job cannot account for every required target, the
+command fails rather than emitting a partial PASS. The support receipt itself is
+checksummed into the candidate evidence and artifact manifest.
+
+Human output is concise. `--json` uses stable status/reason keys. Version apply,
+session registration, and convergence observation are repository-backed guarded
+operations. They use argv-only Git/process and filesystem facades; they do not
+push protected refs, sign, build, or publish. Candidate promotion remains an
+approval-gated workflow authority.
 
 ## Policy schema changes
 
@@ -90,7 +133,8 @@ Each primary step has success and adjacent rejection assertions. Advanced projec
 2. Route CLI plan/check commands to them.
 3. Remove unsafe tag/direct-main text from legacy `prepare.spl` and skills.
 4. Update plugin version/capabilities/projections/parity gate.
-5. Convert external CI/provider mutation in a separately authorized lane; until then, current tag-triggered publication is documented as not admitted by the new release process.
+5. Build and attest candidates in candidate CI, promote only their admitted
+   assets in release CI, and publish admitted npm tarballs unchanged.
 
 ## Runtime boundary decision
 

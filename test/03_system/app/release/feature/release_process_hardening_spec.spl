@@ -113,10 +113,10 @@ once. Required external rows stay blocked until their own receipts exist.
 
 use std.spec.{describe, it, expect, step}
 use app.release.policy.{
-    ReleaseSession, BackportRequest, CandidateManifest, ReleaseAdmission, PromotionPlan,
+    ReleaseSession, BackportRequest, CandidateManifest, QualificationReceipt, ReleaseAdmission, PromotionPlan,
     parse_release_version, check_version_channel, check_version_projection,
     validate_release_session, check_beta_preparation, check_backport_admission,
-    check_candidate_manifest, candidate_identity, check_candidate_create_once,
+    check_candidate_manifest, candidate_identity, check_candidate_create_once, check_qualification_receipt,
     check_promotion_plan, check_withdrawal_plan
 }
 
@@ -175,6 +175,8 @@ fn setup_candidate_fixture() -> CandidateManifest:
         version_manifest_sha256: digest_c(),
         toolchain_manifest_sha256: digest_d(),
         support_manifest_sha256: digest_e(),
+        build_graph_sha256: digest_a(),
+        creator_identity: "github:ormastes/simple/actions/runs/42/attempts/1",
         evidence_manifest_sha256: digest_f()
     )
 
@@ -311,6 +313,7 @@ describe "Hardened Simple and Spipe software release":
         val candidate = setup_candidate_fixture()
         expect(check_candidate_manifest(candidate).valid).to_be(true)
         val identity = candidate_identity(candidate)
+        expect(identity.len()).to_equal(64)
         expect(check_candidate_create_once(identity, candidate).valid).to_be(true)
         expect(check_candidate_create_once("different-existing-identity", candidate).reason).to_equal("candidate identity is create-once and cannot be mutated")
         val separator_candidate = CandidateManifest(
@@ -323,17 +326,38 @@ describe "Hardened Simple and Spipe software release":
             version_manifest_sha256: candidate.version_manifest_sha256,
             toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
             support_manifest_sha256: candidate.support_manifest_sha256,
+            build_graph_sha256: candidate.build_graph_sha256,
+            creator_identity: candidate.creator_identity,
             evidence_manifest_sha256: candidate.evidence_manifest_sha256
         )
         expect(candidate_identity(separator_candidate) == identity).to_be(false)
+        val qualification = QualificationReceipt(
+            candidate_identity: identity,
+            candidate_commit_sha: candidate.commit_sha,
+            build_graph_sha256: candidate.build_graph_sha256,
+            artifact_manifest_sha256: digest_b(),
+            evidence_manifest_sha256: candidate.evidence_manifest_sha256,
+            required_support_sha256: digest_c(),
+            required_support_passed: true
+        )
+        expect(check_qualification_receipt(candidate, qualification).valid).to_be(true)
 
     it "promotes exact admitted artifacts without rebuilding or fallback":
         step("Promote exact admitted artifacts")
         val candidate = setup_candidate_fixture()
         val admission = ReleaseAdmission(
             candidate_version: candidate.version,
+            candidate_attempt: candidate.attempt,
+            candidate_ref: candidate.candidate_ref,
             candidate_identity: candidate_identity(candidate),
             candidate_commit_sha: candidate.commit_sha,
+            source_tree_sha256: candidate.source_tree_sha256,
+            policy_sha256: candidate.policy_sha256,
+            version_manifest_sha256: candidate.version_manifest_sha256,
+            toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
+            support_manifest_sha256: candidate.support_manifest_sha256,
+            build_graph_sha256: candidate.build_graph_sha256,
+            creator_identity: candidate.creator_identity,
             artifact_manifest_sha256: digest_a(),
             evidence_manifest_sha256: candidate.evidence_manifest_sha256,
             qualification_receipt_sha256: digest_b(),

@@ -1,0 +1,205 @@
+name: Protected integration convergence admission
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Protected maintenance line (release/X.Y)
+        required: true
+        type: string
+      candidate_commit_sha:
+        description: Exact protected integration revision to admit
+        required: true
+        type: string
+      main_shared_fix_shas:
+        description: Comma-separated reviewed main fixes shared with the release line
+        required: false
+        default: ''
+        type: string
+      main_selected_shas:
+        description: Comma-separated exact main fixes selected for reviewed backport
+        required: false
+        default: ''
+        type: string
+      release_shared_fix_shas:
+        description: Comma-separated reviewed release-first fixes shared with main
+        required: false
+        default: ''
+        type: string
+      release_forward_ported_shas:
+        description: Comma-separated release-first fixes already forward-ported to main
+        required: false
+        default: ''
+        type: string
+      forward_port_receipt_sha256s:
+        description: Comma-separated exact receipts aligned with forward-ported SHAs
+        required: false
+        default: ''
+        type: string
+      review_summary_sha256:
+        description: SHA-256 of the independent review decision over both classifications
+        required: true
+        type: string
+      evidence_receipt_sha256:
+        description: SHA-256 of renewed tests for the integrated selections
+        required: true
+        type: string
+      integration_receipt_sha256:
+        description: SHA-256 of the protected CAS integration receipt
+        required: true
+        type: string
+
+concurrency:
+  group: convergence-${{ inputs.release_ref }}-${{ inputs.candidate_commit_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  emit-reviewed-convergence-receipt:
+    runs-on: ubuntu-latest
+    environment: protected-integration
+    outputs:
+      artifact_id: ${{ steps.receipt_bundle.outputs.artifact-id }}
+      artifact_digest: ${{ steps.receipt_bundle.outputs.artifact-digest }}
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+      receipt_sha256: ${{ steps.receipt.outputs.receipt_sha256 }}
+    steps:
+      - name: Validate exact protected integration identity
+        id: identity
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_REF" =~ ^release/[0-9]+\.[0-9]+$ ]]
+          [[ "$CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+          echo "artifact_name=convergence-receipt-${CANDIDATE_COMMIT}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.candidate_commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build reviewed bidirectional inventory receipt without mutation
+        id: receipt
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit_sha }}
+          MAIN_SHARED: ${{ inputs.main_shared_fix_shas }}
+          MAIN_SELECTED: ${{ inputs.main_selected_shas }}
+          RELEASE_SHARED: ${{ inputs.release_shared_fix_shas }}
+          RELEASE_FORWARDED: ${{ inputs.release_forward_ported_shas }}
+          FORWARD_RECEIPTS: ${{ inputs.forward_port_receipt_sha256s }}
+          REVIEW_SUMMARY_SHA256: ${{ inputs.review_summary_sha256 }}
+          EVIDENCE_RECEIPT_SHA256: ${{ inputs.evidence_receipt_sha256 }}
+          INTEGRATION_RECEIPT_SHA256: ${{ inputs.integration_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          for digest in "$REVIEW_SUMMARY_SHA256" "$EVIDENCE_RECEIPT_SHA256" "$INTEGRATION_RECEIPT_SHA256"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          done
+          git fetch --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/heads/$RELEASE_REF:refs/remotes/origin/$RELEASE_REF"
+          main_sha=$(git rev-parse refs/remotes/origin/main)
+          release_sha=$(git rev-parse "refs/remotes/origin/$RELEASE_REF")
+          test "$CANDIDATE_COMMIT" = "$release_sha"
+          test "$main_sha" != "$release_sha"
+
+          mkdir -p convergence-receipt
+          git rev-list --topo-order "$release_sha..$main_sha" > convergence-receipt/main.inventory
+          git rev-list --topo-order "$main_sha..$release_sha" > convergence-receipt/release.inventory
+          to_array() {
+            jq -cn --arg csv "$1" '$csv | split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0))'
+          }
+          file_array() {
+            jq -Rsc 'split("\n") | map(select(length > 0))' "$1"
+          }
+          main_inventory=$(file_array convergence-receipt/main.inventory)
+          release_inventory=$(file_array convergence-receipt/release.inventory)
+          main_shared=$(to_array "$MAIN_SHARED")
+          main_selected=$(to_array "$MAIN_SELECTED")
+          release_shared=$(to_array "$RELEASE_SHARED")
+          release_forwarded=$(to_array "$RELEASE_FORWARDED")
+          forward_receipts=$(to_array "$FORWARD_RECEIPTS")
+
+          jq -en --argjson inventory "$main_inventory" --argjson shared "$main_shared" \
+            --argjson selected "$main_selected" '
+              all(($inventory + $shared + $selected)[]; test("^[0-9a-f]{40}$|^[0-9a-f]{64}$")) and
+              all($shared[]; $inventory | index(.) != null) and
+              (($shared | sort | unique) == ($selected | sort | unique)) and
+              (($shared | length) == ($selected | length))' >/dev/null
+          jq -en --argjson inventory "$release_inventory" --argjson shared "$release_shared" \
+            --argjson forwarded "$release_forwarded" --argjson receipts "$forward_receipts" '
+              all(($inventory + $shared + $forwarded)[]; test("^[0-9a-f]{40}$|^[0-9a-f]{64}$")) and
+              all($shared[]; $inventory | index(.) != null) and
+              (($shared | sort | unique) == ($forwarded | sort | unique)) and
+              (($shared | length) == ($forwarded | length)) and
+              (($forwarded | length) == ($receipts | length)) and
+              all($receipts[]; test("^[0-9a-f]{64}$"))' >/dev/null
+
+          jq -n --sort-keys \
+            --arg candidate_commit_sha "$CANDIDATE_COMMIT" --arg release_ref "$RELEASE_REF" \
+            --arg main_head_sha "$main_sha" --arg release_head_sha "$release_sha" \
+            --arg review_summary_sha256 "$REVIEW_SUMMARY_SHA256" \
+            --arg evidence_receipt_sha256 "$EVIDENCE_RECEIPT_SHA256" \
+            --arg integration_receipt_sha256 "$INTEGRATION_RECEIPT_SHA256" \
+            --argjson main_inventory "$main_inventory" --argjson main_shared "$main_shared" \
+            --argjson main_selected "$main_selected" --argjson release_inventory "$release_inventory" \
+            --argjson release_shared "$release_shared" --argjson release_forwarded "$release_forwarded" \
+            --argjson forward_receipts "$forward_receipts" \
+            '{schema:"simple-release-convergence/1",producer:"protected_integration",
+              inventory_origin:"protected_integration",candidate_commit_sha:$candidate_commit_sha,
+              release_ref:$release_ref,main_head_sha:$main_head_sha,release_head_sha:$release_head_sha,
+              review_summary_sha256:$review_summary_sha256,
+              evidence_receipt_sha256:$evidence_receipt_sha256,
+              integration_receipt_sha256:$integration_receipt_sha256,
+              main_to_release:{inventory_shas:$main_inventory,shared_fix_shas:$main_shared,
+                selected_shas:$main_selected},
+              release_to_main:{inventory_shas:$release_inventory,shared_fix_shas:$release_shared,
+                forward_ported_shas:$release_forwarded,
+                forward_port_receipt_sha256s:$forward_receipts},
+              mutation:"none",main_remains_independent:true}' \
+            > convergence-receipt/convergence-receipt.json
+          (cd convergence-receipt && sha256sum convergence-receipt.json > convergence-receipt.sha256)
+          receipt_sha256=$(sha256sum convergence-receipt/convergence-receipt.json | awk '{print $1}')
+          echo "receipt_sha256=$receipt_sha256" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Protected integration convergence receipt"
+            echo "- Artifact: convergence-receipt-${CANDIDATE_COMMIT}"
+            echo "- Receipt SHA-256: ${receipt_sha256}"
+            echo "- Candidate/release head: ${CANDIDATE_COMMIT}"
+            echo "- Mutation: none"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest exact convergence receipt and checksum
+        id: convergence_attestation
+        uses: actions/attest-build-provenance@8beda2b7ed98355c0e97c0a63bec38ae472e66c4 # v4
+        with:
+          subject-path: |
+            convergence-receipt/convergence-receipt.json
+            convergence-receipt/convergence-receipt.sha256
+
+      - name: Preserve attestation bundle with receipt
+        env:
+          BUNDLE_PATH: ${{ steps.convergence_attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -s "$BUNDLE_PATH"
+          cp "$BUNDLE_PATH" convergence-receipt/convergence-receipt.sigstore.json
+
+      - name: Upload immutable convergence receipt
+        id: receipt_bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: convergence-receipt/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false

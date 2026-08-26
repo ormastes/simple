@@ -1,13 +1,22 @@
 name: Build and qualify immutable candidate
 
 on:
-  push:
-    branches:
-      - 'candidate/**'
   workflow_dispatch:
     inputs:
       candidate_ref:
         description: Immutable candidate ref (candidate/vX.Y.Z[-pre.N]/aNNN)
+        required: true
+        type: string
+      convergence_run_id:
+        description: Successful protected-integration workflow run containing the reviewed convergence receipt
+        required: true
+        type: string
+      convergence_artifact:
+        description: Exact convergence receipt artifact name
+        required: true
+        type: string
+      convergence_receipt_sha256:
+        description: Expected SHA-256 of convergence-receipt.json
         required: true
         type: string
 
@@ -17,6 +26,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
   attestations: write
 
@@ -45,6 +55,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Verify release policy projection parity
+        run: sh scripts/check/check-release-policy-parity.shs
+
       - name: Freeze candidate identity
         id: freeze
         run: |
@@ -59,6 +72,58 @@ jobs:
           esac
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          attempt=${{ steps.identity.outputs.candidate_ref }}
+          attempt=${attempt##*/a}
+          echo "attempt=$((10#$attempt))" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce create-once candidate artifact identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: candidate-${{ steps.freeze.outputs.version }}-${{ steps.freeze.outputs.commit }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          # A rerun must allocate a new candidate attempt/ref; it may not
+          # replace the artifact identity admitted by an earlier execution.
+          test "$RUN_ATTEMPT" = 1
+          existing=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100" |
+            jq -s --arg name "$ARTIFACT_NAME" \
+              '[.[].artifacts[] | select(.name == $name)] | length')
+          test "$existing" = 0 || {
+            echo "candidate artifact identity already exists; allocate a new candidate attempt" >&2
+            exit 1
+          }
+
+      - name: Validate canonical version and required support policy
+        env:
+          VERSION: ${{ steps.freeze.outputs.version }}
+        run: |
+          set -euo pipefail
+          runtime=bin/release/x86_64-unknown-linux-gnu/simple
+          test -x "$runtime"
+          channel=stable
+          case "$VERSION" in
+            *-alpha.*) channel=alpha ;;
+            *-beta.*) channel=beta ;;
+            *-rc.*) channel=rc ;;
+          esac
+          mkdir -p build/release-contract
+          SIMPLE_LIB="$PWD/src" "$runtime" run src/app/release/main.spl \
+            version-check --root=. --version="$VERSION" --channel="$channel" --json \
+            > build/release-contract/version-check.json
+          SIMPLE_LIB="$PWD/src" "$runtime" run src/app/release/main.spl \
+            support-check --root=. --channel="$channel" \
+            --observed-target=x86_64-unknown-linux-gnu --json \
+            > build/release-contract/support-check.json
+          jq -e '.status == "ok" and (.required_support | length > 0)' \
+            build/release-contract/support-check.json >/dev/null
+          jq -e '.support_matrix | length > (.required_support | length) and
+            all(.required_support[]; .status == "passed") and
+            all(.support_matrix[]; .status == "passed" or
+              .status == "not_executed" or .status == "unsupported" or
+              .status == "experimental")' \
+            build/release-contract/support-check.json >/dev/null
 
       - name: Full bootstrap and release-bound whole suite
         env:
@@ -68,11 +133,106 @@ jobs:
           sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --full-bootstrap --release --strategy=full
 
+      - name: Download exact protected-integration convergence receipt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.convergence_artifact }}
+          path: build/convergence-receipt
+          run-id: ${{ inputs.convergence_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Admit reviewed bidirectional convergence receipt
+        env:
+          VERSION: ${{ steps.freeze.outputs.version }}
+          COMMIT: ${{ steps.freeze.outputs.commit }}
+          RECEIPT_RUN_ID: ${{ inputs.convergence_run_id }}
+          EXPECTED_RECEIPT_SHA256: ${{ inputs.convergence_receipt_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          receipt=build/convergence-receipt/convergence-receipt.json
+          test -f "$receipt"
+          test "${{ inputs.convergence_artifact }}" = "convergence-receipt-${COMMIT}"
+          [[ "$RECEIPT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_RECEIPT_SHA256" "$receipt" | sha256sum --check --strict
+          (cd build/convergence-receipt && sha256sum --check --strict convergence-receipt.sha256)
+          gh attestation verify "$receipt" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+          run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RECEIPT_RUN_ID}")
+          test "$(jq -r '.conclusion' <<<"$run_json")" = success
+          test "$(jq -r '.head_sha' <<<"$run_json")" = "$COMMIT"
+          test "$(jq -r '.event' <<<"$run_json")" = workflow_dispatch
+          test "$(jq -r '.path' <<<"$run_json")" = .github/workflows/pr-admission.yml
+
+          release_line=$(printf '%s\n' "$VERSION" | awk -F. '{print $1 "." $2}')
+          release_ref="release/$release_line"
+          git fetch --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/heads/$release_ref:refs/remotes/origin/$release_ref"
+          main_sha=$(git rev-parse refs/remotes/origin/main)
+          release_sha=$(git rev-parse "refs/remotes/origin/$release_ref")
+          test "$main_sha" != "$release_sha"
+          test "$COMMIT" = "$release_sha"
+
+          # Exact inventories are recomputed from fetched protected refs.  The
+          # reviewed receipt must classify every source-only commit, including
+          # the legitimate empty case; an invented [] cannot conceal drift.
+          git rev-list --topo-order "$release_sha..$main_sha" > build/main-to-release.actual
+          git rev-list --topo-order "$main_sha..$release_sha" > build/release-to-main.actual
+          jq -r '.main_to_release.inventory_shas[]' "$receipt" > build/main-to-release.receipt
+          jq -r '.release_to_main.inventory_shas[]' "$receipt" > build/release-to-main.receipt
+          diff -u build/main-to-release.actual build/main-to-release.receipt
+          diff -u build/release-to-main.actual build/release-to-main.receipt
+
+          jq -e --arg commit "$COMMIT" --arg release_ref "$release_ref" \
+            --arg main "$main_sha" --arg release "$release_sha" \
+            '.schema == "simple-release-convergence/1" and
+             .producer == "protected_integration" and
+             .inventory_origin == "protected_integration" and
+             .candidate_commit_sha == $commit and .release_ref == $release_ref and
+             .main_head_sha == $main and .release_head_sha == $release and
+             (.review_summary_sha256 | test("^[0-9a-f]{64}$")) and
+             (.evidence_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+             (.integration_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+             (.main_to_release.shared_fix_shas | type == "array") and
+             (.main_to_release.selected_shas | type == "array") and
+             (.release_to_main.shared_fix_shas | type == "array") and
+             (.release_to_main.forward_ported_shas | type == "array") and
+             (.release_to_main.forward_port_receipt_sha256s | type == "array")' \
+            "$receipt" >/dev/null
+
+          csv() { jq -r "$1 | join(\",\")" "$receipt"; }
+          runtime=bin/release/x86_64-unknown-linux-gnu/simple
+          SIMPLE_LIB="$PWD/src" "$runtime" run src/app/release/main.spl \
+            convergence-admission --json \
+            --candidate-commit-sha="$COMMIT" \
+            --receipt-candidate-commit-sha="$(jq -r '.candidate_commit_sha' "$receipt")" \
+            --release-ref="$release_ref" --main-head-sha="$main_sha" \
+            --release-head-sha="$release_sha" --receipt-sha256="$EXPECTED_RECEIPT_SHA256" \
+            --review-summary-sha256="$(jq -r '.review_summary_sha256' "$receipt")" \
+            --integration-receipt-sha256="$(jq -r '.integration_receipt_sha256' "$receipt")" \
+            --inventory-origin="$(jq -r '.inventory_origin' "$receipt")" \
+            --main-inventory="$(csv '.main_to_release.inventory_shas')" \
+            --main-shared="$(csv '.main_to_release.shared_fix_shas')" \
+            --main-selected="$(csv '.main_to_release.selected_shas')" \
+            --release-inventory="$(csv '.release_to_main.inventory_shas')" \
+            --release-shared="$(csv '.release_to_main.shared_fix_shas')" \
+            --release-forward-ported="$(csv '.release_to_main.forward_ported_shas')" \
+            --forward-port-receipts="$(csv '.release_to_main.forward_port_receipt_sha256s')" \
+            > build/release-contract/convergence-admission.json
+          jq -e '.status == "ok" and .mutation == "none" and
+            .main_remains_independent == true' build/release-contract/convergence-admission.json >/dev/null
+          mkdir -p candidate
+          cp "$receipt" candidate/convergence-receipt.json
+
       - name: Assemble admitted candidate without fallback
         env:
           VERSION: ${{ steps.freeze.outputs.version }}
           COMMIT: ${{ steps.freeze.outputs.commit }}
+          ATTEMPT: ${{ steps.freeze.outputs.attempt }}
           CANDIDATE_REF: ${{ steps.identity.outputs.candidate_ref }}
+          CREATOR_IDENTITY: github:${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: |
           set -euo pipefail
           binary=bin/release/x86_64-unknown-linux-gnu/simple
@@ -81,6 +241,7 @@ jobs:
           mkdir -p candidate
           cp "$binary" candidate/simple-x86_64-unknown-linux-gnu
           cp release/support.sdn candidate/support.sdn
+          cp build/release-contract/support-check.json candidate/support-receipt.json
           cp CHANGELOG.md candidate/release-notes.md
           PKG_DIR="simple-${VERSION}-x86_64-unknown-linux-gnu"
           mkdir -p "candidate/${PKG_DIR}/bin"
@@ -100,29 +261,146 @@ jobs:
           "$binary" sbom . --out=candidate/simple.spdx.json \
             --name=ormastes.simple --version="$VERSION"
           test -s candidate/simple.spdx.json
+
+          # Package the already-qualified native MCP binaries now. Publication
+          # consumes these exact tarballs and is never allowed to rebuild them.
+          for package_spec in \
+            "tools/mcp-registry:simple_mcp_server:simple-lang-mcp-server-${VERSION}.tgz" \
+            "tools/lsp-mcp-registry:simple_lsp_mcp_server:simple-lang-lsp-mcp-server-${VERSION}.tgz"; do
+            package_dir=${package_spec%%:*}
+            package_tail=${package_spec#*:}
+            native_name=${package_tail%%:*}
+            output_name=${package_tail#*:}
+            native_binary="bin/release/x86_64-unknown-linux-gnu/${native_name}"
+            test -x "$native_binary"
+            staging=$(mktemp -d "$RUNNER_TEMP/simple-npm.XXXXXX")
+            cp "$package_dir/package.json" "$package_dir/server.json" \
+              "$package_dir/README.md" "$staging/"
+            mkdir "$staging/native"
+            install -m 0755 "$native_binary" "$staging/native/$native_name"
+            test "$(PACKAGE_JSON="$staging/package.json" node -p \
+              'require(process.env.PACKAGE_JSON).version')" = "$VERSION"
+            packed=$(npm pack "$staging" --pack-destination candidate --json |
+              jq -r 'if length == 1 then .[0].filename else error("unexpected npm pack result") end')
+            test -f "candidate/$packed"
+            if test "$packed" != "$output_name"; then
+              mv "candidate/$packed" "candidate/$output_name"
+            fi
+            rm -rf "$staging"
+          done
+
           (cd candidate && sha256sum \
             simple-x86_64-unknown-linux-gnu \
             "${PKG_DIR}.tar.gz" \
-            simple.spdx.json support.sdn release-notes.md > artifacts.sha256)
+            "simple-lang-mcp-server-${VERSION}.tgz" \
+            "simple-lang-lsp-mcp-server-${VERSION}.tgz" \
+            simple.spdx.json support.sdn support-receipt.json release-notes.md \
+            convergence-receipt.json > artifacts.sha256)
           source_tree_sha256=$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')
           artifact_manifest_sha256=$(sha256sum candidate/artifacts.sha256 | awk '{print $1}')
           policy_sha256=$(sha256sum .spipe/policy/vcs.sdn | awk '{print $1}')
           version_manifest_sha256=$(sha256sum release/version.sdn | awk '{print $1}')
           support_manifest_sha256=$(sha256sum release/support.sdn | awk '{print $1}')
           toolchain_manifest_sha256=$(sha256sum src/compiler_rust/Cargo.lock | awk '{print $1}')
+          convergence_receipt_sha256=$(sha256sum candidate/convergence-receipt.json | awk '{print $1}')
+          deploy_receipt="bin/release/x86_64-unknown-linux-gnu/bootstrap-deploy-receipt.env"
+          test -s "$deploy_receipt"
+          deploy_receipt_sha256=$(sha256sum "$deploy_receipt" | awk '{print $1}')
           jq -n \
             --arg candidate_commit_sha "$COMMIT" \
-            --arg artifact_manifest_sha256 "$artifact_manifest_sha256" \
-            '{schema:"simple-release-qualification/1",
+            --arg deploy_receipt_sha256 "$deploy_receipt_sha256" \
+            '{schema:"simple-release-build-graph/1",
               candidate_commit_sha:$candidate_commit_sha,
+              bootstrap_deploy_receipt_sha256:$deploy_receipt_sha256,
+              strategy:"full",release_mode:true}' > candidate/build-graph.json
+          build_graph_sha256=$(sha256sum candidate/build-graph.json | awk '{print $1}')
+          required_support=$(jq -c '.required_support' build/release-contract/support-check.json)
+          required_support_sha256=$(printf '%s' "$required_support" | sha256sum | awk '{print $1}')
+          support_matrix=$(jq -c '.support_matrix' build/release-contract/support-check.json)
+          support_receipt_sha256=$(sha256sum candidate/support-receipt.json | awk '{print $1}')
+          jq -n \
+            --arg artifact_manifest_sha256 "$artifact_manifest_sha256" \
+            --arg build_graph_sha256 "$build_graph_sha256" \
+            --arg convergence_receipt_sha256 "$convergence_receipt_sha256" \
+            --arg required_support_sha256 "$required_support_sha256" \
+            --arg support_receipt_sha256 "$support_receipt_sha256" \
+            --argjson required_support "$required_support" \
+            --argjson support_matrix "$support_matrix" \
+            '{schema:"simple-release-evidence/1",
               artifact_manifest_sha256:$artifact_manifest_sha256,
-              bootstrap:"passed",whole_tests:"passed",
-              required_support:[{target:"x86_64-unknown-linux-gnu",status:"passed"}]}' \
+              build_graph_sha256:$build_graph_sha256,
+              convergence_receipt_sha256:$convergence_receipt_sha256,
+              required_support_sha256:$required_support_sha256,
+              support_receipt_sha256:$support_receipt_sha256,
+              required_support:$required_support,
+              support_matrix:$support_matrix,
+              bootstrap:"passed",whole_tests:"passed"}' \
+            > candidate/evidence-manifest.json
+          evidence_manifest_sha256=$(sha256sum candidate/evidence-manifest.json | awk '{print $1}')
+          jq -n \
+            --arg version "$VERSION" \
+            --argjson attempt "$ATTEMPT" \
+            --arg candidate_ref "$CANDIDATE_REF" \
+            --arg commit_sha "$COMMIT" \
+            --arg source_tree_sha256 "$source_tree_sha256" \
+            --arg policy_sha256 "$policy_sha256" \
+            --arg version_manifest_sha256 "$version_manifest_sha256" \
+            --arg toolchain_manifest_sha256 "$toolchain_manifest_sha256" \
+            --arg support_manifest_sha256 "$support_manifest_sha256" \
+            --arg build_graph_sha256 "$build_graph_sha256" \
+            --arg creator_identity "$CREATOR_IDENTITY" \
+            --arg evidence_manifest_sha256 "$evidence_manifest_sha256" \
+            '{schema:"simple-release-candidate/1",version:$version,attempt:$attempt,
+              candidate_ref:$candidate_ref,commit_sha:$commit_sha,
+              source_tree_sha256:$source_tree_sha256,policy_sha256:$policy_sha256,
+              version_manifest_sha256:$version_manifest_sha256,
+              toolchain_manifest_sha256:$toolchain_manifest_sha256,
+              support_manifest_sha256:$support_manifest_sha256,
+              build_graph_sha256:$build_graph_sha256,creator_identity:$creator_identity,
+              evidence_manifest_sha256:$evidence_manifest_sha256}' \
+            > candidate/candidate-manifest.json
+          SIMPLE_LIB="$PWD/src" "$binary" run src/app/release/main.spl candidate-check --json \
+            --version="$VERSION" --attempt="$ATTEMPT" --candidate-ref="$CANDIDATE_REF" \
+            --commit-sha="$COMMIT" --source-sha256="$source_tree_sha256" \
+            --policy-sha256="$policy_sha256" --version-sha256="$version_manifest_sha256" \
+            --toolchain-sha256="$toolchain_manifest_sha256" --support-sha256="$support_manifest_sha256" \
+            --build-graph-sha256="$build_graph_sha256" --creator-identity="$CREATOR_IDENTITY" \
+            --evidence-sha256="$evidence_manifest_sha256" > candidate/candidate-check.json
+          candidate_identity=$(jq -er '.candidate_identity' candidate/candidate-check.json)
+          jq --arg candidate_identity "$candidate_identity" \
+            '. + {candidate_identity:$candidate_identity}' candidate/candidate-manifest.json \
+            > candidate/candidate-manifest.json.new
+          mv candidate/candidate-manifest.json.new candidate/candidate-manifest.json
+          jq -n \
+            --arg candidate_identity "$candidate_identity" \
+            --arg candidate_commit_sha "$COMMIT" \
+            --arg build_graph_sha256 "$build_graph_sha256" \
+            --arg artifact_manifest_sha256 "$artifact_manifest_sha256" \
+            --arg evidence_manifest_sha256 "$evidence_manifest_sha256" \
+            --arg convergence_receipt_sha256 "$convergence_receipt_sha256" \
+            --arg required_support_sha256 "$required_support_sha256" \
+            --arg support_receipt_sha256 "$support_receipt_sha256" \
+            --argjson required_support "$required_support" \
+            --argjson support_matrix "$support_matrix" \
+            '{schema:"simple-release-qualification/1",
+              candidate_identity:$candidate_identity,
+              candidate_commit_sha:$candidate_commit_sha,
+              build_graph_sha256:$build_graph_sha256,
+              artifact_manifest_sha256:$artifact_manifest_sha256,
+              evidence_manifest_sha256:$evidence_manifest_sha256,
+              convergence_receipt_sha256:$convergence_receipt_sha256,
+              required_support_sha256:$required_support_sha256,
+              support_receipt_sha256:$support_receipt_sha256,
+              required_support:$required_support,
+              support_matrix:$support_matrix,
+              required_support_passed:true}' \
             > candidate/qualification.json
           qualification_receipt_sha256=$(sha256sum candidate/qualification.json | awk '{print $1}')
           jq -n \
             --arg version "$VERSION" \
+            --argjson candidate_attempt "$ATTEMPT" \
             --arg candidate_ref "$CANDIDATE_REF" \
+            --arg candidate_identity "$candidate_identity" \
             --arg candidate_commit_sha "$COMMIT" \
             --arg source_tree_sha256 "$source_tree_sha256" \
             --arg artifact_manifest_sha256 "$artifact_manifest_sha256" \
@@ -130,17 +408,32 @@ jobs:
             --arg version_manifest_sha256 "$version_manifest_sha256" \
             --arg support_manifest_sha256 "$support_manifest_sha256" \
             --arg toolchain_manifest_sha256 "$toolchain_manifest_sha256" \
+            --arg build_graph_sha256 "$build_graph_sha256" \
+            --arg creator_identity "$CREATOR_IDENTITY" \
+            --arg evidence_manifest_sha256 "$evidence_manifest_sha256" \
             --arg qualification_receipt_sha256 "$qualification_receipt_sha256" \
+            --arg convergence_receipt_sha256 "$convergence_receipt_sha256" \
+            --arg required_support_sha256 "$required_support_sha256" \
+            --arg support_receipt_sha256 "$support_receipt_sha256" \
+            --argjson required_support "$required_support" \
+            --argjson support_matrix "$support_matrix" \
             '{schema:"simple-release-admission/1", version:$version,
-              candidate_ref:$candidate_ref, candidate_commit_sha:$candidate_commit_sha,
+              candidate_attempt:$candidate_attempt,candidate_ref:$candidate_ref,
+              candidate_identity:$candidate_identity,candidate_commit_sha:$candidate_commit_sha,
               source_tree_sha256:$source_tree_sha256,
               artifact_manifest_sha256:$artifact_manifest_sha256,
               policy_sha256:$policy_sha256,
               version_manifest_sha256:$version_manifest_sha256,
               support_manifest_sha256:$support_manifest_sha256,
               toolchain_manifest_sha256:$toolchain_manifest_sha256,
+              build_graph_sha256:$build_graph_sha256,creator_identity:$creator_identity,
+              evidence_manifest_sha256:$evidence_manifest_sha256,
               qualification_receipt_sha256:$qualification_receipt_sha256,
-              required_support:[{target:"x86_64-unknown-linux-gnu",status:"passed"}],
+              convergence_receipt_sha256:$convergence_receipt_sha256,
+              required_support_sha256:$required_support_sha256,
+              support_receipt_sha256:$support_receipt_sha256,
+              required_support:$required_support,required_support_passed:true,
+              support_matrix:$support_matrix,
               admitted:true,rebuild_allowed:false,fallback_used:false}' \
             > candidate/release-admission.json
           sha256sum candidate/release-admission.json > candidate/release-admission.sha256
@@ -152,6 +445,8 @@ jobs:
           subject-path: |
             candidate/simple-x86_64-unknown-linux-gnu
             candidate/simple-${{ steps.freeze.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+            candidate/simple-lang-mcp-server-${{ steps.freeze.outputs.version }}.tgz
+            candidate/simple-lang-lsp-mcp-server-${{ steps.freeze.outputs.version }}.tgz
 
       - name: Bind provenance to admission
         env:
@@ -170,6 +465,7 @@ jobs:
           sha256sum candidate/release-admission.json > candidate/release-admission.sha256
 
       - name: Upload immutable candidate bundle
+        id: candidate_bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: candidate-${{ steps.freeze.outputs.version }}-${{ steps.freeze.outputs.commit }}
@@ -177,3 +473,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Emit immutable candidate artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.candidate_bundle.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.candidate_bundle.outputs.artifact-digest }}
+          ARTIFACT_NAME: candidate-${{ steps.freeze.outputs.version }}-${{ steps.freeze.outputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo '## Immutable candidate artifact identity'
+            echo
+            echo "- artifact-id: $ARTIFACT_ID"
+            echo "- artifact-digest: $ARTIFACT_DIGEST"
+            echo "- artifact-name: $ARTIFACT_NAME"
+            echo "- workflow-run-id: $GITHUB_RUN_ID"
+            echo "- workflow-run-attempt: $GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_STEP_SUMMARY"

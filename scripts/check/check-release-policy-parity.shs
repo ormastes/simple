@@ -1,0 +1,79 @@
+#!/bin/sh
+# Repository-wide semantic parity gate for release operator/model surfaces.
+set -eu
+
+root=${1:-.}
+
+surfaces='.agents/skills/software-release/SKILL.md
+.agents/skills/release/SKILL.md
+.codex/skills/software-release/SKILL.md
+.codex/skills/release/SKILL.md
+.claude/skills/software-release.md
+.claude/skills/release.md
+.gemini/commands/software-release.toml
+.gemini/commands/release.toml
+doc/07_guide/infra/software_release.md
+src/app/release/main.spl'
+
+failed=0
+
+normalized_file() {
+    tr '[:upper:]' '[:lower:]' < "$1" \
+        | tr '\n\r\t`_*./|:-' '              ' \
+        | tr -cs '[:alnum:]' ' '
+}
+
+require_words() {
+    file=$1
+    clause=$2
+    shift 2
+    normalized=$(normalized_file "$file")
+    for word in "$@"; do
+        # Stems intentionally accept projection-specific grammar (for example
+        # candidate/candidates and promote/promotion) after normalization.
+        case "$normalized" in
+            *"$word"*) ;;
+            *)
+                echo "release-policy-parity: $file misses $clause token '$word'" >&2
+                failed=1
+                ;;
+        esac
+    done
+}
+
+for relative in $surfaces; do
+    file=$root/$relative
+    if test ! -f "$file"; then
+        echo "release-policy-parity: missing required surface $relative" >&2
+        failed=1
+        continue
+    fi
+
+    require_words "$file" isolated_session isolated session branch worktree
+    require_words "$file" canonical_version canonical version
+    require_words "$file" exact_reviewed_fix beta exact reviewed fix
+    require_words "$file" read_only_convergence main release read only
+    require_words "$file" independent_trunk main development trunk
+    require_words "$file" immutable_candidate candidate immutable once
+    require_words "$file" promote_not_rebuild promotion rebuild
+    require_words "$file" signed_annotated_tag signed annotated tag
+    require_words "$file" non_destructive_recovery rollback withdrawal
+    require_words "$file" external_approval push publication
+done
+
+# These are executable legacy recipes, not prose that describes their denial.
+for relative in $surfaces; do
+    file=$root/$relative
+    test -f "$file" || continue
+    if grep -Eiq 'NO[[:space:]]+BRANCHES|work[[:space:]]+directly[[:space:]]+on[[:space:]]+main|git[[:space:]]+push[[:space:]]+--tags|git[[:space:]]+tag[[:space:]]+-a|jj[[:space:]]+bookmark[[:space:]]+set[[:space:]]+main' "$file"; then
+        echo "release-policy-parity: forbidden legacy mutation recipe in $relative" >&2
+        failed=1
+    fi
+done
+
+if test "$failed" -ne 0; then
+    exit 1
+fi
+
+count=$(printf '%s\n' "$surfaces" | awk 'NF { count += 1 } END { print count }')
+echo "release-policy-parity: PASS ($count surfaces)"

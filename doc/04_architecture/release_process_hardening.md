@@ -27,11 +27,17 @@ The pure layer parses and validates caller-supplied facts and produces typed pla
 - `release/version.sdn`: sole editable product version and projection list.
 - `.spipe/policy/vcs.sdn`: sole ref/session/tag mutation policy.
 - `src/app/release/policy.spl`: pure value types and invariant checks.
-- `src/app/release/version_policy.spl`: SemVer/channel and projection checks.
-- `src/app/release/backport.spl`: reviewed beta bug-fix admission.
-- `src/app/release/candidate.spl`: immutable candidate identity and admission facts.
-- `src/app/release/promotion.spl`: signed exact-tag/no-rebuild/withdrawal plans.
+- `src/app/release/version_authority.spl`: manifest parsing, SemVer/channel,
+  compatibility bumping, deterministic projection render/check/apply.
+- `src/app/release/policy.spl`: reviewed backport, immutable candidate,
+  qualification/admission, signed exact-tag/no-rebuild, and withdrawal values.
 - `src/app/release/main.spl`: CLI translation only; no duplicated policy.
+- `src/app/release/session_authority.spl`: canonical Git-worktree verification,
+  repository-wide session registry, and private output/cache ownership.
+- `src/app/release/convergence.spl`: bounded fetch-only main/release discovery
+  and post-integration divergence receipts.
+- `src/app/release/support_policy.spl`: parsed required support rows shared by
+  candidate qualification and admission.
 - `src/app/release/github.spl`: low-level provider; callable only after admission.
 - `examples/05_stdlib/spipe/`: canonical embedded plugin package and generated operator/model projections.
 
@@ -70,7 +76,7 @@ An operator or integration authority selects an exact proposal. A `main` fix fol
 
 ## Candidate and promotion boundary
 
-Candidate creation is separate from builds. Builders consume the immutable manifest and publish content-addressed artifacts. Admission binds all required artifact/evidence digests. Promotion verifies the same digests and emits the exact signing/tag/publication plan; it never invokes a compiler or packager.
+Candidate creation is separate from builds. Builders consume the immutable manifest and publish content-addressed artifacts, including the already-packed npm registry tarballs. Candidate, qualification, and admission use one versioned schema family and bind source, policy, version, toolchain, support, build graph, creator, evidence, convergence, qualification, and artifact identities. Promotion verifies the same digests and emits the exact signing/tag/publication plan; it never invokes a compiler or packager. Remote execution is retry-idempotent: an existing tag must verify against the same commit and admission digest, existing assets must be byte-identical, and published releases cannot acquire missing or replacement assets.
 
 ## Plugin boundary
 
@@ -90,6 +96,6 @@ The pure capsule cannot mutate refs. Adapters validate ref names and exact expec
 
 ## Consequences
 
-- Existing `prepare.spl` becomes a legacy compatibility entry until callers move to the new CLI; its unsafe tag instructions must be removed.
-- Tag-triggered build CI remains a release blocker until converted to candidate build plus promote-only publication.
-- The first implementation can fully verify pure planning and projection parity without publishing or changing live GitHub configuration.
+- Existing `prepare.spl` is a fail-closed legacy entry while callers move to the guarded CLI.
+- Candidate CI builds and admits exact assets; release CI promotes without rebuilding; npm publication consumes the admitted tarballs unchanged.
+- Repository implementation still cannot prove live provider policy, signing, immutable publication, or release-grade bootstrap evidence without executing those authorities.

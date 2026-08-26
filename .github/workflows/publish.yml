@@ -10,6 +10,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
   attestations: read
 
@@ -21,68 +22,130 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - dir: tools/mcp-registry
-            package: '@simple-lang/mcp-server'
-          - dir: tools/lsp-mcp-registry
-            package: '@simple-lang/lsp-mcp-server'
+          - package: '@simple-lang/mcp-server'
+            asset_prefix: simple-lang-mcp-server
+          - package: '@simple-lang/lsp-mcp-server'
+            asset_prefix: simple-lang-lsp-mcp-server
     steps:
-      - name: Validate exact immutable release identity
+      - name: Verify signed admission chain and download exact admitted tarball
         id: identity
         env:
           TAG: ${{ github.event.release.tag_name }}
+          PACKAGE: ${{ matrix.package }}
+          ASSET_PREFIX: ${{ matrix.asset_prefix }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_ADMIN_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]
+          version=${TAG#v}
           test -n "$RELEASE_ADMIN_TOKEN"
           test "$(GH_TOKEN="$RELEASE_ADMIN_TOKEN" gh api \
             "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq '.enabled')" = true
           gh release verify "$TAG"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.event.release.tag_name }}
-          fetch-depth: 1
-          persist-credentials: false
+          mkdir release-assets
+          for receipt in artifacts.sha256 release-admission.json qualification.json \
+            promotion-receipt.json; do
+            gh release download "$TAG" --pattern "$receipt" --dir release-assets
+            gh release verify-asset "$TAG" "release-assets/$receipt"
+          done
+          ref_json=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}")
+          test "$(jq -r '.object.type' <<<"$ref_json")" = tag
+          tag_object_sha=$(jq -er '.object.sha' <<<"$ref_json")
+          tag_json=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}")
+          test "$(jq -r '.tag' <<<"$tag_json")" = "$TAG"
+          test "$(jq -r '.verification.verified' <<<"$tag_json")" = true
+          admission_sha256=$(jq -r '.message' <<<"$tag_json" |
+            sed -n 's/^Admission-SHA256: //p')
+          promotion_receipt_sha256=$(jq -r '.message' <<<"$tag_json" |
+            sed -n 's/^Promotion-Receipt-SHA256: //p')
+          [[ "$admission_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$promotion_receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$promotion_receipt_sha256" release-assets/promotion-receipt.json |
+            sha256sum --check --strict
+          test "$(jq -r '.admission_sha256' release-assets/promotion-receipt.json)" = \
+            "$admission_sha256"
+          test "$(jq -r '.version' release-assets/promotion-receipt.json)" = "$version"
+          test "$(jq -r '.object.sha' <<<"$tag_json")" = \
+            "$(jq -r '.candidate_commit_sha' release-assets/promotion-receipt.json)"
+          artifact_id=$(jq -er '.candidate_artifact_id' release-assets/promotion-receipt.json)
+          artifact_digest=$(jq -er '.candidate_artifact_digest' release-assets/promotion-receipt.json)
+          [[ "$artifact_id" =~ ^[0-9]+$ ]]
+          [[ "$artifact_digest" =~ ^[0-9a-f]{64}$ ]]
+          test "$(jq -r '.message' <<<"$tag_json" |
+            sed -n 's/^Candidate-Artifact-ID: //p')" = "$artifact_id"
+          test "$(jq -r '.message' <<<"$tag_json" |
+            sed -n 's/^Candidate-Artifact-Digest: //p')" = "$artifact_digest"
+          artifact_json=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}")
+          test "$(jq -r '.workflow_run.id' <<<"$artifact_json")" = \
+            "$(jq -r '.candidate_workflow_run_id' release-assets/promotion-receipt.json)"
+          test "$(jq -r '.workflow_run.head_sha' <<<"$artifact_json")" = \
+            "$(jq -r '.candidate_commit_sha' release-assets/promotion-receipt.json)"
+          remote_digest=$(jq -er '.digest' <<<"$artifact_json")
+          case "$remote_digest" in
+            "$artifact_digest"|"sha256:$artifact_digest") ;;
+            *) echo "published candidate artifact identity changed" >&2; exit 1 ;;
+          esac
+          test "$(jq -r '.version' release-assets/release-admission.json)" = "$version"
+          test "$(jq -r '.admitted' release-assets/release-admission.json)" = true
+          test "$(jq -r '.rebuild_allowed' release-assets/release-admission.json)" = false
+          test "$(jq -r '.fallback_used' release-assets/release-admission.json)" = false
+          printf '%s  %s\n' "$admission_sha256" release-assets/release-admission.json |
+            sha256sum --check --strict
+          qualification_sha256=$(jq -er \
+            '.qualification_receipt_sha256' release-assets/release-admission.json)
+          printf '%s  %s\n' "$qualification_sha256" release-assets/qualification.json |
+            sha256sum --check --strict
+          jq -e --slurpfile qualification release-assets/qualification.json '
+            .candidate_identity == $qualification[0].candidate_identity and
+            .candidate_commit_sha == $qualification[0].candidate_commit_sha and
+            .artifact_manifest_sha256 == $qualification[0].artifact_manifest_sha256 and
+            .required_support_sha256 == $qualification[0].required_support_sha256 and
+            .required_support_passed == true and
+            $qualification[0].required_support_passed == true' \
+            release-assets/release-admission.json >/dev/null
+          artifact_manifest_sha256=$(jq -er \
+            '.artifact_manifest_sha256' release-assets/release-admission.json)
+          printf '%s  %s\n' "$artifact_manifest_sha256" release-assets/artifacts.sha256 |
+            sha256sum --check --strict
+          asset="${ASSET_PREFIX}-${version}.tgz"
+          grep -Eq "^[0-9a-f]{64}  ${asset}$" release-assets/artifacts.sha256
+          gh release download "$TAG" --pattern "$asset" --dir release-assets
+          (cd release-assets && sha256sum --check --strict --ignore-missing artifacts.sha256)
+          gh release verify-asset "$TAG" "release-assets/$asset"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=release-assets/$asset" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           registry-url: https://registry.npmjs.org
-          cache: npm
-          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
 
-      - name: Verify checked-out tag and canonical package projections
-        working-directory: ${{ matrix.dir }}
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-          VERSION: ${{ steps.identity.outputs.version }}
-          PACKAGE: ${{ matrix.package }}
-        run: |
-          set -euo pipefail
-          test "$(git describe --tags --exact-match)" = "$TAG"
-          test "$(node -p 'require("./package.json").name')" = "$PACKAGE"
-          test "$(node -p 'require("./package.json").version')" = "$VERSION"
-          test "$(node -p 'require("./server.json").version')" = "$VERSION"
-          node -e '
-            const pkg = require("./package.json");
-            const server = require("./server.json");
-            const version = process.env.VERSION;
-            if (pkg.runtimeVersion !== undefined && pkg.runtimeVersion !== version) process.exit(1);
-            if (server.packages && server.packages.some((entry) => entry.version !== version)) process.exit(1);
-          '
-          npm ci --ignore-scripts
-          npm pack --dry-run
-
-      - name: Verify admitted native release assets
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: sh scripts/check-mcp-release-assets.shs "${{ matrix.dir }}"
-
-      - name: Publish exact checked-in package with registry provenance
-        working-directory: ${{ matrix.dir }}
+      - name: Publish exact candidate tarball idempotently
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+          PACKAGE: ${{ matrix.package }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          ASSET: ${{ steps.identity.outputs.asset }}
+        run: |
+          set -euo pipefail
+          dist_tag=latest
+          case "$VERSION" in
+            *-alpha.*) dist_tag=alpha ;;
+            *-beta.*) dist_tag=beta ;;
+            *-rc.*) dist_tag=rc ;;
+          esac
+          if npm view "$PACKAGE@$VERSION" version >/dev/null 2>&1; then
+            mkdir registry-copy
+            registry_asset=$(npm pack "$PACKAGE@$VERSION" \
+              --pack-destination registry-copy --json | jq -r '.[0].filename')
+            cmp --silent "$ASSET" "registry-copy/$registry_asset" || {
+              echo "registry version exists with different bytes" >&2; exit 1;
+            }
+            test "$(npm view "$PACKAGE" "dist-tags.$dist_tag")" = "$VERSION"
+            exit 0
+          fi
+          npm publish "$ASSET" --access public --provenance --tag "$dist_tag"
+          test "$(npm view "$PACKAGE@$VERSION" version)" = "$VERSION"
+          test "$(npm view "$PACKAGE" "dist-tags.$dist_tag")" = "$VERSION"

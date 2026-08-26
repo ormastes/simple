@@ -1,12 +1,17 @@
 """Release/main convergence is periodic, caller-selected, and never mutates Git."""
 # @req: REQ-004, REQ-005, REQ-006, REQ-009
 use std.spec.{describe, it, expect, step}
-use app.release.convergence.{ReviewedBugFix, ConvergenceRequest, plan_release_main_convergence}
+use app.release.convergence.{
+    ReviewedBugFix, ConvergenceRequest, ConvergenceAdmissionRequest,
+    plan_release_main_convergence, check_convergence_admission
+}
 
 fn sha_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 fn sha_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 fn sha_c() -> text: "cccccccccccccccccccccccccccccccccccccccc"
 fn receipt_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn receipt_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+fn receipt_c() -> text: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
 fn reviewed_fix(source_ref: text) -> ReviewedBugFix:
     ReviewedBugFix(
@@ -32,6 +37,22 @@ fn request(direction: text, candidates: [ReviewedBugFix], selected: [text], conf
         forward_port_required: direction == "release_to_main",
         forward_port_target_ref: if direction == "release_to_main": "main" else: "",
         main_tracks_release: false
+    )
+
+fn admission() -> ConvergenceAdmissionRequest:
+    ConvergenceAdmissionRequest(
+        candidate_commit_sha: sha_b(), receipt_candidate_commit_sha: sha_b(),
+        release_ref: "release/1.0", main_head_sha: sha_a(), release_head_sha: sha_b(),
+        receipt_sha256: receipt_a(), review_summary_sha256: receipt_b(),
+        evidence_receipt_sha256: receipt_c(), integration_receipt_sha256: receipt_c(),
+        inventory_origin: "protected_integration",
+        main_to_release_inventory_shas: [sha_c()],
+        main_to_release_shared_fix_shas: [sha_c()],
+        main_to_release_selected_shas: [sha_c()],
+        release_to_main_inventory_shas: [sha_a()],
+        release_to_main_shared_fix_shas: [sha_a()],
+        release_to_main_forward_ported_shas: [sha_a()],
+        forward_port_receipt_sha256s: [receipt_a()]
     )
 
 describe "Release/main convergence planner":
@@ -84,3 +105,33 @@ describe "Release/main convergence planner":
 
         early.eligible_reviewed_bug_fixes = [reviewed_fix("main")]
         expect(plan_release_main_convergence(early).valid).to_be(false)
+
+    it "admits an exact protected-integration receipt in both directions":
+        val checked = check_convergence_admission(admission())
+        expect(checked.valid).to_be(true)
+        expect(checked.mutation).to_equal("none")
+        expect(checked.main_to_release_selected_count).to_equal(1)
+        expect(checked.release_to_main_forward_ported_count).to_equal(1)
+        expect(checked.main_remains_independent).to_be(true)
+
+    it "rejects an unselected shared main fix":
+        var request = admission()
+        request.main_to_release_selected_shas = []
+        val checked = check_convergence_admission(request)
+        expect(checked.valid).to_be(false)
+        expect(checked.reason).to_equal("every main shared fix must be explicitly selected for backport")
+
+    it "rejects a missing release-first forward port":
+        var request = admission()
+        request.release_to_main_forward_ported_shas = []
+        request.forward_port_receipt_sha256s = []
+        val checked = check_convergence_admission(request)
+        expect(checked.valid).to_be(false)
+        expect(checked.reason).to_equal("every release-first shared fix requires a completed forward port to main")
+
+    it "rejects a receipt not produced by protected integration":
+        var request = admission()
+        request.inventory_origin = "candidate_ci"
+        val checked = check_convergence_admission(request)
+        expect(checked.valid).to_be(false)
+        expect(checked.reason).to_equal("convergence inventory must originate from protected integration")

@@ -1,343 +1,132 @@
 # Protected beta and stable software release
 
-> This manual shows a release operator how Simple and Spipe validate a beta or stable release before any VCS, build, signing, or hosting provider mutates external state. The executable scenarios exercise pure plans only. A local PASS does not claim that GitHub rulesets, signing keys, protected pushes, immutable publication, or registries were changed.
+> Manually synchronized with the executable SSpec after the final hardening
+> changes. Doc generation was not rerun because this lane had reached its
+> three-cycle retry cap. The runnable source remains authoritative.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+## At a glance
 
-<details>
-<summary>Full Scenario Manual</summary>
+| Property | Rule |
+|---|---|
+| Authoring | One registered session, one `work/*` branch, one linked worktree |
+| Beta fixes | One exact reviewed fix at a time; no automatic cherry-pick |
+| Trunk | `main` remains the independent development trunk |
+| Candidate | Create once; exact candidate/qualification/admission identities |
+| Promotion | Signed annotated exact tag; admitted assets; no rebuild/fallback |
+| npm | Candidate-built admitted tarballs are published unchanged |
+| Recovery | Retry idempotently, redeploy, withdraw, or issue a new version |
 
-# Protected beta and stable software release
+## Requirements and sources
 
-This manual shows a release operator how Simple and Spipe validate a beta or stable release before any VCS, build, signing, or hosting provider mutates external state. The executable scenarios exercise pure plans only. A local PASS does not claim that GitHub rulesets, signing keys, protected pushes, immutable publication, or registries were changed.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Requirements | doc/02_requirements/feature/release_process_hardening.md |
-| Plan | doc/03_plan/sys_test/release_process_hardening.md |
-| Design | doc/05_design/release_process_hardening.md |
-| Research | doc/01_research/infra/release/simple_spipe_release_branch_tag_test_repair_bootstrap_scheduling_hardening_2026-08-26.md |
-| Source | `test/03_system/app/release/feature/release_process_hardening_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-This manual shows a release operator how Simple and Spipe validate a beta or
-stable release before any VCS, build, signing, or hosting provider mutates
-external state. The executable scenarios exercise pure plans only. A local PASS
-does not claim that GitHub rulesets, signing keys, protected pushes, immutable
-publication, or registries were changed.
-
-## Requirements
-
-**Requirements:** doc/02_requirements/feature/release_process_hardening.md
-
-**NFRs:** doc/02_requirements/nfr/release_process_hardening.md
-
-**Research:** doc/01_research/infra/release/simple_spipe_release_branch_tag_test_repair_bootstrap_scheduling_hardening_2026-08-26.md
-
-**Plan:** doc/03_plan/sys_test/release_process_hardening.md
-
-**Architecture:** doc/04_architecture/release_process_hardening.md
-
-**Design:** doc/05_design/release_process_hardening.md
+- Requirements: `doc/02_requirements/feature/release_process_hardening.md`
+- NFRs: `doc/02_requirements/nfr/release_process_hardening.md`
+- Architecture: `doc/04_architecture/release_process_hardening.md`
+- Design: `doc/05_design/release_process_hardening.md`
+- Test plan: `doc/03_plan/sys_test/release_process_hardening.md`
+- Runnable scenario: `test/03_system/app/release/feature/release_process_hardening_spec.spl`
 
 ## Operator flow
 
-Begin in an isolated release session with a unique work branch and worktree.
-Load the canonical version and protected-ref policy. For beta maintenance,
-target the matching release line and validate one explicit reviewed bug fix at
-a time. After renewed focused evidence passes for the resulting revision,
-integrate through compare-and-swap and freeze a new immutable candidate.
-
-Build and qualify that exact candidate once. Promotion consumes the admitted
-artifact manifest without rebuilding or fallback and prepares one signed,
-annotated, exact tag ref. Rollback redeploys an older admitted version;
-withdrawal never deletes, moves, or reuses release identity.
-
-## Commands
-
-Use the shipped validation commands before provider mutation:
-
-```text
-simple release version-check
-simple release beta-prepare
-simple release backport-check
-simple release candidate-check
-simple release promote-check
-simple release withdraw-check
-```
-
-The Spipe plugin exposes `spipe release-guide` and
-`spipe release-capabilities` as read-only discovery surfaces.
-
-## Examples
-
-A valid beta identity is `1.4.0-beta.2` on `release/1.4`; its first immutable
-candidate is `candidate/v1.4.0-beta.2/a001` and its eventual signed tag is
-`v1.4.0-beta.2`. Uppercase or unnumbered beta suffixes are invalid for new
-releases. A backport with `kind=feat` is rejected even when its commit and
-review fields are present. A promotion plan with matching artifacts is still
-rejected when it requests a rebuild, fallback, unsigned tag, or broad tag push.
-
-## Beta backport evidence
-
-A valid beta backport records the exact source SHA, stable change and work IDs,
-change kind `fix`, review receipt digest, target `release/X.Y`, expected target
-SHA, explicit adaptation reason, result SHA, and renewed evidence digest. Reject
-feature commits, commit ranges, moving refs, stale review, wrong release line,
-or evidence from before the backport was applied.
-
-## Candidate evidence
-
-The candidate binds version, attempt, candidate ref, exact commit, source tree,
-policy, version manifest, toolchain, support, and evidence digests. An identical
-repeat is idempotent. A different identity at the same candidate is mutation
-and fails.
-
-## Promotion evidence
-
-Promotion requires an admitted candidate, matching commit and artifact digest,
-canonical tag, signed and annotated intent, and exact single-ref push intent.
-`rebuild=true`, fallback artifacts, unsigned/lightweight tags, all-tag pushes,
-or a mismatched commit/digest fail before a provider can run.
-
-## Troubleshooting
-
-- `release version channel does not match` means the suffix and declared
-  channel disagree; choose a new canonical version and render projections.
-- `release mutation is forbidden in the main worktree` means the operator must
-  start or resume an isolated release session.
-- `beta backports accept reviewed bug fixes only` means the supplied change is
-  not an admissible maintenance fix.
-- `candidate identity is create-once` means inputs changed; allocate a new
-  candidate attempt instead of overwriting the old one.
-- `promotion must not rebuild` means return to candidate build/qualification;
-  promotion is never a build retry.
-- `withdrawal must preserve published release identity` means redeploy or
-  publish a new correction rather than rewriting history.
-
-## Verification boundary
-
-Run this focused scenario once after changes, generate this mirror through
-SPipe, scan it with `sspec-maintain`, and then run the release-bound whole suite
-once. Required external rows stay blocked until their own receipts exist.
-
-## Scenarios
-
-### Hardened Simple and Spipe software release
-
-#### loads the canonical release policy and rejects stale version projections
-
-- Load the canonical release policy
-   - Expected: beta.canonical equals `1.4.0-beta.2`
-   - Expected: beta.line equals `1.4`
-   - Expected: check_version_projection(beta.canonical, "VERSION", "1.4.0-beta.1").reason equals `version projection is stale: VERSION`
-   - Expected: parse_release_version("1.4.0-BETA").channel equals `invalid`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Load the canonical release policy")
-val beta = parse_release_version("1.4.0-beta.2")
-expect(beta.canonical).to_equal("1.4.0-beta.2")
-expect(beta.line).to_equal("1.4")
-expect(check_version_channel(beta, "beta").valid).to_be(true)
-expect(check_version_projection(beta.canonical, "VERSION", "1.4.0-beta.1").reason).to_equal("version projection is stale: VERSION")
-expect(parse_release_version("1.4.0-BETA").channel).to_equal("invalid")
-```
-
-</details>
-
-#### prepares an isolated beta release and rejects the main worktree
-
-- Prepare an isolated beta release
-   - Expected: validate_release_session(main_session).reason equals `release mutation is forbidden in the main worktree`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 15 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Prepare an isolated beta release")
-val session = setup_release_fixture()
-expect(validate_release_session(session).valid).to_be(true)
-expect(check_beta_preparation(parse_release_version("1.4.0-beta.2"), session).valid).to_be(true)
-val main_session = ReleaseSession(
-    session_id: session.session_id,
-    workspace_path: session.main_workspace_path,
-    main_workspace_path: session.main_workspace_path,
-    work_branch: session.work_branch,
-    target_ref: session.target_ref,
-    base_sha: session.base_sha,
-    expected_target_sha: session.expected_target_sha,
-    policy_sha256: session.policy_sha256
-)
-expect(validate_release_session(main_session).reason).to_equal("release mutation is forbidden in the main worktree")
-```
-
-</details>
-
-#### admits reviewed bug-fix backports and rejects unrelated features
-
-- Admit reviewed bug-fix backports
-   - Expected: check_backport_admission(feature).reason equals `beta backports accept reviewed bug fixes only`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Admit reviewed bug-fix backports")
-val request = setup_backport_fixture()
-expect(check_backport_admission(request).valid).to_be(true)
-val feature = BackportRequest(
-    source_commit_sha: request.source_commit_sha,
-    change_id: request.change_id,
-    work_id: request.work_id,
-    change_kind: "feat",
-    review_receipt_sha256: request.review_receipt_sha256,
-    target_line: request.target_line,
-    expected_target_sha: request.expected_target_sha,
-    adaptation_reason: request.adaptation_reason,
-    evidence_sha256: request.evidence_sha256,
-    result_commit_sha: request.result_commit_sha
-)
-expect(check_backport_admission(feature).reason).to_equal("beta backports accept reviewed bug fixes only")
-```
-
-</details>
-
-#### freezes one complete candidate and rejects mutation
-
-- Freeze and qualify the release candidate
-   - Expected: check_candidate_create_once("different-existing-identity", candidate).reason equals `candidate identity is create-once and cannot be mutated`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Freeze and qualify the release candidate")
-val candidate = setup_candidate_fixture()
-expect(check_candidate_manifest(candidate).valid).to_be(true)
-val identity = candidate_identity(candidate)
-expect(check_candidate_create_once(identity, candidate).valid).to_be(true)
-expect(check_candidate_create_once("different-existing-identity", candidate).reason).to_equal("candidate identity is create-once and cannot be mutated")
-```
-
-</details>
-
-#### promotes exact admitted artifacts without rebuilding or fallback
-
-- Promote exact admitted artifacts
-   - Expected: check_promotion_plan(admission, rebuild).reason equals `promotion must not rebuild admitted artifacts`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 35 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Promote exact admitted artifacts")
-val candidate = setup_candidate_fixture()
-val admission = ReleaseAdmission(
-    candidate_identity: candidate_identity(candidate),
-    candidate_commit_sha: candidate.commit_sha,
-    artifact_manifest_sha256: "artifact-digest",
-    evidence_manifest_sha256: candidate.evidence_manifest_sha256,
-    admitted: true
-)
-val plan = PromotionPlan(
-    tag: "v1.4.0-beta.2",
-    target_commit_sha: candidate.commit_sha,
-    candidate_commit_sha: candidate.commit_sha,
-    artifact_manifest_sha256: "artifact-digest",
-    admitted_artifact_manifest_sha256: "artifact-digest",
-    signed_tag: true,
-    annotated_tag: true,
-    exact_tag_push: true,
-    rebuild: false,
-    fallback_artifact: false
-)
-expect(check_promotion_plan(admission, plan).valid).to_be(true)
-val rebuild = PromotionPlan(
-    tag: plan.tag,
-    target_commit_sha: plan.target_commit_sha,
-    candidate_commit_sha: plan.candidate_commit_sha,
-    artifact_manifest_sha256: plan.artifact_manifest_sha256,
-    admitted_artifact_manifest_sha256: plan.admitted_artifact_manifest_sha256,
-    signed_tag: plan.signed_tag,
-    annotated_tag: plan.annotated_tag,
-    exact_tag_push: plan.exact_tag_push,
-    rebuild: true,
-    fallback_artifact: false
-)
-expect(check_promotion_plan(admission, rebuild).reason).to_equal("promotion must not rebuild admitted artifacts")
-```
-
-</details>
-
-#### withdraws without rewriting published release identity
-
-- Withdraw without rewriting release identity
-   - Expected: check_withdrawal_plan(true, false, false, "1.3.9").reason equals `withdrawal must preserve published release identity`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Withdraw without rewriting release identity")
-expect(check_withdrawal_plan(false, false, false, "1.3.9").valid).to_be(true)
-expect(check_withdrawal_plan(true, false, false, "1.3.9").reason).to_equal("withdrawal must preserve published release identity")
-```
-
-</details>
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Requirements:** `doc/02_requirements/feature/release_process_hardening.md`
-- **Plan:** `doc/03_plan/sys_test/release_process_hardening.md`
-- **Design:** `doc/05_design/release_process_hardening.md`
-- **Research:** `doc/01_research/infra/release/simple_spipe_release_branch_tag_test_repair_bootstrap_scheduling_hardening_2026-08-26.md`
-
-
-</details>
+### 1. Load the canonical release policy
+
+Read `release/version.sdn`, verify its deterministic projections, and reject
+stale or undeclared product-version consumers. New prereleases are lowercase
+and numbered, such as `1.4.0-beta.2`.
+
+### 2. Prepare an isolated beta release
+
+Work only from a linked non-main worktree on a unique `work/*` branch. The
+trusted authority verifies canonical paths, Git worktree/branch/HEAD/target
+state, and the VCS-policy digest. Register the session under the repository-wide
+lock before a mutating command. Duplicate session, workspace, or branch
+ownership and stale, detached, protected, symlink-aliased, or unregistered
+sessions fail closed. Outputs and writable cache overlays are session-private.
+
+### 3. Admit reviewed bug-fix backports
+
+An admissible `main`-to-beta fix binds one exact source SHA, stable change/work
+IDs, `kind=fix`, exact source review, exact target head, explicit adaptation
+reason, result SHA, and renewed result evidence. A feature, range, moving ref,
+stale review, or pre-application evidence is rejected.
+
+For a release-first emergency fix, the same contract requires an exact reviewed
+forward-port receipt targeting `main`. A release-only compatibility change may
+remain divergent only with an explicit reviewed reason.
+
+### 4. Inspect main/release convergence
+
+At bounded bootstrap or beta checkpoints, fetch exact `main` and `release/X.Y`
+heads and compare no more than 256 source-only commits. Discovery is fetch-only:
+it never selects, applies, merges, or pushes. A caller explicitly selects exact
+review-bound fixes; each must be reachable from the source and absent, including
+patch equivalence, from the target.
+
+After protected CAS integration, record a divergence receipt only when a fresh
+fetch proves the source unchanged, the target append-only and equal to the
+reviewed result, and every selected patch represented. `main` must remain a
+separate development trunk and must never track, reset to, or be replaced by the
+release line.
+
+### 5. Freeze and qualify the candidate
+
+The first beta candidate is `candidate/v1.4.0-beta.2/a001`. The canonical
+`simple-release-candidate/1` identity binds version, attempt, ref, exact commit,
+source tree, policy, version manifest, toolchain, support manifest, build graph,
+creator, and evidence identities. Identical retry is idempotent; different
+content at the same identity is rejected.
+
+Qualification binds the artifact and required-support manifests to that
+candidate. Admission additionally binds the qualification and convergence
+receipts and asserts `required_support_passed=true`, `admitted=true`,
+`rebuild_allowed=false`, and `fallback_used=false`.
+
+Candidate CI builds the compiler/package assets once, runs the required
+bootstrap and whole-test gates, generates checksum/SBOM/provenance evidence,
+and packs the MCP and LSP MCP npm tarballs. Those `.tgz` files are admitted
+release assets, not recreated by publication.
+
+### 6. Promote exact admitted artifacts
+
+Promotion verifies the successful candidate workflow run, exact candidate ref
+and commit, every manifest digest, required support, provenance, and immutable
+release configuration. It creates or verifies one signed annotated `v...` tag
+and pushes only that exact ref.
+
+A retry accepts an existing tag only when signature, commit, and admission
+digest match. It resumes an existing draft, rejects unadmitted remote assets,
+compares bytes for existing assets, uploads only missing admitted assets, checks
+the final exact asset set, and verifies the immutable published release. It does
+not compile, package, rewrite versions, or use fallback content.
+
+The npm workflow downloads and verifies the admitted tarball, then publishes
+that file with `alpha`, `beta`, `rc`, or `latest`. An already-existing registry
+version is idempotent only when its packed bytes and distribution tag match.
+
+### 7. Withdraw without rewriting release identity
+
+Rollback redeploys a prior admitted version. Withdrawal preserves tags, assets,
+and audit history. A correction receives a new beta, RC, or patch identity.
+
+## Executable scenario coverage
+
+The runnable SSpec currently contains six active scenarios and no placeholders:
+
+1. canonical policy/version parsing and stale projection rejection;
+2. isolated beta preparation and main-worktree rejection;
+3. reviewed backport/forward-port admission and feature/stale-review rejection;
+4. complete candidate and qualification receipt plus create-once rejection;
+5. exact admission/promotion plus rebuild and version/tag mismatch rejection;
+6. non-destructive withdrawal.
+
+Trusted session registration and Git convergence require real repository
+fixtures and are covered by their focused integration specs rather than being
+faked in this pure system scenario.
+
+## Current evidence boundary
+
+This manual does not claim a live beta release. The available local runtime is
+bootstrap seed-derived and therefore cannot prove the release-grade whole-suite
+gate. The final trusted-session integration spec also timed out. GitHub
+rulesets, signing, immutable release settings, protected environments, and npm
+publication still require live receipts. Missing evidence is a release-blocking
+FAIL, never a degraded PASS.

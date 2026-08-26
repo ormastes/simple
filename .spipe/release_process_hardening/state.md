@@ -54,7 +54,7 @@ Implement and verify one policy-driven Simple/Spipe software-release system in w
 
 ## Phase
 
-verify-blocked
+verify-evidence-required
 
 ## Log
 
@@ -72,15 +72,34 @@ verify-blocked
   Spipe build/parity PASS; direct-env runtime guards working/staged PASS.
 - review: lower-model inventory lanes and implementation/docs plugin reviews
   completed; highest-capability release review requested after reconciliation.
-- convergence policy: Added bounded read-only main/release discovery, exact reviewed
-  backport and forward-port paths, protected CAS integration, divergence receipts,
-  and the invariant that `main` remains trunk rather than tracking a release line.
-- highest review: Top-level direct-main rules were corrected. Final review still
-  rejects completion because convergence is not Git/CI-wired, candidate/admission
-  schemas diverge, promotion retries and remote asset checks are incomplete, npm
-  packages are rebuilt after admission, projection parity is partial, and version
-  discovery misses JSON consumers and exceeds its latency target.
-- blocked: release-grade whole-suite/lint evidence cannot be claimed with the
-  available runtime because it identifies itself as bootstrap seed-derived.
-  Live GitHub ruleset verification and promote-only workflow conversion remain
-  outside the authorized live-mutation scope and are tracked separately.
+- session authority: Added canonical linked-worktree verification, exact
+  Git/target/policy checks, a locked unique session/workspace/branch registry,
+  and private output/cache ownership. Its final focused integration run exceeded
+  the bounded timeout and therefore still needs a clean PASS.
+- convergence implementation: Added bounded fetch-only Git discovery, exact
+  review/ancestry/patch-equivalence validation, and post-integration divergence
+  receipts. `main` remains an independent trunk; no bootstrap worker selects,
+  applies, or pushes fixes.
+- protected-ref enforcement: `sj`, Simple JJ sync, and both sync/async MCP JJ
+  push handlers now permit only a bounded explicit `work/*` destination. Raw
+  ref mutation, bulk/tag/force/delete pushes, and protected bookmark movement
+  are denied; adversarial policy tests pass 28/28 and source parity passes 3/3.
+- candidate authority: Added create-once persisted candidate state, bound
+  admission state, status, and promotion planning against exact state digests;
+  focused integration passes 3/3.
+- final focused evidence: real-Git convergence passes 1/1, workflow gate passes
+  2/2, and archive/artifact/publication source contract passes 3/3.
+- candidate/promotion/publication: Unified candidate, qualification, and
+  admission evidence; candidate CI admits exact npm tarballs; promote-only CI
+  verifies signed tag and remote assets idempotently; npm publishes the admitted
+  bytes with channel-aware tags.
+- manual: Manually synchronized the standalone operator manual with the final
+  six-scenario SSpec and repository-backed integration lanes. Docgen was not
+  rerun because the mandatory three-cycle cap had already been reached.
+- blocked evidence: release-grade whole-suite/lint evidence cannot be claimed
+  because the available runtime identifies itself as bootstrap seed-derived.
+  The canonical full release bootstrap was attempted and failed closed with
+  exit 64 `reason-receipt-required`; no admitted parent/runtime/planner receipt
+  identities are available in this isolated workspace.
+  Live GitHub policy/signing/immutable-publication/npm receipts and a bounded
+  trusted-session integration PASS are also still required.

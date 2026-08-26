@@ -7,7 +7,8 @@ on:
       candidate_commit: {description: "Exact admitted commit SHA", required: true, type: string}
       candidate_ref: {description: "Immutable candidate ref", required: true, type: string}
       candidate_run_id: {description: "Candidate workflow run id", required: true, type: string}
-      candidate_artifact: {description: "Immutable candidate artifact name", required: true, type: string}
+      candidate_artifact_id: {description: "Immutable numeric GitHub artifact id", required: true, type: string}
+      candidate_artifact_digest: {description: "Upload-artifact SHA-256 digest", required: true, type: string}
       admission_sha256: {description: "SHA-256 of release-admission.json", required: true, type: string}
 
 concurrency:
@@ -30,20 +31,45 @@ jobs:
           VERSION: ${{ inputs.version }}
           COMMIT: ${{ inputs.candidate_commit }}
           CANDIDATE_REF: ${{ inputs.candidate_ref }}
-          CANDIDATE_ARTIFACT: ${{ inputs.candidate_artifact }}
+          ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
           ADMISSION_SHA256: ${{ inputs.admission_sha256 }}
         run: |
           set -euo pipefail
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$CANDIDATE_REF" =~ ^candidate/v${VERSION}/a[0-9]{3}$ ]]
-          test "$CANDIDATE_ARTIFACT" = "candidate-${VERSION}-${COMMIT}"
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           [[ "$ADMISSION_SHA256" =~ ^[0-9a-f]{64}$ ]]
 
-      - name: Download candidate without rebuilding
+      - name: Resolve exact immutable artifact identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
+          EXPECTED_NAME: candidate-${{ inputs.version }}-${{ inputs.candidate_commit }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          COMMIT: ${{ inputs.candidate_commit }}
+        run: |
+          set -euo pipefail
+          artifact_json=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")
+          test "$(jq -r '.id' <<<"$artifact_json")" = "$ARTIFACT_ID"
+          test "$(jq -r '.name' <<<"$artifact_json")" = "$EXPECTED_NAME"
+          test "$(jq -r '.expired' <<<"$artifact_json")" = false
+          test "$(jq -r '.workflow_run.id' <<<"$artifact_json")" = "$RUN_ID"
+          test "$(jq -r '.workflow_run.head_sha' <<<"$artifact_json")" = "$COMMIT"
+          remote_digest=$(jq -er '.digest' <<<"$artifact_json")
+          case "$remote_digest" in
+            "$ARTIFACT_DIGEST"|"sha256:$ARTIFACT_DIGEST") ;;
+            *) echo "candidate artifact digest mismatch" >&2; exit 1 ;;
+          esac
+
+      - name: Download candidate by immutable id without rebuilding
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.candidate_artifact }}
+          artifact-ids: ${{ inputs.candidate_artifact_id }}
           run-id: ${{ inputs.candidate_run_id }}
           github-token: ${{ github.token }}
           path: candidate
@@ -62,9 +88,12 @@ jobs:
           test -f candidate/release-admission.json
           test -f candidate/artifacts.sha256
           printf '%s  %s\n' "$ADMISSION_SHA256" candidate/release-admission.json | sha256sum --check --strict
+          test "$(jq -r '.schema' candidate/release-admission.json)" = simple-release-admission/1
           test "$(jq -r '.version' candidate/release-admission.json)" = "$VERSION"
           test "$(jq -r '.candidate_commit_sha' candidate/release-admission.json)" = "$COMMIT"
           test "$(jq -r '.candidate_ref' candidate/release-admission.json)" = "$CANDIDATE_REF"
+          attempt_text=${CANDIDATE_REF##*/a}
+          test "$(jq -r '.candidate_attempt' candidate/release-admission.json)" = "$((10#$attempt_text))"
           run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")
           test "$(jq -r '.conclusion' <<<"$run_json")" = success
           test "$(jq -r '.head_sha' <<<"$run_json")" = "$COMMIT"
@@ -79,11 +108,50 @@ jobs:
           qualification_sha256=$(jq -r '.qualification_receipt_sha256' candidate/release-admission.json)
           [[ "$qualification_sha256" =~ ^[0-9a-f]{64}$ ]]
           printf '%s  %s\n' "$qualification_sha256" candidate/qualification.json | sha256sum --check --strict
+          artifact_manifest_sha256=$(jq -r '.artifact_manifest_sha256' candidate/release-admission.json)
+          [[ "$artifact_manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$artifact_manifest_sha256" candidate/artifacts.sha256 | sha256sum --check --strict
+          for binding in \
+            build_graph_sha256:build-graph.json \
+            evidence_manifest_sha256:evidence-manifest.json; do
+            field=${binding%%:*}
+            file=${binding#*:}
+            digest=$(jq -r ".$field" candidate/release-admission.json)
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+            printf '%s  %s\n' "$digest" "candidate/$file" | sha256sum --check --strict
+          done
+          candidate_identity=$(jq -er '.candidate_identity' candidate/release-admission.json)
+          creator_identity=$(jq -er '.creator_identity' candidate/release-admission.json)
+          [[ "$candidate_identity" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$creator_identity" =~ ^github:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[0-9]+/attempts/[0-9]+$ ]]
+          jq -e --slurpfile qualification candidate/qualification.json \
+            --slurpfile evidence candidate/evidence-manifest.json '
+              .candidate_identity == $qualification[0].candidate_identity and
+              .candidate_commit_sha == $qualification[0].candidate_commit_sha and
+              .artifact_manifest_sha256 == $qualification[0].artifact_manifest_sha256 and
+              .build_graph_sha256 == $qualification[0].build_graph_sha256 and
+              .evidence_manifest_sha256 == $qualification[0].evidence_manifest_sha256 and
+              .required_support_sha256 == $qualification[0].required_support_sha256 and
+              .artifact_manifest_sha256 == $evidence[0].artifact_manifest_sha256 and
+              .build_graph_sha256 == $evidence[0].build_graph_sha256 and
+              .required_support_sha256 == $evidence[0].required_support_sha256 and
+              .required_support_passed == true and
+              $qualification[0].required_support_passed == true' \
+            candidate/release-admission.json >/dev/null
+          required_support=$(jq -c '.required_support' candidate/release-admission.json)
+          required_support_sha256=$(printf '%s' "$required_support" | sha256sum | awk '{print $1}')
+          test "$required_support_sha256" = \
+            "$(jq -r '.required_support_sha256' candidate/release-admission.json)"
           jq -e '.required_support | length > 0 and all(.[]; .status == "passed")' \
             candidate/release-admission.json >/dev/null
           (cd candidate && sha256sum --check --strict artifacts.sha256)
-          gh attestation verify candidate/simple-x86_64-unknown-linux-gnu \
-            --repo "$GITHUB_REPOSITORY"
+          for subject in \
+            candidate/simple-x86_64-unknown-linux-gnu \
+            "candidate/simple-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            "candidate/simple-lang-mcp-server-${VERSION}.tgz" \
+            "candidate/simple-lang-lsp-mcp-server-${VERSION}.tgz"; do
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
+          done
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
 
   promote:
@@ -92,6 +160,8 @@ jobs:
     environment: release
     permissions:
       contents: write
+      actions: read
+      attestations: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -99,10 +169,10 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Re-download exact candidate
+      - name: Re-download exact candidate by immutable id
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.candidate_artifact }}
+          artifact-ids: ${{ inputs.candidate_artifact_id }}
           run-id: ${{ inputs.candidate_run_id }}
           github-token: ${{ github.token }}
           path: candidate
@@ -116,21 +186,92 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" | jq -e '.enabled == true' >/dev/null
 
       - name: Reverify at promotion boundary
+        id: promotion_verify
         env:
           ADMISSION_SHA256: ${{ inputs.admission_sha256 }}
           COMMIT: ${{ inputs.candidate_commit }}
           CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
+          EXPECTED_NAME: candidate-${{ inputs.version }}-${{ inputs.candidate_commit }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$COMMIT"
+          artifact_json=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")
+          test "$(jq -r '.id' <<<"$artifact_json")" = "$ARTIFACT_ID"
+          test "$(jq -r '.name' <<<"$artifact_json")" = "$EXPECTED_NAME"
+          test "$(jq -r '.expired' <<<"$artifact_json")" = false
+          test "$(jq -r '.workflow_run.id' <<<"$artifact_json")" = "$RUN_ID"
+          test "$(jq -r '.workflow_run.head_sha' <<<"$artifact_json")" = "$COMMIT"
+          remote_digest=$(jq -er '.digest' <<<"$artifact_json")
+          case "$remote_digest" in
+            "$ARTIFACT_DIGEST"|"sha256:$ARTIFACT_DIGEST") ;;
+            *) echo "candidate artifact digest mismatch at promotion boundary" >&2; exit 1 ;;
+          esac
           gh auth setup-git
           remote_candidate=$(git ls-remote origin "refs/heads/$CANDIDATE_REF" | awk '{print $1}')
           test "$remote_candidate" = "$COMMIT"
           printf '%s  %s\n' "$ADMISSION_SHA256" candidate/release-admission.json | sha256sum --check --strict
           qualification_sha256=$(jq -r '.qualification_receipt_sha256' candidate/release-admission.json)
           printf '%s  %s\n' "$qualification_sha256" candidate/qualification.json | sha256sum --check --strict
+          artifact_manifest_sha256=$(jq -r '.artifact_manifest_sha256' candidate/release-admission.json)
+          printf '%s  %s\n' "$artifact_manifest_sha256" candidate/artifacts.sha256 | sha256sum --check --strict
+          for binding in \
+            build_graph_sha256:build-graph.json \
+            evidence_manifest_sha256:evidence-manifest.json; do
+            field=${binding%%:*}
+            file=${binding#*:}
+            digest=$(jq -r ".$field" candidate/release-admission.json)
+            printf '%s  %s\n' "$digest" "candidate/$file" | sha256sum --check --strict
+          done
+          version=$(jq -r '.version' candidate/release-admission.json)
+          attempt=$(jq -r '.candidate_attempt' candidate/release-admission.json)
+          candidate_identity=$(jq -r '.candidate_identity' candidate/release-admission.json)
+          source_tree_sha256=$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')
+          test "$source_tree_sha256" = "$(jq -r '.source_tree_sha256' candidate/release-admission.json)"
+          test "$(sha256sum .spipe/policy/vcs.sdn | awk '{print $1}')" = \
+            "$(jq -r '.policy_sha256' candidate/release-admission.json)"
+          test "$(sha256sum release/version.sdn | awk '{print $1}')" = \
+            "$(jq -r '.version_manifest_sha256' candidate/release-admission.json)"
+          test "$(sha256sum release/support.sdn | awk '{print $1}')" = \
+            "$(jq -r '.support_manifest_sha256' candidate/release-admission.json)"
+          test "$(sha256sum src/compiler_rust/Cargo.lock | awk '{print $1}')" = \
+            "$(jq -r '.toolchain_manifest_sha256' candidate/release-admission.json)"
+          SIMPLE_LIB="$PWD/src" candidate/simple-x86_64-unknown-linux-gnu \
+            run src/app/release/main.spl candidate-check --json \
+            --version="$version" --attempt="$attempt" --candidate-ref="$CANDIDATE_REF" \
+            --commit-sha="$COMMIT" --source-sha256="$source_tree_sha256" \
+            --policy-sha256="$(jq -r '.policy_sha256' candidate/release-admission.json)" \
+            --version-sha256="$(jq -r '.version_manifest_sha256' candidate/release-admission.json)" \
+            --toolchain-sha256="$(jq -r '.toolchain_manifest_sha256' candidate/release-admission.json)" \
+            --support-sha256="$(jq -r '.support_manifest_sha256' candidate/release-admission.json)" \
+            --build-graph-sha256="$(jq -r '.build_graph_sha256' candidate/release-admission.json)" \
+            --creator-identity="$(jq -r '.creator_identity' candidate/release-admission.json)" \
+            --evidence-sha256="$(jq -r '.evidence_manifest_sha256' candidate/release-admission.json)" \
+            > candidate/promotion-candidate-check.json
+          test "$(jq -er '.candidate_identity' candidate/promotion-candidate-check.json)" = \
+            "$candidate_identity"
           (cd candidate && sha256sum --check --strict artifacts.sha256)
+          jq -n \
+            --arg version "$version" \
+            --arg candidate_ref "$CANDIDATE_REF" \
+            --arg candidate_commit_sha "$COMMIT" \
+            --arg candidate_artifact_id "$ARTIFACT_ID" \
+            --arg candidate_artifact_digest "$ARTIFACT_DIGEST" \
+            --arg candidate_workflow_run_id "$RUN_ID" \
+            --arg admission_sha256 "$ADMISSION_SHA256" \
+            '{schema:"simple-release-promotion/1",version:$version,
+              candidate_ref:$candidate_ref,candidate_commit_sha:$candidate_commit_sha,
+              candidate_artifact_id:$candidate_artifact_id,
+              candidate_artifact_digest:$candidate_artifact_digest,
+              candidate_workflow_run_id:$candidate_workflow_run_id,
+              admission_sha256:$admission_sha256,promote_without_rebuild:true}' \
+            > candidate/promotion-receipt.json
+          promotion_receipt_sha256=$(sha256sum candidate/promotion-receipt.json | awk '{print $1}')
+          echo "promotion_receipt_sha256=$promotion_receipt_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Configure SSH tag signing
         env:
@@ -157,31 +298,106 @@ jobs:
         env:
           TAG: ${{ needs.verify-candidate.outputs.tag }}
           COMMIT: ${{ inputs.candidate_commit }}
+          ADMISSION_SHA256: ${{ inputs.admission_sha256 }}
+          ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
+          PROMOTION_RECEIPT_SHA256: ${{ steps.promotion_verify.outputs.promotion_receipt_sha256 }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG"; then
-            echo "release identity already exists: $TAG" >&2
-            exit 1
-          else
-            test "$?" = 2
-          fi
-          git tag -s "$TAG" "$COMMIT" -m "Release $TAG" \
-            -m "Candidate-Commit: $COMMIT" \
-            -m "Admission-SHA256: ${{ inputs.admission_sha256 }}"
-          git tag --verify "$TAG"
           gh auth setup-git
-          git push origin "refs/tags/$TAG:refs/tags/$TAG"
+          remote_tag=$(git ls-remote origin "refs/tags/$TAG" | awk '{print $1}')
+          if test -n "$remote_tag"; then
+            git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+            test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$COMMIT"
+            git tag --verify "$TAG"
+            test "$(git for-each-ref --format='%(contents)' "refs/tags/$TAG" | \
+              sed -n 's/^Admission-SHA256: //p')" = "$ADMISSION_SHA256"
+            test "$(git for-each-ref --format='%(contents)' "refs/tags/$TAG" | \
+              sed -n 's/^Candidate-Artifact-ID: //p')" = "$ARTIFACT_ID"
+            test "$(git for-each-ref --format='%(contents)' "refs/tags/$TAG" | \
+              sed -n 's/^Candidate-Artifact-Digest: //p')" = "$ARTIFACT_DIGEST"
+            test "$(git for-each-ref --format='%(contents)' "refs/tags/$TAG" | \
+              sed -n 's/^Promotion-Receipt-SHA256: //p')" = "$PROMOTION_RECEIPT_SHA256"
+          else
+            git tag -s "$TAG" "$COMMIT" -m "Release $TAG" \
+              -m "Candidate-Commit: $COMMIT" \
+              -m "Admission-SHA256: $ADMISSION_SHA256" \
+              -m "Candidate-Artifact-ID: $ARTIFACT_ID" \
+              -m "Candidate-Artifact-Digest: $ARTIFACT_DIGEST" \
+              -m "Promotion-Receipt-SHA256: $PROMOTION_RECEIPT_SHA256"
+            git tag --verify "$TAG"
+            git push origin "refs/tags/$TAG:refs/tags/$TAG"
+          fi
 
-      - name: Draft, attach exact assets, then publish
+      - name: Create or resume draft, upload only admitted assets, and publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.verify-candidate.outputs.tag }}
         run: |
           set -euo pipefail
           test -f candidate/release-notes.md
-          gh release create "$TAG" --verify-tag --draft --title "$TAG" --notes-file candidate/release-notes.md
-          mapfile -t assets < <(find candidate -maxdepth 1 -type f -print | sort)
-          test "${#assets[@]}" -gt 2
-          gh release upload "$TAG" "${assets[@]}"
-          gh release edit "$TAG" --draft=false
+          mapfile -t names < <(awk '{print $2}' candidate/artifacts.sha256)
+          test "${#names[@]}" -gt 2
+          test "$(printf '%s\n' "${names[@]}" | sort -u | wc -l)" = "${#names[@]}"
+          receipt_names=(release-admission.json qualification.json promotion-receipt.json)
+          assets=(candidate/artifacts.sha256)
+          for receipt_name in "${receipt_names[@]}"; do
+            test -f "candidate/$receipt_name"
+            assets+=("candidate/$receipt_name")
+          done
+          for name in "${names[@]}"; do
+            case "$name" in
+              ''|*[!A-Za-z0-9_.-]*) echo "invalid admitted asset name: $name" >&2; exit 1 ;;
+            esac
+            test -f "candidate/$name"
+            assets+=("candidate/$name")
+          done
+
+          if ! gh release view "$TAG" --json isDraft >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" \
+              --notes-file candidate/release-notes.md
+          fi
+          is_draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
+          test "$is_draft" = true || test "$is_draft" = false
+
+          mapfile -t expected < <(printf '%s\n' \
+            artifacts.sha256 "${receipt_names[@]}" "${names[@]}" | sort)
+          mapfile -t remote < <(gh release view "$TAG" --json assets \
+            --jq '.assets[].name' | sort)
+          for remote_name in "${remote[@]}"; do
+            printf '%s\n' "${expected[@]}" | grep -Fxq -- "$remote_name" || {
+              echo "draft contains unadmitted asset: $remote_name" >&2; exit 1;
+            }
+          done
+          for asset in "${assets[@]}"; do
+            name=${asset#candidate/}
+            if printf '%s\n' "${remote[@]}" | grep -Fxq -- "$name"; then
+              mkdir -p "$RUNNER_TEMP/release-verify"
+              gh release download "$TAG" --pattern "$name" \
+                --dir "$RUNNER_TEMP/release-verify"
+              cmp --silent "$asset" "$RUNNER_TEMP/release-verify/$name"
+              rm -f "$RUNNER_TEMP/release-verify/$name"
+            elif test "$is_draft" = true; then
+              gh release upload "$TAG" "$asset"
+            else
+              echo "published release is missing admitted asset: $name" >&2
+              exit 1
+            fi
+          done
+
+          mapfile -t final_remote < <(gh release view "$TAG" --json assets \
+            --jq '.assets[].name' | sort)
+          test "$(printf '%s\n' "${expected[@]}")" = "$(printf '%s\n' "${final_remote[@]}")"
+          rm -rf "$RUNNER_TEMP/release-verify"
+          mkdir -p "$RUNNER_TEMP/release-verify"
+          gh release download "$TAG" --dir "$RUNNER_TEMP/release-verify"
+          cmp --silent candidate/artifacts.sha256 "$RUNNER_TEMP/release-verify/artifacts.sha256"
+          (cd "$RUNNER_TEMP/release-verify" && sha256sum --check --strict artifacts.sha256)
+          if test "$is_draft" = true; then
+            gh release edit "$TAG" --draft=false
+          fi
+          gh release verify "$TAG"
+          for name in "${expected[@]}"; do
+            gh release verify-asset "$TAG" "$RUNNER_TEMP/release-verify/$name"
+          done

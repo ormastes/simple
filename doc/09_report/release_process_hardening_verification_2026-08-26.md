@@ -1,51 +1,88 @@
 # Release Process Hardening Verification
 
-**Status:** FAIL — implementation handoff, not beta-release-ready
+**Status:** FAIL — implementation substantially complete; release-grade evidence incomplete
 **Branch:** `work/release/local-20260826-001-release-process-hardening`
 
-## Evidence by acceptance area
+## Implemented evidence
 
-- **AC-1, AC-6, AC-10, AC-12, AC-14:** implemented in the selected
-  requirements/NFRs, architecture/design/plans, operator guide, skills, typed
-  withdrawal policy, and clean working/staged runtime-facade guards.
-- **AC-2:** repository-backed render/check/plan/apply and compatibility-aware
-  bumping now cover canonical Simple and npm-registry projections. Guarded CLI
-  integration passed 10/10, but its full-tree discovery exceeds NFR-008 and
-  does not yet discover undeclared JSON consumers.
-- **AC-3:** typed policy and active guides define isolated authoring/protected
-  refs. Live GitHub policy verification remains blocked by
-  `doc/08_tracking/bug/release_live_policy_verifier_missing_2026-08-26.md`.
-- **AC-4, AC-5, AC-7:** typed receipt and trusted-session checks are implemented;
-  focused release SSpec passed 6/6 and session authority passed 3/3. Candidate
-  workflow contracts still omit required graph/creator/evidence identities.
-- **AC-8, AC-9:** Spipe 0.2.0 guarded planning tools and projection build pass
-  8/8, but parity coverage is incomplete and the planners are not Git-backed
-  mutation authorities.
-- **AC-11:** executable scenarios pass and no `.spl` exists under
-  `doc/06_spec`; the manual requires regeneration after the final identity
-  hardening and the documented adversarial matrix is not complete.
-- **AC-13:** focused tests and plugin parity pass, but the available executable
-  identifies itself as bootstrap seed-derived. Lint and the required whole
-  suite therefore have no release-grade PASS.
-- **AC-15:** this report deliberately leaves verification, release, and the
-  thread goal incomplete.
+- Canonical version parsing, compatibility-aware bump planning/apply, and
+  deterministic Simple plus npm projection checks are repository-backed.
+- Trusted release-session authority validates canonical linked-worktree Git
+  state and registers unique session/workspace/branch ownership under a lock,
+  with private output and cache-overlay namespaces.
+- Beta/main convergence performs bounded fetch-only Git comparison, exact
+  reviewed selection checks, ancestry and patch-equivalence checks, and
+  post-integration divergence receipts. It never applies or pushes; `main`
+  remains the independent trunk.
+- Candidate CI emits one schema family for candidate, qualification, and
+  admission evidence, binds build graph, creator, support, convergence,
+  qualification, artifact, and provenance identities, and admits candidate-built
+  MCP/LSP npm tarballs.
+- Promotion CI is promote-only and retry-idempotent: an existing tag must match
+  signature, commit, and admission digest; draft and published assets must have
+  exactly the admitted names and bytes. It contains no build/fallback path.
+- npm publication verifies immutable-release evidence and admitted tarball
+  bytes, publishes the tarballs unchanged with channel-aware distribution tags,
+  and accepts a retry only when registry bytes and tag already match.
+- Spipe 0.2.0 guarded release planners, CLI/MCP descriptions, general release
+  skills, and projection parity checks describe the same trust boundaries.
+- The executable release SSpec contains six real scenarios. Its standalone
+  manual was manually synchronized with the final source because the docgen
+  lane had reached the mandatory three-cycle retry cap.
 
-## Independent highest-capability review
+## Focused verification recorded in this lane
 
-The final reviewer returned `STATUS: FAIL`. The requested convergence invariant
-is now consistent in top-level rules, typed policy, bootstrap guidance, and
-skills: discovery is read-only; selected fixes cross by reviewed isolated
-backport/forward-port; `main` remains trunk. Remaining P0s are Git/CI wiring for
-that discovery, divergent candidate/admission schemas, non-idempotent promotion,
-npm rebuild-after-admission, incomplete projection parity, and version-check
-latency/JSON discovery. These remain blockers, not warnings converted to PASS.
+- Release policy/system SSpec: PASS (6/6 in the recorded focused run).
+- Guarded release CLI: PASS (10/10 in the recorded focused run).
+- Git convergence focused integration: implemented with exact repository
+  fixtures; final real-Git test PASS (1/1).
+- Persisted candidate authority: PASS (3/3), covering create-once state,
+  admission binding, status, and promote-without-rebuild planning.
+- Protected-ref policy: PASS (28/28 adversarial command cases) and PASS (3/3
+  cross-surface checks) across `sj`, Simple JJ sync, both MCP runtime families,
+  and their prompts. Raw ref mutation and malformed work-bookmark pushes fail
+  closed.
+- Workflow source contracts: whole release gate PASS (2/2) and release archive,
+  immutable artifact identity, and publication chain PASS (3/3).
+- Spipe release/plugin parity: PASS in the recorded plugin build run.
+- Direct environment/runtime facade guards: PASS for working and staged scans.
+- Source/workflow safety checks reject direct protected-ref mutation, broad tag
+  pushes, rebuild/fallback promotion, and destructive tag rollback.
 
-## Required next work
+## Release-blocking evidence gaps
 
-1. Wire convergence to bounded Git fetch/ref comparison and post-integration receipts.
-2. Unify canonical candidate/admission schemas and support-manifest parsing.
-3. Make promotion retries and remote asset verification idempotent.
-4. Build/admit npm tarballs in candidate CI and publish them unchanged with correct prerelease tags.
-5. Fix projection parity and bounded version-consumer indexing.
-6. Regenerate and review the manual, complete adversarial CLI scenarios, then
-   run lint and the whole suite with an admitted pure-Simple executable.
+1. The locally available `simple` executable identifies itself as bootstrap
+   seed-derived. It cannot establish the required release-grade lint and clean
+   whole-suite PASS; no release admission may consume its result as such.
+   A canonical `--full-bootstrap --release --strategy=full` attempt failed
+   closed with exit 64 (`reason-receipt-required`): this workspace has no
+   admitted parent/runtime/planner receipt identities, and inventing them would
+   violate the bootstrap trust boundary.
+2. The full trusted-session registry integration spec exceeded its bounded
+   timeout. Source checking and persisted candidate authority pass, but the
+   complete register/lease/head-advance/cleanup/close scenario still requires a
+   fresh bounded PASS.
+3. Repository workflow source is not live-provider evidence. GitHub rulesets,
+   protected environments, signing identity, immutable-release configuration,
+   artifact attestations, and npm registry publication require successful live
+   receipts before a beta can be declared released.
+
+## Acceptance disposition
+
+- Architecture, selected requirements/NFRs, operator guide, general software
+  release skills, typed release/version/session/convergence implementation,
+  Spipe plugin surfaces, candidate/promotion/publish workflows, and focused
+  adversarial coverage are present and aligned.
+- Production verification and actual beta release remain **FAIL** until all
+  three evidence gaps above pass. Missing evidence is not a warning and no
+  fallback or inferred success is permitted.
+
+## Required next evidence
+
+1. Produce an admitted pure-Simple runtime and run the required lint plus one
+   clean `bin/simple test test --whole --mode=interpreter` confirmation.
+2. Diagnose the trusted-session timeout and obtain one bounded integration PASS
+   without weakening canonical Git/session checks.
+3. Apply/verify live rulesets and protected environments, then exercise one
+   create-once beta candidate and promote its exact assets through signing,
+   immutable GitHub publication, and byte-identical npm publication receipts.
