@@ -1843,3 +1843,10 @@ and unpromoted.
 - [x] Confine it to one always-inlined lexical owner.
 - [x] Distinguish provider failure from the existing empty-source policy.
 - [x] Preserve one-read behavior and add a static ratchet.
+### Completed compiler source-pipeline authority slice
+
+- [x] Correct bootstrap source reads to nullable text.
+- [x] Tag and confine the raw call to one inline lexical owner.
+- [x] Fail source loading on provider `nil`.
+- [x] Preserve the intentional empty-bootstrap-file skip.
+- [x] Preserve one-read streaming behavior and add a static ratchet.

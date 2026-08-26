@@ -266,3 +266,11 @@ call to one always-inlined lexical owner.  Provider `nil` and an existing empty
 source are diagnosed separately.  Loading still performs one read and coverage
 identity reuses the lifted content; no probe, retry, copy, lookup, or generic
 dispatch was added.
+### Compiler source-pipeline authority follow-up
+
+The phase-1 bootstrap source loader now declares its raw file result nullable,
+tags it `unsafe(ffi)`, and confines it to one always-inlined lexical owner.
+Provider `nil` now fails the load instead of being treated as an intentionally
+empty file; the pre-existing empty-file skip remains.  The streaming and
+closure traversal still perform one read per selected bootstrap file, with no
+probe, retry, copy, lookup, or generic dispatch added.

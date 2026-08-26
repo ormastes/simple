@@ -24,12 +24,18 @@ use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
 
-extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw nullable bootstrap source read; nil is provider failure", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_bytes_to_text(data: [u8]) -> text
 extern fn rt_hash_text(data: text) -> i64
+
+@always_inline
+fn _pipeline_source_read_raw(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
 
 fn driver_source_owner_text_copy(value: text) -> text:
     rt_bytes_to_text(value.bytes())
@@ -52,7 +58,11 @@ impl CompilerDriver:
             return true
         if path.contains("/hir_lowering/async"):
             return true
-        val content = rt_file_read_text(path) ?? ""
+        val raw_content = _pipeline_source_read_raw(path)
+        if raw_content == nil:
+            print "[bootstrap_parse] source read failed: {path}"
+            return false
+        val content = raw_content ?? ""
         if content == "":
             return true
         val module_name = _driver_module_name_from_path(path)
