@@ -414,9 +414,31 @@ if let Value::Str(ref s) = recv_val {
             }
         }
         "to_int" | "to_i64" | "to_i32" | "to_i16" | "to_i8" => {
+            // There is no separate runtime `char` value: `for ch in text`
+            // yields a single-character `Value::Str`, and `char` is erased to
+            // `text` below the HIR type layer (see hir/type_registry.rs's
+            // `HirType::Char`, which has no counterpart in `value.rs`'s
+            // `Value` enum). Before this fix, a single non-numeric character
+            // (the overwhelmingly common case for `ch.to_i32()` in a
+            // char-code hash loop) fell through the parse-as-integer arm below
+            // to a hardcoded `Value::Int(0)` — INPUT-INDEPENDENT for every
+            // non-digit character, degenerating any djb2/FNV-style checksum
+            // that folds in `ch.to_i32()` per character (every character
+            // contributed the same 0, so distinct inputs of the same length
+            // collided). Multi-character numeric text (`"42".to_i32()`) must
+            // keep parsing as before. Scope the codepoint fallback to the
+            // single-character case only, and only on parse failure, so
+            // existing numeric-string parsing is unchanged.
             match s.trim().parse::<i64>() {
                 Ok(n) => return Ok(Value::Int(n)),
-                Err(_) => return Ok(Value::Int(0)),
+                Err(_) => {
+                    let mut chars = s.chars();
+                    let only = chars.next();
+                    if only.is_some() && chars.next().is_none() {
+                        return Ok(Value::Int(only.unwrap() as i64));
+                    }
+                    return Ok(Value::Int(0));
+                }
             }
         }
         "to_float" | "to_f64" | "to_f32" => {
