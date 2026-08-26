@@ -923,3 +923,113 @@ pipeline order is exact identity pin, provider-owned exclusion, complete
 lexical/graph sources, complete-pool RRF-v2, standalone evidence verification,
 pair-based reranking, then user limit. A green standalone lexical test is not an
 integrated-search or AC-4 completion signal.
+
+### 13.5 Admitted graph source and frozen lexical-provider boundary
+
+The previous `/tmp/spkc-graph-candidates-4OKnKd` result remains a useful failed
+attempt record, but do not use its `13/14` status as the current graph status.
+The corrected product/oracle pair is admitted at commit `626b3e0797` with
+focused `16/16`, full unit `174/174`, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4
+`9/9`, legacy integration, performance, and pre-runtime/final
+highest-capability review all passing. Its cyclic fixture requires the exact
+counter `workUnits == 10`.
+
+The graph source is safe to consume only through its public factory. Its main
+operator-visible guarantees are:
+
+- depth is capped at 3; `sourceK` at 1,000; page work at 50,000; total work at
+  500,000; snapshot nodes at 20,000; edges at 50,000; roots at 1,001;
+- every node is authorized before accepted-edge receipt verification;
+- traversal is both-direction, deterministic, and can re-expand descendants
+  after a better same-distance path arrives;
+- cursors are opaque, factory-local, single-use, and call no authority port on
+  continuation;
+- total-work exhaustion destroys the continuation and returns no candidates;
+- evidence keeps ordered edge/receipt pairs, so two edges sharing one receipt
+  do not lose their path multiplicity;
+- the edge-set, evidence, source-identity, and candidate digests have independent
+  literal goldens.
+
+This admits graph candidate generation, not integrated search. AC-4 remains
+open.
+
+#### Provider version and operation
+
+Use wire `{major:1,minor:1}` and require capability
+`authorized_lexical_page:true` before issuing `lexical_page`. Do not rename the
+semantic identities: provider remains `spipe-search-provider/1.0`, analyzer
+`spipe-unicode-lex-v1`, and score contract `bm25-fixed-v1`. The page and adapter
+identities are `spipe-authorized-lexical-provider-page-v1` and
+`spipe-authorized-lexical-provider-adapter-v1`. A protocol 1.0 provider is
+legacy-compatible, but it is not conforming for the admitted lexical source.
+
+Send:
+
+```text
+{binding_digest,query_text,query_digest,excluded_document_uid,
+ requested_limit,cursor}
+```
+
+Expect:
+
+```text
+{logical_root,excluded_document_uid,exclusion_applied,requested_limit,
+ page_start_rank,hits,next_cursor,exhausted}
+```
+
+Each hit is `{document_id,source_rank,score_milli}`. When an exact artifact is
+pinned, confirm that its UID was removed before scoring/top-k insertion and
+pagination. Snapshot `N`, `df`, and average document length must not change;
+exclusion is a result-pool rule, not a corpus mutation.
+
+#### Cursor and receipt troubleshooting
+
+A cursor binds provider generation/implementation, workspace, snapshot,
+authorization scope, logical root, binding/query digests, exclusion, and next
+rank. It intentionally does not bind the current `requestedLimit` or `qr-*`
+receipt. A smaller terminal page is normal; drift in any stable binding is not.
+
+Treat receipt namespaces separately:
+
+| Receipt | Owner | Meaning |
+|---|---|---|
+| `qr-*` | Simple wire provider | One transport query/page response |
+| `D-*` | Adapter-side evidence authority | Signed lexical-page evidence consumed by `lexical_source.js` |
+
+The adapter-side authority must verify `qr-*`, persist the signed `D-*` receipt,
+and return exactly the nine page-receipt fields: receipt UID, `lexical_page`
+kind, binding digest,
+excluded UID, exclusion decision, inbound cursor digest, requested limit,
+next-cursor digest, and page digest. Never pass `qr-*` where a `D-*` UID is
+required or synthesize authority from the visible wire payload. The separate
+aggregate evidence authority resolves the retained `D-*` receipts.
+
+#### Implementation and current limits
+
+The current authorized implementation slice is JavaScript/in-process. Its
+owners are `src/index/{contracts,logical_index}.js` and
+`src/provider/{protocol,adapter,js_fixed_point,index,lexical_page}.js` under
+`examples/05_stdlib/spipe/`; its oracle and vector fixture are
+`test/unit/search_lexical_provider_page_test.js` and
+`test/fixture/wave4_search/authorized_lexical_provider_page_vectors.json`.
+The mapped Simple-native owners are
+`src/app/spipe_knowledge_provider/{lexical,wire_query,wire_core,protocol,service}.spl`.
+
+Do not attach a long-lived Simple process to the current synchronous
+`readLexicalProviderPage` port by blocking, polling, retry-sleeping, or spawning
+per page. Native process support waits for a reviewed async lexical-source v2
+or async collection plus immutable synchronous replay design. No process
+adapter filename is canonical yet.
+
+Operational candidate targets are lazy startup, no hot process spawn/full-tree
+scan/retry sleep, startup P95 at most 250 ms, and warm lexical P95 below 100 ms
+on 50,000 artifacts. Maximum RSS needs a qualified receipt and configured cap;
+its numeric target is blocked on Wave 0 profiling. These are targets, not
+current provider-conformance evidence.
+
+The standalone rerank-evidence implementation is currently active. After it
+and the provider adapter are independently admitted, the pipeline order is:
+exact resolution; excluded complete lexical collection; graph generation;
+complete-pool RRF v2; authority-bound rerank evidence; pair-based reranking and
+explanations; user limit last. Until the end-to-end pipeline passes, keep AC-4
+open.

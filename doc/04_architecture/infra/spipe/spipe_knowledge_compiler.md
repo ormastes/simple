@@ -883,3 +883,106 @@ Integration proceeds only through separately owned, reviewable boundaries:
 
 Rerank-evidence is not folded into either graph generation or the pipeline;
 separate evidence admission prevents orchestration from manufacturing authority.
+
+## 17. Accepted Graph Capsule and Authorized Lexical Provider Boundary
+
+Section 16.4 records a real rejected attempt and remains useful provenance, but
+its non-admission status is superseded by commit `626b3e0797`. The accepted
+graph capsule is the product/oracle pair
+`src/search/graph_candidates.js` and
+`test/unit/search_graph_candidates_test.js` under
+`examples/05_stdlib/spipe/`. It passed focused `16/16`, full `174/174`, Wave 2
+`9/9`, Wave 3 `25/25`, Wave 4 `9/9`, legacy integration, performance, and both
+pre-runtime and final highest-capability review.
+
+### 17.1 Capsule authority and lifecycle
+
+`createAcceptedGraphCandidateGeneratorV1` remains a read-only child capsule of
+search orchestration. It captures exactly `readGraphSnapshot`,
+`authorizeNode`, and `verifyEdgeReceipt`; it owns deterministic bounded
+traversal and evidence construction, but it does not own snapshots, policy,
+fusion, reranking, or user-visible result limits.
+
+Its fixed resource envelope is depth 3, at most 1,000 output candidates,
+50,000 incident-edge work units per page, 500,000 total work units, 20,000
+nodes, 50,000 edges, and 1,001 roots. The accepted cyclic oracle is exactly ten
+work units. Canonical authorization runs for every declared node before edge
+verification; only accepted explicit/generated edges with exact authority
+receipts enter traversal. Opaque WeakMap continuation state is factory-local,
+single-use, and destroyed on total exhaustion. Continuations resume the exact
+edge without repeating authority ports.
+
+The path order is deterministic by distance, seed tier, seed rank, generated
+edge count, negative bottleneck confidence, unsigned-UTF-8 edge sequence,
+out-before-in direction sequence, and unsigned-UTF-8 node sequence. The source
+order adds artifact UID as its final tie-break. Ordered
+`{edgeUid,authorityReceiptUid}` pairs are authoritative; derived unique arrays
+must not erase shared-receipt multiplicity. Four independent literal digest
+goldens bind the admitted edge set, evidence records, source identity, and RRF
+candidate pool.
+
+### 17.2 Provider protocol versus semantic identity
+
+The provider adapter is a separate boundary from the lexical-source capsule:
+
+```text
+lexical_source (synchronous evidence consumer)
+        │ admitted nine-field D-* receipt projection
+        ▼
+authorized lexical-page adapter
+        │ wire 1.1 lexical_page / qr-* transport receipt
+        ▼
+JS in-process provider now; Simple process provider after async design
+```
+
+Wire `1.1` adds only the `lexical_page` operation and
+`authorized_lexical_page:true`. It does not fork the search semantics:
+`spipe-search-provider/1.0`, `spipe-unicode-lex-v1`, and `bm25-fixed-v1` remain
+the provider, analyzer, and scorer identities. The new bridge identities are
+`spipe-authorized-lexical-provider-page-v1` for page records and
+`spipe-authorized-lexical-provider-adapter-v1` for the adapter.
+
+Exact exclusion is provider-owned and happens before scoring/top-k insertion;
+corpus statistics remain snapshot-owned and unchanged. Cursor identity binds
+generation/implementation, workspace, snapshot, authorization scope, lexical
+root, binding/query digests, exclusion, and next rank. It intentionally omits
+the per-page `qr-*` receipt and requested limit, because transport receipts are
+page-local and the terminal fragmented page can request fewer candidates.
+
+The `qr-*` and `D-*` namespaces separate transport integrity from evidence
+authority. Simple wire returns a query receipt. The adapter verifies it, stores
+a signed `D-*` page receipt, and exposes the nine fields required by the
+lexical-source capsule. Aggregate authority later resolves the `D-*` receipts;
+neither the pipeline nor the provider may mint that evidence locally.
+
+### 17.3 Ownership and process boundary
+
+JavaScript protocol/schema and in-process semantics stay in
+`examples/05_stdlib/spipe/src/index/{contracts,logical_index}.js` and
+`src/provider/{protocol,adapter,js_fixed_point,index,lexical_page}.js`. The
+independent conformance owner is
+`test/unit/search_lexical_provider_page_test.js` with the fixed Wave 4 vector
+fixture. Simple-native mapping stays in
+`src/app/spipe_knowledge_provider/{lexical,wire_query,wire_core,protocol,service}.spl`;
+no parallel native scorer or lifecycle owner is introduced.
+
+The current lexical-source port is synchronous, while a long-lived Simple
+process speaks asynchronous streams. This is an unresolved architectural
+boundary, not permission to block the hot path or spawn per request. The first
+implementation slice is in-process JavaScript. Native integration requires a
+reviewed async lexical-source v2 or an async-collect/immutable-replay capsule.
+
+### 17.4 Performance, integration, and status
+
+The provider remains lazily started and must not perform process spawning,
+full-tree scans, repeated file reads, or retry sleeps on the request path.
+Candidate gates are startup P95 at most 250 ms and warm lexical P95 below
+100 ms on 50,000 artifacts. Maximum RSS needs both a qualified receipt and a
+configured process cap; the numeric budget is blocked on Wave 0 measurement.
+
+Graph admission does not imply provider conformance or integrated search.
+Rerank-evidence implementation is active as its own authority capsule. The
+only accepted integration sequence is exact identity, provider-owned lexical
+exclusion, complete lexical collection, graph generation, complete-pool RRF
+v2, rerank-evidence verification, pair-based reranking, explanation assembly,
+and user limit last. AC-4 remains open until that complete path is admitted.

@@ -731,3 +731,70 @@ scaffolding. The pipeline integrates only accepted exact identity, lexical and
 graph sources, complete RRF-v2, rerank evidence, and pair-based reranker in that
 order, with user limit last. Merge owner remains `/root`; final reviewer is the
 best available normal/highest-capability model. AC-4 stays open.
+
+### 10.13 Graph admission, provider contract freeze, and active next lane
+
+The fresh graph admission supersedes the rejected attempt's status but not its
+record. Commit `626b3e0797` contains only:
+
+- `examples/05_stdlib/spipe/src/search/graph_candidates.js`;
+- `examples/05_stdlib/spipe/test/unit/search_graph_candidates_test.js`.
+
+Admission evidence is focused `16/16`; full unit `174/174`; Wave 2 `9/9`, Wave
+3 `25/25`, Wave 4 `9/9`; legacy integration and performance `PASS`; pre-runtime
+and final highest-capability review `PASS`. The cyclic oracle is exactly
+`workUnits == 10`. The suite also proves hostile caps, opaque single-use cursor
+lifecycle, exact continuation equivalence, total-limit destruction, exact
+tuple ordering, literal digest goldens, both-direction traversal, later-better
+re-expansion, and ordered edge/receipt evidence when receipts are shared.
+
+Provider adapter ownership is now frozen. The JavaScript implementation lane
+owns these exact changes:
+
+- modify `examples/05_stdlib/spipe/src/index/contracts.js` and
+  `src/index/logical_index.js`;
+- modify `examples/05_stdlib/spipe/src/provider/protocol.js`, `adapter.js`,
+  `js_fixed_point.js`, and `index.js`;
+- add `examples/05_stdlib/spipe/src/provider/lexical_page.js`;
+- add `examples/05_stdlib/spipe/test/unit/search_lexical_provider_page_test.js`;
+- add
+  `examples/05_stdlib/spipe/test/fixture/wave4_search/authorized_lexical_provider_page_vectors.json`.
+
+The Simple-native mapping uses only existing owners
+`src/app/spipe_knowledge_provider/{lexical,wire_query,wire_core,protocol,service}.spl`.
+No new native scorer or guessed Node process adapter is authorized.
+
+The design gate is wire 1.1 `lexical_page` plus
+`authorized_lexical_page:true`, while provider/analyzer/scorer identities remain
+`spipe-search-provider/1.0`, `spipe-unicode-lex-v1`, and `bm25-fixed-v1`.
+Require pre-ranking exact exclusion, unchanged corpus statistics, page schema
+`spipe-authorized-lexical-provider-page-v1`, adapter identity
+`spipe-authorized-lexical-provider-adapter-v1`, and a cursor that binds stable
+provider/query/snapshot/exclusion/rank identity but not per-page `qr-*` or
+`requestedLimit`.
+
+The conformance oracle must distinguish transport `qr-*` receipts from signed
+authority `D-*` lexical-page receipts. The adapter returns only the admitted
+nine-field `D-*` projection, and the aggregate verifier resolves all authority
+receipts and binds page/rank/exclusion/policy/root evidence. Protocol 1.0 is
+legacy-only for this path.
+
+Execution order and ownership:
+
+1. **Provider JS/in-process lane:** implement the frozen files and independent
+   vector oracle. Do not claim native process parity.
+2. **Async-boundary design lane:** decide asynchronous lexical-source v2 versus
+   asynchronous collection plus immutable synchronous replay before any native
+   process adapter is named.
+3. **Rerank-evidence lane:** currently active; preserve its standalone product/
+   oracle ownership and require a separate admission review.
+4. **Pipeline lane:** begin only after provider and rerank-evidence admission;
+   integrate exact pin -> excluded lexical -> graph -> complete-pool RRF v2 ->
+   evidence -> pair rerank/explanation -> user limit.
+
+Candidate NFR gates are lazy startup, no hot process spawn/tree scan/retry
+sleep, startup P95 at most 250 ms, warm 50,000-artifact lexical P95 below 100
+ms, and qualified maximum-RSS evidence with a configured cap. Numeric RSS is
+blocked pending Wave 0 measurement. There is no current provider conformance or
+pipeline-integration claim. Merge owner remains `/root`; final acceptance owner
+is the best available normal/highest-capability reviewer. AC-4 remains open.

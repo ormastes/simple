@@ -2511,3 +2511,99 @@ admit the standalone rerank-evidence source/test pair; then integrate the
 pipeline source/test pair using the already admitted exact resolver, complete
 RRF-v2 pool, and pair-based reranker. AC-4 remains open until that integrated,
 authority-bound pipeline and its explanations pass.
+
+## 39. 2026-08-26 Graph Source Admission and Provider 1.1 Contract Freeze
+
+This checkpoint supersedes Section 38's graph **status**, while retaining its
+failed `/tmp/spkc-graph-candidates-4OKnKd` attempt as provenance. A fresh lane
+corrected the uncontracted cyclic oracle, repeated the bounded admission flow,
+and landed the exact product/oracle pair in commit `626b3e0797`:
+
+- `examples/05_stdlib/spipe/src/search/graph_candidates.js`;
+- `examples/05_stdlib/spipe/test/unit/search_graph_candidates_test.js`.
+
+The focused graph suite passed `16/16`. The full package passed `174/174` unit,
+Wave 2 `9/9`, Wave 3 `25/25`, Wave 4 `9/9`, legacy integration, and performance
+checks. Pre-runtime and final highest-capability reviews both passed. The cyclic
+fixture now has the exact contracted result `workUnits == 10`.
+
+Admission covers more than successful traversal. The independent oracle proves
+both-direction depth-three search; exact-root and seed-rank precedence; the
+complete deterministic tuple; late `sourceK`; same-distance replacement and
+descendant re-expansion; accepted explicit/generated edge authority; ordered
+edge/receipt pairs when two edges share one receipt; literal goldens for the
+accepted-edge-set, evidence, source-identity, and candidate digests; and the
+full continuation lifecycle. Opaque cursors are factory-local and single-use,
+continuations do not recall authority ports, total-work exhaustion destroys
+state, and the uninterrupted and paged results are equal.
+
+Hostile inputs are bounded before recursive traversal. The admitted maxima are
+`sourceK=1,000`, page work `50,000`, total work `500,000`, nodes `20,000`,
+edges `50,000`, roots `1,001`, and 512 UTF-8 bytes for request/seed identifier
+inputs validated through `validText`.
+The tests cover declared and actual collection caps, hidden properties, sparse
+arrays, hostile primitive coercion, forged cursors, workspace confusion, node
+authorization exhaustion, edge-receipt failure, and generic non-disclosing
+errors. This evidence closes the standalone graph-source prerequisite only; it
+does not close AC-4.
+
+### 39.1 Provider ownership and wire contract
+
+The next provider boundary is now frozen as a design contract. Wire protocol
+`{major:1, minor:1}` adds capability `authorized_lexical_page:true` and
+operation `lexical_page`; the semantic identities remain
+`spipe-search-provider/1.0`, `spipe-unicode-lex-v1`, and `bm25-fixed-v1`.
+The authorized page schema is `spipe-authorized-lexical-provider-page-v1`, and
+the adapter identity is `spipe-authorized-lexical-provider-adapter-v1`.
+Protocol 1.0 remains legacy-compatible but cannot supply an admitted lexical
+source because it cannot attest pre-ranking exclusion.
+
+The request payload is
+`{binding_digest,query_text,query_digest,excluded_document_uid,requested_limit,cursor}`.
+The provider returns
+`{logical_root,excluded_document_uid,exclusion_applied,requested_limit,page_start_rank,hits,next_cursor,exhausted}`;
+each hit is `{document_id,source_rank,score_milli}`. Exclusion occurs before
+scoring/top-k insertion and before pagination, while snapshot corpus statistics
+(`N`, `df`, and average document length) remain unchanged.
+
+The cursor binds generation and implementation identity, workspace/snapshot/
+scope/root, binding and query digests, excluded UID, and next rank. It does not
+bind the per-page `qr-*` transport receipt or `requestedLimit`: fragmented pages
+legitimately reduce the last request limit. The two receipt namespaces are not
+interchangeable. `qr-*` is the Simple wire query receipt; the adapter-side
+authority stores a signed `D-*` lexical-page receipt and returns the admitted
+nine-field projection expected by `lexical_source.js`. Aggregate verification
+resolves every `D-*` receipt and binds cursor continuity, page set, ordered rank
+evidence, exclusion, policy, and lexical root.
+
+### 39.2 Concrete owners, unresolved boundary, and NFR candidates
+
+The JavaScript slice modifies:
+
+- `examples/05_stdlib/spipe/src/index/contracts.js`;
+- `examples/05_stdlib/spipe/src/index/logical_index.js`;
+- `examples/05_stdlib/spipe/src/provider/{protocol,adapter,js_fixed_point,index}.js`.
+
+It adds `examples/05_stdlib/spipe/src/provider/lexical_page.js`, the independent
+oracle `examples/05_stdlib/spipe/test/unit/search_lexical_provider_page_test.js`,
+and fixture
+`examples/05_stdlib/spipe/test/fixture/wave4_search/authorized_lexical_provider_page_vectors.json`.
+The existing Simple-native owners are
+`src/app/spipe_knowledge_provider/{lexical,wire_query,wire_core,protocol,service}.spl`.
+
+The synchronous `readLexicalProviderPage` port cannot yet safely drive a
+long-lived asynchronous process provider. Therefore the first conformance slice
+is JavaScript/in-process only. Native process integration remains unresolved
+pending either a reviewed asynchronous lexical-source v2 or an asynchronous
+collection plus immutable synchronous-replay boundary; no Node process-adapter
+filename is inferred before that decision.
+
+Candidate NFRs are lazy startup, no hot-request process spawn/full-tree scan/
+retry sleep, startup P95 at most 250 ms, and warm lexical P95 below 100 ms on a
+50,000-artifact fixture. RSS requires a qualified maximum-RSS receipt plus a
+configured process cap; a numeric RSS PASS is blocked until Wave 0 profiling.
+No provider conformance or integrated-search result is claimed at this freeze.
+The standalone rerank-evidence implementation lane is active, after which the
+pipeline must consume exact identity, excluded lexical source, admitted graph
+source, complete-pool RRF v2, authority-bound rerank evidence, pair-based
+reranking, and only then the user limit. AC-4 remains open.
