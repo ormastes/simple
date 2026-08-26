@@ -78,8 +78,10 @@
 # shifts no key and re-flags nothing. The gate RATCHETS on counts: for each key,
 # only the amount by which the CURRENT count exceeds the BASELINE count is a NEW
 # violation (a genuinely-added loop matching an existing key still counts as
-# new). Shrink the baseline as loops move onto a bulk idiom or get annotated;
-# never grow a count without a plan note.
+# new). A baseline key or count absent from the current scan is stale and also
+# fails: accepted debt must describe the tree exactly, or key churn can hide a
+# later regression. Shrink the baseline as loops move onto a bulk idiom or get
+# annotated; never grow a count without a plan note.
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -369,14 +371,23 @@ fi
 
 # Ratchet on COUNTS. Read baseline (count-keyed) then current (count-keyed);
 # for each key, NEW = max(0, current_count - baseline_count). Report per-key
-# increases and, unless scanning a fixture override, baseline keys whose count
-# shrank (candidates for tightening the baseline).
+# increases and baseline keys whose count shrank. Both directions fail closed:
+# increases are new debt and decreases require tightening the checked-in
+# baseline in the same change.
 report="$tmp_dir/report.txt"
+# A file-list override without a matching baseline override is a partial scan
+# against the repository baseline, so stale reporting would be meaningless.
+# An explicit baseline is a complete caller-owned contract and is validated in
+# both directions; this is what the adversarial fixtures exercise.
+skip_stale=0
+if [ -n "$FILE_LIST_OVERRIDE" ] && [ -z "$BASELINE_OVERRIDE" ]; then
+    skip_stale=1
+fi
 # NOTE: select baseline vs current rows by FILENAME, not `FNR==NR` — the latter
 # misclassifies the current file as the baseline whenever the baseline is empty
 # (e.g. a fresh `--baseline /dev/null` fixture run: an empty first file yields
 # zero records, so awk's FNR resets and the second file matches FNR==NR).
-awk -F'\t' -v skip_stale="${FILE_LIST_OVERRIDE:+1}" -v BF="$BASELINE" '
+awk -F'\t' -v skip_stale="$skip_stale" -v BF="$BASELINE" '
     FILENAME==BF {
         key=$2 SUBSEP $3 SUBSEP $4;
         bcount[key]=$1; bseen[key]=1; btot+=$1; next;
@@ -391,16 +402,18 @@ awk -F'\t' -v skip_stale="${FILE_LIST_OVERRIDE:+1}" -v BF="$BASELINE" '
         }
     }
     END {
-        if (skip_stale == "") {
+        if (skip_stale == 0) {
             for (k in bseen) {
                 c = ccount[k]+0;
                 if (bcount[k] > c) {
                     n=split(k, a, SUBSEP);
                     print "cpu_lane_hotloop_baseline_stale=" a[1] ":" a[2] ":" a[3] " (baseline=" bcount[k] " current=" c ")";
+                    stalec++;
                 }
             }
         }
         print "__NEW__=" newc+0;
+        print "__STALE__=" stalec+0;
         print "__BTOT__=" btot+0;
         print "__CTOT__=" ctot+0;
     }
@@ -408,14 +421,16 @@ awk -F'\t' -v skip_stale="${FILE_LIST_OVERRIDE:+1}" -v BF="$BASELINE" '
 
 grep -v '^__' "$report" || true
 new_count=$(sed -n 's/^__NEW__=//p' "$report"); new_count=${new_count:-0}
+stale_count=$(sed -n 's/^__STALE__=//p' "$report"); stale_count=${stale_count:-0}
 baseline_total=$(sed -n 's/^__BTOT__=//p' "$report"); baseline_total=${baseline_total:-0}
 current_total=$(sed -n 's/^__CTOT__=//p' "$report"); current_total=${current_total:-0}
 
 echo "cpu_lane_hotloop_baselined=$baseline_total"
 echo "cpu_lane_hotloop_current=$current_total"
 echo "cpu_lane_hotloop_new=$new_count"
+echo "cpu_lane_hotloop_stale=$stale_count"
 
-if [ "$new_count" -gt 0 ]; then
+if [ "$new_count" -gt 0 ] || [ "$stale_count" -gt 0 ]; then
     echo "cpu_lane_hotloop_ok=false"
     exit 1
 fi
