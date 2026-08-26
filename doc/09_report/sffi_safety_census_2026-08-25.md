@@ -777,3 +777,16 @@ environment authority while continuing to pin 95 discriminant, six payload,
 and fourteen tuple projections. This removes one potential call layer and adds
 no call, branch, allocation, copy, cache, hash, signature check, lock, lookup,
 boxing, marshalling, or dispatch. Tagged providers remain unsafe and unverified.
+
+### Admission identity join hardening
+
+The contract inventory previously retained the admitted provider identity but
+joined cryptographic admission to source declarations by symbol name alone.
+That could mark a same-named declaration with a different canonical ABI
+signature as reverified. Admission rows now retain `(symbol,
+source_signature_sha256, provider_id)`, require an owned declaration with the
+same symbol/signature pair, and join `reverified` only on that pair. A stale or
+wrong-signature receipt fails closed instead of upgrading unrelated source.
+This is census-only logic with no compiler, loader, or runtime-path cost.
+Provider-to-artifact closure remains a separate admission requirement; source
+annotations alone are still never treated as signed evidence.

@@ -1360,6 +1360,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add a static authority and call-count ratchet.
 - [x] Record the canonical provider as raw, unsigned, and unverified.
 
+### Completed admission identity-join hardening slice
+
+- [x] Preserve admitted symbol, source-signature, and provider identities.
+- [x] Reject admitted symbol/signature pairs absent from owned declarations.
+- [x] Join `reverified` on symbol plus canonical ABI signature, never name alone.
+- [x] Keep source evidence claims non-authoritative and fail closed on mismatch.
+- [x] Add a static regression assertion for the composite join key.
+- [x] Add zero compiler, loader, admission-hot-path, or per-call runtime work.
+
 ### Completed MIR switch/operator environment-authority slice
 
 - [x] Remove the duplicate raw nullable environment declaration.

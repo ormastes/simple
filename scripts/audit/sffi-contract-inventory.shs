@@ -94,7 +94,10 @@ if [ -n "${SFFI_ADMISSION_JOBS:-}" ]; then
             echo "SFFI contract inventory: admitted job $job_index has no provider identity" >&2
             exit 2
         }
-        awk -F '\t' -v provider="$provider" '$1 == "symbol" { print $2 "\t" provider }' \
+        # Symbol name alone is not an admission key: preserve the admitted ABI
+        # signature and provider identity for the fail-closed join below.
+        awk -F '\t' -v provider="$provider" \
+            '$1 == "symbol" { print $2 "\t" $3 "\t" provider }' \
             "$receipt" >>"$work/admitted-symbols.tsv"
     done <"$SFFI_ADMISSION_JOBS"
     test "$job_index" -ge 2 || {
@@ -223,20 +226,20 @@ xargs -0 -r -n 200 perl -MDigest::SHA=sha256_hex -0ne '
 sort -u "$work/contracts-unsorted.tsv" >"$work/contracts.tsv"
 
 if test -s "$work/admitted-symbols.tsv"; then
-    cut -f1 "$work/contracts.tsv" | sort -u >"$work/declared-symbols.txt"
-    cut -f1 "$work/admitted-symbols.tsv" | sort -u >"$work/admitted-symbol-names.txt"
-    comm -23 "$work/admitted-symbol-names.txt" "$work/declared-symbols.txt" \
-        >"$work/admitted-without-declaration.txt"
-    if test -s "$work/admitted-without-declaration.txt"; then
-        echo 'SFFI contract inventory: admitted provider symbols have no owned declaration:' >&2
-        sed -n '1,20p' "$work/admitted-without-declaration.txt" >&2
+    cut -f1,2 "$work/contracts.tsv" | sort -u >"$work/declared-identities.tsv"
+    cut -f1,2 "$work/admitted-symbols.tsv" | sort -u >"$work/admitted-identities.tsv"
+    comm -23 "$work/admitted-identities.tsv" "$work/declared-identities.tsv" \
+        >"$work/admitted-without-declaration.tsv"
+    if test -s "$work/admitted-without-declaration.tsv"; then
+        echo 'SFFI contract inventory: admitted symbol/signature identities have no owned declaration:' >&2
+        sed -n '1,20p' "$work/admitted-without-declaration.tsv" >&2
         exit 2
     fi
 fi
 
 awk -F '\t' 'BEGIN { OFS="\t" }
     FILENAME == ARGV[1] { if (FNR > 1) backing[$1]=$2; next }
-    FILENAME == ARGV[2] { admitted[$1]++; next }
+    FILENAME == ARGV[2] { admitted[$1 SUBSEP $2]++; next }
     {
         b = backing[$1] ? backing[$1] : "unknown"
         language = (b == "c_runtime_source_only") ? "c_or_cpp" : \
@@ -245,7 +248,7 @@ awk -F '\t' 'BEGIN { OFS="\t" }
             (b == "external_library_symbol") ? "external_c_abi" : \
             (b == "bare_exempt") ? "freestanding" : \
             (b == "in_deployed_binary") ? "linked_native_unknown" : "none_observed"
-        admission = admitted[$1] ? "reverified" : "not_admitted"
+        admission = admitted[$1 SUBSEP $2] ? "reverified" : "not_admitted"
         print $1, b, language, $2, $3, $4, $5, $6, admission, $7, $8
     }
 ' "$work/backing.tsv" "$work/admitted-symbols.tsv" "$work/contracts.tsv" >"$work/joined.tsv"
