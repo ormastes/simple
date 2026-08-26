@@ -274,3 +274,11 @@ Provider `nil` now fails the load instead of being treated as an intentionally
 empty file; the pre-existing empty-file skip remains.  The streaming and
 closure traversal still perform one read per selected bootstrap file, with no
 probe, retry, copy, lookup, or generic dispatch added.
+### Compiler public-header authority follow-up
+
+Public-header generation now tags all six raw process/file/directory/path
+declarations `unsafe(ffi)` and confines each to one always-inlined lexical
+owner.  Source reads are nullable, boolean and exit statuses remain checked,
+and empty joined-path sentinels fail before writes.  The hot path retains the
+same foreign-call count and adds no lookup, allocation, copy, hash, or generic
+dispatch.

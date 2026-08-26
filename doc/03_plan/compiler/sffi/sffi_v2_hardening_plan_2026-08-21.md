@@ -1850,3 +1850,10 @@ and unpromoted.
 - [x] Fail source loading on provider `nil`.
 - [x] Preserve the intentional empty-bootstrap-file skip.
 - [x] Preserve one-read streaming behavior and add a static ratchet.
+### Completed compiler public-header authority slice
+
+- [x] Tag all six raw public-header dependencies `unsafe(ffi)`.
+- [x] Confine them to six always-inlined lexical owners.
+- [x] Correct source reads to nullable and reject empty joined paths.
+- [x] Preserve existing write/existence/process status validation.
+- [x] Preserve foreign-call counts and add a static ownership ratchet.
