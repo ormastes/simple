@@ -31,7 +31,9 @@ use os.kernel.loader.executable_admission_pipeline.{
     executable_loader_commit, executable_loader_retrieve_once,
     executable_loader_release_retrieved, executable_loader_revoke
 }
-use os.kernel.loader.executable_image_prepare.{executable_prepare_image_v1}
+use os.kernel.loader.executable_image_prepare.{
+    executable_prepare_image_with_launch_v1
+}
 use os.kernel.loader.executable_load_plan_v1.{
     ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
     ExecutableLoadConsumerV1, ExecutableLoadReceiptV1,
@@ -143,14 +145,17 @@ impl Scheduler:
         self.executable_adoption_token_generation = token.generation
         self.executable_adoption_token_nonce = token.nonce
 
-    pub me adopt_authenticated_executable_pid_v1(
+    me _adopt_authenticated_executable_pid_with_launch_v1(
         mut table: MountTable,
         authorities: ExecutableAuthorityRegistryV1,
         token: ExecutableAuthorityTokenV1,
         consumer: ExecutableLoadConsumerV1,
         entry_point: u64,
         priority: TaskPriority,
-        caps: CapabilitySet
+        caps: CapabilitySet,
+        canonical_path: text,
+        argv: [text],
+        envp: [text]
     ) -> SchedulerExecutableAdoptionResultV1:
         # The token/owner coordinates are the only public authority input.
         # Commit + retrieve is exactly once in the loader registry; no raw
@@ -189,8 +194,9 @@ impl Scheduler:
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.RollbackUnavailable)
 
-        val prepared = executable_prepare_image_v1(
-            table, handle, consumer, entry_point, active_arch)
+        val prepared = executable_prepare_image_with_launch_v1(
+            table, handle, consumer, entry_point, active_arch,
+            canonical_path, argv, envp)
         if prepared.is_err():
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
@@ -293,6 +299,35 @@ impl Scheduler:
         self._record_authenticated_executable_adoption_v1(
             completed_owner.state, id.id, token)
         result
+
+    pub me adopt_authenticated_executable_pid_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        token: ExecutableAuthorityTokenV1,
+        consumer: ExecutableLoadConsumerV1,
+        entry_point: u64,
+        priority: TaskPriority,
+        caps: CapabilitySet
+    ) -> SchedulerExecutableAdoptionResultV1:
+        self._adopt_authenticated_executable_pid_with_launch_v1(
+            table, authorities, token, consumer, entry_point, priority, caps,
+            "authority-image", [], [])
+
+    pub me adopt_authenticated_executable_pid_with_launch_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        token: ExecutableAuthorityTokenV1,
+        consumer: ExecutableLoadConsumerV1,
+        entry_point: u64,
+        priority: TaskPriority,
+        caps: CapabilitySet,
+        canonical_path: text,
+        argv: [text],
+        envp: [text]
+    ) -> SchedulerExecutableAdoptionResultV1:
+        self._adopt_authenticated_executable_pid_with_launch_v1(
+            table, authorities, token, consumer, entry_point, priority, caps,
+            canonical_path, argv, envp)
 
     pub me authenticated_executable_adoption_snapshot_v1(
     ) -> SchedulerExecutableAdoptionSnapshotV1:

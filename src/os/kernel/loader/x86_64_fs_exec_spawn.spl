@@ -6,7 +6,10 @@
 # fs_exec_adopt_authenticated_v1; this facade intentionally cannot mint or
 # reconstruct those values and therefore fails closed for path-only callers.
 
-use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn_as}
+use os.kernel.loader.fs_exec_spawn.{
+    fs_exec_spawn_as, fs_exec_adopt_authenticated_with_launch_v1,
+    FsExecAuthenticatedRunResultV1
+}
 use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_v1}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
@@ -17,6 +20,10 @@ use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
 use os.kernel.types.task_types.{TaskId}
 use os.kernel.scheduler.scheduler.{
     wait_collect_result_error, wait_collect_result_pid, wait_collect_result_status
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.scheduler.process_execution_observation.{
+    scheduler_execution_take_reaped_token_v1
 }
 
 pub fn x86_64_fs_exec_handoff_blob_ready(byte_len: i64, raw_blob: u64) -> bool:
@@ -64,6 +71,45 @@ pub fn x86_64_fs_exec_spawn_authenticated_v1(
        wait_collect_result_status(collected) != exit_code.to_i32():
         return -10
     exit_code
+
+pub(package) fn x86_64_fs_exec_spawn_authenticated_with_launch_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    caller_caps: CapabilitySet,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> FsExecAuthenticatedRunResultV1:
+    """Adopt the exact x86_64 image and its authorized initial stack."""
+    val prepared = fs_exec_adopt_authenticated_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point, caller,
+        caller_caps, path, argv, envp, recipe)
+    if prepared.pid <= 0:
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: prepared.pid, evidence: nil, scheduler: prepared.scheduler)
+    val child = TaskId(id: prepared.pid.to_u64())
+    val exit_code = dispatch_fs_exec_user_handoff(
+        Architecture.X86_64, child.id, prepared.scheduler)
+    var owner = prepared.scheduler
+    owner.exit_task_by_id(child, exit_code.to_i32())
+    val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
+    if (wait_collect_result_error(collected) != 0 or
+        wait_collect_result_pid(collected) != child.id or
+        wait_collect_result_status(collected) != exit_code.to_i32()):
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
+    val evidence = scheduler_execution_take_reaped_token_v1(child.id)
+    if not evidence.?:
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: -10, evidence: nil, scheduler: owner)
+    FsExecAuthenticatedRunResultV1(
+        exit_code: exit_code, evidence: evidence, scheduler: owner)
 
 pub fn x86_64_fs_exec_spawn_as(
     caller: i64,
