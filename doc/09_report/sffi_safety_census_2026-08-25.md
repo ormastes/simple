@@ -183,3 +183,9 @@ the shared positional owner in a lexical unsafe scope, and path resolution uses
 the shared path owner while retaining the legacy empty failure sentinel
 internally.  CLI copy remains one source read and one destination write, with
 no read-back, extra filesystem probe, registry lookup, or generic dispatch.
+### Binary-file authority follow-up
+
+`app.io.binary_file_ops` no longer declares `rt_file_write_bytes`; it delegates
+to the canonical runtime byte-write owner.  The facade still performs one
+direct byte-array write and returns the provider's boolean status, with no
+array conversion, copy, retry, lookup, or generic dispatch.

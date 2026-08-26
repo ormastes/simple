@@ -1767,3 +1767,9 @@ and unpromoted.
 - [x] Keep unavoidable raw ownership inside minimal lexical unsafe scopes.
 - [x] Preserve one-read/one-write CLI copy behavior.
 - [x] Add a static ratchet preventing local raw declarations and calls.
+### Completed binary-file authority slice
+
+- [x] Remove the duplicate raw byte-write declaration from the app facade.
+- [x] Reuse the canonical runtime byte-write owner.
+- [x] Preserve one-call, zero-conversion byte-array behavior.
+- [x] Add a static ratchet preventing raw authority from returning.
