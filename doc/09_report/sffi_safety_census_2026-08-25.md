@@ -851,3 +851,14 @@ resets. Each requested candidate still receives at most one file read and the
 outline scanner runs once on the selected source. No additional directory
 search, source scan, allocation, copy, hash, signature check, lock, lookup,
 boxing, generic marshalling, or dynamic dispatch was added.
+
+### Interpreter CLI argument authority follow-up
+
+Interpreter CLI declaration evaluation removed its duplicate raw
+`rt_cli_get_args` declaration and now obtains arguments once through canonical
+`std.io_runtime.get_args`. Native and Rust runtimes already alias
+`rt_cli_get_args` and `sys_get_args` to the same argument storage. The parser
+retains one `[text]` fetch, the same program/script-prefix skip, and the same
+single pass that builds `argv`; no numeric substitution, second fetch, scan,
+allocation beyond the existing argv copy, cache, hash, lock, lookup, boxing,
+marshalling, or dynamic dispatch was added.

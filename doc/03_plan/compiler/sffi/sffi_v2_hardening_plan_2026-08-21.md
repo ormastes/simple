@@ -1309,6 +1309,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add no extra search, scan, allocation, hash, lock, or dispatch.
 - [x] Add a static typed-contract, call-count, and cache-shape ratchet.
 
+### Completed interpreter CLI argument-authority slice
+
+- [x] Remove the duplicate raw `rt_cli_get_args` declaration.
+- [x] Route the sole fetch through canonical `std.io_runtime.get_args`.
+- [x] Preserve `[text]` semantics and one argument fetch per parse.
+- [x] Preserve the existing program/script-prefix skip and argv pass.
+- [x] Add no numeric workaround, second scan, cache, lock, or dispatch.
+- [x] Add a static authority and one-fetch ratchet.
+
 ### Completed MIR bulk-ops flag spec authority slice
 
 - [x] Remove the spec-local raw environment setter declaration and calls.
