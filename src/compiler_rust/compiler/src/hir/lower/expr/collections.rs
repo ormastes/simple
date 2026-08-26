@@ -268,23 +268,20 @@ impl Lowerer {
         // collide and it can hand back the wrong field list -- fine as a
         // best-effort ORDERING hint (its prior use), but not sound enough to
         // reject a name on. Only the registry list gates the hard error below.
-        let mut from_registry = true;
-        let declared_field_names: Option<Vec<String>> = self
+        let registry_declared: Option<Vec<String>> = self
             .module
             .types
             .get(struct_ty)
             .and_then(|hir_ty| match hir_ty {
                 HirType::Struct { fields: sf, .. } => Some(sf.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()),
                 _ => None,
-            })
-            .or_else(|| {
-                from_registry = false;
-                let bare_name = name.rsplit('.').next().unwrap_or(name);
-                self.global_struct_defs.as_ref().and_then(|defs| {
-                    defs.get(bare_name)
-                        .map(|fs| fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
-                })
             });
+        let from_registry = registry_declared.is_some();
+        let declared_field_names = registry_declared.or_else(|| {
+            self.global_struct_fields_for_name(name).map(|fields| {
+                fields.iter().map(|(field_name, _)| field_name.clone()).collect::<Vec<_>>()
+            })
+        });
 
         let Some(declared) = declared_field_names else {
             // Struct declaration not found anywhere (fully erased, no
