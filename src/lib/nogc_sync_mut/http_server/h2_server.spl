@@ -27,7 +27,6 @@
 #  - PRIORITY scheduling (the HEADERS priority envelope is parsed)
 #  - Full outbound flow-control back-pressure
 #  - Connection-scoped HPACK dynamic-table state (decode is per request)
-#  - Full pseudo-header ordering/duplication validation
 # =============================================================================
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
@@ -54,6 +53,7 @@ use std.nogc_sync_mut.http.h2.h2_stream.{
 }
 use std.common.hpack.encoder.{HpackHeader, HpackEncoderState, hpack_encoder_new, hpack_encode}
 use std.common.hpack.decoder.{HpackDecoderState, hpack_decoder_new, hpack_decode}
+use std.http_server.h2_request_headers.{h2_validate_request_headers}
 use std.nogc_sync_mut.http_server.h2_header_payload.{
     h2_header_payload_error, h2_header_payload_fragment
 }
@@ -431,6 +431,12 @@ fn _hpack_headers_to_request(hpack_bytes: [u8], body_bytes: [u8]) -> HttpRequest
         Err(_): return nil
         Ok(pair):
             val headers = pair.0
+            # Reject the complete decoded field section before extracting any
+            # pseudo-header.  Defaulting missing fields below is convenient
+            # for construction, but must never turn malformed wire input into
+            # a routable request.
+            if not h2_validate_request_headers(headers).valid:
+                return nil
             var method_text = "GET"
             var path_text = "/"
             var scheme_text = "https"
