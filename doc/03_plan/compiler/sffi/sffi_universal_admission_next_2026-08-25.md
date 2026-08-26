@@ -742,3 +742,14 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   run focused source checks, existing fallback spec, and optimizer analysis.
 - [ ] Replace both legacy Intel owners with one versioned typed Level Zero ABI;
   then validate pointer/array layouts and admit a signed exact provider.
+
+### OpenCL raw-owner classification
+
+- [x] Confirm that `sffi_opencl` is the one raw OpenCL declaration owner and
+  that the owned C implementation is source evidence only.
+- [x] Mark all 20 raw OpenCL declarations `unsafe(ffi)` and add an authority
+  guard rejecting duplicate owners.
+- [x] Run the existing eight-case fail-closed OpenCL spec, source check, and
+  optimizer analysis without altering the dispatch path.
+- [ ] Define typed span/handle/status contracts, bind the C provider to an
+  exact artifact, and require signature/evidence admission before safe use.

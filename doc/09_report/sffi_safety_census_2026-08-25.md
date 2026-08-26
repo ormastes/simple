@@ -2248,3 +2248,16 @@ The post-change source-only census is 12,773 SFFI declaration rows and 11,149
 `rt_*` rows, with 3,241/2,920 explicitly unsafe-tagged respectively and zero
 signed-admitted declarations. This is declaration containment, not an ABI,
 ownership, nullability, performance-on-device, or cryptographic verification.
+
+### OpenCL raw-owner classification (2026-08-26)
+
+All 20 declarations in the sole `sffi_opencl` raw owner now explicitly carry
+`unsafe(ffi)`. The authority audit confirms that no other Simple library or app
+file declares an `rt_opencl_*` ABI. The existing fail-closed OpenCL spec passes
+8/8, source check passes, and optimizer analysis reports no general-pattern
+finding. No OpenCL dispatch or render-path behavior changes.
+
+The source-only census remains 12,773 SFFI rows / 11,149 `rt_*` rows, now with
+3,261 / 2,940 explicitly unsafe-tagged declarations and zero signed admission.
+Owned C source is not treated as an admitted artifact, so OpenCL remains unsafe
+and unverified.

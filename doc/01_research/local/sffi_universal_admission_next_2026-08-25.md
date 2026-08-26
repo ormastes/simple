@@ -6422,3 +6422,15 @@ confirms 42 tagged raw declaration rows and none in the active GC consumer.
 This records the still-unverified Level Zero/Engine2D ABI boundary; it does not
 prove pointer/array layout, nullability, ownership, artifact identity, or a
 signature-admitted provider.
+
+### OpenCL raw-owner classification (2026-08-26)
+
+The OpenCL ICD has one active raw owner and a real owned C implementation, but
+source presence is not ABI/nullability/ownership proof or signed admission.
+All 20 `rt_opencl_*` declarations are now explicitly `unsafe(ffi)`, and an
+authority audit rejects a second raw declaration owner. The existing eight-case
+spec exercises fail-closed invalid-handle and name-only-kernel behavior.
+
+This is metadata and audit work only: it adds no render-path branch, lookup,
+allocation, copy, or dispatch. Optimizer analysis reports no general-pattern
+finding. The provider remains unsigned and unverified.
