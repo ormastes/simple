@@ -708,3 +708,14 @@ dead helper removal also eliminates a latent two-scan split/allocation path.
 No admission, hashing, signature check, cache, lock, lookup, boxing, generic
 marshalling, or extra dispatch was added. This centralizes unsafe authority but
 does not make the underlying runtime provider signed or verified.
+
+### MIR module-lowering environment authority follow-up
+
+MIR module lowering removed its duplicate raw nullable environment declaration
+and retains one always-inlined local helper through canonical `env_get_opt`.
+The three trace gates and bootstrap-mode gate keep exactly four startup/lowering
+reads and the same disabled fallback for unset or empty values. No read moved
+into a loop and no cache, allocation, copy, hash, signature check, lock, lookup,
+boxing, generic marshalling, or extra dispatch was added. The canonical owner
+still represents a raw, unsigned, unverified provider; this slice removes
+duplicate authority rather than promoting environment input as verified.

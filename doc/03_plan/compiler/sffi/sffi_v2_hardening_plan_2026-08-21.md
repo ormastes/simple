@@ -1350,3 +1350,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Preserve one exit call per fatal site and add no normal-path work.
 - [x] Add a static authority and fatal-call-count ratchet.
 - [x] Record the centralized runtime provider as unsigned and unverified.
+
+### Completed MIR module-lowering environment-authority slice
+
+- [x] Remove the duplicate raw nullable environment declaration.
+- [x] Retain one always-inline helper through canonical `env_get_opt`.
+- [x] Preserve four reads and disabled fallback for unset/empty values.
+- [x] Add no loop work, cache, allocation, hash, lock, or extra dispatch.
+- [x] Add a static authority and call-count ratchet.
+- [x] Record the canonical provider as raw, unsigned, and unverified.
