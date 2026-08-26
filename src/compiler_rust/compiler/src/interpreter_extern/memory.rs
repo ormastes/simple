@@ -333,9 +333,12 @@ pub fn rt_transient_array_scope_pause(_args: &[Value]) -> Result<Value, CompileE
 }
 
 pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> {
-    let Some(value) = args.first() else {
-        return Ok(Value::Bool(false));
-    };
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_transient_heap_promote requires 1 argument (value)",
+        ));
+    }
+    let value = &args[0];
     let promoted = match value {
         // Raw runtime handles cross the interpreter boundary as integer carriers.
         Value::Int(raw) => {
@@ -1624,7 +1627,7 @@ mod tests {
             rt_transient_heap_promote(&[Value::UInt { value: 0, width: 64 }]),
             Ok(Value::Bool(false))
         ));
-        assert!(matches!(rt_transient_heap_promote(&[]), Ok(Value::Bool(false))));
+        assert!(rt_transient_heap_promote(&[]).is_err());
     }
 
     // ========================================================================

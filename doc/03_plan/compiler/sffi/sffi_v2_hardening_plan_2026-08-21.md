@@ -1540,3 +1540,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Preserved the valid path's existing type match and one release dispatch; no
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 transient-promotion boolean-contract follow-up
+
+- Replaced missing-argument `false` fabrication in the Rust interpreter with a
+  typed runtime error.
+- Preserved genuine provider `true`/`false` results for exactly one argument.
+- Ratcheted the Rust fail-closed path and the canonical `i64 -> i8` registry/C
+  ABI while leaving four frontend owners explicitly unsafe.
+- The valid path retains one argument bounds decision and the existing provider
+  call; no allocation, copy, lookup, hash, lock, or dispatch was added.
+- Status: source-reviewed, deliberately unverified and unsigned.

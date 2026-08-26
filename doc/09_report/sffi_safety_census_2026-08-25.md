@@ -929,3 +929,10 @@ wrong argument type instead of silently treating it as a successful no-op.
 Native C and pure-Simple providers retain registered-handle guards. The valid
 Rust path keeps the same single type match and release call. Source-reviewed,
 but unverified and unsigned.
+## 2026-08-26 transient-promotion boolean-contract follow-up
+
+The Rust interpreter provider for `rt_transient_heap_promote` no longer returns
+fabricated `false` for a missing argument; it returns a typed runtime error.
+Valid calls still return the provider boolean directly. Four frontend registry
+owners remain explicitly unsafe and the ABI stays `i64 -> i8/bool`. This slice
+is source-reviewed but unverified and unsigned.
