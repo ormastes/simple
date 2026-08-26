@@ -235,6 +235,27 @@ fn extract_error_message(output: text) -> text:
             count = count + 1
             if count >= 3:
                 break
+    if result != "":
+        return result
+    # Fallback: no compiler/runtime error line. A BDD assertion failure prints
+    # `✗ <example name>` followed by `expected <got> to <matcher> <want>`; with
+    # neither matched above, the caller collapsed 100+ real assertion failures
+    # into the opaque "Process exited with code 1"
+    # (doc/08_tracking/bug/test_01_unit_process_exit_cluster_2026-08-26.md).
+    # Surface the first failing example and its expectation instead.
+    var prev_was_failure = false
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean.starts_with("✗"):
+            if result != "":
+                break
+            result = clean
+            prev_was_failure = true
+        elif prev_was_failure and clean.starts_with("expected "):
+            result = result + " -- " + clean
+            break
+        else:
+            prev_was_failure = false
     result
 
 val SCENARIO_OMISSION_PREFIX = "__SIMPLE_SCENARIO_OMISSION_V1__|"
