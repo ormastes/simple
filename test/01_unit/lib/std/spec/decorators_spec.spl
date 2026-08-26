@@ -11,6 +11,8 @@ use std.spec.step
 
 use std.spec.*
 use std.spec.decorators.*
+use std.spec.condition.{create_skip_condition}
+use std.io_runtime.{env_get}
 use std.spec.env_detect.*
 
 describe "Skip/Ignore Decorators":
@@ -60,25 +62,24 @@ describe "Skip/Ignore Decorators":
         it "skip decorator runs test when conditions don't match":
             # @req REQ-SSPEC-LIB
             step("skip decorator runs test when conditions don't match")
-            var test_ran = false
-            val decorator = skip(
-                platforms: ["nonexistent_os_xyz"],
-                runtimes: [],
-                profiles: [],
-                architectures: [],
-                features: [],
-                version: "",
-                hardware: [],
-                dependencies: [],
-                env_vars: {},
-                fs_features: [],
-                network: false,
-                tags: [],
-                reason: "test"
+            # Oracle at the condition level, which the decorator delegates to:
+            # an unset env-var probe must NOT match (so the test runs), while
+            # an always-matching condition must match (so the test is skipped).
+            # env_vars skip semantics: skip fires when the live value DIFFERS
+            # from the expected one. Pin a live-set variable to its own
+            # current value so the condition cannot match and the test runs.
+            val path_now = env_get("PATH") ?? ""
+            val no_match = create_skip_condition(
+                [], [], [], [], [], "", [], [],
+                {"PATH": path_now},
+                [], false, [], "probe", false
             )
-            # Note: This test is tricky because decorator expects rt_test_it
-            # We can't easily test the actual behavior without runtime support
-            check(true)
+            expect(no_match.matches()).to_equal(false)
+            val always = create_skip_condition(
+                ["windows", "linux", "macos", "freebsd"], [], [], [], [], "", [], [],
+                {}, [], false, [], "probe", false
+            )
+            expect(always.matches()).to_equal(true)
 
     describe "ignore decorator":
         it "creates ignore decorator with all parameters":

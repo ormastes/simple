@@ -8,19 +8,36 @@
 
 use std.spec.step
 
-extern fn rt_file_read_text(path: text) -> text?
+use std.common.config_core.schema.{ConfigFieldDescriptor}
+use std.common.config_core.layers.{ConfigEntry, config_resolve_valid}
+
+fn _int_desc() -> ConfigFieldDescriptor:
+    ConfigFieldDescriptor(
+        key: "max_depth", label: "Depth", description: "max tree depth",
+        category: "runner", value_type: "i64", default_value: "5",
+        enum_options: [], platform: "all",
+        min_value: 1, max_value: 64, has_min: true, has_max: true
+    )
 
 describe "test config numeric guard":
     # @manual scenario evidence
-    it "guards malformed numeric config values through config_core validation":
+    it "drops malformed numeric entries and keeps the valid lower-layer value":
         # @req REQ-SSPEC-APP
-        step("guards malformed numeric config values through config_core validation")
-        # test_config moved to std.test_runner and is resolved through the
-        # shared std.config core: invalid entries are dropped by
-        # config_resolve_valid, so a malformed integer falls back to the
-        # lower layer / compiled default instead of crashing.
-        val source = rt_file_read_text("src/lib/nogc_sync_mut/test_runner/test_config.spl") ?? ""
+        step("drops malformed numeric entries and keeps the valid lower-layer value")
+        val desc = _int_desc()
+        val entries = [
+            ConfigEntry(key: "max_depth", value: "abc", layer: "session"),
+            ConfigEntry(key: "max_depth", value: "7", layer: "user")
+        ]
+        val r = config_resolve_valid(desc, entries)
+        expect(r.value).to_equal("7")
+        expect(r.layer).to_equal("user")
 
-        expect(source).to_contain("config_resolve_valid")
-        expect(source).to_contain("test_config_schema")
-        expect(source.contains("fn to_int_or(")).to_equal(false)
+    it "falls back to the compiled default when every numeric entry is invalid":
+        # @req REQ-SSPEC-APP
+        step("falls back to the compiled default when every numeric entry is invalid")
+        val desc = _int_desc()
+        val entries = [ConfigEntry(key: "max_depth", value: "999", layer: "workspace")]
+        val r = config_resolve_valid(desc, entries)
+        expect(r.value).to_equal("5")
+        expect(r.layer).to_equal("compiled_default")

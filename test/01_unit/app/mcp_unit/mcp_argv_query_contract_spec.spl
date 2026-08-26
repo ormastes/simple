@@ -11,7 +11,7 @@ use std.spec.step
 
 use std.spec
 use std.io_runtime.{file_read}
-use app.mcp.main_lazy_query_tools.{handle_simple_search, _mcp_public_api_change_details}
+use app.mcp.main_lazy_query_tools.{handle_simple_search, _mcp_public_api_change_details, _mcp_first_lines}
 
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -48,17 +48,22 @@ describe "MCP argv query contract":
             val _ = rt_file_delete(sentinel)
         expect(injected).to_equal(false)
 
-    it "routes public query fields through argv helpers":
+    it "truncates tool output at the argv helper line budget":
         # @req REQ-SSPEC-APP
-        step("routes public query fields through argv helpers")
-        val source = file_read("src/app/mcp/main_lazy_query_tools.spl")
-
-        expect(source).to_contain('["show", "--end-of-options", rev + ":" + file]')
-        expect(source).to_contain('mcp_run_argv("rg", args, 15000, 262144)')
-        expect(source).to_contain("head -n 50")
-        expect(source).to_contain('mcp_run_argv("/bin/sh", args, 15000, 262144)')
-        expect(source).to_contain('"--query", query, "--requester", effective_requester')
-        expect(source).to_contain("_mcp_first_lines(rev_out, 30)")
-        expect(source).to_contain("_mcp_first_lines(out, 51)")
-        expect(source).to_contain("_mcp_first_lines(out, 50)")
-        expect(source.contains("shell_cmd(cmd)")).to_equal(false)
+        step("truncates tool output at the argv helper line budget")
+        var lines: [text] = []
+        var i = 0
+        while i < 60:
+            if i == 0:
+                lines.push("FIRSTLINE")
+            elif i == 49:
+                lines.push("LASTKEPT")
+            elif i == 50:
+                lines.push("FIRSTDROPPED")
+            else:
+                lines.push("filler " + str(i))
+            i = i + 1
+        val out = _mcp_first_lines(lines.join("\n"), 50)
+        expect(out).to_contain("FIRSTLINE")
+        expect(out).to_contain("LASTKEPT")
+        expect(out.contains("FIRSTDROPPED")).to_equal(false)

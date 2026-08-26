@@ -10,11 +10,14 @@
 use std.spec.step
 
 use std.spec.{describe, context, it, expect}
-use std.io_runtime.{file_read}
+use common.ui.draw_ir.{
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     web_draw_ir_gpu_route_last_evidence,
     web_draw_ir_gpu_route_policy_consult_count,
-    web_draw_ir_gpu_route_policy_reset
+    web_draw_ir_gpu_route_policy_reset,
+    web_draw_ir_gpu_route_sample
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
     web_gpu_paint_timing_evidence
@@ -88,9 +91,25 @@ describe "Draw IR GPU route policy receipts":
         it "evicts failed device evidence so the next frame recalibrates":
             # @req REQ-SSPEC-LIB
             step("evicts failed device evidence so the next frame recalibrates")
-            val source = file_read(
-                "src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl")
-            expect(source).to_contain("_web_draw_ir_route_states.remove(invalidated)")
-            expect(source).to_contain(
-                "_web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(failed_evidence)")
-            expect(source.contains("_web_draw_ir_invalidate_state")).to_equal(false)
+            step("sample a composition against a backend with no live device")
+            web_draw_ir_gpu_route_policy_reset()
+            val embedding = draw_ir_embedding_config(
+                "web", "body", 0, 0, 64, 64, 0, 1000, true)
+            val composition = draw_ir_composition(
+                "web-gpu-route-policy", "generic-web", "gpu", [
+                    draw_ir_batch("body", "gpu", embedding, [
+                        draw_ir_rect("background", 0, 0, 64, 64, 0xFF1D4ED8u32)
+                    ])
+                ])
+            val pixels = web_draw_ir_gpu_route_sample(composition, 64, 64, "no-such-backend")
+            step("the failed route leaves no stale success evidence")
+            # oracle: a device-less backend must still render correctly via the
+            # software fallback and record failure, never a stale success receipt
+            expect(pixels.len()).to_equal(64 * 64)
+            val failed = web_draw_ir_gpu_route_last_evidence()
+            expect(failed.available).to_equal(false)
+            expect(failed.should_offload).to_equal(false)
+            step("the next consult recalibrates from scratch rather than reusing the failed state")
+            web_draw_ir_gpu_route_sample(composition, 64, 64, "no-such-backend")
+            # oracle: consult count advances — each frame re-consults after eviction
+            expect(web_draw_ir_gpu_route_policy_consult_count()).to_equal(2)

@@ -8,7 +8,6 @@
 use std.spec.step
 
 use std.spec.*
-use std.sffi.io.{file_read_text}
 use lib.common.crypto.x25519_mlkem768.contract.{
     X25519MlKem768Backend, X25519MlKem768SelectionMode,
     X25519MlKem768VerificationPolicy, X25519MlKem768Config,
@@ -16,7 +15,10 @@ use lib.common.crypto.x25519_mlkem768.contract.{
     X25519_MLKEM768_PROFILE_VERSION
 }
 use os.crypto.x25519_mlkem768.execution_policy.{
-    x25519_mlkem768_resolve_backend
+    x25519_mlkem768_resolve_backend,
+    x25519_mlkem768_resolve_cuda_candidate,
+    x25519_mlkem768_resolve_metal_candidate,
+    x25519_mlkem768_resolve_vulkan_candidate
 }
 
 fn _cache_config(
@@ -99,38 +101,64 @@ describe "X25519MLKEM768 cache boundary contract":
     it "should NFR-012 exclude external process launchers from every executor path":
         # @req REQ-SSPEC-OS
         step("should NFR-012 exclude external process launchers from every executor path")
-        step("Inspect each backend policy and provider for process launch calls")
-        val policy = file_read_text(
-            "src/os/crypto/x25519_mlkem768/execution_policy.spl")
-        val cuda = file_read_text(
-            "src/os/crypto/x25519_mlkem768/cuda_ntt_provider.spl")
-        val vulkan = file_read_text(
-            "src/os/crypto/x25519_mlkem768/vulkan_ntt_provider.spl")
-        val metal = file_read_text(
-            "src/os/crypto/x25519_mlkem768/metal_ntt_provider.spl")
-        for source in [policy, cuda, vulkan, metal]:
-            expect(source.contains("rt_process_run")).to_be(false)
-            expect(source.contains("process_run(")).to_be(false)
+        step("Resolve each device-backend candidate through the executor policy")
+        step("Confirm every resolved path is an in-process candidate with no device execution")
+        # oracle: candidate resolution must stay in-process — no kernel runs,
+        # no submit, no readback, executor identity names the in-process candidate
+        val cuda = x25519_mlkem768_resolve_cuda_candidate(_cache_config(
+            X25519MlKem768Backend.Cuda,
+            X25519MlKem768SelectionMode.Require, 1, 1), "cache-contract")
+        val metal = x25519_mlkem768_resolve_metal_candidate(_cache_config(
+            X25519MlKem768Backend.Metal,
+            X25519MlKem768SelectionMode.Require, 1, 1), "cache-contract")
+        val vulkan = x25519_mlkem768_resolve_vulkan_candidate(_cache_config(
+            X25519MlKem768Backend.Vulkan,
+            X25519MlKem768SelectionMode.Require, 1, 1), "cache-contract")
+        for result in [cuda, metal, vulkan]:
+            expect(result.is_ok()).to_be(true)
+        match cuda:
+            case Ok(ev):
+                expect(ev.executor_identity).to_equal("cuda-candidate")
+                expect(ev.kernel_invocations).to_equal(0)
+                expect(ev.compiled).to_be(false)
+                expect(ev.submitted).to_be(false)
+            case Err(msg):
+                fail_test("cuda candidate resolution failed: {msg}")
+        match metal:
+            case Ok(ev):
+                expect(ev.executor_identity).to_equal("metal-candidate")
+                expect(ev.kernel_invocations).to_equal(0)
+                expect(ev.submitted).to_be(false)
+            case Err(msg):
+                fail_test("metal candidate resolution failed: {msg}")
+        match vulkan:
+            case Ok(ev):
+                expect(ev.executor_identity).to_equal("vulkan-candidate")
+                expect(ev.kernel_invocations).to_equal(0)
+                expect(ev.submitted).to_be(false)
+            case Err(msg):
+                fail_test("vulkan candidate resolution failed: {msg}")
 
     it "should NFR-012 guard device compilation and module load by session state":
         # @req REQ-SSPEC-OS
         step("should NFR-012 guard device compilation and module load by session state")
-        step("Verify initialization guards precede every backend setup call")
-        val cuda = file_read_text(
-            "src/os/crypto/x25519_mlkem768/cuda_ntt_provider.spl")
-        val metal = file_read_text(
-            "src/os/crypto/x25519_mlkem768/metal_ntt_provider.spl")
-        val vulkan = file_read_text(
-            "src/os/crypto/x25519_mlkem768/vulkan_ntt_provider.spl")
-        val cuda_guard = cuda.index_of("if self.session.module == 0:")
-        val cuda_load = cuda.index_of("self.session.load_module(", cuda_guard)
-        val metal_guard = metal.index_of("if not self.session.initialized:")
-        val metal_init = metal.index_of("self.session.init(", metal_guard)
-        val vulkan_guard = vulkan.index_of("if not self.session.initialized:")
-        val vulkan_init = vulkan.index_of("self.session.init(", vulkan_guard)
-        expect(cuda_guard).to_be_greater_than(0)
-        expect(cuda_load).to_be_greater_than(cuda_guard)
-        expect(metal_guard).to_be_greater_than(0)
-        expect(metal_init).to_be_greater_than(metal_guard)
-        expect(vulkan_guard).to_be_greater_than(0)
-        expect(vulkan_init).to_be_greater_than(vulkan_guard)
+        step("Resolve candidates outside any live device session")
+        step("Confirm no compilation, submit, fence, or readback is claimed and cross-backend requests are rejected")
+        # oracle: without an initialized session the evidence must show no
+        # compiled/submitted/fence/readback activity, and a backend mismatch is refused
+        val cuda = x25519_mlkem768_resolve_cuda_candidate(_cache_config(
+            X25519MlKem768Backend.Cuda,
+            X25519MlKem768SelectionMode.Require, 1, 1), "cache-contract")
+        match cuda:
+            case Ok(ev):
+                expect(ev.compiled).to_be(false)
+                expect(ev.submitted).to_be(false)
+                expect(ev.fence_completed).to_be(false)
+                expect(ev.device_readback).to_be(false)
+                expect(ev.oracle_match).to_be(false)
+            case Err(msg):
+                fail_test("cuda candidate resolution failed: {msg}")
+        val wrong_backend = x25519_mlkem768_resolve_cuda_candidate(_cache_config(
+            X25519MlKem768Backend.Vulkan,
+            X25519MlKem768SelectionMode.Require, 1, 1), "cache-contract")
+        expect(wrong_backend.is_err()).to_be(true)

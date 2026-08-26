@@ -39,7 +39,49 @@ val result = counter.ask(GetCount())
 """
 
 
+use std.spec.step
+
+use std.nogc_async_mut.actor.{ActorMailbox, ActorMessage}
+
 describe "Actors":
     # @manual scenario evidence
-    # Tests for actor model implementation and concurrent message passing.
-    pass
+    # Tests for actor model implementation and concurrent message passing,
+    # exercising the real ActorMailbox admission and FIFO drain contract.
+
+    it "delivers messages in FIFO order through the mailbox":
+        # @req REQ-SSPEC-FEATURE
+        step("create a mailbox and enqueue two fire-and-forget messages")
+        val mb = ActorMailbox.new(8)
+        expect(mb.enqueue(ActorMessage.fire_and_forget("first", []))).to_equal(true)
+        expect(mb.enqueue(ActorMessage.fire_and_forget("second", []))).to_equal(true)
+        step("drain the mailbox")
+        val first = mb.dequeue()
+        val second = mb.dequeue()
+        # oracle: actor mailboxes must preserve send order (sequential processing)
+        expect(first?.method).to_equal("first")
+        expect(second?.method).to_equal("second")
+        expect(mb.len()).to_equal(0)
+
+    it "rejects messages beyond the finite mailbox capacity":
+        # @req REQ-SSPEC-FEATURE
+        step("create a one-slot mailbox and fill it")
+        val mb = ActorMailbox.new(1)
+        expect(mb.enqueue(ActorMessage.fire_and_forget("only", []))).to_equal(true)
+        step("attempt to exceed capacity")
+        # oracle: admission must be bounded — the overflow send is refused, not queued
+        expect(mb.enqueue(ActorMessage.fire_and_forget("overflow", []))).to_equal(false)
+        expect(mb.len()).to_equal(1)
+        expect(mb.is_full()).to_equal(true)
+
+    it "marks reply-expecting messages and closes admission on demand":
+        # @req REQ-SSPEC-FEATURE
+        step("enqueue a reply-expecting message")
+        val mb = ActorMailbox.default()
+        expect(mb.enqueue(ActorMessage.with_reply("ask", ["1"], 7))).to_equal(true)
+        val msg = mb.dequeue()
+        expect(msg?.expects_reply()).to_equal(true)
+        step("close the mailbox and confirm further sends are refused")
+        mb.close()
+        # oracle: a closed mailbox preserves accepted work but admits nothing new
+        expect(mb.is_closed()).to_equal(true)
+        expect(mb.enqueue(ActorMessage.fire_and_forget("late", []))).to_equal(false)

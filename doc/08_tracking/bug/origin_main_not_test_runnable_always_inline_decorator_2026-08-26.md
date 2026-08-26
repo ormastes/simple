@@ -1,6 +1,6 @@
 # `origin/main` is not test-runnable: `unknown decorator @always_inline` on a startup-path stdlib file (2026-08-26)
 
-**Status:** OPEN, RED on `origin/main` right now. Found by
+**Status:** FIXED 2026-08-26. Was RED on `origin/main`. Found by
 `scripts/check/check-main-test-runnable-push.shs`, the guard landed for the *previous* instance of
 this exact class (`origin_main_not_test_runnable_env_access_host_parse_2026-08-25.md`) — its first
 real catch, hours after landing.
@@ -83,3 +83,33 @@ stopped working exactly when it was needed. Fixed in the same change: A is now a
 and C1/C2 are a **differential** (inject the paren bug, require a parse diagnostic that the clean
 run did not produce), which needs no healthy baseline. C1 still fails honestly if the clean run
 *already* shows a parse error, since injection would then prove nothing.
+
+## Resolution (2026-08-26)
+
+**Fixed in the seed, not by deleting the annotation.** `@always_inline` is real and honoured:
+`compiler/src/codegen/llvm/backend_core.rs:134` reads it (along with `inline` and `force_inline`)
+and applies LLVM's `alwaysinline` attribute. Only the interpreter's decorator skip-list in
+`compiler/src/interpreter_eval.rs` omitted the three, so every module carrying one was rejected
+at load. All three are now registered.
+
+The alternative — stripping the decorators — was rejected on evidence: **84 files** use
+`@always_inline` at origin, 18 of them under `src/lib` on the startup path. That is an
+established annotation with a working backend implementation, not a typo; deleting it would have
+discarded real optimiser hints across the tree to work around a one-line omission.
+
+Verified with a binary built from `origin/main` + this fix:
+- `test/fixtures/doctest/green.md` → `1 total, 1 passed` (pre-fix binary: aborts, no results line)
+- `test/01_unit/compiler/parser_move_contextual_keyword_spec.spl` → `4 total, 4 passed`
+- the guard: `PASS — 1 fixture invocation executed ... tree is test-runnable`
+
+Regression specs (both in `test/01_unit/compiler/parser_inlining_hint_decorators_spec.spl`):
+a reproduction using `@always_inline`/`@inline`/`@force_inline` on plain functions, and a
+generalization on the exact shape that broke `main` — optional return, body an `unsafe` block
+around an extern, i.e. `file_ops.spl`'s shape. `3 total, 3 passed` on the fixed binary;
+on the pre-fix binary the file does not even load (`unknown decorator @always_inline`), which is
+the reproduction — a decorator defect cannot be caught by an assertion inside the function it
+decorates.
+
+The deployed `bin/release/x86_64-unknown-linux-gnu/simple` was replaced with this build
+(previous binary kept as `simple.pre-alwaysinline-20260826`), and `push-main-test-runnable` is
+**promoted back to `push_blocking: true`** in the same change, as its advisory note required.
