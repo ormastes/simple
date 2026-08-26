@@ -55,7 +55,7 @@ describe "release-wrapper self-delegation (delegation-loop regression)":
         check(not is_release_wrapper_self_delegation("", "/opt/simple/bin/release/x86_64-unknown-linux-gnu/simple"))
 
 describe "delegation-cycle generalization: every external spawn in the driver facades is guarded":
-    it "guards every rt_process_run(simple_bin, ...) call site with the delegation guard":
+    it "guards every process_run(simple_bin, ...) call site with the delegation guard":
         # Probes for SIMILAR cycles: any facade function that spawns the
         # resolved `simple` binary must consult check_compile_delegation_guard
         # first. A new unguarded spawn is a fresh loop waiting to happen.
@@ -66,9 +66,32 @@ describe "delegation-cycle generalization: every external spawn in the driver fa
         ]
         for facade in facades:
             val source = read_file(facade)
-            if source.contains("rt_process_run(simple_bin"):
+            if source.contains("process_run(simple_bin"):
                 check(source.contains("check_compile_delegation_guard("))
                 check(source.contains("mark_compile_delegated()"))
+
+    it "routes lightweight compile process and file access through canonical exact facades":
+        val source = read_file("src/compiler/80.driver/driver_public_compile_process.spl")
+        check(source.contains("use std.nogc_sync_mut.io_runtime.{process_run, file_exists, file_read_nullable}"))
+        # Positive cardinalities make removal or accidental wrapper substitution
+        # fail rather than letting an absence-only ownership check pass vacuously.
+        expect(source.split("process_run(simple_bin,").len() - 1).to_equal(4)
+        expect(source.split("file_exists(").len() - 1).to_equal(2)
+        expect(source.split("file_read_nullable(").len() - 1).to_equal(1)
+
+        # Preserve each public operation's exact one-shot transport shape.
+        check(source.contains("process_run(simple_bin, [\"compile\", path])"))
+        check(source.contains("process_run(simple_bin, [\"compile\", path, \"-o\", output])"))
+        check(source.contains("process_run(simple_bin, [path])"))
+        check(source.contains("process_run(simple_bin, [\"check\", path])"))
+        check(source.contains("file_exists(default_output)"))
+        check(source.contains("file_exists(output)"))
+        check(source.contains("file_read_nullable(path) ?? \"\""))
+
+        # Neither declarations nor calls may bypass the canonical owner.
+        expect(source.contains("rt_process_run")).to_equal(false)
+        expect(source.contains("rt_file_exists")).to_equal(false)
+        expect(source.contains("rt_file_read_text")).to_equal(false)
 
     it "keeps the lightweight facade lightweight: it never loads the full in-process driver":
         # The delegating facade must stay a pure process-spawner. Importing the
@@ -130,7 +153,7 @@ describe "delegation-cycle root cause: the external facade must not shadow the i
         ]
         for path in delegating:
             val source = read_file(path)
-            if source.contains("rt_process_run(simple_bin"):
+            if source.contains("process_run(simple_bin"):
                 for name in COLLIDING:
                     if in_process.contains("pub fn " + name + "("):
                         expect(source.contains("pub fn " + name + "(")).to_equal(false)
