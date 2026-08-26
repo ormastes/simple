@@ -27,16 +27,18 @@ or raw-source execution is not substitute evidence.
 
 ## 1. What the knowledge compiler does
 
-The SPipe Knowledge Compiler turns canonical project documents, source
+The target SPipe Knowledge Compiler turns canonical project documents, source
 metadata, and tests into a stable artifact graph, searchable indexes, and
-read-only virtual documentation views. Canonical content stays single-copy and
-is identified by immutable artifact and section UIDs. Physical and virtual
-paths are locations, not identities.
+read-only virtual documentation views. The released Waves 2–3 currently cover
+identity, parsing, immutable snapshots/overlays, typed graph publication, and
+diagnostics as JavaScript library APIs. Search and virtual views are not yet
+released. Canonical content stays single-copy and paths are not identities.
 
-SPipe remains usable without Simple. Its dependency-free JavaScript provider
-is the baseline; a configured Simple provider may add faster search, compiler
-symbols, duplication analysis, and database integration without changing the
-observable identity, ranking, trace, or projection contracts.
+SPipe remains usable without Simple. The target architecture requires a
+dependency-free JavaScript search provider, but today the dependency-free
+baseline is the identity/graph library only. A later configured Simple provider
+may add faster search, compiler symbols, duplication analysis, and database
+integration without changing observable contracts.
 
 ## 2. Audience
 
@@ -49,7 +51,10 @@ It is not an implementation API reference. Architecture and provider details
 belong in `doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md` and
 `doc/05_design/infra/spipe/spipe_knowledge_compiler.md`.
 
-## 3. Safety model
+## 3. Target safety invariants
+
+The following invariants govern future mutation, view, search, and promotion
+surfaces; their presence here does not mean those surfaces are released:
 
 - Canonical files are writable only through their normal authoring workflow or
   an approved SPipe refactor transaction.
@@ -68,26 +73,54 @@ belong in `doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md` and
 
 ## 4. Preconditions
 
-Before operating on a workspace:
+For currently released host/package operations:
 
-1. use the repository-managed SPipe command and self-hosted Simple binary where
-   configured;
-2. confirm the project registry, linked-project revisions, trust scopes, and
-   worktree identity;
-3. keep unrelated dirty files and other-agent work outside the operation;
-4. ensure `.spipecache/` and `.spipe/view/` are derived/ignored locations;
-5. use explicit temporary roots for destructive fault or recovery exercises;
-6. run `spipe doctor` to resolve incomplete links, interrupted transactions, or
-   incompatible indexes before applying a mutation.
+1. use the repository-managed SPipe package;
+2. pass the host root explicitly when SPipe is not mounted at `.spipe/spipe`;
+3. keep unrelated dirty files and other-agent work outside the operation; and
+4. use `spipe doctor /absolute/host/root` only for package/host link checks.
 
-An unavailable optional provider is not a reason to abandon core operation.
-The compiler should report degraded capabilities and continue with the
-dependency-free exact/BM25/graph path. Do not describe that as proof of the
-missing provider.
+Index, transaction, provider, cache, and materialized-view preconditions apply
+only after their implementation waves land. Current `doctor` does not inspect
+them, and there is no released exact/BM25/graph fallback search path.
+
+### 4.1 Standalone install and released-surface discovery
+
+SPipe has no baseline npm dependencies. From the Simple repository root, use
+the package directly:
+
+```sh
+cd examples/05_stdlib/spipe
+node cli/spipe.js --version       # 0.1.0
+node cli/spipe.js --help
+npm run check
+npm test
+npm run build                    # invokes sh scripts/build.shs
+```
+
+For a local global command installation, run
+`npm install -g ./examples/05_stdlib/spipe` from the repository root. This
+installs `spipe` and `spipe-mcp`. `spipe doctor /absolute/host/root` requires
+an explicit host root when the package is not mounted at `.spipe/spipe`; SPipe
+does not search upward from the current directory.
+
+The released MCP server is newline-delimited stdio:
+
+```sh
+node mcp/server.js
+```
+
+Its initialize response currently advertises protocol `2024-11-05`, server
+`spipe` version `0.1.0`, and tools/resources capabilities. `tools/list` returns
+exactly `spipe_info`, `spipe_experts`, `spipe_read_doc`,
+`spipe_fine_tune_guide`, `spipe_fine_tune_model_guide`, and
+`spipe_fine_tune_template`; `resources/list` returns only `spipe://skill`.
+There are no resource templates, list-change notifications, cache hints,
+Knowledge Compiler tools, or MCP 2026 HTTP transport yet.
 
 ## 5. Primary operator workflow
 
-### 5.0 Current Wave 2 API boundary
+### 5.0 Current Waves 2–3 API boundary
 
 The dependency-free package now provides schemas and JavaScript APIs for
 artifact/project/section/edge/alias/view records, Markdown/SDN/SSpec/source
@@ -128,6 +161,96 @@ UID factory solely to replay a transaction fixture.
 The `spipe index`, `view`, `search`, `trace`, and refactor commands below are
 the stable planned operator surface. They must not be treated as reachable
 until their named implementation wave and focused compatibility evidence land.
+
+#### 5.0.1 Executable Waves 2–3 library walkthrough
+
+The following is the current standalone Knowledge Compiler entry point. Run it
+from `examples/05_stdlib/spipe`; it performs no repository scan or canonical
+write:
+
+```sh
+node --input-type=module <<'NODE'
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  compileKnowledgeInventory,
+  compileKnowledgeDelta
+} from "./src/core/knowledge_compiler.js";
+import { parseMarkdownArtifact } from "./src/parser/index.js";
+import { planUidInjection } from "./src/core/identity.js";
+import { WorktreeOverlayStore } from "./src/storage/overlay_store.js";
+import { ZERO_HASH } from "./src/storage/canonical.js";
+
+const context = {
+  project_uid: "P-000000000000000000000000000000AA",
+  worktree_uid: "W-000000000000000000000000000000BB",
+  revision_id: "185f330328248b89813baf9229b14781f53a60c4",
+  overlay_generation_hash: ZERO_HASH,
+  policy_hash: "4".repeat(64)
+};
+const original = `<!-- spipe:artifact uid=A-00000000000000000000000000000001 key=design.search.core aliases=[old.search] -->
+# Search Core
+
+## Stable identity
+<!-- spipe:section uid=S-00000000000000000000000000000001 key=design.search.identity -->
+Paths are locations.
+`;
+
+const inventory = compileKnowledgeInventory({
+  ...context,
+  inputs: [{ path: "doc/search.md", content: original }]
+});
+assert.match(inventory.snapshot.snapshot_uid, /^spks1-[0-9a-f]{64}$/);
+assert.equal(inventory.identity.resolve("old.search").status, "resolved");
+assert.equal(Object.isFrozen(inventory), true);
+
+const changed = original.replace("Paths are locations.", "Paths remain locations.");
+const incremental = compileKnowledgeDelta(inventory, [{
+  operation: "upsert", path: "doc/search.md", content: changed
+}]);
+assert.equal(incremental.delta.artifacts.updated.length, 1);
+assert.equal(incremental.delta.artifacts.updated[0].uid,
+  "A-00000000000000000000000000000001");
+
+const cacheRoot = mkdtempSync(join(tmpdir(), "spkc-overlay-"));
+try {
+  const overlay = new WorktreeOverlayStore({
+    cacheRoot, worktreeUid: context.worktree_uid
+  });
+  overlay.set("doc/search.md", changed);
+  const reloaded = new WorktreeOverlayStore({
+    cacheRoot, worktreeUid: context.worktree_uid
+  });
+  assert.equal(reloaded.read("doc/search.md").toString(), changed);
+} finally {
+  rmSync(cacheRoot, { recursive: true, force: true });
+}
+
+const unmarked = parseMarkdownArtifact(
+  "# New Note\n\n## Missing identity\nBody.\n",
+  { path: "doc/new-note.md", projectUid: context.project_uid,
+    revision: context.revision_id }
+);
+let sequence = 0;
+const proposals = planUidInjection(unmarked, {
+  uidFactory: prefix => `${prefix}-${String(++sequence).padStart(32, "0")}`
+});
+assert.ok(proposals.some(({ kind }) => kind === "artifact_uid"));
+assert.ok(proposals.some(({ kind }) => kind === "section_uid"));
+assert.ok(proposals.every(({ canonical_mutation }) => canonical_mutation === false));
+console.log("wave2_walkthrough=pass", inventory.snapshot.snapshot_uid,
+  incremental.inventory.snapshot.snapshot_uid);
+NODE
+```
+
+Expected result is one `wave2_walkthrough=pass` line and no assertion failure.
+`planUidInjection` is dry-run-only: no UID apply/persist API, marker-write
+authorization receipt, or `RefactorService` is released. Trust elevation is a
+separate composition-root operation through `createAuthorizationPort` and a
+verified signed receipt; see `test/integration/knowledge_wave2_test.js` for the
+accepted fixture.
 
 ### 5.1 Index canonical knowledge artifacts
 
@@ -569,16 +692,18 @@ no churn. Leave physical content in place until the defect is resolved.
 
 ### Semantic or server provider is unavailable
 
-Record the degraded capability and continue with exact/BM25/graph retrieval if
-policy permits. Do not claim semantic, server, WAND, or authorization evidence
-from fallback execution.
+This is a future provider runbook. After the fallback/provider wave lands,
+record the degraded capability and continue with the explicitly negotiated
+available sources if policy permits. Today there is no released search fallback.
+Never claim semantic, server, WAND, or authorization evidence from degradation.
 
 ## 11. Compatibility and deferred surfaces
 
 Existing SPipe CLI, setup, link, and `doctor` behavior remains compatible.
-Legacy MCP stdio and MCP 2026 stateless transports share a protocol-neutral
-knowledge core. MCP tools/resources, materialized views, and an editor virtual
-filesystem are the supported exposure order.
+Legacy MCP stdio is the only released transport. The protocol-neutral core,
+MCP 2026 stateless HTTP transport, Knowledge Compiler tools/resources,
+materialized views, and editor virtual filesystem are target/deferred surfaces
+in that implementation order.
 
 FUSE/ProjFS is deferred until client evidence proves those mechanisms
 insufficient. An absent OS mount is therefore not a core failure, and no
