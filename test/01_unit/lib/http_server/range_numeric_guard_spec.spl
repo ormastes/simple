@@ -1,30 +1,38 @@
-extern fn rt_file_read_text(path: text) -> text
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+use std.gc_async_mut.http_server.utilities.{parse_range_header, create_content_range}
 
 # Regression guard for the Range header parser.
 #
-# History: this spec used to require `start = start_str.to_int() ?? 0` and
-# `end = end_str.to_int() ?? -1`. That pattern is DEAD -- `.to_int()` is typed
-# `i64?` but its runtime returns a plain int64_t and can never produce nil, so
-# the `??` arm never fired and `bytes=abc-def` was silently served as
-# `bytes=0-0`. `utilities.spl` now parses through `try_parse_int` and IGNORES a
-# malformed Range (serve the whole entity, RFC 9110 §14.2) instead of coercing
-# it. The assertions below pin that stronger behaviour; requiring the old
-# spelling would be requiring the defect back.
+# History: this spec's assertions used to be pinned by reading source text.
+# They now execute the parser directly. The behavioral contract is unchanged:
+# a malformed Range must be IGNORED (return the whole-entity sentinel
+# (0, -1), RFC 9110 §14.2) instead of being coerced to `bytes=0-0`.
 describe "gc async http server range numeric guard":
-    it "parses range bounds through a parser that can actually fail":
-        val source = rt_file_read_text("src/lib/gc_async_mut/http_server/utilities.spl") ?? ""
-
-        expect(source).to_contain("val parsed_start = try_parse_int(start_str)")
-        expect(source).to_contain("val parsed_end = try_parse_int(end_str)")
+    # @manual scenario evidence
+    it "parses well-formed byte ranges exactly":
+        # @req REQ-SSPEC-LIB
+        step("parses well-formed byte ranges exactly")
+        # oracle: bytes=START-END parses to (START, END) verbatim
+        expect(parse_range_header("bytes=10-20")).to_equal((10, 20))
+        expect(parse_range_header("bytes=0-0")).to_equal((0, 0))
+        # oracle: open-ended range keeps end = -1 (whole remainder)
+        expect(parse_range_header("bytes=5-")).to_equal((5, -1))
 
     it "fails closed on a malformed bound instead of coercing it":
-        val source = rt_file_read_text("src/lib/gc_async_mut/http_server/utilities.spl") ?? ""
-
-        expect(source).to_contain("if parsed_start == nil:")
-        expect(source).to_contain("if parsed_end == nil:")
-
-    it "never reintroduces the coercing to_int spellings":
-        val source = rt_file_read_text("src/lib/gc_async_mut/http_server/utilities.spl") ?? ""
-
-        expect(source.contains("start = start_str.to_int()")).to_equal(false)
-        expect(source.contains("end = end_str.to_int()")).to_equal(false)
+        # @req REQ-SSPEC-LIB
+        step("fails closed on a malformed bound instead of coercing it")
+        # oracle: non-numeric bounds must yield the whole-entity sentinel (0, -1),
+        # never a silently-coerced (0, 0)
+        expect(parse_range_header("bytes=abc-def")).to_equal((0, -1))
+        expect(parse_range_header("bytes=abc-")).to_equal((0, -1))
+        expect(parse_range_header("bytes=-def")).to_equal((0, -1))
+        expect(parse_range_header("bytes=1x-9")).to_equal((0, -1))
+        # oracle: non-bytes units are ignored
+        expect(parse_range_header("items=2-5")).to_equal((0, -1))
+        # oracle: Content-Range formatting round-trips parsed bounds
+        expect(create_content_range(10, 20, 100)).to_equal("bytes 10-20/100")
