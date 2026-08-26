@@ -1,4 +1,4 @@
-use compiler.semantics.const_eval.{EvaluatedConstValue}
+use compiler.semantics.const_eval.{EvaluatedConstValue, _sys_env_bool_from_text}
 use std.io.{file_read}
 
 describe "evaluated constant text formatting":
@@ -10,7 +10,24 @@ describe "evaluated constant text formatting":
 
         expect(value.to_text()).to_equal("(7, [true, \"ok\"])")
 
-    it "uses the owned string helper for compile-time environment booleans":
+    it "accepts every compile-time environment boolean truth spelling":
+        for value in ["1", "true", "yes", "on"]:
+            expect(_sys_env_bool_from_text(value)).to_equal(true)
+
+    it "normalizes case for compile-time environment booleans":
+        for value in ["TRUE", "True", "YES", "Yes", "ON", "On"]:
+            expect(_sys_env_bool_from_text(value)).to_equal(true)
+
+    it "rejects unset-equivalent, explicit false, and unknown forms":
+        for value in ["", "0", "false", "off", "no", "unexpected"]:
+            expect(_sys_env_bool_from_text(value)).to_equal(false)
+
+    it "uses one canonical environment lookup and retains the exact truth set":
         val source = file_read("src/compiler/35.semantics/const_eval.spl")
-        expect(source).to_contain("str_to_lower(rt_env_get(env_name))")
-        expect(source.contains("rt_env_get(env_name).to_lowercase()")).to_equal(false)
+        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{env_get}")
+        expect(source.contains("rt_env_get")).to_equal(false)
+        expect(source.split("env_get(").len()).to_equal(2)
+        expect(source).to_contain("val value = env_get(env_name)")
+        expect(source).to_contain("value == \"1\" or value == \"true\" or value == \"yes\" or value == \"on\"")
+        expect(source).to_contain("sys_env_bool requires 1 argument")
+        expect(source).to_contain("ConstEvalError.TypeError(\"string\", \"non-string\", span)")
