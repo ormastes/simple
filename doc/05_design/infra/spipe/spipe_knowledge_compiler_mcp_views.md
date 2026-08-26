@@ -815,3 +815,32 @@ all-and-only aggregate selection, permit/root rejection, substitution/revision
 denial, and stage/write/fsync/CAS/rename/parent-fsync/restart recovery. Until
 independent review passes, authority and dependent cursor/URI/MCP paths remain
 `NON-ADMITTED`.
+
+### 12.6 Publisher re-admission implementation order
+
+The prior publisher candidate is **`NON-ADMITTED`**. Replace it in this order;
+do not reuse public journal/`instanceof` admission, in-memory manifests, or
+fixture-only recovery as evidence.
+
+1. Make `TargetInventoryStoreV1` validate an unexported closure brand issued by
+   `PublisherPermitIssuerV1` during `KnowledgeCompilerCommitPublisherV1.commit`.
+   The build, roots, contributor selection, and permit are private transaction
+   outputs; URI/MCP/projection callers cannot fabricate them.
+2. Canonicalize `CommitInputV1` after delta normalization and persist one
+   versioned SHA-256 replay-envelope digest binding commit ID, all exact tuple
+   IDs, expected IDs, and deltas. Exact digest replay returns the recorded
+   result; every altered envelope or stale expected tuple denies.
+3. Put every inventory/manifest object and its content hash under
+   `AuthorityPublicationJournalV1` ownership. Journal states are `staging`,
+   `objects_durable`, `record_durable`, `current_cas`, `acknowledged`; each
+   stage uses atomic replacement/rename plus file and parent fsync. Recovery
+   handles a dead writer's lock and an actual process crash at every boundary.
+4. Before `openPublishedAuthorityInventoryV1` or recovery returns a head,
+   recompute all referenced object hashes, record/project/aggregate/page roots,
+   both manifest digests, and exact workspace/project/worktree/revision/base+
+   authority snapshot bindings. After an initial head, readers may receive only
+   the old complete or new complete record, never null/staged/partial state.
+5. Run W5A-26 as a real clean-vs-incremental production comparison and W5A-28
+   with independent processes and concurrent readers. Include sealed directory
+   ordering, authenticated continuation, `1..100` limits, and the exact 100
+   entries/200 lines/6,000 token limits in those oracles.

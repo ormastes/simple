@@ -3247,3 +3247,53 @@ clean/incremental byte parity, permit/root and contributor negatives, manifest
 substitution/revision windows, and stage/write/fsync/CAS/rename/parent-fsync/
 restart faults. Only then may W5A-18..24 or dependent cursor/URI/MCP work claim
 admission.
+
+### 43.4 Publisher implementation non-admission findings (2026-08-26)
+
+The first `KnowledgeCompilerCommitPublisherV1` implementation is
+**`NON-ADMITTED`**. Passing focused tests is not admission evidence: it used a
+publicly constructible journal/instance check instead of a non-forgeable
+`TargetInventoryStoreV1` publisher capability; replay compared convenient
+fields rather than one canonical envelope hash; and its reader/recovery path
+did not deeply validate the current record's sealed roots, manifests, and every
+referenced object before returning it.
+
+The replacement must meet these closed rules:
+
+1. `TargetInventoryStoreV1.publishAuthorityInventoryV1` accepts a
+   closure-branded, composition-root-issued permit only. No exported journal,
+   `instanceof`, string tag, structural object, or caller-supplied root is an
+   authority check. The publisher alone constructs the sealed build and selects
+   registry-complete project/aggregate contributors.
+2. The canonical replay envelope is SHA-256 over versioned canonical bytes of
+   `{commitId, workspaceUid, projectUidOrNull, worktreeUid, revisionId,
+   expectedRegistryRevisionId, expectedBaseSnapshotUidOrNull,
+   expectedPublicationUidOrNull, normalizedInputDeltas}`. A durable record
+   stores that digest; equal digest replays its exact completed result and any
+   changed bytes deny, even when a subset of IDs matches.
+3. `AuthorityPublicationJournalV1` exclusively persists the content-addressed
+   inventory and manifest objects, their object hashes, the complete
+   `AuthorityPublicationRecordV1`, and the current pointer. Its durable state
+   machine is `staging -> objects_durable -> record_durable -> current_cas ->
+   acknowledged`, with atomic rename, file and parent-directory fsync, stale
+   writer-lock recovery, and process-crash recovery at every transition.
+4. A reader never observes `null`, a staged record, or a partially validated
+   head after a successful prior publication: it returns only the preceding
+   complete record or the next complete record. Open and recovery recompute and
+   verify object hashes, project and aggregate roots, both manifest digests,
+   exact `{workspace, project, worktree, revision, registryRevision,
+   baseSnapshotUid, authoritySnapshotUid}` bindings, and sealed page/directory
+   membership before any target lookup.
+5. Directory listings remain sealed and bounded: canonical child order,
+   `1..100` request limit, <=100 entries, <=200 lines, <=6,000
+   `spipe-markdown-token-v1@1` tokens, and an authenticated continuation whose
+   domain/position/limit cannot be widened, substituted, or reused across a
+   directory. Clean and incremental commits must produce byte-identical base
+   and authority snapshots, inventories, manifests, roots, pages, and
+   projections for equivalent input.
+
+The next implementation sequence is therefore: first create the branded store
+publisher path and canonical replay envelope; then journal-owned durable object
+publication and deep current/recovery validation; then real cross-process crash
+and concurrent-reader evidence. W5A-18..30, cursor, URI, projection, MCP, and
+materialization remain blocked until an independent review passes this sequence.

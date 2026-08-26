@@ -1648,7 +1648,14 @@ standalone authority primitive are `NOT-EVIDENCE`.
 | W5A-28 | Fault stage/write/**AuthorityPublicationJournalV1 publication-journal atomic rename**/file-fsync/parent-fsync/current-pointer-CAS/ack/restart; concurrently read at every boundary | AuthorityPublicationJournalV1 validates one AuthorityPublicationRecordV1; recovery and concurrent reader see only old complete or new complete dual-scope state, never staged/partial state |
 | W5A-29 | Equal commit-ID/exact tuple/input then altered input, stale revision, or changed expected base/publication UID | Equal replay idempotent; altered/stale denies without publication |
 | W5A-30 | Substitute manifest/inventory/snapshot/revision/section/target/directory root | Revalidation denies before lookup or ProjectionPort |
+| W5A-31 | Supply public journal, `instanceof` lookalike, structural permit, serialized permit, or caller aggregate/root | Only TargetInventoryStoreV1's composition-root closure brand publishes; no write or visible record otherwise |
+| W5A-32 | Replay same commit ID with altered expected IDs or normalized deltas | Exact canonical replay-envelope SHA-256 returns the original durable result; altered envelope denies before write |
+| W5A-33 | Corrupt current record, inventory/manifest object, object hash, project/aggregate root, page root, or exact tuple after publication | Open/recovery deep validation denies before lookup; it never returns a partially checked head |
+| W5A-34 | Kill publisher process or leave writer lock at each journal state/rename/fsync/CAS boundary; start independent recovery process | Recovery resolves stale lock and exposes prior complete or next complete record only, never null/staged/partial |
+| W5A-35 | Compare a clean commit and equivalent delta sequence, then list bounded directory pages with forged/foreign continuations | Byte-identical dual snapshots/inventories/manifests/roots/pages/projections; only sealed ordered <=100-entry/<=200-line/<=6,000-token pages continue |
 
 W5A-25..30 run against real composition-root registry, snapshot, inventory,
 journal, and filesystem owners. They gate W5A-18..24, W5C, URI, MCP, and
 materializer re-attempts.
+W5A-31..35 are additional non-admission gates for the rejected publisher
+implementation; focused or in-memory substitutes do not satisfy them.

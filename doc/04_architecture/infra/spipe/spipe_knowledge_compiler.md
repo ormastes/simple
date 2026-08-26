@@ -1718,3 +1718,32 @@ is idempotent; changed replay/stale revision fail; recovery exposes old complete
 or new complete state only. W5A-18/19/21/22 require real all-kind parity,
 forged-permit/contributor/substitution negatives and crash/restart/CAS proof;
 authority/projection/cursor claims remain non-admitted before that evidence.
+
+### 21.6 Publisher admission invariants
+
+The rejected publisher is `NON-ADMITTED`; the following are architecture
+invariants, not implementation suggestions. `TargetInventoryStoreV1` owns the
+non-forgeable publication boundary. It recognizes only the closure brand minted
+by `PublisherPermitIssuerV1` inside the composition-root transaction; neither a
+public `AuthorityPublicationJournalV1`, `instanceof`, object shape, nor a
+caller-selected project/aggregate root can confer authority.
+
+`CommitInputV1` is reduced once to a versioned canonical replay envelope hash
+covering `commitId`, exact workspace/project/worktree/revision tuple, expected
+registry/base/publication IDs, and normalized deltas. The journal stores this
+hash in `AuthorityPublicationRecordV1`; same hash returns the exact durable
+result, while changed bytes deny before any write. The record contains the exact
+workspace/project/worktree/revision/base-and-authority-snapshot tuple, ordered
+project roots, aggregate root, manifest digests, and content hashes for every
+journal-owned inventory/manifest object.
+
+`AuthorityPublicationJournalV1` is the sole durable state-machine and recovery
+owner: `staging`, `objects_durable`, `record_durable`, `current_cas`, and
+`acknowledged`. It writes immutable content-addressed objects and record before
+one atomic rename/CAS current pointer, fsyncing files and parent directories;
+it recovers stale writer locks and process interruption deterministically.
+`openPublishedAuthorityInventoryV1` and recovery deep-verify record schema,
+all object hashes, both manifests, project/aggregate roots, exact binding, and
+sealed page roots before returning. Once a head exists, reads return only its
+complete predecessor or its complete successor—never `null`, staging, or a
+partially checked record.

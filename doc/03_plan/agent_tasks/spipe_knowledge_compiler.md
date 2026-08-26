@@ -1012,6 +1012,30 @@ publish -> recovery-safe acknowledgement. URI/MCP/materializer stays read-only.
 Merge owner: `/root`; final reviewer: independent highest-capability reviewer.
 No authority/cursor/URI/projection admission before W5A-P/J/E passes.
 
+### 10.25 Publisher non-admission repair sequence (2026-08-26)
+
+**Status: `NON-ADMITTED`.** The first W5A-P candidate may not be repaired by
+loosening an oracle. It failed five ownership/evidence gates: public
+journal/`instanceof` permit admission, non-canonical replay identity, shallow
+current/recovery validation, non-durable inventory/manifest ownership, and
+non-production crash/parity proof.
+
+| Step | Owner | Required deliverable | Admission evidence |
+|---|---|---|---|
+| P1 | W5A-P + W5A-S | closure-branded `TargetInventoryStoreV1` path and canonical replay envelope hash | strings, structural objects, serialized permits, public journals, and caller roots deny |
+| P2 | W5A-J | journal-owned content-addressed inventory/manifest objects, full record fields, atomic state machine | staged objects/record/current pointer survive fsync/rename/CAS/restart and replay exactly |
+| P3 | W5A-J + W5A-E | deep current/recovery verifier and stale-lock/process-crash recovery | readers see only old/new complete record, never null/staged/partial; corruption denies |
+| P4 | W5A-P + W5A-E | real clean/incremental publisher parity and sealed directory continuations | W5A-26, W5A-28, W5A-31..35 PASS against production filesystem owners |
+
+`AuthorityPublicationRecordV1` must contain exact workspace/project/worktree/
+revision IDs, expected registry/base/publication IDs, base and authority
+snapshot IDs, ordered project roots, aggregate root, manifest digests, object
+hashes, and canonical replay-envelope digest. The journal alone owns its
+objects, transitions (`staging -> objects_durable -> record_durable ->
+current_cas -> acknowledged`), recovery, and current pointer. W5A-P accepts no
+parallel shortcut: cursor, URI, projection, MCP, and materialization remain
+blocked until independent highest-capability review reports PASS.
+
 ### 11.2 Wave 5a sealed-publication repair gate (2026-08-26)
 
 1. **Status/ownership.** The rejected pre-cursor authority candidate is
