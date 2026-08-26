@@ -1530,3 +1530,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
   behavior with one direct call and no allocation, copy, lookup, lock, or retry.
 - Reduced lexer raw declarations to the locally owned array-release boundary.
 - Status: source-reviewed, deliberately unverified for this sync.
+## 2026-08-26 lexer array-release provider follow-up
+
+- Kept `rt_array_free(i64)` explicitly unsafe; the type cannot prove ownership.
+- Changed the Rust interpreter provider from wrong-type silent success to its
+  existing typed integer-conversion error path.
+- Added a static cross-provider ratchet for Rust type rejection and C/Simple
+  invalid/unregistered-handle guards.
+- Preserved the valid path's existing type match and one release dispatch; no
+  allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
+- Status: source-reviewed, deliberately unverified and unsigned.

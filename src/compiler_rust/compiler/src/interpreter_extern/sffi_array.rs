@@ -661,9 +661,8 @@ pub fn rt_array_free_fn(args: &[Value]) -> Result<Value, CompileError> {
             ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
         )
     })?;
-    if let Value::Int(raw) = array {
-        rt_array_free(RuntimeValue::from_raw(*raw as u64));
-    }
+    let raw = array.as_int()?;
+    rt_array_free(RuntimeValue::from_raw(raw as u64));
     Ok(Value::Nil)
 }
 

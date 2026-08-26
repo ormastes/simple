@@ -921,3 +921,11 @@ The compiler lexer no longer redeclares `rt_env_set`; all twenty-eight writes
 use the canonical now-always-inline `env_set` owner with unchanged boolean ABI
 and ignored-result behavior. Array release is the lexer's sole remaining raw
 boundary. This slice is source-reviewed but unverified.
+## 2026-08-26 lexer array-release provider follow-up
+
+The lexer's final raw boundary remains explicitly unsafe because its `i64`
+handle cannot prove ownership. The Rust interpreter provider now rejects a
+wrong argument type instead of silently treating it as a successful no-op.
+Native C and pure-Simple providers retain registered-handle guards. The valid
+Rust path keeps the same single type match and release call. Source-reviewed,
+but unverified and unsigned.
