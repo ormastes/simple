@@ -1,5 +1,7 @@
 # Protected Software Release
 
+Release contract: isolated-session; reviewed-beta-backport; immutable-candidate; promote-without-rebuild; protected-ref-guard; non-destructive-release-identity.
+
 This is the semantic source for Simple/Spipe stable, alpha, beta, RC, patch, and hotfix release projections.
 
 ## Invariants

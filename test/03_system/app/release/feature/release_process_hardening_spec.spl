@@ -120,6 +120,16 @@ use app.release.policy.{
     check_promotion_plan, check_withdrawal_plan
 }
 
+fn sha_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn sha_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+fn sha_c() -> text: "cccccccccccccccccccccccccccccccccccccccc"
+fn digest_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn digest_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+fn digest_c() -> text: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+fn digest_d() -> text: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+fn digest_e() -> text: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+fn digest_f() -> text: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
 fn setup_release_fixture() -> ReleaseSession:
     ReleaseSession(
         session_id: "s-release-001",
@@ -127,23 +137,31 @@ fn setup_release_fixture() -> ReleaseSession:
         main_workspace_path: "/workspace/main",
         work_branch: "work/release/v1.4.0-beta.2-s-release-001",
         target_ref: "release/1.4",
-        base_sha: "base-commit",
-        expected_target_sha: "target-commit",
-        policy_sha256: "policy-digest"
+        base_sha: sha_a(),
+        expected_target_sha: sha_b(),
+        policy_sha256: digest_a()
     )
 
 fn setup_backport_fixture() -> BackportRequest:
     BackportRequest(
-        source_commit_sha: "fix-source-commit",
+        direction: "main_to_beta",
+        source_ref: "main",
+        source_commit_sha: sha_a(),
         change_id: "change-k3m8z",
         work_id: "gh-512",
         change_kind: "fix",
-        review_receipt_sha256: "review-digest",
+        review_receipt_sha256: digest_a(),
+        reviewed_source_commit_sha: sha_a(),
+        reviewed_change_id: "change-k3m8z",
         target_line: "release/1.4",
-        expected_target_sha: "target-commit",
+        expected_target_sha: sha_b(),
         adaptation_reason: "none",
-        evidence_sha256: "focused-evidence-digest",
-        result_commit_sha: "backported-result-commit"
+        evidence_sha256: digest_b(),
+        evidence_result_commit_sha: sha_c(),
+        evidence_target_sha: sha_b(),
+        result_commit_sha: sha_c(),
+        forward_port_target_ref: "",
+        forward_port_receipt_sha256: ""
     )
 
 fn setup_candidate_fixture() -> CandidateManifest:
@@ -151,13 +169,13 @@ fn setup_candidate_fixture() -> CandidateManifest:
         version: "1.4.0-beta.2",
         attempt: 1,
         candidate_ref: "candidate/v1.4.0-beta.2/a001",
-        commit_sha: "candidate-commit",
-        source_tree_sha256: "source-digest",
-        policy_sha256: "policy-digest",
-        version_manifest_sha256: "version-digest",
-        toolchain_manifest_sha256: "toolchain-digest",
-        support_manifest_sha256: "support-digest",
-        evidence_manifest_sha256: "evidence-digest"
+        commit_sha: sha_c(),
+        source_tree_sha256: digest_a(),
+        policy_sha256: digest_b(),
+        version_manifest_sha256: digest_c(),
+        toolchain_manifest_sha256: digest_d(),
+        support_manifest_sha256: digest_e(),
+        evidence_manifest_sha256: digest_f()
     )
 
 describe "Hardened Simple and Spipe software release":
@@ -187,24 +205,106 @@ describe "Hardened Simple and Spipe software release":
             policy_sha256: session.policy_sha256
         )
         expect(validate_release_session(main_session).reason).to_equal("release mutation is forbidden in the main worktree")
+        val unsafe_branch = ReleaseSession(
+            session_id: session.session_id,
+            workspace_path: session.workspace_path,
+            main_workspace_path: session.main_workspace_path,
+            work_branch: "work/release/../../main",
+            target_ref: session.target_ref,
+            base_sha: session.base_sha,
+            expected_target_sha: session.expected_target_sha,
+            policy_sha256: session.policy_sha256
+        )
+        expect(validate_release_session(unsafe_branch).reason).to_equal("release session must own a work branch")
 
     it "admits reviewed bug-fix backports and rejects unrelated features":
         step("Admit reviewed bug-fix backports")
         val request = setup_backport_fixture()
         expect(check_backport_admission(request).valid).to_be(true)
         val feature = BackportRequest(
+            direction: request.direction,
+            source_ref: request.source_ref,
             source_commit_sha: request.source_commit_sha,
             change_id: request.change_id,
             work_id: request.work_id,
             change_kind: "feat",
             review_receipt_sha256: request.review_receipt_sha256,
+            reviewed_source_commit_sha: request.reviewed_source_commit_sha,
+            reviewed_change_id: request.reviewed_change_id,
             target_line: request.target_line,
             expected_target_sha: request.expected_target_sha,
             adaptation_reason: request.adaptation_reason,
             evidence_sha256: request.evidence_sha256,
-            result_commit_sha: request.result_commit_sha
+            evidence_result_commit_sha: request.evidence_result_commit_sha,
+            evidence_target_sha: request.evidence_target_sha,
+            result_commit_sha: request.result_commit_sha,
+            forward_port_target_ref: request.forward_port_target_ref,
+            forward_port_receipt_sha256: request.forward_port_receipt_sha256
         )
         expect(check_backport_admission(feature).reason).to_equal("beta backports accept reviewed bug fixes only")
+        val stale_review = BackportRequest(
+            direction: request.direction,
+            source_ref: request.source_ref,
+            source_commit_sha: request.source_commit_sha,
+            change_id: request.change_id,
+            work_id: request.work_id,
+            change_kind: request.change_kind,
+            review_receipt_sha256: request.review_receipt_sha256,
+            reviewed_source_commit_sha: sha_b(),
+            reviewed_change_id: request.reviewed_change_id,
+            target_line: request.target_line,
+            expected_target_sha: request.expected_target_sha,
+            adaptation_reason: request.adaptation_reason,
+            evidence_sha256: request.evidence_sha256,
+            evidence_result_commit_sha: request.evidence_result_commit_sha,
+            evidence_target_sha: request.evidence_target_sha,
+            result_commit_sha: request.result_commit_sha,
+            forward_port_target_ref: request.forward_port_target_ref,
+            forward_port_receipt_sha256: request.forward_port_receipt_sha256
+        )
+        expect(check_backport_admission(stale_review).reason).to_equal("backport review receipt binding does not match the requested change")
+        val emergency = BackportRequest(
+            direction: "beta_to_main",
+            source_ref: request.target_line,
+            source_commit_sha: request.source_commit_sha,
+            change_id: request.change_id,
+            work_id: request.work_id,
+            change_kind: request.change_kind,
+            review_receipt_sha256: request.review_receipt_sha256,
+            reviewed_source_commit_sha: request.reviewed_source_commit_sha,
+            reviewed_change_id: request.reviewed_change_id,
+            target_line: request.target_line,
+            expected_target_sha: request.expected_target_sha,
+            adaptation_reason: "emergency correction originated on the beta line",
+            evidence_sha256: request.evidence_sha256,
+            evidence_result_commit_sha: request.evidence_result_commit_sha,
+            evidence_target_sha: request.evidence_target_sha,
+            result_commit_sha: request.result_commit_sha,
+            forward_port_target_ref: "main",
+            forward_port_receipt_sha256: digest_c()
+        )
+        expect(check_backport_admission(emergency).valid).to_be(true)
+        val missing_forward_port = BackportRequest(
+            direction: emergency.direction,
+            source_ref: emergency.source_ref,
+            source_commit_sha: emergency.source_commit_sha,
+            change_id: emergency.change_id,
+            work_id: emergency.work_id,
+            change_kind: emergency.change_kind,
+            review_receipt_sha256: emergency.review_receipt_sha256,
+            reviewed_source_commit_sha: emergency.reviewed_source_commit_sha,
+            reviewed_change_id: emergency.reviewed_change_id,
+            target_line: emergency.target_line,
+            expected_target_sha: emergency.expected_target_sha,
+            adaptation_reason: emergency.adaptation_reason,
+            evidence_sha256: emergency.evidence_sha256,
+            evidence_result_commit_sha: emergency.evidence_result_commit_sha,
+            evidence_target_sha: emergency.evidence_target_sha,
+            result_commit_sha: emergency.result_commit_sha,
+            forward_port_target_ref: "main",
+            forward_port_receipt_sha256: ""
+        )
+        expect(check_backport_admission(missing_forward_port).reason).to_equal("release-first emergency fix requires an exact forward-port receipt to main")
 
     it "freezes one complete candidate and rejects mutation":
         step("Freeze and qualify the release candidate")
@@ -217,8 +317,8 @@ describe "Hardened Simple and Spipe software release":
             version: candidate.version,
             attempt: candidate.attempt,
             candidate_ref: candidate.candidate_ref,
-            commit_sha: "candidate|commit",
-            source_tree_sha256: "source-digest",
+            commit_sha: sha_b(),
+            source_tree_sha256: digest_a(),
             policy_sha256: candidate.policy_sha256,
             version_manifest_sha256: candidate.version_manifest_sha256,
             toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
@@ -231,19 +331,21 @@ describe "Hardened Simple and Spipe software release":
         step("Promote exact admitted artifacts")
         val candidate = setup_candidate_fixture()
         val admission = ReleaseAdmission(
+            candidate_version: candidate.version,
             candidate_identity: candidate_identity(candidate),
             candidate_commit_sha: candidate.commit_sha,
-            artifact_manifest_sha256: "artifact-digest",
+            artifact_manifest_sha256: digest_a(),
             evidence_manifest_sha256: candidate.evidence_manifest_sha256,
-            admitted: true
+            qualification_receipt_sha256: digest_b(),
+            admission_receipt_sha256: digest_c()
         )
         val plan = PromotionPlan(
             candidate_identity: admission.candidate_identity,
             tag: "v1.4.0-beta.2",
             target_commit_sha: candidate.commit_sha,
             candidate_commit_sha: candidate.commit_sha,
-            artifact_manifest_sha256: "artifact-digest",
-            admitted_artifact_manifest_sha256: "artifact-digest",
+            artifact_manifest_sha256: digest_a(),
+            admitted_artifact_manifest_sha256: digest_a(),
             signed_tag: true,
             annotated_tag: true,
             exact_tag_push: true,
@@ -279,6 +381,20 @@ describe "Hardened Simple and Spipe software release":
             fallback_artifact: false
         )
         expect(check_promotion_plan(admission, stale_candidate).reason).to_equal("promotion candidate identity does not match release admission")
+        val wrong_version = PromotionPlan(
+            candidate_identity: plan.candidate_identity,
+            tag: "v1.4.0-beta.3",
+            target_commit_sha: plan.target_commit_sha,
+            candidate_commit_sha: plan.candidate_commit_sha,
+            artifact_manifest_sha256: plan.artifact_manifest_sha256,
+            admitted_artifact_manifest_sha256: plan.admitted_artifact_manifest_sha256,
+            signed_tag: plan.signed_tag,
+            annotated_tag: plan.annotated_tag,
+            exact_tag_push: plan.exact_tag_push,
+            rebuild: false,
+            fallback_artifact: false
+        )
+        expect(check_promotion_plan(admission, wrong_version).reason).to_equal("promotion tag version does not match the admitted candidate version")
 
     it "withdraws without rewriting published release identity":
         step("Withdraw without rewriting release identity")

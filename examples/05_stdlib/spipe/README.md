@@ -100,6 +100,15 @@ powershell -ExecutionPolicy Bypass -File .spipe\spipe\scripts\setup-spipe-links.
 Use `--force` or `-Force` only when replacing existing host directories with
 links to this module.
 
+## Guarded release operations
+
+The CLI and MCP server expose deterministic validation/planning operations for
+isolated sessions, read-only main fix discovery, reviewed beta backports,
+release-first forward ports, immutable candidates, and exact promotion. They
+perform no repository or release mutation. Main-fix discovery never selects or
+cherry-picks a candidate; external protected authorities remain responsible
+for integration, signing, pushing, and publication.
+
 ## Subproject Experts
 
 For repositories with subprojects stored as Git submodules, create

@@ -49,6 +49,8 @@ The pure layer parses and validates caller-supplied facts and produces typed pla
 6. Candidate creation is create-once; a changed input creates a new attempt.
 7. Promotion binds the admitted commit and artifact manifest, requires a signed annotated exact tag plan, and forbids rebuilding/fallback/all-tag push.
 8. Withdrawal preserves identity; correction increments version.
+9. `main` remains the development trunk; a maintenance line is never its upstream, replacement, or tracking target.
+10. Periodic main/release discovery is read-only. Only an explicit reviewed convergence plan may cross a fix between protected lines.
 
 ## MDSOC evaluation
 
@@ -59,6 +61,12 @@ Release validation is cross-cutting, but an MDSOC feature transform would obscur
 `BackportRequest` carries source commit, change ID, work ID, kind, source review, target `release/X.Y`, expected target SHA, adaptation reason, evidence digest, and tested result SHA. Validation returns a deterministic plan or one actionable error. The executor may cherry-pick only that exact source into a private session branch. It then obtains renewed evidence for the result revision before integration authority performs CAS.
 
 The command must never accept “latest,” an unqualified branch, a range of commits, or an automatic set of fixes. Each bug fix has a separate provenance record.
+
+## Main/release convergence
+
+The bootstrap/release supervisor may run a bounded scheduled discovery task after fetch and at configured qualification checkpoints. The task compares immutable snapshots of `main` and the active `release/X.Y`, classifies reviewed `fix` changes, and emits proposals only. Discovery has no ref-write capability and cannot feed a cherry-pick executor directly.
+
+An operator or integration authority selects an exact proposal. A `main` fix follows the normal backport path into a private release-line work branch. A fix first created on `release/X.Y` follows the symmetric forward-port path into a private `main`-targeted work branch. Adapted patches receive their own review. Both paths rerun focused evidence on the resulting commit and produce a divergence receipt containing source and target refs/SHAs, selected source commit, result commit, direction, review/evidence digests, omitted proposals with reasons, and remaining divergence. The protected integration authority performs the final CAS update. No scheduler, bootstrap worker, or ordinary session pushes a protected ref.
 
 ## Candidate and promotion boundary
 

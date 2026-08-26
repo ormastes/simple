@@ -1,6 +1,6 @@
 # Software Release Layer Expert
 
-The software-release layer converts canonical version, VCS policy, session, backport, candidate, admission, and artifact facts into fail-closed plans before provider mutation.
+The software-release layer converts canonical version, VCS policy, session, backport/forward-port convergence, candidate, admission, and artifact facts into fail-closed plans before provider mutation. Its scheduled main/release discovery is read-only; exact reviewed changes cross protected lines only through isolated sessions, renewed evidence, divergence receipts, and integration-authority CAS. `main` remains the independent development trunk.
 
 Canonical references:
 

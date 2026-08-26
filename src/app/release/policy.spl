@@ -22,16 +22,24 @@ struct ReleaseSession:
     policy_sha256: text
 
 struct BackportRequest:
+    direction: text
+    source_ref: text
     source_commit_sha: text
     change_id: text
     work_id: text
     change_kind: text
     review_receipt_sha256: text
+    reviewed_source_commit_sha: text
+    reviewed_change_id: text
     target_line: text
     expected_target_sha: text
     adaptation_reason: text
     evidence_sha256: text
+    evidence_result_commit_sha: text
+    evidence_target_sha: text
     result_commit_sha: text
+    forward_port_target_ref: text
+    forward_port_receipt_sha256: text
 
 struct CandidateManifest:
     version: text
@@ -46,11 +54,13 @@ struct CandidateManifest:
     evidence_manifest_sha256: text
 
 struct ReleaseAdmission:
+    candidate_version: text
     candidate_identity: text
     candidate_commit_sha: text
     artifact_manifest_sha256: text
     evidence_manifest_sha256: text
-    admitted: bool
+    qualification_receipt_sha256: text
+    admission_receipt_sha256: text
 
 struct PromotionPlan:
     candidate_identity: text
@@ -70,6 +80,65 @@ fn release_pass() -> ReleaseCheck:
 
 fn release_fail(reason: text) -> ReleaseCheck:
     ReleaseCheck(valid: false, reason: reason)
+
+fn _hex_identity_valid(value: text, expected_len: i64) -> bool:
+    if value.len() != expected_len:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        val decimal = code >= 48 and code <= 57
+        val lowercase_hex = code >= 97 and code <= 102
+        if not decimal and not lowercase_hex:
+            return false
+        i = i + 1
+    true
+
+fn _commit_sha_valid(value: text) -> bool:
+    _hex_identity_valid(value, 40) or _hex_identity_valid(value, 64)
+
+fn _sha256_valid(value: text) -> bool:
+    _hex_identity_valid(value, 64)
+
+fn _safe_ref_component(value: text) -> bool:
+    if value == "" or value.starts_with(".") or value.ends_with("."):
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        val lowercase = code >= 97 and code <= 122
+        val decimal = code >= 48 and code <= 57
+        if not lowercase and not decimal and code != 45 and code != 46:
+            return false
+        i = i + 1
+    true
+
+fn _work_branch_valid(value: text) -> bool:
+    val parts = value.split("/")
+    if parts.len() != 3 or parts[0] != "work":
+        return false
+    val kind = parts[1]
+    val known_kind = (
+        kind == "feat" or kind == "fix" or kind == "refactor" or
+        kind == "perf" or kind == "test" or kind == "docs" or
+        kind == "build" or kind == "chore" or kind == "patch" or
+        kind == "hotfix" or kind == "backport" or kind == "release" or
+        kind == "recovery"
+    )
+    known_kind and _safe_ref_component(parts[2])
+
+fn _release_line_valid(value: text) -> bool:
+    if not value.starts_with("release/"):
+        return false
+    val components = value[8:].split(".")
+    (components.len() == 2 and
+        _decimal_identifier_valid(components[0], true) and
+        _decimal_identifier_valid(components[1], true))
+
+fn _absolute_workspace_path_valid(value: text) -> bool:
+    (value.starts_with("/") and value != "/" and
+        not value.contains("/../") and not value.contains("/./") and
+        not value.ends_with("/..") and not value.ends_with("/."))
 
 fn _decimal_identifier_valid(value: text, allow_zero: bool) -> bool:
     if value == "":
@@ -130,15 +199,15 @@ fn check_version_projection(expected: text, projection_name: text, observed: tex
     release_pass()
 
 fn validate_release_session(session: ReleaseSession) -> ReleaseCheck:
-    if session.session_id == "" or session.workspace_path == "":
+    if not _safe_ref_component(session.session_id) or not _absolute_workspace_path_valid(session.workspace_path):
         return release_fail("release mutation requires a session id and workspace")
-    if session.main_workspace_path == "" or session.workspace_path == session.main_workspace_path:
+    if not _absolute_workspace_path_valid(session.main_workspace_path) or session.workspace_path == session.main_workspace_path:
         return release_fail("release mutation is forbidden in the main worktree")
-    if not session.work_branch.starts_with("work/"):
+    if not _work_branch_valid(session.work_branch):
         return release_fail("release session must own a work branch")
-    if session.target_ref != "main" and not session.target_ref.starts_with("release/"):
+    if session.target_ref != "main" and not _release_line_valid(session.target_ref):
         return release_fail("release session target must be main or a release line")
-    if session.base_sha == "" or session.expected_target_sha == "" or session.policy_sha256 == "":
+    if not _commit_sha_valid(session.base_sha) or not _commit_sha_valid(session.expected_target_sha) or not _sha256_valid(session.policy_sha256):
         return release_fail("release session requires exact base, target, and policy identities")
     release_pass()
 
@@ -153,22 +222,38 @@ fn check_beta_preparation(version: ReleaseVersion, session: ReleaseSession) -> R
     release_pass()
 
 fn check_backport_admission(request: BackportRequest) -> ReleaseCheck:
-    if request.source_commit_sha == "" or request.result_commit_sha == "":
+    if not _commit_sha_valid(request.source_commit_sha) or not _commit_sha_valid(request.result_commit_sha):
         return release_fail("backport requires exact source and result commits")
     if request.change_id == "" or request.work_id == "":
         return release_fail("backport requires stable change and work identities")
     if request.change_kind != "fix":
         return release_fail("beta backports accept reviewed bug fixes only")
-    if request.review_receipt_sha256 == "":
+    if request.direction == "main_to_beta":
+        if request.source_ref != "main":
+            return release_fail("main-to-beta backport source must be main")
+        if request.forward_port_target_ref != "" or request.forward_port_receipt_sha256 != "":
+            return release_fail("main-to-beta backport must not claim a forward port")
+    elif request.direction == "beta_to_main":
+        if request.source_ref != request.target_line:
+            return release_fail("release-first emergency fix source must match the beta release line")
+        if request.forward_port_target_ref != "main" or not _sha256_valid(request.forward_port_receipt_sha256):
+            return release_fail("release-first emergency fix requires an exact forward-port receipt to main")
+    else:
+        return release_fail("backport direction must be main_to_beta or beta_to_main")
+    if not _sha256_valid(request.review_receipt_sha256):
         return release_fail("backport requires a review receipt")
-    if not request.target_line.starts_with("release/"):
+    if request.reviewed_source_commit_sha != request.source_commit_sha or request.reviewed_change_id != request.change_id:
+        return release_fail("backport review receipt binding does not match the requested change")
+    if not _release_line_valid(request.target_line):
         return release_fail("backport target must be a release line")
-    if request.expected_target_sha == "":
+    if not _commit_sha_valid(request.expected_target_sha):
         return release_fail("backport requires the exact expected target revision")
     if request.adaptation_reason == "":
         return release_fail("backport adaptation reason must be none or an explanation")
-    if request.evidence_sha256 == "":
+    if not _sha256_valid(request.evidence_sha256):
         return release_fail("backport requires renewed focused evidence")
+    if request.evidence_result_commit_sha != request.result_commit_sha or request.evidence_target_sha != request.expected_target_sha:
+        return release_fail("backport evidence does not bind the result and target revisions")
     if request.result_commit_sha == request.expected_target_sha:
         return release_fail("backport evidence must bind the post-application revision")
     release_pass()
@@ -189,13 +274,13 @@ fn check_candidate_manifest(candidate: CandidateManifest) -> ReleaseCheck:
         return release_fail("candidate attempt must be positive")
     if candidate.candidate_ref != expected_candidate_ref(version.canonical, candidate.attempt):
         return release_fail("candidate ref does not match version and attempt")
-    if candidate.commit_sha == "" or candidate.source_tree_sha256 == "":
+    if not _commit_sha_valid(candidate.commit_sha) or not _sha256_valid(candidate.source_tree_sha256):
         return release_fail("candidate requires exact commit and source identities")
-    if candidate.policy_sha256 == "" or candidate.version_manifest_sha256 == "":
+    if not _sha256_valid(candidate.policy_sha256) or not _sha256_valid(candidate.version_manifest_sha256):
         return release_fail("candidate requires policy and version manifest identities")
-    if candidate.toolchain_manifest_sha256 == "" or candidate.support_manifest_sha256 == "":
+    if not _sha256_valid(candidate.toolchain_manifest_sha256) or not _sha256_valid(candidate.support_manifest_sha256):
         return release_fail("candidate requires toolchain and support manifest identities")
-    if candidate.evidence_manifest_sha256 == "":
+    if not _sha256_valid(candidate.evidence_manifest_sha256):
         return release_fail("candidate requires an evidence manifest identity")
     release_pass()
 
@@ -222,17 +307,20 @@ fn check_candidate_create_once(existing_identity: text, candidate: CandidateMani
     release_pass()
 
 fn check_promotion_plan(admission: ReleaseAdmission, plan: PromotionPlan) -> ReleaseCheck:
-    if not admission.admitted:
-        return release_fail("release candidate has not been admitted")
-    if admission.candidate_commit_sha == "" or admission.candidate_identity == "":
+    val admitted_version = parse_release_version(admission.candidate_version)
+    if admitted_version.channel == "invalid":
+        return release_fail("release admission candidate version is invalid")
+    if not _commit_sha_valid(admission.candidate_commit_sha) or admission.candidate_identity == "":
         return release_fail("release admission identity is incomplete")
-    if admission.evidence_manifest_sha256 == "":
+    if not _sha256_valid(admission.artifact_manifest_sha256) or not _sha256_valid(admission.evidence_manifest_sha256):
         return release_fail("release admission evidence identity is incomplete")
+    if not _sha256_valid(admission.qualification_receipt_sha256) or not _sha256_valid(admission.admission_receipt_sha256):
+        return release_fail("release candidate requires qualification and admission receipts")
     if plan.candidate_identity != admission.candidate_identity:
         return release_fail("promotion candidate identity does not match release admission")
     if plan.target_commit_sha != admission.candidate_commit_sha or plan.candidate_commit_sha != admission.candidate_commit_sha:
         return release_fail("promotion target does not match the admitted candidate commit")
-    if plan.artifact_manifest_sha256 == "" or plan.artifact_manifest_sha256 != admission.artifact_manifest_sha256:
+    if not _sha256_valid(plan.artifact_manifest_sha256) or plan.artifact_manifest_sha256 != admission.artifact_manifest_sha256:
         return release_fail("promotion artifacts do not match the admitted manifest")
     if plan.admitted_artifact_manifest_sha256 != admission.artifact_manifest_sha256:
         return release_fail("promotion admission binding is stale")
@@ -241,6 +329,8 @@ fn check_promotion_plan(admission: ReleaseAdmission, plan: PromotionPlan) -> Rel
     val tag_version = parse_release_version(plan.tag[1:])
     if tag_version.channel == "invalid" or plan.tag != "v" + tag_version.canonical:
         return release_fail("promotion requires one canonical SemVer release tag")
+    if tag_version.canonical != admitted_version.canonical:
+        return release_fail("promotion tag version does not match the admitted candidate version")
     if not plan.signed_tag or not plan.annotated_tag:
         return release_fail("promotion tag must be signed and annotated")
     if not plan.exact_tag_push:

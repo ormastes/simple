@@ -21,20 +21,23 @@ alwaysApply: false
 
 ## When `jj git push` fails ("External git program failed")
 
-Origin's HTTPS token is dead. Push the rebased tip directly over SSH, then re-sync tracking:
+If HTTPS authentication fails, repair the credential path and retry the owned
+work branch. Authentication failure never authorizes bypassing protected
+integration or pushing a commit directly to `main`:
 
 ```bash
-TIP=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id')
-GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" \
-  git push git@github.com:ormastes/simple.git "$TIP":refs/heads/main
-GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" jj --ignore-working-copy git fetch
+env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark <work-branch>
 ```
 
 Always verify with `git ls-remote` after — a clean-looking exit is not proof the content landed.
 
 ## Rebase conflict loop (root-first)
 
-Parallel agent sessions force-push main continuously; a rebase can conflict a whole chain. Never resolve at the tip — resolve the ROOT and let descendants auto-rebase, looping until empty:
+Parallel agent sessions may advance their private branches while the integration
+authority advances `main`; protected `main` is never force-pushed. A private
+rebase can conflict a whole chain. Resolve the root and let descendants
+auto-rebase, looping until empty:
 
 ```bash
 jj --ignore-working-copy log -r 'roots((main@origin..@) & conflicts())'   # find root

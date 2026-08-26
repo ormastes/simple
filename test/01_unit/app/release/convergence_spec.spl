@@ -1,0 +1,86 @@
+"""Release/main convergence is periodic, caller-selected, and never mutates Git."""
+# @req: REQ-004, REQ-005, REQ-006, REQ-009
+use std.spec.{describe, it, expect, step}
+use app.release.convergence.{ReviewedBugFix, ConvergenceRequest, plan_release_main_convergence}
+
+fn sha_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn sha_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+fn sha_c() -> text: "cccccccccccccccccccccccccccccccccccccccc"
+fn receipt_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn reviewed_fix(source_ref: text) -> ReviewedBugFix:
+    ReviewedBugFix(
+        commit_sha: sha_c(),
+        review_receipt_sha256: receipt_a(),
+        source_ref: source_ref,
+        change_kind: "fix"
+    )
+
+fn request(direction: text, candidates: [ReviewedBugFix], selected: [text], confirmed: bool) -> ConvergenceRequest:
+    ConvergenceRequest(
+        last_scanned_main_sha: sha_a(),
+        current_main_sha: sha_b(),
+        release_ref: "release/1.0",
+        release_head_sha: sha_a(),
+        last_scan_epoch_seconds: 100,
+        current_epoch_seconds: 200,
+        scan_interval_seconds: 60,
+        eligible_reviewed_bug_fixes: candidates,
+        selected_bug_fix_shas: selected,
+        caller_selection_confirmed: confirmed,
+        direction: direction,
+        forward_port_required: direction == "release_to_main",
+        forward_port_target_ref: if direction == "release_to_main": "main" else: "",
+        main_tracks_release: false
+    )
+
+describe "Release/main convergence planner":
+    it "binds periodic main-to-release bug-fix selection without mutation":
+        step("Plan an occasional scan of main from the release line")
+        val plan = plan_release_main_convergence(request("main_to_release", [reviewed_fix("main")], [sha_c()], true))
+        expect(plan.valid).to_be(true)
+        expect(plan.ready).to_be(true)
+        expect(plan.scan_due).to_be(true)
+        expect(plan.mutation).to_equal("none")
+        expect(plan.last_scanned_main_sha).to_equal(sha_a())
+        expect(plan.current_main_sha).to_equal(sha_b())
+        expect(plan.release_head_sha).to_equal(sha_a())
+        expect(plan.eligible_reviewed_bug_fix_shas).to_equal([sha_c()])
+        expect(plan.caller_selection_required).to_be(true)
+        expect(plan.direction).to_equal("main_to_release")
+        expect(plan.forward_port_required).to_be(false)
+        expect(plan.main_remains_independent).to_be(true)
+
+    it "rejects automatic selection of an eligible main bug fix":
+        val plan = plan_release_main_convergence(request("main_to_release", [reviewed_fix("main")], [sha_c()], false))
+        expect(plan.valid).to_be(false)
+        expect(plan.reason).to_equal("caller must explicitly select eligible bug-fix SHAs")
+
+    it "requires release-first fixes to be forwarded to main":
+        val valid = plan_release_main_convergence(request("release_to_main", [reviewed_fix("release/1.0")], [sha_c()], true))
+        expect(valid.valid).to_be(true)
+        expect(valid.forward_port_required).to_be(true)
+        expect(valid.forward_port_target_ref).to_equal("main")
+
+        var missing = request("release_to_main", [reviewed_fix("release/1.0")], [sha_c()], true)
+        missing.forward_port_required = false
+        missing.forward_port_target_ref = ""
+        expect(plan_release_main_convergence(missing).reason).to_equal("release-first fixes require a forward port to main")
+
+    it "rejects treating main as a branch that tracks the release line":
+        var invalid = request("main_to_release", [], [], false)
+        invalid.main_tracks_release = true
+        val plan = plan_release_main_convergence(invalid)
+        expect(plan.valid).to_be(false)
+        expect(plan.reason).to_contain("main must remain an independent trunk")
+
+    it "does not scan early or accept candidates before the interval":
+        var early = request("main_to_release", [], [], false)
+        early.current_epoch_seconds = 120
+        val plan = plan_release_main_convergence(early)
+        expect(plan.valid).to_be(true)
+        expect(plan.ready).to_be(false)
+        expect(plan.scan_due).to_be(false)
+
+        early.eligible_reviewed_bug_fixes = [reviewed_fix("main")]
+        expect(plan_release_main_convergence(early).valid).to_be(false)

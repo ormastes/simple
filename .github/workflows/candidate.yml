@@ -1,0 +1,179 @@
+name: Build and qualify immutable candidate
+
+on:
+  push:
+    branches:
+      - 'candidate/**'
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Immutable candidate ref (candidate/vX.Y.Z[-pre.N]/aNNN)
+        required: true
+        type: string
+
+concurrency:
+  group: candidate-${{ github.event_name == 'workflow_dispatch' && inputs.candidate_ref || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  qualify-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve immutable candidate ref
+        id: identity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_REF: ${{ inputs.candidate_ref }}
+          PUSH_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          candidate_ref="$PUSH_REF"
+          if test "$EVENT_NAME" = workflow_dispatch; then
+            candidate_ref="$REQUESTED_REF"
+          fi
+          [[ "$candidate_ref" =~ ^candidate/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?/a[0-9]{3}$ ]]
+          echo "candidate_ref=$candidate_ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.identity.outputs.candidate_ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Freeze candidate identity
+        id: freeze
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          version=$(awk '$1 == "semver:" {print $2; exit}' release/version.sdn)
+          test -n "$version"
+          test "${{ steps.identity.outputs.candidate_ref }}" != "candidate/v${version}/a000"
+          case "${{ steps.identity.outputs.candidate_ref }}" in
+            candidate/v"$version"/a[0-9][0-9][0-9]) ;;
+            *) echo "candidate ref/version mismatch" >&2; exit 1 ;;
+          esac
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Full bootstrap and release-bound whole suite
+        env:
+          SIMPLE_NO_STUB_FALLBACK: '1'
+        run: |
+          set -euo pipefail
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --full-bootstrap --release --strategy=full
+
+      - name: Assemble admitted candidate without fallback
+        env:
+          VERSION: ${{ steps.freeze.outputs.version }}
+          COMMIT: ${{ steps.freeze.outputs.commit }}
+          CANDIDATE_REF: ${{ steps.identity.outputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          binary=bin/release/x86_64-unknown-linux-gnu/simple
+          test -x "$binary"
+          test -f release/support.sdn
+          mkdir -p candidate
+          cp "$binary" candidate/simple-x86_64-unknown-linux-gnu
+          cp release/support.sdn candidate/support.sdn
+          cp CHANGELOG.md candidate/release-notes.md
+          PKG_DIR="simple-${VERSION}-x86_64-unknown-linux-gnu"
+          mkdir -p "candidate/${PKG_DIR}/bin"
+          mkdir -p "candidate/${PKG_DIR}/share/simple/assets"
+          cp "$binary" "candidate/${PKG_DIR}/bin/simple-runtime"
+          printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' \
+            'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/../share/simple"' \
+            'exec "$SCRIPT_DIR/simple-runtime" "$@"' \
+            > "candidate/${PKG_DIR}/bin/simple"
+          chmod +x "candidate/${PKG_DIR}/bin/simple"
+          cp -r assets/fonts "candidate/${PKG_DIR}/share/simple/assets/"
+          cp LICENSE THIRD_PARTY_NOTICES.md "candidate/${PKG_DIR}/share/simple/"
+          sh scripts/check_release_payload.shs --dir "candidate/${PKG_DIR}"
+          tar -C candidate -czf "candidate/${PKG_DIR}.tar.gz" "$PKG_DIR"
+          sh scripts/check_release_payload.shs --tar "candidate/${PKG_DIR}.tar.gz"
+          rm -rf "candidate/${PKG_DIR}"
+          "$binary" sbom . --out=candidate/simple.spdx.json \
+            --name=ormastes.simple --version="$VERSION"
+          test -s candidate/simple.spdx.json
+          (cd candidate && sha256sum \
+            simple-x86_64-unknown-linux-gnu \
+            "${PKG_DIR}.tar.gz" \
+            simple.spdx.json support.sdn release-notes.md > artifacts.sha256)
+          source_tree_sha256=$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')
+          artifact_manifest_sha256=$(sha256sum candidate/artifacts.sha256 | awk '{print $1}')
+          policy_sha256=$(sha256sum .spipe/policy/vcs.sdn | awk '{print $1}')
+          version_manifest_sha256=$(sha256sum release/version.sdn | awk '{print $1}')
+          support_manifest_sha256=$(sha256sum release/support.sdn | awk '{print $1}')
+          toolchain_manifest_sha256=$(sha256sum src/compiler_rust/Cargo.lock | awk '{print $1}')
+          jq -n \
+            --arg candidate_commit_sha "$COMMIT" \
+            --arg artifact_manifest_sha256 "$artifact_manifest_sha256" \
+            '{schema:"simple-release-qualification/1",
+              candidate_commit_sha:$candidate_commit_sha,
+              artifact_manifest_sha256:$artifact_manifest_sha256,
+              bootstrap:"passed",whole_tests:"passed",
+              required_support:[{target:"x86_64-unknown-linux-gnu",status:"passed"}]}' \
+            > candidate/qualification.json
+          qualification_receipt_sha256=$(sha256sum candidate/qualification.json | awk '{print $1}')
+          jq -n \
+            --arg version "$VERSION" \
+            --arg candidate_ref "$CANDIDATE_REF" \
+            --arg candidate_commit_sha "$COMMIT" \
+            --arg source_tree_sha256 "$source_tree_sha256" \
+            --arg artifact_manifest_sha256 "$artifact_manifest_sha256" \
+            --arg policy_sha256 "$policy_sha256" \
+            --arg version_manifest_sha256 "$version_manifest_sha256" \
+            --arg support_manifest_sha256 "$support_manifest_sha256" \
+            --arg toolchain_manifest_sha256 "$toolchain_manifest_sha256" \
+            --arg qualification_receipt_sha256 "$qualification_receipt_sha256" \
+            '{schema:"simple-release-admission/1", version:$version,
+              candidate_ref:$candidate_ref, candidate_commit_sha:$candidate_commit_sha,
+              source_tree_sha256:$source_tree_sha256,
+              artifact_manifest_sha256:$artifact_manifest_sha256,
+              policy_sha256:$policy_sha256,
+              version_manifest_sha256:$version_manifest_sha256,
+              support_manifest_sha256:$support_manifest_sha256,
+              toolchain_manifest_sha256:$toolchain_manifest_sha256,
+              qualification_receipt_sha256:$qualification_receipt_sha256,
+              required_support:[{target:"x86_64-unknown-linux-gnu",status:"passed"}],
+              admitted:true,rebuild_allowed:false,fallback_used:false}' \
+            > candidate/release-admission.json
+          sha256sum candidate/release-admission.json > candidate/release-admission.sha256
+
+      - name: Attest admitted compiler provenance
+        id: attest
+        uses: actions/attest-build-provenance@8beda2b7ed98355c0e97c0a63bec38ae472e66c4 # v4
+        with:
+          subject-path: |
+            candidate/simple-x86_64-unknown-linux-gnu
+            candidate/simple-${{ steps.freeze.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+
+      - name: Bind provenance to admission
+        env:
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -n "$ATTESTATION_ID"
+          test -s "$BUNDLE_PATH"
+          cp "$BUNDLE_PATH" candidate/provenance.sigstore.json
+          jq --arg id "$ATTESTATION_ID" --arg url "$ATTESTATION_URL" \
+            '. + {provenance_attestation_id:$id,provenance_attestation_url:$url}' \
+            candidate/release-admission.json > candidate/release-admission.json.new
+          mv candidate/release-admission.json.new candidate/release-admission.json
+          sha256sum candidate/release-admission.json > candidate/release-admission.sha256
+
+      - name: Upload immutable candidate bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-${{ steps.freeze.outputs.version }}-${{ steps.freeze.outputs.commit }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

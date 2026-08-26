@@ -28,6 +28,28 @@ Validate each fix with `simple release backport-check` and record:
 
 Apply the commit only on the private work branch, rerun affected tests, and submit by compare-and-swap. Feature commits, ranges, moving branch names, automatic “all fixes” selection, stale review, or pre-application evidence are rejected. Every changed input creates a new candidate attempt and, after publication, a new beta number.
 
+### Periodic main/release convergence
+
+During a long beta or bootstrap qualification run, schedule an occasional read-only fetch-and-compare checkpoint. It reports reviewed bug-fix commits present on only one of `main` or `release/X.Y`; it must not choose, cherry-pick, merge, or push a fix. Avoid tight polling and do not give the bootstrap worker protected-ref credentials.
+
+For each operator-selected exact commit:
+
+1. From `main` to `release/X.Y`, create a private backport branch/worktree, verify the source review, apply only that commit, renew focused evidence, and submit to the release-line integration authority.
+2. From `release/X.Y` to `main`, create a private forward-port branch/worktree targeting the exact current `main`, apply or adapt only the reviewed fix, obtain review and renewed evidence, and submit to the trunk integration authority.
+3. Record a divergence receipt with both before SHAs, direction, source/result commits, review/evidence/integration digests, deliberately omitted fixes and reasons, and remaining divergence.
+
+If either protected head changes, discard stale admission and retry from a fresh snapshot. `main` always remains the development trunk: never reset or repoint it to `release/X.Y`, make the release branch its upstream, merge an entire maintenance line merely to carry one fix, or push either protected ref directly. Release-only compatibility changes may remain on the release line when the divergence receipt explains why; shared bug fixes must be forward-ported unless explicitly rejected by review.
+
+Required platform rows are declared in `release/support.sdn`. The candidate
+workflow `.github/workflows/candidate.yml` builds the exact create-once
+candidate ref, runs full bootstrap and whole tests, and emits immutable product,
+SBOM, qualification, checksum, provenance-attestation, support, and admission
+evidence. The promotion
+workflow `.github/workflows/release.yml` accepts only that successful workflow
+run, revalidates the candidate ref/commit and every digest, then signs one exact
+tag and publishes the unchanged assets. Promotion contains no compiler build or
+fallback path.
+
 ## Candidate
 
 Run `simple release candidate-check` over the canonical version, positive attempt, `candidate/v.../aNNN`, exact commit, and source/policy/version/toolchain/support/evidence digests. Existing identical identity is idempotent; a different identity at the same candidate is mutation and fails.

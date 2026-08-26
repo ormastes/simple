@@ -138,6 +138,23 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
   success alone is not pure-Simple architecture evidence.
 
+## Beta release-line convergence
+
+A long-running beta bootstrap lane periodically fetches and inspects `main` for
+new reviewed bug fixes. Discovery is read-only and produces a candidate list;
+it never cherry-picks automatically and never pushes a protected ref. Each
+selected fix must carry exact source SHA, review receipt, target-line base SHA,
+post-application SHA, and renewed focused evidence before the integration
+authority may update `release/X.Y`.
+
+`main` always remains the development trunk; it must not be reset, rebased, or
+made to track a release branch. Normally a fix lands on `main` first and is then
+backported. If an emergency fix is developed on `release/X.Y` first, candidate
+qualification remains blocked until an equivalent reviewed forward-port is
+integrated into `main` or an explicit incompatibility waiver identifies the
+owner and expiry. Bootstrap receipts record the last scanned `main` SHA and the
+backport/forward-port change identities so periodic scans are idempotent.
+
 ## Verification tiering — match the gate to the change
 
 The authoritative feature-development policy is

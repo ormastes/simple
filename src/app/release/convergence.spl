@@ -1,0 +1,171 @@
+# codex-impl
+# Deterministic release/main convergence planning. This module never invokes VCS.
+
+struct ReviewedBugFix:
+    commit_sha: text
+    review_receipt_sha256: text
+    source_ref: text
+    change_kind: text
+
+struct ConvergenceRequest:
+    last_scanned_main_sha: text
+    current_main_sha: text
+    release_ref: text
+    release_head_sha: text
+    last_scan_epoch_seconds: i64
+    current_epoch_seconds: i64
+    scan_interval_seconds: i64
+    eligible_reviewed_bug_fixes: [ReviewedBugFix]
+    selected_bug_fix_shas: [text]
+    caller_selection_confirmed: bool
+    direction: text
+    forward_port_required: bool
+    forward_port_target_ref: text
+    main_tracks_release: bool
+
+struct ConvergenceReceipt:
+    valid: bool
+    ready: bool
+    reason: text
+    mutation: text
+    last_scanned_main_sha: text
+    current_main_sha: text
+    release_ref: text
+    release_head_sha: text
+    scan_interval_seconds: i64
+    scan_due: bool
+    eligible_reviewed_bug_fix_shas: [text]
+    selected_bug_fix_shas: [text]
+    caller_selection_required: bool
+    direction: text
+    forward_port_required: bool
+    forward_port_target_ref: text
+    main_remains_independent: bool
+
+fn _hex_identity_valid(value: text, expected_len: i64) -> bool:
+    if value.len() != expected_len:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        val decimal = code >= 48 and code <= 57
+        val lowercase_hex = code >= 97 and code <= 102
+        if not decimal and not lowercase_hex:
+            return false
+        i = i + 1
+    true
+
+fn _commit_sha_valid(value: text) -> bool:
+    _hex_identity_valid(value, 40) or _hex_identity_valid(value, 64)
+
+fn _sha256_valid(value: text) -> bool:
+    _hex_identity_valid(value, 64)
+
+fn _release_ref_valid(value: text) -> bool:
+    if not value.starts_with("release/"):
+        return false
+    val line = value[8:].split(".")
+    if line.len() != 2 or line[0] == "" or line[1] == "":
+        return false
+    var i = 0
+    while i < line.len():
+        val part = line[i]
+        var j = 0
+        while j < part.len():
+            val code = part.char_code_at(j)
+            if code < 48 or code > 57:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn _contains(values: [text], expected: text) -> bool:
+    for value in values:
+        if value == expected:
+            return true
+    false
+
+fn _has_duplicates(values: [text]) -> bool:
+    var i = 0
+    while i < values.len():
+        var j = i + 1
+        while j < values.len():
+            if values[i] == values[j]:
+                return true
+            j = j + 1
+        i = i + 1
+    false
+
+fn _receipt(request: ConvergenceRequest, valid: bool, ready: bool, reason: text,
+            due: bool, eligible_shas: [text]) -> ConvergenceReceipt:
+    ConvergenceReceipt(
+        valid: valid,
+        ready: ready,
+        reason: reason,
+        mutation: "none",
+        last_scanned_main_sha: request.last_scanned_main_sha,
+        current_main_sha: request.current_main_sha,
+        release_ref: request.release_ref,
+        release_head_sha: request.release_head_sha,
+        scan_interval_seconds: request.scan_interval_seconds,
+        scan_due: due,
+        eligible_reviewed_bug_fix_shas: eligible_shas,
+        selected_bug_fix_shas: request.selected_bug_fix_shas,
+        caller_selection_required: due and eligible_shas.len() > 0,
+        direction: request.direction,
+        forward_port_required: request.forward_port_required,
+        forward_port_target_ref: request.forward_port_target_ref,
+        main_remains_independent: not request.main_tracks_release
+    )
+
+fn plan_release_main_convergence(request: ConvergenceRequest) -> ConvergenceReceipt:
+    var eligible_shas: [text] = []
+    if not _commit_sha_valid(request.last_scanned_main_sha) or not _commit_sha_valid(request.current_main_sha):
+        return _receipt(request, false, false, "convergence scan requires exact main revisions", false, eligible_shas)
+    if not _release_ref_valid(request.release_ref) or not _commit_sha_valid(request.release_head_sha):
+        return _receipt(request, false, false, "convergence scan requires an exact release-line head", false, eligible_shas)
+    if request.main_tracks_release:
+        return _receipt(request, false, false, "main must remain an independent trunk and never track a release branch", false, eligible_shas)
+    if request.scan_interval_seconds <= 0 or request.last_scan_epoch_seconds < 0 or request.current_epoch_seconds < request.last_scan_epoch_seconds:
+        return _receipt(request, false, false, "convergence scan requires a positive interval and monotonic timestamps", false, eligible_shas)
+
+    val due = request.current_epoch_seconds - request.last_scan_epoch_seconds >= request.scan_interval_seconds
+    if not due:
+        if request.eligible_reviewed_bug_fixes.len() > 0 or request.selected_bug_fix_shas.len() > 0:
+            return _receipt(request, false, false, "bug-fix candidates cannot be admitted before the convergence scan is due", false, eligible_shas)
+        return _receipt(request, true, false, "convergence scan is not due", false, eligible_shas)
+
+    val expected_source_ref = if request.direction == "main_to_release": "main" else: request.release_ref
+    if request.direction != "main_to_release" and request.direction != "release_to_main":
+        return _receipt(request, false, false, "convergence direction must be main_to_release or release_to_main", true, eligible_shas)
+
+    for fix in request.eligible_reviewed_bug_fixes:
+        if not _commit_sha_valid(fix.commit_sha) or not _sha256_valid(fix.review_receipt_sha256):
+            return _receipt(request, false, false, "eligible bug fixes require exact commit and review identities", true, eligible_shas)
+        if fix.change_kind != "fix" or fix.source_ref != expected_source_ref:
+            return _receipt(request, false, false, "eligible candidates must be reviewed bug fixes from the declared direction", true, eligible_shas)
+        eligible_shas.push(fix.commit_sha)
+    if _has_duplicates(eligible_shas) or _has_duplicates(request.selected_bug_fix_shas):
+        return _receipt(request, false, false, "convergence candidates and selections must be unique", true, eligible_shas)
+
+    if request.direction == "main_to_release":
+        if request.forward_port_required or request.forward_port_target_ref != "":
+            return _receipt(request, false, false, "main-to-release fixes do not claim a forward port", true, eligible_shas)
+    else:
+        if not request.forward_port_required or request.forward_port_target_ref != "main":
+            return _receipt(request, false, false, "release-first fixes require a forward port to main", true, eligible_shas)
+
+    if eligible_shas.len() == 0:
+        if request.selected_bug_fix_shas.len() > 0 or request.caller_selection_confirmed:
+            return _receipt(request, false, false, "caller selection cannot name an ineligible bug fix", true, eligible_shas)
+        return _receipt(request, true, true, "no eligible reviewed bug fixes", true, eligible_shas)
+    if not request.caller_selection_confirmed or request.selected_bug_fix_shas.len() == 0:
+        return _receipt(request, false, false, "caller must explicitly select eligible bug-fix SHAs", true, eligible_shas)
+    for selected in request.selected_bug_fix_shas:
+        if not _contains(eligible_shas, selected):
+            return _receipt(request, false, false, "caller selection contains an ineligible bug-fix SHA", true, eligible_shas)
+
+    _receipt(request, true, true, "convergence plan is ready for an external guarded VCS adapter", true, eligible_shas)
+
+export ReviewedBugFix, ConvergenceRequest, ConvergenceReceipt
+export plan_release_main_convergence

@@ -1,137 +1,88 @@
-# Publish all MCP server npm packages
-# Triggers on version tags (e.g., v1.0.0) or manual dispatch
-#
-# Publishes 5 packages:
-#   @simple-lang/mcp-server         (simple-mcp)
-#   @simple-lang/lsp-mcp-server     (simple-lsp-mcp)
-#   @simple-lang/t32-mcp-server     (t32-mcp)
-#   @simple-lang/t32-lsp-mcp-server (t32-lsp-mcp)
-#   @simple-lang/obsidian-search    (obsidian-search)
-
-name: Publish npm Packages
+name: Publish admitted npm packages
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to publish (e.g., 1.0.0). Leave empty to use tag version.'
-        required: false
-        type: string
-      packages:
-        description: 'Packages to publish (all, mcp, lsp-mcp, t32-mcp, t32-lsp-mcp, obsidian-search)'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - mcp
-          - lsp-mcp
-          - t32-mcp
-          - t32-lsp-mcp
-          - obsidian-search
+  release:
+    types: [published]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: npm-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
 
 permissions:
-  packages: write
   contents: read
+  id-token: write
+  attestations: read
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: npm-release
     strategy:
+      fail-fast: true
       matrix:
         include:
-          - name: mcp
-            dir: tools/mcp-registry
-            pkg: "@simple-lang/mcp-server"
-          - name: lsp-mcp
-            dir: tools/lsp-mcp-registry
-            pkg: "@simple-lang/lsp-mcp-server"
-          - name: t32-mcp
-            dir: tools/t32-mcp-registry
-            pkg: "@simple-lang/t32-mcp-server"
-          - name: t32-lsp-mcp
-            dir: tools/t32-lsp-mcp-registry
-            pkg: "@simple-lang/t32-lsp-mcp-server"
-          - name: obsidian-lsp-mcp
-            dir: tools/obsidian-lsp-mcp-registry
-            pkg: "@simple-lang/obsidian-lsp-mcp-server"
-
+          - dir: tools/mcp-registry
+            package: '@simple-lang/mcp-server'
+          - dir: tools/lsp-mcp-registry
+            package: '@simple-lang/lsp-mcp-server'
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Check if package should be published
-        id: check
-        run: |
-          SELECTED="${{ inputs.packages || 'all' }}"
-          if [ "$SELECTED" = "all" ] || [ "$SELECTED" = "${{ matrix.name }}" ]; then
-            echo "should_publish=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_publish=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Extract version
-        if: steps.check.outputs.should_publish == 'true'
-        id: version
-        shell: bash
-        run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            VERSION="${{ inputs.version }}"
-          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          else
-            echo "::error::No version provided and not triggered by a tag (GITHUB_REF=${GITHUB_REF}). Specify the 'version' input on workflow_dispatch." >&2
-            exit 1
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved VERSION=${VERSION}"
-
-      - name: Update package version
-        if: steps.check.outputs.should_publish == 'true'
-        working-directory: ${{ matrix.dir }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          # Update version in package.json
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = '${VERSION}';
-            if (Object.prototype.hasOwnProperty.call(pkg, 'runtimeVersion')) {
-              pkg.runtimeVersion = '${VERSION}';
-            }
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          # Update version in server.json
-          node -e "
-            const fs = require('fs');
-            const srv = JSON.parse(fs.readFileSync('server.json', 'utf8'));
-            srv.version = '${VERSION}';
-            if (srv.packages) srv.packages.forEach(p => p.version = '${VERSION}');
-            fs.writeFileSync('server.json', JSON.stringify(srv, null, 2) + '\n');
-          "
-          echo "Publishing ${{ matrix.pkg }}@${VERSION}"
-
-      - name: Verify MCP bootstrap release asset
-        if: steps.check.outputs.should_publish == 'true' && (matrix.name == 'mcp' || matrix.name == 'lsp-mcp')
+      - name: Validate exact immutable release identity
+        id: identity
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ADMIN_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]
+          test -n "$RELEASE_ADMIN_TOKEN"
+          test "$(GH_TOKEN="$RELEASE_ADMIN_TOKEN" gh api \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq '.enabled')" = true
+          gh release verify "$TAG"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+
+      - name: Verify checked-out tag and canonical package projections
+        working-directory: ${{ matrix.dir }}
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          test "$(git describe --tags --exact-match)" = "$TAG"
+          test "$(node -p 'require("./package.json").name')" = "$PACKAGE"
+          test "$(node -p 'require("./package.json").version')" = "$VERSION"
+          test "$(node -p 'require("./server.json").version')" = "$VERSION"
+          node -e '
+            const pkg = require("./package.json");
+            const server = require("./server.json");
+            const version = process.env.VERSION;
+            if (pkg.runtimeVersion !== undefined && pkg.runtimeVersion !== version) process.exit(1);
+            if (server.packages && server.packages.some((entry) => entry.version !== version)) process.exit(1);
+          '
+          npm ci --ignore-scripts
+          npm pack --dry-run
+
+      - name: Verify admitted native release assets
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: sh scripts/check-mcp-release-assets.shs "${{ matrix.dir }}"
 
-      - name: Publish to npm
-        if: steps.check.outputs.should_publish == 'true'
+      - name: Publish exact checked-in package with registry provenance
         working-directory: ${{ matrix.dir }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: npm publish --access public --provenance

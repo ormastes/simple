@@ -1,0 +1,91 @@
+"""Release mutation trusts observed Git/worktree state, not caller session claims."""
+# @req: REQ-004, REQ-005
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use app.io.mod.{process_run_bounded}
+use app.release.policy.{ReleaseSession}
+use app.release.session_authority.{verify_release_session}
+
+fn run(command: text, arguments: [text]) -> text:
+    val (stdout, _stderr, code) = process_run_bounded(command, arguments, 5000, 262144)
+    if code != 0:
+        return ""
+    stdout.trim()
+
+fn git(root: text, arguments: [text]) -> text:
+    run("git", ["-C", root] + arguments)
+
+fn main_worktree(root: text) -> text:
+    val listing = git(root, ["worktree", "list", "--porcelain"])
+    for line in listing.split("\n"):
+        if line.starts_with("worktree "):
+            return run("realpath", [line[9:].trim()])
+    ""
+
+fn actual_session(root: text) -> ReleaseSession:
+    val canonical = run("realpath", [root])
+    ReleaseSession(
+        session_id: "session-authority-spec",
+        workspace_path: canonical,
+        main_workspace_path: main_worktree(canonical),
+        work_branch: git(canonical, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+        target_ref: "main",
+        base_sha: git(canonical, ["rev-parse", "--verify", "HEAD"]),
+        expected_target_sha: git(canonical, ["rev-parse", "--verify", "refs/remotes/origin/main"]),
+        policy_sha256: file_hash_sha256(canonical + "/.spipe/policy/vcs.sdn")
+    )
+
+describe "Release session authority":
+    it "admits the current isolated work branch using observed identities":
+        step("Resolve canonical Git and worktree identities")
+        val session = actual_session(".")
+        val verified = verify_release_session(".", session)
+        expect(verified.valid).to_be(true)
+        expect(verified.canonical_root).to_equal(session.workspace_path)
+        expect(verified.current_head).to_equal(session.base_sha)
+        expect(verified.target_head).to_equal(session.expected_target_sha)
+
+    it "rejects forged branch head target and policy claims":
+        val session = actual_session(".")
+        val forged_branch = ReleaseSession(
+            session_id: session.session_id, workspace_path: session.workspace_path,
+            main_workspace_path: session.main_workspace_path,
+            work_branch: "work/release/forged", target_ref: session.target_ref,
+            base_sha: session.base_sha, expected_target_sha: session.expected_target_sha,
+            policy_sha256: session.policy_sha256
+        )
+        expect(verify_release_session(".", forged_branch).reason).to_contain("branch claim")
+
+        val forged_head = ReleaseSession(
+            session_id: session.session_id, workspace_path: session.workspace_path,
+            main_workspace_path: session.main_workspace_path,
+            work_branch: session.work_branch, target_ref: session.target_ref,
+            base_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            expected_target_sha: session.expected_target_sha,
+            policy_sha256: session.policy_sha256
+        )
+        expect(verify_release_session(".", forged_head).reason).to_contain("base identity")
+
+        val forged_target = ReleaseSession(
+            session_id: session.session_id, workspace_path: session.workspace_path,
+            main_workspace_path: session.main_workspace_path,
+            work_branch: session.work_branch, target_ref: session.target_ref,
+            base_sha: session.base_sha,
+            expected_target_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            policy_sha256: session.policy_sha256
+        )
+        expect(verify_release_session(".", forged_target).reason).to_contain("target identity")
+
+        val forged_policy = ReleaseSession(
+            session_id: session.session_id, workspace_path: session.workspace_path,
+            main_workspace_path: session.main_workspace_path,
+            work_branch: session.work_branch, target_ref: session.target_ref,
+            base_sha: session.base_sha, expected_target_sha: session.expected_target_sha,
+            policy_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        )
+        expect(verify_release_session(".", forged_policy).reason).to_contain("policy identity")
+
+    it "rejects subdirectories and symlink aliases masquerading as the repository root":
+        val session = actual_session(".")
+        expect(verify_release_session("src", session).reason).to_contain("root of its Git repository")
+        expect(verify_release_session("/proc/self/cwd", session).reason).to_contain("symlink alias")

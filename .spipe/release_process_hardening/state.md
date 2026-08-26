@@ -32,6 +32,7 @@ Implement and verify one policy-driven Simple/Spipe software-release system in w
 - AC-13: Focused verification runs each acceptance gate once, includes Simple release beta dry-run and rejection fixtures, plugin build/parity checks, lint and token duplicate-check for changed `.spl`, exact candidate identity checks, and the release-bound whole test command `bin/simple test test --whole --mode=interpreter`; required failures/fallbacks cannot yield PASS and the lane stops after at most three distinct fix/verify cycles.
 - AC-14: Knowledge is updated in the saved research doc, feature/NFR requirements, architecture, design, plans, generated/manual spec, `doc/07_guide`, and both feature- and layer-expert `skill.md` pages; remaining gaps receive `doc/08_tracking/bug/` records with file:line and unblock conditions, and any must-check ledger v3 TODO/blocked row has an owner and actionable unblock condition while PASS uses `none`.
 - AC-15: The final audit maps every AC to current authoritative file or command evidence, distinguishes current-host/implementation handoff from full completion, and does not mark verify/release/goal complete while any required host, policy, signing, whole-suite, generated-manual, or plugin-projection evidence is missing.
+- AC-16: An active beta/bootstrap lane performs bounded read-only discovery of reviewed fixes diverging between exact `main` and `release/X.Y` snapshots; each selected fix crosses through an isolated reviewed backport or forward-port and protected CAS integration, emits a divergence receipt, and never makes `main` track or become the release branch.
 
 ## Scope Exclusions
 
@@ -46,7 +47,7 @@ Implement and verify one policy-driven Simple/Spipe software-release system in w
 - Merge owner: primary Codex `/root` agent.
 - Final reviewer: primary normal/highest-capability Codex agent after sidecar findings are reconciled.
 - Shared interfaces: `ReleaseVersion`, `ReleaseChannel`, `ReleasePolicy`, `ReleaseSession`, `BackportRequest`, `CandidateManifest`, `ReleaseAdmission`, `PromotionPlan`, `ReleaseReceipt`.
-- Manual flow helpers: `step("Load the canonical release policy")`, `step("Prepare an isolated beta release")`, `step("Admit reviewed bug-fix backports")`, `step("Freeze and qualify the release candidate")`, `step("Promote exact admitted artifacts")`, `step("Withdraw without rewriting release identity")`.
+- Manual flow helpers: `step("Load the canonical release policy")`, `step("Prepare an isolated beta release")`, `step("Admit reviewed bug-fix backports")`, `step("Reconcile reviewed fixes with main")`, `step("Freeze and qualify the release candidate")`, `step("Promote exact admitted artifacts")`, `step("Withdraw without rewriting release identity")`.
 - Setup/checker helpers: `setup_release_fixture`, `check_version_projection`, `check_backport_admission`, `check_candidate_manifest`, `check_promotion_plan`, `check_release_projection_parity`.
 - Fail-fast placeholders: unresolved scaffolds use `assert(false)` or `fail(...)`; no placeholder PASS is admissible.
 - Generated-manual review owner: primary Codex agent; sidecars may inventory but may not accept manual quality or done marks.
@@ -71,6 +72,14 @@ verify-blocked
   Spipe build/parity PASS; direct-env runtime guards working/staged PASS.
 - review: lower-model inventory lanes and implementation/docs plugin reviews
   completed; highest-capability release review requested after reconciliation.
+- convergence policy: Added bounded read-only main/release discovery, exact reviewed
+  backport and forward-port paths, protected CAS integration, divergence receipts,
+  and the invariant that `main` remains trunk rather than tracking a release line.
+- highest review: Top-level direct-main rules were corrected. Final review still
+  rejects completion because convergence is not Git/CI-wired, candidate/admission
+  schemas diverge, promotion retries and remote asset checks are incomplete, npm
+  packages are rebuilt after admission, projection parity is partial, and version
+  discovery misses JSON consumers and exceeds its latency target.
 - blocked: release-grade whole-suite/lint evidence cannot be claimed with the
   available runtime because it identifies itself as bootstrap seed-derived.
   Live GitHub ruleset verification and promote-only workflow conversion remain

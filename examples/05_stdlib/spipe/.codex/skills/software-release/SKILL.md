@@ -5,6 +5,8 @@ description: Prepare and promote stable or prerelease software through isolated 
 
 # Protected Software Release
 
+Release contract: isolated-session; reviewed-beta-backport; immutable-candidate; promote-without-rebuild; protected-ref-guard; non-destructive-release-identity.
+
 Use `doc/00_llm_process/skill_command/command/release.md` as the canonical process.
 
 Never author in the main worktree, mutate a protected ref directly, build from a release tag, rebuild during promotion, push all tags, or delete/move/reuse a published tag. Beta fixes are explicit reviewed backports of one exact bug-fix commit with provenance and renewed evidence.

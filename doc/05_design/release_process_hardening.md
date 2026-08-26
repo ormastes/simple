@@ -31,6 +31,12 @@ result_commit_sha
 
 `check_backport_admission` accepts only `change_kind=fix`, `target_line=release/X.Y`, exact nonempty commit/digest facts, and evidence bound after application. Empty adaptation reason is normalized to `none`; ambiguous refs and feature changes reject.
 
+### Convergence discovery and forward-port
+
+`ConvergenceSnapshot` records exact fetched `main` and `release/X.Y` SHAs, policy digest, discovery timestamp/cadence identity, and reviewed fix metadata. `discover_convergence` is read-only and returns candidate proposals; it cannot select, apply, or push them. Each proposal names one exact commit and direction (`main_to_release` or `release_to_main`).
+
+`DivergenceReceipt` records source/target refs and before SHAs, selected source commit, result SHA, review and renewed-evidence digests, integration receipt, omitted proposals/reasons, and the remaining ahead/behind sets. For `release_to_main`, the target is always `main`, but application occurs on an isolated `work/fix/...` or `work/backport/...` branch. Only integration authority may CAS-update `main`. The design forbids changing `main`'s upstream to `release/X.Y`, resetting trunk to the release head, merging the whole release line as a substitute for an exact forward-port, or allowing a bootstrap task to hold write credentials.
+
 ### Candidate
 
 `CandidateManifest` includes canonical version, attempt, ref, commit and source/policy/version/toolchain/support digests. `candidate_identity()` creates canonical length-delimited text for hashing by an outer facade. `check_candidate_manifest` validates ref/version/attempt agreement and all required facts. `check_candidate_create_once(existing_identity, proposed_identity)` accepts absence or exact idempotent equality and rejects mutation.
@@ -71,9 +77,10 @@ The executable scenario uses the frozen manual steps:
 1. `Load the canonical release policy`
 2. `Prepare an isolated beta release`
 3. `Admit reviewed bug-fix backports`
-4. `Freeze and qualify the release candidate`
-5. `Promote exact admitted artifacts`
-6. `Withdraw without rewriting release identity`
+4. `Reconcile reviewed fixes with main`
+5. `Freeze and qualify the release candidate`
+6. `Promote exact admitted artifacts`
+7. `Withdraw without rewriting release identity`
 
 Each primary step has success and adjacent rejection assertions. Advanced projection/plugin parity detail is folded. The manual shows commands, expected typed reasons, and recovery behavior without raw test code dominating.
 

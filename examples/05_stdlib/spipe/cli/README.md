@@ -21,6 +21,12 @@ protected-release process and `release-capabilities` prints the policy schema
 and supported planning boundaries. Provider mutation still requires a unique
 session, live protected-ref authority, and explicit approval.
 
+The guarded operational commands each accept exactly one JSON object:
+`release-session-plan`, `release-main-fix-discovery-plan`,
+`release-beta-backport-plan`, `release-forward-port-plan`,
+`release-candidate-plan`, and `release-promotion-plan`. They validate and hash
+evidence but never checkout, cherry-pick, build, tag, push, delete, or publish.
+
 Fine-tune process examples:
 
 ```sh

@@ -279,18 +279,20 @@ Must show `STATUS: PASS` before release.
 Run `/release` — version bump, CHANGELOG, commit, tag, and push only after
 `/verify` shows `STATUS: PASS`.
 
-Release uses jj for linear history:
+Release preparation uses an isolated work branch/worktree. It does not move a
+protected branch or create a tag. After exact candidate admission, the release
+authority promotes without rebuilding and pushes exactly one signed tag:
 
 ```bash
-jj commit -m "chore: release vX.Y.Z"
 jj git fetch
-jj rebase -d main@origin
-jj bookmark set main -r @-
-env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
-env -u GITHUB_TOKEN -u GH_TOKEN git push --tags
+jj rebase -d <target>@origin
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark <work-branch>
+# Protected integration and exact signed-tag publication occur only through
+# the reviewed integration/release authority.
 ```
 
-Ask before pushing. Treat "pull" as `jj git fetch` plus `jj rebase`; do not use
+Ask before pushing. Never push `main`, `release/*`, `candidate/*`, or all tags
+from an authoring session. Treat "pull" as `jj git fetch` plus `jj rebase`; do not use
 merge-style pulls.
 
 When pushing over HTTPS with GitHub CLI credentials, stale `GH_TOKEN` or

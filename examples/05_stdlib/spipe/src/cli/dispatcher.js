@@ -1,4 +1,6 @@
 import { printUsage } from "./usage.js";
+import { releaseCapabilities, releaseContractHash, releaseSchemas } from "../release/contract.js";
+import { runReleaseCommand } from "./release_commands.js";
 
 export async function runCli(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
@@ -19,15 +21,18 @@ export async function runCli(argv = process.argv.slice(2)) {
     return;
   }
   if (command === "release-capabilities") {
-    console.log("schema.vcs_policy=spipe-vcs/3");
-    console.log("schema.session=spipe-session/1");
-    console.log("schema.release=spipe-release/1");
-    console.log("schema.candidate=spipe-candidate/1");
-    console.log("capability.isolated_sessions=true");
-    console.log("capability.reviewed_beta_backports=true");
-    console.log("capability.immutable_release_candidates=true");
-    console.log("capability.promote_without_rebuild=true");
+    for (const [name, value] of Object.entries(releaseSchemas)) console.log(`schema.${name}=${value}`);
+    for (const [name, value] of Object.entries(releaseCapabilities)) console.log(`capability.${name}=${value}`);
+    console.log(`contract.sha256=${releaseContractHash()}`);
     return;
+  }
+  try {
+    const releaseResult = runReleaseCommand(command, args);
+    if (releaseResult.handled) return releaseResult;
+  } catch (error) {
+    console.error(`spipe: ${error.message}`);
+    process.exitCode = 2;
+    return { handled: true, error: error.message };
   }
   const { runHostCommand } = await import("./host_commands.js");
   const hostResult = runHostCommand(command, args);

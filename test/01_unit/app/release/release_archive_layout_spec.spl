@@ -1,35 +1,36 @@
 """# Release Archive Layout
 
-Checks release workflow source resolves installed runtimes from the extracted
-archive root and reuses the declared bootstrap runtime and launcher for fallback.
+Checks release promotion reuses the exact admitted candidate artifacts and has
+no archive fallback or rebuild path.
 """
 
 use std.spec.*
 use std.io_runtime.{read_file_text}
 
-describe "release archive layout":
+describe "release candidate artifact layout":
     # @req REQ-004 REQ-014
-    it "should derive installer runtime paths from the extracted archive root":
-        step("Verify release archives expose the installed runtime layout")
+    it "should bind the product artifact to the admitted checksum manifest":
+        step("Verify candidate artifacts are assembled once")
+        val candidate = read_file_text(".github/workflows/candidate.yml") ?? ""
+
+        expect(candidate).to_contain("cp \"$binary\" candidate/simple-x86_64-unknown-linux-gnu")
+        expect(candidate).to_contain("sha256sum simple-x86_64-unknown-linux-gnu simple.spdx.json support.sdn release-notes.md > artifacts.sha256")
+        expect(candidate).to_contain("--out=candidate/simple.spdx.json")
+        expect(candidate).to_contain("actions/attest-build-provenance@8beda2b7ed98355c0e97c0a63bec38ae472e66c4")
+        expect(candidate).to_contain("qualification_receipt_sha256")
+        expect(candidate).to_contain("fallback_used:false")
+
+    # @req REQ-004 REQ-014
+    it "should promote the downloaded candidate without rebuilding or clobbering":
+        step("Verify promotion consumes exact admitted assets")
         val workflow = read_file_text(".github/workflows/release.yml") ?? ""
 
-        expect(workflow).to_contain("LINUX_PKG_ROOT=\"${LINUX_ARCHIVE%.spk}\"")
-        expect(workflow).to_contain("$LINUX_PKG_ROOT/bin/simple-runtime")
-        expect(workflow).to_contain("WINDOWS_PKG_ROOT=\"${WINDOWS_ARCHIVE%.spk}\"")
-        expect(workflow).to_contain("$WINDOWS_PKG_ROOT/bin/simple.exe")
-        expect(workflow.contains("if [ -f bin/simple-runtime ]; then")).to_be(false)
-        expect(workflow.contains("if [ -f bin/simple.exe ]; then")).to_be(false)
-
-    # @req REQ-004 REQ-014
-    it "should reuse the bootstrap runtime and launcher in the full fallback":
-        step("Verify release archives expose the installed runtime layout")
-        val workflow = read_file_text(".github/workflows/release.yml") ?? ""
-
-        expect(workflow).to_contain("needs: [check-version, build-bootstrap]")
-        expect(workflow).to_contain("name: bootstrap-linux-x86_64")
-        expect(workflow).to_contain("FULL_BOOTSTRAP_ROOT=\"${FULL_ARCHIVE%.spk}\"")
-        expect(workflow).to_contain("test -x \"$FULL_BOOTSTRAP_ROOT/bin/simple-runtime\"")
-        expect(workflow).to_contain("test -x \"$FULL_BOOTSTRAP_ROOT/bin/simple\"")
-        expect(workflow).to_contain("cp \"$FULL_BOOTSTRAP_ROOT/bin/simple-runtime\" \"$PKG_ROOT/bin/\"")
-        expect(workflow).to_contain("cp \"$FULL_BOOTSTRAP_ROOT/bin/simple\" \"$PKG_ROOT/bin/\"")
-        expect(workflow).to_contain("dist/simple-full-*.tar.gz.sha256")
+        expect(workflow).to_contain("Re-download exact candidate")
+        expect(workflow).to_contain("sha256sum --check --strict artifacts.sha256")
+        expect(workflow).to_contain("gh attestation verify candidate/simple-x86_64-unknown-linux-gnu")
+        expect(workflow).to_contain("immutable-releases")
+        expect(workflow).to_contain("RELEASE_ADMIN_TOKEN")
+        expect(workflow).to_contain("git push origin \"refs/tags/$TAG:refs/tags/$TAG\"")
+        expect(workflow).to_contain("gh release upload \"$TAG\" \"${assets[@]}\"")
+        expect(workflow.contains("--clobber")).to_be(false)
+        expect(workflow.contains("bootstrap-from-scratch")).to_be(false)

@@ -3,11 +3,16 @@
 use std.cli.cli_util.{get_cli_args}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+use app.release.version_authority.{
+    CompatibilitySnapshot, VersionBumpPlan, check_repository_version,
+    plan_repository_version_render, plan_repository_version_bump,
+    apply_repository_version_bump
+}
 
 use app.release.policy.{
     ReleaseCheck, ReleaseSession, BackportRequest, CandidateManifest,
     ReleaseAdmission, PromotionPlan, parse_release_version,
-    check_version_channel, check_version_projection, check_beta_preparation,
+    check_beta_preparation,
     check_backport_admission, check_candidate_manifest, candidate_identity,
     check_candidate_create_once, check_promotion_plan, check_withdrawal_plan
 }
@@ -18,7 +23,10 @@ fn print_help():
     print ""
     print "Commands:"
     print "  plan                 Show the migration plan to remove shell/Node release paths"
-    print "  version-check        Validate canonical SemVer/channel and one projection"
+    print "  version-check        Validate release/version.sdn and every declared projection"
+    print "  version-render-plan  Plan a compatible version/projection update without writing"
+    print "  version-bump-plan    Plan version/projection edits with explicit compatibility counters"
+    print "  version-bump         Recompute and apply a bump in an isolated session with manifest CAS"
     print "  beta-prepare         Validate an isolated beta release session"
     print "  backport-check       Validate one reviewed bug-fix backport"
     print "  candidate-check      Validate one immutable candidate manifest"
@@ -31,17 +39,19 @@ fn print_help():
         print "  {line}"
 
 fn _is_log_option(arg: text) -> bool:
-    arg == "--human" or arg == "--llm" or arg == "--json" or
+    (arg == "--human" or arg == "--llm" or arg == "--json" or
         arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
         arg == "--verbose" or arg == "--dots" or arg == "--count" or
         arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
         arg == "--progress" or arg.starts_with("--log-mode=") or
-        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+        arg.starts_with("--surface=") or arg.starts_with("--progress="))
 
 fn _json_escape(value: text) -> text:
     val slashes = value.replace("\\", "\\\\")
     val quotes = slashes.replace("\"", "\\\"")
-    quotes.replace("\n", "\\n")
+    val newlines = quotes.replace("\n", "\\n")
+    val returns = newlines.replace("\r", "\\r")
+    returns.replace("\t", "\\t")
 
 fn print_plan():
     print "Release/Deploy Migration Plan"
@@ -59,7 +69,10 @@ fn print_plan():
     print "   Status: pending."
 
 fn print_plan_json():
-    print "{\"command\":\"release plan\",\"status\":\"blocked\",\"steps\":5,\"implemented\":0,\"partial\":1,\"pending\":4,\"reason\":\"promote-only provider and live-policy verification are not implemented\"}"
+    print "{\"output_version\":\"simple-release/v1\",\"command\":\"release plan\",\"status\":\"blocked\",\"steps\":3,\"implemented\":0,\"partial\":1,\"pending\":2,\"reason\":\"promote-only provider and live-policy verification are not implemented\"}"
+
+fn print_help_json():
+    print "{\"output_version\":\"simple-release/v1\",\"command\":\"release help\",\"status\":\"ok\",\"mutation\":\"none\",\"commands\":[\"plan\",\"version-check\",\"version-render-plan\",\"version-bump-plan\",\"version-bump\",\"beta-prepare\",\"backport-check\",\"candidate-check\",\"promote-check\",\"withdraw-check\"]}"
 
 fn arg_value(args: [text], key: text) -> text:
     val prefix = "--{key}="
@@ -75,24 +88,171 @@ fn has_flag(args: [text], key: text) -> bool:
             return true
     false
 
+fn _validate_command_args(args: [text], value_keys: [text], flag_keys: [text]) -> ReleaseCheck:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            i = i + 2
+            continue
+        if _is_log_option(arg):
+            i = i + 1
+            continue
+        var known = false
+        for key in value_keys:
+            if arg.starts_with("--" + key + "="):
+                known = true
+                break
+        if not known:
+            for key in flag_keys:
+                if arg == "--" + key:
+                    known = true
+                    break
+        if not known:
+            return ReleaseCheck(valid: false, reason: "unknown or malformed option: " + arg)
+        i = i + 1
+    ReleaseCheck(valid: true, reason: "")
+
 fn _print_release_check(command: text, check: ReleaseCheck, as_json: bool) -> i64:
     if as_json:
         val reason_json = _json_escape(check.reason)
         val status = if check.valid: "ok" else: "rejected"
-        print "{\"command\":\"release {command}\",\"status\":\"{status}\",\"reason\":\"{reason_json}\"}"
+        print "{\"output_version\":\"simple-release/v1\",\"command\":\"release {command}\",\"status\":\"{status}\",\"reason\":\"{reason_json}\"}"
     elif check.valid:
         print "Release {command}: PASS"
     else:
         error("release", check.reason)
     if check.valid: 0 else: 1
 
+fn _compatibility_keys() -> [text]:
+    [
+        "public-api-major", "compiler-abi", "bootstrap-protocol",
+        "package-format", "scv-store-schema", "scv-wire-protocol",
+        "devhub-provider-api", "spipe-skill-api",
+        "release-manifest-schema", "bootstrap-receipt-schema"
+    ]
+
+fn _compatibility_args_check(args: [text]) -> ReleaseCheck:
+    for key in _compatibility_keys():
+        val raw = arg_value(args, key)
+        if raw == "" or (raw.to_int() ?? -1) < 0:
+            return ReleaseCheck(valid: false, reason: "required compatibility counter is missing or invalid: --" + key)
+    ReleaseCheck(valid: true, reason: "")
+
+fn _compatibility_from_args(args: [text]) -> CompatibilitySnapshot:
+    CompatibilitySnapshot(
+        public_api_major: arg_value(args, "public-api-major").to_int() ?? -1,
+        compiler_abi: arg_value(args, "compiler-abi").to_int() ?? -1,
+        bootstrap_protocol: arg_value(args, "bootstrap-protocol").to_int() ?? -1,
+        package_format: arg_value(args, "package-format").to_int() ?? -1,
+        scv_store_schema: arg_value(args, "scv-store-schema").to_int() ?? -1,
+        scv_wire_protocol: arg_value(args, "scv-wire-protocol").to_int() ?? -1,
+        devhub_provider_api: arg_value(args, "devhub-provider-api").to_int() ?? -1,
+        spipe_skill_api: arg_value(args, "spipe-skill-api").to_int() ?? -1,
+        release_manifest_schema: arg_value(args, "release-manifest-schema").to_int() ?? -1,
+        bootstrap_receipt_schema: arg_value(args, "bootstrap-receipt-schema").to_int() ?? -1
+    )
+
+fn _version_plan_json(command: text, plan: VersionBumpPlan, mutation: text) -> text:
+    var edits_json: [text] = []
+    for edit in plan.projection_edits:
+        val changed = if edit.changed: "true" else: "false"
+        edits_json.push("{\"path\":\"" + _json_escape(edit.path) + "\",\"original_sha256\":\"" + _json_escape(edit.original_sha256) + "\",\"observed_version\":\"" + _json_escape(edit.observed_version) + "\",\"target_version\":\"" + _json_escape(edit.target_version) + "\",\"changed\":" + changed + ",\"rendered_content\":\"" + _json_escape(edit.rendered_content) + "\"}")
+    "{\"output_version\":\"simple-release/v1\",\"command\":\"release " + command + "\",\"status\":\"ok\",\"mutation\":\"" + mutation + "\",\"current_version\":\"" + _json_escape(plan.current_version) + "\",\"target_version\":\"" + _json_escape(plan.target_version) + "\",\"requested_bump\":\"" + _json_escape(plan.requested_bump) + "\",\"minimum_bump\":\"" + _json_escape(plan.minimum_bump) + "\",\"manifest_content\":\"" + _json_escape(plan.manifest_content) + "\",\"projection_edits\":[" + edits_json.join(",") + "]}"
+
 fn run_version_check(args: [text], as_json: bool) -> i64:
-    val version = parse_release_version(arg_value(args, "version"))
-    var check = check_version_channel(version, arg_value(args, "channel"))
-    val projection = arg_value(args, "projection")
-    if check.valid and projection != "":
-        check = check_version_projection(version.canonical, projection, arg_value(args, "observed"))
+    val args_check = _validate_command_args(args, ["root", "version", "channel"], [])
+    if not args_check.valid:
+        return _print_release_check("version-check", args_check, as_json)
+    val root = if arg_value(args, "root") != "": arg_value(args, "root") else: "."
+    val report = check_repository_version(root)
+    var check = ReleaseCheck(valid: report.valid, reason: report.reason)
+    val expected_version = arg_value(args, "version")
+    if check.valid and expected_version != "" and expected_version != report.manifest.semver:
+        check = ReleaseCheck(valid: false, reason: "requested version does not match the canonical version manifest")
+    val expected_channel = arg_value(args, "channel")
+    if check.valid and expected_channel != "" and expected_channel != report.manifest.channel:
+        check = ReleaseCheck(valid: false, reason: "requested channel does not match the canonical version manifest")
     _print_release_check("version-check", check, as_json)
+
+fn run_version_render_plan(args: [text], as_json: bool) -> i64:
+    val args_check = _validate_command_args(args, ["root", "version", "channel"], [])
+    if not args_check.valid:
+        return _print_release_check("version-render-plan", args_check, as_json)
+    val root = if arg_value(args, "root") != "": arg_value(args, "root") else: "."
+    val plan = plan_repository_version_render(root, arg_value(args, "version"), arg_value(args, "channel"))
+    if not plan.valid:
+        return _print_release_check("version-render-plan", ReleaseCheck(valid: false, reason: plan.reason), as_json)
+    if as_json:
+        print _version_plan_json("version-render-plan", plan, "none")
+    else:
+        print "Release version-render-plan: PASS"
+        print "  current: {plan.current_version}"
+        print "  target: {plan.target_version}"
+        print "  bump: {plan.requested_bump} (minimum {plan.minimum_bump})"
+        print "  projection edits: {plan.projection_edits.len()}"
+        print "  mutation: none"
+    0
+
+fn _version_plan_value_keys() -> [text]:
+    var keys = ["root", "version", "channel"]
+    for key in _compatibility_keys():
+        keys.push(key)
+    keys
+
+fn run_version_bump_plan(args: [text], as_json: bool) -> i64:
+    val args_check = _validate_command_args(args, _version_plan_value_keys(), [])
+    if not args_check.valid:
+        return _print_release_check("version-bump-plan", args_check, as_json)
+    val compatibility_check = _compatibility_args_check(args)
+    if not compatibility_check.valid:
+        return _print_release_check("version-bump-plan", compatibility_check, as_json)
+    val root = if arg_value(args, "root") != "": arg_value(args, "root") else: "."
+    val plan = plan_repository_version_bump(root, arg_value(args, "version"), arg_value(args, "channel"), _compatibility_from_args(args))
+    if not plan.valid:
+        return _print_release_check("version-bump-plan", ReleaseCheck(valid: false, reason: plan.reason), as_json)
+    if as_json:
+        print _version_plan_json("version-bump-plan", plan, "none")
+    else:
+        print "Release version-bump-plan: PASS"
+        print "  current: {plan.current_version}"
+        print "  target: {plan.target_version}"
+        print "  bump: {plan.requested_bump} (minimum {plan.minimum_bump})"
+        print "  manifest and {plan.projection_edits.len()} projection edits are planned"
+        print "  mutation: none"
+    0
+
+fn run_version_bump(args: [text], as_json: bool) -> i64:
+    var value_keys = _version_plan_value_keys()
+    for key in ["expected-manifest-sha256", "session", "workspace", "main-workspace", "branch", "target", "base-sha", "target-sha", "policy-sha256"]:
+        value_keys.push(key)
+    val args_check = _validate_command_args(args, value_keys, [])
+    if not args_check.valid:
+        return _print_release_check("version-bump", args_check, as_json)
+    val compatibility_check = _compatibility_args_check(args)
+    if not compatibility_check.valid:
+        return _print_release_check("version-bump", compatibility_check, as_json)
+    val root = if arg_value(args, "root") != "": arg_value(args, "root") else: "."
+    val result = apply_repository_version_bump(
+        root, arg_value(args, "expected-manifest-sha256"), _session_from_args(args),
+        arg_value(args, "version"), arg_value(args, "channel"), _compatibility_from_args(args)
+    )
+    val recovery = if result.recovery_required: "true" else: "false"
+    var files_json: [text] = []
+    for path in result.applied_files:
+        files_json.push("\"" + _json_escape(path) + "\"")
+    if not result.valid:
+        if as_json:
+            print "{\"output_version\":\"simple-release/v1\",\"command\":\"release version-bump\",\"status\":\"rejected\",\"mutation\":\"none\",\"reason\":\"{_json_escape(result.reason)}\",\"recovery_required\":{recovery},\"applied_files\":[{files_json.join(",")}] }"
+            return 1
+        return _print_release_check("version-bump", ReleaseCheck(valid: false, reason: result.reason), false)
+    if as_json:
+        print "{\"output_version\":\"simple-release/v1\",\"command\":\"release version-bump\",\"status\":\"ok\",\"mutation\":\"applied\",\"applied_version\":\"{_json_escape(result.applied_version)}\",\"recovery_required\":{recovery},\"applied_files\":[{files_json.join(",")}] }"
+    else:
+        print "Release version-bump: PASS"
+        print "  applied version: {result.applied_version}"
+        print "  applied files: {result.applied_files.len()}"
+    0
 
 fn _session_from_args(args: [text]) -> ReleaseSession:
     ReleaseSession(
@@ -107,21 +267,35 @@ fn _session_from_args(args: [text]) -> ReleaseSession:
     )
 
 fn run_beta_prepare(args: [text], as_json: bool) -> i64:
+    val args_check = _validate_command_args(args, ["version", "session", "workspace", "main-workspace", "branch", "target", "base-sha", "target-sha", "policy-sha256"], [])
+    if not args_check.valid:
+        return _print_release_check("beta-prepare", args_check, as_json)
     val check = check_beta_preparation(parse_release_version(arg_value(args, "version")), _session_from_args(args))
     _print_release_check("beta-prepare", check, as_json)
 
 fn run_backport_check(args: [text], as_json: bool) -> i64:
+    val args_check = _validate_command_args(args, ["direction", "source-ref", "source-sha", "change-id", "work-id", "kind", "review-sha256", "reviewed-source-sha", "reviewed-change-id", "target", "target-sha", "adaptation", "evidence-sha256", "evidence-result-sha", "evidence-target-sha", "result-sha", "forward-port-target", "forward-port-sha256"], [])
+    if not args_check.valid:
+        return _print_release_check("backport-check", args_check, as_json)
     val request = BackportRequest(
+        direction: arg_value(args, "direction"),
+        source_ref: arg_value(args, "source-ref"),
         source_commit_sha: arg_value(args, "source-sha"),
         change_id: arg_value(args, "change-id"),
         work_id: arg_value(args, "work-id"),
         change_kind: arg_value(args, "kind"),
         review_receipt_sha256: arg_value(args, "review-sha256"),
+        reviewed_source_commit_sha: arg_value(args, "reviewed-source-sha"),
+        reviewed_change_id: arg_value(args, "reviewed-change-id"),
         target_line: arg_value(args, "target"),
         expected_target_sha: arg_value(args, "target-sha"),
         adaptation_reason: arg_value(args, "adaptation"),
         evidence_sha256: arg_value(args, "evidence-sha256"),
-        result_commit_sha: arg_value(args, "result-sha")
+        evidence_result_commit_sha: arg_value(args, "evidence-result-sha"),
+        evidence_target_sha: arg_value(args, "evidence-target-sha"),
+        result_commit_sha: arg_value(args, "result-sha"),
+        forward_port_target_ref: arg_value(args, "forward-port-target"),
+        forward_port_receipt_sha256: arg_value(args, "forward-port-sha256")
     )
     _print_release_check("backport-check", check_backport_admission(request), as_json)
 
@@ -140,23 +314,31 @@ fn _candidate_from_args(args: [text]) -> CandidateManifest:
     )
 
 fn run_candidate_check(args: [text], as_json: bool) -> i64:
+    val args_check = _validate_command_args(args, ["version", "attempt", "candidate-ref", "commit-sha", "source-sha256", "policy-sha256", "version-sha256", "toolchain-sha256", "support-sha256", "evidence-sha256", "existing-identity"], [])
+    if not args_check.valid:
+        return _print_release_check("candidate-check", args_check, as_json)
     val candidate = _candidate_from_args(args)
     var check = check_candidate_manifest(candidate)
     if check.valid:
         check = check_candidate_create_once(arg_value(args, "existing-identity"), candidate)
     if as_json and check.valid:
         val identity_json = _json_escape(candidate_identity(candidate))
-        print "{\"command\":\"release candidate-check\",\"status\":\"ok\",\"candidate_identity\":\"{identity_json}\"}"
+        print "{\"output_version\":\"simple-release/v1\",\"command\":\"release candidate-check\",\"status\":\"ok\",\"candidate_identity\":\"{identity_json}\"}"
         return 0
     _print_release_check("candidate-check", check, as_json)
 
 fn run_promote_check(args: [text], as_json: bool) -> i64:
+    val args_check = _validate_command_args(args, ["candidate-version", "candidate-identity", "candidate-commit-sha", "target-sha", "tag", "artifact-sha256", "admitted-artifact-sha256", "evidence-sha256", "qualification-sha256", "admission-sha256"], ["signed", "annotated", "exact-push", "rebuild", "fallback"])
+    if not args_check.valid:
+        return _print_release_check("promote-check", args_check, as_json)
     val admission = ReleaseAdmission(
+        candidate_version: arg_value(args, "candidate-version"),
         candidate_identity: arg_value(args, "candidate-identity"),
         candidate_commit_sha: arg_value(args, "candidate-commit-sha"),
         artifact_manifest_sha256: arg_value(args, "admitted-artifact-sha256"),
         evidence_manifest_sha256: arg_value(args, "evidence-sha256"),
-        admitted: has_flag(args, "admitted")
+        qualification_receipt_sha256: arg_value(args, "qualification-sha256"),
+        admission_receipt_sha256: arg_value(args, "admission-sha256")
     )
     val plan = PromotionPlan(
         candidate_identity: arg_value(args, "candidate-identity"),
@@ -174,17 +356,30 @@ fn run_promote_check(args: [text], as_json: bool) -> i64:
     _print_release_check("promote-check", check_promotion_plan(admission, plan), as_json)
 
 fn run_withdraw_check(args: [text], as_json: bool) -> i64:
+    val args_check = _validate_command_args(args, ["redeploy"], ["delete-tag", "move-tag", "reuse-version"])
+    if not args_check.valid:
+        return _print_release_check("withdraw-check", args_check, as_json)
     val check = check_withdrawal_plan(
         has_flag(args, "delete-tag"), has_flag(args, "move-tag"),
         has_flag(args, "reuse-version"), arg_value(args, "redeploy")
     )
     _print_release_check("withdraw-check", check, as_json)
 
-fn main() -> i64:
-    val args = get_cli_args()
+fn _requested_json(args: [text]) -> bool:
+    for arg in args:
+        if arg == "--json" or arg == "--log-mode=json":
+            return true
+    false
+
+fn run_release(args: [text]) -> i64:
+    val requested_json = _requested_json(args)
     val log_opts = parse_log_options(args)
     if not log_opts.valid:
-        error("release", log_opts.error)
+        if requested_json:
+            val message = _json_escape(log_opts.error)
+            print "{\"output_version\":\"simple-release/v1\",\"command\":\"release\",\"status\":\"rejected\",\"reason\":\"{message}\"}"
+        else:
+            error("release", log_opts.error)
         return 1
     if args.len() == 0:
         print_help()
@@ -204,13 +399,16 @@ fn main() -> i64:
             pass
         ai = ai + 1
 
-    if log_opts.progress != "summary":
+    if not as_json and log_opts.progress != "summary":
         val progress_line = render_progress(log_opts.progress, 1, 1, "release {subcommand}")
         if progress_line != "":
             print progress_line
 
     match subcommand:
         case "plan":
+            val plan_args_check = _validate_command_args(sub_args, [], [])
+            if not plan_args_check.valid:
+                return _print_release_check("plan", plan_args_check, as_json)
             if as_json:
                 print_plan_json()
             else:
@@ -218,6 +416,12 @@ fn main() -> i64:
             return 0
         case "version-check":
             return run_version_check(sub_args, as_json)
+        case "version-render-plan":
+            return run_version_render_plan(sub_args, as_json)
+        case "version-bump-plan":
+            return run_version_bump_plan(sub_args, as_json)
+        case "version-bump":
+            return run_version_bump(sub_args, as_json)
         case "beta-prepare":
             return run_beta_prepare(sub_args, as_json)
         case "backport-check":
@@ -229,9 +433,21 @@ fn main() -> i64:
         case "withdraw-check":
             return run_withdraw_check(sub_args, as_json)
         case "-h" | "--help" | "help":
-            print_help()
+            if as_json:
+                print_help_json()
+            else:
+                print_help()
             return 0
         case _:
-            error("release", "unknown subcommand: {subcommand}")
-            print_help()
+            if as_json:
+                val unknown_json = _json_escape(subcommand)
+                print "{\"output_version\":\"simple-release/v1\",\"command\":\"release\",\"status\":\"rejected\",\"reason\":\"unknown subcommand: {unknown_json}\"}"
+            else:
+                error("release", "unknown subcommand: {subcommand}")
+                print_help()
             return 1
+
+fn main() -> i64:
+    run_release(get_cli_args())
+
+export run_release

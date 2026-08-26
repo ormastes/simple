@@ -3,23 +3,30 @@ use std.io_runtime.{read_file_text}
 use std.test_runner.doctest_runner.{extract_doctests}
 
 describe "whole release test gate":
-    it "keeps release, bootstrap, and the runner on one fail-closed command":
-        val workflow = read_file_text(".github/workflows/release.yml") ?? ""
+    it "builds and qualifies the candidate before promote-only publication":
+        val candidate = read_file_text(".github/workflows/candidate.yml") ?? ""
+        val promotion = read_file_text(".github/workflows/release.yml") ?? ""
         val bootstrap = read_file_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
         val prepare = read_file_text("src/app/release/prepare.spl") ?? ""
         val runner = read_file_text("src/lib/nogc_sync_mut/test_runner/test_runner_args.spl") ?? ""
         val sdoctest_runner = read_file_text("src/lib/nogc_sync_mut/test_runner/sdoctest/runner.spl") ?? ""
         val app_runner = read_file_text("src/app/test_runner_new/test_runner_main.spl") ?? ""
 
-        expect(workflow).to_contain("needs: [build-bootstrap, build-installers, simpleos-build, whole-tests]")
-        expect(workflow).to_contain("\"$SIMPLE_WHOLE_TEST_BIN\" test test --whole --mode=interpreter")
-        expect(bootstrap).to_contain("run_logged stage6-whole-tests \"${deployed_bin}\" test test --whole --mode=interpreter")
-        expect(prepare).to_contain("[\"test\", \"test\", \"--whole\", \"--mode=interpreter\"]")
+        expect(candidate).to_contain("--full-bootstrap --release --strategy=full")
+        expect(candidate).to_contain("admitted:true,rebuild_allowed:false,fallback_used:false")
+        expect(promotion).to_contain("Download candidate without rebuilding")
+        expect(promotion).to_contain("test \"$(jq -r '.rebuild_allowed' candidate/release-admission.json)\" = false")
+        expect(promotion.contains("bootstrap-from-scratch")).to_be(false)
+        expect(promotion.contains("continue-on-error")).to_be(false)
+        expect(bootstrap).to_contain("run_logged stage6-whole-tests")
+        expect(bootstrap).to_contain("test test --whole --mode=interpreter")
+        expect(prepare).to_contain("legacy preparation is disabled")
         expect(runner).to_contain("elif arg == \"--whole\":")
         expect(runner).to_contain("sdoctest = true")
         expect(runner).to_contain("spl_doctest = true")
         expect(sdoctest_runner).to_contain("options.path != \"test/\" and options.path != \"test\"")
-        expect(app_runner).to_contain("use std.test_runner.test_runner_modes.{run_spl_doctest_mode}")
+        expect(app_runner).to_contain("use std.test_runner.test_runner_modes")
+        expect(app_runner).to_contain("run_spl_doctest_mode")
         val sdoc_override = app_runner.index_of("if options.sdoctest:")
         val md_override = app_runner.index_of("if options.path.ends_with(\".md\"):")
         val spl_override = app_runner.index_of("if options.spl_doctest:")

@@ -1,0 +1,131 @@
+# codex-impl
+# Trusted release-session observation. Caller-supplied session fields are only
+# claims until this boundary binds them to canonical Git/worktree state.
+
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256}
+use app.io.mod.{process_run_bounded}
+use app.release.policy.{ReleaseSession, validate_release_session}
+
+struct ReleaseSessionVerification:
+    valid: bool
+    reason: text
+    canonical_root: text
+    current_head: text
+    target_head: text
+    current_branch: text
+    main_workspace_path: text
+
+fn _rejected(reason: text) -> ReleaseSessionVerification:
+    ReleaseSessionVerification(
+        valid: false, reason: reason, canonical_root: "", current_head: "",
+        target_head: "", current_branch: "", main_workspace_path: ""
+    )
+
+fn _run(command: text, arguments: [text]) -> (text, text, i64):
+    process_run_bounded(command, arguments, 5000, 262144)
+
+fn _realpath(path: text) -> text:
+    val (stdout, _stderr, code) = _run("realpath", [path])
+    if code != 0:
+        return ""
+    stdout.trim()
+
+fn _lexical_absolute_path(path: text) -> text:
+    # `-s` makes symlink aliases observable while still normalizing relative
+    # paths and dot segments. It is passed as argv, never through a shell.
+    val (stdout, _stderr, code) = _run("realpath", ["-s", path])
+    if code != 0:
+        return ""
+    stdout.trim()
+
+fn _git(root: text, arguments: [text]) -> (text, text, i64):
+    _run("git", ["-C", root] + arguments)
+
+fn _git_value(root: text, arguments: [text]) -> text:
+    val (stdout, _stderr, code) = _git(root, arguments)
+    if code != 0:
+        return ""
+    stdout.trim()
+
+fn _trim_trailing_slashes(path: text) -> text:
+    var result = path
+    while result.len() > 1 and result.ends_with("/"):
+        result = result[0:result.len() - 1]
+    result
+
+fn _protected_branch(branch: text) -> bool:
+    branch == "main" or branch.starts_with("release/") or branch.starts_with("candidate/")
+
+fn _worktree_paths(root: text) -> [text]:
+    val (stdout, _stderr, code) = _git(root, ["worktree", "list", "--porcelain"])
+    if code != 0:
+        return []
+    var paths: [text] = []
+    for raw in stdout.split("\n"):
+        if raw.starts_with("worktree "):
+            val canonical = _realpath(raw[9:].trim())
+            if canonical == "":
+                return []
+            paths.push(canonical)
+    paths
+
+fn _target_head(root: text, target_ref: text) -> text:
+    val remote = _git_value(root, ["rev-parse", "--verify", "refs/remotes/origin/" + target_ref])
+    if remote != "":
+        return remote
+    _git_value(root, ["rev-parse", "--verify", "refs/heads/" + target_ref])
+
+fn verify_release_session(root: text, claimed: ReleaseSession) -> ReleaseSessionVerification:
+    # Keep the pure shape validation as the first, cheap rejection layer.
+    val shape = validate_release_session(claimed)
+    if not shape.valid:
+        return _rejected(shape.reason)
+
+    val canonical_root = _realpath(root)
+    if canonical_root == "":
+        return _rejected("release workspace root does not exist or cannot be canonicalized")
+    val lexical_root = _lexical_absolute_path(root)
+    if lexical_root == "" or _trim_trailing_slashes(lexical_root) != canonical_root:
+        return _rejected("release workspace root must not be a symlink alias")
+
+    val repository_root = _git_value(canonical_root, ["rev-parse", "--show-toplevel"])
+    if repository_root == "" or _realpath(repository_root) != canonical_root:
+        return _rejected("release workspace root must be the root of its Git repository")
+    if claimed.workspace_path != canonical_root:
+        return _rejected("release session workspace does not match the canonical repository root")
+
+    val worktrees = _worktree_paths(canonical_root)
+    if worktrees.len() == 0 or not worktrees.contains(canonical_root):
+        return _rejected("release workspace is not a registered Git worktree")
+    val main_workspace = worktrees[0]
+    if canonical_root == main_workspace:
+        return _rejected("release mutation is forbidden in the main worktree")
+    if claimed.main_workspace_path != main_workspace:
+        return _rejected("release session main-worktree claim does not match Git state")
+
+    val branch = _git_value(canonical_root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    if branch == "":
+        return _rejected("release mutation is forbidden from detached HEAD")
+    if _protected_branch(branch):
+        return _rejected("release mutation is forbidden on a protected branch")
+    if branch != claimed.work_branch:
+        return _rejected("release session branch claim does not match Git state")
+
+    val head = _git_value(canonical_root, ["rev-parse", "--verify", "HEAD"])
+    if head == "" or head != claimed.base_sha:
+        return _rejected("release session base identity does not match current HEAD")
+    val target_head = _target_head(canonical_root, claimed.target_ref)
+    if target_head == "" or target_head != claimed.expected_target_sha:
+        return _rejected("release target identity does not match fetched Git state")
+
+    val policy_path = canonical_root + "/.spipe/policy/vcs.sdn"
+    if not file_exists(policy_path) or file_hash_sha256(policy_path) != claimed.policy_sha256:
+        return _rejected("release policy identity does not match the workspace policy")
+
+    ReleaseSessionVerification(
+        valid: true, reason: "", canonical_root: canonical_root,
+        current_head: head, target_head: target_head, current_branch: branch,
+        main_workspace_path: main_workspace
+    )
+
+export ReleaseSessionVerification, verify_release_session

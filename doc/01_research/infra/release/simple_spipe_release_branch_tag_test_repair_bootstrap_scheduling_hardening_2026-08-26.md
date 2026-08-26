@@ -96,6 +96,20 @@ Because these are personal repositories, implement an Spipe/SJ serialized integr
 
 Normal fixes target `main`. Patch work targets `release/X.Y`. Hotfixes start from the affected tag/line, remain minimal, land on the maintenance line, and forward-port to `main`. Backports record source commit/change identity, target line, and adaptation reason.
 
+### Audit addendum — periodic bootstrap/release-line convergence
+
+An active beta/bootstrap lane periodically fetches and compares exact `main` and
+`release/X.Y` revisions, but discovery is read-only. It may propose reviewed bug
+fixes; it may not automatically cherry-pick, merge, push, or choose fixes. A
+selected shared fix crosses through an isolated work branch/worktree, renewed
+review and focused evidence, a divergence receipt, and protected CAS integration.
+Normally the fix lands on `main` and is backported. If an emergency fix lands on
+the release line first, candidate qualification requires a reviewed forward-port
+to `main`, unless review records that the change is release-line-only. `main`
+always remains the independent development trunk: it never tracks, becomes, or
+is reset to the release branch, and neither protected ref is pushed directly by
+the bootstrap session.
+
 ## Version and release policy
 
 `release/version.sdn` projects into `VERSION`, compiler/bootstrap identity, core/package manifests, release notes, and tag checks. Add `simple release version render|check|bump`. Check fails on stale/missing projections, unexpected product-version literals, case drift, package drift, or compatibility-dimension drift.
