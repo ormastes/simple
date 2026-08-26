@@ -1780,3 +1780,20 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Preserved one payload pass and one registry operation per valid call; no
   extra payload copy, traversal, lookup, hash pass, lock, or dispatch was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 mmap-byte provider identity correction
+
+- Corrected the stale claim that no owned native provider exists: Rust exports
+  `rt_file_mmap_read_bytes`, and pure-Simple/C-bootstrap provide the sibling
+  byte-reader implementation.
+- Kept the family unsafe because the Rust provider collapses path, read, and
+  allocation/lift failures into `RuntimeValue::NIL`, while the caller declares
+  a bare array and cannot preserve that failure state.
+- Require the replacement ABI to return status plus an owned array output (or
+  an equivalent typed `Result`) in one provider call, with success/non-null and
+  failure/no-output invariants generated from the registry.
+- Reject extra stat/existence probes, duplicate reads, per-byte foreign calls,
+  and sentinel payloads: they add races, I/O, dispatch, or ambiguity.
+- Preserve the current one-read/O(n)-copy performance envelope; keep signature
+  and evidence verification at provider admission, never on the call path.
+- Status: source-reviewed, deliberately unverified and unsigned.

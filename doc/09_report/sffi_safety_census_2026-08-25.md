@@ -1151,9 +1151,19 @@ with typed errors instead of delegating to the legacy `Nil`-returning reader;
 success still performs one `fs::read` and directly lifts its sole byte buffer.
 File-size lifting now uses checked `u64`-to-`i64` conversion rather than wrapping
 oversized metadata into a negative sentinel.
-No owned native provider for the rich array symbol was found, so this family
-remains explicitly unverified and unsigned. Source-reviewed only; checks were
-not executed.
+Follow-up provider tracing found both the Rust native export and the
+pure-Simple/C-bootstrap byte readers. This corrects the earlier missing-provider
+classification, but does not promote the boundary: the Rust exports return
+`RuntimeValue::NIL` for invalid paths, read failures, and allocation/lift
+failures, while the safe-looking Simple declaration returns only `[i64]`.
+Consequently a provider failure can still be confused with the array bridge's
+absence/empty representation, with the zero-length-file case defeating an
+external length check. The required fix is a generated status-plus-owned-output
+contract (or an equivalently typed `Result`) lifted in one call. A preliminary
+existence/stat call, a second read, a per-element foreign loop, and a sentinel
+byte were rejected because they are racy, slower, or ambiguous. This family
+therefore remains explicitly unsafe, unverified, and unsigned. Source-reviewed
+only; checks were not executed.
 
 ## 2026-08-26 Base64/Base64url contract follow-up
 
