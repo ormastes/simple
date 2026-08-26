@@ -20,7 +20,9 @@
 # - Query parameter handling
 
 use std.error.{SimpleError, error}
-use std.net.sffi.{bytes_to_string, file_write_bytes, http_request, url_decode, url_encode, url_parse}
+use std.net.sffi.{bytes_to_string, file_write_bytes, http_request, url_decode, url_encode}
+use std.nogc_async_mut.http_client.types.{parse_url as parse_url_parts,
+    url_default_port}
 
 # ============================================================================
 # HttpMethod - HTTP Request Methods
@@ -343,7 +345,19 @@ class Url:
         Example:
             val url = Url.parse("https://example.com/path")?
         """
-        url_parse(url)
+        match parse_url_parts(url):
+            Some(parts):
+                if parts.opaque:
+                    return Err(error("URL must use an authority"))
+                var port: i64? = nil
+                if parts.port != 0 and parts.port != url_default_port(parts.scheme):
+                    port = Some(parts.port)
+                val query = if parts.query.len() > 0: Some(parts.query) else: nil
+                val fragment = if parts.fragment.len() > 0: Some(parts.fragment) else: nil
+                Ok(Url(scheme: parts.scheme, host: parts.host, port: port,
+                    path: parts.path, query: query, fragment: fragment))
+            nil:
+                Err(error("invalid absolute URL"))
 
     fn scheme() -> text:
         """Get URL scheme.

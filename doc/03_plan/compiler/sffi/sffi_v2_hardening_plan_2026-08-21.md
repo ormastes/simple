@@ -2158,3 +2158,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
   parse). Remaining production debt: 4,270 unsafe-tag gaps, 6,072 contract
   gaps, and zero signed-admitted declarations.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+### Pure-Simple URL parser follow-up
+
+- Remove both remaining `url_parse` foreign declarations and adapt each
+  `net.Url.parse` variant from its matching Pure-Simple fail-closed parser.
+- Preserve the public `Result<Url, SimpleError>` API and construct only the
+  required public result after the existing O(n) parse; add no foreign
+  marshalling, registry lookup, signature check, hash, lock, or dispatch.
+- Remaining network providerless identities: 15 (14 UDP and HTTP request).
+  Remaining production debt: 4,268 unsafe-tag gaps, 6,072 contract gaps, and
+  zero signed-admitted declarations.
+- Status: source-reviewed, deliberately unverified and unsigned.

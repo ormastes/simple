@@ -1600,3 +1600,18 @@ wrapper, allocation, lookup, hash, lock, or dispatch. The production inventory
 falls to 7,134 declarations, 4,270 unsafe-tag gaps, 6,072 contract gaps, and
 zero signed-admitted declarations. Sixteen distinct providerless network
 identities remain. Source-reviewed only; checks were not executed.
+
+### Pure-Simple network URL parser follow-up
+
+The three legacy `net.Url.parse` variants now adapt the existing matching
+Pure-Simple `http_client.types.parse_url` result instead of calling two
+providerless high-level-object extern declarations. The parser fails closed on
+malformed absolute URLs, authority spoofing, invalid hosts/ports, and opaque
+URLs that the legacy `net.Url` shape cannot represent. It is O(n); conversion
+constructs the one public `Url` result and adds no registry lookup, foreign
+marshalling, signature check, hash, lock, or transport dispatch.
+
+Production falls to 7,132 declarations, 4,268 unsafe-tag gaps, 6,072 contract
+gaps, and zero signed-admitted declarations. Fifteen providerless network
+identities remain: fourteen UDP operations and `http_request`. Source-reviewed
+only; checks were not executed.
