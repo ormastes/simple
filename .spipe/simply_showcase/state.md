@@ -32,7 +32,7 @@ recursion guard between simply and simple.
 | Seed shadowing fix | done | redeployed seed built from origin/main; strace 0 foreign opens |
 | Completion criteria + test lists | done | simply `doc/plan/completion_criteria.md`, `data/tests.sdn` (`80ffc46`) |
 | Full `test/01_unit` sweep → dashboard | in progress | 8,807 files; results go to simply `data/test_results.json` |
-| Sweep-fix campaign | in progress | landed: `b1ded64c8e4` sha1_x4, `8d8d11097a0` expect_not/imports, `88fe280bb0f` tmux, `05b134ac502` node-id fixtures |
+| Sweep-fix campaign | wave 2 landed | wave 1: `b1ded64c8e4` `8d8d11097a0` `88fe280bb0f` `05b134ac502`; wave 2 (5 parallel agents, 48 specs, ~15 lib bugs): `dddd834f996` `c433e5d091d` `6e7b2eb616a` `9c5595b146d` `4907ce1da97` `e5a10e3ee78` `f65ae4a5f9c` `d9ca9d78b1d` `2f3f215003b`; residue: `doc/08_tracking/bug/unit_sweep_language_and_interpreter_gaps_2026-08-26.md` |
 
 ## Open
 
@@ -42,3 +42,7 @@ recursion guard between simply and simple.
   binary runs in its CI.
 - Stale-API spec drift in browser script specs (`.tag`, `execute_with_type`)
   needs a spec rewrite, not a fixture fix.
+- Language/interpreter gaps from the sweep (inline `if/else` expression,
+  `_1` lifting, typed empty-array ctor, block-scope leak, `BTreeMap.new`
+  intercept, `type X = SharedX` ctor loss) — each needs a compiler change; see
+  the bug record above.

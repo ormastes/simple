@@ -59,3 +59,19 @@ the recursion guards between simply and this repo.
   classes: wrong import module path, missing export, bad tuple annotation,
   auto-id-0 DOM fixtures, stale-API specs from the sspec-modernization waves.
 - Process state: `.spipe/simply_showcase/state.md`.
+
+## Update 2026-08-26 (wave 2, parallel agents)
+
+- Five agents, one per ~80-file slice (sorted path) of the 401 FAILs seen at
+  3,550/8,807, landed `dddd834f996` `c433e5d091d` `6e7b2eb616a` `9c5595b146d`
+  `4907ce1da97` `e5a10e3ee78` `f65ae4a5f9c` `d9ca9d78b1d` `2f3f215003b` —
+  48 specs green. Lib bugs fixed: jwt/encode + os/crypto/jwt (block-scoped
+  `idx3`), date/*, html/entities, composition (`.to_bytes`→`.bytes`),
+  search/inverted_index, engine/{rect,color}, skia/{ot_parser_glyf,
+  ot_layout_gpos,glyph_cache,font_loader}, text_advanced, regex_match,
+  h2_connection imports, dbfs_engine ctor aliases, ndarray.
+- Non-mechanical residue (grammar, interpreter, missing SFFI, spec drift):
+  `doc/08_tracking/bug/unit_sweep_language_and_interpreter_gaps_2026-08-26.md`.
+- Lessons: slice by sorted path so each agent owns coherent directories; make
+  agents run specs in the foreground (one stalled waiting on a background
+  batch); give each a private scratch dir (two collided on `out3/`).

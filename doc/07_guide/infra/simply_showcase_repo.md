@@ -51,3 +51,12 @@ have no effect, `--json` prints the old shape. Check with
 `strace -e openat bin/simple run x.spl | grep worktrees/`, and redeploy a seed
 built from origin/main. See
 `doc/08_tracking/bug/deployed_seed_resolves_stdlib_from_foreign_worktree_2026-08-20.md`.
+
+## Sweep-fix campaign
+
+Failures from the full sweep are sliced by sorted path into ~80-file lists and
+handed to parallel agents, each in its own `git worktree add --detach …
+origin/main` with the seed symlinked into `bin/`. Agents fix only mechanical
+failures (imports, exports, annotations, fixtures, obvious lib bugs) and land
+with `--no-verify`; everything else goes into a dated `doc/08_tracking/bug/`
+record — latest `unit_sweep_language_and_interpreter_gaps_2026-08-26.md`.
