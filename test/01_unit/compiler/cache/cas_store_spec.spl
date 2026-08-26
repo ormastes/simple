@@ -49,6 +49,12 @@ describe "CAS blob store":
         expect(digest).to_equal(sha256_text(content))
         expect(cas_get(root, digest) ?? "<absent>").to_equal(content)
 
+    it "keeps an empty payload distinct from an absent blob":
+        val root = fresh_root()
+        val digest = cas_put(root, "")
+        expect(digest).to_equal(sha256_text(""))
+        expect(cas_get(root, digest) ?? "<absent>").to_equal("")
+
     it "dedups identical content on repeated put":
         val root = fresh_root()
         val d1 = cas_put(root, "same bytes twice")
@@ -146,3 +152,40 @@ describe "CAS schema versioning":
         rt_env_set("SIMPLE_CACHE", "")
         expect(cas_root()).to_equal("build/cache_cas")
         rt_env_set("SIMPLE_CACHE", saved)
+
+describe "CAS nullable-read facade ownership":
+    it "uses the exact owner four times and preserves branch order":
+        val source = rt_file_read_text("src/compiler/80.driver/cache/cas_store.spl") ?? ""
+
+        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{file_read_nullable}")
+        expect(source.split("file_read_nullable(").len() - 1).to_equal(4)
+        expect(source).to_not_contain("extern fn rt_file_read_text")
+        expect(source).to_not_contain("rt_file_read_text(")
+
+        val open_pos = source.index_of("fn cas_open(root: text) -> bool:")
+        val version_exists_pos = source.index_of("if rt_file_exists(vpath):", open_pos)
+        val version_read_pos = source.index_of("val stored = file_read_nullable(vpath) ?? \"\"", open_pos)
+        val version_branch_pos = source.index_of("if stored.trim() != current:", open_pos)
+        expect(version_exists_pos).to_be_greater_than(open_pos)
+        expect(version_read_pos).to_be_greater_than(version_exists_pos)
+        expect(version_branch_pos).to_be_greater_than(version_read_pos)
+
+        val blob_pos = source.index_of("fn cas_get(root: text, digest: text) -> text?:")
+        val blob_exists_pos = source.index_of("if not rt_file_exists(path):", blob_pos)
+        val blob_read_pos = source.index_of("val content = file_read_nullable(path) ?? \"\"", blob_pos)
+        val blob_hash_pos = source.index_of("if sha256_text(content) != digest:", blob_pos)
+        expect(blob_exists_pos).to_be_greater_than(blob_pos)
+        expect(blob_read_pos).to_be_greater_than(blob_exists_pos)
+        expect(blob_hash_pos).to_be_greater_than(blob_read_pos)
+
+        val action_pos = source.index_of("fn action_get(root: text, action_digest: text) -> ActionManifest?:")
+        val action_read_pos = source.index_of("val content = file_read_nullable(path) ?? \"\"", action_pos)
+        val action_parse_pos = source.index_of("val parsed = action_manifest_parse(content)", action_pos)
+        expect(action_read_pos).to_be_greater_than(action_pos)
+        expect(action_parse_pos).to_be_greater_than(action_read_pos)
+
+        val result_pos = source.index_of("fn result_manifest_get(root: text, action_digest: text) -> ResultManifest?:")
+        val result_read_pos = source.index_of("val content = file_read_nullable(path) ?? \"\"", result_pos)
+        val result_parse_pos = source.index_of("val parsed = result_manifest_parse(content)", result_pos)
+        expect(result_read_pos).to_be_greater_than(result_pos)
+        expect(result_parse_pos).to_be_greater_than(result_read_pos)
