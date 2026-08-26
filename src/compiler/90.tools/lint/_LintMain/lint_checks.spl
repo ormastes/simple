@@ -53,7 +53,7 @@ fn _raw_rt_wrapper_is_in_scope(content: text, wrapper: text) -> bool:
     # Auto-fix requires an exact selective import of this symbol. Broad module
     # imports, comments, strings, lookalike module names, and unrelated wrapper
     # symbols are intentionally insufficient evidence for a Safe edit.
-    val modules = ["app.io.mod", "std.io_runtime"]
+    val modules = ["app.io.mod", "std.io_runtime", "std.nogc_sync_mut.io_runtime"]
     for raw_line in raw_rt_lexical_code_lines(content):
         val line = raw_line.trim()
         if not line.starts_with("use "):
@@ -400,12 +400,14 @@ impl Linter:
 
     me check_raw_rt_access_spl(path: String, content: String):
         val findings = check_raw_rt_access_with_allowlist(content, path, _raw_rt_canonical_allowlist())
-        # There is currently one signature-proven mechanical mapping. Resolve
-        # its import evidence once per file, not once per finding.
+        # Resolve import evidence for signature-proven mechanical mappings once
+        # per file, not once per finding.
         val process_run_fixable = if findings.len() > 0: _raw_rt_wrapper_is_in_scope(content, "process_run") else: false
+        val env_set_fixable = if findings.len() > 0: _raw_rt_wrapper_is_in_scope(content, "env_set") else: false
+        val has_fixable_wrapper = process_run_fixable or env_set_fixable
         var fix_lines: [text] = []
         var fix_line_starts: [i64] = []
-        if process_run_fixable:
+        if has_fixable_wrapper:
             fix_lines = content.split("\n")
             var next_start = 0
             for fix_line in fix_lines:
@@ -415,7 +417,9 @@ impl Linter:
             var lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
                 .with_fix(finding.note)
             val wrapper = raw_rt_wrapper_replacement(finding.name)
-            if finding.code == "RAW-RT-002" and wrapper == "process_run" and process_run_fixable:
+            val wrapper_fixable = ((wrapper == "process_run" and process_run_fixable) or
+                (wrapper == "env_set" and env_set_fixable))
+            if finding.code == "RAW-RT-002" and finding.kind == "call" and wrapper_fixable:
                 val line_idx = finding.line_num - 1
                 if line_idx >= 0 and line_idx < fix_lines.len():
                     val source_line = fix_lines[line_idx]

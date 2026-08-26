@@ -127,6 +127,17 @@ describe "RAW-RT-002: direct raw runtime use":
         expect(findings[0].note).to_contain("file_read_text")
         expect(findings[0].note).to_contain("simple lint --fix")
 
+    it "guides nullable environment reads without an unsafe mechanical rewrite":
+        step("Verify: nullable and empty-value semantics select the environment facade")
+        val source = "fn read(key: text) -> text?:\n    rt_env_get(key)\n"
+        val findings = check_raw_rt_access(source, "src/compiler/80.driver/owner.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].name).to_equal("rt_env_get")
+        expect(findings[0].note).to_contain("env_get_nullable")
+        expect(findings[0].note).to_contain("env_get_opt")
+        expect(findings[0].note).to_contain("explicitly empty values")
+        expect(raw_rt_wrapper_replacement("rt_env_get")).to_equal("")
+
     it "accepts a call contained by a minimal ffi-unsafe block":
         step("Verify: lexical ffi containment discharges the raw-call lint")
         val source = "@unsafe(reason: \"raw nullable file boundary\", capabilities: [ffi])\nextern fn rt_file_read_text(path: text) -> text?\nfn load(path: text) -> text?:\n    unsafe(capabilities: [ffi]):\n        rt_file_read_text(path)\n"
@@ -199,7 +210,15 @@ describe "raw rt wrapper fix lookup":
     it "returns safe known replacements and no invented replacement":
         step("Verify: returns safe known replacements and no invented replacement")
         expect(raw_rt_wrapper_replacement("rt_process_run")).to_equal("process_run")
+        expect(raw_rt_wrapper_replacement("rt_env_set")).to_equal("env_set")
         expect(raw_rt_wrapper_replacement("rt_unknown_device_op")).to_equal("")
+
+        val process_finding = check_raw_rt_access(
+            "fn run(): rt_process_run(cmd, args)\n", "src/compiler/80.driver/process.spl")
+        val env_set_finding = check_raw_rt_access(
+            "fn set(): rt_env_set(\"SIMPLE_MODE\", \"1\")\n", "src/compiler/80.driver/env.spl")
+        expect(process_finding[0].note).to_contain("stdout, stderr, i64 exit_code")
+        expect(env_set_finding[0].note).to_contain("boolean mutation status")
 
     it "uses exact canonical prefix and suffix allowlist semantics":
         step("Verify: uses exact canonical prefix and suffix allowlist semantics")
@@ -268,6 +287,42 @@ describe "RAW-RT-002 auto-fix":
                     case nil: val _ = 0
         expect(replacements).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
+    it "safely renames environment mutation with the exact canonical facade in scope":
+        step("Verify: env_set preserves the bool mutation status and arguments")
+        val source = "u" + "se std.nogc_sync_mut.io_runtime.{env_set}\nfn configure():\n    rt_env_set(\"SIMPLE_MODE\", \"1\")\n"
+        var replacements = 0
+        var applied = ""
+        for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_env_set_fix.spl", source):
+            if result.lint.code == "RAW-RT-002" and result.line == 3:
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        for rep in easyfix_replacements(fix):
+                            replacements = replacements + 1
+                            applied = source.slice(0, rep.start) + rep.new_text + source.slice(rep.end)
+                    case nil:
+                        val _ = 0
+        expect(replacements).to_equal(1)
+        expect(applied).to_contain("    env_set(\"SIMPLE_MODE\", \"1\")")
+        expect(applied).to_not_contain("    rt_env_set(")
+
+    it "never rewrites a multiline raw-import continuation as a call":
+        step("Verify: call-kind evidence is required before a Safe rename")
+        val source = "u" + "se std.nogc_sync_mut.io_runtime.{env_set}\nu" +
+            "se raw.runtime.{\n    r" + "t_env_set\n}\n"
+        val findings = check_raw_rt_access(source, "src/compiler/80.driver/imports.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].kind).to_equal("import")
+
+        var replacements = 0
+        for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_env_set_import.spl", source):
+            if result.lint.code == "RAW-RT-002":
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        replacements = replacements + easyfix_replacements(fix).len()
+                    case nil:
+                        val _ = 0
+        expect(replacements).to_equal(0)
+
     context "when the file opts out with @runtime_intrinsics":
         """
         ### Scenario: file-level opt-out marker
@@ -313,6 +368,7 @@ describe "RawRtAccessFinding formatting":
         step("Verify: produces formatted output")
         val f = RawRtAccessFinding(
             code: "RAW-RT-001",
+            kind: "declaration",
             severity: "WARNING",
             message: "test message",
             name: "rt_thing",

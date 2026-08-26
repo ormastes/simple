@@ -31,6 +31,7 @@
 
 pub struct RawRtAccessFinding:
     code: text
+    kind: text
     severity: text
     message: text
     name: text
@@ -128,16 +129,23 @@ fn _rra_leading_indent(line: text) -> i64:
 
 pub fn raw_rt_wrapper_replacement(name: text) -> text:
     """Canonical wrapper name when a mechanical call rename is known."""
-    # Only this mapping is signature-identical across the canonical facades.
-    # Nullable file/env and recursive-dir wrappers deliberately remain hints,
-    # not mechanical edits.
+    # These mappings are signature-identical across the canonical facades.
+    # Nullable environment reads and recursive-dir wrappers deliberately remain
+    # hints, not mechanical edits.
     if name == "rt_process_run": return "process_run"
+    if name == "rt_env_set": return "env_set"
     ""
 
 fn _rra_fix_note(name: text) -> text:
     val wrapper = raw_rt_wrapper_replacement(name)
+    if name == "rt_process_run":
+        return "replace `rt_process_run(...)` with `process_run(...)` from the canonical std/app I/O facade; it preserves `(stdout, stderr, i64 exit_code)` transport; `simple lint --fix` applies this rename only when `process_run` is already imported"
+    if name == "rt_env_set":
+        return "replace `rt_env_set(...)` with `env_set(...)` from the canonical std/app I/O facade; it preserves the boolean mutation status; `simple lint --fix` applies this rename only when `env_set` is already imported"
     if wrapper != "":
         return "replace `{name}(...)` with `{wrapper}(...)` from the canonical std/app I/O facade; `simple lint --fix` applies this rename when `{wrapper}` is already imported"
+    if name == "rt_env_get":
+        return "use `env_get_nullable` from `std.nogc_sync_mut.io_runtime` for exact `text?` transport (including explicitly empty values); choose `env_get_opt` only when empty and absent are intentionally equivalent; `simple lint --fix` keeps this warning-only because return contracts differ"
     if name == "rt_file_read_text":
         return "use `file_read_text` from the canonical std/app I/O facade; `simple lint --fix` keeps this as a warning-only migration because nullable return contracts can differ"
     "route `{name}` through its std semantic facade; if none exists, create a provider wrapper instead of a product-side rt_* alias"
@@ -304,7 +312,7 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
             pending_ffi_declaration = false
             if name.starts_with("rt_") and not acknowledged_unsafe:
                 findings.push(RawRtAccessFinding(
-                    code: "RAW-RT-001", severity: "WARNING",
+                    code: "RAW-RT-001", kind: "declaration", severity: "WARNING",
                     message: "product code must not declare raw runtime intrinsic `{name}` directly",
                     name: name, note: _rra_fix_note(name), line_num: line_num,
                     column: code_line.find(name) + 1
@@ -318,7 +326,7 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
             val stop = tail.find("(")
             val name = if stop > 0: tail.substring(0, stop).trim() else: "rt_alias"
             findings.push(RawRtAccessFinding(
-                code: "RAW-RT-003", severity: "WARNING",
+                code: "RAW-RT-003", kind: "alias", severity: "WARNING",
                 message: "product-side runtime alias `{name}` is removed; expose a semantic wrapper instead",
                 name: name, note: _rra_fix_note(name), line_num: line_num,
                 column: code_line.find(name) + 1
@@ -334,7 +342,7 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
         if import_names.len() > 0:
             val name = import_names[0]
             findings.push(RawRtAccessFinding(
-                code: "RAW-RT-002", severity: "WARNING",
+                code: "RAW-RT-002", kind: "import", severity: "WARNING",
                 message: "product code imports raw runtime intrinsic `{name}` directly",
                 name: name, note: _rra_fix_note(name), line_num: line_num,
                 column: code_line.find(name) + 1
@@ -345,7 +353,7 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
         if call_names.len() > 0 and not inside_ffi_block:
             val name = call_names[0]
             findings.push(RawRtAccessFinding(
-                code: "RAW-RT-002", severity: "WARNING",
+                code: "RAW-RT-002", kind: "call", severity: "WARNING",
                 message: "product code calls raw runtime intrinsic `{name}` directly",
                 name: name, note: _rra_fix_note(name), line_num: line_num,
                 column: _rra_call_column(code_line, name)
