@@ -1081,11 +1081,14 @@ broader SFFI signing and admission remain absent.
 
 ## 2026-08-26 provider-scoped census admission follow-up
 
-The inventory schema now records declaration `provider_id` from compiler-owned
-`@sffi` metadata and joins signed admission by `(symbol, canonical source
-signature hash, provider_id)`. A matching symbol/signature from another provider, or a
-declaration without provider identity, cannot inherit admission. The census
-also stops calling `unsafe` tag plus contract metadata “minimized”: that proves
+The inventory schema now records declaration `provider_id` from `@sffi`
+metadata and joins signed admission by `(symbol, canonical source
+signature hash, provider_id)`. A matching symbol/signature from another
+provider, or a declaration without provider identity, cannot inherit admission.
+The census
+reports provider-declared rows, provider-missing rows, and symbols naming more
+than one provider so attribution debt and provider conflicts remain visible.
+It also stops calling `unsafe` tag plus contract metadata “minimized”: that proves
 neither lexical call ownership nor call-site count. It reports contract-declared
 unsafe rows separately and emits `unsafe_minimization_status=not_measured`
 until an authoritative resolved-call graph supplies that evidence. This is an

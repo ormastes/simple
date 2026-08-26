@@ -1546,6 +1546,8 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Added declaration provider identity to the SFFI inventory schema.
 - Bound cryptographic admission to symbol + canonical source signature hash +
   provider ID; missing/mismatched provider metadata fails closed.
+- Added provider-declared, provider-missing, and multi-provider-symbol census
+  metrics so provider attribution debt cannot disappear inside generic unsafe.
 - Renamed annotation-derived “minimized” counts to contract-declared unsafe and
   reports lexical minimization as `not_measured` until resolved-call evidence
   exists.
