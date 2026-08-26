@@ -1329,6 +1329,22 @@ inside its matching private mandatory-inline thunk. Pointer-bearing thunks
 request `raw_ptr`; tagged-scalar thunks request only `ffi`. Semantic string
 code contains no direct raw call.
 
+The final `simple_core` pass covers `core_values` (eight declarations) and
+`core_enum` (five). Every remaining declaration under
+`src/runtime/simple_core` is now unsafe-tagged and every executable raw call is
+confined to its matching mandatory-inline thunk. The Simple provider's own
+`rt_value_float` definition now accepts `f64`; it performs the required bit
+projection once internally, aligning Simple, C, Rust, and native registry
+register classes end to end.
+
+Adding that explicit scalar projection dependency increases the production
+declaration inventory by one, to 7,260. After tagging the 14 declarations in
+this pass, production has 2,842 unsafe-tagged declarations, 4,418 unsafe-tag
+gaps, and 6,172 contract gaps. The `rt_*` subset has 3,284 unsafe-tag gaps and
+5,012 contract gaps. No hot-path branch, allocation, lookup, copy, lock, or
+dispatch is introduced; all thunks are mandatory-inline. Signed admission and
+runtime verification remain absent.
+
 ## 2026-08-26 public RuntimeValue closure completion
 
 The remaining public `value_eq`, `value_print`, and `value_println` wrappers

@@ -7,6 +7,8 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 string="$root/src/runtime/simple_core/core_string.spl"
 any_ops="$root/src/runtime/simple_core/core_any_ops.spl"
+values="$root/src/runtime/simple_core/core_values.spl"
+enum="$root/src/runtime/simple_core/core_enum.spl"
 registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
 rust_values="$root/src/compiler_rust/runtime/src/value/sffi/value_ops.rs"
 runtime_h="$root/src/runtime/runtime.h"
@@ -21,6 +23,8 @@ check_owner() {
 
 check_owner "$string" 35
 check_owner "$any_ops" 4
+check_owner "$values" 8
+check_owner "$enum" 5
 [ "$(grep -c '^@always_inline$' "$any_ops")" -eq 4 ]
 [ "$(grep -c '^[[:space:]]*unsafe(capabilities: \[ffi\]):$' "$any_ops")" -eq 4 ]
 for raw in spl_bits_to_f64 rt_value_int rt_value_as_int rt_value_float; do
@@ -57,9 +61,20 @@ done
 
 grep -q '^extern fn rt_value_float(value: f64) -> i64$' "$string"
 grep -q '^extern fn rt_value_float(value: f64) -> i64$' "$any_ops"
+grep -q '^pub fn rt_value_float(value: f64) -> i64:$' "$values"
 ! grep -q 'rt_value_float(spl_f64_to_bits' "$string" "$any_ops"
 grep -q 'RuntimeFuncSpec::new("rt_value_float", &\[F64\], &\[I64\])' "$registry"
 grep -q 'pub extern "C" fn rt_value_float(f: f64)' "$rust_values"
 grep -q 'int64_t  rt_value_float(double value_f64);' "$runtime_h"
 
-echo "simple-core string SFFI authority: PASS (35 string + 4 Any declarations tagged; Any raw calls confined; exact f64 register class)"
+for owner in "$values" "$enum"; do
+    for raw in $(sed -n 's/^extern fn \([A-Za-z0-9_]*\).*/\1/p' "$owner"); do
+        [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$owner")" -eq 1 ]
+    done
+done
+[ "$(grep -c '^@always_inline$' "$values")" -eq 8 ]
+[ "$(grep -c '^[[:space:]]*unsafe(capabilities: \[ffi' "$values")" -eq 8 ]
+[ "$(grep -c '^@always_inline$' "$enum")" -eq 5 ]
+[ "$(grep -c '^[[:space:]]*unsafe(capabilities: \[ffi' "$enum")" -eq 5 ]
+
+echo "simple-core SFFI authority: PASS (52 declarations tagged and confined; exact f64 register class)"

@@ -1573,6 +1573,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Bootstrap string minimization complete: all 35 raw identities have one
   mandatory-inline lexical unsafe thunk and no additional executable raw call;
   pointer capabilities are confined to the thunks that carry raw pointers.
+- Complete the remaining `core_values` and `core_enum` owners: 13 existing raw
+  declarations plus the exact `spl_f64_to_bits(f64)` provider dependency are
+  tagged and confined, leaving zero untagged `simple_core` externs.
+- Align the Simple `rt_value_float` provider itself to `f64`; callers and all
+  provider lanes now agree on the floating register class.
+- Remaining production debt after this pass: 4,418 unsafe-tag gaps, 6,172
+  contract gaps, and zero signed-admitted declarations.
 - Remaining production debt: 4,431 unsafe-tag gaps, 6,185 contract gaps, zero
   signed-admitted declarations.
 
