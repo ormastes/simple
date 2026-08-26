@@ -15742,7 +15742,11 @@ S2(rt_result_unwrap_or)
 
 S1(rt_weak_ref)
 S1(rt_weak_deref)
-S1(rt_closure_new)
+/* rt_closure_new is supplied by the selected runtime bundle. A fatal S1 stub
+ * here is a strong definition and silently shadows the real allocator while
+ * the other closure accessors remain real, yielding an ABI-incoherent guest.
+ * Leave the symbol unresolved so no-stub linking fails closed when the runtime
+ * bundle is missing. */
 S2(rt_closure_call)
 S1(rt_closure_bind)
 
