@@ -1,12 +1,15 @@
 # Compiler Performance Baseline Tests
 #
-# **Feature IDs:** Performance Audit Round 1
-# **Category:** Performance | Testing
-# **Status:** Implemented
+# Purpose and audience: compiler hot-path benchmark evidence for compiler and
+# runtime engineers; scope is wall-clock baselines for struct field access,
+# array push/slice, dict lookup and string substring, timed with
+# rt_time_now_unix_micros().
 #
-# Measures wall-clock microseconds for critical compiler hot-path operations.
-# Uses rt_time_now_unix_micros() for timing.
-# Note: interpreter mode only verifies file loading (it block bodies don't execute).
+# @req REQ-PERF-COMPILER-BASELINE
+# research: doc/01_research/compiler/performance/performance_optimization_plan.md ;
+# plan: doc/03_plan/infra/perf_umbrella/perf_opt_plan.md
+
+use std.spec.step
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_current_time_ms() -> i64
@@ -41,7 +44,7 @@ fn bench_struct_field_access() -> bool:
         i = i + 1
     val elapsed = rt_time_now_unix_micros() - start
     print "[perf] struct_field_access: {elapsed} us for 1000 iterations (sum={sum})"
-    # Should complete in reasonable time - 10 seconds max
+    # oracle: 10s ceiling exists only to catch order-of-magnitude regressions.
     elapsed < 10000000
 
 # =========================================================================
@@ -58,6 +61,7 @@ fn bench_array_push() -> bool:
         i = i + 1
     val elapsed = rt_time_now_unix_micros() - start
     print "[perf] array_push: {elapsed} us for 1000 pushes (len={arr.len()})"
+    # oracle: 10s ceiling exists only to catch order-of-magnitude regressions.
     elapsed < 10000000
 
 fn bench_array_slice() -> bool:
@@ -76,6 +80,7 @@ fn bench_array_slice() -> bool:
         i = i + 1
     val elapsed = rt_time_now_unix_micros() - start
     print "[perf] array_slice: {elapsed} us for 100 slices (sum={sum})"
+    # oracle: 10s ceiling exists only to catch order-of-magnitude regressions.
     elapsed < 10000000
 
 # =========================================================================
@@ -100,6 +105,7 @@ fn bench_dict_lookup() -> bool:
         i = i + 1
     val elapsed = rt_time_now_unix_micros() - start
     print "[perf] dict_lookup: {elapsed} us for 500 lookups (sum={sum})"
+    # oracle: 10s ceiling exists only to catch order-of-magnitude regressions.
     elapsed < 10000000
 
 # =========================================================================
@@ -118,6 +124,7 @@ fn bench_string_substring() -> bool:
         i = i + 1
     val elapsed = rt_time_now_unix_micros() - start
     print "[perf] string_substring: {elapsed} us for 1000 substrings (total_len={total_len})"
+    # oracle: 10s ceiling exists only to catch order-of-magnitude regressions.
     elapsed < 10000000
 
 # =========================================================================
@@ -125,6 +132,7 @@ fn bench_string_substring() -> bool:
 # =========================================================================
 
 describe "Compiler Performance Baseline":
+    # @manual compiler hot-path baseline evidence
     """
     # Compiler Performance Baseline
 
@@ -141,16 +149,57 @@ describe "Compiler Performance Baseline":
     """
 
     slow_it "struct field access completes within threshold":
+        # @req REQ-PERF-COMPILER-BASELINE
+        step("time 1000 iterations of 10-field struct reads and check the ceiling")
         check(bench_struct_field_access())
+        # oracle: one read of all 10 fields sums to 55 (1+2+...+10).
+        val p = BenchPoint(x: 1, y: 2, z: 3, w: 4, r: 5, g: 6, b: 7, a: 8, u: 9, v: 10)
+        expect(p.x + p.y + p.z + p.w + p.r + p.g + p.b + p.a + p.u + p.v).to_equal(55)
 
     slow_it "array push completes within threshold":
+        # @req REQ-PERF-COMPILER-BASELINE
+        step("time 1000 array pushes and check the ceiling")
         check(bench_array_push())
+        # oracle: pushing 0..999 leaves len exactly 1000 with last element 999.
+        var probe: [i64] = []
+        var j: i64 = 0
+        while j < 1000:
+            probe.push(j)
+            j = j + 1
+        expect(probe.len()).to_equal(1000)
+        expect(probe[999]).to_equal(999)
 
     slow_it "array slice completes within threshold":
+        # @req REQ-PERF-COMPILER-BASELINE
+        step("time 100 slices of a 1000-element array and check the ceiling")
         check(bench_array_slice())
+        # oracle: arr[10:20] on 0..999 is exactly the values 10..19, sum 145.
+        var base: [i64] = []
+        var j: i64 = 0
+        while j < 1000:
+            base.push(j)
+            j = j + 1
+        val sl = base[10:20]
+        expect(sl.len()).to_equal(10)
+        expect(sl[0] + sl[9]).to_equal(29)
 
     slow_it "dict lookup completes within threshold":
+        # @req REQ-PERF-COMPILER-BASELINE
+        step("time 500 dict insert+lookup cycles and check the ceiling")
         check(bench_dict_lookup())
+        # oracle: key_7 holds 7 after the insert pattern used by the bench.
+        var d: {text: i64} = {}
+        var j: i64 = 0
+        while j < 10:
+            d["key_{j}"] = j
+            j = j + 1
+        expect(d["key_7"]).to_equal(7)
 
     slow_it "string substring completes within threshold":
+        # @req REQ-PERF-COMPILER-BASELINE
+        step("time 1000 substring extractions and check the ceiling")
         check(bench_string_substring())
+        # oracle: chars 4..15 of the fixture string are "quick_brown", len 11.
+        val sub = "the_quick_brown_fox".substring(4, 15)
+        expect(sub.len()).to_equal(11)
+        expect(sub).to_equal("quick_brown")
