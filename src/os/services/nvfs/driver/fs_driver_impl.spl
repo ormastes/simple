@@ -103,46 +103,15 @@ struct NvfsOpenHandle:
     read_only: bool
 
 # ---------------------------------------------------------------------------
-# Module-level handle table (maps FileHandle.id to NvfsOpenHandle)
+# Per-driver handle table (maps FileHandle.id to NvfsOpenHandle).
+#
+# Handles are mount-local authority.  Keeping this state at module scope lets
+# one mounted NVFS instance observe, close, or hold another instance busy.
+# That is not a valid shared FsDriver boundary.
 # ---------------------------------------------------------------------------
 
-var _open_handles: [NvfsOpenHandle] = []
-var _next_handle_id: u64 = 1
 val NVFS_DRIVER_MAX_OPEN_HANDLES: i64 = 65536
 val NVFS_DRIVER_MAX_HANDLE_ID: u64 = 0xFFFFFFFFFFFFFFFFu64
-
-fn _find_handle(id: u64) -> i64:
-    """Return index of handle with id in _open_handles, or -1."""
-    var i = 0
-    while i < _open_handles.len() as i64:
-        if _open_handles[i].handle_id == id:
-            return i
-        i = i + 1
-    -1
-
-fn _alloc_handle(arena_id: i64, read_only: bool) -> Result<FileHandle, FsError>:
-    """Allocate a new handle entry and return the opaque FileHandle."""
-    if _open_handles.len() >= NVFS_DRIVER_MAX_OPEN_HANDLES or
-        _next_handle_id == NVFS_DRIVER_MAX_HANDLE_ID:
-        return Err(FsError.TooLarge)
-    val id = _next_handle_id
-    _next_handle_id = _next_handle_id + 1
-    val h = NvfsOpenHandle(handle_id: id, arena_id: arena_id, read_only: read_only)
-    _open_handles.push(h)
-    Ok(FileHandle(id: id))
-
-fn _remove_handle(idx: i64):
-    """Remove the handle at idx from the table (swap-remove for O(1))."""
-    val last = _open_handles.len() as i64 - 1
-    if idx != last:
-        _open_handles[idx] = _open_handles[last]
-    # pop last element
-    var new_list: [NvfsOpenHandle] = []
-    var i = 0
-    while i < last:
-        new_list.push(_open_handles[i])
-        i = i + 1
-    _open_handles = new_list
 
 # ---------------------------------------------------------------------------
 # NvfsDriver struct
@@ -161,6 +130,8 @@ struct NvfsDriver:
     mounted:   bool
     read_only: bool
     ns: Namespace
+    open_handles: [NvfsOpenHandle]
+    next_handle_id: u64
 
 impl NvfsDriver:
 
@@ -169,8 +140,35 @@ impl NvfsDriver:
             name:      name,
             mounted:   false,
             read_only: false,
-            ns: Namespace.new()
+            ns: Namespace.new(),
+            open_handles: [],
+            next_handle_id: 1
         )
+
+    fn _find_handle(id: u64) -> i64:
+        var i = 0
+        while i < self.open_handles.len() as i64:
+            if self.open_handles[i].handle_id == id:
+                return i
+            i = i + 1
+        -1
+
+    fn _alloc_handle(arena_id: i64, read_only: bool) -> Result<FileHandle, FsError>:
+        if self.open_handles.len() >= NVFS_DRIVER_MAX_OPEN_HANDLES or
+            self.next_handle_id == NVFS_DRIVER_MAX_HANDLE_ID:
+            return Err(FsError.TooLarge)
+        val id = self.next_handle_id
+        self.next_handle_id = self.next_handle_id + 1
+        self.open_handles.push(NvfsOpenHandle(
+            handle_id: id, arena_id: arena_id, read_only: read_only))
+        Ok(FileHandle(id: id))
+
+    fn _remove_handle(idx: i64):
+        """Swap-remove one mount-local handle without copying the table."""
+        val last = self.open_handles.len() as i64 - 1
+        if idx != last:
+            self.open_handles[idx] = self.open_handles[last]
+        self.open_handles.pop()
 
 impl FsDriver for NvfsDriver:
 
@@ -184,7 +182,7 @@ impl FsDriver for NvfsDriver:
 
     fn unmount() -> Result<(), FsError>:
         """Flush and unmount. Fails with Busy if any handles remain open."""
-        if _open_handles.len() as i64 > 0:
+        if self.open_handles.len() as i64 > 0:
             return Err(FsError.Busy)
         self.mounted = false
         Ok(())
@@ -221,18 +219,20 @@ impl FsDriver for NvfsDriver:
         """
         if (not self.mounted):
             return Err(FsError.InvalidArg)
-        val writable = flags.is_writable()
-        if (writable and self.read_only):
+        # Native N1 has no retained path namespace: every open allocates an
+        # arena.  A read-only mount must therefore reject even a read-only
+        # descriptor request rather than mutate storage while probing.
+        if self.read_only:
             return Err(FsError.ReadOnly)
         val arena_id = arena_create_impl(0, 4096)
-        _alloc_handle(arena_id, not writable)
+        self._alloc_handle(arena_id, not flags.is_writable())
 
     fn close(handle: FileHandle) -> Result<(), FsError>:
         """Release an open FileHandle."""
-        val idx = _find_handle(handle.id)
+        val idx = self._find_handle(handle.id)
         if idx < 0:
             return Err(FsError.InvalidArg)
-        _remove_handle(idx)
+        self._remove_handle(idx)
         Ok(())
 
     fn read(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
@@ -242,10 +242,10 @@ impl FsDriver for NvfsDriver:
         and verifies the checksum of the returned bytes.  Returns
         Err(Corrupt) on mismatch.
         """
-        val idx = _find_handle(handle.id)
+        val idx = self._find_handle(handle.id)
         if idx < 0:
             return Err(FsError.InvalidArg)
-        val h = _open_handles[idx]
+        val h = self.open_handles[idx]
         val data = arena_readv_impl(h.arena_id, offset, buf.len() as i64)
         if _verify_on_read and data.len() as i64 > 0:
             val entry_opt = _pmap_sidecar_get(h.arena_id, offset)
@@ -263,11 +263,11 @@ impl FsDriver for NvfsDriver:
         Callers requiring random-write must use NvfsPosixDriver (agent B2).
         Records a pmap sidecar entry (checksum) for verify-on-read.
         """
-        val idx = _find_handle(handle.id)
+        val idx = self._find_handle(handle.id)
         if idx < 0:
             return Err(FsError.InvalidArg)
-        val h = _open_handles[idx]
-        if h.read_only:
+        val h = self.open_handles[idx]
+        if self.read_only or h.read_only:
             return Err(FsError.ReadOnly)
         val current_len = arena_total_bytes_impl(h.arena_id)
         if offset != current_len:
@@ -301,10 +301,10 @@ impl FsDriver for NvfsDriver:
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         """Return zero-filled stat for the file backing handle."""
-        val idx = _find_handle(handle.id)
+        val idx = self._find_handle(handle.id)
         if idx < 0:
             return Err(FsError.InvalidArg)
-        val h = _open_handles[idx]
+        val h = self.open_handles[idx]
         val size = arena_total_bytes_impl(h.arena_id)
         val sz = if size < 0: 0 else: size as u64
         Ok(FileStat(
@@ -336,7 +336,7 @@ impl FsDriver for NvfsDriver:
 
     fn fsync(handle: FileHandle) -> Result<(), FsError>:
         """Fail closed: this service driver has no acknowledged device barrier."""
-        val idx = _find_handle(handle.id)
+        val idx = self._find_handle(handle.id)
         if idx < 0:
             return Err(FsError.InvalidArg)
         Err(FsError.Unsupported)
