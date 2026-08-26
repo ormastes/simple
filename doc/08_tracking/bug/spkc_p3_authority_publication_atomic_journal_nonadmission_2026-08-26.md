@@ -9,7 +9,7 @@ authority-safe atomic publication contract required after P2. P3 must not use a
 publicly constructible lexical/state object as an authority substitute, nor
 expose a partially staged publication through a convenience recovery path.
 
-Two admission blockers remain after the earlier sealed-record, old-to-new head,
+Three admission blockers remain after the earlier sealed-record, old-to-new head,
 pointer revalidation, and open-reader findings were repaired in the candidate:
 
 1. The authority bridge is duck-typed/forgeable. A caller can currently choose
@@ -26,6 +26,16 @@ pointer revalidation, and open-reader findings were repaired in the candidate:
    delete a replacement owner, and restart proof after the owning process is
    killed. Time-based path unlinking, a PID check alone, or a mutable caller
    supplied lock record is insufficient.
+3. Competing stale-lock continuers can still turn a benign handoff into a
+   thrown recovery failure. After a continuer has validated a stale lock but
+   before it unlinks it, another valid continuer may remove that exact lock.
+   That post-validation `ENOENT` is a lost-race result, not an error: the
+   first continuer must re-read current state and return completed/retry. The
+   same rule applies when the first continuer wins the `.retiring -> .done`
+   claim rename: any follower observing `ENOENT`, the already-completed
+   `.done` receipt, or a changed claim identity must idempotently return
+   completed/retry, never throw or delete a successor claim. This continuation
+   race leaves P3 non-admitted even when recovery authority remains fixed.
 
 The only public ABI names for this slice are exactly:
 
@@ -55,6 +65,17 @@ expected old/current-pointer identity. A reclaimer must re-read and compare the
 same receipt and lock identity immediately before it removes either path; if
 either changed, it loses the race and retries without deletion. The current
 pointer update is authorized only while that exact owner receipt remains live.
+
+Recovery is a retrying, idempotent state machine. Following successful stale
+receipt/lock validation, `unlink(lock)` may report `ENOENT` only because a peer
+already completed that exact retirement; the caller then reloads the pointer,
+lock, owner receipt, and retirement state and returns `completed` when the
+desired head is already durable or retries from the new identity otherwise.
+It must not throw solely for that race. A claimant moves only its exact,
+revalidated `.retiring` receipt to `.done`; a loser that sees post-validation
+`ENOENT`, a valid `.done`, or a changed receipt identity likewise reloads and
+returns completed/retry. No continuation may unlink, rename, or infer success
+from a path that it did not revalidate as its own exact claim.
 
 The closed record must rebind, from canonical bytes rather than defaults or
 sanitization, at least its exact schema/version and field set, replay scope,
@@ -114,10 +135,16 @@ claims restart or concurrent-reader behavior:
    only the exact owner receipt holder may advance it; a stale reclaimer cannot
    delete a replacement receipt/lock; and a SIGKILL owner is reclaimed only
    after a fresh process verifies stale receipt identity and restart safety.
+8. deterministic independent-process barriers pause two stale continuers (a)
+   after stale validation and before lock unlink, and (b) after claim validation
+   and before `.retiring -> .done` rename. In each ordering, the loser sees
+   `ENOENT`, a valid `.done`, or a changed exact identity and returns
+   completed/retry; it never throws, removes the winner's successor, or exposes
+   an incomplete head.
 
 Run the focused Node test once after the repair, then obtain an independent
 highest-capability review of the exact three-file diff. Package/full-suite
 results do not replace the restart and independent-process proofs. No source is
-admitted or pushed until all seven cases pass together and the review is PASS.
+admitted or pushed until all eight cases pass together and the review is PASS.
 
 Cross-links: [W5A publisher gates](../../03_plan/sys_test/spipe_knowledge_compiler.md#224-ordered-remediation-gates-blocking-test-execution) and [remediation order](../../03_plan/agent_tasks/spipe_knowledge_compiler.md#wave-5-admission-remediation-execution-order-2026-08-26).
