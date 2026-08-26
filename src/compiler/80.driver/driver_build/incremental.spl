@@ -427,6 +427,56 @@ impl IncrChangeSet:
                 out = out.push(item.path)
         out
 
+# Append missing cached paths without repeatedly scanning source_files.  The
+# membership index is deliberately local: it is derived from this invocation,
+# so it cannot become stale when callers construct BuildCache directly or
+# reuse the cache after an invalidation.
+fn incremental_append_deleted_changes(changes: IncrChangeSet,
+                                      source_files: [text],
+                                      cached_paths: [text]) -> IncrChangeSet:
+    var result = changes
+    var source_paths: {text: bool} = {}
+    for path in source_files:
+        source_paths[path] = true
+
+    # Keep cached_paths order exactly; only membership changes from a linear
+    # source_files scan to an expected-constant-time dictionary lookup.
+    for path in cached_paths:
+        if not source_paths.contains_key(path):
+            result = result.add(path, ChangeKind.Deleted)
+    result
+
+# Append the direct dependents of existing Added/Modified changes.  `changes`
+# stays the ordering authority; changed_paths is membership-only and is
+# updated at the same point as every append.  DependencyChanged entries
+# deliberately do not propagate again: this retains the established one-hop
+# invalidation contract independently of for-loop array snapshot semantics.
+fn incremental_propagate_dependency_changes(changes: IncrChangeSet,
+                                            entries: {text: DependencyEntry}) -> IncrChangeSet:
+    var result = changes
+    var changed_paths: {text: bool} = {}
+    for change in result.changes:
+        changed_paths[change.path] = true
+
+    # entries is not mutated, so its key order is stable for every change.  A
+    # single snapshot also avoids allocating a new keys array per iteration.
+    val entry_sources = entries.keys()
+    var change_index: i64 = 0
+    while change_index < result.changes.len():
+        val change = result.changes[change_index]
+        match change.kind:
+            case Added | Modified:
+                for src in entry_sources:
+                    val entry = entries[src]
+                    if entry.dependencies.contains(change.path):
+                        if not changed_paths.contains_key(src):
+                            changed_paths[src] = true
+                            result = result.add(src, ChangeKind.DependencyChanged)
+            case DependencyChanged | Deleted:
+                pass_do_nothing("derived and deleted changes retain the existing non-propagating contract")
+        change_index = change_index + 1
+    result
+
 struct IncrementalCompileResult:
     files: [text]
     changes: IncrChangeSet
@@ -647,26 +697,10 @@ impl BuildCache:
                 if cur_fp.is_stale(fresh_fingerprint):
                     changes = changes.add(path, ChangeKind.Modified)
 
-        # Check for deleted files
-        for path in self.fingerprints.keys():
-            if not source_files.contains(path):
-                changes = changes.add(path, ChangeKind.Deleted)
+        changes = incremental_append_deleted_changes(
+            changes, source_files, self.fingerprints.keys())
 
-        # Check transitive dependencies
-        for change in changes.changes:
-            val path = change.path
-            match change.kind:
-                case Added | Modified:
-                    # Find all files that depend on this one
-                    # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-                    for src in self.entries.keys():
-                        val entry = self.entries[src]
-                        if entry.dependencies.contains(path):
-                            if not changes.changed_files().contains(src):
-                                changes = changes.add(src, ChangeKind.DependencyChanged)
-                case _: ()
-
-        changes
+        incremental_propagate_dependency_changes(changes, self.entries)
 
     me invalidate_all():
         """Clear entire cache."""
