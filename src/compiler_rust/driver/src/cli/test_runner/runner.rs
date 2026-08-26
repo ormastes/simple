@@ -203,6 +203,77 @@ fn parse_resource_throttle_config(content: &str, options: &mut TestOptions) {
     }
 }
 
+/// Feature-group key for a spec path: the segment after `test/`, else the
+/// first segment, else "other" — mirrors `test_file_group` in the pure-Simple
+/// emitter so both lanes bucket identically.
+fn test_file_group(path: &Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    let rest = s.strip_prefix("test/").unwrap_or(&s);
+    match rest.split('/').next() {
+        Some(seg) if rest.contains('/') => seg.to_string(),
+        _ => "other".to_string(),
+    }
+}
+
+/// One-line combined run JSON matching the pure-Simple emitter's shape
+/// (`combined_test_run_json` in test_runner_output.spl): totals, per-group
+/// aggregates with done_pct, per-file rows. `pending` maps from the seed's
+/// `ignored` bucket (where `planned()` specs land — see the call site).
+fn combined_run_json(result: &TestRunResult) -> String {
+    let mut groups: Vec<(String, usize, usize, usize, usize)> = Vec::new();
+    let mut files_json: Vec<String> = Vec::new();
+    for f in &result.files {
+        let g = test_file_group(&f.path);
+        let entry = match groups.iter_mut().find(|(name, ..)| *name == g) {
+            Some(e) => e,
+            None => {
+                groups.push((g, 0, 0, 0, 0));
+                groups.last_mut().unwrap()
+            }
+        };
+        entry.1 += f.passed;
+        entry.2 += f.failed;
+        entry.3 += f.skipped;
+        entry.4 += f.ignored;
+        files_json.push(format!(
+            "{{\"path\":{},\"passed\":{},\"failed\":{},\"skipped\":{},\"pending\":{},\"duration_ms\":{},\"error\":{}}}",
+            serde_json::to_string(&f.path.to_string_lossy()).unwrap_or_else(|_| "\"\"".into()),
+            f.passed,
+            f.failed,
+            f.skipped,
+            f.ignored,
+            f.duration_ms,
+            match &f.error {
+                Some(e) => serde_json::to_string(e).unwrap_or_else(|_| "null".into()),
+                None => "null".into(),
+            }
+        ));
+    }
+    let groups_json: Vec<String> = groups
+        .iter()
+        .map(|(name, p, fl, s, pe)| {
+            let denom = p + fl + pe;
+            let done_pct = if denom > 0 { p * 100 / denom } else { 0 };
+            format!(
+                "{{\"name\":{},\"passed\":{},\"failed\":{},\"skipped\":{},\"pending\":{},\"done_pct\":{}}}",
+                serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into()),
+                p, fl, s, pe, done_pct
+            )
+        })
+        .collect();
+    let success = result.total_failed == 0;
+    format!(
+        "{{\"success\":{success},\"spec\":{{\"success\":{success},\"total_passed\":{},\"total_failed\":{},\"total_skipped\":{},\"total_pending\":{},\"total_duration_ms\":{},\"groups\":[{}],\"files\":[{}]}},\"spl_doctest\":null,\"sdoctest\":null}}",
+        result.total_passed,
+        result.total_failed,
+        result.total_skipped,
+        result.total_ignored,
+        result.total_duration_ms,
+        groups_json.join(","),
+        files_json.join(",")
+    )
+}
+
 /// Run tests with the given options
 pub fn run_tests(options: TestOptions) -> TestRunResult {
     let suite_start = Instant::now();
@@ -426,6 +497,15 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         total_ignored,
         total_duration_ms: suite_start.elapsed().as_millis() as u64,
     };
+
+    // Combined machine-readable summary for dashboard consumers, matching the
+    // pure-Simple emitter's shape (src/lib/nogc_sync_mut/test_runner/
+    // test_runner_output.spl, pinned by test_runner_group_json_spec.spl).
+    // The seed has no per-test planned/pending distinction — planned() specs
+    // land in the ignored bucket — so total_pending maps from total_ignored.
+    if options.format == OutputFormat::Json {
+        println!("{}", combined_run_json(&result));
+    }
 
     // Post-processing (skip in list mode)
     if !list_mode {
@@ -1669,10 +1749,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        generate_spipe_docs_for_results_with_binary, handle_run_management_with_db, platform_tag_matches_mode,
-        targeted_discovery_is_empty,
+        generate_spipe_docs_for_results_with_binary, handle_run_management_with_db,
+        platform_tag_matches_mode, targeted_discovery_is_empty,
     };
-    use crate::cli::test_runner::types::{OutputFormat, TestExecutionMode, TestFileResult, TestOptions, TestRunResult};
+    use crate::cli::test_runner::types::{
+        OutputFormat, TestExecutionMode, TestFileResult, TestOptions, TestRunResult,
+    };
     use crate::test_db::{TestRunRecord, TestRunStatus, list_runs};
     use crate::unified_db::Database;
 

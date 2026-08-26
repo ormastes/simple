@@ -20,7 +20,6 @@ use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_erro
 use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.mode_filter.{path_mode_matches}
-use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_broken_line, in_development_summary_line}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
@@ -33,11 +32,9 @@ use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary,
 # use sequential_container.{SequentialContainerConfig, sequential_container_run_all_tests}
 # use test_runner_container.container_detect_runtime
 use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, print_coverage_summary, generate_coverage_reports, check_coverage_threshold, check_cover_annotation_thresholds, get_coverage_threshold, print_coverage_delta}
-use std.test_runner.test_runner_mcdc_report.{test_runner_finalize_mcdc_results}
-use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 # GROUP 4: Database & feature tracking
 use std.test_runner.test_db_compat.{RunnerTestDb, load_test_db_compat}
-use std.test_runner.test_runner_helpers.{update_test_database, apply_historical_anomaly_policy}
+use std.test_runner.test_runner_helpers.{update_test_database}
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
 # GROUP 5: Doc generation & sdoctest
@@ -55,7 +52,7 @@ use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_new, incremental_test_state_load}
 # GROUP 6: Self-protection imports
 use std.test_runner.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete}
-use std.test_runner.system_monitor.{self_tree_exceeds_threshold, ensure_kill_monitor_running, is_linux}
+use std.test_runner.system_monitor.{system_exceeds_threshold, ensure_kill_monitor_running, is_linux}
 use std.test_runner.shutdown.{shutdown_graceful}
 # GROUP 7: Parallel execution imports
 use std.test_runner.test_runner_async.{run_tests_parallel_with_monitoring, get_cpu_count}
@@ -186,15 +183,6 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         print "CI mode enabled (via --ci flag)"
         print ""
 
-    # Cached/daemon result protocols do not carry raw MC/DC vectors. Keep an
-    # enabled run on the canonical local carrier; accepting a cache hit or a
-    # daemon summary here would discard evidence before suite aggregation.
-    val requested_mcdc_mode = env_get("SIMPLE_MCDC_MODE") ?? ""
-    if requested_mcdc_mode == "on" or requested_mcdc_mode == "dynamic":
-        updated_options.no_cache = true
-        updated_options.session_share = false
-        updated_options.session_daemon = false
-
     # Unstable mode: run to the END of the test list with classified outcomes.
     # Default ON for the bootstrap path, OFF for ordinary interactive runs;
     # `--unstable` / `--no-unstable` override in both directions.
@@ -320,12 +308,6 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
     # Propagate env vars
     propagate_env_vars(options)
-    val mcdc_mode_error = env_get("SIMPLE_MCDC_MODE_ERROR") ?? ""
-    if mcdc_mode_error != "":
-        print "MCDC-E-MODE-POLICY: normal-or-stricter test runs require MC/DC; explicit off requires bounded reviewed waiver metadata"
-        return TestRunResult(files: [], total_passed: 0, total_failed: 1,
-            total_skipped: 0, total_pending: 0, total_timed_out: 0,
-            total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
     # MEMORY DEBUG: container mode disabled (GROUP 3)
     # val exec_mode = options.execution_mode
@@ -427,17 +409,9 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     for file_path in files:
         # Only check system thresholds every 20 tests (avoids 100ms CPU sleep per check)
         if updated_options.self_protect and tests_run % 20 == 0:
-            # The runner's OWN process tree, not the whole box. Sampling
-            # system-wide meant the suite aborted because of OTHER people's
-            # processes on a shared machine (measured 2026-08-23: the system
-            # tree was unrunnable at 88% memory used, none of it the
-            # runner's). Fails open when unmeasurable -- see the predicate.
-            val (violated, reason) = self_tree_exceeds_threshold(updated_options.cpu_threshold, updated_options.mem_threshold)
+            val (violated, reason) = system_exceeds_threshold(updated_options.cpu_threshold, updated_options.mem_threshold)
             if violated:
-                # Pass the DENOMINATOR so the abort banner can state the
-                # truncation as a fraction. Without it the banner reports a
-                # bare completed-count that reads like a finished run.
-                shutdown_graceful(reason, completed_files, total_passed, total_failed, total_skipped, files.len())
+                shutdown_graceful(reason, completed_files, total_passed, total_failed, total_skipped)
 
         if updated_options.self_protect and tests_run % 50 == 0 and tests_run > 0:
             checkpoint_save(completed_files, total_passed, total_failed, total_skipped, "periodic")
@@ -463,16 +437,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                     setup_ms: 0,
                     error: "",
                     timed_out: false,
-                    cached: true,
-                    # The incremental cache does not persist this field, so
-                    # reconstruct it from the tag. Without this a cached
-                    # in-development replay comes back with zero examples of
-                    # every kind, classifies NOT_RUN, and the exit path reads
-                    # that as Unverified (exit 5) -- turning a cache HIT on a
-                    # parked spec into a failed run. Storing the count in
-                    # `skipped` used to mask this; moving to a separate
-                    # bucket exposed it.
-                    in_development: _cached_in_development(file_path, cached_entry.passed, cached_entry.failed)
+                    cached: true
                 )
                 print_result(cached_result, updated_options.format)
                 total_passed = total_passed + cached_result.passed
@@ -575,16 +540,7 @@ fn run_tests_parallel_mode(
                     setup_ms: 0,
                     error: "",
                     timed_out: false,
-                    cached: true,
-                    # The incremental cache does not persist this field, so
-                    # reconstruct it from the tag. Without this a cached
-                    # in-development replay comes back with zero examples of
-                    # every kind, classifies NOT_RUN, and the exit path reads
-                    # that as Unverified (exit 5) -- turning a cache HIT on a
-                    # parked spec into a failed run. Storing the count in
-                    # `skipped` used to mask this; moving to a separate
-                    # bucket exposed it.
-                    in_development: _cached_in_development(file_path, cached_entry.passed, cached_entry.failed)
+                    cached: true
                 )
                 cached_results.push(cached_result)
             else:
@@ -806,20 +762,10 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
         if (monitor_timeout.to_int() ?? 0) < effective_options.timeout:
             env_set("SIMPLE_TIMEOUT_SECONDS", "{effective_options.timeout}")
 
-    # MC/DC probes are MIR-owned. Route every canonical runner mode through
-    # the one native compile/run carrier so smf/composite/safe aliases cannot
-    # bypass evidence transport and later appear to satisfy the suite gate.
-    val mcdc_mode = env_get("SIMPLE_MCDC_MODE") ?? ""
-    if mcdc_mode == "on" or mcdc_mode == "dynamic":
-        return in_development_adjust(
-            file_path, options, run_test_file_native(file_path, effective_options))
-
     # G1: Use safe mode with resource limits when enabled
     if effective_options.safe_mode:
-        return in_development_adjust(file_path, options, run_test_file_safe_mode(file_path, effective_options))
-    # Bound rather than returned as a tail expression so the in-development
-    # adjustment below sees EVERY execution mode's result.
-    val raw = match effective_options.mode:
+        return run_test_file_safe_mode(file_path, effective_options)
+    match effective_options.mode:
         case TestExecutionMode.Interpreter:
             run_test_file_interpreter(file_path, effective_options)
         case TestExecutionMode.Smf:
@@ -830,193 +776,6 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
             run_test_file_compile(file_path, effective_options)
         case TestExecutionMode.Composite(spec):
             run_test_file_composite(file_path, effective_options, spec)
-    in_development_adjust(file_path, options, raw)
-
-# =========================================================================
-# In-development tag (`# @tag:in-development`)
-# =========================================================================
-#
-# A spec declaring `# @tag:in-development` is WORK IN PROGRESS and is
-# EXPECTED TO FAIL. In a sweep its failure is neutralised -- but it is
-# COUNTED and PRINTED, never silently dropped. Run by explicit path it
-# reports the honest verdict so a developer can actually work on it.
-#
-# Semantics, the rationale for each branch, and why the tag is spelled
-# `in-development` rather than `wip`/`pending`, all live in the module
-# docstring of src/lib/nogc_sync_mut/spec/in_development.spl. The rule
-# itself lives THERE, in `classify_in_development`, and is not re-derived
-# here -- same discipline as `test_file_result_outcome_class`: two
-# spellings of one rule is how two surfaces come to disagree.
-
-fn file_is_in_development(file_path: text) -> bool:
-    """True when the spec SOURCE carries `# @tag:in-development`.
-
-    Reads the file here rather than in the library so the library stays
-    pure (no extern, no new direct `rt_*` call site on the ratchet)."""
-    source_is_in_development(file_read(file_path) ?? "")
-
-fn _requested_paths(options: TestOptions) -> [text]:
-    """Same fallback `discover_all_requested_files` uses: `paths` when the
-    CLI populated it, otherwise the single scalar `path`."""
-    if options.paths.len() > 0: options.paths else: [options.path]
-
-fn _cached_in_development(file_path: text, cached_passed: i64, cached_failed: i64) -> i64:
-    """In-development count for a CACHE REPLAY, reconstructed from the tag.
-
-    The incremental cache stores passed/failed/skipped only, so a
-    neutralised result replays with no examples at all. Recomputed here
-    rather than persisted: the tag is the source of truth and may have
-    been removed since the entry was written, in which case the file is no
-    longer in development and must not be reported as such."""
-    if cached_passed > 0 or cached_failed > 0:
-        return 0
-    if file_is_in_development(file_path):
-        return 1
-    0
-
-fn in_development_adjust(file_path: text, options: TestOptions, raw: TestFileResult) -> TestFileResult:
-    """Apply the in-development semantics to ONE file's raw result.
-
-    Neutralisation happens here, at the single point every execution mode
-    funnels through, so no mode (interpreter/smf/native/compile/composite/
-    safe) can bypass it.
-
-    The neutralised shape is deliberately RECOVERABLE by a later pass with
-    no new struct field (TestFileResult belongs to another lane and was not
-    touched): a tagged file left with passed=0, failed=0, skipped>0 is an
-    expected failure, and a tagged file with passed>0 is an unexpected
-    pass. `in_development_totals` reads exactly that back."""
-    if not file_is_in_development(file_path):
-        return raw
-    val explicit = in_development_explicitly_targeted(
-        file_path, options.path_explicit, _requested_paths(options))
-    val errored = raw.timed_out or raw.error != ""
-    # Load failure is read from the RAW error, before any neutralisation
-    # below clears it. Getting this order wrong is not hypothetical: the
-    # first cut of this function cleared `error` first, so by the time
-    # `emit_spec_file_verdicts` ran its own `is_load_failure(r.error)` test
-    # the evidence was already gone and every broken tagged spec printed a
-    # bare `outcome=NOT_RUN`.
-    val load_failed = raw.error != "" and is_load_failure(raw.error)
-    match classify_in_development(true, explicit, raw.failed, raw.passed, errored, load_failed):
-        case InDevelopmentOutcome.NotInDevelopment:
-            raw
-        case InDevelopmentOutcome.ExplicitRun:
-            # Honest verdict, untouched. The advisory only explains why this
-            # red is not the red the suite would have shown.
-            print in_development_explicit_line(file_path)
-            raw
-        case InDevelopmentOutcome.LoadFailure:
-            # BROKEN. Returned essentially UNCHANGED -- error preserved, so
-            # `emit_spec_file_verdicts` still routes it through
-            # `unrun_verdict_line` and the greenwash gates still see it --
-            # and forced to at least one failure so the sweep goes RED.
-            #
-            # This is the one in-development class that still fails the
-            # run. Rationale in the library's classifier: the tag is a
-            # claim about the code under test, not a licence for a spec
-            # file that cannot be parsed. Across a tree-wide tagging sweep,
-            # absorbing these into the skip count would turn the tag into a
-            # place broken files go to stop being counted.
-            print in_development_broken_line(file_path, unrun_reason(raw.error))
-            if raw.failed > 0:
-                raw
-            else:
-                TestFileResult(
-                    path: raw.path,
-                    passed: raw.passed,
-                    failed: 1,
-                    skipped: raw.skipped,
-                    pending: raw.pending,
-                    duration_ms: raw.duration_ms,
-                    setup_ms: raw.setup_ms,
-                    error: raw.error,
-                    timed_out: raw.timed_out,
-                    cached: raw.cached,
-                    mcdc_evidence_v1: raw.mcdc_evidence_v1
-                )
-        case InDevelopmentOutcome.ExpectedFailure:
-            # Count at least 1 even when the failure arrived as a timeout or
-            # a crash (failed == 0 on those paths): a neutralised file that
-            # reported skipped=0 would be indistinguishable from a file that
-            # was never in development at all, and would vanish from the
-            # totals -- the exact invisible-debt shape this feature exists
-            # to prevent.
-            val expected = if raw.failed > 0: raw.failed else: 1
-            print in_development_line(file_path, expected)
-            # Carried in `in_development`, NOT in `skipped`. The two are
-            # different states and must not be merged: `skipped` means the
-            # environment could not run it; this file RAN and only its
-            # verdict was neutralised. Any genuine skips the file itself
-            # reported are preserved untouched in `raw.skipped`.
-            TestFileResult(
-                path: raw.path,
-                passed: 0,
-                failed: 0,
-                skipped: raw.skipped,
-                pending: raw.pending,
-                duration_ms: raw.duration_ms,
-                setup_ms: raw.setup_ms,
-                error: "",
-                timed_out: false,
-                cached: raw.cached,
-                in_development: expected,
-                mcdc_evidence_v1: raw.mcdc_evidence_v1
-            )
-        case InDevelopmentOutcome.UnexpectedPass:
-            # Left as a genuine pass -- it did pass -- but announced, and
-            # totalled separately below. Reporting it loudly is the point:
-            # it is ready to be promoted.
-            print in_development_unexpected_pass_line(file_path, raw.passed)
-            raw
-
-fn in_development_totals(results: [TestFileResult]) -> (i64, i64, i64):
-    """(in_development, unexpected passes, BROKEN) across a finished run.
-
-    **The first bucket is named `in_development`, not `skipped`** — and
-    the values behind it live in `TestFileResult.in_development`, a field
-    separate from `skipped`. That separation is the point: the stats lane
-    must not reintroduce the word downstream, because a tagged spec runs
-    and only its verdict is neutralised.
-
-    Re-reads the tag from source rather than trusting a marker in the
-    result, so a result that arrived from the daemon or a cache replay --
-    paths that never went through `in_development_adjust` in THIS process
-    -- is still classified correctly.
-
-    The three buckets are mutually exclusive and none is merged into
-    another: BROKEN is a defect that fails the run, an unexpected pass is
-    an action item, and in-development is the ordinary parked state.
-    """
-    var in_development = 0
-    var unexpected = 0
-    var broken = 0
-    for r in results:
-        if file_is_in_development(r.path):
-            if r.error != "" and is_load_failure(r.error):
-                broken = broken + 1
-            elif r.failed == 0 and r.passed > 0:
-                unexpected = unexpected + 1
-            else:
-                in_development = in_development + 1
-    (in_development, unexpected, broken)
-
-fn print_in_development_summary(results: [TestFileResult]):
-    """Print the three-state summary row: pass / fail / in-development.
-
-    UNCONDITIONAL, and always carrying all three counts even at zero. A
-    row that appears only when non-empty leaves a reader unable to tell
-    "no in-development work" from "this runner does not track it" -- and
-    the second reading is how a whole category quietly stops being looked
-    at. Printed on the ordinary summary surface, never behind --verbose.
-    """
-    val (in_development, unexpected, broken) = in_development_totals(results)
-    var passed = 0
-    var failed = 0
-    for r in results:
-        passed = passed + r.passed
-        failed = failed + r.failed
-    print in_development_summary_line(passed, failed, in_development, unexpected, broken)
 
 # =========================================================================
 # Session Config Propagation
@@ -1289,7 +1048,16 @@ fn run_test_cli() -> i64:
         json_worker = true
         i = marker + 1
     while i < all_args.len():
-        args.push(all_args[i])
+        # Public JSON mode: `--json` (or `--format json`) on the DIRECT
+        # dispatch path (seed `simple test`, which skips the _CliMain
+        # json_wrapper subprocess). Reuses the worker-mode emission and print
+        # suppression; only the private --test-json-worker marker needs auth.
+        if all_args[i] == "--json":
+            json_worker = true
+        else:
+            if all_args[i] == "--format" and i + 1 < all_args.len() and all_args[i + 1] == "json":
+                json_worker = true
+            args.push(all_args[i])
         i = i + 1
 
     # Handle run management commands (status/stop/etc.)
@@ -1343,10 +1111,6 @@ fn run_test_cli() -> i64:
         return 1
 
     propagate_env_vars(options)
-    val mcdc_mode_error = env_get("SIMPLE_MCDC_MODE_ERROR") ?? ""
-    if mcdc_mode_error != "":
-        print "MCDC-E-MODE-POLICY: normal-or-stricter test runs require MC/DC; explicit off requires bounded reviewed waiver metadata"
-        return 2
 
     var exit_code = 0
     var db: Result<RunnerTestDb, text> = Err("not_run")
@@ -1357,7 +1121,7 @@ fn run_test_cli() -> i64:
         print ""
 
         val run_start = time_now_unix_micros()
-        spec_result = apply_historical_anomaly_policy(run_tests(options))
+        spec_result = run_tests(options)
         val run_end = time_now_unix_micros()
         val spec_exit_code = test_run_outcome_exit_code(classify_test_run_result(spec_result, test_empty_selection_is_success(options)))
 
@@ -1368,10 +1132,6 @@ fn run_test_cli() -> i64:
         if not json_worker:
             emit_spec_file_verdicts(result_files)
             print_summary(spec_result, options.format)
-            # In-development counts ride on the ordinary summary surface,
-            # right after it, so they are in the block every session pastes
-            # as evidence. Never hidden behind --verbose.
-            print_in_development_summary(result_files)
 
         if options.coverage:
             val coverage = collect_coverage()
@@ -1386,22 +1146,6 @@ fn run_test_cli() -> i64:
             for result_file in result_files:
                 coverage_test_files.push(result_file.path)
             if not options.no_cover_check and not check_cover_annotation_thresholds(coverage, coverage_test_files):
-                exit_code = 1
-
-        # MC/DC completion consumes independence-pair evidence, never legacy
-        # branch counters. Legacy --coverage remains branch/line coverage and
-        # cannot opt a run into exact MC/DC. Off does no aggregation.
-        val configured_mcdc_mode = env_get("SIMPLE_MCDC_MODE") ?? ""
-        val mcdc_mode = if configured_mcdc_mode != "": configured_mcdc_mode else: "off"
-        if mcdc_mode != "off":
-            val resolved_profile = env_get("SIMPLE_SAFETY_PROFILE") ?? options.profile
-            val completion = test_runner_finalize_mcdc_results(
-                mcdc_mode, AssuranceStrictness.from_name(resolved_profile), result_files)
-            if not json_worker:
-                print completion.human_diagnostic
-                if options.verbose:
-                    print completion.machine_diagnostic
-            if not completion.accepted:
                 exit_code = 1
 
         # Persist test results to database and regenerate reports
