@@ -10,6 +10,7 @@ use app.io.mod (file_exists, file_read, file_append)
 use std.scv.core.{scv_rel_path, scv_repo_dir, scv_metadata_path_safe}
 use std.scv.parser.{scv_language_for_text, scv_is_binary_text, scv_parse_gate}
 use std.scv.parser_registry.{scv_parser_for_path}
+use std.scv.profiles.{scv_profile_read, scv_profile_refuses_forced}
 
 # Classify one path under the explicit-commit parse policy.
 fn scv_commit_parse_policy(root: text, path: text) -> text:
@@ -52,6 +53,11 @@ fn scv_commit_parse_policy_forced(root: text, path: text, reason: text) -> text:
     val rel = scv_rel_path(root, path)
     if not scv_metadata_path_safe(rel):
         return "ERROR commit-policy: unsafe path: {rel}\n"
+    # SCV-IMPL-G-04: strict / mission_critical profiles refuse the escape hatch
+    # outright — nothing is recorded, nothing is green-washed.
+    val profile = scv_profile_read(root)
+    if scv_profile_refuses_forced(profile):
+        return "ERROR commit-policy: profile {profile} forbids --force-unparsed ({rel})\n"
     file_append(scv_forced_unparsed_log_path(root), "{rel}|forced_unparsed|{reason}\n")
     "path: {rel}\npolicy: forced_unparsed\nstate: forced_unparsed\nreason: {reason}\nmode: line\npublic_ready: blocked\n"
 
@@ -62,8 +68,9 @@ fn scv_forced_unparsed_audit(root: text) -> text:
         return ""
     file_read(log)
 
-# Default policy: any recorded forced_unparsed entry blocks public_ready.
-# (Profile-level overrides are G-04's concern, not this module's.)
+# Any recorded forced_unparsed entry blocks public_ready under EVERY profile
+# (G-04): profiles only ever add strictness on top of this default.
+# See std.scv.profiles for the per-repo profile and the blocked reason text.
 fn scv_forced_unparsed_blocks_public(root: text) -> bool:
     scv_forced_unparsed_audit(root) != ""
 

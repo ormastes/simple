@@ -1,9 +1,10 @@
 # SCV three-way tree merge with conflicts as data.
 
-use app.io.mod (file_exists, file_read, file_delete, dir_walk)
+use app.io.mod (file_exists, file_read, file_delete, file_size, dir_walk)
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.scv.core.{scv_object_path, scv_chunk_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe}
-use std.scv.store.{scv_hash_text, scv_write_text, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op, scv_commit_tree}
+use std.scv.store.{scv_hash_text, scv_write_text, scv_write_chunk_from_file, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op, scv_commit_tree}
+use std.scv.identity_merge.{scv_identity_merge_groups}
 use std.scv.structural_match.{scv_default_match_config, scv_compute_edit_script, scv_parser_index_root_node, scv_text_block_names, scv_structural_merge_from_text}
 
 # ---------------------------------------------------------------------------
@@ -224,13 +225,18 @@ fn scv_apply_line_side(base_text: text, side_text: text, side_changes: text) -> 
 fn scv_write_merged_line_file(root: text, rel: text, content: text) -> text:
     if not scv_worktree_path_safe(rel):
         return ""
-    val chunk = scv_hash_text("sha256", content)
-    scv_write_text(scv_chunk_path(root, chunk), content)
-    val payload = "path: {rel}\nchunk: {chunk}\nsize: {content.len()}\nmtime: 0\n"
+    # The chunk id MUST be the sha256 of the bytes on disk (export-tree and
+    # fsck recompute it from the file), so the merged text is staged to a file
+    # and chunked exactly like a snapshot does (one digest path, no drift).
+    val staged = "{root}/.scv/merge_stage_{current_time_ms()}_{scv_hash_text(\"stage\", content)}"
+    scv_write_text(staged, content)
+    val chunk = scv_write_chunk_from_file(root, staged)
+    val size = file_size(staged)
+    file_delete(staged)
+    val payload = "path: {rel}\nchunk: {chunk}\nsize: {size}\nmtime: 0\n"
     val file_id = scv_hash_text("file", payload)
     scv_write_text(scv_object_path(root, "files", file_id), payload)
-    "{rel}|{file_id}|{chunk}|{content.len()}|0"
-
+    "{rel}|{file_id}|{chunk}|{size}|0"
 fn scv_try_syntax_node_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     if base_line == "" or left_line == "" or right_line == "":
         return ""
@@ -334,6 +340,47 @@ fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, 
     val conflict_id2 = scv_write_conflict(root, rel, base_line, left_line, right_line)
     (left_line, conflict_id2, "conflict-data")
 
+# SCV-IMPL-D-04 — identity-aware pre-pass. Groups are entities the path/chunk
+# logic cannot resolve (rename+edit vs edit, rename vs rename, rename vs
+# delete); each consumes its paths so the path loop below never sees them.
+# Conflicts stay DATA objects (jj remains the conflict-storage authority).
+fn scv_write_conflict_kind(root: text, rel: text, kind: text, entity: text, base_line: text, left_line: text, right_line: text) -> text:
+    val payload = "path: {rel}\nkind: {kind}\nentity: {entity}\nbase: {base_line}\nleft: {left_line}\nright: {right_line}\ntime_ms: {current_time_ms()}\n"
+    val id = scv_hash_text("conflict", payload)
+    scv_write_text(scv_object_path(root, "conflicts", id), payload)
+    id
+
+# Returns (picked_line, conflict_id, strategy_rows, consumed_paths).
+fn scv_apply_identity_group(root: text, group: text, base_tree: text, left_tree: text, right_tree: text) -> (text, text, text, text):
+    val f = group.split("\t")
+    if f.len() != 7:
+        return ("", "", "", "")
+    val kind = f[0]
+    val entity = f[1]
+    val target = f[2]
+    var consumed = ""
+    for p in f[3].split(","):
+        if p != "":
+            consumed = consumed + p + "\n"
+    val base_line = if f[4] != "": scv_tree_line_with_path(f[4], target) else: ""
+    val left_line = if f[5] != "": scv_tree_line_with_path(f[5], target) else: ""
+    val right_line = if f[6] != "": scv_tree_line_with_path(f[6], target) else: ""
+    val source = scv_tree_line_path(f[4])
+    if kind == "rename_edit":
+        val (picked, conflict_id, strategy) = scv_pick_merge_line(root, target, base_tree, left_tree, right_tree, base_line, left_line, right_line)
+        val rows = "{source}: identity-rename-source\n{target}: identity-rename-edit ({strategy}) entity={entity}\n"
+        return (picked, conflict_id, rows, consumed)
+    if kind == "rename_rename":
+        val conflict_id = scv_write_conflict_kind(root, target, "entity_identity_ambiguous", entity, f[4], f[5], f[6])
+        val rows = "{source}: identity-rename-source\n{target}: identity-rename-rename conflict entity={entity}\n"
+        return (left_line, conflict_id, rows, consumed)
+    if kind == "rename_delete":
+        val kept = if left_line != "": left_line else: right_line
+        val conflict_id = scv_write_conflict_kind(root, target, "entity_rename_delete", entity, f[4], f[5], f[6])
+        val rows = "{source}: identity-rename-source\n{target}: identity-rename-delete conflict entity={entity}\n"
+        return (kept, conflict_id, rows, consumed)
+    ("", "", "", "")
+
 fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_commit: text) -> text:
     val base_tree = scv_tree_content(root, base_commit)
     val left_tree = scv_tree_content(root, left_commit)
@@ -357,9 +404,23 @@ fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_com
     var conflict_count = 0
     var conflict_ids = ""
     var strategies = ""
+    var consumed = ""
+    for group in scv_identity_merge_groups(root, base_commit, left_commit, right_commit):
+        val (g_picked, g_conflict, g_rows, g_consumed) = scv_apply_identity_group(root, group, base_tree, left_tree, right_tree)
+        if g_consumed == "":
+            continue
+        consumed = consumed + g_consumed
+        if g_picked != "":
+            merged_lines.push(g_picked)
+        strategies = strategies + g_rows
+        if g_conflict != "":
+            conflict_count = conflict_count + 1
+            conflict_ids = conflict_ids + g_conflict + "\n"
     for rel in paths.split("\n"):
         val path = rel.trim()
         if path == "":
+            continue
+        if scv_line_set_contains(consumed, path):
             continue
         val base_line = scv_tree_line_for_path(base_tree, path)
         val left_line = scv_tree_line_for_path(left_tree, path)
@@ -373,7 +434,9 @@ fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_com
             conflict_count = conflict_count + 1
             conflict_ids = conflict_ids + conflict_id + "\n"
     val tree = scv_write_tree_object(root, merged_lines)
-    val commit = scv_write_commit(root, "{left_commit},{right_commit}", tree, scv_state_private())
+    # Parents are SPACE-joined: scv_write_operation validates each parent by
+    # splitting on " " (store.spl), so the old comma join could never be recorded.
+    val commit = scv_write_commit(root, "{left_commit} {right_commit}", tree, scv_state_private())
     val op = scv_write_operation(root, scv_current_op(root), commit, "merge-commits {base_commit} {left_commit} {right_commit}")
     if op.starts_with("ERROR"):
         return op

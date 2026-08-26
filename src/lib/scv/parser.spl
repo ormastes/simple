@@ -9,6 +9,7 @@ use std.scv.core.{scv_state_parsed_error, scv_state_parsed_ok}
 use std.scv.parser_registry.{scv_langmap_validate, scv_language_for_path, scv_parser_for_path, scv_locked_parser_hash}
 use std.scv.wasm_executor.{scv_wasm_executor_available, scv_wasm_parse}
 use std.scv.alloc_bounds.{scv_bound_parser_input_bytes}
+use std.scv.query_packs.{scv_query_pack_line_decls}
 
 fn scv_first_line(content: text) -> text:
     val lines = content.split("\n")
@@ -188,19 +189,32 @@ fn scv_fallback_binary_root(root: text, path: text, bytes: [i64], language: text
     val payload = "grammar: fallback-binary\nversion: builtin\nexecution: fallback-binary\nkind: binary\nfield: root\nchildren: {child_ids}\npath: {rel}\nlanguage: {language}\nbyte_len: {bytes.len()}\nraw: {raw}\nsyntax: {syntax_hash}\nsemantic: {syntax_hash}\nparse_status: ok\n"
     scv_write_syntax_node(root, payload)
 
-fn scv_fallback_line_node(root: text, language: text, line_no: i64, line: text, byte_start: i64) -> text:
+# SCV-IMPL-P-06: a line the language's query pack recognises as a
+# declaration is written with the pack's decl kind plus `name:` (qualified
+# container.name) and `signature:` fields, so structural anchors over a
+# fallback tree are NAMED. `decl` is "kind|qualified_name|signature" or "".
+fn scv_fallback_line_node(root: text, language: text, line_no: i64, line: text, byte_start: i64, decl: text) -> text:
     val syntax_hash = scv_hash_text("syntax", "line:{line_no}:{line}")
     val semantic_hash = scv_hash_text("semantic", "line:{line_no}:{scv_trim_trailing_space(line)}")
     val raw_hash = scv_hash_text("raw", line)
-    val payload = "grammar: fallback-line\nversion: builtin\nexecution: fallback-line\nkind: line\nfield:\nchildren:\nline: {line_no}\nbyte_start: {byte_start}\nbyte_end: {byte_start + line.len()}\nlanguage: {language}\nraw: {raw_hash}\nsyntax: {syntax_hash}\nsemantic: {semantic_hash}\nparse_status: ok\n"
+    var kind = "line"
+    var decl_fields = ""
+    if decl != "":
+        val p = decl.split("|")
+        if p.len() >= 3 and p[1] != "":
+            kind = p[0]
+            decl_fields = "name: {p[1]}\nsignature: {p[2]}\n"
+    val payload = "grammar: fallback-line\nversion: builtin\nexecution: fallback-line\nkind: {kind}\nfield:\nchildren:\n{decl_fields}line: {line_no}\nbyte_start: {byte_start}\nbyte_end: {byte_start + line.len()}\nlanguage: {language}\nraw: {raw_hash}\nsyntax: {syntax_hash}\nsemantic: {semantic_hash}\nparse_status: ok\n"
     scv_write_syntax_node(root, payload)
 
 fn scv_fallback_syntax_root(root: text, path: text, content: text, language: text, parser_kind: text, parser_version: text, parser_hash: text, raw: text, syntax_hash: text, semantic_hash: text, parse_status: text) -> text:
     var children: [text] = []
     var line_no = 1
     var byte_start = 0
+    val decls = scv_query_pack_line_decls(language, content)
     for line in content.split("\n"):
-        val child = scv_fallback_line_node(root, language, line_no, line, byte_start)
+        val decl = if decls.contains_key("{line_no}"): decls["{line_no}"] else: ""
+        val child = scv_fallback_line_node(root, language, line_no, line, byte_start, decl)
         children.push(child)
         byte_start = byte_start + line.len() + 1
         line_no = line_no + 1

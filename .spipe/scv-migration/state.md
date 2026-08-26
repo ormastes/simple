@@ -234,3 +234,93 @@ run is FAIL. Step scripts are committed unsigned and signed by a human with
 - B-01 stays OUT of the ledger (blocked on sj repair, per plan Wave order).
 - Ledger: 9 rows appended (week 6, due 2026-10-13); flipped by the signed
   checker at --now 2026-10-13T12:00:00Z → 42/42 done.
+
+## Wave 3 — COMPLETE 2026-08-26 (closeout lane)
+- SCV-IMPL E-06, E-07, P-06, G-05, D-01, I-04, D-03, D-04, G-04 landed by four
+  lanes; all nine acceptance specs green at expected counts (closeout sweep
+  2026-08-26, binary bin/release/x86_64-unknown-linux-gnu/simple 60744944B
+  2026-08-26 01:16, seed): warm-status 6/6, bulk-update 5/5, query-packs 5/5,
+  hir-fingerprint 3/3, structural-roots-diff 5/5, refactoring-relations 7/7,
+  edit-graph 4/4, identity-merge 3/3, profiles 6/6. Regressions held:
+  mvp 11/11, merge 5/5 (newly green, see finding 1), symbol-entity 3/3,
+  generic-cst 4/4, incremental-parse 9/9, three-view-diff 5/5,
+  file-identity 8/8, state-model 8/8, forced-unparsed 6/6, event-coalesce 8/8,
+  worktree-index 5/5, metadata-db 5/5, shadow-replication 3/3, dual-write 4/4,
+  fsck-strong/journal-wal/checkpoint/rebuild-db green; structural_match 5/8
+  and parser_wasm 7/12 unchanged baselines. Gates: mission-critical PASS
+  (6 profile rows enforced), crash harness PASS 9/9, restore drills PASS 6.
+- Per-item notes (verified against module content):
+  - E-06 warm status: real ScvIoCounter at the two syscall choke points
+    (_ws_stat/_ws_read); warm clean = 0 stats / 0 reads / no parse; one
+    changed path = at most one stable FileBuffer read; never uses the E-01
+    fswatch_scan sha256-per-poll path (src/lib/scv/warm_status.spl).
+  - E-07 bulk update: begin bumps the E-05 dirty generation and holds the
+    coalescer; defer is zero-I/O with per-path folding; end reconciles once
+    through E-06 (src/lib/scv/bulk_update.spl).
+  - P-06 query packs: simple/python/rust packs on one engine; symbol_entity
+    (I-03) now delegates to the simple pack; fallback decl nodes carry
+    name:+signature: so structural anchors are named. Packs are
+    line-structural rules, NOT grammars (src/lib/scv/query_packs.spl).
+  - G-05 fingerprints: reuses the compiler's compile_interface_digest
+    (simple/compile-interface/v1) + implementation_digest_of; fields are
+    syntactic_interface_id / normalized_impl_hash — names state the
+    guarantee, no "semantic" claim (src/lib/scv/hir_fingerprint.spl).
+  - D-01 structural-roots diff: diff loads REAL P-05 CST roots keyed by
+    revision+ContentId (`scv cst-store <path>`); provenance line carries
+    structural_source=cst-roots > syntax-roots > text-blocks plus both keys;
+    named move/rename ops, ties reported ambiguous (src/lib/scv/diff.spl,
+    structural_match.spl).
+  - I-04 refactoring relations: rename/move/move_rename/extract/inline/split/
+    merge/pull_up/push_down/signature_change as many-to-many lineage edges;
+    anchors → indexed GumTree candidates → rules; bounds
+    SCV_REFACTOR_MAX_PAIRS=512 / CANDIDATES_PER_UNIT=64 / AMBIGUITY_MARGIN=50;
+    ties are never accepted (src/lib/scv/refactoring_relations.spl).
+  - D-03 edit graph: `scv diff --view graph` links raw hunks ↔ entities ↔
+    inferred refactoring ops (src/lib/scv/edit_graph.spl).
+  - D-04 identity-aware merge: per-commit EntityId maps + merge.spl pre-pass;
+    rename-one-side/edit-other resolves by EntityId, jj stays conflict
+    authority; rename-vs-rename is limited by the linear I-02 store (TODO in
+    spec) (src/lib/scv/identity_merge.spl).
+  - G-04 profiles: default/strict/mission_critical, pinned per repo in
+    .scv/profile.sdn; strict and mission_critical refuse forced_unparsed
+    publication; check-scv-mission-critical.shs gained the
+    "6 profile row(s) enforced" row (src/lib/scv/profiles.spl).
+- Findings:
+  1. text_to_u8 zero-bytes hash collision (ROOT CAUSE of the "merge 1/5"
+     baseline). `scv_text_to_u8` iterated `for ch in value` +
+     `ch.to_i64() & 0xFF`, which yields 0 for every character on the current
+     seed, so every text-derived id (chunk/file/conflict/syntax_node/tree/
+     commit/op ids) collided by LENGTH. Line/syntax merges saw no per-line
+     change and returned BASE as "merged"; export-tree hit corrupt chunk ids.
+     Fixed in store.spl (`value.bytes()`; merged text staged to a file and
+     chunked through scv_write_chunk_from_file — one digest path).
+     Baseline correction: the pre-existing "merge 1/5" red recorded in Waves
+     1-2 was this defect, not a merge-policy gap; scv_merge is now 5/5. The
+     seed-side `for ch in text` / `to_i64()` defect stays OPEN; object ids in
+     repos created before the fix are length-collided (fsck/rebuild-db will
+     report them; pre-cutover, no migration).
+     doc/08_tracking/bug/scv_text_to_u8_zero_bytes_hash_collision_2026-08-26.md
+  2. sj probe: `timeout 20 sj --version` rc=139 (SIGSEGV) on 2026-08-26 —
+     B-01 and therefore B-02 stay OUT of the ledger (assessed only, not
+     implemented).
+  3. P-05 root store had NO producer until D-01's `scv cst-store` landed: the
+     generic CST IR existed since Wave 2 but nothing wrote roots keyed by
+     revision+ContentId; the interim `cst-spl-1` builder in structural_match.spl
+     is the producer until P-06/WS-A grammar-backed roots land (TODO there).
+  4. typed_hir_hash unavailable: the compiler frontend has no typed-HIR
+     extractor, so G-05 reports `typed_hir_hash: unavailable:…` honestly;
+     recorded as TODO(SCV-IMPL-G-06) in hir_fingerprint.spl (Wave 4).
+  5. mtime second-granularity racy-index class: rt_file_stat is seconds*1000,
+     so a write within the same second as the indexed stat is invisible to a
+     stat-only warm check. E-06 stores mtime in ms to match E-05's unit and
+     only trusts a read whose post-read stat equals its pre-read stat; a racy
+     write leaves the entry un-updated so the next status re-reads it.
+  6. merge-commit `parents:` separator inconsistency: merge.spl wrote
+     comma-joined parents while the store validator splits on space, so every
+     merge-commits call failed "invalid operation commit parent". Fixed to
+     space-joined; integrity_view/recover/maintenance/integrity still split
+     on "," — OPEN bug record
+     doc/08_tracking/bug/scv_merge_commit_parents_separator_inconsistent_2026-08-26.md
+- Ledger: 9 rows appended (week 7, due 2026-10-27); step scripts PQ-signed
+  (WOTS leaves 50..58) and flipped by the signed checker at
+  --now 2026-10-27T12:00:00Z → 51/51 done.

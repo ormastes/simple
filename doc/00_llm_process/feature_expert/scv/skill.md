@@ -102,3 +102,40 @@ entities via interim .spl structural scanner (`symbol_entity.spl`, P-06
 query-pack hookup TODO). Ledger 42/42 done (week-6 rows due 2026-10-13,
 signed step scripts SCV-IMPL-{E-04,E-05,P-04,P-05,G-02,G-03,B-03,B-04,I-03}).
 B-01 remains blocked on sj repair.
+
+## Post-Wave-3 (2026-08-26)
+Wave 3 (SCV-IMPL E-06, E-07, P-06, G-05, D-01, I-04, D-03, D-04, G-04) is
+landed and green (closeout sweep 2026-08-26; regressions all held, incl.
+mvp 11/11, merge 5/5, symbol-entity 3/3, incremental-parse 9/9,
+file-identity 8/8; gates mission-critical PASS with 6 profile rows, crash
+harness 9/9, restore drills 6). New capabilities: warm status with a REAL
+I/O counter at the stat/read choke points — warm clean is 0 stats/0 reads/no
+parse, one change is at most one stable read (`src/lib/scv/warm_status.spl`);
+bulk-update generation that holds the coalescer and reconciles once through
+warm status (`bulk_update.spl`); entity query packs for simple/python/rust on
+one engine — line-structural rules, not grammars; symbol_entity now delegates
+to the simple pack (`query_packs.spl`); interface/HIR fingerprints reusing the
+compiler's `compile_interface_digest` + `implementation_digest_of` as
+`syntactic_interface_id` / `normalized_impl_hash` — `typed_hir_hash` is
+honestly `unavailable`, no typed-HIR extractor exists, TODO(SCV-IMPL-G-06)
+(`hir_fingerprint.spl`); structural-roots diff over REAL P-05 CST roots keyed
+by revision+ContentId via `scv cst-store` — the first producer for the P-05
+root store, interim `cst-spl-1` builder until grammar-backed roots land
+(`diff.spl`, `structural_match.spl`); refactoring relations as many-to-many
+lineage edges with bounds (MAX_PAIRS=512 / CANDIDATES_PER_UNIT=64 /
+AMBIGUITY_MARGIN=50), ties never accepted (`refactoring_relations.spl`);
+`scv diff --view graph` hunks <-> entities <-> ops (`edit_graph.spl`);
+identity-aware merge via per-commit EntityId maps, jj stays conflict authority,
+rename-vs-rename limited by the linear I-02 store (`identity_merge.spl`);
+default/strict/mission_critical profiles pinned in `.scv/profile.sdn`, strict
+and mission_critical refuse forced_unparsed publication (`profiles.spl`).
+Findings: the long-standing "merge 1/5" red was a `scv_text_to_u8` all-zero
+hash collision (every text-derived id collided by length; fixed in
+`store.spl` with `value.bytes()`, seed-side `for ch in text` defect still
+OPEN, pre-fix repos have length-collided ids); merge-commit `parents:`
+separator inconsistency (merge.spl fixed to space-joined; integrity_view/
+recover/maintenance/integrity still split on "," — OPEN); mtime is
+second-granular so warm status only trusts reads whose post-read stat matches
+the pre-read stat. Ledger 51/51 done (week-7 rows due 2026-10-27, signed step
+scripts SCV-IMPL-{E-06,E-07,P-06,G-05,D-01,I-04,D-03,D-04,G-04}). B-01/B-02
+remain blocked on sj repair (`sj --version` rc=139 on 2026-08-26).
