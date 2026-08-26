@@ -1304,3 +1304,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Tag and confine non-status-bearing benchmark timestamp text.
 - [x] Preserve one direct provider call per sample and add no timing-path work.
 - [x] Add a static authority and call-count ratchet.
+
+### Completed builtin type-registry authority slice
+
+- [x] Tag nullable lookup and boolean membership declarations `unsafe(ffi)`.
+- [x] Confine both primitives to always-inline lexical owners.
+- [x] Preserve nullable and boolean APIs without zero/empty substitution.
+- [x] Preserve exactly one direct provider call per query.
+- [x] Add no hot-path admission, hash, lookup, allocation, lock, or dispatch.
+- [x] Record absence/provider-failure ambiguity as unverified and unsigned.

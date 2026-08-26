@@ -647,3 +647,14 @@ fabricating empty text, while a valid empty file remains `Ok("")`.  The slice
 preserves read counts and search complexity.  Each existing read gains one
 bounded typed-result lift outside inner scan loops; there is no retry, extra
 traversal, file-buffer copy, cache, lock, hash, lookup, or dynamic dispatch.
+
+### Builtin type-registry authority follow-up
+
+Builtin type lookup and membership now tag their two raw provider declarations
+`unsafe(ffi)` and confine each to an always-inlined lexical owner. Lookup
+remains nullable and membership remains boolean: no nil, empty-text, or numeric
+substitution was introduced. Each query retains exactly one direct provider
+call and adds no hashing, signature check, map, cache, lock, allocation, copy,
+boxing, generic marshalling, or dynamic dispatch. Because nil/false still
+cannot distinguish ordinary absence from provider failure, the provider remains
+unsafe, unsigned, and unverified rather than being promoted as safe.
