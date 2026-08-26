@@ -15,7 +15,7 @@ use std.scv.maintenance.{scv_stats, scv_export_tree, scv_export_manifest, scv_im
 use std.scv.fast_import.{scv_export_git_fast_import, scv_import_git_fast_import}
 use std.scv.integrity.{scv_fsck}
 use std.scv.pack.{scv_pack_status, scv_pack_write, scv_pack_verify, scv_pack_import, scv_private_sync, scv_private_sync_verify, scv_private_sync_import}
-use std.scv.pack_v2.{scv_pack_write_v2, scv_pack_verify_v2, scv_pack_read_object}
+use std.scv.pack_v2.{scv_pack_write_v2, scv_pack_verify_v2, scv_pack_read_object, scv_pack_write_v2_reachable, scv_pack_verify_v2_reachable, scv_pack_v2_fuzz, scv_pack_v2_soak}
 use std.scv.public_remote.{scv_public_export, scv_public_export_verify, scv_public_push, scv_public_push_verify, scv_public_pull}
 use std.scv.network_remote.{scv_network_push, scv_network_push_chunked, scv_network_push_cas, scv_network_push_verify, scv_network_pull, scv_network_config_set_auth, scv_network_config_set_tls_no_verify, scv_network_pull_simulate_interrupt, scv_network_pull_discard}
 use std.scv.merge.{scv_merge_commits, scv_conflicts, scv_resolve_conflict}
@@ -38,6 +38,7 @@ fn scv_help() -> text:
     lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set|new-change|close-change|checkpoint|doctor|verify-backends|backend|rebuild-db|promote-verify|shadow-sync|gc|recover|file-history|commit-policy|event-record|event-commit|event-replay|events>")
     lines.push("Wave-3 D-01: scv cst-store <path>   # store the file CST in the P-05 root store (revision+ContentId)")
     lines.push("Wave-4 I-06: scv identity <link|unlink|split|merge|trace> ...   # logged identity corrections")
+    lines.push("Wave-5 B-06: scv pack-write-v2r | pack-verify-v2r | pack-fuzz-v2 <seed> <cases> | pack-soak-v2 <iterations>   # reachability-aware pack v2, delta fuzz, GC soak")
     lines.push("Wave-4 B-05: scv shadow-write <enable --dest <dir> [--git <dir>]|sync|status>   # continuous native shadow write")
     lines.push("")
     lines.push("Shared log options:")
@@ -315,6 +316,18 @@ fn main() -> i64:
         case "pack-verify-v2":
             val pack_id_v2 = if args.len() >= 2: args[1] else: ""
             return scv_cli_result(scv_pack_verify_v2(root, pack_id_v2))
+        case "pack-write-v2r":
+            return scv_cli_result(scv_pack_write_v2_reachable(root))
+        case "pack-verify-v2r":
+            val pack_id_v2r = if args.len() >= 2: args[1] else: ""
+            return scv_cli_result(scv_pack_verify_v2_reachable(root, pack_id_v2r))
+        case "pack-fuzz-v2":
+            val fuzz_seed = if args.len() >= 2: (args[1].to_i64() ?? 1) else: 1
+            val fuzz_cases = if args.len() >= 3: (args[2].to_i64() ?? 32) else: 32
+            return scv_cli_result(scv_pack_v2_fuzz(root, fuzz_seed, fuzz_cases))
+        case "pack-soak-v2":
+            val soak_iters = if args.len() >= 2: (args[1].to_i64() ?? 50) else: 50
+            return scv_cli_result(scv_pack_v2_soak(root, soak_iters))
         case "pack-read-object":
             if args.len() < 3:
                 print "ERROR pack-read-object requires kind and object-id"
