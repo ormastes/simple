@@ -15,7 +15,8 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 scan_root=${SFFI_SCAN_ROOT:-$root}
-out=${1:-/dev/stdout}
+requested_out=${1:-/dev/stdout}
+out=$requested_out
 symbols_out=${2:-}
 if [ -z "$symbols_out" ] && [ "$out" != "/dev/stdout" ]; then
     symbols_out=${out%.tsv}.symbols.tsv
@@ -29,6 +30,14 @@ else
 fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
+
+# Later aggregation must read a regular file.  Reading `/dev/stdout` after
+# writing the ledger makes a default invocation consume its own pipe forever.
+# Keep the public default (TSV on stdout), but spool privately until all
+# fail-closed summaries have completed.
+if [ "$requested_out" = "/dev/stdout" ]; then
+    out="$work/sffi-contract-inventory.tsv"
+fi
 
 # Optional cryptographic admission jobs. The inventory never trusts a saved
 # receipt: each row names the nine original inputs and is re-admitted into this
@@ -442,4 +451,8 @@ if [ -n "$symbols_out" ]; then
         echo "SFFI contract inventory: FAIL source_variants=$source_signature_variants/$max_source_signature_variants migration=$migration_required/$max_migration_required" >&2
         exit 1
     fi
+fi
+
+if [ "$requested_out" = "/dev/stdout" ]; then
+    cat "$out"
 fi

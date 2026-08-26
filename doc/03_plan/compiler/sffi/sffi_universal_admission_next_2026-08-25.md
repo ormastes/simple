@@ -695,3 +695,16 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   guard that rejects raw CUDA externs/calls returning to that module.
 - [ ] Migrate any future engine2d CUDA execution through the existing typed
   CUDA owner with versioned ABI/evidence admission, never this cache module.
+
+### Serial raw-owner consolidation
+
+- [x] Delete the unused app-level serial raw declaration copy and retain one
+  canonical no-GC serial owner.
+- [x] Mark all seven retained raw serial declarations `unsafe(ffi)` and route
+  dedicated-hardware transport through its typed `SerialPort` façade.
+- [x] Remove the providerless availability call by returning a typed error;
+  add an authority guard and a no-hardware fail-closed unit spec.
+- [x] Fix default-stdout inventory spooling so full census aggregation cannot
+  read from its own stdout pipe.
+- [ ] Define a versioned serial status/out ABI, validate text/handle ownership,
+  and bind C/Rust provider artifacts to signed admission evidence.

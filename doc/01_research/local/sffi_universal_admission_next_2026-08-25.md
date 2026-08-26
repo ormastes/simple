@@ -6356,3 +6356,22 @@ and the providerless guard confirms no raw CUDA extern/call can return. The
 flat four-slot layout, O(1) lookup, and allocation behavior are unchanged;
 the deleted SFFI call paths reduce code and runtime risk. This does not verify
 or sign the still-active typed CUDA providers.
+
+### Serial owner consolidation and inventory repair (2026-08-26)
+
+The prior serial estate had three raw declaration owners.  The app and
+bare-metal copies used `i32` widths that disagreed with the canonical `i64`
+runtime ABI; they also exposed baud/parity/data-bit/stop-bit/availability calls
+for which no admitted provider was observed.  The unused app copy is removed.
+`std.nogc_sync_mut.io.serial_sffi` is the one raw owner, with seven explicit
+`unsafe(ffi)` declarations.  The dedicated-hardware transport uses its typed
+`SerialPort` façade, so it no longer redeclares or directly invokes raw serial
+symbols.  The unsupported availability request now returns a typed `Err`
+without issuing a foreign call.
+
+This preserves the serial I/O complexity: one façade call remains per physical
+I/O operation; no polling loop, buffer copy, lookup, or allocation was added.
+The inventory tool's default stdout mode also now spools the TSV privately
+before aggregation, fixing its former self-pipe hang.  Neither change signs or
+verifies the runtime serial provider; it remains unsafe, unsigned, and
+unverified.

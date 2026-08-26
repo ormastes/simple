@@ -2185,3 +2185,22 @@ four-slot cache/rejection bookkeeping, covered by the same 2/2 spec before and
 after the change; source check and the providerless guard pass. No hot-path
 work was added. This removes a false CUDA execution surface, not the need for
 signed and typed contracts on active CUDA providers.
+
+### Serial raw-owner consolidation and inventory stdout repair (2026-08-26)
+
+The serial family previously had three raw declaration owners, with app and
+bare-metal signatures that narrowed arguments relative to the canonical `i64`
+ABI and included unadmitted configuration/availability symbols.  The unused
+app owner is removed.  The seven canonical no-GC raw declarations are now
+explicitly `unsafe(ffi)`; dedicated hardware calls the checked `SerialPort`
+façade rather than raw serial functions.  Its unavailable availability query
+fails closed as `Err` without a provider call.  The authority audit and source
+checks pass, while the no-hardware unit spec covers that error path.
+
+The SFFI inventory's default stdout path now spools the ledger to its private
+temporary file before its aggregation passes.  This fixes the concrete
+`/dev/stdout` self-read hang and preserves output/schema semantics.  A fresh
+source-only census reports 12,816 SFFI rows, 11,192 `rt_*` rows, 1,514
+incompletely unsafe-tagged `rt_*` symbols, and zero signed-admitted symbols.
+The source-only mode deliberately has no observed provider-language evidence;
+the serial provider remains unsafe, unsigned, and unverified.
