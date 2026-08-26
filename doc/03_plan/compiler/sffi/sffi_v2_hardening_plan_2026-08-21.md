@@ -1905,3 +1905,20 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Next replace no-match/provider-failure ambiguity and feature-gated stub
   outputs with typed results and signed exact-artifact admission.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 compiler minimal-runtime unsafe-surface restoration
+
+- Restored explicit `unsafe(ffi)` authority on all 42 raw declarations and all
+  42 direct wrappers after a snapshot regressed the implementation while
+  retaining its authority scripts.
+- Preserved the newer bounded no-follow file-read API and included it in the
+  same one-declaration/one-wrapper policy.
+- Preserved nullable environment lookup and deep-array release results rather
+  than fabricating integer zero.
+- Retained one direct provider operation per wrapper; no allocation, copy,
+  lookup, hash, branch, generic dispatch, or registry work was added.
+- Provider closure remains incomplete (15 both lanes, 3 native-only, 6
+  interpreter-only, 18 neither); resolve or remove the 27 asymmetric/missing
+  contracts before safe promotion, then require signed exact-artifact
+  admission.
+- Status: source-reviewed, deliberately unverified and unsigned.

@@ -1289,3 +1289,18 @@ wrapper hop. Regex false/empty results can still conflate no-match with provider
 failure, and a feature-gated Rust stub provider exists, so the retained family
 remains unsafe, unsigned, and unverified. Source-reviewed only; checks were not
 executed.
+
+## 2026-08-26 compiler minimal-runtime unsafe-surface restoration
+
+The compiler's minimal runtime facade again marks all 42 raw declarations and
+all 42 smallest-scope wrappers `unsafe(ffi)`, including the newer bounded
+no-follow file reader. A later snapshot had restored the pre-annotation source
+while leaving its two authority policies in place; this change reconciles the
+implementation with those policies without adding intermediary dispatch.
+Nullable environment lookup and deep-array release outcomes remain optional
+instead of being collapsed to integer zero. Each wrapper still performs one
+direct provider operation, so there is no new allocation, copy, lookup, hash,
+branch, or per-call registry work. Only 15 symbols have both native-codegen and
+interpreter registration; 3 are native-only, 6 interpreter-only, and 18 have
+neither. The facade therefore remains explicitly unsafe, unsigned, and
+unverified. Source-reviewed only; checks were not executed.
