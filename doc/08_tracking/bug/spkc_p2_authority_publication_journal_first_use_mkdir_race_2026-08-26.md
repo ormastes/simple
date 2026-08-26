@@ -4,7 +4,7 @@ Status: OPEN (P1)
 
 ## Defect
 
-`AuthorityPublicationJournalV1` is **NON-ADMITTED**. Three release-blocking
+`AuthorityPublicationJournalV1` is **NON-ADMITTED**. Four release-blocking
 defects remain in one durability/authority boundary:
 
 1. On a fresh ledger, two independent publisher processes can both observe
@@ -17,6 +17,12 @@ defects remain in one durability/authority boundary:
 3. A reclaimer using `O_EXCL`/hardlink ownership must not let an `EEXIST`
    contender unlink another live reclaimer's claim. Removal requires the exact
    observed claim identity and ownership revalidation, not a path-only retry.
+4. Receipt liveness must reject a PID that is not a positive safe integer
+   before any call to `process.kill`. In particular, `process.kill(0, 0)`
+   probes the caller's process group and can incorrectly certify an arbitrary
+   lock as live. A corrupted receipt must fail closed into the exact durable
+   `O_EXCL` reclaim protocol (or a reported unrecoverable state), not loop for
+   an arbitrary 1,000 attempts or treat malformed PID data as authority.
 
 These are authority, correctness, and availability failures. Weakening
 ownership, canonical verification, or durability to retry them is prohibited.
@@ -35,6 +41,14 @@ must win a durable claim, and the losing `EEXIST` contender must preserve that
 live claim exactly. An in-process race, pre-created ledger, timer-only probe,
 or a parser that repairs malformed state is not a reproducer.
 
+Also persist or arrange a stale receipt with each of `pid: 0`, `pid: -1`, a
+non-integer numeric PID, and a PID above `Number.MAX_SAFE_INTEGER`. Instrument
+or substitute the liveness seam to prove no case invokes `process.kill`.
+For a corrupted owner receipt, run two independent reclaimers under the normal
+`O_EXCL` protocol and prove exactly one claimant can acquire ownership without
+an arbitrary retry-bound timeout; the loser must preserve the winner's durable
+claim.
+
 ## Safety invariant
 
 A visible lock must have a durable owner receipt. Stale recovery may remove
@@ -48,13 +62,24 @@ verify before `_open` constructs a projection. A reclaimer claim is likewise a
 durable identity, not merely a pathname; an `EEXIST` loser may observe and
 report it but may not delete it without exact ownership revalidation.
 
+PID liveness is advisory only after receipt parsing passes: valid means an
+integer in `[1, Number.MAX_SAFE_INTEGER]`. Every other PID is invalid and must
+be denied before signaling. Corruption is not evidence that a lock is live,
+and it is not permission for path-blind deletion; recovery must retain the
+same exact-identity, exclusive-claim protocol and terminate with a durable
+outcome rather than a fixed retry-count timeout.
+
 ## Accepted prior evidence and boundary
 
 P1 is accepted for closure-branded target inventory/permit selection and
-canonical replay-envelope normalization. Earlier P2 focused/package tests,
-independent process-race coverage, and SIGKILL/restart probes remain useful but
-non-admission evidence because all three defects remain. No P2 source repair
-is authorized in the capped session.
+canonical replay-envelope normalization. Cycle 3 also produced useful
+non-admission evidence: the journal constructor/owner is lexical-private,
+the absent-root process test sequences the genuine parent-creation path, and
+independent processes deny replay divergence. Those positives do not admit P2:
+the durable lock/reclaimer boundary still has all four defects above. Earlier
+P2 focused/package tests, independent process-race coverage, and
+SIGKILL/restart probes remain non-admission evidence. No P2 source repair is
+authorized in the capped session.
 
 ## Fresh-session entry point
 
@@ -66,10 +91,11 @@ node --test test/unit/target_inventory_store_test.js
 
 The fresh lane must first add all combined reproducers: barrier-based
 fresh-ledger creation, v1-to-v2/extra-field closed-schema rejection before
-projection, and two-reclaimer `EEXIST` claim preservation. Then run the
-combined reproducers once after the repair and submit the exact-scope diff for
-an independent highest-capability review. A passing focused command alone is
-not admission evidence.
+projection, two-reclaimer `EEXIST` claim preservation, and PID-validation plus
+corrupted-receipt exact-`O_EXCL` recovery. Then run the combined reproducers
+once after the repair and submit the exact-scope diff for an independent
+highest-capability review. A passing focused command alone is not admission
+evidence.
 
 ## Minimal affected files
 
@@ -97,8 +123,13 @@ not admission evidence.
    `O_EXCL`/hardlink claim, the losing `EEXIST` contender neither unlinks nor
    replaces that live claim; recovery remains bound to exact claim identity and
    ownership.
+6. Liveness rejects PID `0`, negative, fractional, non-numeric, and
+   non-safe-integer values before any `process.kill` call. A corrupted receipt
+   enters the exact durable exclusive-claim outcome path: concurrent
+   reclaimers have one owner, the loser preserves it, and neither path uses an
+   arbitrary 1,000-attempt timeout.
 
-No source is admitted until one fresh lane passes all five cases together,
+No source is admitted until one fresh lane passes all six cases together,
 including the earlier SIGKILL/restart recovery case, and an independent
 highest-capability review accepts the exact-scope diff.
 
