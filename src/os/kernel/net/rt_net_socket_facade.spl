@@ -22,17 +22,23 @@ extern fn rt_boot_tcp_send_ssh_banner(fd: i64) -> i64
 extern fn rt_boot_tcp_read_bytes(max_len: i64) -> [u8]
 @unsafe(reason: "raw boot/runtime network support ABI", capabilities: [ffi])
 extern fn rt_boot_tcp_read_bytes_for_fd(fd: i64, max_len: i64) -> [u8]
-@unsafe(reason: "raw boot/runtime network support ABI", capabilities: [ffi])
+@cfg(riscv64)
+@unsafe(reason: "RV64-only opaque boot TCP registry ABI", capabilities: [ffi])
 extern fn rt_boot_tcp_registry_bind(addr: text) -> i64
-@unsafe(reason: "raw boot/runtime network support ABI", capabilities: [ffi])
+@cfg(riscv64)
+@unsafe(reason: "RV64-only opaque boot TCP registry ABI", capabilities: [ffi])
 extern fn rt_boot_tcp_registry_bind_port(port: i64) -> i64
-@unsafe(reason: "raw boot/runtime network support ABI", capabilities: [ffi])
+@cfg(riscv64)
+@unsafe(reason: "RV64-only opaque boot TCP registry ABI", capabilities: [ffi])
 extern fn rt_boot_tcp_registry_accept_timeout(listener_fd: i64, ms: i64) -> i64
-@unsafe(reason: "raw boot/runtime network support ABI", capabilities: [ffi])
+@cfg(riscv64)
+@unsafe(reason: "RV64-only opaque boot TCP registry ABI", capabilities: [ffi])
 extern fn rt_boot_tcp_registry_write_bytes(client_fd: i64, data: [u8]) -> i64
-@unsafe(reason: "raw boot/runtime network support ABI", capabilities: [ffi])
+@cfg(riscv64)
+@unsafe(reason: "RV64-only opaque boot TCP registry ABI", capabilities: [ffi])
 extern fn rt_boot_tcp_registry_read_bytes(client_fd: i64, max_len: i64) -> [u8]
-@unsafe(reason: "raw boot/runtime network support ABI", capabilities: [ffi])
+@cfg(riscv64)
+@unsafe(reason: "RV64-only opaque boot TCP registry ABI", capabilities: [ffi])
 extern fn rt_boot_tcp_registry_close(fd: i64) -> i64
 @unsafe(reason: "raw boot/runtime network support ABI", capabilities: [ffi])
 extern fn rt_boot_tcp_read_ssh_plain_packet_payload(fd: i64) -> [u8]
@@ -48,7 +54,9 @@ extern fn rt_thread_sleep(ms: i64)
 struct RtNetSocketEntry:
     fd: i64
     port: u16
-    os_fd: i32
+    # Opaque RV64 registry handles are i64 generation-tagged values.  Keep
+    # them lossless in the façade entry rather than narrowing to an OS fd.
+    os_fd: i64
     listening: bool
 
 var _rt_net_sockets: [RtNetSocketEntry] = []
@@ -56,8 +64,6 @@ var _rt_net_next_fd: i64 = 1000
 var _rt_net_port_inited: bool = false
 var _rt_net_last_plain_payload: [u8] = []
 var _rt_net_last_plain_payload_len_value: u64 = 0
-var _rt_net_bound_listener_fd: i64 = -1
-var _rt_net_bound_listener_port: u16 = 0u16
 
 val RT_NET_SSH_ENCRYPTED_BODY_MAX: u32 = 35000u32
 val RT_NET_SSH_GCM_TAG_BYTES: u64 = 16u64
@@ -106,6 +112,69 @@ fn _rt_net_exact_write_result(raw: i64, expected: u64) -> i64:
 fn rt_net_socket_facade_link_anchor() -> bool:
     true
 
+# Keep the RV64 registry private to this façade.  The public rt_net_* ABI
+# remains unchanged, while each façade entry retains the registry descriptor
+# belonging to its own listener or accepted client.
+@cfg(riscv64)
+fn _rt_net_transport_bind(addr: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_registry_bind(addr)
+
+@cfg(not(riscv64))
+fn _rt_net_transport_bind(addr: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_bind(addr)
+
+@cfg(riscv64)
+fn _rt_net_transport_bind_port(port: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_registry_bind_port(port)
+
+@cfg(not(riscv64))
+fn _rt_net_transport_bind_port(port: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_bind_port(port)
+
+@cfg(riscv64)
+fn _rt_net_transport_accept(listener_fd: i64, ms: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_registry_accept_timeout(listener_fd, ms)
+
+@cfg(not(riscv64))
+fn _rt_net_transport_accept(listener_fd: i64, ms: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_accept_timeout(listener_fd, ms)
+
+@cfg(riscv64)
+fn _rt_net_transport_write(client_fd: i64, data: [u8]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_registry_write_bytes(client_fd, data)
+
+@cfg(not(riscv64))
+fn _rt_net_transport_write(client_fd: i64, data: [u8]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_write_bytes(client_fd, data)
+
+@cfg(riscv64)
+fn _rt_net_transport_read(client_fd: i64, max_len: i64) -> [u8]:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_registry_read_bytes(client_fd, max_len)
+
+@cfg(not(riscv64))
+fn _rt_net_transport_read(client_fd: i64, max_len: i64) -> [u8]:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_read_bytes_for_fd(client_fd, max_len)
+
+@cfg(riscv64)
+fn _rt_net_transport_close(fd: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_registry_close(fd)
+
+@cfg(not(riscv64))
+fn _rt_net_transport_close(fd: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_boot_tcp_close(fd)
+
 fn _rt_net_bind_and_listen_impl(sock_fd: i64, port_num: i64) -> i64:
     if port_num < 0 or port_num > 65535:
         return -1
@@ -117,23 +186,20 @@ fn _rt_net_bind_and_listen_impl(sock_fd: i64, port_num: i64) -> i64:
             return -1
     if not _rt_net_ensure_ready():
         return -1
-    _rt_net_bound_listener_fd = sock_fd
-    _rt_net_bound_listener_port = port_num.to_u16()
     var os_fd = current.os_fd
     if os_fd < 0:
         val bind_addr =
-            if _rt_net_bound_listener_port == 2222u16:
+            if port_num == 2222:
                 "0.0.0.0:2222"
             else:
                 "0.0.0.0:0"
-        val raw_os_fd = unsafe(capabilities: [ffi]):
-            rt_boot_tcp_bind(bind_addr)
-        if raw_os_fd < 0 or raw_os_fd > 2147483647i64:
+        val raw_os_fd = _rt_net_transport_bind(bind_addr)
+        if raw_os_fd < 0:
             return -1
-        os_fd = raw_os_fd.to_i32()
+        os_fd = raw_os_fd
     val updated = RtNetSocketEntry(
         fd: current.fd,
-        port: _rt_net_bound_listener_port,
+        port: port_num.to_u16(),
         os_fd: os_fd,
         listening: true
     )
@@ -215,8 +281,7 @@ fn _rt_net_read_exact(os_fd: i64, want: u64) -> [u8]:
     var out: [u8] = []
     var empty_reads: u64 = 0
     while out.len() < want:
-        val chunk = unsafe(capabilities: [ffi]):
-            rt_boot_tcp_read_bytes_for_fd(os_fd, (want - out.len()).to_i64())
+        val chunk = _rt_net_transport_read(os_fd, (want - out.len()).to_i64())
         if chunk.len() > want - out.len():
             return []
         if chunk.len() == 0:
@@ -273,8 +338,17 @@ fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64:
     val entry = _rt_net_find(sock_fd)
     if entry == nil:
         return -1
-    _rt_net_bound_listener_fd = sock_fd
-    _rt_net_bound_listener_port = port_num.to_u16()
+    val current = match entry:
+        Some(found):
+            found
+        nil:
+            return -1
+    _rt_net_set(RtNetSocketEntry(
+        fd: current.fd,
+        port: port_num.to_u16(),
+        os_fd: current.os_fd,
+        listening: current.listening
+    ))
     0
 
 @export("C", name: "rt_net_listen")
@@ -287,18 +361,13 @@ fn rt_net_listen(sock_fd: i64, backlog: i64) -> i64:
             return -1
     if not _rt_net_ensure_ready():
         return -1
-    val listen_port =
-        if _rt_net_bound_listener_fd == sock_fd and _rt_net_bound_listener_port != 0u16:
-            _rt_net_bound_listener_port
-        else:
-            current.port
+    val listen_port = current.port
     var os_fd = current.os_fd
     if os_fd < 0:
-        val raw_os_fd = unsafe(capabilities: [ffi]):
-            rt_boot_tcp_bind_port(listen_port.to_i64())
-        if raw_os_fd < 0 or raw_os_fd > 2147483647i64:
+        val raw_os_fd = _rt_net_transport_bind_port(listen_port.to_i64())
+        if raw_os_fd < 0:
             return -1
-        os_fd = raw_os_fd.to_i32()
+        os_fd = raw_os_fd
     val updated = RtNetSocketEntry(
         fd: current.fd,
         port: listen_port,
@@ -320,13 +389,12 @@ fn rt_net_accept(sock_fd: i64) -> i64:
         return -1
     if not _rt_net_ensure_ready():
         return -1
-    val client_os_fd = unsafe(capabilities: [ffi]):
-        rt_boot_tcp_accept_timeout(current.os_fd.to_i64(), 1)
-    if client_os_fd < 0 or client_os_fd > 2147483647i64:
+    val client_os_fd = _rt_net_transport_accept(current.os_fd, 1)
+    if client_os_fd < 0:
         return -1
     val fd = _rt_net_next_fd
     _rt_net_next_fd = _rt_net_next_fd + 1
-    _rt_net_sockets = _rt_net_sockets.push(RtNetSocketEntry(fd: fd, port: current.port, os_fd: client_os_fd.to_i32(), listening: false))
+    _rt_net_sockets = _rt_net_sockets.push(RtNetSocketEntry(fd: fd, port: current.port, os_fd: client_os_fd, listening: false))
     fd
 
 @export("C", name: "rt_net_close")
@@ -341,8 +409,7 @@ fn rt_net_close(sock_fd: i64) -> i64:
                     return rt_boot_tcp_close(sock_fd)
             return -1
     if current.os_fd >= 0:
-        val closed = unsafe(capabilities: [ffi]):
-            rt_boot_tcp_close(current.os_fd.to_i64())
+        val closed = _rt_net_transport_close(current.os_fd)
         if closed != 0:
             return -1
     _rt_net_remove(sock_fd)
@@ -366,8 +433,7 @@ fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64:
         return -1
     if not _rt_net_ensure_ready():
         return -1
-    val rc = unsafe(capabilities: [ffi]):
-        rt_boot_tcp_write_bytes(current.os_fd.to_i64(), data)
+    val rc = _rt_net_transport_write(current.os_fd, data)
     _rt_net_exact_write_result(rc, data.len())
 
 @export("C", name: "rt_net_send_ssh_banner")
@@ -387,7 +453,7 @@ fn rt_net_send_ssh_banner(sock_fd: i64) -> i64:
     if not _rt_net_ensure_ready():
         return -1
     val rc = unsafe(capabilities: [ffi]):
-        rt_boot_tcp_send_ssh_banner(current.os_fd.to_i64())
+        rt_boot_tcp_send_ssh_banner(current.os_fd)
     _rt_net_exact_write_result(rc, 22u64)
 
 @export("C", name: "rt_net_recv_bytes")
@@ -410,8 +476,7 @@ fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]:
         return []
     if not _rt_net_ensure_ready():
         return []
-    val bytes = unsafe(capabilities: [ffi]):
-        rt_boot_tcp_read_bytes_for_fd(current.os_fd.to_i64(), max_len)
+    val bytes = _rt_net_transport_read(current.os_fd, max_len)
     if bytes.len() > max_len.to_u64():
         return []
     bytes
@@ -440,8 +505,7 @@ fn rt_net_recv_version_text(sock_fd: i64) -> text:
     # overlong line from a valid line that exactly reaches the limit, without
     # allowing an unauthenticated peer to grow this buffer without bound.
     while line.len() < 256u64:
-        val chunk = unsafe(capabilities: [ffi]):
-            rt_boot_tcp_read_bytes_for_fd(current.os_fd.to_i64(), 1)
+        val chunk = _rt_net_transport_read(current.os_fd, 1)
         if chunk.len() > 1u64:
             return ""
         if chunk.len() == 0:
@@ -485,7 +549,7 @@ fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]:
         return []
     if not _rt_net_ensure_ready():
         return []
-    val os_fd = socket_entry.os_fd.to_i64()
+    val os_fd = socket_entry.os_fd
     val header = _rt_net_read_exact(os_fd, 5u64)
     if header.len() != 5:
         return []
@@ -541,7 +605,7 @@ fn rt_net_recv_ssh_encrypted_packet(sock_fd: i64) -> [u8]:
                     return []
             if not _rt_net_ensure_ready():
                 return []
-            RtNetSocketReadOwner(socket_fd: socket_entry.fd, os_fd: socket_entry.os_fd.to_i64())
+            RtNetSocketReadOwner(socket_fd: socket_entry.fd, os_fd: socket_entry.os_fd)
     val resolved = rt_net_resolve_socket_read_owner(sock_fd, owner)
     if resolved == nil:
         return []

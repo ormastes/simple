@@ -2,6 +2,8 @@
 use std.spipe.*
 use os.kernel.net.rt_net_socket_facade.{RtNetSocketReadOwner, rt_net_resolve_socket_read_owner, rt_net_ssh_encrypted_read_plan}
 
+extern fn rt_file_read_text(path: text) -> text
+
 describe "SSH encrypted socket read admission":
     it "admits the minimum and maximum body before reading the remainder":
         val minimum = rt_net_ssh_encrypted_read_plan(2u32)
@@ -29,3 +31,23 @@ describe "SSH encrypted socket read admission":
         expect(rt_net_resolve_socket_read_owner(1002, first)).to_be_nil()
         expect(rt_net_resolve_socket_read_owner(1002, second).unwrap()).to_equal(201)
         expect(rt_net_resolve_socket_read_owner(1001, RtNetSocketReadOwner(socket_fd: 1001, os_fd: -1))).to_be_nil()
+
+    it "keeps RV64 registry ownership inside the socket facade":
+        """The opaque registry is RV64-only.  Web and dbd share the façade
+        contract, but no server receives a process-wide registry alias."""
+        val facade = rt_file_read_text("src/os/kernel/net/rt_net_socket_facade.spl")
+        val dbd = rt_file_read_text("src/os/apps/dbd/dbd.spl")
+        val web = rt_file_read_text("src/os/kernel/boot/http_baremetal.spl")
+
+        expect(facade).to_contain("@cfg(riscv64)\n@unsafe(reason: \"RV64-only opaque boot TCP registry ABI\"")
+        expect(facade).to_contain("rt_boot_tcp_registry_bind_port(port)")
+        expect(facade).to_contain("rt_boot_tcp_registry_accept_timeout(listener_fd, ms)")
+        expect(facade).to_contain("rt_boot_tcp_registry_write_bytes(client_fd, data)")
+        expect(facade).to_contain("rt_boot_tcp_registry_read_bytes(client_fd, max_len)")
+        expect(facade).to_contain("rt_boot_tcp_registry_close(fd)")
+        expect(facade.contains("_rt_net_bound_listener_fd")).to_be(false)
+        expect(facade.contains("_rt_net_bound_listener_port")).to_be(false)
+        expect(facade).to_contain("port: port_num.to_u16()")
+        expect(dbd).to_contain("use os.kernel.net.rt_net_socket_facade.{")
+        expect(dbd.contains("extern fn rt_net_socket(proto: i64)")).to_be(false)
+        expect(web).to_contain("use os.kernel.net.rt_net_socket_facade.{")
