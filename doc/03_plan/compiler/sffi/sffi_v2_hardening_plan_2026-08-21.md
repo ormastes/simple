@@ -1197,3 +1197,11 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Preserve both conditional MinGW environment lookups and all platform
   process-probe behavior.
 - [x] Add a static authority and call-count ratchet.
+
+### Completed SSA and AOP environment-authority slice
+
+- [x] Remove both module-local raw environment declarations and calls.
+- [x] Route SSA debug and AOP configuration reads through canonical nullable
+  `env_get_opt`.
+- [x] Preserve two mutation-visible SSA debug checks and four AOP reads.
+- [x] Add no cache or hot-path work and add a static call-count ratchet.

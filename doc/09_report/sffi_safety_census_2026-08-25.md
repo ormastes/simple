@@ -517,3 +517,12 @@ MinGW detection retains exactly the existing `MSYSTEM` lookup followed, when
 needed, by `SIMPLE_LINKER_FLAVOR`; platform process probes are unchanged.  No
 new allocation, copy, cache, lock, hash, boxing, subprocess, or dispatch was
 introduced.
+
+### SSA and AOP environment-authority follow-up
+
+Variable-reassignment SSA and driver AOP weaving no longer declare or call raw
+`rt_env_get`; both use canonical nullable `env_get_opt`.  SSA deliberately
+retains its two mutation-visible debug checks on the multi-block materialization
+path, while AOP retains two boolean and two level reads per weave.  No caching,
+allocation, copy, lock, hash, boxing, extra provider call, or dispatch table was
+introduced.
