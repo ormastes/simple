@@ -1215,3 +1215,21 @@ facade. All 20 provider symbols remain unregistered in both seed registry lanes,
 so the family is explicitly unsafe, unavailable, unsigned, and unverified—not
 silently safe because duplication was removed. Source-reviewed only; checks
 were not executed.
+
+## 2026-08-26 volatile/MMIO duplicate-boundary removal
+
+`app.io.volatile_ops` is now an export-only facade over the canonical
+Pure-Simple no-GC owner instead of a second eleven-declaration implementation.
+Its three native-required u64 read/write/full-barrier entrypoints moved to that
+owner and confine exactly one provider call each inside lexical `unsafe(ffi)`
+(`raw_ptr` where applicable). The app facade therefore adds no runtime call,
+branch, allocation, lookup, copy, or dispatch, and the host audio/GPU daemon
+paths retain their direct native operation shape.
+
+This is deliberately not a safety promotion. The canonical generic API still
+contains eight untagged raw declarations and hardcoded false availability that
+fabricates zero reads/no-op writes and barriers through fallback functions.
+The new authority ratchet counts that debt instead of hiding it. Those generic
+operations require a capability-correct fail-closed migration across HAL/DMA
+consumers before they can be described as safe. Providers remain unsigned and
+unverified. Source-reviewed only; checks were not executed.

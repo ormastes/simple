@@ -1841,3 +1841,19 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Keep all 20 symbols unsafe/unavailable until real typed providers are
   registered, then require signed exact-artifact admission before promotion.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 volatile/MMIO boundary deduplication
+
+- Replaced the app-local eleven-declaration volatile/MMIO implementation with
+  an export-only facade over the canonical Pure-Simple no-GC owner.
+- Moved the three native-required u64 read/write/full-barrier helpers to the
+  canonical owner and tagged/confined their raw operations with `ffi` and
+  `raw_ptr` authority.
+- Preserved one direct provider operation for each host daemon call and added no
+  runtime branch, allocation, lookup, copy, hash, or dispatch.
+- Added a static ratchet that prevents a raw app boundary and explicitly counts
+  the remaining eight untagged declarations plus fabricated fallback behavior.
+- Next migrate HAL/DMA consumers to capability-correct fail-closed volatile
+  APIs, remove zero/no-op fallback providers, and keep signed admission off the
+  MMIO hot path.
+- Status: source-reviewed, deliberately unverified and unsigned.
