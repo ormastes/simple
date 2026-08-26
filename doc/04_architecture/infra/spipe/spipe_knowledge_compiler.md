@@ -1137,3 +1137,20 @@ architecture contract.
 The architecture dependency order is now provider-ABI repair, provider
 implementation/admission, then integrated pipeline admission. Wave 4 and AC-4
 remain open.
+
+### 17.8 Final-four provider ABI architecture handoff (2026-08-26)
+
+The fresh final-four repair narrowed the prior blockers but reached the third
+review/fix cycle with one unresolved representability conflict. After a
+reservation, a cursor-authority malfunction has the public result
+`internal_error`, while the closed tombstone enum cannot represent that value.
+The next fresh architecture pass must explicitly freeze either (a) a legal
+stored `interrupted` tombstone paired with public `internal_error`, or (b) an
+added `internal_error` tombstone member. No implicit coercion is admissible.
+
+The failed immutable snapshot
+`4c009a35f32be370cba5df6fcd142841165fcb57` is retained only at
+`/tmp/spkc-provider-abi-final4-b60RQD/repo`. The session landed no contract or
+product edits, ran no product tests, and pushed nothing. Its text remains
+non-authoritative. Wave 4, provider admission, AC-4, and pipeline admission
+remain open.

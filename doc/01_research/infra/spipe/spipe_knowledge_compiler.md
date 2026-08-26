@@ -2737,3 +2737,20 @@ text is authoritative.
 Wave 4 and AC-4 remain open. The integrated pipeline may consume the admitted
 rerank-evidence capsule only after a fresh provider-authority ABI repair and
 provider implementation pass independent admission.
+
+### 39.6 Final-four provider ABI handoff (2026-08-26)
+
+A fresh provider-ABI session narrowed the four blockers recorded in Section
+39.5 but ended `FAIL` at the mandatory three-cycle cap. It landed no contract
+or product edit, ran no product test, and pushed nothing. Its immutable failed
+snapshot is `4c009a35f32be370cba5df6fcd142841165fcb57` in the clean forensic
+worktree `/tmp/spkc-provider-abi-final4-b60RQD/repo`; its text is not
+authoritative and must not be copied into the canonical contract.
+
+One representability blocker remains. A public cursor-authority malfunction
+after reservation must return `internal_error`, but the exact tombstone enum
+does not contain `internal_error`. The next fresh session must choose and
+freeze one coherent representation: store the legal `interrupted` tombstone
+while returning public `internal_error`, or add and freeze an `internal_error`
+tombstone member. Wave 4, provider admission, AC-4, and the integrated pipeline
+remain open.

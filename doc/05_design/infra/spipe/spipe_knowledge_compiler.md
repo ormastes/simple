@@ -2263,3 +2263,20 @@ items, then implement and admit the provider. Only afterward may the pipeline
 integrate exact identity, excluded lexical results, graph results,
 complete-pool RRF v2, admitted rerank evidence, pair reranking/explanations,
 and the final user limit. Wave 4 and AC-4 remain open.
+
+### 17.10 Final-four implementation-readiness stop (2026-08-26)
+
+The fresh provider-ABI review narrowed the previous four blockers to one but
+finished `FAIL` after the mandatory third cycle. The unresolved state is
+representational: a cursor-authority malfunction occurring after reservation
+must return public `internal_error`, yet the exact tombstone enum has no
+`internal_error` member. Before product work resumes, a fresh design session
+must freeze either legal stored `interrupted` plus public `internal_error`, or
+an explicit new `internal_error` tombstone enum member, including its oracle
+expectations.
+
+No contract or product edit landed, no product test ran, and no push occurred.
+Snapshot `4c009a35f32be370cba5df6fcd142841165fcb57` in
+`/tmp/spkc-provider-abi-final4-b60RQD/repo` is failed forensic evidence only;
+do not copy its contract text. Provider implementation readiness, Wave 4,
+AC-4, and the integrated pipeline remain open.

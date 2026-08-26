@@ -964,3 +964,24 @@ normal/highest-capability model. AC-4 remains open.
 
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
+
+### 10.17 Final-four provider ABI stop and next-session choice (2026-08-26)
+
+1. **Provider ABI — still stopped.** A fresh session narrowed the earlier four
+   blockers but exhausted all three review/fix cycles with one remaining
+   representability blocker: cursor-authority malfunction after reservation
+   returns public `internal_error`, while the exact tombstone enum lacks that
+   member.
+2. **Next fresh session — freeze one branch.** Either store legal
+   `interrupted` while returning public `internal_error`, or add and freeze an
+   `internal_error` tombstone member. Specify the chosen stored/public mapping
+   and independent oracle before implementation begins.
+3. **Evidence — forensic only.** Failed immutable snapshot
+   `4c009a35f32be370cba5df6fcd142841165fcb57` is retained in clean worktree
+   `/tmp/spkc-provider-abi-final4-b60RQD/repo`. No contract/product edit landed,
+   no product test ran, and nothing was pushed. Do not copy its contract text.
+4. **Downstream lanes — waiting.** Provider admission, Wave 4, AC-4, and the
+   integrated pipeline remain open.
+
+Merge owner remains `/root`; independent normal/highest-capability review is
+still required for the next frozen contract and implementation.
