@@ -1359,3 +1359,10 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add no loop work, cache, allocation, hash, lock, or extra dispatch.
 - [x] Add a static authority and call-count ratchet.
 - [x] Record the canonical provider as raw, unsigned, and unverified.
+
+### Completed MIR literal-lowering dead-authority slice
+
+- [x] Remove unused raw dictionary, environment, and discriminant declarations.
+- [x] Introduce no replacement wrapper or duplicate authority.
+- [x] Preserve generated MIR, loops, dispatch, calls, and allocations exactly.
+- [x] Add a static no-raw-authority ratchet.

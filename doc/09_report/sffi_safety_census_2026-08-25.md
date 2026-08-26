@@ -719,3 +719,12 @@ into a loop and no cache, allocation, copy, hash, signature check, lock, lookup,
 boxing, generic marshalling, or extra dispatch was added. The canonical owner
 still represents a raw, unsigned, unverified provider; this slice removes
 duplicate authority rather than promoting environment input as verified.
+
+### MIR literal-lowering dead-authority follow-up
+
+MIR literal lowering removed three unused raw dictionary, environment, and
+tagged-discriminant declarations. The module had no call sites for any of them,
+so no wrapper or replacement authority was introduced. Generated MIR, loop and
+dispatch complexity, call counts, branches, allocations, copies, caches, locks,
+hashes, lookups, boxing, and marshalling are unchanged; the module now exposes
+no raw `rt_*` declaration at all.
