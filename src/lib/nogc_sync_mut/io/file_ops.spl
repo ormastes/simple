@@ -3,7 +3,7 @@
 
 # Extern fn declarations (runtime resolves at file level)
 
-use std.io_runtime.{read_file_text, read_file_text_result, file_read_result, file_delete, file_copy}
+use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_copy}
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_mmap_read_text(path: text) -> text
 @unsafe(reason: "raw nullable mmap byte-array ABI; nil means mapping or read failure", capabilities: [ffi])
@@ -23,6 +23,10 @@ extern fn rt_msync(addr: i64, size: i64) -> bool
 use std.io_runtime.{process_run}
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
+@unsafe(reason: "opens one no-follow file descriptor, verifies regular-file metadata, and returns at most the caller-owned bound", capabilities: [ffi])
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+@unsafe(reason: "requests durable synchronization of an opened file", capabilities: [ffi])
+extern fn rt_file_fsync(path: text) -> bool
 # extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
 extern fn rt_file_atomic_write(path: text, content: text) -> bool
 extern fn rt_file_size(path: text) -> i64
@@ -70,21 +74,23 @@ fn file_is_regular_no_follow(path: text) -> bool:
     # artifacts; replace with no-follow open/fstat/hash-on-fd for hostile races.
     rt_file_is_regular_no_follow(path)
 
+fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<text, text>:
+    if max_bytes < 0:
+        return Err("bounded file read requires a non-negative limit")
+    var content: text? = nil
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_regular_no_follow_bounded(path, max_bytes)
+    if content.?:
+        Ok(content.unwrap())
+    else:
+        Err("regular no-follow bounded file read failed: {path}")
+
 fn file_size_raw(path: text) -> i64:
     rt_file_size(path)
 
-# Do NOT forward to `read_file_text`: it lived in std.io_runtime and forwarded
-# back to `file_read`, which has a second co-compiled definition (this one), so
-# last-definition-wins dispatch closed the pair into unbounded mutual recursion
-# and aborted the process with a native stack overflow on the FIRST read of any
-# file. std.io_runtime.read_file_text no longer routes through `file_read`; this
-# side is pinned to the uniquely-named `file_read_result` as well so neither
-# half of the pair can re-close the cycle.
-# doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md
 fn file_read(path: text) -> text:
-    match file_read_result(path):
-        case Ok(content): content
-        case Err(_): ""
+    # rt_file_read_text returns Option in bootstrap runtime — unwrap with ??
+    read_file_text(path)
 
 # reason positional io file_ops API
 fn file_write(path: text, content: text) -> bool:
@@ -146,14 +152,8 @@ fn file_unlock(handle: i64) -> bool:
         released = rt_file_unlock(handle)
     released
 
-# Call the extern directly, not the sibling forwarder: `file_size_raw` also has
-# a definition in std.io_runtime that forwards back to `file_size`, and both
-# names are duplicated across co-compiled modules, so the pair can close into
-# infinite mutual recursion under last-definition-wins dispatch. Same defect
-# class as file_read/read_file_text -- see
-# doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md
 fn file_size(path: text) -> i64:
-    rt_file_size(path)
+    file_size_raw(path)
 
 # --- Memory-Mapped File I/O (SFFI wrappers) ---
 
@@ -199,8 +199,18 @@ fn file_write_text_at(path: text, offset: i64, data: text) -> i64:
     rt_file_write_text_at(path, offset, data)
 
 fn file_fsync(path: text) -> bool:
-    # Portable fallback: hosted backends may provide real durability elsewhere.
-    rt_file_exists(path)
+    var synced = false
+    unsafe(capabilities: [ffi]):
+        synced = rt_file_fsync(path)
+    synced
+
+fn directory_fsync(path: text) -> bool:
+    var synced = false
+    unsafe(capabilities: [ffi]):
+        # POSIX synchronizes directory entries through the same fsync syscall;
+        # hosted backends that cannot open/sync directories fail closed here.
+        synced = rt_file_fsync(path)
+    synced
 
 fn file_fsync_cached(path: text) -> bool:
     # Portable fallback mirrors file_fsync without forcing hosted file SFFI.

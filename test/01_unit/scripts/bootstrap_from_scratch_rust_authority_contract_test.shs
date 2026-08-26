@@ -2,9 +2,6 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-# This contract asserts the authority pointer is a real symlink ([ -L ... ]),
-# which Windows shells would otherwise turn into a copy.
-. "$root/scripts/check/lib/portable-symlink-mode.shs"
 BOOTSTRAP_STAGE3_FACADE_PATH=\
 "$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 export BOOTSTRAP_STAGE3_FACADE_PATH
@@ -12,7 +9,7 @@ export BOOTSTRAP_STAGE3_FACADE_PATH
 PORTABLE_LOCK_ATOMIC_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
 export PORTABLE_LOCK_ATOMIC_HELPER_PATH
 . "$root/scripts/check/lib/portable-process-lock.shs"
-BOOTSTRAP_LIB_ONLY=1 . "$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+. "$root/scripts/bootstrap/bootstrap-authority-wiring.shs"
 
 tmp=${TMPDIR:-/tmp}/simple-authority-publication.$$
 trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT INT TERM
@@ -26,15 +23,6 @@ make_source() {
   chmod 755 "$dir/simple"
   printf 'native-%s\n' "$marker" >"$dir/libsimple_native_all.a"
   printf 'backfill-%s\n' "$marker" >"$dir/libsimple_compiler_backfill.a"
-  # The publisher DERIVES a fourth tuple member from the native-all archive
-  # name (libsimple_native_all.a -> deps/libsimple_runtime.a) because Stage 4
-  # consumes the non-LTO Rust static runtime straight out of deps/, and it
-  # requires every tuple member to be a regular non-symlink file. Without this
-  # the tuple probe returns 1 for every fixture and the whole test is dead.
-  # See bootstrap_stage3_publish_seed_generation in
-  # scripts/check/lib/bootstrap-stage3/authority.shs.
-  mkdir -p "$dir/deps"
-  printf 'runtime-%s\n' "$marker" >"$dir/deps/libsimple_runtime.a"
 }
 make_source "$tmp/source-a" A
 make_source "$tmp/source-b" B
@@ -211,7 +199,7 @@ ROOT_PATH=$root FIXTURE_ROOT=$tmp \
   sh -c '
     . "$ROOT_PATH/scripts/check/lib/bootstrap-stage3-provenance.shs"
     . "$ROOT_PATH/scripts/check/lib/portable-process-lock.shs"
-    BOOTSTRAP_LIB_ONLY=1 . "$ROOT_PATH/scripts/bootstrap/bootstrap-from-scratch.sh"
+    . "$ROOT_PATH/scripts/bootstrap/bootstrap-authority-wiring.shs"
     PORTABLE_LOCK_HANDLES=
     portable_lock_acquire "$FIXTURE_ROOT/locks" authority 5
     recovery_handle=$PORTABLE_LOCK_HANDLE
@@ -228,7 +216,7 @@ stage4_receipt="$tmp/stage4-driver.env"
 ROOT_PATH=$root PRIVATE_AUTHORITY="$tmp/source-a" RECEIPT=$stage4_receipt \
   sh -c '
     . "$ROOT_PATH/scripts/check/lib/bootstrap-stage3-provenance.shs"
-    BOOTSTRAP_LIB_ONLY=1 . "$ROOT_PATH/scripts/bootstrap/bootstrap-from-scratch.sh"
+    . "$ROOT_PATH/scripts/bootstrap/bootstrap-authority-wiring.shs"
     bootstrap_authority_pin_stage4 "$PRIVATE_AUTHORITY" simple \
       libsimple_native_all.a libsimple_compiler_backfill.a
     {

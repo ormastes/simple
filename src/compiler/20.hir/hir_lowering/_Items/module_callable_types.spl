@@ -1,7 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum}
-use compiler.hir.hir_lowering._Items.lowering_helpers.{ReturnScan, return_scan_empty, merge_return_scan, hir_type_simple_name, hir_type_kind_from_simple_name, hir_simple_type_name_is_known, ast_binop_is_comparison, ast_binop_is_arith}
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -40,46 +38,11 @@ impl HirLowering:
         """Register parser struct/class fields before function lowering."""
         var field_types: Dict<text, HirType> = {}
         var field_order: [text] = []
-        var field_access: Dict<text, bool> = {}
         for field in fields:
             field_types[field.name] = self.lower_type(field.type_)
             field_order = field_order.push(field.name)
-            # A declaration is always accessible from its own module.
-            field_access[field.name] = true
         self.struct_field_types_by_name[name] = field_types
         self.struct_field_order_by_name[name] = field_order
-        self.struct_field_access_by_name[name] = field_access
-        self.struct_constructor_access_by_name[name] = true
-        # MODULE-QUALIFIED KEY (2026-08-24). The bare name is NOT a unique key:
-        # two modules may declare the same composite name, and the second
-        # registration silently overwrites the first, so every field read
-        # against the loser resolves through the winner's field set and the
-        # WHOLE field set reads as invisible. Measured in the stage-3 self-host
-        # run: `JitInstantiator` is declared by both
-        # `src/compiler/99.loader/jit_instantiator.spl` and
-        # `src/compiler/99.loader/loader/jit_instantiator.spl` (drifted copies,
-        # same field NAMES, different field TYPES), producing 83 of the 405 HIR
-        # lowering fatals.
-        #
-        # The consumer side already prefers a module-qualified key --
-        # `composite_name_for_owner_raw` (expression_support.spl) builds
-        # `defining_module + "." + name` and only falls back to the bare name
-        # when that key is absent -- and the IMPORT path already registers one
-        # (`module_import_registration.spl`, `canonical_composite_name`). Local
-        # declarations were the only writer that never registered it, so the
-        # lookup always fell back to the colliding bare key.
-        #
-        # `declare_module_symbols` passes `self.module_filename` as the symbol's
-        # `defining_module`, so that is the spelling the reader reconstructs;
-        # it must be used verbatim here or the key will not be found.
-        # Purely ADDITIVE: the bare key above is still written, so any consumer
-        # that has no owner symbol (and therefore cannot build the qualified
-        # key) keeps resolving exactly as before.
-        if self.module_filename != "":
-            self.struct_field_types_by_name[self.module_filename + "." + name] = field_types
-            self.struct_field_order_by_name[self.module_filename + "." + name] = field_order
-            self.struct_field_access_by_name[self.module_filename + "." + name] = field_access
-            self.struct_constructor_access_by_name[self.module_filename + "." + name] = true
 
     # Nested-field-access support (native --entry path bug, see
     # struct_field_types_by_name doc comment in types.spl): record this
@@ -91,20 +54,9 @@ impl HirLowering:
     # array field indexed on the native path).
     me register_struct_field_types(hir_struct: HirStruct):
         var field_types: Dict<text, HirType> = {}
-        var field_access: Dict<text, bool> = {}
         for f in hir_struct.fields:
             field_types[f.name] = f.type_
-            field_access[f.name] = true
         self.struct_field_types_by_name[hir_struct.name] = field_types
-        self.struct_field_access_by_name[hir_struct.name] = field_access
-        self.struct_constructor_access_by_name[hir_struct.name] = true
-        # Module-qualified key -- see the rationale on the twin write in
-        # `prescan_composite_field_types` above. Same reason, same spelling,
-        # same additive stance: the bare key is still written.
-        if self.module_filename != "":
-            self.struct_field_types_by_name[self.module_filename + "." + hir_struct.name] = field_types
-            self.struct_field_access_by_name[self.module_filename + "." + hir_struct.name] = field_access
-            self.struct_constructor_access_by_name[self.module_filename + "." + hir_struct.name] = true
 
     # Untyped-return inference (native --entry path) -- see the `ReturnScan`
     # doc comment in lowering_helpers.spl for the full rationale. Runs over
@@ -185,19 +137,7 @@ impl HirLowering:
             kind: HirTypeKind.Function(param_types, return_type, []),
             span: fn_decl.span
         )
-        # Bare-lift: an explicit `Some(...)` tail in a `-> HirType?` function
-        # allocates a heap Option BOX on the native lane instead of lifting the
-        # bare value into the optional slot (same defect the 2026-07-23
-        # bare-lift notes describe in module_declarations_bootstrap.spl:433).
-        # The box then lands in `HirSymbol.type_`, and every consumer that
-        # reads it AS a HirType -- notably the generated HIR-cache encoder
-        # `hc_enc_hir_type` -- reads the box header as `.kind` and the box's
-        # second word as `.span`, untags that non-pointer and dereferences it:
-        # deterministic SIGSEGV on `native-build` of any program (bug
-        # hir_cache_encode_segv_some_box_in_symbol_type_2026-08-23).
-        # The sibling `declared_surface_callable_type` below already returns the
-        # bare value from its `-> HirType?` tail; match it.
-        callable_type
+        Some(callable_type)
 
     me declared_surface_callable_type(callable: ModuleSurfaceCallable, owner_symbol: SymbolId?) -> HirType?:
         if callable.type_params.len() > 0 or not callable.has_return_type:
@@ -223,105 +163,13 @@ impl HirLowering:
             param_idx = param_idx + 1
         HirType(kind: HirTypeKind.Function(param_types, self.lower_type(callable.return_type), []), span: callable.span)
 
-    me imported_surface_type(type_: Type, imported_module_name: text, bound_type_params: [text]) -> HirType:
+    me imported_surface_type(type_: Type, imported_module_name: text) -> HirType:
         val source_name = parser_type_kind_named_name(type_.kind)
-        # A name the CALLABLE binds (`C`, `T`, ...) is not a name the owner
-        # declares. Projecting it through the owner's qualified scope finds
-        # nothing and `lower_named_kind` then reports `unresolved type: C`
-        # against an innocent importer -- which is exactly why
-        # `declared_imported_surface_callable_type` used to bail out of generic
-        # callables entirely rather than project them. Bind them here instead,
-        # so the signature can be projected without inventing that error.
-        # This is dependency PROJECTION only: instantiation stays where the
-        # hardening plan puts it (monomorphization, plan section 9).
-        if source_name != "" and module_surface_name_position(bound_type_params, source_name) >= 0:
-            return HirType(kind: HirTypeKind.TypeParam(source_name, []), span: type_.span)
         if source_name != "":
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, source_name)
-            # GENERIC CONSTRUCTOR (`Dict<K,V>`, `Option<T>` (`T?`), `Result<A,B>`)
-            # must be projected HEAD-AND-ARGUMENTS, in the OWNER's scope.
-            #
-            # Both halves of this arm are load-bearing and neither works alone.
-            #
-            # 1. ARGUMENTS WERE DROPPED ON A HIT. The `Named(id, [])` return
-            #    below discards `parser_type_kind_named_args` entirely, so a
-            #    projected `Dict<text, MirType>` reached the importer's symbol
-            #    table erased to `Dict<any, any>` with ZERO diagnostics. That
-            #    silent erasure is the ORIGINAL defect and must not be restored
-            #    as a "safe" fallback; `d481f15e1ac` measured it directly.
-            #
-            # 2. THE OUTER HEAD FELL THROUGH ON A MISS. `Dict`/`Option`/`Result`
-            #    are BUILTIN generics: nothing ever calls `bind_qualified_type`
-            #    for them, so `lookup_qualified_type_raw(owner, "Dict")` always
-            #    misses, and the fall-through then handed the WHOLE type to
-            #    `self.lower_type` -- which re-lowers in the IMPORTER's scope and
-            #    recurses into the ARGUMENTS there. `HirModule`, which the
-            #    importer never imported, is what then hard-errors, with a
-            #    synthesized span naming the innocent importer. Measured by the
-            #    `[ist-scalar-fallthrough]` probe:
-            #      name=Dict owner=compiler.mono.monomorphize_integration
-            #      lowering=src/compiler/mono/instantiation.spl
-            #    Note the name is `Dict`, the OUTER generic -- not the argument.
-            #
-            # This is why fixing only (1) made things catastrophically WORSE:
-            # `d481f15e1ac` recursed into arguments while the head still fell
-            # through to `lower_type`, so the importer-scope re-lowering happened
-            # anyway and stage-1 went 48 -> 3716 fatals / 437 poisoned modules.
-            # It is also why the owner-side import sweep could not help: once the
-            # type reaches `lower_type` in the importer's scope, what the OWNER
-            # imports is irrelevant (75 owner-side imports across `40.mono` left
-            # the fatal count completely unchanged; one IMPORTER-side binding
-            # cleared it).
-            #
-            # The fix is to never reach `lower_type` for a generic at all.
-            # `lower_named_kind` takes ALREADY-LOWERED `hir_args` and resolves
-            # the HEAD by name -- it has real arms for `Option`, `Result`, `Dict`
-            # and every builtin. So projecting the arguments HERE, through
-            # `imported_surface_type` in the owner's scope (which is exactly
-            # where `materialize_imported_callable_dependency` bound them via
-            # `bind_qualified_type(imported_mod.module_name, dep, symbol)`), and
-            # handing those HirTypes to `lower_named_kind`, resolves head and
-            # arguments each in the scope that actually declares them.
-            #
-            # This restores the symmetry that is this bug's root theme: the
-            # MATERIALIZATION walk (`parser_type_named_dependencies`) already
-            # recurses Array -> Tuple -> Named and binds every argument
-            # correctly; only this PROJECTION failed to consult what it bound.
-            #
-            # Scoped deliberately to `named_args.len() > 0`: a true scalar keeps
-            # byte-identical behaviour, so the blast radius is exactly the types
-            # that carry generic arguments.
-            # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-            # and doc/08_tracking/bug/hir_generic_projection_regression_run15_2026-08-22.md
-            val named_args = parser_type_kind_named_args(type_.kind)
-            if named_args.len() > 0:
-                var projected_args: [HirType] = []
-                for named_arg in named_args:
-                    projected_args = projected_args.push(
-                        self.imported_surface_type(
-                            named_arg, imported_module_name, bound_type_params))
-                if raw_symbol_id >= 0:
-                    return HirType(
-                        kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), projected_args),
-                        span: type_.span)
-                if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
-                    eprint("[ist-generic-head-projected] name={source_name} args={named_args.len()} owner={imported_module_name} lowering={self.module_filename}")
-                return HirType(
-                    kind: self.lower_named_kind(source_name, projected_args, type_.span),
-                    span: type_.span)
             if raw_symbol_id >= 0:
                 return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
-            # Level-gated OWNER probe (default off). This fall-through hands the
-            # type to `lower_type`, which resolves in the IMPORTER's scope; the
-            # resulting `unresolved type: X` carries a SYNTHESIZED span
-            # (span_file empty, line 0) and is attributed to the importer, so
-            # nothing in the diagnostic names the owner whose surface asked for
-            # it. `[ist-proj-miss]` does not cover this path -- it fires only in
-            # `imported_surface_type_projected` -- which is why HirModule and
-            # LocalId produced zero probe lines of any kind.
-            if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
-                eprint("[ist-scalar-fallthrough] name={source_name} owner={imported_module_name} lowering={self.module_filename}")
             return self.lower_type(type_)
         # COMPOSITE shapes must be projected ELEMENTWISE.
         #
@@ -351,15 +199,9 @@ impl HirLowering:
             var lowered_elements: [HirType] = []
             for element in tuple_elements:
                 lowered_elements = lowered_elements.push(
-                    self.imported_surface_type(element, imported_module_name, bound_type_params))
+                    self.imported_surface_type(element, imported_module_name))
             return HirType(kind: HirTypeKind.Tuple(lowered_elements), span: type_.span)
         val array_element_name = parser_type_kind_array_element_name(type_.kind)
-        if array_element_name != "" and module_surface_name_position(bound_type_params, array_element_name) >= 0:
-            return HirType(
-                kind: HirTypeKind.Array(
-                    HirType(kind: HirTypeKind.TypeParam(array_element_name, []), span: type_.span),
-                    nil),
-                span: type_.span)
         if array_element_name != "":
             val raw_element_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, array_element_name)
@@ -368,127 +210,13 @@ impl HirLowering:
             else:
                 HirType(kind: self.lower_named_kind(array_element_name, [], type_.span), span: type_.span)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
-        # ARRAY WHOSE ELEMENT IS NOT A PLAIN NAMED TYPE must still be projected
-        # ELEMENTWISE. The branch above is keyed on
-        # `parser_type_kind_array_element_name`, which answers "" for BOTH "not
-        # an array" and "an array of something that is not a bare Named" --
-        # `[(text, MirType)]`, `[[T]]`, `[T?]`. So an array-of-TUPLE fell past
-        # it to `lower_type`, which resolves names in the IMPORTER's scope,
-        # where a cross-module signature dependency is bound only as
-        # `{owner}::{name}`.
-        #
-        # This is the same defect as the bare-tuple one fixed on 2026-08-21
-        # (`hir_tuple_signature_dependency_unprojected_2026-08-21.md`), one
-        # level of nesting deeper: that lane taught `imported_surface_type` to
-        # recurse through a TOP-LEVEL tuple, but the array arm still projected
-        # by NAME only, so wrapping the same tuple in `[...]` slipped through
-        # again.
-        #
-        # Stage-1: `fn map_struct(fields: [(text, MirType)])` in
-        # `70.backend/backend/common/type_mapper.spl` -- which explicitly
-        # imports MirType on line 8 -- produced `unresolved type: MirType`
-        # attributed to innocent importers such as the 29-line, zero-`use`
-        # `70.backend/backend_port.spl`. It emits NO
-        # `[hir-callable-dep-origin-unresolved]`, because the MATERIALIZATION
-        # walk (`parser_type_named_dependencies`) does recurse Array -> Tuple
-        # -> Named and binds the name correctly; only this PROJECTION failed to
-        # consult it. That asymmetry is why the owner-missing-import lane's
-        # predicted MirType clearance never materialised.
-        # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-        # POINTER (`*T`) and UNION (`A | B`) are projected ELEMENTWISE for the
-        # same reason the array and tuple arms are. Both are recursed by the
-        # MATERIALIZATION walk (`parser_type_named_dependencies`) and were not
-        # recursed here, so the binding it created was never consulted and the
-        # name died as a hard `unresolved type: X` blamed on an importer.
-        # Reproduced directly: `fn f(x: *MirType)` and `fn f(x: MirType | text)`
-        # both yield `unresolved type: MirType` against the importing module.
-        # Owned code carries 22 pointer params and 13 union positions, so this
-        # is live, not hypothetical.
-        if parser_type_kind_is_pointer(type_.kind):
-            val pointee = parser_type_kind_pointer_inner(type_.kind, type_)
-            return HirType(
-                kind: HirTypeKind.Ptr(
-                    self.imported_surface_type(pointee, imported_module_name, bound_type_params),
-                    parser_type_kind_pointer_is_mutable(type_.kind)),
-                span: type_.span)
-        val union_members = parser_type_kind_union_members(type_.kind)
-        if union_members.len() > 0:
-            var projected_members: [HirType] = []
-            for member in union_members:
-                projected_members = projected_members.push(
-                    self.imported_surface_type(member, imported_module_name, bound_type_params))
-            return HirType(kind: HirTypeKind.Union(projected_members), span: type_.span)
-        if parser_type_kind_is_array(type_.kind):
-            val nested_element = parser_type_kind_array_element(type_.kind, type_)
-            return HirType(
-                kind: HirTypeKind.Array(
-                    self.imported_surface_type(nested_element, imported_module_name, bound_type_params),
-                    nil),
-                span: type_.span)
-        # FUNCTION (`fn(A, B) -> C`) is projected ELEMENTWISE for the same
-        # reason the array/tuple/pointer/union arms are: it is recursed by the
-        # MATERIALIZATION walk (`parser_type_named_dependencies`) and was not
-        # recursed here. It only became reachable once generic callables were
-        # projected at all -- the generated fold visitors are the population
-        # that carries it (`f: fn(AstWalkNode, C) -> C`), and without this arm
-        # enabling that projection would have traded a dropped signature for a
-        # fresh `unresolved type: AstWalkNode` on every importer.
-        if parser_type_kind_is_function(type_.kind):
-            var projected_params: [HirType] = []
-            for fn_param in parser_type_kind_function_params(type_.kind):
-                projected_params = projected_params.push(
-                    self.imported_surface_type(fn_param, imported_module_name, bound_type_params))
-            return HirType(
-                kind: HirTypeKind.Function(
-                    projected_params,
-                    self.imported_surface_type(
-                        parser_type_kind_function_return(type_.kind, type_),
-                        imported_module_name, bound_type_params),
-                    []),
-                span: type_.span)
-        # Level-gated OWNER probe (default off) on the CATCH-ALL fall-through --
-        # the shape that matched none of the projected constructors. Same
-        # rationale as the scalar probe above: without it the importer-scope
-        # failure is anonymous.
-        if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
-            eprint("[ist-catchall-fallthrough] owner={imported_module_name} lowering={self.module_filename}")
         self.lower_type(type_)
 
-    me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text, bound_type_params: [text]) -> HirType:
-        # Scalar fast paths run BEFORE the qualified lookup, so a callable-bound
-        # type parameter has to be recognised here too, not only in
-        # `imported_surface_type`.
-        if type_name != "" and module_surface_name_position(bound_type_params, type_name) >= 0:
-            return HirType(kind: HirTypeKind.TypeParam(type_name, []), span: type_.span)
-        if array_element_name != "" and module_surface_name_position(bound_type_params, array_element_name) >= 0:
-            return HirType(
-                kind: HirTypeKind.Array(
-                    HirType(kind: HirTypeKind.TypeParam(array_element_name, []), span: type_.span),
-                    nil),
-                span: type_.span)
+    me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text) -> HirType:
         # Prefer scalar projections captured before the parser Type crossed a
         # nested Dict/array boundary.  The retained Type remains the complete
         # fallback for shapes not yet affected by the staged-native ABI bug.
         if type_name != "":
-            # GENERIC CONSTRUCTOR -- delegate to the head-and-arguments arm.
-            #
-            # `type_name` is the pre-captured scalar HEAD name, so for
-            # `Dict<text, Payload>` it is `Dict`. Both exits below discard the
-            # arguments (`Named(id, [])` on a hit, `lower_named_kind(name, [],
-            # ...)` on a miss), which SILENTLY erases `Dict<text, MirType>` to
-            # `Dict<any, any>` in the importer's symbol table -- no error, no
-            # probe line, nothing. Measured on the three-module fixture in
-            # `imported_generic_head_argument_owner_scope_spec.spl`, where this
-            # path (not the `imported_surface_type` fall-through) is the one
-            # that fires: `[ist-proj-miss] name=Dict owner=svc.provider`.
-            #
-            # `imported_surface_type` now projects head AND arguments in the
-            # OWNER's scope, so delegate rather than duplicating that logic.
-            # Guarded on the retained parser Type actually carrying arguments,
-            # which keeps a true scalar byte-identical.
-            # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-            if parser_type_kind_named_args(type_.kind).len() > 0:
-                return self.imported_surface_type(type_, imported_module_name, bound_type_params)
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, type_name)
             if raw_symbol_id >= 0:
@@ -505,8 +233,6 @@ impl HirLowering:
                     imported_module_name, type_name[4:])
                 if has_symbol_id >= 0:
                     return HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Named(SymbolId(id: has_symbol_id), []), span: type_.span)), span: type_.span)
-            if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
-                eprint("[ist-proj-miss] name={type_name} owner={imported_module_name} lowering={self.module_filename}")
             return HirType(kind: self.lower_named_kind(type_name, [], type_.span), span: type_.span)
         if array_element_name != "":
             val raw_element_id = self.symbols.lookup_qualified_type_raw(
@@ -521,26 +247,11 @@ impl HirLowering:
                     kind: self.lower_named_kind(array_element_name, [], type_.span),
                     span: type_.span)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
-        self.imported_surface_type(type_, imported_module_name, bound_type_params)
+        self.imported_surface_type(type_, imported_module_name)
 
     me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
-        # A GENERIC callable used to return nil here, so its signature was never
-        # projected AT ALL: the importer got a `SymbolKind.Function` symbol with
-        # a `nil` type, losing every parameter type, the return type, and the
-        # projected identity of every cross-module type the signature names.
-        # The population is dominated by the generated fold visitors and codecs,
-        # whose every walker is generic
-        # (`walk_ast_asm_location<C>(node: AsmLocation, ctx: C, f: fn(AstWalkNode, C) -> C) -> C`),
-        # while their non-generic siblings in the same module projected fine.
-        # Project them too, with the callable's own type parameters BOUND (see
-        # `imported_surface_type`) so `C` cannot surface as `unresolved type: C`.
-        # Instantiation is untouched -- monomorphization stays in plan section 9.
-        # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-        if not callable.has_return_type:
+        if callable.type_params.len() > 0 or not callable.has_return_type:
             return nil
-        var bound_type_params: [text] = []
-        for type_param in callable.type_params:
-            bound_type_params = bound_type_params.push(type_param.name)
         var param_types: [HirType] = []
         var param_idx = 0
         if val owner_id = owner_symbol:
@@ -555,8 +266,7 @@ impl HirLowering:
                 return nil
             val param = callable.params[param_idx]
             param_types = param_types.push(self.imported_surface_type_projected(
-                param.type_, param.type_name, param.array_element_name, imported_module_name,
-                bound_type_params))
+                param.type_, param.type_name, param.array_element_name, imported_module_name))
             param_idx = param_idx + 1
         HirType(
             kind: HirTypeKind.Function(
@@ -565,11 +275,69 @@ impl HirLowering:
                     callable.return_type,
                     callable.return_type_name,
                     callable.return_array_element_name,
-                    imported_module_name,
-                    bound_type_params),
+                    imported_module_name),
                 []),
             span: callable.span)
 
+    me imported_surface_projected_name_type(shape: text, type_name: text, imported_module_name: text, span: Span) -> HirType?:
+        if shape != "named" and shape != "named_array":
+            return nil
+        val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
+            imported_module_name, type_name)
+        var element: HirType = HirType(kind: HirTypeKind.Error, span: span)
+        if raw_symbol_id >= 0:
+            element = HirType(
+                kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []),
+                span: span)
+        else:
+            element = HirType(
+                kind: self.lower_named_kind(type_name, [], span), span: span)
+        var projected: HirType = element
+        if shape == "named_array":
+            projected = HirType(
+                kind: HirTypeKind.Array(element, nil), span: span)
+        Some(projected)
+
+    me declared_imported_surface_signature_type(surface: ModuleSurface, signature_index: i64, imported_module_name: text, owner_symbol: SymbolId?, import_span: Span) -> HirType?:
+        if not module_surface_signature_arrays_aligned(surface) or
+           signature_index < 0 or signature_index >= surface.signature_names.len() or
+           surface.signature_type_param_counts[signature_index] > 0 or
+           not surface.signature_has_return_types[signature_index]:
+            return nil
+        var param_types: [HirType] = []
+        val offset = surface.signature_param_offsets[signature_index]
+        val count = surface.signature_param_counts[signature_index]
+        var relative_index = 0
+        if val owner_id = owner_symbol:
+            if not surface.signature_is_static[signature_index]:
+                param_types = param_types.push(HirType(
+                    kind: HirTypeKind.Named(owner_id, []), span: import_span))
+                if count > 0:
+                    val receiver_name = surface.signature_param_names[offset]
+                    if receiver_name == "self" or receiver_name == "me":
+                        relative_index = 1
+        while relative_index < count:
+            val param_index = offset + relative_index
+            if not surface.signature_param_has_types[param_index]:
+                return nil
+            val projected = self.imported_surface_projected_name_type(
+                surface.signature_param_shapes[param_index],
+                surface.signature_param_type_names[param_index],
+                imported_module_name, import_span)
+            if val projected_type = projected:
+                param_types = param_types.push(projected_type)
+            else:
+                return nil
+            relative_index = relative_index + 1
+        val projected_return = self.imported_surface_projected_name_type(
+            surface.signature_return_shapes[signature_index],
+            surface.signature_return_type_names[signature_index],
+            imported_module_name, import_span)
+        if val return_type = projected_return:
+            return Some(HirType(
+                kind: HirTypeKind.Function(param_types, return_type, []),
+                span: import_span))
+        nil
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:
             case ExprKind.IntLit(_):

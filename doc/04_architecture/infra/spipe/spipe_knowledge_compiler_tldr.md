@@ -47,6 +47,11 @@ runtime adapters.
 - Dependency-free JS is the normative lexical provider. Simple acceleration
   must match tokenization, fixed-point scores, ties, explanations, updates, and
   exhaustive top-k exactly; optional semantics only add candidates.
+- Provider cooperative streaming is specified in
+  `spipe_knowledge_compiler_cooperative_streaming.md`: one session owner keeps
+  bytes raw through bounded framing/iterative JSON, steps SHA/Unicode/work
+  machines, arbitrates cancel/deadline before commit I/O, and advertises
+  `cancel:true` only after a real framed-cancel qualification test.
 
 ## Runtime and security
 

@@ -965,3 +965,23 @@ Use these commands when changing GPU sessions, backend adapters, or ARM/RISC-V t
 | Vulkan/SPIR-V smoke | `bin/simple test test/05_perf/graphics_2d/vulkan_spirv_spec.spl --mode=interpreter --clean` | Vulkan runtime or software ICD |
 
 Backend guides must state whether a test is CPU-only, software-ICD, or hardware-dependent. Do not use hardware-dependent perf tests as the only release gate for API compatibility.
+
+## Surface changes 2026-08-25 (hardening pass)
+
+- `std.cuda` now also exports `cuda_get_device_name` (alias of `cuda_device_name`) and
+  `CudaStream`, `cuda_stream_create/destroy/sync` — the **default stream only** (handle 0);
+  the runtime has no `cuStreamCreate` and no events.
+- `std.io` CUDA SFFI (`io/cuda_sffi.spl`) was rewritten against the real runtime ABI: 17 of its
+  24 `rt_cuda_*` externs did not exist. Surviving API: `cuda_available/device_count/set_device/
+  device_info`, `CudaPtr` + `cuda_alloc/free/copy_to_device/copy_from_device/memset`,
+  `CudaModule` + `cuda_compile(ptx)/cuda_unload`, `CudaFunc` + `cuda_get_kernel`,
+  `cuda_launch_config_1d/3d`, `cuda_launch(kfn, cfg, args: [i64])`, `cuda_run_1d`, `cuda_sync`.
+  Removed (no runtime backing, zero callers): `cuda_get_device`, `cuda_last_error`,
+  `cuda_peek_error`, `CudaDeviceInfo.total_memory`.
+- `gpu_ops` typed transfers (`gpu_upload_*` / `gpu_download_*`) stage through a raw buffer;
+  previously they handed the interpreter's `Vec<Value>` pointer to `cuMemcpy`.
+- `std.gpu_runtime` `gpu_available/gpu_device_count/gpu_backend_name` probe the CUDA driver
+  directly instead of `rt_torch_cuda_available`.
+- `std.gpu` `Context.new(backend: GpuBackend.Vulkan)` no longer runs on CUDA; it yields
+  `gpu_none()` — Vulkan compute lives in `std.gc_async_mut.gpu_lane.vulkan_*`.
+- Practical guide with tutorial mapping: `cuda_gpu_programming.md`.

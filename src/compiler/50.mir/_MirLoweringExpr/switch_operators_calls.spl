@@ -430,6 +430,39 @@ impl MirLowering:
         self.builder = b
         value ?? raw
 
+    me bitcast_float_enum_payload(payload_local: LocalId) -> LocalId:
+        """Make a float enum payload bit-preserving before `rt_enum_new`.
+
+        `rt_enum_new`'s payload parameter is declared i64. A float-typed local
+        passed straight into that slot is coerced by the generic
+        call-argument path (value_as_type -> select_cast_instruction), which
+        picks `fptosi` -- a NUMERIC truncation (2.5 -> 2), not a bit-preserving
+        transfer. The matching unbox (`enum_payload_value`'s F64 arm) does a
+        plain `bitcast` back to double, so `Some(2.5).unwrap()` read back a
+        denormal near-zero instead of 2.5.
+
+        `ensure_option_handle` (just below) already does exactly this for the
+        values it promotes; the `Some(v)` / `Shape.Circle(v)` construction
+        paths never did, so every float payload built through `rt_enum_new`
+        was destroyed at construction -- for EVERY consumer (`.unwrap()`,
+        `match case Some(x)`, `if val`), not only the `if val` binder.
+        """
+        val payload_ty = self.local_mir_type_of(payload_local)
+        if payload_ty == nil:
+            return payload_local
+        var b = self.builder
+        var out = payload_local
+        match (payload_ty ?? MirType.i64()).kind:
+            case MirTypeKind.F64:
+                out = b.emit_bitcast(mir_operand_copy(payload_local), MirType.i64())
+            case MirTypeKind.F32:
+                val promoted = b.emit_cast(mir_operand_copy(payload_local), MirType.f64())
+                out = b.emit_bitcast(mir_operand_copy(promoted), MirType.i64())
+            case _:
+                ()
+        self.builder = b
+        out
+
     me ensure_option_handle(local: LocalId, option_type: HirType) -> LocalId:
         """Promote a typed Optional value to the canonical enum-id-1 handle."""
         if self.option_value_locals.has(local.id):
@@ -2510,7 +2543,26 @@ impl MirLowering:
                                     match bind_symbol:
                                         case Some(found_bind_symbol): found_bind_symbol.type_
                                         case _: nil
-                    val bound_payload = match payload_hir_type:
+                    # Float payload provenance. None of the three sources
+                    # above knows the payload type of a BUILT-IN Option
+                    # (`match opt: case Some(m)`): `Some`/`None` are not
+                    # declared variants, so `enum_single_payload_types` has no
+                    # row and the bind symbol carries no annotation. Without a
+                    # type, `enum_payload_value`'s F64 arm never ran and the
+                    # arm body saw the raw IEEE-754 bit pattern
+                    # (4612811918334230528 for 2.5). Recover it from the
+                    # scrutinee's own declared inner type -- the same
+                    # provenance `.unwrap()` and `.?` use -- rather than
+                    # sniffing the lowered shape. Float only: every other
+                    # payload class already round-trips as a raw word.
+                    var effective_payload_type: HirType? = payload_hir_type
+                    if effective_payload_type == nil:
+                        if val option_inner = self.option_inner_hir_type_for_local(scrutinee, scrut_local):
+                            match option_inner.kind:
+                                case HirTypeKind.Float(_):
+                                    effective_payload_type = Some(option_inner)
+                                case _: ()
+                    val bound_payload = match effective_payload_type:
                         case Some(found_payload_type): self.enum_payload_value(pl, self.lower_type(found_payload_type))
                         case _: pl
                     if result_match_candidate:
@@ -3165,6 +3217,7 @@ impl MirLowering:
                         val payload_ty = self.local_mir_type_of(payload_local)
                         if payload_ty != nil and (payload_ty ?? MirType.i64()).kind == MirTypeKind.U64:
                             payload_local = self.box_u64_runtime_value(payload_local)
+                        payload_local = self.bitcast_float_enum_payload(payload_local)
                         has_payload = true
                         # Same struct-value chain fix as lower_enum_construct_named
                         # -- see enum_payload_struct_names' own field comment.
@@ -3264,6 +3317,7 @@ impl MirLowering:
             val payload_ty = self.local_mir_type_of(payload_local)
             if payload_ty != nil and (payload_ty ?? MirType.i64()).kind == MirTypeKind.U64:
                 payload_local = self.box_u64_runtime_value(payload_local)
+            payload_local = self.bitcast_float_enum_payload(payload_local)
             # Struct-value chain fix: a single-field payload (`Ok(make(3))`,
             # `Circle(make_point())`) may itself be a struct VALUE. Record
             # "{enum_name}::{variant}" -> that struct's NAME here, at the

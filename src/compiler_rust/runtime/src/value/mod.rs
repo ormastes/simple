@@ -135,9 +135,7 @@ pub use collections::{
     rt_array_len, rt_array_len_safe, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push,
     rt_array_push_i64_raw, rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
     rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
-    rt_transient_heap_promote, rt_transient_last_promoted_nodes, rt_transient_last_promoted_bytes,
-    rt_transient_promotion_stats_reset, rt_transient_scope_promoted_nodes, rt_transient_scope_promoted_bytes,
-    rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
+    rt_transient_heap_promote, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
     rt_bytes_u8_at, rt_bytes_u8_set,
     rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get, rt_index_set, rt_len, rt_range,
     rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes, rt_string_chars, rt_string_lines,
@@ -246,7 +244,7 @@ pub use objects::{
     hash_variant_discriminant, rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture,
     rt_enum_check_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_new, rt_enum_payload, rt_option_map,
     rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set, rt_object_new, rt_is_some,
-    rt_unwrap_or_self, rt_unwrap_or_trap, rt_unwrap_or_value, rt_expect_or_trap, rt_heap_ref_wellformed,
+    rt_unwrap_or_self, rt_unwrap_or_trap, rt_unwrap_or_value, rt_expect_or_trap,
 };
 
 // Re-export unique pointer SFFI functions
@@ -416,6 +414,7 @@ pub use sffi::{
     // File ops
     rt_file_canonicalize,
     rt_file_read_text,
+    rt_file_read_regular_no_follow_bounded,
     rt_file_read_text_rv,
     rt_file_write_text,
     rt_file_copy,

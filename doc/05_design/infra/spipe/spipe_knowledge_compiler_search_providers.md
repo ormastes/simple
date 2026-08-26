@@ -333,6 +333,14 @@ hex, frames above the negotiated maximum, invalid UTF-8, duplicate critical
 keys, trailing data, and unknown required protocol versions. Stderr is bounded
 diagnostic output and never part of the protocol.
 
+Raw-byte transport behavior is normatively refined by
+`spipe_knowledge_compiler_cooperative_streaming.md`. In particular,
+`invalid_utf8` and `frame_too_large` are payload-free local
+`TransportDiagnosticV1` classes. Before a complete typed envelope is
+host-bound, either class discards decoder state and closes silently; it never
+creates a `ProviderResponseV1`, reflects untrusted fields, or enters the bound
+provider error vocabulary.
+
 JSON is the interoperability format; equivalent SDN output may be offered for
 CLI diagnostics but is not a second wire contract.
 
@@ -382,7 +390,7 @@ request_id         opaque client correlation ID
 operation          closed operation vocabulary
 workspace          stable workspace UID
 snapshot           required snapshot or expected parent snapshot
-deadline_ms        relative bounded deadline
+deadline_ms        1..30,000 ms relative to the first accepted header byte
 payload            operation-specific object
 ```
 
@@ -473,7 +481,7 @@ Protocol v1 has hard maxima, further reducible by configuration or handshake:
 | Field value | 1 MiB; frame limit still applies |
 | Duplicate candidates | 1,000 total, 100 per document |
 | Symbol page | 1,000 symbols |
-| Client deadline | 50 ms minimum, 30 s maximum |
+| Client deadline | 1 ms minimum, 30,000 ms maximum |
 
 The parser accounts for expansions before execution and rejects over-budget
 queries rather than truncating them into different semantics. Search also has
@@ -1556,11 +1564,11 @@ ErrorResponseV1 {
   snapshot:SnapshotId, scope_digest:HashText,
   query_receipt:QueryReceiptV1|null,
   operation_receipt:OperationReceiptV1|null,
-  error:{code,message,retryable}
+  error:ProviderErrorV1
 }
 PreBindingErrorResponseV1 {
   request_id, operation, ok:false, protocol,
-  error:{code,message,retryable:false}
+  error:ProviderErrorV1{code,message,retryable:false}
 }
 ```
 
@@ -1572,6 +1580,8 @@ no `provider_generation`, workspace, snapshot, scope, or receipts because no
 binding exists yet. A malformed length header, invalid UTF-8/JSON, noncanonical
 JSON, unknown operation, or request from which those three fields cannot be
 recovered closes the transport silently; it never fabricates a response.
+Specifically, `invalid_utf8` and `frame_too_large` are local
+`TransportDiagnosticV1` classes, not values of `ProviderErrorV1`.
 Every post-initialization error uses `ErrorResponseV1` and echoes the exact
 request bindings. The adapter deterministically creates and sends a non-null
 `query_receipt` for `search` and `explain`; every bound success or error echoes
@@ -2055,14 +2065,23 @@ adding `receipt_id` or `signature` to the preimage changes verification to
 failure. Mutations of authority ID/generation, either time, candidate/apply
 binding, receipt kind, or durable replay bytes also fail.
 
-### 14.18 Closed provider error codes
+### 14.18 Transport diagnostics and bound provider errors
+
+`TransportDiagnosticV1` is local, payload-free evidence. Its closed code set is
+`invalid_utf8 | frame_too_large`; it may retain bounded numeric byte/count
+metrics but no request payload, message/details copied from input, request ID,
+operation, provider generation, workspace, snapshot, scope, or receipt. It is
+never serialized as a provider response. A pre-binding occurrence records the
+local diagnostic and closes silently.
+
+`ProviderErrorV1` is the closed `{code,message,retryable}` object carried only
+by the applicable `ErrorResponseV1` or defined `PreBindingErrorResponseV1`.
+Its code set is:
 
 | Code | Operations | Exact condition |
 |---|---|---|
 | `invalid_request` | all | closed-schema/type/null/order violation |
 | `noncanonical_json` | all | canonical byte-profile violation |
-| `invalid_utf8` | all | invalid/non-shortest UTF-8 or surrogate scalar |
-| `frame_too_large` | pre-binding/all | declared frame length exceeds 1 MiB before allocation |
 | `limit_exceeded` | all | another declared structural/resource bound is exceeded |
 | `protocol_unsupported` | initialize/pre-binding | protocol major/minor cannot be negotiated |
 | `handshake_required` | all except initialize | operation received before healthy initialization |
@@ -2088,7 +2107,7 @@ binding, receipt kind, or durable replay bytes also fail.
 | `candidate_expired` | index_publish | candidate expired before publication |
 | `candidate_aborted` | index_publish | candidate was durably aborted |
 | `deadline_exceeded` | all bound operations | monotonic deadline crossed according to Section 14.19 |
-| `cancelled` | target operation | accepted cancellation won before target linearization |
+| `cancelled` | target operation | accepted cancellation won before target commit admission |
 | `cancel_target_not_found` | cancel | target request never existed in this generation |
 | `semantic_unavailable` | optional future semantic source | source failed/was denied; lexical generation remains valid |
 | `semantic_mismatch` | optional future semantic source | model/snapshot/scope/result binding differs; semantic source quarantined |
@@ -2102,37 +2121,48 @@ candidate exists.
 
 ### 14.19 Cancellation, deadlines, and shutdown
 
-Each request owns an atomic state `pending -> linearized -> completed` or
+Each request-control owner has an atomic state
+`pending -> commit_admitted -> completed` or
 `pending -> cancelled -> completed`. `cancel` linearizes by CAS from pending to
-cancelled; `already_complete` means the target was already linearized or
+cancelled; `already_complete` means the target was already commit-admitted or
 completed. A target that never existed in this provider generation returns the
 bound `cancel_target_not_found` error with `retryable:false`,
 `query_receipt:null`, and `operation_receipt:null`; `not_found` is not a success
 status. An accepted cancellation guarantees no result page, candidate, or
-current-root publication occurs afterward. For `index_apply`, linearization is
+current-root publication occurs afterward. `try_commit_admission` arbitrates
+only cancel/deadline eligibility and creates no search-state truth. For
+`index_apply`, semantic mutation linearization is
 durable candidate creation; for every terminal `index_publish` outcome
 (`published`, `stale_base`, or `aborted`), linearization is the single atomic
 terminal transaction in Section 14.17—not an earlier candidate check or a bare
 root-pointer CAS;
 for reads, immutable snapshot pin plus completed bounded result construction.
 
-The adapter samples a monotonic clock at request admission and computes a
-checked deadline from `deadline_ms`. Expiry before linearization returns
-`deadline_exceeded`; cancellation/deadline winning before the terminal
-transaction prevents that transaction and produces no terminal receipt.
+The decoder samples a monotonic clock when it accepts the first frame-header
+byte. After the typed envelope supplies `deadline_ms`, the request-control owner
+computes the checked absolute deadline from that recorded header timestamp,
+accepting only the inclusive range 1..30,000 milliseconds. Ingress framing,
+UTF-8/JSON/schema work, normalization, hashing, execution, and response
+construction therefore consume one semantic budget. Expiry before a complete
+trusted binding closes silently; expiry after binding but before
+`try_commit_admission` returns `deadline_exceeded`. Cancellation/deadline
+winning commit-admission arbitration prevents the following mutation
+transaction and produces no new candidate or terminal receipt.
 The atomic ordering is binary: cancellation/deadline ordered before the
-terminal transaction prevents it; cancellation/deadline ordered after the
-committed transaction reports `already_complete`/cannot relabel it, and the
-adapter returns or replays the terminal signed result. No observer can order
-inside the transaction. Workers check cancel/deadline at
-bounded work intervals and immediately before entering every durable
+commit-admission permit prevents commit work; once the permit is issued,
+cancellation/deadline reports `already_complete` and cannot relabel the later
+durable result. The permit itself is not the linearization point. The durable
+candidate-creation or combined terminal transaction is indivisible; the
+adapter returns or replays its signed result and no observer can order inside
+it. Workers check cancel/deadline at bounded work intervals and call
+`try_commit_admission` immediately before entering every durable mutation
 linearization transaction.
 
 `shutdown` first linearizes `healthy -> closed-to-new-work`, rejects new work,
-and drains already-linearized operations. It cancels pending operations, waits
+and drains commit-admitted operations. It cancels pending operations, waits
 up to its configured monotonic drain deadline, then kills the owned process
-group. A publish not linearized before shutdown/cancel cannot publish during or
-after drain. Replay storage and the current-root CAS determine restart state;
+group. A publish not commit-admitted before shutdown/cancel cannot publish
+during or after drain. Replay storage and the current-root CAS determine restart state;
 process exit timing never does.
 
 ### 14.20 Closed initialization negotiation
@@ -2177,3 +2207,201 @@ future minor versions may name at most 32 `IdText` leaf fields, but cannot make
 a required/semantic field optional. Unknown nested keys or a value exceeding a
 client hard maximum rejects initialization. Negotiated effective limits are
 the componentwise minima; they are recorded in generation identity.
+
+## 15. Wave 4 implementation evidence checkpoint (2026-08-25)
+
+Commit `2b9f25f8604` accepts only the Lane C canonical checked-BM25 slice:
+
+- `src/lib/common/search/ranking.spl`;
+- `test/01_unit/lib/common/search/ranking_spec.spl`.
+
+Highest-capability review is `PASS`. A clean integration checkout reported the
+ranking source check `PASS` and the focused specification `PASS 30/30`. That
+execution used bootstrap-seed/non-Stage-4 runtime provenance, so it proves the
+accepted scorer slice under that runtime only; it is not Stage 4 runtime
+qualification and does not close Wave 4.
+
+The proposed DBFS bundle is `FAIL` and `NOT-EVIDENCE`. Its standalone
+`wave4_compatibility` path is a duplicate fixture scorer rather than a facade
+over the canonical scorer; probe cells are too weak; asserted clean/parity
+evidence was not executed and is false as stated; embeddings zero-use is not
+proved; and capability/statistics behavior is defective. No DBFS file from
+that bundle is accepted.
+
+The next DBFS slice must be an actual compatibility facade over the canonical
+scorer. It must prove idempotent remove/re-add statistics, deduplicated query
+terms, advertise `explain:false` until explanation is implemented, and compare
+incremental results with an independently rebuilt final corpus. Wave 4 remains
+`IN PROGRESS`.
+
+Post-push lint is a separate tooling blocker, not a scorer failure: in the
+clean integration checkout,
+`bin/simple lint src/lib/common/search/ranking.spl` failed before producing a
+lint result because runtime/codegen dispatch could not resolve
+`Array.sort_by`. The command also had bootstrap-seed provenance. No duplicate
+check was run because the lint owner tool is unresolved and the same seed path
+is not qualified.
+
+### 15.1 DBFS facade attempt closure
+
+The clean-clone candidate consisted of exactly:
+
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/__init__.spl`;
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/bm25.spl`;
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/inverted_index.spl`;
+- `src/lib/nogc_sync_mut/db/dbfs_engine/fts/search.spl`;
+- `test/02_integration/storage/dbfs/fts_canonical_facade_spec.spl`.
+
+All three permitted execution cycles produced zero owned-code execution. The
+Stage 3 Simple runtime,
+`9ce412a1d102de421de6d7042d8dc5c65201cc514b463b9b6a5bc5de2f66970c`,
+does not provide the required `check` or `test` command. The Rust seed,
+`c9c783b8568cf9a199945fe1ee98d08615b728387e6c89cbdc9b50e600f3e091`,
+stopped first on unrelated `nogc_async_mut/path.spl` `E1002 unsafe` and
+`plan_sdn.spl` `Dedent` failures.
+
+Static highest-capability review is `FAIL` with admissible files `[]`.
+`inverted_index` and the engine mutate nested collection/struct fields without
+building complete child copies and performing one owner reassignment. The
+lexical index commits before trigram/content state, so replacement is not
+atomic. The frozen `contains_document` ABI has a `me fn` mismatch. The
+focused spec omits intermediate statistics/averages, complete independent
+clean-corpus statistics, contains/absent behavior, exact result-order equality,
+legacy success, and checked-upsert failure/no-change assertions.
+
+Preserve the canonical-scorer facade direction, checked-operation/capability
+intent, and focused regression-fixture shape as design input only. No candidate
+file is accepted. The next slice must rebuild and write back value-semantic
+child copies, commit the complete engine transaction atomically, correct the
+frozen ABI, complete the oracle, and then run a fresh bounded execution on a
+capable pure-Simple runtime. Wave 4 remains `IN PROGRESS`.
+
+### 15.2 Canonical analyzer batch/identity contract freeze
+
+The current analyzer candidate is `FAIL`; its admissible file set is `[]`.
+Freeze this separate `std.common.search` algorithm seam:
+
+```text
+enum SearchFieldIdentityV1:
+  Identifier; Title; Heading; Classification; Body
+
+enum AnalyzerErrorV1:
+  InvalidLimits; InvalidFieldIdentity; InputLimitExceeded; InvalidUtf8;
+  NormalizedLimitExceeded; TokenBytesLimitExceeded; TokenCountLimitExceeded;
+  DistinctTermLimitExceeded
+
+struct AnalyzerIdentityV1:
+  analyzer_id:text
+  unicode_version:text
+  unicode_manifest_sha256:text
+  normalization_id:text
+  lowercase_id:text
+  tokenizer_id:text
+  stop_words_id:text
+  stop_words_sha256:text
+  stemming_id:text
+  field_schema_id:text
+  limits_schema_id:text
+
+struct AnalyzerLimitsV1:
+  max_input_bytes:i64
+  max_normalized_bytes:i64
+  max_token_bytes:i64
+  max_tokens:i64
+  max_distinct_terms:i64
+
+struct AnalyzedTokenV1:
+  value:text
+  position:i64
+  exact_identifier:bool
+
+struct AnalyzedTextV1:
+  normalized:text
+  tokens:[AnalyzedTokenV1]
+
+struct AnalyzedQueryTermV1:
+  value:text
+  qtf:i64
+
+struct AnalyzedQueryV1:
+  normalized:text
+  terms:[AnalyzedQueryTermV1]
+
+analyze_field_v1(input:text, field:SearchFieldIdentityV1,
+                 identity:AnalyzerIdentityV1, limits:AnalyzerLimitsV1)
+  -> Result<AnalyzedTextV1,AnalyzerErrorV1>
+analyze_query_v1(input:text, identity:AnalyzerIdentityV1,
+                 limits:AnalyzerLimitsV1)
+  -> Result<AnalyzedQueryV1,AnalyzerErrorV1>
+unsigned_utf8_less(left:text, right:text) -> bool
+```
+
+This batch seam neither renames nor replaces `ProviderAnalyzerLimitsV1`,
+`ProviderAnalyzedTokenV1`, `ProviderAnalyzedTokenSinkPort`, or
+`ProviderStreamingAnalyzerV1`. The provider streaming seam adapts the
+canonical algorithm layer, and byte-for-byte token/position/error parity is an
+acceptance requirement.
+
+V1 analysis is UCD 17.0.0 NFC, Unicode Default Lowercase Conversion (not case
+folding), then NFC. Tokens are maximal runs of Unicode `Alphabetic`,
+`Decimal_Number`, `Mark`, or `_`. Positions are one-based and assigned
+before removing the exact stop-word set `[a,an,and,of,the,to]`, whose SHA-256
+is
+`6f0a7c26d3d0e3d06a2fbbbeaa1843294f83c3be26baf1c04651191e011510bf`.
+For `Identifier`, append the full normalized value last, without trimming,
+at position zero, and deduplicate it. Query terms retain QTF and sort by
+unsigned UTF-8 bytes.
+
+Query limits are exactly `AnalyzerLimitsV1(4096,4096,4096,128,128)` in field
+order. Field input has a hard 1,048,576-byte ceiling; its configured token
+count cannot exceed 524,288. The full limit tuple, Unicode manifest digest,
+stop-word ID/digest, and field/limit schema IDs participate in snapshot/cache
+identity. Analysis performs no embedding, process launch, network access, or
+locale-dependent operation.
+
+Analyzer-lane ownership is limited to
+`src/lib/common/search/analyzer.spl` and
+`test/01_unit/lib/common/search/analyzer_contract_spec.spl`;
+`src/lib/common/search/__init__.spl` is merge-owned. The required generated
+UCD 17 bundle and manifest from Section 14.7 are absent on `main`, so they are
+a prerequisite, not analyzer-lane output. The existing candidate is unbounded
+and its parity claim is false; accept none of it. Wave 4 remains
+`IN PROGRESS`.
+
+### 15.3 Unicode 17 prerequisite attempt closure
+
+The Unicode prerequisite is one atomic 14-file bundle:
+
+- `examples/05_stdlib/spipe/tools/unicode/generate_unicode_tables.mjs`;
+- `examples/05_stdlib/spipe/tools/unicode/UNICODE-LICENSE.txt`;
+- the seven files under
+  `examples/05_stdlib/spipe/tools/unicode/ucd/17.0.0/`:
+  `UnicodeData.txt`, `DerivedCoreProperties.txt`, `PropList.txt`,
+  `SpecialCasing.txt`, `CaseFolding.txt`, `CompositionExclusions.txt`,
+  and `NormalizationTest.txt`;
+- `examples/05_stdlib/spipe/src/search/generated/unicode_17_0_0.js`;
+- `src/lib/common/search/generated/unicode_17_0_0.spl`;
+- `examples/05_stdlib/spipe/test/fixture/wave4_search/unicode_17_0_0_manifest.json`;
+- `examples/05_stdlib/spipe/test/unit/unicode_17_tables_test.js`;
+- `test/01_unit/lib/common/search/unicode_17_0_0_spec.spl`.
+
+The attempt repaired its generator toward stable 256-code-point canonical
+combining-class buckets with bounded-linear processing, O(n) final-sigma
+contexts, and bounded 4,096-element JavaScript output chunks. JavaScript passed
+7/7 over all 20,034 normalization vectors in five forms, every scalar, and a
+1-MiB case.
+
+This does not admit the bundle. Cycle 2's Simple invocation timed out with exit
+124 and no summary on the Rust seed. Cycle 3 merely repeated the already-green
+JavaScript check, adding no evidence and violating the bounded process plan.
+Highest-capability review is `FAIL` with admissible files `[]`: Simple
+push/value-semantics and the optimizer bound remain unproved; the Simple spec
+directly calls `rt_file_read_text` instead of the required facade; requirement
+`REQ-SPK-SEARCH-UNICODE-001` is orphaned; the generated JavaScript license
+path is wrong; and the independent lowercase matrix is weak for
+`Case_Ignorable` final-sigma contexts.
+
+Accept no file from the bundle. The analyzer's Unicode prerequisite therefore
+remains absent. The next session must repair every static defect first, then
+run the complete Simple parity suite exactly once on a capable pure-Simple
+runtime. Wave 4 remains `IN PROGRESS`.

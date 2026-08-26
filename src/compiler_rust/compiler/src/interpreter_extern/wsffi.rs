@@ -53,15 +53,13 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
 
     #[cfg(windows)]
     {
-        extern "system" {
-            fn LoadLibraryA(lpLibFileName: *const u8) -> isize;
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+        if path.contains('\0') {
+            return Ok(Value::Int(0));
         }
-        let c_path = match CString::new(path.as_str()) {
-            Ok(c) => c,
-            Err(_) => return Ok(Value::Int(0)),
-        };
-        let handle = unsafe { LoadLibraryA(c_path.as_ptr() as *const u8) };
-        if handle == 0 {
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
+        if handle.is_null() {
             tracing::warn!("spl_dlopen failed for '{}'", path);
             Ok(Value::Int(0))
         } else {

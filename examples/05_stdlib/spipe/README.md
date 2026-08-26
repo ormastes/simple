@@ -58,7 +58,7 @@ Run the package layout check before publishing or updating a host submodule
 pointer:
 
 ```sh
-sh scripts/build.sh
+sh scripts/build.shs
 ```
 
 Host repositories that mount SPipe as submodules should also keep the parent

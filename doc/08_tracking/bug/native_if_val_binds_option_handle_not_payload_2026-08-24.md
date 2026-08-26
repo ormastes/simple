@@ -1,7 +1,7 @@
 # `if val x = opt:` binds the Option HANDLE, not the payload (native lane)
 
 **Date:** 2026-08-24
-**Status:** RESOLVED 2026-08-24 — fix landed in `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`; gate GREEN (see "Resolution")
+**Status:** RESOLVED 2026-08-24 — binder fix in `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`; float payload follow-up in `src/compiler/50.mir/_MirLoweringExpr/` (see "Float payload resolution"); gate GREEN with 12 probes
 **Severity:** Critical — silent-wrong values, escalating to SIGSEGV in the self-hosted compiler
 **Lane:** V
 
@@ -255,7 +255,7 @@ stashing the fix and re-running: the output is byte-identical with and without
 the change. It is a distinct seed-interpreter defect and is out of scope for
 this record.
 
-### Known remaining #2: FLOAT payloads are still wrong (pre-existing, NOT a regression)
+### Known remaining #2: FLOAT payloads — RESOLVED 2026-08-24 (follow-up landing)
 
 `if val f = <f64?>` does not produce a usable float on the native lane. Measured
 on the same binary and working tree, one probe, both sides:
@@ -291,3 +291,103 @@ header documents, and why that gate keeps its work dir inside `build/`.)
 Byte-identical source built and ran clean from an in-repo path on the same
 binary with the fix applied (`R=7`, rc 0), and neither failing case contains an
 optional at all. Unrelated to this change.
+
+## Float payload resolution (2026-08-24, follow-up)
+
+The "Known remaining #2" section above attributed the float breakage to the
+`if val` decode seam. **That attribution was wrong**, and the instrumented
+measurement says so plainly. A five-shape float probe, native-built and run
+(exit status read directly into a variable, never through a pipe), on the tree
+carrying the binder fix:
+
+```
+boxed=0   raw=4609434218613702656   unwrap=0.0   match=0   none=ABSENT
+```
+
+`.unwrap()` and `match case Some(m)` are **also wrong** — so this was never an
+`if val` defect. Two independent defects, fixed separately:
+
+### Defect A — `Some(<float>)` was destroyed at CONSTRUCTION
+
+`rt_enum_new`'s payload parameter is declared `i64`. A float-typed payload local
+passed straight into that slot is coerced by the generic call-argument path
+(`value_as_type` -> `select_cast_instruction`), which picks `fptosi` — a NUMERIC
+truncation — while every decode side (`enum_payload_value`'s F64 arm) does a
+bit-preserving `bitcast` back. `Some(2.5)` therefore stored `2` and read back a
+denormal near-zero. `ensure_option_handle`
+(`50.mir/_MirLoweringExpr/switch_operators_calls.spl`) already documents and
+performs exactly this bitcast for the values it promotes (bug
+`hosted_native_option_try_unwrap_payload_leak_2026-07-19`), but neither
+construction path — `lower_enum_lit` nor `lower_enum_construct_named`, which is
+where `Some(v)` lands via `expr_dispatch.spl`'s built-in Option interception —
+ever did. That broke every consumer of every float enum payload, `Option` and
+user enums alike.
+
+**Fix:** new `me bitcast_float_enum_payload` in `switch_operators_calls.spl`,
+called at both construction sites next to the existing U64 boxing.
+Measured immediately after: `unwrap=2.5` (was `0.0`).
+
+### Defect B — the float payload had no SEMANTIC type at the decode sites
+
+With A fixed, the bits survived but were rendered as integers
+(`boxed=4612811918334230528` — the IEEE-754 bits of 2.5). Two decode sites lacked
+the payload's type, so `enum_payload_value` skipped its F64 bitcast arm:
+
+- **`.?` / `if val`.** The existing float compensation in
+  `mir_lowering_stmts.spl` (`has_if_val_float_binding`, both `lower_if` and
+  `lower_if_chain`) is the RIGHT design and was **not** deleted: `if val v =
+  opt:` is desugared to a binding plus `v != nil`, so the binder slot must stay
+  a raw i64 for the sentinel comparison (typing it `f64` makes llc reject the
+  sentinel outright: *"integer constant must have integer type"*), and the
+  decode belongs in the present branch — which is exactly what that code does.
+  It never fired because it asks `find_local_hir_type` for the binder's semantic
+  type and **nothing ever registered one**. Instrumented proof, printed during a
+  real `native-build`: the detection reached its type check 3 times (once per
+  `if val` in the fixture) with the MIR type correctly `I64`, and the HIR type
+  present but neither `Float` nor `Optional`.
+  **Fix:** the `ExistsCheck` arm in `_MirLoweringExpr/expr_dispatch.spl` now
+  records the Option's declared inner type on its result local via
+  `remember_local_hir_type`, sourced from `option_inner_hir_type_for_local` —
+  the same provenance `.unwrap()` uses. The probe then read `name=Float`, the
+  compensation fired, and `boxed`/`raw` went to `2.5`/`1.5`. This is provenance
+  carried forward, not new shape-sniffing.
+- **`match opt: case Some(m)`.** `Some`/`None` are built-ins, so none of the
+  three payload-type sources (`result_payload_type`, `enum_single_payload_types`,
+  the bind symbol's annotation) has a row. **Fix:** in `lower_enum_match`, fall
+  back to `option_inner_hir_type_for_local` on the scrutinee, restricted to
+  `Float` — every other payload class already round-trips as a raw word.
+
+### Files changed
+
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` (A + match half of B)
+- `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (`.?` half of B)
+
+Nothing in `mir_lowering_stmts.spl` was changed; its float compensation is now
+live for the first time.
+
+### Gate: float rows added
+
+`scripts/check/check-native-if-val-option-payload.shs` had **no float probe at
+all** — that blind spot is why a fully broken float seam shipped green. Five
+float rows were added (`fboxed`, `funwrap`, `fmatch`, `fraw`, `fnone`), covering
+every shape the measurement found broken, not just the binder. The `--selftest`
+block additionally refuses to run on an expectation encoding either measured
+wrong rendering (the raw-bits value, or a zeroed `funwrap`). Fail-closed
+behaviour is proven, not asserted — with the two compiler files reverted to
+`origin/main` and everything else unchanged:
+
+```
+FAIL — 12 probe(s) checked, got: if_val=99 unwrap=99 match=99 field=77 raw=55 int=55 none=ABSENT fboxed=-1 funwrap=-NaN fmatch=-1 fraw=4609434218613702656 fnone=ABSENT  (expected ... fboxed=2.5 funwrap=2.5 fmatch=2.5 fraw=1.5 fnone=ABSENT)
+```
+
+exit 1. With the fix restored:
+
+```
+PASS — 12 probe(s) checked across 1 native-built fixture, 0 mismatches
+```
+
+exit 0. Note the seven pre-existing rows are identical on both sides — this
+change neither regresses nor depends on them. Neighbour gate, same tree:
+`PASS — 4 engine(s) executed, 0 crashes, unwrap-then-field holds`
+(`check-optional-class-unwrap-field.shs`, exit 0).
+

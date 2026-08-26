@@ -1919,7 +1919,6 @@ impl<M: Module> CodegenBackend<M> {
     fn emit_vtable_data_objects(
         &mut self,
         vtable_impls: &[(crate::hir::TypeId, String, String, Vec<Option<String>>, bool)],
-        selfless_slots: &std::collections::HashSet<String>,
     ) -> BackendResult<()> {
         for (struct_type_id, struct_name, vtable_sym, method_fns, export_symbol) in vtable_impls {
             // `method_fns` is INDEXED BY CANONICAL TRAIT VTABLE SLOT (index i ==
@@ -1965,14 +1964,10 @@ impl<M: Module> CodegenBackend<M> {
                     continue;
                 };
                 // Look up the func_id — try both mangled and unmangled names.
-                // A selfless body is reached through its `$vt` thunk, which
-                // accepts-and-drops the receiver the virtual call passes.
-                let thunk_name = super::closure_boxed_entry::vtable_selfless_entry_name(fn_name);
-                let func_id_opt = selfless_slots
-                    .contains(fn_name)
-                    .then(|| self.func_ids.get(&thunk_name).copied())
-                    .flatten()
-                    .or_else(|| self.func_ids.get(fn_name).copied())
+                let func_id_opt = self
+                    .func_ids
+                    .get(fn_name)
+                    .copied()
                     .or_else(|| {
                         // Try with _dot_ mangling (StructName_dot_methodName)
                         let mangled = fn_name.replace('.', "_dot_");
@@ -2129,20 +2124,13 @@ impl<M: Module> CodegenBackend<M> {
         // The pointer at slot i is the address of the i-th method function.
         // The struct_name entry in vtable_data_ids is used by compile_struct_init
         // to write vtable_ptr at offset 0.
-        let slot_fn_names: std::collections::HashSet<String> = mir
-            .vtable_impls
-            .iter()
-            .flat_map(|(_, _, _, fns, _)| fns.iter().flatten().cloned())
-            .collect();
-        let selfless_slots = self.emit_vtable_selfless_entries(&functions, &slot_fn_names)?;
-        self.emit_vtable_data_objects(&mir.vtable_impls, &selfless_slots)?;
+        self.emit_vtable_data_objects(&mir.vtable_impls)?;
 
         // Boxed entry thunks for the runtime-facing closure convention. Must
         // run after `declare_functions` (every outlined lambda must already be
         // in `func_ids`) and before any body that references one.
         // See codegen/closure_boxed_entry.rs.
         self.emit_boxed_closure_entries(&functions)?;
-        self.emit_boxed_fn_value_entries(mir, &functions)?;
         if native_trace {
             eprintln!("[rust-jit] compile_all function bodies start");
         }

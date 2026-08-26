@@ -19,11 +19,6 @@ use std.log.{error, info}
 use std.tooling.easy_fix.types.{EasyFix, LintLevel, LintCategory}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
 use compiler.common.assurance.policy_names.{normalize_profile_name, deprecated_profile_alias_replacement}
-use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
-    warning_phase_env_var_name, downgrade_severity_rank,
-    severity_rank_warn, severity_rank_deny}
-
-extern fn rt_env_get(key: text) -> text
 
 # File I/O wrapper
 
@@ -136,7 +131,7 @@ fn all_lint_names() -> [text]:
      "export_outside_init", "init_boundary_violation",
      "bypass_with_code_files", "unknown_decorator", "stub_impl",
      "unknown_attribute", "too_many_arguments", "dummy_accessor",
-     "similar_parent_method_name", "nonexistent_type",
+     "similar_parent_method_name",
      "required_comment",
      "ui_no_raw_widget_kind", "ui_no_raw_variant", "ui_no_raw_theme_name",
      "stale_md_diagrams", "hash_bracket_attribute", "llvm_backend_type_safety",
@@ -203,7 +198,6 @@ fn build_default_levels() -> Dict<String, String>:
     levels["too_many_arguments"] = "warn"
     levels["dummy_accessor"] = "warn"
     levels["similar_parent_method_name"] = "warn"
-    levels["nonexistent_type"] = "warn"
     levels["required_comment"] = "warn"
     levels["ui_no_raw_widget_kind"] = "warn"
     levels["ui_no_raw_variant"] = "warn"
@@ -354,46 +348,6 @@ fn parse_lint_level(level_str: String) -> Option<LintLevel>:
         return Some(LintLevel.Deny)
     nil
 
-# ---------------------------------------------------------------------------
-# WARNING PHASE — lint's projection of the one-level severity downgrade.
-#
-# Ladder: Deny -> Warn -> (clamped at Warn). Lint's enum has an `Allow` rung
-# below Warn, but `Allow` means "do not report at all", and the feature is
-# explicitly NOT a way to silence diagnostics — so lint clamps one rung ABOVE
-# its enum's bottom. An error becomes a warning; a warning stays a warning and
-# is still reported.
-#
-# A level that is ALREADY `Allow` is returned unchanged: the downgrade never
-# raises a severity, it only lowers one, and a rule the user turned off stays
-# off.
-# ---------------------------------------------------------------------------
-fn downgrade_lint_level(level: LintLevel) -> LintLevel:
-    val rank = _lint_level_rank(level)
-    val lowered = downgrade_severity_rank(rank, severity_rank_warn())
-    _lint_level_of_rank(lowered, level)
-
-fn _lint_level_rank(level: LintLevel) -> i64:
-    match level:
-        LintLevel.Deny: severity_rank_deny()
-        LintLevel.Warn: severity_rank_warn()
-        LintLevel.Allow: severity_rank_warn() - 1
-
-# `fallback` is returned for any rank below the Warn floor, which is only ever
-# reachable for a level that was already `Allow`.
-fn _lint_level_of_rank(rank: i64, fallback: LintLevel) -> LintLevel:
-    if rank >= severity_rank_deny():
-        return LintLevel.Deny
-    if rank == severity_rank_warn():
-        return LintLevel.Warn
-    fallback
-
-# Non-warning phase returns `level` untouched, so "unchanged when off" is a
-# property of this one function rather than of every call site.
-fn phased_lint_level(level: LintLevel, warning_phase: bool) -> LintLevel:
-    if not warning_phase:
-        return level
-    downgrade_lint_level(level)
-
 # LintDiag configuration — overrides for lint levels.
 # Loaded from the simple.sdn `lints:` section and/or file-level attributes.
 class LintConfig:
@@ -401,24 +355,11 @@ class LintConfig:
     # Selected strictness tier; nil = unset (legacy build_default_levels behavior).
     profile: Option<LintProfile>
     error: String
-    # WARNING PHASE (2026-08-23): when true, every effective level this config
-    # yields drops EXACTLY ONE severity rung. Lint's floor is Warn, NOT Allow —
-    # `Allow` is silence, and this feature is a severity transform, never a mute
-    # switch. Default false, so a config that never sets it behaves byte-identically
-    # to before. See compiler.common.assurance.warning_phase.
-    warning_phase: bool
 
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
     static fn new() -> LintConfig:
-        # Warning phase is seeded from the shared env knob so that ONE knob
-        # reaches all three projections (lint level dict, driver
-        # SafetyPassSeverity, interpreter bool). The SDN `warning_phase:` key
-        # and `LintConfig.set_warning_phase` both override it afterwards.
-        # Unset/unrecognised => false => today's exact behaviour.
-        LintConfig(levels: {}, profile: nil, error: "",
-                   warning_phase: warning_phase_enabled_for_value(
-                       rt_env_get(warning_phase_env_var_name()) ?? ""))
+        LintConfig(levels: {}, profile: nil, error: "")
 
     # Load config from an SDN file.  Parses the canonical `lints:` section.
     static fn from_sdn_file(path: String) -> LintConfig:
@@ -482,13 +423,7 @@ impl LintConfig:
 
                     # profile: <tier> selects the strictness tier (not a lint name).
                     # Handle it BEFORE the all_lint_names() gate or it is dropped.
-                    # warning_phase: <bool> is the assurance WARNING PHASE
-                    # modifier — orthogonal to `profile`, never encoded inside
-                    # it. See compiler.common.assurance.warning_phase for why a
-                    # separate key fails CLOSED where a name suffix fails OPEN.
-                    if lint_name == "warning_phase":
-                        config.set_warning_phase_from_value(level_str)
-                    elif lint_name == "profile":
+                    if lint_name == "profile":
                         if parse_lint_profile(level_str).?:
                             config.set_profile_from_string(level_str)
                         else:
@@ -534,27 +469,18 @@ impl LintConfig:
             if defaults.has(lint_name):
                 level_str = defaults[lint_name]
             else:
-                return phased_lint_level(LintLevel.Warn, self.warning_phase)  # Unknown lint defaults to Warn
+                return LintLevel.Warn  # Unknown lint defaults to Warn
 
         val parsed = parse_lint_level(level_str)
         match parsed:
             case Some(level):
-                return phased_lint_level(level, self.warning_phase)
+                return level
             case nil:
-                return phased_lint_level(LintLevel.Warn, self.warning_phase)
+                return LintLevel.Warn
 
     # Select the strictness tier directly.
     me set_profile(profile: LintProfile):
         self.profile = Some(profile)
-
-    # Enable/disable the one-level severity downgrade (assurance warning phase).
-    me set_warning_phase(on: bool):
-        self.warning_phase = on
-
-    # Seed the warning phase from the shared env knob's VALUE. The caller reads
-    # the environment; this stays a pure function of its argument.
-    me set_warning_phase_from_value(raw: String):
-        self.warning_phase = warning_phase_enabled_for_value(raw)
 
     me set_error_once(message: String):
         if self.error == "":
@@ -659,8 +585,7 @@ impl LintConfig:
             if src_keys != nil:
                 for key in src_keys:
                     new_levels[key] = src_levels[key]
-        LintConfig(levels: new_levels, profile: self.profile, error: self.error,
-                   warning_phase: self.warning_phase)
+        LintConfig(levels: new_levels, profile: self.profile, error: self.error)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
     var config = base.child()
@@ -725,8 +650,6 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "wm_lane_boundary"
     if code == "ACC001":
         return "dummy_accessor"
-    if code == "TYPE001" or code == "TYPE002":
-        return "nonexistent_type"
     if code == "NAME001":
         return "similar_parent_method_name"
     if code == "STUB001" or code == "STUB002" or code == "STUB003":
@@ -792,8 +715,6 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "freestanding_global_call_init"
     if code == "MODINIT001":
         return "module_init_literal"
-    if code == "PERF-COW-001" or code == "PERF-COW-002" or code == "PERF-COW-003":
-        return "cow_alias_hotpath"
     if code == "RAW-RT-001" or code == "RAW-RT-002" or code == "RAW-RT-003":
         return "raw_rt_access"
     if code == "W-MC-REF-001":

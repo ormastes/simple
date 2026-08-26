@@ -5,7 +5,6 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -25,12 +24,15 @@ impl HirLowering:
     # Nested-field-access support (native --entry path bug -- see
     # struct_field_types_by_name / local_struct_types doc comments in
     # types.spl). `val/var x = StructName(...)` is the only local-declared-
-    # type shapes this lane can recover without a full inference pass are a
-    # direct aggregate constructor and a bare function whose retained
-    # signature has a nominal return. Structs and imported signatures are
-    # registered before bodies, so both decisions are constant-time here.
-    # Qualified constructors and dynamically dispatched calls remain outside
-    # this narrow ownership projection.
+    # type shape this lane can recover without a full inference pass: the
+    # callee name is a compile-time-static struct name IF it is already
+    # registered in struct_field_types_by_name (structs are lowered in a
+    # up-front pass before function bodies, so this dict is fully populated
+    # by the time any function body -- and thus any Let -- is lowered).
+    # Deliberately narrow: only a bare `Ident(...)` call callee: qualified
+    # constructors, method calls, etc. are left untracked (Field-expr
+    # lowering then falls back to its pre-existing untyped i64 default,
+    # same as today -- this is additive, never a regression).
     me try_register_local_struct_type(sym: SymbolId, init_expr: Expr):
         match init_expr.kind:
             case ExprKind.Call(callee, call_args):
@@ -67,25 +69,6 @@ impl HirLowering:
                                         case _: ()
                                     arg_i = arg_i + 1
                                 self.struct_field_types_by_name[callee_name] = known_fields
-                        else:
-                            # Preserve a nominal function result for a later
-                            # field access (`val v = make(); v.private`). The
-                            # local symbol itself is untyped on this path, so
-                            # dropping this owner would bypass member policy.
-                            val callee_symbol = self.symbols.lookup_or_invalid(callee_name)
-                            if callee_symbol.is_valid():
-                                if val callable = self.symbols.get_symbol_raw(callee_symbol.id):
-                                    if callable.type_ != nil:
-                                        val callable_type = callable.type_ ?? HirType(
-                                            kind: HirTypeKind.Error, span: init_expr.span)
-                                        match callable_type.kind:
-                                            case HirTypeKind.Function(_, return_type, _):
-                                                val return_owner = self.named_owner_raw_from_type(return_type)
-                                                if return_owner >= 0:
-                                                    val composite_name = self.composite_name_for_owner_raw(return_owner)
-                                                    if composite_name != "":
-                                                        self.local_struct_types[sym.id] = composite_name
-                                            case _: ()
                     case _: ()
             case _: ()
 
@@ -138,7 +121,7 @@ impl HirLowering:
         for item in items:
             val hir_context = self.lower_hir_expr(item.context_expr)
             val hir_target: SymbolId? = if item.target.?:
-                val symbol = self.symbols.define(item.target ?? "", SymbolKind.Variable, nil, item.span, Visibility.Private, false, nil)
+                val symbol = self.symbols.define(item.target ?? "", SymbolKind.Variable, nil, item.span, false, false, nil)
                 Some(symbol)
             else:
                 nil
@@ -213,7 +196,7 @@ impl HirLowering:
                     while i < names.len():
                         val nm = names[i]
                         val hir_init = self.lower_hir_expr(elements[i])
-                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
+                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, false, false, nil)
                         result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, nil, hir_init), span: span))
                         i = i + 1
                     result
@@ -246,7 +229,7 @@ impl HirLowering:
                     while i < names.len():
                         val nm = names[i]
                         val hir_init = self.lower_hir_expr(elements[i])
-                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, Visibility.Private, true, nil)
+                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, false, true, nil)
                         result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, nil, hir_init), span: span))
                         i = i + 1
                     result
@@ -300,7 +283,7 @@ impl HirLowering:
         val inner = name.slice(1, name.len() - 1)
         val parts = inner.split(",")
         var stmts: [HirStmt] = []
-        val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
+        val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, nil, span, false, false, nil)
         stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_init), span: span))
         var td_elem_types: [HirType] = []
         val td_base_sym: SymbolId? = match hir_init.kind:
@@ -340,7 +323,7 @@ impl HirLowering:
                     HirExpr(kind: HirExprKind.Var(tmp_sym), type_: nil, span: span),
                     HirExpr(kind: HirExprKind.IntLit(i, nil), type_: nil, span: span)
                 ), type_: td_idx_type, span: span)
-                val psym = self.symbols.define(pname, SymbolKind.Variable, nil, span, Visibility.Private, is_mut, nil)
+                val psym = self.symbols.define(pname, SymbolKind.Variable, nil, span, false, is_mut, nil)
                 stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(psym, nil, idx_expr), span: span))
             i = i + 1
         HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: span), span: span)), span: span)
@@ -377,28 +360,15 @@ impl HirLowering:
                     vinit
                 case _:
                     sk_dummy
-            # An OPTION HANDLE MUST NOT REACH `HirStmtKind.Let`. Its field is
-            # `type_: HirType` (hir_definitions.spl:765), NOT `HirType?`, while
-            # `SymbolTable.define` (hir_types.spl:316) legitimately takes `HirType?`.
-            # Passing one `Some(...)` local to both stored the Option's ENUM HEADER in the
-            # `type_` slot; every consumer that clones a `HirStmt` then read header word[1]
-            # (`enum_id | variant<<32`, enum_id=1 for Option) as `HirType.span` and
-            # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
-            # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
-            # Keep the bare value for the HIR node and the Option for the symbol table.
-            val v_hir_type_bare: HirType = if v_type.?:
-                self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span))
-            else:
-                nil
-            val v_hir_type: HirType? = if v_type.?:
-                Some(v_hir_type_bare)
+            val v_hir_type = if v_type.?:
+                Some(self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span)))
             else:
                 nil
             val v_hir_init = self.lower_hir_expr(v_init)
-            val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, Visibility.Private, false, nil)
+            val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, false, false, nil)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
-            return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type_bare, v_hir_init), span: s.span)
+            return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
             val vr_name = match stmt_kind_value:
                 case StmtKind.Var(vrname, _, _):
@@ -415,32 +385,19 @@ impl HirLowering:
                     vrinit
                 case _:
                     nil
-            # An OPTION HANDLE MUST NOT REACH `HirStmtKind.Let`. Its field is
-            # `type_: HirType` (hir_definitions.spl:765), NOT `HirType?`, while
-            # `SymbolTable.define` (hir_types.spl:316) legitimately takes `HirType?`.
-            # Passing one `Some(...)` local to both stored the Option's ENUM HEADER in the
-            # `type_` slot; every consumer that clones a `HirStmt` then read header word[1]
-            # (`enum_id | variant<<32`, enum_id=1 for Option) as `HirType.span` and
-            # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
-            # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
-            # Keep the bare value for the HIR node and the Option for the symbol table.
-            val vr_hir_type_bare: HirType = if vr_type.?:
-                self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span))
-            else:
-                nil
-            val vr_hir_type: HirType? = if vr_type.?:
-                Some(vr_hir_type_bare)
+            val vr_hir_type = if vr_type.?:
+                Some(self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span)))
             else:
                 nil
             val vr_hir_init = if vr_init.?:
                 self.lower_hir_expr(vr_init ?? sk_dummy)
             else:
                 HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-            val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, Visibility.Private, true, nil)
+            val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, false, true, nil)
             if val vr_init_present = vr_init:
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
                 self.try_register_local_tuple_type(vr_symbol, vr_init_present)
-            return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type_bare, vr_hir_init), span: s.span)
+            return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type, vr_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Return(nil)):
             val rt_val: Expr? = match stmt_kind_value:
                 case StmtKind.Return(rvalue):
@@ -517,51 +474,25 @@ impl HirLowering:
 
         val kind: HirStmtKind = match stmt_kind_value:
             case StmtKind.Val(name, type_, init):
-                # An OPTION HANDLE MUST NOT REACH `HirStmtKind.Let`. Its field is
-                # `type_: HirType` (hir_definitions.spl:765), NOT `HirType?`, while
-                # `SymbolTable.define` (hir_types.spl:316) legitimately takes `HirType?`.
-                # Passing one `Some(...)` local to both stored the Option's ENUM HEADER in the
-                # `type_` slot; every consumer that clones a `HirStmt` then read header word[1]
-                # (`enum_id | variant<<32`, enum_id=1 for Option) as `HirType.span` and
-                # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
-                # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
-                # Keep the bare value for the HIR node and the Option for the symbol table.
-                val hir_type_bare: HirType = if type_.?:
-                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
-                else:
-                    nil
-                val hir_type: HirType? = if type_.?:
-                    Some(hir_type_bare)
+                val hir_type = if type_.?:
+                    Some(self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span)))
                 else:
                     nil
                 val hir_init = self.lower_hir_expr(init)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, Visibility.Private, false, nil)
-                HirStmtKind.Let(symbol, hir_type_bare, hir_init)
+                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, false, nil)
+                HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Var(name, type_, init):
-                # An OPTION HANDLE MUST NOT REACH `HirStmtKind.Let`. Its field is
-                # `type_: HirType` (hir_definitions.spl:765), NOT `HirType?`, while
-                # `SymbolTable.define` (hir_types.spl:316) legitimately takes `HirType?`.
-                # Passing one `Some(...)` local to both stored the Option's ENUM HEADER in the
-                # `type_` slot; every consumer that clones a `HirStmt` then read header word[1]
-                # (`enum_id | variant<<32`, enum_id=1 for Option) as `HirType.span` and
-                # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
-                # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
-                # Keep the bare value for the HIR node and the Option for the symbol table.
-                val hir_type_bare: HirType = if type_.?:
-                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
-                else:
-                    nil
-                val hir_type: HirType? = if type_.?:
-                    Some(hir_type_bare)
+                val hir_type = if type_.?:
+                    Some(self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span)))
                 else:
                     nil
                 val hir_init = if init.?:
                     self.lower_hir_expr(init ?? Expr(kind: ExprKind.NilLit, span: s.span))
                 else:
                     HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, Visibility.Private, true, nil)
-                HirStmtKind.Let(symbol, hir_type_bare, hir_init)
+                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, true, nil)
+                HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Assign(target, op, value):
                 val hir_op = self.lower_hir_assign_op_opt(op)
@@ -588,7 +519,7 @@ impl HirLowering:
                 val hir_body_kind = if for_is_tuple:
                     val for_inner = var_.slice(1, var_.len() - 1)
                     val for_parts = for_inner.split(",")
-                    val for_elem_sym = self.symbols.define("__for_tuple_elem", SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
+                    val for_elem_sym = self.symbols.define("__for_tuple_elem", SymbolKind.Variable, nil, s.span, false, false, nil)
                     var for_prefix: [HirStmt] = []
                     var for_pi = 0
                     while for_pi < for_parts.len():
@@ -598,7 +529,7 @@ impl HirLowering:
                                 HirExpr(kind: HirExprKind.Var(for_elem_sym), type_: nil, span: s.span),
                                 HirExpr(kind: HirExprKind.IntLit(for_pi, nil), type_: nil, span: s.span)
                             ), type_: nil, span: s.span)
-                            val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
+                            val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, nil, s.span, false, false, nil)
                             for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, nil, for_idx_expr), span: s.span))
                         for_pi = for_pi + 1
                     val for_hir_body_raw = self.lower_hir_block(body)
@@ -610,7 +541,7 @@ impl HirLowering:
                     )
                     HirExprKind.For(for_elem_sym, hir_iter, for_hir_body, nil)
                 else:
-                    val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, s.span, Visibility.Private, false, nil)
+                    val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, s.span, false, false, nil)
                     val hir_body = self.lower_hir_block(body)
                     HirExprKind.For(symbol, hir_iter, hir_body, nil)
                 self.loop_depth = self.loop_depth - 1

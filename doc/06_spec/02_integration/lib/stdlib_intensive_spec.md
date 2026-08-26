@@ -1,6 +1,29 @@
-# stdlib_intensive_spec
+# Standard Library Intensive Tests
 
-> Verifies the stdlib intensive behaviour end to end so maintainers of this
+> Comprehensive integration testing of all stdlib modules working together. Tests realistic workflows using multiple stdlib components simultaneously.
+
+<!-- sdn-diagram:id=stdlib_intensive_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=stdlib_intensive_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+stdlib_intensive_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=stdlib_intensive_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +32,48 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# stdlib_intensive_spec
+# Standard Library Intensive Tests
 
-Verifies the stdlib intensive behaviour end to end so maintainers of this
+Comprehensive integration testing of all stdlib modules working together. Tests realistic workflows using multiple stdlib components simultaneously.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Category | Standard Library |
-| Status | Active |
+| Feature IDs | #1011-1020 |
+| Category | Testing |
+| Difficulty | 4/5 |
+| Status | Implemented |
 | Source | `test/02_integration/lib/stdlib_intensive_spec.spl` |
-| Updated | 2026-08-22 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Verifies the stdlib intensive behaviour end to end so maintainers of this
-component and reviewers of its spec share one pinned definition.
-## Operator workflow
-Run `bin/simple test <this spec>`; read the per-scenario verdicts in
-the `Results:` summary. Each scenario asserts an observable outcome.
-## Compatibility and limitations
-Covers the currently shipped behaviour only; performance, stress and
-unrelated sibling features are out of scope.
+## Overview
+
+Comprehensive integration testing of all stdlib modules working together.
+Tests realistic workflows using multiple stdlib components simultaneously.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Module Integration | Multiple stdlib modules working together |
+| Real Workflows | Practical use cases combining features |
+| Performance | Test under load with realistic data |
+
+## Related Specifications
+
+- [Collections](../../src/lib/src/collections/) - Data structures
+- [String](../../src/lib/common/text.spl) - String operations
+- [Math](../../src/lib/src/math/) - Mathematical functions
+- [Path](../../src/lib/common/path.spl) - Path manipulation
+
+## Examples
+
+```simple
+# Multi-module workflow
+var data = read_file(path) |> parse_json |> validate
+```
 
 ## Scenarios
 
@@ -44,19 +86,16 @@ unrelated sibling features are out of scope.
 
 #### processes 1000 strings with split/join _(slow)_
 
-- Verify: processes 1000 strings with split/join
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: processes 1000 strings with split/join")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var lines = []
 for i in 0..1000:
     lines = lines + ["item_{i},value_{i},status_{i}"]
@@ -81,19 +120,18 @@ check(processed == 1000)
 
 #### builds text with array concatenation _(slow)_
 
-- Verify: builds text with array concatenation
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: builds text with array concatenation")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var words = []
 for i in 0..500:
     words = words + ["word{i}"]
@@ -116,19 +154,16 @@ check(text.contains("word499"))
 
 #### filters and maps 1000 items _(slow)_
 
-- Verify: filters and maps 1000 items
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: filters and maps 1000 items")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var items = []
 for i in 0..1000:
     items = items + [i]
@@ -152,19 +187,16 @@ check(evens.len() == 500)
 
 #### transforms strings to uppercase pattern _(slow)_
 
-- Verify: transforms strings to uppercase pattern
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: transforms strings to uppercase pattern")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var words = ["hello", "world", "test", "simple"]
 
 var uppers = []
@@ -189,19 +221,16 @@ check(uppers.len() == 4)
 
 #### computes sum of 1000 numbers _(slow)_
 
-- Verify: computes sum of 1000 numbers
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: computes sum of 1000 numbers")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var numbers = []
 for i in 0..1000:
     numbers = numbers + [i]
@@ -224,19 +253,17 @@ check(sum == 499500)
 
 #### finds min/max in large dataset _(slow)_
 
-- Verify: finds min/max in large dataset
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: finds min/max in large dataset")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var numbers = []
 for i in 0..1000:
     val n = (i * 7) % 100  # Generate varied numbers
@@ -267,19 +294,18 @@ check(max_val < 100)
 
 #### applies arithmetic to 500 items _(slow)_
 
-- Verify: applies arithmetic to 500 items
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: applies arithmetic to 500 items")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var values = []
 for i in 0..500:
     values = values + [i]
@@ -308,19 +334,18 @@ check(squared[10] == 100)
 
 #### builds 500 file paths _(slow)_
 
-- Verify: builds 500 file paths
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: builds 500 file paths")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var paths = []
 for i in 0..500:
     val path = "dir/subdir/file{i}.spl"
@@ -341,19 +366,17 @@ check(paths[499].contains("file499.spl"))
 
 #### extracts components from paths _(slow)_
 
-- Verify: extracts components from paths
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: extracts components from paths")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var paths = [
     "src/compiler/10.frontend/core/lexer.spl",
     "test/unit/std/string_spec.spl",
@@ -380,19 +403,16 @@ for path in paths:
 
 #### validates 1000 path patterns _(slow)_
 
-- Verify: validates 1000 path patterns
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: validates 1000 path patterns")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var valid_count = 0
 
 for i in 0..1000:
@@ -419,19 +439,16 @@ check(valid_count == 1000)
 
 #### processes CSV-like data end-to-end _(slow)_
 
-- Verify: processes CSV-like data end-to-end
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: processes CSV-like data end-to-end")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 # Generate CSV data
 var csv_lines = []
 csv_lines = csv_lines + ["name,age,city"]
@@ -463,19 +480,16 @@ check(records.len() == 100)
 
 #### aggregates data by category _(slow)_
 
-- Verify: aggregates data by category
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: aggregates data by category")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var data = []
 for i in 0..200:
     val category = i % 5
@@ -504,19 +518,18 @@ for count in counts:
 
 #### analyzes 500 text documents _(slow)_
 
-- Verify: analyzes 500 text documents
+1. var words = doc split
+2. word count = word count + words len
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: analyzes 500 text documents")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var docs = []
 for i in 0..500:
     val doc = "Document {i} contains multiple words and numbers like {i * 2}"
@@ -540,19 +553,16 @@ check(word_count > 3000)
 
 #### filters and sorts text data _(slow)_
 
-- Verify: filters and sorts text data
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: filters and sorts text data")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var items = []
 for i in 0..300:
     if i % 3 == 0:
@@ -583,19 +593,18 @@ check(special.len() == 100)
 
 #### appends 2000 items _(slow)_
 
-- Verify: appends 2000 items
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: appends 2000 items")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var arr = []
 for i in 0..2000:
     arr = arr + [i]
@@ -615,19 +624,16 @@ check(arr[1999] == 1999)
 
 #### concatenates arrays repeatedly _(slow)_
 
-- Verify: concatenates arrays repeatedly
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: concatenates arrays repeatedly")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var base = [1, 2, 3]
 var result = []
 
@@ -650,19 +656,17 @@ check(result.len() == 300)
 
 #### handles nested arrays _(slow)_
 
-- Verify: handles nested arrays
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: handles nested arrays")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var matrix = []
 for row in 0..50:
     var row_data = []
@@ -684,19 +688,16 @@ check(matrix[0].len() == 50)
 
 #### processes nested data structures _(slow)_
 
-- Verify: processes nested data structures
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: processes nested data structures")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var groups = []
 for g in 0..10:
     var items = []
@@ -727,19 +728,16 @@ check(flattened.len() == 200)
 
 #### concatenates 500 strings _(slow)_
 
-- Verify: concatenates 500 strings
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: concatenates 500 strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var parts: [text] = []
 for i in 0..500:
     parts = parts + ["item{i},"]
@@ -747,6 +745,18 @@ val result = parts.join("")
 
 check(result.len() > 2500)
 ```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> var parts: [text] = []<br>
+> for i in 0..500:<br>
+>     parts = parts + ["ite$i$,"]<br>
+> val result = parts.join("")<br>
+> <br>
+> check(result.len() > 2500)
+
+</details>
 
 </details>
 
@@ -758,19 +768,16 @@ check(result.len() > 2500)
 
 #### splits and rejoins strings _(slow)_
 
-- Verify: splits and rejoins strings
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: splits and rejoins strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var original = "a,b,c,d,e,f,g,h,i,j"
 
 for i in 0..100:
@@ -791,19 +798,16 @@ for i in 0..100:
 
 #### searches in 1000 strings _(slow)_
 
-- Verify: searches in 1000 strings
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: searches in 1000 strings")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var matches = 0
 
 for i in 0..1000:
@@ -824,19 +828,16 @@ check(matches == 1000)
 
 #### extracts substrings repeatedly _(slow)_
 
-- Verify: extracts substrings repeatedly
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-LIB-LIB_STDLIB_INTENSIVE-001
-step("Verify: extracts substrings repeatedly")
-# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "0123456789abcdefghij"
 
 var extracts = []
@@ -865,37 +866,3 @@ check(extracts.len() == 10)
 
 
 </details>
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `256e18fd88fb45c69482a7f2654bba999c2ed4b58de505a22e8ae815e0da6218`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `256e18fd88fb45c69482a7f2654bba999c2ed4b58de505a22e8ae815e0da6218`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `256e18fd88fb45c69482a7f2654bba999c2ed4b58de505a22e8ae815e0da6218`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
-
-SSpec documentization score: 94/100
-source: test/02_integration/lib/stdlib_intensive_spec.spl
-mirror: doc/06_spec/02_integration/lib/stdlib_intensive_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=85 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/lib/stdlib_intensive_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
-doc/06_spec/02_integration/lib/stdlib_intensive_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/lib/stdlib_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-<!-- sspec-maintain:scorecard:end -->

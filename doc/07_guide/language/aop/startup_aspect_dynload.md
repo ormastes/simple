@@ -1,7 +1,8 @@
 # Startup aspect dynload
 
 **Status:** implemented and gated (2026-08-24).
-**Gate:** `sh scripts/check/check-startup-aspect-dynload.shs` — `PASS — 9 case(s) checked, ...`
+**Gate:** `sh scripts/check/check-startup-aspect-dynload.shs` — exercises the
+environment and command-line extension forms with real shared libraries.
 **Runtime:** `src/runtime/runtime_native.c` (`__simple_startup_before_main`)
 
 A native Simple program can load custom shared libraries **at startup, before any
@@ -10,6 +11,8 @@ user code runs**, and call an entry point in each one.
 ```sh
 SIMPLE_STARTUP_ASPECTS=/path/libobservability.so ./my_program
 SIMPLE_STARTUP_ASPECTS=/path/a.so:/path/b.so ./my_program   # ';' on Windows
+./my_program --startup-extension=/path/libobservability.so
+./my_program --startup-extension /path/a.so --startup-extension /path/b.so
 ```
 
 Each listed library must export:
@@ -42,6 +45,12 @@ activation mode ("before application publication").
 | Situation | Result |
 |---|---|
 | Variable unset or empty | No packs loaded, program runs normally. Not an error. |
+| Repeated `--startup-extension` options | Loaded after environment packs, in argument order. |
+| `--` argument terminator | Later extension-looking arguments are ignored. |
+| Missing or empty command-line path | Startup fails closed; exit **125**. |
+
+Runtime-owned `--startup-extension` arguments are removed from the argv view
+published to Simple application code. Arguments after `--` remain untouched.
 | Pack loads, `simple_aspect_pack_init` returns 0 | Continue to the next pack, then to `main`. |
 | Path cannot be opened | stderr names the path and the `dlopen` reason; exit **125**. |
 | Library exports no `simple_aspect_pack_init` | stderr names the missing symbol; exit **125**. |
@@ -90,10 +99,18 @@ For **on-demand** (non-startup) loading from Simple code, the existing userland
 API is `src/lib/nogc_sync_mut/sffi/dynamic.spl` (`DynLib.open` / `try_open` /
 `sym`). This change adds no second userland API.
 
-## Limits
+## Portable configuration and limits
 
-- Hosted native binaries only. The generated `main` guards the call with
-  `#if !defined(_MSC_VER)`, so MSVC builds do not call the hook.
+- Hosted native binaries support the startup hook on ELF, Mach-O, MinGW/COFF,
+  and MSVC entry closures. Platform-specific library opening stays in the
+  runtime's host-loader adapter.
+- Windows paths are decoded as UTF-8 and opened through `LoadLibraryW`; symbol
+  names remain the portable C ABI byte names required by `GetProcAddress`.
+- Applications that need checked dynSMF selection can use
+  `--dynload-config=<path>` (or its two-argument form), repeatable
+  `--dynload=<id>:<axis-spec>`, and `SIMPLE_DYNLOAD_CONFIG`. CLI config wins
+  over the environment, which wins over `simple_dynload.sdn`; repeated settings
+  preserve argument order and the last value for an id wins.
 - Only the hosted C entry closure calls the hook. The three pure-LLVM entry
   variants in `src/compiler/70.backend/backend/entry_point.spl:43,94,142` emit
   `__simple_runtime_init` but **no** pre-main call, so a program built through
@@ -101,8 +118,6 @@ API is `src/lib/nogc_sync_mut/sffi/dynamic.spl` (`DynLib.open` / `try_open` /
   variants never had the slot — and gate case 8 pins only
   `llvm_native_link_hosted_support.spl`. Probing an `entry_point.spl` lane and
   seeing no pack load is expected, not a bug.
-- The path list is read from the environment. There is no manifest or config
-  file wiring yet — that arrives with the aspect catalog.
 - The gate builds against `build/simple-core/libsimple_runtime.a`, replacing the
   recompiled `runtime_native.o` inside a private copy. It reports
   `ERROR — nothing was checked` if that archive is absent.

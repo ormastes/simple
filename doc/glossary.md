@@ -426,16 +426,6 @@ See:
 - `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md`
 - `doc/02_requirements/feature/unified_optimizer_plugin.md`
 
-## Must-check tiers
-
-The mandatory release-safety split between a lightweight interactive push
-consumer and an expensive bootstrap evidence producer. The push tier validates
-committed tree structure plus a source-fresh textual SDN ledger, with bounded
-ref count and evidence hashing. The bootstrap tier runs compiler phases,
-full/exhaustive checks, Sdoctest, Caret, platform, and performance producers,
-then atomically promotes only explicit PASS evidence. TODO remains visible debt,
-never an implicit pass.
-
 ## MIR Optimizer
 The compile-time static optimization pass pipeline in `src/compiler/60.mir_opt/`. Runs deterministic passes (DCE, const-fold, inline, CSE, GVN, copy propagation, loop optimization, auto-vectorization, bounds-check elimination, tail-call optimization, strength reduction, string-builder optimization) on MIR before backend codegen. Passes implement `trait MirPass` and register via `DynamicPassRegistry` / `OptimizerManifest`. Controlled by `OptLevel` (nil/Size/Speed/Aggressive).
 
@@ -1181,9 +1171,7 @@ A documentation test discovered and executed by the full Simple test runner.
 A **Markdown sdoctest** is a closed, non-empty `simple`, `spl`, or `sdoctest`
 fence in Markdown. A **comment sdoctest** is a runnable fenced example or
 `sdoctest:` section in Simple source documentation comments. Text-only examples
-use a `text` fence. In **whole-test scope**, the positional spec path does not
-become doctest provenance: Markdown follows `config/sdoctest.sdn`, and comment
-sdoctests follow the production `src/lib`, `src/compiler`, and `src/app` roots.
+use a `text` fence and are not executable.
 
 ## LLM Fraud Prevention (rules.sdl)
 

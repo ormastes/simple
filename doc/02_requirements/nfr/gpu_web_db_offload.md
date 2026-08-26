@@ -28,3 +28,6 @@ Status: selected requirements, recovered.
 - `NFR-GPU-WDB-018`: Benchmark reports include dataset size, row/document count, vector dimensions, index type, storage provider, backend, fallback policy, and hardware.
 - `NFR-GPU-WDB-019`: SPipe specs assert both CPU fallback and GPU-hit states; no placeholder passes or equality-only GPU claims.
 - `NFR-GPU-WDB-020`: Every requirement in the GPU-WDB family traces to design, implementation, and evidence before release.
+- `NFR-GPU-WDB-021`: Invalid, upload-only, synthetic-handle, CPU-mirror, and
+  checksum-mismatch receipts fail before production counters or response/query
+  authority can attribute work to a GPU.

@@ -1,6 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
-use compiler.hir.hir_lowering.hir_phase_profile.{hir_ambig_dep_trace, hir_ambig_dep_trace_enabled, hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum}
+use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
 use compiler.hir.hir_lowering._Items.module_lowering.*
 # HIR Lowering - Item Lowering
 #
@@ -36,9 +35,6 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
-# Level-gated diagnostic switch, default OFF (.claude/rules/code-style.md).
-val HIR_REEXPORT_IMPL_TRACE = false
-
 impl HirLowering:
     me find_reexport_source_walk(
         facade_index: i64, wanted: text, depth: i64,
@@ -46,24 +42,16 @@ impl HirLowering:
     ) -> HirReexportSource:
         """Walk frozen physical routes without path normalization or splits."""
         if depth > 8:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("chase-bail reason=depth-cap facade={facade_index} wanted={wanted} depth={depth}")
             state.complete = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if facade_index < 0 or facade_index >= self.module_surfaces.surfaces.len():
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("chase-bail reason=invalid-facade-index facade={facade_index} wanted={wanted} depth={depth}")
             state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if not module_surface_route_arrays_aligned(self.module_surfaces.surfaces[facade_index]):
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("chase-bail reason=route-arrays-misaligned facade={self.module_surfaces.surfaces[facade_index].module_name} wanted={wanted} depth={depth}")
             state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if (state.surface_indices.len() != state.wanted_names.len() or
             state.surface_indices.len() != state.depths.len()):
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("chase-bail reason=walk-state-misaligned wanted={wanted} depth={depth}")
             state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
 
@@ -73,8 +61,6 @@ impl HirLowering:
         if visit_entry >= 0:
             val seen_depth = state.depths[visit_entry]
             if seen_depth <= depth:
-                if hir_ambig_dep_trace_enabled():
-                    hir_ambig_dep_trace("chase-bail reason=visited-memo facade={self.module_surfaces.surfaces[facade_index].module_name} wanted={wanted} depth={depth} seen_depth={seen_depth}")
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             state.depths[visit_entry] = depth
         else:
@@ -92,8 +78,6 @@ impl HirLowering:
                 self.module_surfaces, origin_lookup.owner_module)
             if origin_index_value < 0 or
                origin_index_value >= self.module_surfaces.surfaces.len():
-                if hir_ambig_dep_trace_enabled():
-                    hir_ambig_dep_trace("chase-bail reason=export-origin-owner-unresolved facade={facade_mod.module_name} wanted={wanted} owner={origin_lookup.owner_module}")
                 state.valid = false
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             return HirReexportSource(
@@ -102,62 +86,41 @@ impl HirLowering:
                 module_name: self.module_surfaces.surfaces[origin_index_value].preferred_registry_name,
                 item_name: origin_lookup.source_name)
 
-        # Two passes: explicit named import rows first, glob rows only if no
-        # explicit route resolved. An explicit import binds the name; a glob
-        # only fills names the module did not import explicitly.
-        var pass_index = 0
-        while pass_index < 2:
-            var import_idx = 0
-            while import_idx < facade_mod.imports.len():
-                val item_start = facade_mod.import_item_offsets[import_idx]
-                val item_end = facade_mod.import_item_offsets[import_idx + 1]
-                val row_is_glob = item_start == item_end
-                var matches = row_is_glob
-                # EXPLICIT-OVER-GLOB (2026-08-22): pass 0 considers ONLY
-                # explicit named rows, pass 1 ONLY globs. A glob row matches
-                # ANY wanted name, so a single ordered pass let a glob in an
-                # EARLIER import slot win the name over an explicit
-                # `use m.{Name}` in a later slot -- measured in run14:
-                # `compiler.backend.backend.env` bound the GLOBBED
-                # `compiler.frontend.parser_types_expr` `enum Backend` instead
-                # of the `use ...backend_api.{Backend}` it explicitly names.
-                if (pass_index == 0 and row_is_glob) or
-                   (pass_index == 1 and not row_is_glob):
-                    matches = false
-                var source_item = wanted
-                var item_idx = item_start
-                # Only the named pass scans item rows; otherwise the scan below
-                # would set `matches` back to true for a named row in the glob
-                # pass and undo the gate above.
-                while pass_index == 0 and item_idx < item_end:
-                    val item_name = facade_mod.import_item_names[item_idx]
-                    val local = if facade_mod.import_item_has_alias[item_idx]:
-                        facade_mod.import_item_aliases[item_idx]
-                    else: item_name
-                    if local == wanted or item_name == wanted:
-                        matches = true
-                        source_item = item_name
-                    item_idx = item_idx + 1
-                if matches and import_idx < facade_mod.import_target_indices.len():
-                    val next_index = facade_mod.import_target_indices[import_idx]
-                    if next_index >= 0 and next_index < self.module_surfaces.surfaces.len():
-                        val next_mod = self.module_surfaces.surfaces[next_index]
-                        if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                            val next_declares = hir_module_declares_item(
-                                next_mod, source_item)
-                            eprint("[reexport-hop] facade={facade_mod.preferred_registry_name} wanted={wanted} import={import_idx} item_start={item_start} item_end={item_end} source_item={source_item} target={next_index} target_name={next_mod.preferred_registry_name} declares={next_declares} composites={next_mod.composite_names.len()} enums={next_mod.enum_names.len()} traits={next_mod.trait_names.len()} callables={next_mod.callable_names.len()} aliases={next_mod.type_alias_names.len()} constants={next_mod.constant_names.len()}")
-                        if hir_module_declares_item(next_mod, source_item):
-                            return HirReexportSource(
-                                found: true,
-                                module_index: next_index,
-                                module_name: next_mod.preferred_registry_name,
-                                item_name: source_item)
-                        val deeper = self.find_reexport_source_walk(
-                            next_index, source_item, depth + 1, state)
-                        if deeper.found:
-                            return deeper
-                import_idx = import_idx + 1
-            pass_index = pass_index + 1
+        var import_idx = 0
+        while import_idx < facade_mod.imports.len():
+            val item_start = facade_mod.import_item_offsets[import_idx]
+            val item_end = facade_mod.import_item_offsets[import_idx + 1]
+            var matches = item_start == item_end
+            var source_item = wanted
+            var item_idx = item_start
+            while item_idx < item_end:
+                val item_name = facade_mod.import_item_names[item_idx]
+                val local = if facade_mod.import_item_has_alias[item_idx]:
+                    facade_mod.import_item_aliases[item_idx]
+                else: item_name
+                if local == wanted or item_name == wanted:
+                    matches = true
+                    source_item = item_name
+                item_idx = item_idx + 1
+            if matches and import_idx < facade_mod.import_target_indices.len():
+                val next_index = facade_mod.import_target_indices[import_idx]
+                if next_index >= 0 and next_index < self.module_surfaces.surfaces.len():
+                    val next_mod = self.module_surfaces.surfaces[next_index]
+                    if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                        val next_declares = hir_module_declares_item(
+                            next_mod, source_item)
+                        eprint("[reexport-hop] facade={facade_mod.preferred_registry_name} wanted={wanted} import={import_idx} item_start={item_start} item_end={item_end} source_item={source_item} target={next_index} target_name={next_mod.preferred_registry_name} declares={next_declares} composites={next_mod.composite_names.len()} enums={next_mod.enum_names.len()} traits={next_mod.trait_names.len()} callables={next_mod.callable_names.len()} aliases={next_mod.type_alias_names.len()} constants={next_mod.constant_names.len()}")
+                    if hir_module_declares_item(next_mod, source_item):
+                        return HirReexportSource(
+                            found: true,
+                            module_index: next_index,
+                            module_name: next_mod.preferred_registry_name,
+                            item_name: source_item)
+                    val deeper = self.find_reexport_source_walk(
+                        next_index, source_item, depth + 1, state)
+                    if deeper.found:
+                        return deeper
+            import_idx = import_idx + 1
 
         var route_index = 0
         while route_index < facade_mod.export_route_sources.len():
@@ -244,13 +207,6 @@ impl HirLowering:
                     val facade_package = self.cached_surface_package_name(facade_mod.module_name)
                     if facade_package != "":
                         val sibling_names = self.package_sibling_registry_names(facade_package)
-                        # DISTINCT-OWNER dedup. The earlier form compared only
-                        # against the LAST match (`sibling_match_index !=
-                        # candidate`), which is order-dependent: an A, B, A
-                        # sibling ordering recorded three matches for two
-                        # owners. Keep the full set of owner indices seen so the
-                        # uniqueness test below is a real distinct count.
-                        var sibling_match_indices: [i64] = []
                         var sibling_match_index = -1
                         var sibling_match_count = 0
                         var sibling_idx = 0
@@ -262,8 +218,7 @@ impl HirLowering:
                                sibling_index != facade_index:
                                 val sibling = self.module_surfaces.surfaces[sibling_index]
                                 if hir_module_declares_item(sibling, wanted):
-                                    if not hir_i64_list_contains(sibling_match_indices, sibling_index):
-                                        sibling_match_indices.push(sibling_index)
+                                    if sibling_match_index != sibling_index:
                                         sibling_match_count = sibling_match_count + 1
                                         sibling_match_index = sibling_index
                                 else:
@@ -276,8 +231,7 @@ impl HirLowering:
                                     val via_sibling = self.find_reexport_source_walk(
                                         sibling_index, wanted, depth + 1, state)
                                     if via_sibling.found and
-                                       not hir_i64_list_contains(sibling_match_indices, via_sibling.module_index):
-                                        sibling_match_indices.push(via_sibling.module_index)
+                                       sibling_match_index != via_sibling.module_index:
                                         sibling_match_count = sibling_match_count + 1
                                         sibling_match_index = via_sibling.module_index
                             sibling_idx = sibling_idx + 1
@@ -456,24 +410,8 @@ impl HirLowering:
 
     me register_materialized_payload_named_dependency_inner(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, skipped: {text: bool}, import_span: Span):
         if dependency == "" or skipped.contains_key(dependency): return
-        # Builtins are resolved by lower_named_kind's primitive arms, never by a
-        # module surface; asking an owner to declare `text` can only ever fail.
-        if hir_dependency_is_builtin_type(dependency): return
-        # PAYLOADMISS: a name this owner cannot resolve is re-searched by every
-        # importer and every occurrence. Container spellings dominate that cost
-        # (run14: Dict 14,847, Option 9,857, Result 7,015 advisories) and they
-        # deliberately are NOT builtin-filtered, because a user module may
-        # really declare `Result`/`Dict` and must win. Caching only the MISS
-        # keeps that precedence exactly: a declared type resolves on step 1 and
-        # is never cached, so the memo can only ever short-circuit a search
-        # whose answer was already "this owner does not have it".
-        val miss_key = hir_payload_origin_miss_key(imported_mod_name, dependency)
-        if self.payload_origin_miss_memo.contains_key(miss_key):
-            self.payload_origin_miss_skip_count = self.payload_origin_miss_skip_count + 1
-            return
         val origin = self.resolve_materialized_enum_payload_origin(imported_mod, imported_mod_name, dependency)
         if not origin.found:
-            self.payload_origin_miss_memo[miss_key] = true
             # NEVER silent. An unresolved payload origin used to return with no
             # trace at all, and the failure resurfaced much later as a hard
             # `unresolved type: {name}` (hir_lowering/types.spl) attributed to
@@ -588,9 +526,6 @@ impl HirLowering:
     ):
         """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off)."""
         val started = hir_phase_profile_now()
-        if hir_dependency_is_builtin_type(hir_dependency_type_name(dependency)):
-            hir_phase_profile_add(HIR_PROF_RIS_EXPLICIT_DEP, started)
-            return
         self.materialize_imported_callable_explicit_dependency_inner(
             imported_mod, hir_dependency_type_name(dependency), import_span, materialize_enum)
         hir_phase_profile_add(HIR_PROF_RIS_EXPLICIT_DEP, started)
@@ -616,8 +551,6 @@ impl HirLowering:
             selected_target = self.explicit_dep_target_memo[memo_key]
             selected_item = self.explicit_dep_item_memo[memo_key]
         else:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("sweep-enter owner={imported_mod.module_name} dep={dependency} imports={imported_mod.imports.len()}")
             self.explicit_dep_scan_count = self.explicit_dep_scan_count + 1
             hir_phase_profile_count_explicit_scan(imported_mod.imports.len())
             # Resolve only an explicit named import written by the callable
@@ -627,18 +560,6 @@ impl HirLowering:
             # signature.
             var import_index: i64 = 0
             var ambiguous = false
-            # EXPLICIT-OVER-GLOB (2026-08-22). Rank of the current selection:
-            # 1 = an explicit named import row written by the callable owner,
-            # 0 = a glob route, -1 = nothing selected yet. Ambiguity is only
-            # ever computed WITHIN a rank: two disagreeing EXPLICIT routes are
-            # a real ambiguity and still report, but a glob route must never
-            # compete with -- let alone override -- an explicit import.
-            # Measured in run14: this owner's four candidate rows were
-            # glob/glob/named/glob, the named row naming
-            # `compiler.backend.backend.backend_api` and the globs naming
-            # `compiler.frontend.parser_types_expr`; last-writer-wins made the
-            # trailing GLOB the selection and flagged the pair ambiguous.
-            var selected_rank: i64 = -1
             while import_index < imported_mod.imports.len() and
                   import_index < imported_mod.import_target_indices.len():
                 val target_index = imported_mod.import_target_indices[import_index]
@@ -665,17 +586,10 @@ impl HirLowering:
                                 candidate_item = hop.item_name
                                 candidate_found = true
                         if candidate_found:
-                            if hir_ambig_dep_trace_enabled():
-                                hir_ambig_dep_trace("sweep-candidate route=named owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
-                            if selected_rank == 1 and
+                            if selected_target >= 0 and
                                (selected_target != candidate_target or
                                 selected_item != candidate_item):
                                 ambiguous = true
-                            if selected_rank < 1:
-                                # First explicit route supersedes any glob
-                                # selection, including a glob-vs-glob ambiguity.
-                                ambiguous = false
-                            selected_rank = 1
                             selected_target = candidate_target
                             selected_item = candidate_item
                     item_index = item_index + 1
@@ -696,20 +610,14 @@ impl HirLowering:
                             candidate_target = hop.module_index
                             candidate_item = hop.item_name
                             candidate_found = true
-                    if candidate_found and selected_rank < 1:
-                        if hir_ambig_dep_trace_enabled():
-                            hir_ambig_dep_trace("sweep-candidate route=glob owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
-                        if selected_rank == 0 and
+                    if candidate_found:
+                        if selected_target >= 0 and
                            (selected_target != candidate_target or
                             selected_item != candidate_item):
                             ambiguous = true
-                        selected_rank = 0
                         selected_target = candidate_target
                         selected_item = candidate_item
                 import_index = import_index + 1
-            if hir_ambig_dep_trace_enabled():
-                val sweep_verdict_name = if selected_target >= 0: self.module_surfaces.surfaces[selected_target].module_name else: "<none>"
-                hir_ambig_dep_trace("sweep-verdict owner={imported_mod.module_name} dep={dependency} ambiguous={ambiguous} selected_target={sweep_verdict_name} selected_item={selected_item}")
             if ambiguous:
                 # -2 is the ambiguity sentinel, cached like any other fact so a
                 # later importer does not re-sweep to rediscover it. The
@@ -725,35 +633,6 @@ impl HirLowering:
                 import_span)
             return
         if selected_target < 0:
-            # NEVER silent -- same rule the payload path already follows.
-            # This bare `return` is the twin of the payload-origin defect: the
-            # callable owner names a type in a signature that it neither
-            # declares, re-exports, nor explicitly imports, nothing is bound,
-            # and the failure resurfaces much later as a hard
-            # `unresolved type: {dependency}` (hir_lowering/types.spl)
-            # attributed to whichever module imported the CALLABLE -- an
-            # innocent third party that never names the type. Stage-1 run13
-            # lost 12 distinct type names this way (CodegenTarget 113,
-            # MirType 87, Export 26, TypeLayout 18, HirPattern 14, HirIfArm 11,
-            # CompilationContext 6, AsmLocation 5, AsmConstraintKind 5,
-            # HirModule/HirFunction/HirExpr/CompiledModule 2 each) with ZERO
-            # diagnostic naming the real owner. Advisory (eprint, not
-            # self.error) on purpose, exactly as the payload twin: a consumer
-            # that already has the name in scope still lowers fine, so failing
-            # here would be a regression rather than a fix.
-            # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-            # Namespaced away from the payload keys on purpose: the callable
-            # sweep's negative ("no explicit import declares it") is NARROWER
-            # than the payload search's negative, so letting one suppress the
-            # other would skip a resolution that could still succeed. This key
-            # only ever dedupes the ADVISORY.
-            val callable_miss_key = hir_payload_origin_miss_key("callable " + imported_mod.module_name, dependency)
-            val callable_already_advised = self.payload_origin_miss_memo.contains_key(callable_miss_key)
-            if callable_already_advised:
-                self.payload_origin_miss_skip_count = self.payload_origin_miss_skip_count + 1
-            if not hir_dependency_is_builtin_type(dependency) and not callable_already_advised:
-                self.payload_origin_miss_memo[callable_miss_key] = true
-                eprint("[hir-callable-dep-origin-unresolved] owner={imported_mod.module_name} dependency={dependency}: no declaration, re-export hop, or explicit import of this name in the owner; a later `unresolved type: {dependency}` will be reported against an importing module instead")
             return
         val terminal = self.module_surfaces.surfaces[selected_target]
         val terminal_local_name = "{terminal.module_name}::{selected_item}"
@@ -931,33 +810,6 @@ impl HirLowering:
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name, param.type_name,
                     import_span, materialize_enum)
-            # GENERIC ARGUMENTS of a scalar HEAD must be materialized too.
-            #
-            # `type_name` is the pre-captured scalar head, so for
-            # `Dict<text, Payload>` it is `Dict` -- a builtin that materializes
-            # to nothing -- and this branch then RETURNED without ever walking
-            # the arguments. `parser_type_named_dependencies` already recurses
-            # Named -> args correctly; it was simply never called on this path,
-            # because the `else` that calls it is only reached when NO scalar
-            # head was captured. So the argument was never bound in the owner's
-            # qualified scope at all.
-            #
-            # THIS is the asymmetry that made both previous attempts fail.
-            # `d481f15e1ac` taught PROJECTION to recurse into generic arguments
-            # while this walk still bound nothing for them, so every recursed
-            # argument missed the owner-scope lookup and fell through to
-            # `lower_type` in the importer's scope -- stage-1 48 -> 3716 fatals.
-            # Reproduced in miniature on the three-module fixture in
-            # `imported_generic_head_argument_owner_scope_spec.spl`: projecting
-            # arguments without this call yields `unresolved type: Payload`,
-            # exactly the flood shape, in seconds instead of 72 minutes.
-            # Projection can only resolve what materialization has bound.
-            # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-                if parser_type_kind_named_args(param.type_.kind).len() > 0:
-                    for arg_dependency in parser_type_named_dependencies(param.type_):
-                        self.materialize_imported_callable_dependency(
-                            imported_mod, imported_mod_name, arg_dependency,
-                            import_span, materialize_enum)
             elif param.array_element_name != "":
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name, param.array_element_name,
@@ -972,12 +824,6 @@ impl HirLowering:
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name, callable.return_type_name,
                     import_span, materialize_enum)
-                # Same generic-argument gap as the param branch above.
-                if parser_type_kind_named_args(callable.return_type.kind).len() > 0:
-                    for arg_dependency in parser_type_named_dependencies(callable.return_type):
-                        self.materialize_imported_callable_dependency(
-                            imported_mod, imported_mod_name, arg_dependency,
-                            import_span, materialize_enum)
             elif callable.return_array_element_name != "":
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name,
@@ -1005,28 +851,16 @@ impl HirLowering:
         registration of a zero-import member (sugar_registry.spl, context.spl,
         modes.spl, value.spl) lowered that signature first and died with
         `unresolved type: Completion` blamed on the member being lowered."""
-        if hir_ambig_dep_trace_enabled():
-            hir_ambig_dep_trace("router owner={imported_mod.module_name} dep={dependency} imports={imported_mod.imports.len()}")
         if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("router-preresolved owner={imported_mod.module_name} dep={dependency}")
             return
         self.materialize_imported_callable_declared_dependency(
             imported_mod, imported_mod_name, dependency, import_span, materialize_enum)
         if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("router-step1-declared-bound owner={imported_mod.module_name} dep={dependency}")
             return
-        if hir_ambig_dep_trace_enabled():
-            hir_ambig_dep_trace("router-step1-missed owner={imported_mod.module_name} dep={dependency} (facade chase did not bind; entering explicit sweep)")
         self.materialize_imported_callable_explicit_dependency(
             imported_mod, dependency, import_span, materialize_enum)
         if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
-            if hir_ambig_dep_trace_enabled():
-                hir_ambig_dep_trace("router-step2-explicit-bound owner={imported_mod.module_name} dep={dependency}")
             return
-        if hir_ambig_dep_trace_enabled():
-            hir_ambig_dep_trace("router-step2-missed owner={imported_mod.module_name} dep={dependency} (entering package-sibling fallback)")
         self.materialize_imported_field_package_dependency(
             imported_mod.physical_index, hir_dependency_type_name(dependency), import_span, materialize_enum)
 
@@ -1075,36 +909,18 @@ impl HirLowering:
         hir_phase_profile_add(HIR_PROF_RIS_METHODS, started)
         self.imported_type_methods_in_progress_pop(reentry_key)
 
-    me ensure_impl_index(imported_mod: ModuleSurface) -> text:
-        """IMPLIDX: build, once per frozen surface, the three projections the
-        method-registration loop reads, and return the `{generation}
-        {physical_index}` key every probe is prefixed with.
-
-        Returns the KEY, not an array. The previous shape returned `[i64]` and
-        so allocated -- on EVERY call -- either a copy of the positions row or,
-        for the overwhelmingly common type-with-no-impls query, a fresh empty
-        array (`val none: [i64] = []`). Stage-3 `sample` on 2026-08-23 put ~100%
-        of hits in `rt_alloc -> rt_transient_raw_register` reached from exactly
-        that statement; the transient scope stays ACTIVE across the whole module
-        lowering, so each of those allocations was retained, not reclaimed.
-        Handing back the key lets the caller answer "has any impl at all?" with
-        a pure `contains_key` probe and allocate nothing on the empty path.
-
-        IMPLROWCACHE: the same sweep also records, per impl position, the impl's
-        method NAMES and (only when `has_trait_`) its trait name, so the hot
-        loop never has to materialize a `ModuleSurfaceImpl` row. All three dicts
-        are pure functions of the frozen registry, so they are shared across
-        importers and never cleared per module."""
+    me imported_impl_positions(imported_mod: ModuleSurface, imported_name: text) -> [i64]:
+        """IMPLIDX: positions in `imported_mod.impls` whose implemented type is
+        `imported_name`, in declaration order. Built once per frozen surface
+        (`generation physical_index`) by a single sweep; every later query is
+        a Dict probe. Keyed on the frozen registry only, so the answer is the
+        same for every importer and is never cleared per module."""
         val surface_key = "{self.module_surfaces.generation} {imported_mod.physical_index}"
         if not self.impl_index_built.contains_key(surface_key):
             self.impl_index_build_count = self.impl_index_build_count + 1
             var position = 0
             while position < imported_mod.impls.len():
-                # The ONE place a whole impl row is read. Bounded by the impls
-                # in the surface, once per surface, instead of once per row per
-                # registration call.
-                val impl_row = imported_mod.impls[position]
-                val implemented = parser_type_kind_named_name(impl_row.type_.kind)
+                val implemented = parser_type_kind_named_name(imported_mod.impls[position].type_.kind)
                 val rows_key = surface_key + " " + implemented
                 if self.impl_index_positions.contains_key(rows_key):
                     # One-time build over a few rows per type: the temporary
@@ -1115,30 +931,15 @@ impl HirLowering:
                 else:
                     val first_rows: [i64] = [position]
                     self.impl_index_positions[rows_key] = first_rows
-                val row_key = surface_key + " #" + position.to_text()
-                self.impl_method_name_index[row_key] = impl_row.methods.keys()
-                if impl_row.has_trait_:
-                    self.impl_trait_name_index[row_key] = parser_type_kind_named_name(impl_row.trait_.kind)
                 position = position + 1
             self.impl_index_built[surface_key] = true
-        surface_key
+        val wanted_key = surface_key + " " + imported_name
+        if self.impl_index_positions.contains_key(wanted_key):
+            return self.impl_index_positions[wanted_key]
+        val none: [i64] = []
+        none
 
     me register_imported_type_methods_inner(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
-        # IMPLIDX: visit only the impls that implement `imported_name`, in
-        # declaration order, instead of sweeping (and copying) every impl row
-        # of the declaring module per registration.
-        #
-        # ORDER MATTERS: the zero-impl answer is the dominant one, and nothing
-        # below the early return is needed to produce it. Computing the owner
-        # module and the symbol prefix first cost four text allocations per
-        # call on a path that then did no work at all.
-        val surface_key = self.ensure_impl_index(imported_mod)
-        val wanted_key = surface_key + " " + imported_name
-        # Zero-impl types are the common case, and the previous shape allocated
-        # a fresh empty `[i64]` for every one of them. Answer with a pure probe.
-        if not self.impl_index_positions.contains_key(wanted_key):
-            return
-        val impl_positions = self.impl_index_positions[wanted_key]
         var local_owner_module: text = imported_mod_name
         var local_owner_defining_module: text? = nil
         if val owner_symbol = self.symbols.get_symbol(local_owner):
@@ -1146,60 +947,19 @@ impl HirLowering:
                 local_owner_module = module_name
                 local_owner_defining_module = Some(module_name)
         val owner_module = hir_module_logical_name_from_path(local_owner_module)
-        # SYMNAMEHOIST (2026-08-23): both method loops below spell every symbol
-        # as "{owner_module}.{imported_name}::{method}". The first two
-        # fragments are loop-invariant for the whole call, so interpolate them
-        # once here instead of once per method per impl row.
-        val symbol_name_prefix = "{owner_module}.{imported_name}::"
+        # IMPLIDX: visit only the impls that implement `imported_name`, in
+        # declaration order, instead of sweeping (and copying) every impl row
+        # of the declaring module per registration.
+        val impl_positions = self.imported_impl_positions(imported_mod, imported_name)
         var impl_cursor = 0
         while impl_cursor < impl_positions.len():
-            val impl_position = impl_positions[impl_cursor]
+            val impl_ = imported_mod.impls[impl_positions[impl_cursor]]
             impl_cursor = impl_cursor + 1
             self.impl_rows_visited = self.impl_rows_visited + 1
-            val impl_row_key = surface_key + " #" + impl_position.to_text()
-            # Hoist the key projection: `.keys()` materializes the whole
-            # collection, and this is also the probe point for the retained
-            # `ModuleSurfaceImpl.methods` Dict carrier -- the one
-            # aggregate-valued Dict that crosses the staged transient teardown.
-            # Measured 2026-08-23: stage 3 spends unbounded time in this loop.
-            # IMPLROWCACHE: read the method NAMES out of the per-surface index
-            # instead of `imported_mod.impls[pos]`, which deep-copies the whole
-            # `ModuleSurfaceImpl` -- signatures Dict included -- per row per
-            # call. The row itself is now materialized only in the
-            # symbol-missing branch below, which in the steady state is never
-            # taken.
-            val impl_method_names = self.impl_method_name_index[impl_row_key]
-            # Level-gated per .claude/rules/code-style.md, default OFF.
-            # Flip HIR_REEXPORT_IMPL_TRACE below to re-enable.
-            if HIR_REEXPORT_IMPL_TRACE and _hir_reexport_impl_probe_budget > 0:
-                _hir_reexport_impl_probe_budget = _hir_reexport_impl_probe_budget - 1
-                print "[reexport-probe] owner={imported_name} module={imported_mod_name} impl_rows={impl_positions.len()} methods_keys={impl_method_names.len()} visited={self.impl_rows_visited}"
-            for method_name in impl_method_names:
-                # SYMNAMEHOIST (2026-08-23): build the invariant prefix ONCE
-                # per call instead of re-interpolating three fragments per
-                # method, and defer the `impl_.methods[...]` row read until the
-                # symbol is actually missing. In the steady state almost every
-                # method is already registered (this method is re-entered for
-                # the same type many times per module -- it is re-entrancy
-                # guarded, not memoized), so the row read and the two extra
-                # concats were pure waste on the overwhelmingly common hit
-                # path. Both are behaviour-preserving: `symbol_name` is the
-                # same text, and `method` is only ever read inside this branch.
-                # A stage-3 `sample(1)` on 2026-08-23 put 58% of all CPU
-                # samples in this function, every one under rt_alloc ->
-                # rt_transient_raw_register, whose scope stays ACTIVE across
-                # the whole lowering so nothing here is reclaimed until the
-                # module ends.
-                val symbol_name = symbol_name_prefix + method_name
+            for method_name in impl_.methods.keys():
+                val method = impl_.methods[method_name]
+                val symbol_name = "{owner_module}.{imported_name}::{method_name}"
                 if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
-                    # Deferred into the cold branch on purpose: this is the only
-                    # statement that materializes a whole `ModuleSurfaceImpl`
-                    # row (its `Dict<text, ModuleSurfaceCallable>` included),
-                    # and in the steady state it never executes. Kept as two
-                    # statements rather than one chained index expression --
-                    # the two-step form is the shape this file has always used.
-                    val impl_ = imported_mod.impls[impl_position]
-                    val method = impl_.methods[method_name]
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
                     self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, method, import_span, materialize_enum)
                     val sig_started = hir_phase_profile_now()
@@ -1207,11 +967,8 @@ impl HirLowering:
                         method, imported_mod.module_name, Some(local_owner))
                     hir_phase_profile_add(HIR_PROF_RIS_SIGTYPE, sig_started)
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
-            # IMPLROWCACHE: `contains_key` IS the `has_trait_` test -- the index
-            # stores a row only for impls that carry a trait -- so a trait whose
-            # name projects to "" is still distinguished from "no trait".
-            if self.impl_trait_name_index.contains_key(impl_row_key):
-                val trait_name = self.impl_trait_name_index[impl_row_key]
+            if impl_.has_trait_:
+                val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
                 var trait_module = imported_mod
                 var trait_module_found = true
                 var trait_source_name = trait_name
@@ -1229,9 +986,7 @@ impl HirLowering:
                     if trait_module_found and trait_position >= 0:
                         val trait_ = trait_module.trait_values[trait_position]
                         for trait_method in trait_.methods:
-                            # SYMNAMEHOIST: same invariant prefix as the impl
-                            # method loop above.
-                            val symbol_name = symbol_name_prefix + trait_method.name
+                            val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
                             if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                                 val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
                                 # The signature belongs to the trait's physical
@@ -1246,73 +1001,6 @@ impl HirLowering:
                                     trait_method, trait_module.module_name,
                                     Some(local_owner))
                                 self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
-
-# Concrete i64 membership scan: the native build path has no generic
-# monomorphization, so a `[i64].contains` method call is not available here.
-# Probe budget for the retained impl-methods Dict carrier. Capped so a stage-3
-# run records the shape of the first rows without flooding the transcript.
-var _hir_reexport_impl_probe_budget: i64 = 40
-
-fn hir_i64_list_contains(values: [i64], needle: i64) -> bool:
-    var idx = 0
-    while idx < values.len():
-        if values[idx] == needle:
-            return true
-        idx = idx + 1
-    false
-
-fn hir_payload_origin_miss_key(owner_key: text, dependency: text) -> text:
-    """Memo key for a FAILED payload-origin search: `{owner key} {name}`.
-
-    Owner-scoped on purpose. Two modules may spell the same name and only one
-    of them declare it, so a global name-keyed memo would be unsound; keying on
-    the owner makes the cached fact exactly the question that was asked.
-    See doc/08_tracking/bug/hir_builtin_container_origin_search_storm_2026-08-22.md"""
-    owner_key + " " + dependency
-
-fn hir_dependency_is_builtin_type(dependency: text) -> bool:
-    """True for a PRIMITIVE/builtin spelling that no user module can ever own.
-
-    Payload- and callable-dependency materialization asks the DECLARING module
-    for a declaration, a re-export hop, or an explicit import of every name a
-    signature or enum payload mentions -- including `text`, `i64`, `bool`,
-    `Option`, `f64`, `Any`, `char`, `Dict`. No module declares or imports those,
-    so every one resolved to not-found and, since 2026-08-21, printed a
-    `[hir-payload-origin-unresolved]` advisory. In stage-1 run13 that was
-    12,171 of 12,364 advisory lines (98.4%) -- pure noise that buried the ONE
-    genuine finding (BlockValue, 193) and cost a full sweep of the owner's
-    import table per occurrence.
-
-    Filtering them is not merely cosmetic: `lower_named_kind` resolves every
-    name here from its own primitive arms BEFORE any symbol lookup, so
-    materializing them was never capable of changing a lowering outcome.
-    See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md"""
-    if dependency == "": return true
-    # DELIBERATELY lowercase-only, plus `Any`. The CAPITALIZED dialect aliases
-    # (Int/Bool/Char/String/Float) and the container spellings
-    # (Option/Result/Dict/Set/Map/List/Array/Vec) are NOT filtered, because
-    # `lower_named_kind` places their arms AFTER the symbol lookup precisely so
-    # a DECLARED type of the same name wins -- and such declarations really
-    # exist in this tree (`struct Bool` in */ndarray/mod.spl, and 42 `Result`,
-    # 14 `Option`, 10 `Array`, 7 `List`, 4 `Set`, 4 `Map`, 1 `Dict`
-    # declarations). Filtering those would silently stop materializing a real
-    # user type, which is a correctness regression, not noise reduction. `Any`
-    # is safe: zero declarations in the tree, and its lowering is `recovered`,
-    # never a hard error.
-    if dependency == "text" or dependency == "str" or dependency == "string":
-        return true
-    if dependency == "i8" or dependency == "i16" or dependency == "i32" or
-       dependency == "i64" or dependency == "int" or dependency == "isize":
-        return true
-    if dependency == "u8" or dependency == "u16" or dependency == "u32" or
-       dependency == "u64" or dependency == "uint" or dependency == "usize":
-        return true
-    if dependency == "f32" or dependency == "f64" or dependency == "float":
-        return true
-    if dependency == "bool" or dependency == "char" or dependency == "byte" or
-       dependency == "void" or dependency == "nil" or dependency == "Any":
-        return true
-    false
 
 fn hir_dependency_type_name(dependency: text) -> text:
     """The declared type a signature dependency names. `has_X` is the optional

@@ -73,30 +73,6 @@ Related env the same setup manages: `SIMPLE_TIMEOUT_SECONDS` (raise-only
 against the monitor timeout) and `SIMPLE_SYSTEM_TEST` (`1` for paths containing
 `/system/` or `/feature/`, else `0`).
 
-
-### `# @tag:in-development` — NOT parsed by this runner (yet)
-
-The in-development tag (canonical guide:
-`doc/07_guide/infra/testing.md` § Tags and Filtering) marks a spec that is
-expected to fail because the code it describes does not exist yet. Its contract
-is: expected FAIL, SKIPPED in whole-suite runs, **COUNTED** in the summary,
-selectable with `simple test --tag in-development`.
-
-**Status against `origin/main` @ `3ccf808f6f2` (2026-08-23): this layer does not
-implement any of it.** `test_runner_single.spl` still parses exactly the two
-directives in the table above; there is no `@tag:` branch. `--tag <name>`
-filtering exists only in the seed driver
-(`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at
-`execution.rs:923-925`), and `@tag:qemu` is read there solely for the timeout
-budget (`execution.rs:95`). So a spec carrying the tag today **runs normally and
-fails normally**. Do not report a tagged spec as skipped without checking the
-parser first — that is exactly the shape of false claim this wiki exists to stop.
-
-When the sibling lanes land the skip+count semantics, the natural home is the
-same header-scan in `test_runner_single.spl` that reads `# @di_test`, plus the
-summary emitter, plus the `test_db.sdn` / `test_result.md` writers so the count
-survives into the tracking artefacts.
-
 ## Statement coverage
 
 - Working `SIMPLE_COVERAGE=1` statement coverage landed as `1a6c1e362a5`
@@ -465,40 +441,3 @@ sessions queued behind each other. The client now bypasses the daemon rather tha
 
 **Verify:** `bin/simple test test/01_unit/app/compiler_schema/` — read the `Results: N total,
 N passed, 0 failed` line, and confirm the process exit code separately (see the exit-zero bug above).
-
-## Phase-gating principle (2026-08-23)
-
-When the runner is invoked as a **bootstrap phase gate** rather than as the full
-suite, its scope is "the capabilities the next phase depends on", not everything.
-Measured at `origin/main` 2026-08-23: 21,228 spec files total; the
-compiler/interpreter/loader scope is 2,106 (`test/01_unit/compiler/**` 2,063 +
-`test/02_integration/compiler/**` 43 + `test/01_unit/app/cli/` 69 +
-`test/01_unit/app/compile/` 4).
-
-Categorically ineligible for any gate, in every tree: `test/01_unit/bugs/`
-(specs that document defects by construction and must fail), `test/fixtures/`
-(the runner's own deliberate red inputs — gating them neutralises the fixtures
-proving the runner reports failure at all), `test/tmp_repro/` (scratch repros).
-
-A gate run must state counts and scope in its verdict, report `ERROR` if it
-executed zero specs, and hold optional-feature failures as TODOs rather than
-skipping them in source. Full statement:
-`doc/07_guide/tooling/bootstrap_phase_verification.md`.
-
-## Companion rules (2026-08-23)
-
-**The bootstrap path contains exactly what the next step requires.**
-
-| policy | statement |
-|---|---|
-| **Scope** | Each phase's tests verify the next phase's prerequisites, not optional features. |
-| **Incomplete work** | Disable with skip or assert plus a TODO — **never delete**, never silently half-working. Skip is the authorised mechanism for excluding out-of-scope optional surface; it lives in the gate's scope declaration, not anonymously in spec files. In the Rust seed the equivalent is `#[ignore]` or an assert, plus a TODO. |
-| **rust simple** | For the Rust seed (`src/compiler_rust/**`): **do not implement optional features unless requested, or needed to build phase 2.** The phase-2 exception requires a demonstrable build failure the feature resolves — "phase 2 will probably want this" is not it — and whoever invokes it records what broke. Simple is the default implementation language per CLAUDE.md. Applies to new work; existing optional seed surface is an observation, not a defect. |
-
-Rationale for the seed rule: it is bootstrap-only tooling whose single job is to
-compile Simple until the self-hosted compiler takes over. Every optional feature
-added to it must then be maintained in two languages and eventually replicated on
-the self-hosted path — enlarging the bootstrap problem this phase exists to
-shrink.
-
-Full statement: `doc/07_guide/tooling/bootstrap_phase_verification.md`.

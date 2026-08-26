@@ -10,7 +10,12 @@ Audience: compiler and tooling engineers who maintain this spec.
 # Tests for src/lib/common/encoding/codec.spl
 # Covers: Encoding enum, encode, decode, transcode
 
-use std.common.encoding.codec.{encode, decode, transcode, Encoding}
+use std.common.encoding.codec.{
+    encode, decode, transcode, Encoding,
+    encoding_name, encoding_from_name,
+    decode_to_codepoints, encode_from_codepoints,
+    char_from_code_fast
+}
 
 # ============================================================================
 # Encode / Decode roundtrips
@@ -34,6 +39,15 @@ describe "codec encode and decode UTF-8":
         expect(bytes[0]).to_equal(0x48)
         expect(bytes[1]).to_equal(0x69)
 
+    it "roundtrips multilingual UTF-8 without bytewise replacement":
+        step("Verify: roundtrips multilingual UTF-8 without bytewise replacement")
+        val original = "é한中😀"
+        expect(decode(encode(original, Encoding.Utf8), Encoding.Utf8)).to_equal(original)
+
+    it "replaces one malformed UTF-8 input sequence":
+        step("Verify: replaces one malformed UTF-8 input sequence")
+        expect(decode([0xE2, 0x28, 0xA1], Encoding.Utf8)).to_equal("�(�")
+
 describe "codec encode and decode UTF-16LE":
     it "roundtrips ASCII text through UTF-16LE":
         step("Verify: roundtrips ASCII text through UTF-16LE")
@@ -48,6 +62,11 @@ describe "codec encode and decode UTF-16LE":
         expect(bytes.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(bytes[0]).to_equal(0x41)
         expect(bytes[1]).to_equal(0x00)
+
+    it "roundtrips supplementary and multilingual scalars":
+        step("Verify: roundtrips supplementary and multilingual scalars through UTF-16LE")
+        val original = "é한😀"
+        expect(decode(encode(original, Encoding.Utf16LE), Encoding.Utf16LE)).to_equal(original)
 
 describe "codec encode and decode UTF-16BE":
     it "roundtrips ASCII text through UTF-16BE":
@@ -89,6 +108,11 @@ describe "codec encode and decode UTF-32BE":
         val restored = decode(bytes, Encoding.Utf32BE)
         expect(restored).to_equal(original)
 
+    it "roundtrips multilingual scalars":
+        step("Verify: roundtrips multilingual scalars through UTF-32BE")
+        val original = "한中😀"
+        expect(decode(encode(original, Encoding.Utf32BE), Encoding.Utf32BE)).to_equal(original)
+
 describe "codec encode and decode ASCII":
     it "roundtrips ASCII text":
         step("Verify: roundtrips ASCII text")
@@ -103,6 +127,11 @@ describe "codec encode and decode ASCII":
         expect(bytes.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(bytes[0]).to_equal(0x41)
 
+    it "replaces each non-ASCII scalar once":
+        step("Verify: replaces each non-ASCII scalar once")
+        expect(encode("é", Encoding.Ascii)).to_equal([0x3F])
+        expect(decode([-1, 0x41, 0x80, 256], Encoding.Ascii)).to_equal("?A??")
+
 describe "codec encode and decode Latin1":
     it "roundtrips ASCII subset through Latin-1":
         step("Verify: roundtrips ASCII subset through Latin-1")
@@ -111,11 +140,20 @@ describe "codec encode and decode Latin1":
         val restored = decode(bytes, Encoding.Latin1)
         expect(restored).to_equal(original)
 
+    it "roundtrips the Latin-1 high range and replaces out-of-range input":
+        step("Verify: roundtrips Latin-1 and replaces unsupported values")
+        expect(decode(encode("éÿ", Encoding.Latin1), Encoding.Latin1)).to_equal("éÿ")
+        expect(encode("한", Encoding.Latin1)).to_equal([0x3F])
+        expect(decode([-1, 256], Encoding.Latin1)).to_equal("??")
+
 # ============================================================================
 # Transcode
 # ============================================================================
 
 describe "codec transcode":
+    it "returns the original byte value for an identity transcode":
+        step("Verify: identity transcode")
+        expect(transcode([0x41, 0x42], Encoding.Utf8, Encoding.Utf8)).to_equal([0x41, 0x42])
     it "transcodes UTF-8 to UTF-16LE and back":
         step("Verify: transcodes UTF-8 to UTF-16LE and back")
         val utf8_bytes = encode("Hello", Encoding.Utf8)
@@ -159,3 +197,65 @@ describe "codec edge cases":
         step("Verify: handles empty UTF-32LE")
         val bytes = encode("", Encoding.Utf32LE)
         expect(bytes.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+describe "codec registry names":
+    it "returns every canonical encoding name":
+        step("Verify: every canonical codec name")
+        expect(encoding_name(Encoding.Utf8)).to_equal("UTF-8")
+        expect(encoding_name(Encoding.Utf16LE)).to_equal("UTF-16LE")
+        expect(encoding_name(Encoding.Utf16BE)).to_equal("UTF-16BE")
+        expect(encoding_name(Encoding.Utf32LE)).to_equal("UTF-32LE")
+        expect(encoding_name(Encoding.Utf32BE)).to_equal("UTF-32BE")
+        expect(encoding_name(Encoding.Ascii)).to_equal("ASCII")
+        expect(encoding_name(Encoding.Latin1)).to_equal("ISO-8859-1")
+
+    it "accepts canonical, compact, and case-insensitive aliases":
+        step("Verify: supported codec aliases")
+        expect(encoding_from_name("UTF-8")).to_equal(Encoding.Utf8)
+        expect(encoding_from_name("utf8")).to_equal(Encoding.Utf8)
+        expect(encoding_from_name("UTF-16LE")).to_equal(Encoding.Utf16LE)
+        expect(encoding_from_name("utf16le")).to_equal(Encoding.Utf16LE)
+        expect(encoding_from_name("UTF-16BE")).to_equal(Encoding.Utf16BE)
+        expect(encoding_from_name("utf16be")).to_equal(Encoding.Utf16BE)
+        expect(encoding_from_name("UTF-32LE")).to_equal(Encoding.Utf32LE)
+        expect(encoding_from_name("utf32le")).to_equal(Encoding.Utf32LE)
+        expect(encoding_from_name("UTF-32BE")).to_equal(Encoding.Utf32BE)
+        expect(encoding_from_name("utf32be")).to_equal(Encoding.Utf32BE)
+        expect(encoding_from_name("ASCII")).to_equal(Encoding.Ascii)
+        expect(encoding_from_name("us-ascii")).to_equal(Encoding.Ascii)
+        expect(encoding_from_name("latin-1")).to_equal(Encoding.Latin1)
+        expect(encoding_from_name("latin1")).to_equal(Encoding.Latin1)
+        expect(encoding_from_name("iso-8859-1")).to_equal(Encoding.Latin1)
+        expect(encoding_from_name("iso8859-1")).to_equal(Encoding.Latin1)
+        # Compatibility behavior is covered until the typed parser migration.
+        expect(encoding_from_name("unknown")).to_equal(Encoding.Utf8)
+
+describe "codec codepoint helpers":
+    it "covers every source decoder and replacement policy":
+        step("Verify: every source codec decoder")
+        expect(decode_to_codepoints([0x41], Encoding.Utf8)).to_equal([0x41])
+        expect(decode_to_codepoints([-1, 0x41, 0x80, 256], Encoding.Ascii)).to_equal([0x3F, 0x41, 0x3F, 0x3F])
+        expect(decode_to_codepoints([-1, 0xE9, 256], Encoding.Latin1)).to_equal([0x3F, 0xE9, 0x3F])
+        expect(decode_to_codepoints([0x41, 0], Encoding.Utf16LE)).to_equal([0x41])
+        expect(decode_to_codepoints([0, 0x41], Encoding.Utf16BE)).to_equal([0x41])
+        expect(decode_to_codepoints([0x41, 0, 0, 0], Encoding.Utf32LE)).to_equal([0x41])
+        expect(decode_to_codepoints([0, 0, 0, 0x41], Encoding.Utf32BE)).to_equal([0x41])
+
+    it "covers every target encoder and replacement policy":
+        step("Verify: every target codec encoder")
+        expect(encode_from_codepoints([0x41], Encoding.Utf8)).to_equal([0x41])
+        expect(encode_from_codepoints([-1, 0x41, 0x80], Encoding.Ascii)).to_equal([0x3F, 0x41, 0x3F])
+        expect(encode_from_codepoints([-1, 0xE9, 0x100], Encoding.Latin1)).to_equal([0x3F, 0xE9, 0x3F])
+        expect(encode_from_codepoints([0x41], Encoding.Utf16LE)).to_equal([0x41, 0])
+        expect(encode_from_codepoints([0x41], Encoding.Utf16BE)).to_equal([0, 0x41])
+        expect(encode_from_codepoints([0x41], Encoding.Utf32LE)).to_equal([0x41, 0, 0, 0])
+        expect(encode_from_codepoints([0x41], Encoding.Utf32BE)).to_equal([0, 0, 0, 0x41])
+
+    it "covers byte-to-text control and fallback classes":
+        step("Verify: byte-to-text control classes")
+        expect(char_from_code_fast(65)).to_equal("A")
+        expect(char_from_code_fast(10)).to_equal("\n")
+        expect(char_from_code_fast(13)).to_equal("\r")
+        expect(char_from_code_fast(9)).to_equal("\t")
+        expect(char_from_code_fast(0)).to_equal("\x00")
+        expect(char_from_code_fast(1)).to_equal("�")

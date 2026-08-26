@@ -1,0 +1,798 @@
+use app.spipe_knowledge_provider.state.{SpipeProviderStateV1}
+use app.spipe_knowledge_provider.lexical.{search_snapshot_lexical_bounded, apply_snapshot_delta, document_matches_query_bounded}
+use app.spipe_knowledge_provider.protocol.{provider_prebinding_error, provider_bound_error}
+use std.common.search.document.{SearchDocument, SearchHit}
+use std.common.search.query.{SearchQuery}
+use std.common.search.snapshot.{SearchSnapshot, SearchIndexDelta}
+use std.common.search.analyzer.{AnalyzerIdentity}
+use app.spipe_knowledge_provider.lifecycle.{ReceiptAuthorityPort, CandidateAuthorityPort, DurableLifecyclePort, CandidateTransitionAuthorityPort, PureEd25519ReceiptAuthorityV1, FileDurableLifecycleV1, DeterministicCandidateTransitionAuthorityV1, SystemCandidateTransitionAuthorityV1, validate_operation_receipt, validate_candidate_expiry_receipt, provider_generation_id}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_string, json_to_number}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use app.spipe_knowledge_provider.durable_records.{ProviderReplayV1, ProviderCandidateV1, stored_text, stored_int, closed_object, lifecycle_json_bytes_canonical, response_hash, receipt_id, replay_binding_domain_bytes, lifecycle_records_json, restore_document, operation_receipt_bound, expiry_receipt_bound, signed_success_response_bound, success_response_request_id, validate_publications, candidate_root_preimage_bound, candidate_commitment_preimage, candidate_root_from_commitment, candidate_transition_bound, durable_success_replays_bound}
+use app.spipe_knowledge_provider.terminal_records.{durable_terminal_record_bound}
+use app.spipe_knowledge_provider.wire_identity.{provider_candidate_uid}
+use app.spipe_knowledge_provider.wire_json.{wire_canonical_json_value}
+use app.spipe_knowledge_provider.candidate_binding.{CandidateBindingV1}
+use app.spipe_knowledge_provider.service_limits.{provider_live_document_count_valid, provider_active_live_document_allocation_count, provider_active_candidate_document_allocation_available, provider_restored_live_document_allocation_count, provider_lifecycle_size_valid, provider_lifecycle_capacity_available, provider_lifecycle_restore_header, provider_restore_candidate_documents, provider_publication_state_bound}
+class SpipeProviderServiceV1:
+    state: SpipeProviderStateV1
+    staged_snapshot_id: text
+    staged_snapshot: SearchSnapshot
+    receipt_authority: ReceiptAuthorityPort
+    candidate_authority: CandidateAuthorityPort
+    transition_authority: CandidateTransitionAuthorityPort
+    durable_lifecycle: DurableLifecyclePort
+    replay: [ProviderReplayV1]
+    candidates: [ProviderCandidateV1]
+    current_document_ids: [text]
+    current_document_hashes: [text]
+    current_document_hash_preimages: [text]
+    lifecycle_etag: text
+    fn candidate_index(candidate_uid: text) -> i64:
+        var i = 0
+        while i < self.candidates.len():
+            if self.candidates[i].uid == candidate_uid:
+                return i
+            i = i + 1
+        0 - 1
+    me fn terminalize_candidate_owned(candidate_uid: text, operation_id: text,
+                                      state_value: text, receipt_kind: text,
+                                      receipt: text,
+                                      terminal_at_ms: i64) -> Result<(), text>:
+        val index = self.candidate_index(candidate_uid)
+        if index < 0: return Err("candidate_missing")
+        if self.candidates[index].state != "staged":
+            return Err("candidate_" + self.candidates[index].state)
+        if state_value != "published" and state_value != "aborted" and
+                state_value != "expired" and state_value != "stale_base":
+            return Err("invalid_request")
+        if (state_value == "expired" and
+                (operation_id != "" or receipt_kind != "candidate_expiry")) or
+                (state_value != "expired" and
+                 (operation_id == "" or receipt_kind != "operation")):
+            return Err("invalid_request")
+        self.candidates[index].state = state_value
+        self.candidates[index].terminal_operation_id = operation_id
+        self.candidates[index].terminal_receipt_kind = receipt_kind
+        self.candidates[index].terminal_receipt = receipt
+        self.candidates[index].terminal_at_ms = terminal_at_ms
+        Ok(())
+    fn candidate_state(candidate_uid: text, candidate_root: text,
+                       base_root: text) -> Result<text, text>:
+        val index = self.candidate_index(candidate_uid)
+        if index < 0:
+            return Err("candidate_missing")
+        val item = self.candidates[index]
+        if item.candidate_root != candidate_root or item.base_root != base_root:
+            return Err("candidate_mismatch")
+        Ok(item.state)
+    fn candidate_terminal_observation(candidate_uid: text) -> Result<(text, text, text), text>:
+        val index = self.candidate_index(candidate_uid)
+        if index < 0: return Err("candidate_missing")
+        val item = self.candidates[index]
+        val terminal_receipt_id = receipt_id(item.terminal_receipt)
+        if item.state == "staged" or item.terminal_receipt_kind == "" or
+                terminal_receipt_id == "":
+            return Err("candidate_not_terminal")
+        Ok((item.state, item.terminal_receipt_kind, terminal_receipt_id))
+    fn candidate_expiry_binding(candidate_uid: text) -> Result<(text, text, text, text, text, i64), text>:
+        val index = self.candidate_index(candidate_uid)
+        if index < 0:
+            return Err("candidate_missing")
+        val item = self.candidates[index]
+        if item.state != "staged" or item.apply_receipt == "":
+            return Err("candidate_missing")
+        Ok((item.base_root, item.candidate_root, item.apply_operation_id,
+            item.apply_receipt, item.apply_payload_hash, item.expires_at_ms))
+    fn lifecycle_json() -> text:
+        lifecycle_records_json(self.replay, self.candidates, self.state.workspace,
+            self.state.snapshot_id, self.state.scope_digest,
+            self.state.provider_generation, self.state.logical_root)
+    fn lifecycle_capacity_available(add_replay: i64, add_candidates: i64,
+                                    add_publications: i64) -> bool:
+        provider_lifecycle_capacity_available(self.replay.len(), self.candidates,
+            add_replay, add_candidates, add_publications)
+    fn live_document_allocation_valid() -> bool: provider_active_live_document_allocation_count(self.state.logical_root, self.state.snapshot_value.documents.len(), self.candidates).is_ok()
+    fn candidate_document_allocation_available(candidate_documents: i64) -> bool: provider_active_candidate_document_allocation_available(self.state.logical_root, self.state.snapshot_value.documents.len(), self.candidates, candidate_documents)
+    # Restored lifecycle identity is immutable and may not be host-relabeled.
+    fn lifecycle_identity_matches(workspace: text, snapshot: text,
+                                  scope_digest: text,
+                                  provider_generation: i64) -> bool:
+        val unbound = self.state.workspace == "" and
+            self.state.snapshot_id == "" and self.state.scope_digest == "" and
+            self.state.provider_generation == 0
+        unbound or (self.state.workspace == workspace and
+            self.state.snapshot_id == snapshot and
+            self.state.scope_digest == scope_digest and
+            self.state.provider_generation == provider_generation)
+    fn replay_signature(operation: text, operation_id: text,
+                        payload_hash: text, response: text, receipt: text) -> Result<text, text>:
+        self.receipt_authority.sign(replay_binding_domain_bytes(self.state.workspace,
+            self.state.snapshot_id, self.state.scope_digest, operation, operation_id,
+            payload_hash, success_response_request_id(response), response_hash(response), receipt_id(receipt)))
+    static fn empty() -> SpipeProviderServiceV1:
+        SpipeProviderServiceV1(
+            state: SpipeProviderStateV1.empty(), staged_snapshot_id: "",
+            staged_snapshot: SearchSnapshot.of("", "", AnalyzerIdentity.spipe_v1(), []),
+            receipt_authority: PureEd25519ReceiptAuthorityV1.unavailable(),
+            candidate_authority: PureEd25519ReceiptAuthorityV1.unavailable(),
+            transition_authority: DeterministicCandidateTransitionAuthorityV1.unavailable(),
+            durable_lifecycle: FileDurableLifecycleV1.unavailable(),
+            replay: [], candidates: [], current_document_ids: [], current_document_hashes: [], current_document_hash_preimages: [],
+            lifecycle_etag: "",
+        )
+    static fn configured(receipt_authority: ReceiptAuthorityPort,
+                         durable_lifecycle: DurableLifecyclePort) -> Result<SpipeProviderServiceV1, text>:
+        SpipeProviderServiceV1.configured_with_transition(receipt_authority,
+            durable_lifecycle, SystemCandidateTransitionAuthorityV1.configured())
+    static fn configured_with_authorities(receipt_authority: ReceiptAuthorityPort,
+                         candidate_authority: CandidateAuthorityPort,
+                         durable_lifecycle: DurableLifecyclePort) -> Result<SpipeProviderServiceV1, text>:
+        SpipeProviderServiceV1.configured_with_authorities_and_transition(
+            receipt_authority, candidate_authority, durable_lifecycle,
+            SystemCandidateTransitionAuthorityV1.configured())
+    static fn configured_with_transition(receipt_authority: ReceiptAuthorityPort,
+                         durable_lifecycle: DurableLifecyclePort,
+                         transition_authority: CandidateTransitionAuthorityPort) -> Result<SpipeProviderServiceV1, text>:
+        SpipeProviderServiceV1.configured_composed(
+            receipt_authority, PureEd25519ReceiptAuthorityV1.unavailable(),
+            durable_lifecycle, transition_authority)
+    static fn configured_with_authorities_and_transition(
+                         receipt_authority: ReceiptAuthorityPort,
+                         candidate_authority: CandidateAuthorityPort,
+                         durable_lifecycle: DurableLifecyclePort,
+                         transition_authority: CandidateTransitionAuthorityPort) -> Result<SpipeProviderServiceV1, text>:
+        if not candidate_authority.available():
+            return Err("candidate_authority_unavailable")
+        SpipeProviderServiceV1.configured_composed(receipt_authority,
+            candidate_authority, durable_lifecycle, transition_authority)
+    static fn configured_composed(receipt_authority: ReceiptAuthorityPort,
+                         candidate_authority: CandidateAuthorityPort,
+                         durable_lifecycle: DurableLifecyclePort,
+                         transition_authority: CandidateTransitionAuthorityPort) -> Result<SpipeProviderServiceV1, text>:
+        if not receipt_authority.available() or not durable_lifecycle.available():
+            return Err("provider_unavailable")
+        if not transition_authority.available():
+            return Err("transition_authority_unavailable")
+        var service = SpipeProviderServiceV1(
+            state: SpipeProviderStateV1.empty(), staged_snapshot_id: "",
+            staged_snapshot: SearchSnapshot.of("", "", AnalyzerIdentity.spipe_v1(), []),
+            receipt_authority: receipt_authority, durable_lifecycle: durable_lifecycle,
+            candidate_authority: candidate_authority,
+            transition_authority: transition_authority,
+            replay: [], candidates: [], current_document_ids: [], current_document_hashes: [], current_document_hash_preimages: [],
+            lifecycle_etag: "",
+        )
+        val stored = service.durable_lifecycle.load()?
+        service.restore_lifecycle(stored)?
+        service.lifecycle_etag = sha256_u8_hex(text_to_bytes(stored))
+        Ok(service)
+    me next_transition_at_ms(observed_ms: i64) -> Result<i64, text>:
+        self.transition_authority.next_recorded_at_ms(observed_ms)
+    me restore_lifecycle(canonical_state: text) -> Result<(), text>:
+        if not provider_lifecycle_size_valid(canonical_state):
+            return Err("limit_exceeded")
+        if not lifecycle_json_bytes_canonical(canonical_state):
+            return Err("snapshot_corrupt")
+        val parsed = json_parse_with_error(canonical_state)
+        if parsed.1 != "" or json_get_type(parsed.0) != "object" or
+                stored_text(parsed.0, "schema") != "spipe-provider-lifecycle-store-v1":
+            return Err("snapshot_corrupt")
+        # Admit only the exact, proven empty Wave 4 migration record.
+        if canonical_state == "{\"candidates\":{},\"replay\":{},\"roots\":{},\"schema\":\"spipe-provider-lifecycle-store-v1\"}":
+            return Ok(())
+        val header = provider_lifecycle_restore_header(parsed.0)?
+        val raw_replay = header.raw_replay
+        val raw_candidates = header.raw_candidates
+        val raw_publications = header.raw_publications
+        val workspace = header.workspace
+        val snapshot = header.snapshot
+        val scope_digest = header.scope_digest
+        val provider_generation = header.provider_generation
+        var restored_replay: [ProviderReplayV1] = []
+        var replay_operation_ids: [text] = []
+        var max_durable_at_ms = 0
+        var i = 0
+        while i < json_array_length(raw_replay):
+            val row = json_array_get(raw_replay, i)
+            val row_schema = stored_text(row, "schema")
+            val expected_replay_keys = if row_schema == "spipe-durable-terminal-error-v1":
+                ["candidate_uid", "observed_terminal_receipt_id", "observed_terminal_receipt_kind", "observed_terminal_state", "operation", "operation_id", "payload_hash", "recorded_at_ms", "request_id", "response", "response_hash", "schema", "scope_digest", "snapshot", "workspace"]
+            else:
+                ["operation", "operation_id", "payload_hash", "receipt", "receipt_id", "replay_signature", "request_id", "response", "response_hash", "schema", "scope_digest", "snapshot", "workspace"]
+            if not closed_object(row, expected_replay_keys): return Err("snapshot_corrupt")
+            val operation = stored_text(row, "operation")
+            val operation_id = stored_text(row, "operation_id")
+            val request_id = stored_text(row, "request_id")
+            val payload_hash = stored_text(row, "payload_hash")
+            val response = stored_text(row, "response")
+            val receipt = stored_text(row, "receipt")
+            val receipt_id_value = stored_text(row, "receipt_id")
+            val replay_signature = stored_text(row, "replay_signature")
+            val response_hash_value = stored_text(row, "response_hash")
+            val candidate_uid = stored_text(row, "candidate_uid")
+            val observed_state = stored_text(row, "observed_terminal_state")
+            val observed_kind = stored_text(row, "observed_terminal_receipt_kind")
+            val observed_receipt_id = stored_text(row, "observed_terminal_receipt_id")
+            val recorded_at_ms = stored_int(row, "recorded_at_ms", -1)
+            if (operation != "index_apply" and operation != "index_publish") or
+                    operation_id == "" or payload_hash == "" or response == "" or
+                    response_hash_value != response_hash(response) or receipt_id_value != receipt_id(receipt) or
+                    stored_text(row, "workspace") != workspace or
+                    stored_text(row, "snapshot") != snapshot or
+                    stored_text(row, "scope_digest") != scope_digest or
+                    (receipt == "" and row_schema != "spipe-durable-terminal-error-v1") or
+                    (receipt != "" and row_schema != "spipe-durable-replay-v1"):
+                return Err("snapshot_corrupt")
+            if replay_operation_ids.contains(operation_id) or
+                    (receipt == "" and not durable_terminal_record_bound(
+                        request_id, operation, operation_id, payload_hash,
+                        candidate_uid, observed_state, observed_kind,
+                        observed_receipt_id, recorded_at_ms, response,
+                        provider_generation_id(provider_generation), workspace,
+                        snapshot, scope_digest)) or
+                    (receipt != "" and (not validate_operation_receipt(self.receipt_authority, receipt) or
+                     replay_signature == "" or not self.receipt_authority.verify(
+                        replay_binding_domain_bytes(workspace, snapshot, scope_digest,
+                            operation, operation_id, payload_hash, request_id,
+                            response_hash_value, receipt_id_value), replay_signature) or
+                     not signed_success_response_bound(response, request_id, operation,
+                        receipt, workspace, snapshot, scope_digest))):
+                return Err("snapshot_corrupt")
+            replay_operation_ids.push(operation_id)
+            if recorded_at_ms > max_durable_at_ms: max_durable_at_ms = recorded_at_ms
+            if receipt != "":
+                val receipt_value = json_parse_with_error(receipt).0
+                if stored_text(receipt_value, "operation") != operation or
+                        stored_text(receipt_value, "operation_id") != operation_id or
+                        stored_text(receipt_value, "payload_hash") != payload_hash or
+                        stored_text(receipt_value, "workspace") != workspace or
+                        stored_text(receipt_value, "snapshot") != snapshot or
+                        stored_text(receipt_value, "scope_digest") != scope_digest:
+                    return Err("snapshot_corrupt")
+            restored_replay.push(ProviderReplayV1(operation: operation, request_id: request_id,
+                operation_id: operation_id, payload_hash: payload_hash,
+                response: response, receipt: receipt, receipt_id: receipt_id_value,
+                response_hash: response_hash_value, replay_signature: replay_signature,
+                candidate_uid: candidate_uid,
+                observed_terminal_state: observed_state,
+                observed_terminal_receipt_kind: observed_kind,
+                observed_terminal_receipt_id: observed_receipt_id,
+                recorded_at_ms: if receipt == "": recorded_at_ms else: 0))
+            i = i + 1
+        var restored_candidates: [ProviderCandidateV1] = []
+        var candidate_uids: [text] = []
+        var candidate_apply_operation_ids: [text] = []
+        i = 0
+        while i < json_array_length(raw_candidates):
+            val row = json_array_get(raw_candidates, i)
+            if not closed_object(row, ["apply_operation_id", "apply_payload_hash", "apply_receipt", "apply_receipt_id", "base_root", "candidate_root", "candidate_root_preimage", "created_at_ms", "documents", "expires_at_ms", "schema", "scope_digest", "snapshot", "state", "terminal_at_ms", "terminal_operation_id", "terminal_receipt", "terminal_receipt_id", "terminal_receipt_kind", "terminal_result_root", "uid", "workspace"]):
+                return Err("snapshot_corrupt")
+            val state_value = stored_text(row, "state")
+            val uid = stored_text(row, "uid")
+            val base_root = stored_text(row, "base_root")
+            val candidate_root = stored_text(row, "candidate_root")
+            val candidate_root_preimage = stored_text(row, "candidate_root_preimage")
+            val created = stored_int(row, "created_at_ms", -1)
+            val expires = stored_int(row, "expires_at_ms", -1)
+            val terminal_at = stored_int(row, "terminal_at_ms", 0)
+            val terminal_operation = stored_text(row, "terminal_operation_id")
+            val terminal_kind = stored_text(row, "terminal_receipt_kind")
+            val terminal_receipt = stored_text(row, "terminal_receipt")
+            val terminal_result_root = stored_text(row, "terminal_result_root")
+            val staged_nulls = json_get_type(json_object_get(row, "terminal_at_ms")) == "null" and
+                json_get_type(json_object_get(row, "terminal_operation_id")) == "null" and
+                json_get_type(json_object_get(row, "terminal_receipt")) == "null" and
+                json_get_type(json_object_get(row, "terminal_receipt_id")) == "null" and
+                json_get_type(json_object_get(row, "terminal_receipt_kind")) == "null" and
+                json_get_type(json_object_get(row, "terminal_result_root")) == "null"
+            val operation_terminal_types =
+                json_get_type(json_object_get(row, "terminal_at_ms")) == "number" and
+                json_get_type(json_object_get(row, "terminal_operation_id")) == "string" and
+                json_get_type(json_object_get(row, "terminal_receipt")) == "string" and
+                json_get_type(json_object_get(row, "terminal_receipt_id")) == "string" and
+                json_get_type(json_object_get(row, "terminal_receipt_kind")) == "string" and
+                json_get_type(json_object_get(row, "terminal_result_root")) == "string"
+            val expiry_terminal_types =
+                json_get_type(json_object_get(row, "terminal_at_ms")) == "number" and
+                json_get_type(json_object_get(row, "terminal_operation_id")) == "null" and
+                json_get_type(json_object_get(row, "terminal_receipt")) == "string" and
+                json_get_type(json_object_get(row, "terminal_receipt_id")) == "string" and
+                json_get_type(json_object_get(row, "terminal_receipt_kind")) == "string" and
+                json_get_type(json_object_get(row, "terminal_result_root")) == "null"
+            if stored_text(row, "schema") != "spipe-candidate-record-v1" or
+                    stored_text(row, "workspace") != workspace or
+                    stored_text(row, "snapshot") != snapshot or
+                    stored_text(row, "scope_digest") != scope_digest or
+                    stored_text(row, "apply_receipt_id") != receipt_id(stored_text(row, "apply_receipt")) or
+                    stored_text(row, "terminal_receipt_id") != receipt_id(terminal_receipt):
+                return Err("snapshot_corrupt")
+            if uid == "" or base_root == "" or candidate_root == "" or
+                    created < 0 or expires < created or terminal_at < 0 or
+                    (state_value != "staged" and state_value != "published" and
+                     state_value != "aborted" and state_value != "expired" and
+                     state_value != "stale_base"):
+                return Err("snapshot_corrupt")
+            if candidate_uids.contains(uid) or
+                    candidate_apply_operation_ids.contains(stored_text(row, "apply_operation_id")) or
+                    uid != provider_candidate_uid(workspace, snapshot, scope_digest,
+                        base_root, candidate_root, stored_text(row, "apply_payload_hash")) or
+                    not candidate_root_preimage_bound(base_root, candidate_root, candidate_root_preimage) or
+                    json_get_type(json_object_get(row, "candidate_root_preimage")) != "string":
+                return Err("snapshot_corrupt")
+            candidate_uids.push(uid)
+            candidate_apply_operation_ids.push(stored_text(row, "apply_operation_id"))
+            if created > max_durable_at_ms: max_durable_at_ms = created
+            if terminal_at > max_durable_at_ms: max_durable_at_ms = terminal_at
+            if (state_value == "staged" and not staged_nulls) or
+                    (state_value == "expired" and not expiry_terminal_types) or
+                    (state_value != "staged" and state_value != "expired" and not operation_terminal_types) or
+                    (state_value == "expired" and (terminal_operation != "" or terminal_kind != "candidate_expiry" or terminal_receipt == "")) or
+                    ((state_value == "published" or state_value == "aborted" or
+                      state_value == "stale_base") and
+                     (terminal_operation == "" or terminal_kind != "operation" or
+                      terminal_receipt == "" or terminal_result_root == "")):
+                return Err("snapshot_corrupt")
+            val apply_receipt = stored_text(row, "apply_receipt")
+            if apply_receipt == "" or not validate_operation_receipt(self.receipt_authority, apply_receipt):
+                return Err("snapshot_corrupt")
+            val apply_outcome = stored_text(json_parse_with_error(apply_receipt).0, "outcome")
+            if (apply_outcome != "applied" and apply_outcome != "no_op") or
+                    not operation_receipt_bound(apply_receipt, "index_apply", apply_outcome,
+                    stored_text(row, "apply_operation_id"), uid, workspace, snapshot,
+                    scope_digest, base_root, candidate_root,
+                    stored_text(row, "apply_payload_hash")):
+                return Err("snapshot_corrupt")
+            var apply_replay_bound = false
+            var replay_index = 0
+            while replay_index < restored_replay.len():
+                val replay_row = restored_replay[replay_index]
+                if replay_row.operation == "index_apply" and
+                        replay_row.operation_id == stored_text(row, "apply_operation_id") and
+                        replay_row.payload_hash == stored_text(row, "apply_payload_hash") and
+                        replay_row.receipt == apply_receipt:
+                    apply_replay_bound = true
+                replay_index = replay_index + 1
+            if not apply_replay_bound:
+                return Err("snapshot_corrupt")
+            if terminal_kind == "operation" and
+                    not validate_operation_receipt(self.receipt_authority, terminal_receipt):
+                return Err("snapshot_corrupt")
+            if terminal_kind == "candidate_expiry" and
+                    not validate_candidate_expiry_receipt(self.candidate_authority,
+                        terminal_receipt):
+                return Err("snapshot_corrupt")
+            var base_documents: [SearchDocument] = []
+            var base_hashes: [text] = []
+            var base_hash_preimages: [text] = []
+            var base_bound = base_root == "sha256:" + "0" * 64
+            var base_index = 0
+            while base_index < restored_candidates.len():
+                val base_candidate = restored_candidates[base_index]
+                if base_candidate.state == "published" and
+                        base_candidate.candidate_root == base_root:
+                    if base_bound and base_root != "sha256:" + "0" * 64:
+                        return Err("snapshot_corrupt")
+                    base_bound = true
+                    base_documents = base_candidate.snapshot.documents
+                    base_hashes = base_candidate.document_hashes
+                    base_hash_preimages = base_candidate.document_hash_preimages
+                base_index = base_index + 1
+            if not base_bound: return Err("snapshot_corrupt")
+            val raw_documents = json_object_get(row, "documents")
+            val restored_documents = provider_restore_candidate_documents(
+                raw_documents, scope_digest)?
+            val documents = restored_documents.documents
+            val document_hashes = restored_documents.hashes
+            val document_hash_preimages = restored_documents.hash_preimages
+            val candidate_snapshot = SearchSnapshot.of(candidate_root, "candidate", AnalyzerIdentity.spipe_v1(), documents)
+            restored_candidates.push(ProviderCandidateV1(
+                uid: uid, base_root: base_root, candidate_root: candidate_root, candidate_root_preimage: candidate_root_preimage,
+                apply_operation_id: stored_text(row, "apply_operation_id"),
+                apply_payload_hash: stored_text(row, "apply_payload_hash"),
+                apply_receipt: apply_receipt,
+                created_at_ms: created, expires_at_ms: expires, state: state_value,
+                terminal_operation_id: terminal_operation,
+                terminal_receipt_kind: terminal_kind,
+                terminal_receipt: terminal_receipt,
+                terminal_result_root: terminal_result_root, terminal_at_ms: terminal_at,
+                snapshot: candidate_snapshot, document_hashes: document_hashes, document_hash_preimages: document_hash_preimages,
+            ))
+            val restored_candidate = restored_candidates[restored_candidates.len() - 1]
+            if not candidate_transition_bound(base_root, candidate_root,
+                    candidate_root_preimage, stored_text(row, "apply_operation_id"),
+                    stored_text(row, "apply_payload_hash"), scope_digest,
+                    base_documents, base_hashes, base_hash_preimages,
+                    documents, document_hashes, document_hash_preimages):
+                return Err("snapshot_corrupt")
+            if terminal_kind == "operation" and not operation_receipt_bound(
+                    terminal_receipt, "index_publish", state_value,
+                    terminal_operation, uid, workspace, snapshot, scope_digest,
+                    base_root, terminal_result_root,
+                    stored_text(json_parse_with_error(terminal_receipt).0, "payload_hash")):
+                return Err("snapshot_corrupt")
+            if terminal_kind == "operation":
+                var terminal_replay_bound = false
+                replay_index = 0
+                while replay_index < restored_replay.len():
+                    val replay_row = restored_replay[replay_index]
+                    if replay_row.operation == "index_publish" and
+                            replay_row.operation_id == terminal_operation and
+                            replay_row.receipt == terminal_receipt:
+                        terminal_replay_bound = true
+                    replay_index = replay_index + 1
+                if not terminal_replay_bound:
+                    return Err("snapshot_corrupt")
+            if terminal_kind == "candidate_expiry" and not expiry_receipt_bound(
+                    terminal_receipt, restored_candidate, workspace, snapshot, scope_digest):
+                return Err("snapshot_corrupt")
+            i = i + 1
+        val current_root = stored_text(parsed.0, "current_logical_root")
+        val publication_time = provider_publication_state_bound(
+            raw_publications, restored_candidates, current_root)?
+        provider_restored_live_document_allocation_count(
+            current_root, restored_candidates)?
+        if publication_time > max_durable_at_ms:
+            max_durable_at_ms = publication_time
+        if not durable_success_replays_bound(restored_replay, restored_candidates,
+                workspace, snapshot, scope_digest): return Err("snapshot_corrupt")
+        i = 0
+        while i < restored_replay.len():
+            val replay_row = restored_replay[i]
+            if replay_row.receipt == "":
+                var terminal_bound = false
+                var candidate_index = 0
+                while candidate_index < restored_candidates.len():
+                    val candidate = restored_candidates[candidate_index]
+                    if candidate.uid == replay_row.candidate_uid and
+                            candidate.state == replay_row.observed_terminal_state and
+                            candidate.terminal_receipt_kind == replay_row.observed_terminal_receipt_kind and
+                            receipt_id(candidate.terminal_receipt) == replay_row.observed_terminal_receipt_id:
+                        terminal_bound = true
+                    candidate_index = candidate_index + 1
+                if not terminal_bound: return Err("snapshot_corrupt")
+            i = i + 1
+        # Canonical JSON alone is insufficient here: lifecycle arrays and
+        # nested escaped receipt/envelope bytes also have an owned deterministic
+        # order.  Re-serialize the fully validated reconstruction and require
+        # byte equality before admitting any restored state.
+        if lifecycle_records_json(restored_replay, restored_candidates,
+                workspace, snapshot, scope_digest, provider_generation,
+                current_root) != canonical_state:
+            return Err("snapshot_corrupt")
+        self.replay = restored_replay
+        self.candidates = restored_candidates
+        self.state.workspace = stored_text(parsed.0, "workspace")
+        self.state.snapshot_id = stored_text(parsed.0, "snapshot")
+        self.state.scope_digest = stored_text(parsed.0, "scope_digest")
+        self.state.provider_generation = provider_generation
+        self.state.logical_root = current_root
+        self.next_transition_at_ms(max_durable_at_ms)?
+        Ok(())
+    fn lifecycle_available() -> bool: self.receipt_authority.available() and self.durable_lifecycle.available()
+    me commit_current_lifecycle() -> Result<(), text>:
+        if self.lifecycle_etag == "":
+            return Err("snapshot_corrupt")
+        if not self.live_document_allocation_valid():
+            return Err("limit_exceeded")
+        if not self.lifecycle_capacity_available(0, 0, 0):
+            return Err("limit_exceeded")
+        val canonical = self.lifecycle_json()
+        if not provider_lifecycle_size_valid(canonical):
+            return Err("limit_exceeded")
+        self.durable_lifecycle.commit_if_unchanged(self.lifecycle_etag, canonical)?
+        self.lifecycle_etag = sha256_u8_hex(text_to_bytes(canonical))
+        Ok(())
+    me reload_lifecycle_after_conflict() -> Result<(), text>:
+        val canonical = self.durable_lifecycle.load()?
+        self.restore_lifecycle(canonical)?
+        self.lifecycle_etag = sha256_u8_hex(text_to_bytes(canonical))
+        Ok(())
+    fn scoped_content_hash(document_id: text) -> text:
+        var i = 0
+        while i < self.current_document_ids.len():
+            if self.current_document_ids[i] == document_id:
+                return self.current_document_hashes[i]
+            i = i + 1
+        ""
+    fn replay_response(operation: text, operation_id: text,
+                       payload_hash: text) -> Result<text?, text>:
+        var i = 0
+        while i < self.replay.len():
+            val item = self.replay[i]
+            if item.operation == operation and item.operation_id == operation_id:
+                if item.payload_hash != payload_hash:
+                    return Err("operation_conflict")
+                return Ok(item.response)
+            i = i + 1
+        Ok(nil)
+    fn candidate_transition_binding(delta: SearchIndexDelta,
+                                    operations_preimage: text, outcome: text,
+                                    operation_ids: [text], operation_hashes: [text],
+                                    operation_hash_preimages: [text]) -> Result<(text, text), text>:
+        val preview = apply_snapshot_delta(self.state.snapshot_value, delta,
+            "count-check", "count-check")?
+        if not provider_live_document_count_valid(preview.documents.len()):
+            return Err("limit_exceeded")
+        if not self.candidate_document_allocation_available(
+                preview.documents.len()):
+            return Err("limit_exceeded")
+        CandidateBindingV1.transition_binding(self.state.logical_root,
+            self.state.snapshot_value, self.current_document_ids,
+            self.current_document_hashes, self.current_document_hash_preimages,
+            delta, operations_preimage, outcome, operation_ids,
+            operation_hashes, operation_hash_preimages)
+    me record_apply_transaction(operation_id: text, delta: SearchIndexDelta,
+                                candidate_uid: text, candidate_snapshot_id: text,
+                                candidate_root_preimage: text,
+                                payload_hash: text, response: text, receipt: text,
+                                revision: text, created_at_ms: i64,
+                                expires_at_ms: i64, operation_ids: [text],
+                                operation_hashes: [text], operation_hash_preimages: [text]) -> Result<text, text>:
+        if not self.state.request_allowed():
+            return Err("handshake_required")
+        if not self.lifecycle_capacity_available(1, 1, 0):
+            return Err("limit_exceeded")
+        if operation_id == "" or candidate_uid == "" or candidate_snapshot_id == "" or
+                payload_hash == "" or response == "" or receipt == "" or
+                created_at_ms < 0 or expires_at_ms < created_at_ms or
+                operation_ids.len() != operation_hashes.len() or
+                operation_ids.len() != operation_hash_preimages.len() or
+                not candidate_root_preimage_bound(self.state.logical_root,
+                    candidate_snapshot_id, candidate_root_preimage):
+            return Err("invalid_request")
+        if self.candidate_index(candidate_uid) >= 0:
+            return Err("operation_conflict")
+        if not validate_operation_receipt(self.receipt_authority, receipt):
+            return Err("invalid_receipt")
+        val apply_outcome = stored_text(json_parse_with_error(receipt).0, "outcome")
+        if candidate_root_from_commitment(self.state.logical_root, apply_outcome,
+                candidate_root_preimage)? != candidate_snapshot_id or
+                not signed_success_response_bound(response,
+                    success_response_request_id(response), "index_apply", receipt,
+                    self.state.workspace, self.state.snapshot_id,
+                    self.state.scope_digest):
+            return Err("snapshot_corrupt")
+        val binding = CandidateBindingV1.document_bindings(
+            self.state.snapshot_value, self.current_document_ids,
+            self.current_document_hashes, self.current_document_hash_preimages,
+            delta, revision, operation_ids, operation_hashes,
+            operation_hash_preimages)?
+        var staged = binding.0
+        staged.snapshot_id = candidate_snapshot_id
+        if not provider_live_document_count_valid(staged.documents.len()):
+            return Err("limit_exceeded")
+        if not self.candidate_document_allocation_available(
+                staged.documents.len()):
+            return Err("limit_exceeded")
+        val hashes = binding.1
+        val hash_preimages = binding.2
+        val expected_preimage = candidate_commitment_preimage(
+            wire_canonical_json_value(json_object_get(
+                json_parse_with_error(candidate_root_preimage).0, "operations"))?,
+            staged.documents, hashes)?
+        if expected_preimage != candidate_root_preimage:
+            return Err("snapshot_corrupt")
+        if not candidate_transition_bound(self.state.logical_root,
+                candidate_snapshot_id, candidate_root_preimage, operation_id,
+                payload_hash, self.state.scope_digest,
+                self.state.snapshot_value.documents, self.current_document_hashes,
+                self.current_document_hash_preimages, staged.documents, hashes,
+                hash_preimages):
+            return Err("snapshot_corrupt")
+        val old_candidates = self.candidates
+        val old_replay = self.replay
+        val old_staged_id = self.staged_snapshot_id
+        val old_staged = self.staged_snapshot
+        self.staged_snapshot = staged
+        self.staged_snapshot_id = candidate_snapshot_id
+        self.candidates.push(ProviderCandidateV1(
+            uid: candidate_uid, base_root: self.state.logical_root,
+            candidate_root: candidate_snapshot_id, candidate_root_preimage: candidate_root_preimage, apply_operation_id: operation_id,
+            apply_payload_hash: payload_hash, apply_receipt: receipt,
+            created_at_ms: created_at_ms, expires_at_ms: expires_at_ms,
+            state: "staged", terminal_operation_id: "", terminal_receipt_kind: "",
+            terminal_receipt: "", terminal_result_root: "", terminal_at_ms: 0, snapshot: staged,
+            document_hashes: hashes, document_hash_preimages: hash_preimages,
+        ))
+        self.replay.push(ProviderReplayV1(operation: "index_apply", request_id: success_response_request_id(response),
+            operation_id: operation_id, payload_hash: payload_hash,
+            response: response, receipt: receipt, receipt_id: receipt_id(receipt),
+            response_hash: response_hash(response),
+            replay_signature: self.replay_signature("index_apply", operation_id, payload_hash, response, receipt)?, candidate_uid: "",
+            observed_terminal_state: "", observed_terminal_receipt_kind: "",
+            observed_terminal_receipt_id: "", recorded_at_ms: 0))
+        if val Err(reason) = self.commit_current_lifecycle():
+            self.candidates = old_candidates
+            self.replay = old_replay
+            self.staged_snapshot_id = old_staged_id
+            self.staged_snapshot = old_staged
+            return Err(reason)
+        Ok("staged")
+    me record_terminal_response(candidate_uid: text, operation_id: text,
+                                payload_hash: text, response: text,
+                                receipt: text, terminal_state: text,
+                                terminal_result_root: text,
+                                terminal_at_ms: i64) -> Result<(), text>:
+        val publication_growth = if terminal_state == "published": 1 else: 0
+        if not self.lifecycle_capacity_available(1, 0, publication_growth):
+            return Err("limit_exceeded")
+        val old_candidates = self.candidates
+        val old_root = self.state.logical_root
+        val old_snapshot_id = self.state.snapshot_id
+        val old_snapshot = self.state.snapshot_value
+        val old_document_ids = self.current_document_ids
+        val old_document_hashes = self.current_document_hashes
+        val old_document_hash_preimages = self.current_document_hash_preimages
+        val old_replay = self.replay
+        val index = self.candidate_index(candidate_uid)
+        if index < 0:
+            return Err("candidate_missing")
+        if terminal_state == "published" and
+                not provider_live_document_count_valid(
+                    self.candidates[index].snapshot.documents.len()):
+            return Err("snapshot_corrupt")
+        if terminal_result_root == "" or
+                not validate_operation_receipt(self.receipt_authority, receipt) or
+                not operation_receipt_bound(receipt, "index_publish", terminal_state,
+                    operation_id, candidate_uid, self.state.workspace,
+                    self.state.snapshot_id, self.state.scope_digest,
+                    self.candidates[index].base_root, terminal_result_root,
+                    payload_hash) or
+                not signed_success_response_bound(response,
+                    success_response_request_id(response), "index_publish", receipt,
+                    self.state.workspace, self.state.snapshot_id,
+                    self.state.scope_digest):
+            return Err("snapshot_corrupt")
+        if val Err(reason) = self.terminalize_candidate_owned(candidate_uid, operation_id,
+                terminal_state, "operation", receipt, terminal_at_ms):
+            return Err(reason)
+        self.candidates[index].terminal_result_root = terminal_result_root
+        if terminal_state == "published":
+            self.state.logical_root = self.candidates[index].candidate_root
+            self.state.snapshot_value = self.candidates[index].snapshot
+            self.current_document_ids = []
+            self.current_document_hashes = self.candidates[index].document_hashes
+            self.current_document_hash_preimages = self.candidates[index].document_hash_preimages
+            var h = 0
+            while h < self.state.snapshot_value.documents.len():
+                self.current_document_ids.push(self.state.snapshot_value.documents[h].id)
+                h = h + 1
+        self.replay.push(ProviderReplayV1(operation: "index_publish", request_id: success_response_request_id(response), operation_id: operation_id,
+            payload_hash: payload_hash, response: response, receipt: receipt,
+            receipt_id: receipt_id(receipt), response_hash: response_hash(response),
+            replay_signature: self.replay_signature("index_publish", operation_id, payload_hash, response, receipt)?,
+            candidate_uid: "", observed_terminal_state: "",
+            observed_terminal_receipt_kind: "", observed_terminal_receipt_id: "",
+            recorded_at_ms: 0))
+        if val Err(reason) = self.commit_current_lifecycle():
+            self.candidates = old_candidates
+            self.state.logical_root = old_root
+            self.state.snapshot_id = old_snapshot_id
+            self.state.snapshot_value = old_snapshot
+            self.current_document_ids = old_document_ids
+            self.current_document_hashes = old_document_hashes
+            self.current_document_hash_preimages = old_document_hash_preimages
+            self.replay = old_replay
+            return Err(reason)
+        Ok(())
+    me record_terminal_error(candidate_uid: text, request_id: text, operation_id: text,
+                             payload_hash: text, response: text,
+                             observed_terminal_state: text,
+                             observed_terminal_receipt_kind: text,
+                             observed_terminal_receipt_id: text,
+                             recorded_at_ms: i64) -> Result<(), text>:
+        if not self.lifecycle_capacity_available(1, 0, 0):
+            return Err("limit_exceeded")
+        val observation = self.candidate_terminal_observation(candidate_uid)
+        if val Err(_) = observation: return Err("snapshot_corrupt")
+        val observed = observation.unwrap()
+        if observed.0 != observed_terminal_state or
+                observed.1 != observed_terminal_receipt_kind or
+                observed.2 != observed_terminal_receipt_id or
+                not durable_terminal_record_bound(request_id, "index_publish",
+                    operation_id, payload_hash, candidate_uid,
+                    observed_terminal_state, observed_terminal_receipt_kind,
+                    observed_terminal_receipt_id, recorded_at_ms, response,
+                    provider_generation_id(self.state.provider_generation),
+                    self.state.workspace, self.state.snapshot_id,
+                    self.state.scope_digest):
+            return Err("snapshot_corrupt")
+        val old_replay = self.replay
+        self.replay.push(ProviderReplayV1(operation: "index_publish", request_id: request_id,
+            operation_id: operation_id, payload_hash: payload_hash,
+            response: response, receipt: "", receipt_id: "",
+            response_hash: response_hash(response), replay_signature: "", candidate_uid: candidate_uid,
+            observed_terminal_state: observed_terminal_state,
+            observed_terminal_receipt_kind: observed_terminal_receipt_kind,
+            observed_terminal_receipt_id: observed_terminal_receipt_id,
+            recorded_at_ms: recorded_at_ms))
+        if val Err(reason) = self.commit_current_lifecycle():
+            self.replay = old_replay
+            return Err(reason)
+        Ok(())
+    me expire_candidate(candidate_uid: text, expiry_receipt: text,
+                        expired_at_ms: i64,
+                        terminal_at_ms: i64) -> Result<(), text>:
+        val index = self.candidate_index(candidate_uid)
+        if index < 0: return Err("candidate_missing")
+        val candidate = self.candidates[index]
+        val parsed = json_parse_with_error(expiry_receipt)
+        if terminal_at_ms < expired_at_ms or
+                not validate_candidate_expiry_receipt(
+                    self.candidate_authority, expiry_receipt) or
+                not expiry_receipt_bound(expiry_receipt, candidate,
+                    self.state.workspace, self.state.snapshot_id,
+                    self.state.scope_digest) or parsed.1 != "" or
+                stored_int(parsed.0, "expired_at_ms", -1) != expired_at_ms or
+                stored_int(parsed.0, "candidate_expires_at_ms", -1) !=
+                    candidate.expires_at_ms:
+            return Err("snapshot_corrupt")
+        val old_candidates = self.candidates
+        if val Err(reason) = self.terminalize_candidate_owned(candidate_uid, "", "expired",
+                "candidate_expiry", expiry_receipt, terminal_at_ms):
+            return Err(reason)
+        if val Err(reason) = self.commit_current_lifecycle():
+            self.candidates = old_candidates
+            return Err(reason)
+        Ok(())
+    me wire_index_open(mode: text, logical_root: text?) -> Result<(text, i64, text), text>:
+        if not self.state.request_allowed():
+            return Err("handshake_required")
+        val document_count = self.state.snapshot_value.documents.len()
+        if not provider_live_document_count_valid(document_count):
+            return Err("snapshot_corrupt")
+        if mode == "create":
+            if logical_root != nil:
+                return Err("invalid_request")
+            # `create` observes the initialized/restored root without mutation.
+            val state_value = if self.state.logical_root ==
+                "sha256:" + "0" * 64: "created" else: "opened"
+            return Ok((self.state.logical_root,
+                document_count, state_value))
+        if mode == "open":
+            if logical_root == nil or logical_root.unwrap() != self.state.logical_root:
+                return Err("snapshot_not_found")
+            return Ok((self.state.logical_root, document_count, "opened"))
+        Err("invalid_request")
+    fn search_bounded(request_id: text, query: SearchQuery,
+                      admitted_at_ms: i64,
+                      deadline_ms: i64) -> Result<[SearchHit], text>:
+        if not self.state.request_allowed():
+            return Err("handshake_required")
+        search_snapshot_lexical_bounded(self.state.snapshot_value, query, 1000,
+                                        admitted_at_ms, deadline_ms)
+    fn explain_bounded(request_id: text, query: SearchQuery, document_id: text,
+                       admitted_at_ms: i64,
+                       deadline_ms: i64) -> Result<text, text>:
+        if not self.state.request_allowed():
+            return Err("handshake_required")
+        if document_matches_query_bounded(self.state.snapshot_value, query,
+                document_id, admitted_at_ms, deadline_ms)?:
+            return Ok(document_id)
+        Err("document_not_found")
+    fn stats() -> Result<(i64, text), text>:
+        if not self.state.request_allowed():
+            return Err("handshake_required")
+        val document_count = self.state.snapshot_value.documents.len()
+        if not provider_live_document_count_valid(document_count):
+            return Err("snapshot_corrupt")
+        Ok((document_count, self.state.logical_root))
+    fn unsupported(operation: text) -> Result<text, text>:
+        if not self.state.request_allowed():
+            return Err("handshake_required")
+        if operation == "duplicate_candidates" or operation == "symbols_snapshot" or
+                operation == "semantic" or operation == "phrase" or
+                operation == "regex" or operation == "wildcard":
+            return Err("unsupported_capability")
+        Err("unknown_operation")
+    fn prebinding_error(request_id: text, operation: text) -> text:
+        provider_prebinding_error(request_id, operation, "handshake_required", "initialize first")
+    fn bound_error(request_id: text, operation: text, code: text, message: text) -> text:
+        provider_bound_error(request_id, operation, provider_generation_id(self.state.provider_generation),
+                             self.state.workspace, self.state.snapshot_id,
+                             self.state.scope_digest, code, message)

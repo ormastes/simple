@@ -20,10 +20,13 @@ use std.io_runtime
 use std.spipe.*
 use std.db.dbfs_engine.fts.tokenizer.{FtsToken, fts_tokenize, fts_tokenize_raw}
 use std.db.dbfs_engine.fts.inverted_index.{FtsInvertedIndex, FtsPosting}
-use std.db.dbfs_engine.fts.bm25.{fts_bm25_search, fts_bm25_score, FtsSearchResult}
+use std.db.dbfs_engine.fts.bm25.{fts_bm25_search, fts_bm25_score, fts_bm25_score_fixed, fts_bm25_explain, FtsSearchResult}
 use std.db.dbfs_engine.fts.trigram.{FtsTrigramIndex, fts_generate_trigrams}
 use std.db.dbfs_engine.fts.fuzzy.{fts_levenshtein, fts_fuzzy_match}
-use std.db.dbfs_engine.fts.search.{FtsEngine}
+use std.db.dbfs_engine.fts.search.{FtsEngine, FtsCompatibilityIndex}
+use std.db.dbfs_engine.fts.wave4_compatibility.{DBFS_W4_SCOPE, DbfsWave4Document, dbfs_wave4_golden_index}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.search.ranking.{bm25_score_default}
 
 # ── Tokenizer ──────────────────────────────────────────────────────────────────
 
@@ -125,6 +128,18 @@ describe "FTS Inverted Index":
         expect(idx.doc_freq("hello")).to_equal(2)  # oracle: value fixed by the spec contract
         expect(idx.doc_freq("world")).to_equal(1)  # oracle: value fixed by the spec contract
 
+    it "replaces a document without inflating corpus statistics":
+        step("Verify: replacement preserves exact corpus statistics")
+        # @req: REQ-STORAGE-FtsEngi-001
+        var idx = FtsInvertedIndex.new()
+        idx.index_document(7, "alpha beta beta")
+        idx.index_document(7, "gamma")
+        expect(idx.doc_count()).to_equal(1)
+        expect(idx.doc_length(7)).to_equal(1)
+        expect(idx.avg_doc_length_fixed()).to_equal(1000000)
+        expect(idx.doc_freq("beta")).to_equal(0)
+        expect(idx.doc_freq("gamma")).to_equal(1)
+
 # ── BM25 Scoring ──────────────────────────────────────────────────────────────
 
 describe "FTS BM25 Scoring":
@@ -152,6 +167,31 @@ describe "FTS BM25 Scoring":
         expect(rlen > 0).to_equal(true)
         val first = results[0]
         expect(first.doc_id).to_equal(1)  # oracle: value fixed by the spec contract
+
+    it "uses exact lengths and deterministic ascending id ties":
+        step("Verify: BM25 uses exact document lengths and stable tie ordering")
+        # @req: REQ-STORAGE-FtsEngi-001
+        var idx = FtsInvertedIndex.new()
+        idx.index_document(9, "needle short")
+        idx.index_document(3, "needle short")
+        idx.index_document(12, "needle with many additional searchable tokens")
+        val results = fts_bm25_search(idx, "needle")
+        expect(results.len()).to_equal(3)
+        expect(results[0].doc_id).to_equal(3)
+        expect(results[1].doc_id).to_equal(9)
+        expect(results[0].score).to_equal(results[1].score)
+        expect(results[1].score > results[2].score).to_equal(true)
+
+    it "matches the canonical scorer on the golden corpus term vector":
+        step("Verify: DBFS exact facade has canonical bm25-fixed-v1 parity")
+        # @req: REQ-STORAGE-FtsEngi-001
+        val facade_score = fts_bm25_score_fixed(3, 2, 4, 4500000, 5)
+        val canonical_score = bm25_score_default([3], [2], 4, 4500000, 5)
+        expect(facade_score).to_equal(canonical_score.raw_value())
+        val explanation = fts_bm25_explain(3, 2, 4, 4500000, 5)
+        expect(explanation.score_contract).to_equal("bm25-fixed-v1")
+        expect(explanation.score_milli).to_equal(facade_score)
+        expect(explanation.average_document_length_fixed).to_equal(4500000)
 
 # ── Trigram Index ──────────────────────────────────────────────────────────────
 
@@ -240,6 +280,96 @@ describe "FTS Fuzzy Search":
 # ── FtsEngine Unified ──────────────────────────────────────────────────────────
 
 describe "FTS Engine":
+    it "emits exact Wave 4 five-field root stats scores order and explanations":
+        step("Verify: DBFS executable parity evidence matches the locked canonical fixture")
+        var index = dbfs_wave4_golden_index()
+        expect(index.logical_root()).to_equal("sha256:8cd7ac31569e67b132a477ed1e5e66cc610a9119f0bf899b8fee26d5d27e90dd")
+        val identifier = index.field_stats("identifier")
+        val title = index.field_stats("title")
+        val heading = index.field_stats("heading")
+        val classification = index.field_stats("classification")
+        val body = index.field_stats("body")
+        expect(identifier.total_length).to_equal(11)
+        expect(title.total_length).to_equal(4)
+        expect(heading.total_length).to_equal(6)
+        expect(classification.total_length).to_equal(3)
+        expect(body.total_length).to_equal(5)
+        val alpha = index.query(DBFS_W4_SCOPE, "alpha search").unwrap()
+        expect(alpha.hits.len()).to_equal(2)
+        expect(alpha.hits[0].document_id).to_equal("A-ascii")
+        expect(alpha.hits[0].score_milli).to_equal(5564)
+        expect(alpha.hits[1].document_id).to_equal("A-é")
+        expect(alpha.hits[1].score_milli).to_equal(5471)
+        expect("sha256:" + sha256_text(alpha.hits[0].explanation_json)).to_equal("sha256:79a325595560360181d111119163260ab218ae630338542ed942e36f169f1040")
+        expect("sha256:" + sha256_text(alpha.hits[1].explanation_json)).to_equal("sha256:8cd5535ac3cbd8631371e67e3e3d7c6bc5755f9c70fcfcc3a025e03a29055bf1")
+        val exact = index.query(DBFS_W4_SCOPE, "REQ-SPKC-011").unwrap()
+        expect(exact.hits[0].score_milli).to_equal(7407)
+        expect(exact.hits[1].score_milli).to_equal(3625)
+        val public = index.query_filtered(DBFS_W4_SCOPE, "alpha", "visibility", "public").unwrap()
+        expect(public.hits.len()).to_equal(2)
+        expect(index.query_filtered(DBFS_W4_SCOPE, "alpha", "visibility", "private").unwrap().hits.len()).to_equal(0)
+        expect(index.query_filtered(DBFS_W4_SCOPE, "alpha", "unknown", "value").unwrap_err()).to_equal("unsupported_filter")
+        expect(index.query(DBFS_W4_SCOPE, "\"alpha search\"").unwrap_err()).to_equal("unsupported_capability")
+        expect(index.query("sha256:" + "2" * 64, "secret-needle").unwrap_err()).to_equal("unsupported_scope")
+
+        val base_count = index.document_count()
+        expect(index.remove("A-absent")).to_equal(false)
+        val no_op_root = index.logical_root()
+        expect(no_op_root).to_equal("sha256:8cd7ac31569e67b132a477ed1e5e66cc610a9119f0bf899b8fee26d5d27e90dd")
+        expect(index.contains_document("A-added")).to_equal(false)
+        expect(index.add(DbfsWave4Document.of("A-added", "r1", "ID-EMPTY", "", "", "empty", "", "public", DBFS_W4_SCOPE)).is_ok()).to_equal(true)
+        expect(index.contains_document("A-added")).to_equal(true)
+        expect(index.add(DbfsWave4Document.of("A-ascii", "r2", "REQ-SPKC-011", "Alpha Search", "Alpha combining é", "search", "alpha replacement", "public", DBFS_W4_SCOPE)).is_ok()).to_equal(true)
+        expect(index.remove("A-é")).to_equal(true)
+        expect(index.document_count()).to_equal(base_count)
+        var clean = dbfs_wave4_golden_index()
+        clean.add(DbfsWave4Document.of("A-added", "r1", "ID-EMPTY", "", "", "empty", "", "public", DBFS_W4_SCOPE))
+        clean.add(DbfsWave4Document.of("A-ascii", "r2", "REQ-SPKC-011", "Alpha Search", "Alpha combining é", "search", "alpha replacement", "public", DBFS_W4_SCOPE))
+        clean.remove("A-é")
+        expect(index.logical_root()).to_equal(clean.logical_root())
+
+    it "upserts one document id across keyword and substring indexes":
+        step("Verify: engine replacement removes stale lexical and trigram entries")
+        # @req: REQ-STORAGE-FtsEngi-001
+        var engine = FtsEngine.new()
+        engine.add_document(4, "obsolete phrase")
+        engine.add_document(4, "current phrase")
+        expect(engine.search_keyword("obsolete").len()).to_equal(0)
+        expect(engine.search_substring("obsolete").len()).to_equal(0)
+        expect(engine.search_keyword("current").len()).to_equal(1)
+
+    it "bridges text ids with public deterministic ties and honest capabilities":
+        step("Verify: DBFS compatibility facade exposes its supported subset")
+        # @req: REQ-STORAGE-FtsEngi-001
+        var bridge = FtsCompatibilityIndex.new("tenant-a")
+        val z_ordinal = bridge.add_document("zeta", "equal token")
+        val a_ordinal = bridge.add_document("alpha", "equal token")
+        expect(z_ordinal < a_ordinal).to_equal(true)
+        val results = bridge.query("tenant-a", "equal").unwrap()
+        expect(results.len()).to_equal(2)
+        expect(results[0].document_id).to_equal("alpha")
+        expect(results[1].document_id).to_equal("zeta")
+        expect(results[0].score_milli).to_equal(results[1].score_milli)
+        val caps = bridge.capabilities()
+        expect(caps.lexical).to_equal(true)
+        expect(caps.explain).to_equal(true)
+        expect(caps.stats).to_equal(true)
+        expect(caps.provider_protocol).to_equal(false)
+        expect(caps.phrase).to_equal(false)
+
+    it "rejects unsupported scope before reading index state":
+        step("Verify: scope denial precedes lexical index access")
+        # @req: REQ-STORAGE-FtsEngi-001
+        var bridge = FtsCompatibilityIndex.new("tenant-a")
+        bridge.add_document("doc-a", "private needle")
+        val before = bridge.stats()
+        val denied = bridge.query("tenant-b", "needle")
+        expect(denied.unwrap_err()).to_equal("unsupported_scope")
+        val after = bridge.stats()
+        expect(after.query_reads).to_equal(before.query_reads)
+        expect(after.document_count).to_equal(1)
+        expect(after.total_tokens).to_equal(2)
+
     it "adds documents and searches by keyword":
         step("Verify: adds documents and searches by keyword")
         # @req: REQ-STORAGE-FtsEngi-001

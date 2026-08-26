@@ -106,8 +106,6 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
-use compiler.mir.mir_types.{MirType}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
 fn string_literal_has_runtime_interpolations(interps: [HirInterpolation]?) -> bool:
     if val parts = interps:
@@ -326,6 +324,34 @@ impl MirLowering:
         if defining_module != "":
             return "{defining_module}::{symbol.name}"
         symbol.name
+
+    # Bare struct name for a `MirTypeKind.Struct(symbol)`.
+    #
+    # `canonical_mir_type_symbol` above MINTS ids from 1000000000 up that exist
+    # only in `canonical_type_symbols` -- `symbols.get_symbol_raw` knows nothing
+    # about them. So a consumer that only asked the symbol table got nil for
+    # every canonicalized struct type and silently fell back to "unknown type".
+    # That is what left `for f in d.values()` with no element struct name and
+    # collapsed every field read to offset 0 (see the bug comment in
+    # _MirLoweringExpr/method_calls_literals.spl's values/keys arm). Try the
+    # real symbol table first, then reverse the canonical map, returning the
+    # bare name (the segment after the last '.') because that is the form
+    # `struct_value_syms` / `resolve_field_index` are keyed on.
+    me mir_struct_symbol_name(symbol: SymbolId) -> text:
+        match self.symbols.get_symbol_raw(symbol.id):
+            case Some(info):
+                if info != nil and info.name != "": return info.name
+            case None: ()
+        val canonical_keys = self.canonical_type_symbols.keys()
+        var cki = 0
+        while cki < canonical_keys.len():
+            val canonical_key = canonical_keys[cki]
+            if self.canonical_type_symbols[canonical_key] == symbol.id:
+                val canonical_parts = canonical_key.split(".")
+                if canonical_parts.len() == 0: return canonical_key
+                return canonical_parts[canonical_parts.len() - 1]
+            cki = cki + 1
+        ""
 
     me canonical_mir_type_symbol(symbol: SymbolId) -> SymbolId:
         val symbol_info = self.symbols.get_symbol_raw(symbol.id)
@@ -1162,17 +1188,7 @@ impl MirLowering:
                     case HirTypeKind.Str:
                         bootstrap_fn_ret_type_register(fn_.name, self.lower_type(fn_.return_type))
                     case _: ()
-                # #158 Phase C: a generic TEMPLATE is non-emittable (hardening
-                # plan 9.3 step 12). It carries unsubstituted TypeParams, so
-                # lowering it produces opaque pointer-width slots and silent
-                # wrong answers. 40.mono emits the specializations that ARE
-                # reachable; anything still flagged here has zero live
-                # instantiations and must simply not be emitted. A generic
-                # call that mono could NOT rewrite is still a hard error
-                # (E-MONO-030), so this skip cannot hide a real use.
-                if fn_.is_generic_template:
-                    ()
-                elif not self.hir_function_is_extern(fn_):
+                if not self.hir_function_is_extern(fn_):
                     if bootstrap_trace:
                         print "[mir-lower] function:start {fn_.name}"
                     var mir_fn = self.lower_function(fn_)
@@ -1457,11 +1473,7 @@ impl MirLowering:
         var fni = 0
         while fni < fn_values.len():
             val fn_: HirFunction = fn_values[fni]
-            if fn_.is_generic_template:
-                fni = fni + 1
-                # #158 Phase C: generic templates are non-emittable (see the
-                # function-symbol loop above for the full rationale).
-            elif self.hir_function_is_extern(fn_):
+            if self.hir_function_is_extern(fn_):
                 fni = fni + 1
                 # skip extern functions
             else:

@@ -39,7 +39,7 @@ wiki / file-server access from caret and from dev tools (MCP); bootstrap redeplo
 ## Gap ledger (production-level = all rows closed or explicitly accepted)
 | # | gap | status | unblock condition / owner |
 |---|---|---|---|
-| G1 | All evidence on the Rust SEED, not the self-hosted binary | OPEN | redeploy lane: Stage 4 CLI; then rerun the 67-spec census |
+| G1 | All evidence on the Rust SEED, not the self-hosted binary | OPEN | blocked deeper than expected: Stage 3/4 are planner-receipt-gated (simple-bootstrap-planner-admission-v2, 28 bound keys, exit 64 without). Bootstrap chain running; then rerun the 67-spec census |
 | G2 | 5 specs env-blocked (cli_cached, cli_hidden_cached, native_closure, tui_pty, messaging_phase_cli) | OPEN → agent | qualified cached caret artifact + SIMPLE_STAGE3/4_BINARY |
 | G3 | Deployed seed cannot parse origin stdlib (`unsafe(...)`) | **CLOSED 2026-08-25** | seed redeployed 05:16 (60641352, sha 706fa636…); orchestrator probe printed the value |
 | G4 | No STARTTLS (587/143) | **PARTIAL** — negotiation shipped, transport BLOCKED | no fd-upgrade extern exists anywhere; `rt_tls_client_from_fd` designed in tls_no_fd_upgrade_blocks_starttls_2026-08-25; runtime lane |
@@ -54,8 +54,11 @@ wiki / file-server access from caret and from dev tools (MCP); bootstrap redeplo
 | G13 | Live infra evidence needs a Docker host | ACCEPTED | CI runner with Docker |
 | G14 | LSP code-action emitter must emit `}}}}`/concatenate | OPEN, needs record | IDE lane |
 | G16 | Tracked stage binaries SEGV (advisory guard RED) | OPEN, pre-existing | bootstrap lane; guard promotes to mandatory after redeploy |
-| G17 | Seed deployed 05:16 cannot parse easy_fix/accessor_rewrite.spl (aborts md doctests, demotes JIT) | OPEN → agent | fix-forward in src/compiler_rust/parser; agent recommends deploy-or-rollback |
+| G17 | Seed 05:16 could not parse easy_fix/accessor_rewrite.spl | **CLOSED 2026-08-25** | root cause: expression-position unsafe-block rule accepted a bare colon, so an identifier named unsafe/danger ate its block header. Fixed + rebuilt + DEPLOYED 06:08 (60646096, sha 3ef64bff…); cargo test 8/8, doctest 1/1, regression specs green |
 | G18 | MCP core tool set serves 3 tools, specs pin 20 (pre-existing at origin) | OPEN, filed | mcp_core_tool_set_has_3_tools_spec_expects_20_2026-08-25 |
+| G19 | Seeds have been built from UNCOMMITTED trees (the 05:16 deploy came from a scratch worktree carrying an unlanded parser hunk) | OPEN, needs record | require a git-clean, origin-pinned source for any deployed binary; check-seed-builds-push could bind the deployed sha to a commit |
+| G20 | caret wiki_write appends .md, wiki_read does not — a page cannot be read back by the id used to write it | OPEN, filed | llm_caret_wiki_write_read_id_asymmetry_2026-08-25; one normalisation fn owned by write/read/search |
+| G21 | doc/08_tracking/todo/todo_db.sdn regenerates to 277 rows against origin's 741 — a full-tree scan from this worktree would delete 464 tracked rows | OPEN, needs owner | establish which tree is authoritative for todo-scan before regenerating; this session deliberately did NOT commit the regenerated db |
 
 ## Rejected shortcuts (do not retry)
 - Subagent stripped spec docstrings/@req/step() while "fixing one line" (2x) — restore origin spec, re-apply hunk only.

@@ -446,7 +446,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
         Expr::Unary { op, operand } => {
             analyze_expr(operand, reasons, mode);
             match op {
-                UnaryOp::Ref | UnaryOp::RefMut | UnaryOp::Deref => {}
+                UnaryOp::Ref | UnaryOp::RefMut | UnaryOp::Deref => {
+                    add_reason(reasons, FallbackReason::NotYetImplemented("ref".into()));
+                }
                 _ => {}
             }
         }

@@ -363,11 +363,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_transient_array_scope_begin", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_pause", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_heap_promote", &[I64], &[I8]),
-    RuntimeFuncSpec::new("rt_transient_last_promoted_nodes", &[], &[I64]),
-    RuntimeFuncSpec::new("rt_transient_last_promoted_bytes", &[], &[I64]),
-    RuntimeFuncSpec::new("rt_transient_promotion_stats_reset", &[], &[]),
-    RuntimeFuncSpec::new("rt_transient_scope_promoted_nodes", &[], &[I64]),
-    RuntimeFuncSpec::new("rt_transient_scope_promoted_bytes", &[], &[I64]),
     RuntimeFuncSpec::new("rt_transient_array_scope_end", &[], &[I8]),
     RuntimeFuncSpec::new("rt_array_extend_i64", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_len", &[I64], &[I64]),
@@ -1510,10 +1505,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_wait", &[I64, I64], &[I64]),
     // rt_process_kill(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_kill", &[I64], &[I64]),
-    // Checked piped process state. The stdout call returns RuntimeValue text
-    // and writes an i32 status through the second pointer argument.
-    RuntimeFuncSpec::new("rt_process_read_stdout_checked", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_process_is_alive_checked", &[I64], &[I32]),
     // rt_process_spawn_async(cmd_ptr, cmd_len, args) -> pid (i64)
     RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_guarded", &[I64, I64, I64], &[I64]),
@@ -1951,6 +1942,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_file_canonicalize", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64], &[I64]),    // path_ptr, path_len -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_read_regular_no_follow_bounded", &[I64, I64, I64], &[I64]), // path_ptr, path_len, max_bytes -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_text_rv", &[I64], &[I64]),      // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_read_text", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_len", &[I64, I64], &[I64]),     // path_ptr, path_len -> byte length
@@ -1977,6 +1969,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
     RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),           // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle_begin_v1", &[I64,I64,I64,I64,I64,I64,I64,I64,I64,I64,I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle_read_stage_v1", &[I64,I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle_identity_v1", &[I64,I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle_stage_scr1_v1", &[I64,I64,I64,I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hosted_safe_artifact_bundle_finish_v1", &[I64,I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]),            // ptr, len -> RuntimeValue (byte array)
     RuntimeFuncSpec::new("rt_u32s_from_raw", &[I64, I64], &[I64]),             // ptr, count -> RuntimeValue (u32 array)
     RuntimeFuncSpec::new(

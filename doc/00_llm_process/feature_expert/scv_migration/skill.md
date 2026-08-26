@@ -1,0 +1,75 @@
+# Feature Expert: scv_migration
+
+## Role
+
+Own feature-specific process knowledge for the SCV stabilization migration: the
+month plan (S0 → S4 ceiling, 2026-08-25..2026-09-25), the signature-gated hourly
+ledger checker, the step-script acceptance contract, and the timer — plus the
+handoff seams to the trust (PQ signing), scv (commands/specs), and mci (critical
+lint) lanes.
+
+## Pipeline Links
+
+- [research](../../skill_command/skills/pipe/research/skill.md)
+- [design](../../skill_command/skills/pipe/design/skill.md)
+- [impl](../../skill_command/skills/pipe/impl/skill.md)
+- [verify](../../skill_command/skills/pipe/verify/skill.md)
+- [release](../../skill_command/skills/pipe/release/skill.md)
+- [pipeline next step plan](../../pipeline_next_step_plan.md)
+
+## Feature Links
+
+- Research: `doc/01_research/app/tools/scv/scv_migration_stabilization_2026-08-25.md`,
+  `doc/01_research/app/tools/scv/scv_v2_final_report_2026-08-25.md`
+- Plan: `doc/03_plan/app/tools/scv_migration_month_plan.md` (+ `_tldr.md`)
+- Lane skill: `.claude/skills/scv_migration.md`
+- Ledger + state: `.spipe/scv-migration/todo.sdn`, `.spipe/scv-migration/state.md`
+- Checker: `scripts/check/check-scv-migration-todo.shs` (`--selftest` 5 fixtures, fatal)
+- Steps: `scripts/scv-migration/steps/SCV-MIG-NN.shs` (unsigned until a human signs)
+- Timer: `scripts/setup/install-scv-migration-timer.shs`
+- Source under migration: `src/lib/scv/**`, `src/app/scv/main.spl` (scv lane, do not edit here)
+
+## Constraints / Handoff Notes (2026-08-25)
+
+- Fail-closed rule: the checker NEVER executes a step script that does not verify
+  via `scripts/trust/verify-script.shs` against `config/trust/scv_migration_root.pub`;
+  such steps are `blocked/unsigned` and the run FAILs. This is the intended state
+  until the human root-key holder signs the step scripts.
+- SCV must not become authoritative within the month (S4 dual-write is the
+  ceiling); Git/jj + GitHub remain the recovery authority for every step.
+- Week 1 acceptance specs (`test/integration/app/scv_{changeid,checkpoint,doctor,verify_backends,fault_injection}_spec.spl`)
+  are delivered by the scv lane; a missing spec makes its step script print
+  `ERROR — nothing was checked`, never a pass.
+- `.spipe/scv-migration/todo.sdn` is owned by the checker — `bin/simple todo-scan`
+  must never write it, and it must never move to `doc/08_tracking/todo/todo_db.sdn`.
+
+## Update Rule
+
+When the migration creates or changes research, plans, step scripts, checker
+behavior, or stage-gate status, update this skill with the new links and the
+current handoff notes.
+
+## Update Checklist
+
+- Add links to new or changed plans, specs, and reports.
+- Record affected layers and link their layer expert skills.
+- Record implementation constraints, known blockers, and required verification commands.
+- Update this file after each pipeline stage before handing off to the next stage.
+
+## Post-W4 / Wave-1 status (2026-08-26)
+Week 4 (SCV-MIG-21..25) and Wave 1 (SCV-IMPL-E-01..03, P-02, P-03, I-02,
+D-02, G-01) are landed and green. New capabilities: conservative quarantine
+GC (`src/lib/scv/gc.spl`), leveled recovery (`stabilize.spl`), dual-write
+independent compare + shadow replication, S4 review
+(`doc/03_plan/app/tools/scv_s4_review.md`, 30-day shadow clock started),
+file-system event watch/source (`src/lib/nogc_async_mut/file_system/`),
+event journal on the W2 WAL, hardened WASM shim contract
+(`src/runtime/scv_wasm_shim.c` + `test/integration/runtime/scv_wasm_shim_contract_spec.spl`),
+true incremental parse (persistent ParserSession), file-history CLI
+(`scv file-history`, `src/lib/scv/file_history.spl`), three-view diff, and
+explicit-commit parse policy. All 13 step scripts PQ-signed (WOTS leaves
+27..39; checker re-signed at leaf 40 after being extended to accept SCV-IMPL rows, see doc/08_tracking/bug/scv_migration_checker_ignored_impl_rows_2026-08-26.md); ledger `.spipe/scv-migration/todo.sdn` shows MIG-01..25 + 8 Wave-1
+rows done. Known gaps: Rust notify bridge (src/runtime/fswatch/) TODO;
+SCV-IMPL-B-01 blocked on sj repair; pre-existing reds unchanged
+(parser_wasm 7/12, structural_match 5/9, merge 1/5, gates 4/10, storage,
+parser_incremental, parser_cache, wasm_executor).

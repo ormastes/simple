@@ -1,20 +1,45 @@
 # SPipe Knowledge Compiler Operator Guide
 
-**Status:** Wave 2 core accepted; later commands remain planned until their dependency wave lands
-**Date:** 2026-08-25
+**Status:** Waves 1–3 accepted; Wave 4 partial; Waves 5–11 planned
+**Date:** 2026-08-26
+
+## 0. Current capability and evidence matrix
+
+This table is authoritative for deciding whether a workflow below is runnable.
+Commands described for an unlanded wave are contract previews, not executable
+operator instructions.
+
+| Capability | State | Evidence / operator consequence |
+|---|---|---|
+| Legacy CLI/MCP modularization | Accepted (Wave 1) | Commit `185f3303282`; existing host, fine-tune, doctor, and legacy MCP surfaces remain the only released command surface. |
+| Identity, parsing, registry, snapshots, overlays | Accepted (Wave 2) | Commit `deccbce964e`; callable through the dependency-free JavaScript library and tests, not through the planned Knowledge Compiler CLI. |
+| Typed graph and diagnostics foundation | Accepted (Wave 3) | Commit `5e2a049eb89`; graph publication and diagnostic APIs are library surfaces. Later lifecycle/run/result trace nodes remain Wave 7. |
+| Checked common BM25 scorer | Accepted foundation | Commit `2b9f25f8604`; this does not prove SPipe search, RRF, provider, JavaScript fallback, or DBFS parity. |
+| Dependency-free raw RRF kernel | Accepted foundation | Commit `595ba6e449`; deterministic fusion only, without identity dominance, graph candidate construction, post-fusion adjustments, or an exposed search command. |
+| Wave 4 provider/search integration | In progress | JSON, Unicode/analyzer, provider, DBFS, and parity candidates are rejected, blocked, or unverified unless a later accepted commit says otherwise. |
+| Virtual views/MCP 2026/refactor/rebalance/promotion/skill compiler/DB adapters | Planned | Waves 5–11; the corresponding commands in this guide are unavailable. |
+| Five system SSpecs and manuals | RED design scaffolds | Their fail-fast helpers are intentional. They are not runtime or release evidence. |
+
+To inspect the released surface, use the installed package's `spipe --help`
+and MCP `tools/list`; never infer command availability from a planned syntax
+block. A missing admitted self-hosted Simple runtime does not block standalone
+JavaScript work, but it does block native Simple admission. Rust bootstrap-seed
+or raw-source execution is not substitute evidence.
 
 ## 1. What the knowledge compiler does
 
-The SPipe Knowledge Compiler turns canonical project documents, source
+The target SPipe Knowledge Compiler turns canonical project documents, source
 metadata, and tests into a stable artifact graph, searchable indexes, and
-read-only virtual documentation views. Canonical content stays single-copy and
-is identified by immutable artifact and section UIDs. Physical and virtual
-paths are locations, not identities.
+read-only virtual documentation views. The released Waves 2–3 currently cover
+identity, parsing, immutable snapshots/overlays, typed graph publication, and
+diagnostics as JavaScript library APIs. Search and virtual views are not yet
+released. Canonical content stays single-copy and paths are not identities.
 
-SPipe remains usable without Simple. Its dependency-free JavaScript provider
-is the baseline; a configured Simple provider may add faster search, compiler
-symbols, duplication analysis, and database integration without changing the
-observable identity, ranking, trace, or projection contracts.
+SPipe remains usable without Simple. The target architecture requires a
+dependency-free JavaScript search provider, but today the dependency-free
+baseline is the identity/graph library only. A later configured Simple provider
+may add faster search, compiler symbols, duplication analysis, and database
+integration without changing observable contracts.
 
 ## 2. Audience
 
@@ -27,7 +52,10 @@ It is not an implementation API reference. Architecture and provider details
 belong in `doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md` and
 `doc/05_design/infra/spipe/spipe_knowledge_compiler.md`.
 
-## 3. Safety model
+## 3. Target safety invariants
+
+The following invariants govern future mutation, view, search, and promotion
+surfaces; their presence here does not mean those surfaces are released:
 
 - Canonical files are writable only through their normal authoring workflow or
   an approved SPipe refactor transaction.
@@ -46,26 +74,54 @@ belong in `doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md` and
 
 ## 4. Preconditions
 
-Before operating on a workspace:
+For currently released host/package operations:
 
-1. use the repository-managed SPipe command and self-hosted Simple binary where
-   configured;
-2. confirm the project registry, linked-project revisions, trust scopes, and
-   worktree identity;
-3. keep unrelated dirty files and other-agent work outside the operation;
-4. ensure `.spipecache/` and `.spipe/view/` are derived/ignored locations;
-5. use explicit temporary roots for destructive fault or recovery exercises;
-6. run `spipe doctor` to resolve incomplete links, interrupted transactions, or
-   incompatible indexes before applying a mutation.
+1. use the repository-managed SPipe package;
+2. pass the host root explicitly when SPipe is not mounted at `.spipe/spipe`;
+3. keep unrelated dirty files and other-agent work outside the operation; and
+4. use `spipe doctor /absolute/host/root` only for package/host link checks.
 
-An unavailable optional provider is not a reason to abandon core operation.
-The compiler should report degraded capabilities and continue with the
-dependency-free exact/BM25/graph path. Do not describe that as proof of the
-missing provider.
+Index, transaction, provider, cache, and materialized-view preconditions apply
+only after their implementation waves land. Current `doctor` does not inspect
+them, and there is no released exact/BM25/graph fallback search path.
+
+### 4.1 Standalone install and released-surface discovery
+
+SPipe has no baseline npm dependencies. From the Simple repository root, use
+the package directly:
+
+```sh
+cd examples/05_stdlib/spipe
+node cli/spipe.js --version       # 0.1.0
+node cli/spipe.js --help
+npm run check
+npm test
+npm run build                    # invokes sh scripts/build.shs
+```
+
+For a local global command installation, run
+`npm install -g ./examples/05_stdlib/spipe` from the repository root. This
+installs `spipe` and `spipe-mcp`. `spipe doctor /absolute/host/root` requires
+an explicit host root when the package is not mounted at `.spipe/spipe`; SPipe
+does not search upward from the current directory.
+
+The released MCP server is newline-delimited stdio:
+
+```sh
+node mcp/server.js
+```
+
+Its initialize response currently advertises protocol `2024-11-05`, server
+`spipe` version `0.1.0`, and tools/resources capabilities. `tools/list` returns
+exactly `spipe_info`, `spipe_experts`, `spipe_read_doc`,
+`spipe_fine_tune_guide`, `spipe_fine_tune_model_guide`, and
+`spipe_fine_tune_template`; `resources/list` returns only `spipe://skill`.
+There are no resource templates, list-change notifications, cache hints,
+Knowledge Compiler tools, or MCP 2026 HTTP transport yet.
 
 ## 5. Primary operator workflow
 
-### 5.0 Current Wave 2 API boundary
+### 5.0 Current Waves 2–3 API boundary
 
 The dependency-free package now provides schemas and JavaScript APIs for
 artifact/project/section/edge/alias/view records, Markdown/SDN/SSpec/source
@@ -106,6 +162,96 @@ UID factory solely to replay a transaction fixture.
 The `spipe index`, `view`, `search`, `trace`, and refactor commands below are
 the stable planned operator surface. They must not be treated as reachable
 until their named implementation wave and focused compatibility evidence land.
+
+#### 5.0.1 Executable Waves 2–3 library walkthrough
+
+The following is the current standalone Knowledge Compiler entry point. Run it
+from `examples/05_stdlib/spipe`; it performs no repository scan or canonical
+write:
+
+```sh
+node --input-type=module <<'NODE'
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  compileKnowledgeInventory,
+  compileKnowledgeDelta
+} from "./src/core/knowledge_compiler.js";
+import { parseMarkdownArtifact } from "./src/parser/index.js";
+import { planUidInjection } from "./src/core/identity.js";
+import { WorktreeOverlayStore } from "./src/storage/overlay_store.js";
+import { ZERO_HASH } from "./src/storage/canonical.js";
+
+const context = {
+  project_uid: "P-000000000000000000000000000000AA",
+  worktree_uid: "W-000000000000000000000000000000BB",
+  revision_id: "185f330328248b89813baf9229b14781f53a60c4",
+  overlay_generation_hash: ZERO_HASH,
+  policy_hash: "4".repeat(64)
+};
+const original = `<!-- spipe:artifact uid=A-00000000000000000000000000000001 key=design.search.core aliases=[old.search] -->
+# Search Core
+
+## Stable identity
+<!-- spipe:section uid=S-00000000000000000000000000000001 key=design.search.identity -->
+Paths are locations.
+`;
+
+const inventory = compileKnowledgeInventory({
+  ...context,
+  inputs: [{ path: "doc/search.md", content: original }]
+});
+assert.match(inventory.snapshot.snapshot_uid, /^spks1-[0-9a-f]{64}$/);
+assert.equal(inventory.identity.resolve("old.search").status, "resolved");
+assert.equal(Object.isFrozen(inventory), true);
+
+const changed = original.replace("Paths are locations.", "Paths remain locations.");
+const incremental = compileKnowledgeDelta(inventory, [{
+  operation: "upsert", path: "doc/search.md", content: changed
+}]);
+assert.equal(incremental.delta.artifacts.updated.length, 1);
+assert.equal(incremental.delta.artifacts.updated[0].uid,
+  "A-00000000000000000000000000000001");
+
+const cacheRoot = mkdtempSync(join(tmpdir(), "spkc-overlay-"));
+try {
+  const overlay = new WorktreeOverlayStore({
+    cacheRoot, worktreeUid: context.worktree_uid
+  });
+  overlay.set("doc/search.md", changed);
+  const reloaded = new WorktreeOverlayStore({
+    cacheRoot, worktreeUid: context.worktree_uid
+  });
+  assert.equal(reloaded.read("doc/search.md").toString(), changed);
+} finally {
+  rmSync(cacheRoot, { recursive: true, force: true });
+}
+
+const unmarked = parseMarkdownArtifact(
+  "# New Note\n\n## Missing identity\nBody.\n",
+  { path: "doc/new-note.md", projectUid: context.project_uid,
+    revision: context.revision_id }
+);
+let sequence = 0;
+const proposals = planUidInjection(unmarked, {
+  uidFactory: prefix => `${prefix}-${String(++sequence).padStart(32, "0")}`
+});
+assert.ok(proposals.some(({ kind }) => kind === "artifact_uid"));
+assert.ok(proposals.some(({ kind }) => kind === "section_uid"));
+assert.ok(proposals.every(({ canonical_mutation }) => canonical_mutation === false));
+console.log("wave2_walkthrough=pass", inventory.snapshot.snapshot_uid,
+  incremental.inventory.snapshot.snapshot_uid);
+NODE
+```
+
+Expected result is one `wave2_walkthrough=pass` line and no assertion failure.
+`planUidInjection` is dry-run-only: no UID apply/persist API, marker-write
+authorization receipt, or `RefactorService` is released. Trust elevation is a
+separate composition-root operation through `createAuthorizationPort` and a
+verified signed receipt; see `test/integration/knowledge_wave2_test.js` for the
+accepted fixture.
 
 ### 5.1 Index canonical knowledge artifacts
 
@@ -319,11 +465,19 @@ Provider query limits add: 128 tokens, 64 Boolean clauses, nesting depth 8,
 values each, 1,000 hits, 128 explanation terms and 32 fields per hit, 64 KiB
 explanation per hit/512 KiB per page, 1,000 delta documents, 64 fields/document,
 1 MiB field value, 1,000 duplicate candidates total/100 per document, 1,000
-symbols, and a client deadline from 50 ms through 30 s. Regex and leading
-unbounded wildcards are unsupported.
+symbols, and a client deadline from 1 through 30,000 milliseconds inclusive.
+The deadline starts when the decoder accepts the first frame-header byte, so
+ingress, decoding, validation, normalization, hashing, execution, and response
+construction consume one semantic budget. Regex and leading unbounded
+wildcards are unsupported.
 
-At limit-plus-one, expect typed `frame_too_large`, `limit_exceeded`,
-`deadline_exceeded`, or `invalid_request`; stale/cross-scope requests return
+At a frame-size limit-plus-one, expect a payload-free local
+`TransportDiagnosticV1(code:frame_too_large)` and silent close, not a provider
+response. Invalid UTF-8 is handled identically with `code:invalid_utf8`.
+These two classes are never bound `ProviderErrorV1` codes. After a complete
+typed request is host-bound, applicable named operations may return bound
+`limit_exceeded`, `deadline_exceeded`, or `invalid_request` errors;
+stale/cross-scope requests return
 `stale_cursor` or `unauthorized`. Transactions and analysis additionally use
 `precondition_failed`, `transaction_conflict`, `recovery_required`,
 `unsupported_version`, `constraint_conflict`, `budget_exceeded`,
@@ -539,22 +693,28 @@ no churn. Leave physical content in place until the defect is resolved.
 
 ### Semantic or server provider is unavailable
 
-Record the degraded capability and continue with exact/BM25/graph retrieval if
-policy permits. Do not claim semantic, server, WAND, or authorization evidence
-from fallback execution.
+This is a future provider runbook. After the fallback/provider wave lands,
+record the degraded capability and continue with the explicitly negotiated
+available sources if policy permits. Today there is no released search fallback.
+Never claim semantic, server, WAND, or authorization evidence from degradation.
 
 ## 11. Compatibility and deferred surfaces
 
 Existing SPipe CLI, setup, link, and `doctor` behavior remains compatible.
-Legacy MCP stdio and MCP 2026 stateless transports share a protocol-neutral
-knowledge core. MCP tools/resources, materialized views, and an editor virtual
-filesystem are the supported exposure order.
+Legacy MCP stdio is the only released transport. The protocol-neutral core,
+MCP 2026 stateless HTTP transport, Knowledge Compiler tools/resources,
+materialized views, and editor virtual filesystem are target/deferred surfaces
+in that implementation order.
 
 FUSE/ProjFS is deferred until client evidence proves those mechanisms
 insufficient. An absent OS mount is therefore not a core failure, and no
 materialized or editor view may be misreported as OS-mount evidence.
 
 ## 12. Related knowledge
+
+- `doc/04_architecture/infra/spipe/spipe_knowledge_compiler_cooperative_streaming.md`
+- `doc/05_design/infra/spipe/spipe_knowledge_compiler_cooperative_streaming.md`
+- `doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md`
 
 - `doc/00_llm_process/feature_expert/modern_sspec/skill.md`
 - `doc/00_llm_process/feature_expert/mcp_runtime/skill.md`
@@ -567,3 +727,134 @@ materialized or editor view may be misreported as OS-mount evidence.
 When the feature behavior becomes reachable, add/update the dedicated feature
 expert entry and link these adjacent experts to the canonical guide rather than
 duplicating the full contract.
+
+## 13. Current Wave 4 search evidence
+
+The checked canonical BM25 slice is accepted at commit `2b9f25f8604`, limited
+to `src/lib/common/search/ranking.spl` and
+`test/01_unit/lib/common/search/ranking_spec.spl`. Highest-capability review is
+`PASS`; a clean integration checkout produced source check `PASS` and focused
+specification `PASS 30/30`. The runtime was bootstrap-seed/non-Stage-4, so do
+not present these receipts as Stage 4 runtime qualification or as Wave 4
+completion.
+
+Do not use the rejected standalone DBFS `wave4_compatibility` bundle. It
+duplicates scoring instead of delegating to the canonical scorer, has weak
+probe coverage, lacks executed clean/parity and embeddings-zero-use evidence,
+and violates capability/statistics contracts. Its status is
+`FAIL`/`NOT-EVIDENCE`, and none of its files is accepted.
+
+The next DBFS implementation must be a real facade over the canonical scorer.
+Acceptance requires idempotent remove/re-add statistics, query-term
+deduplication, `explain:false` until explanations are implemented, and an
+independent final-corpus clean rebuild oracle. Wave 4 remains `IN PROGRESS`.
+
+The clean post-push lint attempt stopped before a lint verdict because the
+bootstrap runtime/codegen path could not resolve `Array.sort_by`. Record that
+as a tooling blocker, not a scorer failure or pass. No duplicate-check receipt
+exists for this slice.
+
+### 13.1 Rejected DBFS facade attempt
+
+Do not consume the current clean-clone DBFS candidate. Its exact scope was the
+four files
+`src/lib/nogc_sync_mut/db/dbfs_engine/fts/{__init__,bm25,inverted_index,search}.spl`
+plus
+`test/02_integration/storage/dbfs/fts_canonical_facade_spec.spl`.
+All three bounded cycles executed zero owned-code assertions. Stage 3 Simple
+`9ce412a1d102de421de6d7042d8dc5c65201cc514b463b9b6a5bc5de2f66970c`
+lacks `check`/`test`; Rust seed
+`c9c783b8568cf9a199945fe1ee98d08615b728387e6c89cbdc9b50e600f3e091`
+stopped on unrelated `nogc_async_mut/path.spl` `E1002 unsafe` and
+`plan_sdn.spl` `Dedent`.
+
+Highest-capability static review is `FAIL`, admissible files `[]`. The
+candidate mutates nested value-semantic state without complete copy/writeback,
+commits lexical state before trigram/content state, mismatches the frozen
+`contains_document` `me fn` ABI, and lacks the full statistics, clean-rebuild,
+contains/absent, ordering, legacy-success, and checked-upsert failure oracle.
+
+The facade direction and focused fixture are useful design input, not accepted
+implementation. Rebuild child state and write it back once, make the whole
+engine update atomic, correct the ABI, complete the oracle, and use a capable
+pure-Simple runtime for the next fresh bounded run. Wave 4 remains
+`IN PROGRESS`.
+
+### 13.2 Analyzer V1 handoff
+
+Do not accept the current analyzer candidate: static status is `FAIL`,
+admissible files `[]`, because it is unbounded and its parity claim is false.
+The analyzer lane owns only `src/lib/common/search/analyzer.spl` and
+`test/01_unit/lib/common/search/analyzer_contract_spec.spl`;
+`src/lib/common/search/__init__.spl` is merge-owned. The generated UCD17
+tables and manifest are missing from `main` and must land first.
+
+The common batch ABI consists of
+`SearchFieldIdentityV1(Identifier|Title|Heading|Classification|Body)`,
+`AnalyzerErrorV1(InvalidLimits|InvalidFieldIdentity|InputLimitExceeded|
+InvalidUtf8|NormalizedLimitExceeded|TokenBytesLimitExceeded|
+TokenCountLimitExceeded|DistinctTermLimitExceeded)`,
+`AnalyzerIdentityV1` with eleven text fields
+`analyzer_id,unicode_version,unicode_manifest_sha256,normalization_id,
+lowercase_id,tokenizer_id,stop_words_id,stop_words_sha256,stemming_id,
+field_schema_id,limits_schema_id`, and `AnalyzerLimitsV1` with five i64
+fields `max_input_bytes,max_normalized_bytes,max_token_bytes,max_tokens,
+max_distinct_terms`.
+
+Result types are `AnalyzedTokenV1(value:text,position:i64,
+exact_identifier:bool)`,
+`AnalyzedTextV1(normalized:text,tokens:[AnalyzedTokenV1])`,
+`AnalyzedQueryTermV1(value:text,qtf:i64)`, and
+`AnalyzedQueryV1(normalized:text,terms:[AnalyzedQueryTermV1])`. Call
+`analyze_field_v1(text,SearchFieldIdentityV1,AnalyzerIdentityV1,
+AnalyzerLimitsV1)->Result<AnalyzedTextV1,AnalyzerErrorV1>`,
+`analyze_query_v1(text,AnalyzerIdentityV1,AnalyzerLimitsV1)
+->Result<AnalyzedQueryV1,AnalyzerErrorV1>`, or
+`unsigned_utf8_less(text,text)->bool`.
+
+Semantics are UCD17 NFC -> default lowercase, not folding -> NFC; maximal
+`Alphabetic|Decimal_Number|Mark|_` tokens; pre-stopword one-based positions;
+`[a,an,and,of,the,to]` with SHA-256
+`6f0a7c26d3d0e3d06a2fbbbeaa1843294f83c3be26baf1c04651191e011510bf`;
+identifier full-normalized/no-trim append-last token at position zero with
+deduplication; and QTF terms sorted by unsigned UTF-8.
+
+Use query limits `4096/4096/4096/128/128` in struct order. Field input
+hard-caps at 1,048,576 bytes and configured `max_tokens` at 524,288. Unicode
+manifest, stopword, limits, and schema identities are cache identity. Analyzer
+code must not embed, spawn a process, access a network, or use locale state.
+
+This batch layer feeds but does not replace `ProviderAnalyzerLimitsV1`,
+`ProviderAnalyzedTokenV1`, `ProviderAnalyzedTokenSinkPort`, or
+`ProviderStreamingAnalyzerV1`; adapter parity is required. Wave 4 remains
+`IN PROGRESS`.
+
+### 13.3 Rejected Unicode 17 prerequisite bundle
+
+The Unicode prerequisite is atomic across 14 files: generator, license, seven
+UCD inputs (`UnicodeData`, `DerivedCoreProperties`, `PropList`,
+`SpecialCasing`, `CaseFolding`, `CompositionExclusions`,
+`NormalizationTest`), generated JavaScript/Simple tables, manifest, and the
+JavaScript/Simple tests. These live under
+`examples/05_stdlib/spipe/tools/unicode/`,
+`examples/05_stdlib/spipe/src/search/generated/`,
+`src/lib/common/search/generated/`,
+`examples/05_stdlib/spipe/test/fixture/wave4_search/`,
+`examples/05_stdlib/spipe/test/unit/unicode_17_tables_test.js`, and
+`test/01_unit/lib/common/search/unicode_17_0_0_spec.spl`.
+
+The 256-CCC bounded-linear normalization repair, O(n) sigma contexts, and
+4,096-element JavaScript chunking are useful but unaccepted. JavaScript passed
+7/7 for 20,034 records in five NFC forms, every scalar, and 1 MiB. Cycle 2's
+Rust-seed Simple attempt timed out `124` without a summary; cycle 3 repeated
+the JavaScript PASS and supplies no additional evidence.
+
+Highest-capability status is `FAIL`, admissible `[]`. Remaining defects are
+unproved Simple push/value semantics and optimizer bounds, direct
+`rt_file_read_text` use rather than the file facade, orphan
+`REQ-SPK-SEARCH-UNICODE-001`, the wrong generated-JavaScript license path,
+and weak independent `Case_Ignorable` final-sigma lowercase coverage.
+
+Accept none of the bundle. Repair the static defects first, then run complete
+parity once on a capable pure-Simple runtime. The analyzer prerequisite is
+still missing and Wave 4 remains `IN PROGRESS`.

@@ -305,7 +305,9 @@ On refusal the script prints exactly one line to stderr and exits **3**
 Wired into `scripts/check/land.shs`, `check-seed-builds-push.shs`,
 `check-stage-binaries-runnable.shs` and `lint-cached.shs`. Overhead is shell
 builtins only (no subprocess, no file I/O): measured 2026-08-25 at **~56 µs per
-source** (selftest, 200 iterations) and 1000 sourced iterations in 60 ms wall
+source** (selftest, 200 iterations; re-measured 74 us/source on 2026-08-25
+under load — the figure is load-sensitive, both are far under the 1 ms bound)
+and 1000 sourced iterations in 60 ms wall
 including `sh` startup. `sh scripts/lib/recursion_guard.shs --selftest` runs 4
 fixtures (depth-0 runs; self-invoking fixture stopped with exit 3 after exactly
 MAX_DEPTH invocations; `SIMPLE_SHS_MAX_DEPTH` override honoured; overhead

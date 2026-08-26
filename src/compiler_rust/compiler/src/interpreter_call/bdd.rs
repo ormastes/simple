@@ -922,6 +922,28 @@ pub(super) fn eval_bdd_builtin(
                 }
             }
         }
+        "planned" => {
+            // Future-implementation marker: a spec declared before its feature
+            // exists. Bookkeeping mirrors `pending` (never pass, never fail,
+            // counted into the total) so dashboards can report planned work
+            // separately from failures. Runtime body: src/lib/nogc_sync_mut/
+            // spec.spl `planned` (live on the self-hosted binary).
+            let name_str = extract_desc_str(args, "unnamed");
+
+            let indent = BDD_INDENT.with(|cell| *cell.borrow());
+            let indent_str = "  ".repeat(indent);
+
+            println!("{}\x1b[33m○ {} (planned)\x1b[0m", indent_str, name_str);
+
+            BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
+
+            let desc_path = get_current_describe_path();
+            record_test_result(desc_path, name_str.clone(), true, true);
+
+            BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+
+            Ok(Some(Value::Nil))
+        }
         "pending" | "pending_it" => {
             let name_str = extract_desc_str(args, "unnamed");
 

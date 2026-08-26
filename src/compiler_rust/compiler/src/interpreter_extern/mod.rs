@@ -128,6 +128,7 @@ pub mod crypto;
 pub mod sha256;
 pub mod sha512;
 pub mod dynamic_sffi;
+pub mod host_dynlib;
 #[cfg(feature = "gui")]
 pub mod winit_sffi;
 pub mod rapier2d_sffi;
@@ -225,6 +226,14 @@ fn rt_browser_http_job_bool_stub(_args: &[Value]) -> Result<Value, CompileError>
     Ok(Value::Bool(false))
 }
 
+fn rt_hosted_safe_artifact_bundle_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+fn rt_hosted_safe_artifact_bundle_identity_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-1))
+}
+
 fn rt_cli_command_v1_call_interpreter(args: &[Value]) -> Result<Value, CompileError> {
     let [Value::Int(fn_ptr), Value::Int(interface_handle), Value::Int(provider_context),
         Value::Int(request_ptr), Value::Int(request_len), Value::Int(result_ptr),
@@ -251,6 +260,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         };
     }
     insert_simple!("abs", math::abs);
+    insert_simple!("rt_host_dynlib_open", host_dynlib::rt_host_dynlib_open);
+    insert_simple!("rt_host_dynlib_symbol", host_dynlib::rt_host_dynlib_symbol);
+    insert_simple!("rt_host_dynlib_close", host_dynlib::rt_host_dynlib_close);
     insert_simple!("arc_box_dec_strong", rc::arc_box_dec_strong);
     insert_simple!("arc_box_dec_weak", rc::arc_box_dec_weak);
     insert_simple!("arc_box_drop_value", rc::arc_box_drop_value);
@@ -389,17 +401,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_transient_heap_promote",
         memory::rt_transient_heap_promote
     );
-    insert_simple!(
-        "rt_transient_last_promoted_nodes",
-        memory::rt_transient_last_promoted_nodes
-    );
-    insert_simple!(
-        "rt_transient_last_promoted_bytes",
-        memory::rt_transient_last_promoted_bytes
-    );
-    insert_simple!("rt_transient_promotion_stats_reset", memory::rt_transient_promotion_stats_reset);
-    insert_simple!("rt_transient_scope_promoted_nodes", memory::rt_transient_scope_promoted_nodes);
-    insert_simple!("rt_transient_scope_promoted_bytes", memory::rt_transient_scope_promoted_bytes);
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -1347,6 +1348,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_exists_probe_begin", file_io::rt_file_exists_probe_begin);
     insert_simple!("rt_file_exists_probe_end", file_io::rt_file_exists_probe_end);
     insert_simple!("rt_file_is_regular_no_follow", file_io::rt_file_is_regular_no_follow);
+    insert_simple!("rt_file_read_regular_no_follow_bounded", file_io::rt_file_read_regular_no_follow_bounded);
     insert_simple!("rt_file_is_char_device", file_io::rt_file_is_char_device);
     insert_simple!("rt_file_exists_str", file_io::rt_file_exists);
     insert_simple!("rt_file_find", file_io::rt_file_find);
@@ -1395,6 +1397,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_extract_smf_dynlib", file_io::rt_file_extract_smf_dynlib);
     insert_simple!("rt_file_write_text_at", file_io::rt_file_write_text_at);
     insert_simple!("rt_file_write_text", file_io::rt_file_write_text);
+    insert_simple!("rt_hosted_safe_artifact_bundle_begin_v1", rt_hosted_safe_artifact_bundle_unavailable);
+    insert_simple!("rt_hosted_safe_artifact_bundle_read_stage_v1", rt_hosted_safe_artifact_bundle_unavailable);
+    insert_simple!("rt_hosted_safe_artifact_bundle_identity_v1", rt_hosted_safe_artifact_bundle_identity_unavailable);
+    insert_simple!("rt_hosted_safe_artifact_bundle_stage_scr1_v1", rt_hosted_safe_artifact_bundle_unavailable);
+    insert_simple!("rt_hosted_safe_artifact_bundle_finish_v1", rt_hosted_safe_artifact_bundle_unavailable);
     // rt_io_file_* backs std.nogc_sync_mut.io.file (FileHandle/File) -- a
     // separate family from rt_file_* above with its own fd-based, real-OS-fd
     // semantics (see io_file.rs module doc). Previously unregistered here,
@@ -1660,9 +1667,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_spawn_piped", system::rt_process_spawn_piped);
     insert_simple!("rt_process_write_stdin", system::rt_process_write_stdin);
     insert_simple!("rt_process_read_stdout", system::rt_process_read_stdout);
-    insert_simple!("rt_process_read_stdout_checked", system::rt_process_read_stdout_checked);
     insert_simple!("rt_process_is_alive", system::rt_process_is_alive);
-    insert_simple!("rt_process_is_alive_checked", system::rt_process_is_alive_checked);
     insert_simple!("rt_process_close_piped", system::rt_process_close_piped);
     insert_simple!("rt_process_spawn_guarded", system::rt_process_spawn_guarded);
     insert_simple!("rt_process_wait", system::rt_process_wait);
@@ -2115,7 +2120,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_value_int", sffi_value::rt_value_int_fn);
     insert_simple!("rt_value_is_bool", sffi_value::rt_value_is_bool_fn);
     insert_simple!("rt_value_is_float", sffi_value::rt_value_is_float_fn);
-    insert_simple!("rt_heap_ref_wellformed", sffi_value::rt_heap_ref_wellformed_fn);
     insert_simple!("rt_value_is_heap", sffi_value::rt_value_is_heap_fn);
     insert_simple!("rt_value_is_int", sffi_value::rt_value_is_int_fn);
     insert_simple!("rt_value_is_nil", sffi_value::rt_value_is_nil_fn);
@@ -3005,54 +3009,15 @@ mod tests {
         assert!(EXTERN_DISPATCH.contains_key("rt_cli_run_tests_process_args"));
     }
 
-    /// Regression guard for
-    /// doc/08_tracking/bug/seed_interpreter_extern_missing_rt_heap_ref_wellformed_2026-08-23.md.
-    ///
-    /// `rt_heap_ref_wellformed` was defined in the C runtime, the Rust runtime,
-    /// `simple_core`, and `runtime_symbols.rs` -- and MISSING here. Because
-    /// `native-build` interprets the pure-Simple driver under this table, and
-    /// `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:55` declares it,
-    /// EVERY host native-build died with
-    /// `semantic: unknown extern function: rt_heap_ref_wellformed`, on a
-    /// three-line no-import hello world. Registration alone is the invariant.
     #[test]
-    fn dispatch_registers_heap_ref_wellformed() {
-        assert!(simple_common::RUNTIME_SYMBOL_NAMES.contains(&"rt_heap_ref_wellformed"));
-        assert!(
-            EXTERN_DISPATCH.contains_key("rt_heap_ref_wellformed"),
-            "interpreter_extern must register every rt_* the compiler's own sources declare"
-        );
-    }
-
-    /// The adapter is a FORMATION probe over the interpreter's `Value`, not a
-    /// tag-bit read over a raw word. Cloning `rt_value_is_heap_fn`'s
-    /// `.as_int()?` shape would error on the class instances real call sites
-    /// pass (`self.ctx.module_surfaces.unwrap()`), trading "unknown extern" for
-    /// a mid-build type error. `objects.rs` documents the contract as
-    /// "can never false-reject a live object".
-    #[test]
-    fn heap_ref_wellformed_adapter_semantics() {
-        use super::sffi_value::rt_heap_ref_wellformed_fn;
-
-        // nil: nothing to probe
-        assert_eq!(rt_heap_ref_wellformed_fn(&[Value::Nil]).unwrap(), Value::Bool(false));
-
-        // scalar carrier: delegated to the real runtime probe, which reports 0
-        // for a non-heap-tagged word by design.
-        assert_eq!(rt_heap_ref_wellformed_fn(&[Value::Int(3)]).unwrap(), Value::Bool(false));
-
-        // a live interpreter object is well-formed by construction, and must
-        // never be false-rejected.
-        assert_eq!(
-            rt_heap_ref_wellformed_fn(&[Value::Array(std::sync::Arc::new(vec![Value::Int(1)]))]).unwrap(),
-            Value::Bool(true)
-        );
-
-        // arity is enforced, and NOT as a generic "unknown extern function".
-        let err = rt_heap_ref_wellformed_fn(&[]).unwrap_err();
-        let text = format!("{err}");
-        assert!(text.contains("rt_heap_ref_wellformed expects 1 argument"), "got: {text}");
-        assert!(!text.contains("unknown extern function"), "got: {text}");
+    fn dispatch_registers_host_dynlib_family() {
+        for name in [
+            "rt_host_dynlib_open",
+            "rt_host_dynlib_symbol",
+            "rt_host_dynlib_close",
+        ] {
+            assert!(EXTERN_DISPATCH.contains_key(name), "{name} not registered");
+        }
     }
 
     #[test]
@@ -3173,11 +3138,6 @@ mod tests {
             "rt_transient_array_scope_pause",
             "rt_transient_array_scope_end",
             "rt_transient_heap_promote",
-            "rt_transient_last_promoted_nodes",
-            "rt_transient_last_promoted_bytes",
-            "rt_transient_promotion_stats_reset",
-            "rt_transient_scope_promoted_nodes",
-            "rt_transient_scope_promoted_bytes",
         ] {
             assert!(EXTERN_DISPATCH.contains_key(name));
         }

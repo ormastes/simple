@@ -132,6 +132,37 @@ the stub described in
   `src/lib/nogc_sync_mut/sffi/dynamic.spl` wraps `spl_dlopen`, `spl_dlsym`, and
   `spl_wffi_call_i64` for `.so`/`.dylib` host libraries. That proves host dynlib
   calls, not SMF dynlib acceptance.
+
+## GPU provider registry
+
+Hosted native products compile `src/runtime/runtime_dynload.c` as the canonical
+owner of the optional GPU provider registry. A compatible first-party provider
+is selected before process start with `SIMPLE_CUDA_PROVIDER_PATH`,
+`SIMPLE_VULKAN_PROVIDER_PATH`, or `SIMPLE_METAL_PROVIDER_PATH`. The host opens
+the library with local symbol visibility, requires ABI version 1, verifies the
+declared backend bit and every required operation, and only then publishes the
+handle. Missing libraries, wrong ABI versions, backend mismatches, and partial
+surfaces remain unavailable.
+
+The provider is not a static link dependency. `rt_gpu_provider_unload` closes
+one owned handle and clears its cached path/metadata so a later lookup can load
+a replacement library through the same unchanged host executable. Callers must
+quiesce provider-owned sessions and resources before unload; the registry does
+not invalidate live backend objects on their behalf. Concurrent registry lookup
+is serialized, while resolved provider operations run outside the registry lock.
+
+The host-independent acceptance commands are:
+
+```sh
+sh scripts/check/check-gpu-provider-dynload-registry.shs
+sh scripts/check/check-metal-provider-dynload-registry.shs
+```
+
+They prove ABI and required-symbol rejection, Vulkan/CUDA operation dispatch,
+bounded concurrent lookup, unload/reload replacement without rebuilding the
+host, Metal length-delimited byte conversion, and absence of a provider link
+edge. They do not prove physical CUDA, Vulkan, or Metal device execution; use
+the backend-specific native readback gates for that claim.
 - **Legacy runtime SMF file helpers are not the GUI release lane**:
   `rt_file_wrap_smf_dynlib` and `rt_file_extract_smf_dynlib` still exist as
   generic runtime helpers, but they are not accepted GUI release-lane evidence.

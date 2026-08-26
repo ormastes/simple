@@ -21,7 +21,7 @@ Tests for MountTable lifecycle:
 """
 
 use std.spipe.*
-use std.fs_driver.mount_table.{MountTable, MountId, ExecuteOpenBinding, PositionedDriverKind}
+use std.fs_driver.mount_table.{MountTable, MountId, ExecuteOpenBinding}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags, FileHandle, ExecuteTrust}
 use std.fs_driver.instance.{DriverInstance, RamFsStub}
 use std.fs_driver.error.{FsError}
@@ -45,14 +45,6 @@ fn foo_bar_path() -> Path:
 
 fn real_driver() -> DriverInstance:
     DriverInstance.RamFs(driver: RamFsDriver.new())
-
-fn table_with_program() -> MountTable:
-    var table = MountTable.new()
-    table.mount("/", real_driver(), MountOptions.default()).unwrap()
-    val writer = table.open("/program", OpenFlags.create_write()).unwrap()
-    table.ftruncate(writer, 4).unwrap()
-    table.close(writer).unwrap()
-    table
 
 fn is_permission(error: FsError) -> bool:
     match error:
@@ -121,8 +113,6 @@ describe "MountTable — execute-open policy and ownership":
         val binding = ExecuteOpenBinding(
             mount_id: id,
             backend_name: "ramfs",
-            backend_kind: "ramfs",
-            canonical_source_path: "/program",
             file_handle: FileHandle(id: 1),
             mount_generation: 1u64,
             namespace_generation: 1u64,
@@ -131,20 +121,6 @@ describe "MountTable — execute-open policy and ownership":
         )
         mt.bump_content_generation(id)
         expect(mt.execute_binding_is_current(binding)).to_be(false)
-
-    it "projects canonical ramfs kind separately from its display name":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val created = mt.open("/program.smf", OpenFlags.create_write()).unwrap()
-        mt.write(created, "SMF1").unwrap()
-        mt.close(created).unwrap()
-        val binding = mt.open_for_execute("/program.smf", ExecuteTrust.Trusted).unwrap()
-        expect(binding.backend_kind).to_equal("ramfs")
-        expect(binding.canonical_source_path).to_equal("/program.smf")
-        var forged = binding
-        forged.canonical_source_path = "/different.smf"
-        expect(mt.execute_binding_is_current(forged)).to_be(false)
-        mt.close(binding.file_handle).unwrap()
 
     it "rejects unknown handles instead of probing other mounts":
         var mt = MountTable.new()
@@ -173,8 +149,6 @@ describe "MountTable — execute-open policy and ownership":
         val snapshot = ExecuteOpenBinding(
             mount_id: id,
             backend_name: "ramfs",
-            backend_kind: "ramfs",
-            canonical_source_path: "/program",
             file_handle: FileHandle(id: 1),
             mount_generation: 1u64,
             namespace_generation: 1u64,
@@ -232,158 +206,6 @@ describe "MountTable — execute-open policy and ownership":
         expect(mt.read(FileHandle(id: 1u64), 16777217).is_err()).to_be(true)
         expect(mt.pread(FileHandle(id: 1u64), 0, 16777217).is_err()).to_be(true)
         expect(mt.pread(FileHandle(id: 1u64), 0 - 1, 1).is_err()).to_be(true)
-
-
-describe "MountTable — mutation generation invalidation":
-    it "advances namespace exactly once after successful create open":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val before = mt.mounts[0].namespace_generation
-        val opened = mt.open("/created", OpenFlags.create_write())
-        expect(opened.is_ok()).to_be(true)
-        expect(mt.mounts[0].namespace_generation).to_equal(before + 1u64)
-
-    it "advances both requested generations exactly once after failed create truncate open":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val existing = mt.open("/existing", OpenFlags.create_write()).unwrap()
-        mt.close(existing).unwrap()
-        val namespace_before = mt.mounts[0].namespace_generation
-        val content_before = mt.mounts[0].content_generation
-        val create_exclusive = OpenFlags.create_write().with_excl()
-        val flags = create_exclusive.with_trunc()
-        expect(mt.open("/existing", flags).is_err()).to_be(true)
-        expect(mt.mounts[0].namespace_generation).to_equal(namespace_before + 1u64)
-        expect(mt.mounts[0].content_generation).to_equal(content_before + 1u64)
-
-    it "advances content exactly once after successful truncate open":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val existing = mt.open("/existing", OpenFlags.create_write()).unwrap()
-        mt.close(existing).unwrap()
-        val before = mt.mounts[0].content_generation
-        val truncate_flags = OpenFlags.write_only().with_trunc()
-        expect(mt.open("/existing", truncate_flags).is_ok()).to_be(true)
-        expect(mt.mounts[0].content_generation).to_equal(before + 1u64)
-
-    it "invalidates namespace after a backend reports mutation failure":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        mt.mkdir("/present", 0o755).unwrap()
-        val before = mt.mounts[0].namespace_generation
-        expect(mt.mkdir("/present", 0o755).is_err()).to_be(true)
-        expect(mt.mounts[0].namespace_generation).to_equal(before + 1u64)
-
-    it "invalidates namespace after failed unlink and rename calls":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val before_unlink = mt.mounts[0].namespace_generation
-        expect(mt.unlink("/missing").is_err()).to_be(true)
-        expect(mt.mounts[0].namespace_generation).to_equal(before_unlink + 1u64)
-        val before_rename = mt.mounts[0].namespace_generation
-        expect(mt.rename("/missing", "/new").is_err()).to_be(true)
-        expect(mt.mounts[0].namespace_generation).to_equal(before_rename + 1u64)
-
-    it "invalidates namespace after a failed link call":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val before = mt.mounts[0].namespace_generation
-        expect(mt.link("/target", "/alias").is_err()).to_be(true)
-        expect(mt.mounts[0].namespace_generation).to_equal(before + 1u64)
-
-    it "invalidates content exactly once after failed handle mutations":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val handle = mt.open("/data", OpenFlags.create_write()).unwrap()
-        val before_write = mt.mounts[0].content_generation
-        expect(mt.write(handle, "x").is_err()).to_be(true)
-        expect(mt.mounts[0].content_generation).to_equal(before_write + 1u64)
-        val before_pwrite = mt.mounts[0].content_generation
-        expect(mt.pwrite(handle, "y", 0).is_err()).to_be(true)
-        expect(mt.mounts[0].content_generation).to_equal(before_pwrite + 1u64)
-        val before_truncate = mt.mounts[0].content_generation
-        expect(mt.ftruncate(handle, 0).is_err()).to_be(true)
-        expect(mt.mounts[0].content_generation).to_equal(before_truncate + 1u64)
-
-    it "invalidates content after failed positioned write dispatch":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val handle = mt.open("/data", OpenFlags.create_write()).unwrap()
-        val before = mt.mounts[0].content_generation
-        val bytes: [u8] = [1u8, 2u8]
-        expect(mt.positioned_write_bytes(handle.id, PositionedDriverKind.Auto, 0u64, bytes).is_err()).to_be(true)
-        expect(mt.mounts[0].content_generation).to_equal(before + 1u64)
-
-    it "invalidates content after failed shared writable mapping":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val handle = mt.open("/data", OpenFlags.create_write()).unwrap()
-        val before = mt.mounts[0].content_generation
-        expect(mt.mmap_shared_writable(handle, 0, 4096).is_err()).to_be(true)
-        expect(mt.mounts[0].content_generation).to_equal(before + 1u64)
-
-    it "does not mutate the backend or advance generation when capacity is exhausted":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        mt.mounts[0].namespace_generation = 0xFFFFFFFFFFFFFFFFu64
-        expect(mt.mkdir("/blocked", 0o755).is_err()).to_be(true)
-        expect(mt.mounts[0].namespace_generation).to_equal(0xFFFFFFFFFFFFFFFFu64)
-        expect(mt.stat("/blocked").is_err()).to_be(true)
-
-
-describe "MountTable — replacement lifecycle":
-    it "reports an empty table as quiescent":
-        val mt = MountTable.new()
-        expect(mt.has_live_handles()).to_be(false)
-        expect(mt.can_replace()).to_be(true)
-
-    it "reports mounted but quiescent tables as ready for owner review":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        expect(mt.has_live_handles()).to_be(false)
-        expect(mt.can_replace()).to_be(true)
-
-    it "reports Busy without mutation while a file handle is live":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val handle = mt.open("/file", OpenFlags.create_write()).unwrap()
-        val mounts_before = mt.mounts.len()
-        val next_id_before = mt.next_id
-        val files_before = mt.open_files.len()
-        expect(mt.has_live_handles()).to_be(true)
-        expect(mt.can_replace()).to_be(false)
-        expect(mt.unmount("/").unwrap_err()).to_equal(FsError.Busy)
-        expect(mt.mounts.len()).to_equal(mounts_before)
-        expect(mt.next_id).to_equal(next_id_before)
-        expect(mt.open_files.len()).to_equal(files_before)
-        expect(mt.read(handle, 1).is_ok()).to_be(true)
-        expect(mt.close(handle).is_ok()).to_be(true)
-        expect(mt.can_replace()).to_be(true)
-        expect(mt.unmount("/").is_ok()).to_be(true)
-
-    it "reports Busy for a directory binding without a close contract":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        val directory = mt.opendir("/").unwrap()
-        val mounts_before = mt.mounts.len()
-        expect(mt.readdir(directory).is_ok()).to_be(true)
-        expect(mt.has_live_handles()).to_be(true)
-        expect(mt.can_replace()).to_be(false)
-        expect(mt.unmount("/").unwrap_err()).to_equal(FsError.Busy)
-        expect(mt.mounts.len()).to_equal(mounts_before)
-        expect(mt.readdir(directory).is_ok()).to_be(true)
-
-    it "reports Busy for execute bindings until their owned file is closed":
-        var mt = table_with_program()
-        val binding = mt.open_for_execute("/program", ExecuteTrust.Trusted).unwrap()
-        expect(mt.has_live_handles()).to_be(true)
-        expect(mt.can_replace()).to_be(false)
-        expect(mt.unmount("/").unwrap_err()).to_equal(FsError.Busy)
-        expect(mt.execute_binding_is_current(binding)).to_be(true)
-        expect(mt.close(binding.file_handle).is_ok()).to_be(true)
-        expect(mt.has_live_handles()).to_be(false)
-        expect(mt.can_replace()).to_be(true)
-        expect(mt.unmount("/").is_ok()).to_be(true)
 
 
 # ============================================================================

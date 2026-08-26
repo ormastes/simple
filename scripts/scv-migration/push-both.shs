@@ -1,0 +1,248 @@
+#!/bin/sh
+# push-both.shs — SCV migration dual-push: GitHub (canonical, remote #1) then the
+# secondary local backup server (shadow, remote #2, /mnt/data/scv-backup/simple.git).
+# Order per doc/01_research/app/tools/scv/scv_migration_stabilization_2026-08-25.md §1:
+# GitHub FIRST via a guarded plain `git push` run from a CLEAN detached temp
+# worktree (`git worktree add --detach` on the commit being pushed), so the full
+# pre-push hook fan-out runs against COMMITTED content, never the dirty shared
+# tree. NO --no-verify on this leg, ever — if the hooks fail in the clean
+# worktree, that is a genuine FAIL, no fallback. (Formerly this leg called
+# scripts/check/land.shs, which depends on sj/jj — both broken on this host;
+# see .spipe/scv-migration/state.md W3.) Then the SAME commit goes to the
+# backup remote, then the pushed legs must agree on main's SHA.
+#
+# The backup leg uses `git push --no-verify`: the pre-push guards run on the GitHub
+# leg (hooks in the clean worktree); the backup leg only mirrors commits that are already guarded
+# (and the guards' outgoing-range logic is meaningless against the local mirror).
+# Note: the working clone is SHALLOW, so the mirror is a shallow mirror
+# (receive.shallowUpdate=true on the bare repo); GitHub stays the only
+# full-history authority.
+#
+# Options:
+#   --dry-run       read-only: check remotes exist and report SHA agreement, push nothing
+#   --skip-github   skip the GitHub leg (reported as SKIPPED, never compared)
+#   --skip-backup   skip the backup leg
+#   --bundle        also write /mnt/data/scv-backup/bundles/git-YYYY-MM-DD.bundle (UTC)
+#                   and `git bundle verify` it
+#   --selftest      run the selftest only; --no-selftest skips the implicit selftest
+#
+# Also mirrors, when present: .scv/checkpoints/ -> $BACKUP_ROOT/checkpoints/, and
+# .spipe/scv-migration/{todo.sdn,runs.log} -> $BACKUP_ROOT/scv-migration-state/.
+# Missing optional inputs are reported, never a failure.
+#
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 /
+# "ERROR — nothing was checked" exit 2. Selftest is fatal and runs first
+# unless --no-selftest.
+#
+# Committed UNSIGNED: sign with
+#   sh scripts/trust/sign-script.shs --name scv-migration-root scripts/scv-migration/push-both.shs
+set -u
+
+# Env overrides exist so the selftest (and only the selftest) can point every leg
+# at fixtures. Defaults are the real lane.
+REPO="${PB_REPO:-$(pwd)}"
+BACKUP_REMOTE="${PB_BACKUP_REMOTE:-scvbackup}"
+BACKUP_ROOT="${PB_BACKUP_ROOT:-/mnt/data/scv-backup}"
+GH_REMOTE="${PB_GH_REMOTE:-origin}"
+BRANCH="${PB_BRANCH:-main}"
+
+DRY=0; SKIP_GH=0; SKIP_BK=0; BUNDLE=0; SELFTEST_ONLY=0; NO_SELFTEST=0
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY=1 ;;
+    --skip-github) SKIP_GH=1 ;;
+    --skip-backup) SKIP_BK=1 ;;
+    --bundle) BUNDLE=1 ;;
+    --selftest) SELFTEST_ONLY=1 ;;
+    --no-selftest) NO_SELFTEST=1 ;;
+    *) echo "ERROR — nothing was checked (unknown option: $a)"; exit 2 ;;
+  esac
+done
+
+selftest() {
+  ST="$(mktemp -d)" || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+  fail() { echo "ERROR — nothing was checked (selftest broken: $1)"; rm -rf "$ST"; exit 2; }
+  SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
+  # fixture source repo with one commit
+  git init -q -b main "$ST/src" && \
+    git -C "$ST/src" -c user.email=t@t -c user.name=t commit -q --allow-empty -m seed || fail "fixture init"
+  git init -q --bare -b main "$ST/backup/fix.git" || fail "bare init"
+  mkdir -p "$ST/backup/bundles" "$ST/backup/checkpoints"
+  git -C "$ST/src" remote add fixbackup "$ST/backup/fix.git" || fail "remote add"
+  # 1) clean push -> PASS
+  OUT=$(cd "$ST/src" && PB_REPO="$ST/src" PB_BACKUP_REMOTE=fixbackup PB_BACKUP_ROOT="$ST/backup" \
+        sh "$SELF" --no-selftest --skip-github 2>&1); rc=$?
+  V=$(printf '%s\n' "$OUT" | tail -n 1)
+  { [ "$rc" -eq 0 ] && [ "${V#PASS}" != "$V" ]; } || fail "clean push expected PASS, got rc=$rc [$V]"
+  # 2) corrupt the bare repo ref -> mismatch FAIL
+  BAD=0000000000000000000000000000000000000000
+  git -C "$ST/src" -c user.email=t@t -c user.name=t commit -q --allow-empty -m bad-marker || fail "commit2"
+  git -C "$ST/backup/fix.git" update-ref "refs/heads/main" "$(git -C "$ST/src" rev-parse main)" 2>/dev/null
+  # make backup diverge: point it at an unrelated commit
+  git -C "$ST/src" -c user.email=t@t -c user.name=t commit -q --allow-empty -m newer || fail "commit3"
+  OUT=$(cd "$ST/src" && PB_REPO="$ST/src" PB_BACKUP_REMOTE=fixbackup PB_BACKUP_ROOT="$ST/backup" \
+        sh "$SELF" --no-selftest --skip-github --skip-backup 2>&1); rc=$?
+  V=$(printf '%s\n' "$OUT" | tail -n 1)
+  { [ "$rc" -eq 1 ] && [ "${V#FAIL}" != "$V" ]; } || fail "stale backup expected mismatch FAIL, got rc=$rc [$V]"
+  # 3) zero remotes configured -> ERROR
+  git init -q -b main "$ST/lone" && \
+    git -C "$ST/lone" -c user.email=t@t -c user.name=t commit -q --allow-empty -m seed || fail "lone init"
+  OUT=$(cd "$ST/lone" && PB_REPO="$ST/lone" PB_BACKUP_REMOTE=fixbackup PB_BACKUP_ROOT="$ST/backup" \
+        sh "$SELF" --no-selftest --skip-github 2>&1); rc=$?
+  V=$(printf '%s\n' "$OUT" | tail -n 1)
+  { [ "$rc" -eq 2 ] && [ "${V#ERROR}" != "$V" ]; } || fail "no-remote expected ERROR, got rc=$rc [$V]"
+  # 4) GitHub leg via clean-worktree push to a fixture "origin" -> PASS
+  git init -q --bare -b main "$ST/gh/fix.git" || fail "gh bare init"
+  git init -q -b main "$ST/src2" && \
+    git -C "$ST/src2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m seed || fail "src2 init"
+  git -C "$ST/src2" remote add fixorigin "$ST/gh/fix.git" || fail "gh remote add"
+  git init -q --bare -b main "$ST/gh/bk.git" || fail "gh bk bare init"
+  git -C "$ST/src2" remote add fixbackup "$ST/gh/bk.git" || fail "gh bk remote add"
+  OUT=$(cd "$ST/src2" && PB_REPO="$ST/src2" PB_GH_REMOTE=fixorigin PB_BACKUP_REMOTE=fixbackup PB_BACKUP_ROOT="$ST/backup" \
+        sh "$SELF" --no-selftest 2>&1); rc=$?
+  V=$(printf '%s\n' "$OUT" | tail -n 1)
+  { [ "$rc" -eq 0 ] && [ "${V#PASS}" != "$V" ]; } || fail "gh clean-worktree push expected PASS, got rc=$rc [$V]"
+  GOT=$(git -C "$ST/gh/fix.git" rev-parse main 2>/dev/null)
+  WANT=$(git -C "$ST/src2" rev-parse main)
+  [ "$GOT" = "$WANT" ] || fail "gh push landed wrong sha"
+  # 5) failing pre-push hook in the source repo must FAIL the GitHub leg
+  #    (proves hooks actually run on the clean-worktree path — the point of it)
+  printf '#!/bin/sh\nexit 1\n' > "$ST/src2/.git/hooks/pre-push" && chmod +x "$ST/src2/.git/hooks/pre-push" || fail "hook install"
+  git -C "$ST/src2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m next || fail "src2 commit2"
+  OUT=$(cd "$ST/src2" && PB_REPO="$ST/src2" PB_GH_REMOTE=fixorigin PB_BACKUP_REMOTE=fixbackup PB_BACKUP_ROOT="$ST/backup" \
+        sh "$SELF" --no-selftest 2>&1); rc=$?
+  V=$(printf '%s\n' "$OUT" | tail -n 1)
+  { [ "$rc" -eq 1 ] && [ "${V#FAIL}" != "$V" ] && [ "${OUT#*github leg: FAIL}" != "$OUT" ]; } || fail "gh hook-reject expected github-leg FAIL, got rc=$rc [$V]"
+  rm -rf "$ST"
+  echo "selftest: 5 fixtures OK"
+}
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+  selftest; echo "PASS — 5 selftest fixture(s) checked, 0 failures"; exit 0
+fi
+[ "$NO_SELFTEST" -eq 1 ] || selftest
+
+cd "$REPO" || { echo "ERROR — nothing was checked (cannot cd $REPO)"; exit 2; }
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "ERROR — nothing was checked (not a git repo: $REPO)"; exit 2; }
+
+LOCAL_SHA=$(git rev-parse "$BRANCH" 2>/dev/null) || { echo "ERROR — nothing was checked (no branch $BRANCH)"; exit 2; }
+echo "local $BRANCH: $LOCAL_SHA"
+
+CHECKED=0
+FAILS=""
+
+# --- backup remote must exist unless leg is skipped; and if NOTHING would be
+# checked at all, that's ERROR, not PASS.
+HAVE_BK=1
+git remote get-url "$BACKUP_REMOTE" >/dev/null 2>&1 || HAVE_BK=0
+if [ "$HAVE_BK" -eq 0 ] && [ "$SKIP_GH" -eq 1 ]; then
+  echo "ERROR — nothing was checked (remote $BACKUP_REMOTE not configured and GitHub leg skipped)"; exit 2
+fi
+
+# --- GitHub leg (canonical) ---
+GH_STATE="SKIPPED"
+if [ "$SKIP_GH" -eq 0 ]; then
+  if [ "$DRY" -eq 1 ]; then
+    if git remote get-url "$GH_REMOTE" >/dev/null 2>&1; then
+      GH_STATE="DRY ($GH_REMOTE configured)"; CHECKED=$((CHECKED+1))
+    else
+      GH_STATE="FAIL ($GH_REMOTE not configured)"; FAILS="$FAILS github"
+    fi
+  elif ! git remote get-url "$GH_REMOTE" >/dev/null 2>&1; then
+    GH_STATE="FAIL ($GH_REMOTE not configured)"; FAILS="$FAILS github"
+  else
+    # Push from a CLEAN detached temp worktree so the pre-push hooks examine
+    # committed content only. NEVER --no-verify here: a hook failure in the
+    # clean worktree is a genuine FAIL, no fallback.
+    WT="${TMPDIR:-/tmp}/pb-gh-wt.$$"
+    if git worktree add --detach "$WT" "$LOCAL_SHA" >/dev/null 2>&1; then
+      git -C "$WT" push "$GH_REMOTE" "$LOCAL_SHA:refs/heads/$BRANCH"; ghrc=$?
+      git worktree remove --force "$WT" >/dev/null 2>&1
+      git worktree prune >/dev/null 2>&1
+      CHECKED=$((CHECKED+1))
+      if [ "$ghrc" -eq 0 ]; then GH_STATE="OK (guarded push from clean worktree rc=0)"; else
+        GH_STATE="FAIL (guarded push rc=$ghrc — hooks ran in clean worktree, no fallback)"; FAILS="$FAILS github"
+      fi
+    else
+      GH_STATE="FAIL (git worktree add failed for $LOCAL_SHA)"; FAILS="$FAILS github"
+    fi
+  fi
+fi
+echo "github leg: $GH_STATE"
+
+# --- backup leg (shadow) ---
+BK_STATE="SKIPPED"
+if [ "$SKIP_BK" -eq 0 ] && [ "$HAVE_BK" -eq 1 ]; then
+  if [ "$DRY" -eq 1 ]; then
+    BK_STATE="DRY ($BACKUP_REMOTE configured)"; CHECKED=$((CHECKED+1))
+  else
+    # --no-verify: guards belong to the GitHub leg; this mirrors guarded commits.
+    git push --no-verify "$BACKUP_REMOTE" "$BRANCH"; bkrc=$?
+    CHECKED=$((CHECKED+1))
+    if [ "$bkrc" -eq 0 ]; then BK_STATE="OK"; else BK_STATE="FAIL (push rc=$bkrc)"; FAILS="$FAILS backup"; fi
+  fi
+elif [ "$HAVE_BK" -eq 0 ]; then
+  BK_STATE="FAIL (remote $BACKUP_REMOTE not configured)"; FAILS="$FAILS backup"
+fi
+echo "backup leg: $BK_STATE"
+
+# --- SHA agreement: compare only legs that are pushed/present ---
+BK_SHA=""
+if [ "$HAVE_BK" -eq 1 ]; then
+  BK_SHA=$(git ls-remote "$BACKUP_REMOTE" "refs/heads/$BRANCH" 2>/dev/null | cut -f1)
+  BK_URL=$(git remote get-url "$BACKUP_REMOTE")
+  BARE_SHA=""
+  [ -d "$BK_URL" ] && BARE_SHA=$(git -C "$BK_URL" rev-parse "$BRANCH" 2>/dev/null)
+  echo "backup $BRANCH: ${BK_SHA:-<none>} (bare rev-parse: ${BARE_SHA:-n/a})"
+  CHECKED=$((CHECKED+1))
+  if [ "$DRY" -eq 0 ] && [ "$SKIP_BK" -eq 0 ] && [ "$BK_SHA" != "$LOCAL_SHA" ]; then
+    FAILS="$FAILS backup-sha-mismatch"
+  fi
+  if [ "$DRY" -eq 1 ] || [ "$SKIP_BK" -eq 1 ]; then
+    [ "$BK_SHA" = "$LOCAL_SHA" ] || { echo "note: backup trails local ($BK_SHA)"; FAILS="$FAILS backup-sha-mismatch"; }
+  fi
+fi
+if [ "$SKIP_GH" -eq 0 ] && [ "$DRY" -eq 0 ]; then
+  GH_SHA=$(git ls-remote "$GH_REMOTE" "refs/heads/$BRANCH" 2>/dev/null | cut -f1)
+  echo "github $BRANCH: ${GH_SHA:-<none>}"
+  CHECKED=$((CHECKED+1))
+  [ -n "$GH_SHA" ] && [ -n "$BK_SHA" ] && [ "$SKIP_BK" -eq 0 ] && [ "$GH_SHA" != "$BK_SHA" ] && FAILS="$FAILS github/backup-disagree"
+fi
+
+# --- bundle ---
+if [ "$BUNDLE" -eq 1 ]; then
+  BF="$BACKUP_ROOT/bundles/git-$(date -u +%Y-%m-%d).bundle"
+  if [ "$DRY" -eq 1 ]; then
+    echo "bundle: DRY (would write $BF)"
+  else
+    mkdir -p "$BACKUP_ROOT/bundles"
+    git bundle create "$BF" "$BRANCH" >/dev/null 2>&1; brc=$?
+    if [ "$brc" -eq 0 ] && git bundle verify "$BF" >/dev/null 2>&1; then
+      echo "bundle: OK $BF"; CHECKED=$((CHECKED+1))
+    else
+      echo "bundle: FAIL ($BF rc=$brc)"; FAILS="$FAILS bundle"; CHECKED=$((CHECKED+1))
+    fi
+  fi
+fi
+
+# --- optional mirrors (never a failure when absent) ---
+if [ "$DRY" -eq 0 ]; then
+  if [ -d .scv/checkpoints ]; then
+    mkdir -p "$BACKUP_ROOT/checkpoints"
+    if command -v rsync >/dev/null 2>&1; then rsync -a .scv/checkpoints/ "$BACKUP_ROOT/checkpoints/"; else cp -r .scv/checkpoints/. "$BACKUP_ROOT/checkpoints/"; fi
+    echo "checkpoints: mirrored"
+  else
+    echo "checkpoints: none (.scv/checkpoints/ absent)"
+  fi
+  mkdir -p "$BACKUP_ROOT/scv-migration-state"
+  for f in .spipe/scv-migration/todo.sdn .spipe/scv-migration/runs.log; do
+    [ -f "$f" ] && cp "$f" "$BACKUP_ROOT/scv-migration-state/" && echo "state: copied $f" || echo "state: absent $f"
+  done
+fi
+
+if [ "$CHECKED" -eq 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+if [ -n "$FAILS" ]; then
+  echo "FAIL — $CHECKED check(s) run, failing legs:$FAILS"; exit 1
+fi
+echo "PASS — $CHECKED check(s) run, github: $GH_STATE, backup: $BK_STATE"
+exit 0

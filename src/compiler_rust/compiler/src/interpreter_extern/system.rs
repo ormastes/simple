@@ -236,7 +236,6 @@ fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result
 use crate::value_bridge::runtime_to_value;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
 lazy_static::lazy_static! {
@@ -1131,43 +1130,11 @@ pub fn rt_process_kill(args: &[Value]) -> Result<Value, CompileError> {
 //   * write_stdin / close_piped / is_alive return bool.
 // ---------------------------------------------------------------------------
 
-const PIPED_PROCESS_SLOT_COUNT: usize = 16;
-const PIPED_PROCESS_RESERVED: i64 = -1;
-
-struct PipedProcessSlot {
-    pid: AtomicI64,
-    child: Mutex<Option<std::process::Child>>,
-}
-
 lazy_static::lazy_static! {
-    /// Stable, allocation-free process slots. Atomic tags make lookup bounded
-    /// and keep unrelated child I/O out of a global registry critical section.
-    static ref PIPED_PROCESS_SLOTS: [PipedProcessSlot; PIPED_PROCESS_SLOT_COUNT] =
-        std::array::from_fn(|_| PipedProcessSlot {
-            pid: AtomicI64::new(0),
-            child: Mutex::new(None),
-        });
-}
-
-fn piped_find_slot(pid: i64) -> Option<&'static PipedProcessSlot> {
-    if pid <= 0 {
-        return None;
-    }
-    PIPED_PROCESS_SLOTS
-        .iter()
-        .find(|slot| slot.pid.load(Ordering::Acquire) == pid)
-}
-
-fn piped_reserve_slot() -> Option<&'static PipedProcessSlot> {
-    PIPED_PROCESS_SLOTS.iter().find(|slot| {
-        slot.pid
-            .compare_exchange(0, PIPED_PROCESS_RESERVED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    })
-}
-
-fn piped_release_reservation(slot: &PipedProcessSlot) {
-    slot.pid.store(0, Ordering::Release);
+    /// Children spawned by `rt_process_spawn_piped`, keyed by OS pid.
+    /// Kept separate from `SPAWNED_PROCESSES` because these own live pipe
+    /// handles that `rt_process_wait`/`rt_process_kill` must not steal.
+    static ref PIPED_PROCESSES: Mutex<HashMap<i64, std::process::Child>> = Mutex::new(HashMap::new());
 }
 
 fn piped_arg_pid(args: &[Value], who: &str) -> Result<i64, CompileError> {
@@ -1213,53 +1180,26 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
 
-    let Some(slot) = piped_reserve_slot() else {
-        return Ok(Value::Int(-1));
-    };
-
     match command.spawn() {
         Ok(child) => {
             let pid = child.id() as i64;
-            // Match the C runtime: stdout is non-blocking, so bounded reads
-            // cannot park the interpreter indefinitely.
+            // Match the C runtime: stdout is non-blocking, so `read_stdout`
+            // can return "" instead of parking the interpreter forever.
             #[cfg(unix)]
-            {
+            if let Some(out) = child.stdout.as_ref() {
                 use std::os::unix::io::AsRawFd;
-                if let Some(output) = child.stdout.as_ref() {
-                    let fd = output.as_raw_fd();
-                    unsafe {
-                        let flags = libc::fcntl(fd, libc::F_GETFL);
-                        if flags >= 0 {
-                            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-                        }
+                let fd = out.as_raw_fd();
+                unsafe {
+                    let flags = libc::fcntl(fd, libc::F_GETFL);
+                    if flags >= 0 {
+                        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
                     }
                 }
             }
-            if let Some(previous) = piped_find_slot(pid) {
-                if !std::ptr::eq(previous, slot) {
-                    let mut previous_child = previous
-                        .child
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if previous.pid.load(Ordering::Acquire) == pid {
-                        // PID reuse is possible only after the previous child
-                        // was reaped. Retire its cached object without sending
-                        // a signal that could target the new process.
-                        drop(previous_child.take());
-                        previous.pid.store(0, Ordering::Release);
-                    }
-                }
-            }
-            let mut owned = slot
-                .child
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *owned = Some(child);
-            slot.pid.store(pid, Ordering::Release);
+            PIPED_PROCESSES.lock().unwrap().insert(pid, child);
             Ok(Value::Int(pid))
         }
         Err(error) => {
-            piped_release_reservation(slot);
             if std::env::var_os("SIMPLE_PROCESS_DEBUG").is_some() {
                 eprintln!("rt_process_spawn_piped: {error}");
             }
@@ -1283,20 +1223,8 @@ pub fn rt_process_write_stdin(args: &[Value]) -> Result<Value, CompileError> {
         Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_process_write_stdin: data must be a string")),
     };
-    let Some(slot) = piped_find_slot(pid) else {
-        return Ok(Value::Bool(false));
-    };
-    let mut owned = slot
-        .child
-        .lock()
-        .map_err(|_| CompileError::runtime("piped process child lock poisoned"))?;
-    if slot.pid.load(Ordering::Acquire) != pid {
-        return Ok(Value::Bool(false));
-    }
-    let Some(child) = owned.as_mut() else {
-        return Ok(Value::Bool(false));
-    };
-    let ok = match child.stdin.as_mut() {
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let ok = match map.get_mut(&pid).and_then(|c| c.stdin.as_mut()) {
         Some(stdin) => stdin.write_all(data.as_bytes()).and_then(|()| stdin.flush()).is_ok(),
         None => false,
     };
@@ -1358,20 +1286,8 @@ pub fn rt_process_write_stdin_some(args: &[Value]) -> Result<Value, CompileError
         return Ok(Value::Int(0));
     }
 
-    let Some(slot) = piped_find_slot(pid) else {
-        return Ok(Value::Int(-1));
-    };
-    let mut owned = slot
-        .child
-        .lock()
-        .map_err(|_| CompileError::runtime("piped process child lock poisoned"))?;
-    if slot.pid.load(Ordering::Acquire) != pid {
-        return Ok(Value::Int(-1));
-    }
-    let Some(child) = owned.as_mut() else {
-        return Ok(Value::Int(-1));
-    };
-    match child.stdin.as_mut() {
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    match map.get_mut(&pid).and_then(|c| c.stdin.as_mut()) {
         Some(stdin) => match stdin.write(&bytes[start..start + request]) {
             Ok(n) => {
                 let _ = stdin.flush();
@@ -1388,65 +1304,29 @@ pub fn rt_process_write_stdin_some(args: &[Value]) -> Result<Value, CompileError
 /// Callable from Simple as: `rt_process_read_stdout(pid: i64) -> text`
 /// Returns "" when the child is unknown or no data is available yet -- this is
 /// the documented C behaviour, not an error.
-fn piped_read_stdout_checked(pid: i64) -> Result<(String, i32), CompileError> {
-    use std::io::Read;
-    let Some(slot) = piped_find_slot(pid) else {
-        return Ok((String::new(), -2));
-    };
-    let mut owned = slot
-        .child
-        .lock()
-        .map_err(|_| CompileError::runtime("piped process child lock poisoned"))?;
-    if slot.pid.load(Ordering::Acquire) != pid {
-        return Ok((String::new(), -2));
-    }
-    let Some(child) = owned.as_mut() else {
-        return Ok((String::new(), -2));
-    };
-    let Some(stdout) = child.stdout.as_mut() else {
-        return Ok((String::new(), -2));
-    };
-    let mut buf = [0u8; 8192];
-    let read = loop {
-        match stdout.read(&mut buf) {
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            result => break result,
-        }
-    };
-    match read {
-        Ok(0) => Ok((String::new(), 2)),
-        Ok(n) => Ok((String::from_utf8_lossy(&buf[..n]).into_owned(), 1)),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok((String::new(), 0)),
-        Err(_) => Ok((String::new(), -3)),
-    }
-}
-
 pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
+    use std::io::Read;
     let pid = piped_arg_pid(args, "rt_process_read_stdout")?;
-    let (out, _) = piped_read_stdout_checked(pid)?;
-    Ok(Value::text(out))
-}
-
-/// Checked non-blocking stdout read. Returns the text from the single read
-/// observation and writes 1=data, 0=would-block, 2=EOF, or a negative error.
-pub fn rt_process_read_stdout_checked(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 {
-        return Err(CompileError::runtime(
-            "rt_process_read_stdout_checked requires 2 arguments (pid, out_status)",
-        ));
-    }
-    let pid = piped_arg_pid(args, "rt_process_read_stdout_checked")?;
-    let status_out = match &args[1] {
-        Value::BorrowMut(value) => value,
-        _ => {
-            return Err(CompileError::runtime(
-                "rt_process_read_stdout_checked: out_status must be &mut i32",
-            ))
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let mut out = Vec::new();
+    if let Some(stdout) = map.get_mut(&pid).and_then(|c| c.stdout.as_mut()) {
+        let mut buf = [0u8; 8192];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.extend_from_slice(&buf[..n]);
+                    if n < buf.len() {
+                        break;
+                    }
+                }
+                // WouldBlock is the normal "nothing yet" answer on the
+                // O_NONBLOCK fd; every other error also yields "".
+                Err(_) => break,
+            }
         }
-    };
-    let (out, status) = piped_read_stdout_checked(pid)?;
-    *status_out.inner_mut() = Value::Int(i64::from(status));
-    Ok(Value::text(out))
+    }
+    Ok(Value::text(String::from_utf8_lossy(&out).into_owned()))
 }
 
 /// Is a piped child still running?
@@ -1454,35 +1334,13 @@ pub fn rt_process_read_stdout_checked(args: &[Value]) -> Result<Value, CompileEr
 /// Callable from Simple as: `rt_process_is_alive(pid: i64) -> bool`
 pub fn rt_process_is_alive(args: &[Value]) -> Result<Value, CompileError> {
     let pid = piped_arg_pid(args, "rt_process_is_alive")?;
-    Ok(Value::Bool(piped_is_alive_checked(pid)? == 1))
-}
-
-fn piped_is_alive_checked(pid: i64) -> Result<i32, CompileError> {
-    let Some(slot) = piped_find_slot(pid) else {
-        return Ok(-2);
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let alive = match map.get_mut(&pid) {
+        // try_wait -> Ok(None) means "still running".
+        Some(child) => matches!(child.try_wait(), Ok(None)),
+        None => false,
     };
-    let mut owned = slot
-        .child
-        .lock()
-        .map_err(|_| CompileError::runtime("piped process child lock poisoned"))?;
-    if slot.pid.load(Ordering::Acquire) != pid {
-        return Ok(-2);
-    }
-    let Some(child) = owned.as_mut() else {
-        return Ok(-2);
-    };
-    let status = match child.try_wait() {
-        Ok(None) => 1,
-        Ok(Some(_)) => 0,
-        Err(_) => -3,
-    };
-    Ok(status)
-}
-
-/// Checked piped-child liveness: 1=alive, 0=exited, negatives=error.
-pub fn rt_process_is_alive_checked(args: &[Value]) -> Result<Value, CompileError> {
-    let pid = piped_arg_pid(args, "rt_process_is_alive_checked")?;
-    Ok(Value::Int(i64::from(piped_is_alive_checked(pid)?)))
+    Ok(Value::Bool(alive))
 }
 
 /// Close a piped child: drop its stdin (EOF to the child), then kill+reap it.
@@ -1490,19 +1348,7 @@ pub fn rt_process_is_alive_checked(args: &[Value]) -> Result<Value, CompileError
 /// Callable from Simple as: `rt_process_close_piped(pid: i64) -> bool`
 pub fn rt_process_close_piped(args: &[Value]) -> Result<Value, CompileError> {
     let pid = piped_arg_pid(args, "rt_process_close_piped")?;
-    let Some(slot) = piped_find_slot(pid) else {
-        return Ok(Value::Bool(false));
-    };
-    let mut owned = slot
-        .child
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if slot.pid.load(Ordering::Acquire) != pid {
-        return Ok(Value::Bool(false));
-    }
-    slot.pid.store(PIPED_PROCESS_RESERVED, Ordering::Release);
-    let child = owned.take();
-    drop(owned);
+    let child = PIPED_PROCESSES.lock().unwrap().remove(&pid);
     match child {
         Some(mut child) => {
             // Dropping stdin sends EOF, giving a well-behaved child the chance
@@ -1510,13 +1356,9 @@ pub fn rt_process_close_piped(args: &[Value]) -> Result<Value, CompileError> {
             drop(child.stdin.take());
             let _ = child.kill();
             let _ = child.wait();
-            slot.pid.store(0, Ordering::Release);
             Ok(Value::Bool(true))
         }
-        None => {
-            slot.pid.store(0, Ordering::Release);
-            Ok(Value::Bool(false))
-        }
+        None => Ok(Value::Bool(false)),
     }
 }
 
@@ -1741,18 +1583,6 @@ pub fn rt_shell_exec_tuple(args: &[Value]) -> Result<Value, CompileError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
-
-    #[test]
-    fn piped_failure_sentinel_cannot_steal_spawn_reservation() {
-        let slot = piped_reserve_slot().expect("fixture process slot");
-        assert_eq!(slot.pid.load(Ordering::Acquire), PIPED_PROCESS_RESERVED);
-        assert_eq!(
-            rt_process_close_piped(&[Value::Int(PIPED_PROCESS_RESERVED)]).unwrap(),
-            Value::Bool(false)
-        );
-        assert_eq!(slot.pid.load(Ordering::Acquire), PIPED_PROCESS_RESERVED);
-        piped_release_reservation(slot);
-    }
 
     #[cfg(unix)]
     #[test]

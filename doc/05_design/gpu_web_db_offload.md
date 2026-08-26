@@ -65,3 +65,11 @@ explicit fallback reasons.
 3. Bounded resource controls.
 4. GPU fallback discrimination.
 5. GPU performance evidence.
+# Device receipt validation
+
+`device_backend.spl` validates completion, positive handle, positive device
+identity, `readback_source=device_readback`, positive/equal expected and actual
+checksums, zero mismatches, and no CPU fallback. It returns a typed first-failure
+reason. `gpu_wdb_run_device_batch` requires both a valid receipt and positive
+backend timing before setting `production_device_claim`; submission eligibility
+or a caller Boolean cannot do so alone.

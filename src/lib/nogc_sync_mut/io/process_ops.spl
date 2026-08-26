@@ -29,12 +29,8 @@ extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
 extern fn rt_process_write_stdin_some(pid: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
 @unsafe(reason: "raw nonblocking stdout; empty sentinel conflates no data with absent or read failure", capabilities: [ffi])
 extern fn rt_process_read_stdout(pid: i64) -> text
-@unsafe(reason: "raw checked nonblocking stdout; status 1=data, 0=would-block, 2=EOF, negatives=contract/runtime error", capabilities: [ffi, raw_ptr])
-extern fn rt_process_read_stdout_checked(pid: i64, out_status: *mut i32) -> text
 @unsafe(reason: "raw piped-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_alive(pid: i64) -> bool
-@unsafe(reason: "raw checked piped-child liveness status; 1=alive, 0=exited, negatives=contract/runtime error", capabilities: [ffi])
-extern fn rt_process_is_alive_checked(pid: i64) -> i32
 @unsafe(reason: "raw piped-child close status; false sentinel means absent or cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped(pid: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -85,17 +81,9 @@ fn _process_read_stdout_raw(pid: i64) -> text:
     unsafe(capabilities: [ffi]):
         rt_process_read_stdout(pid)
 
-fn _process_read_stdout_checked_raw(pid: i64, out_status: *mut i32) -> text:
-    unsafe(capabilities: [ffi, raw_ptr]):
-        rt_process_read_stdout_checked(pid, out_status)
-
 fn _process_is_alive_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_is_alive(pid)
-
-fn _process_is_alive_checked_raw(pid: i64) -> i32:
-    unsafe(capabilities: [ffi]):
-        rt_process_is_alive_checked(pid)
 
 fn _process_close_piped_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -200,12 +188,6 @@ pub fn process_bounded_kill_signal(exit_code: i64) -> i64:
 pub fn process_spawn_piped(cmd: text, args: [text]) -> i64:
     _process_spawn_piped_raw(cmd, args)
 
-pub fn process_spawn_piped_result(cmd: text, args: [text]) -> Result<i64, text>:
-    if cmd == "": return Err("empty_process_command")
-    val pid = _process_spawn_piped_raw(cmd, args)
-    if pid <= 0: return Err("process_spawn_failed")
-    Ok(pid)
-
 pub fn browser_renderer_spawn_sandboxed(cmd: text, args: [text]) -> i64:
     rt_browser_renderer_spawn_sandboxed(cmd, args)
 
@@ -215,47 +197,17 @@ pub fn browser_renderer_sandbox_enter() -> bool:
 pub fn process_write_stdin(pid: i64, data: text) -> bool:
     _process_write_stdin_raw(pid, data)
 
-pub fn process_write_stdin_result(pid: i64, data: text) -> Result<(), text>:
-    if pid <= 0: return Err("invalid_process_handle")
-    if not _process_write_stdin_raw(pid, data): return Err("process_write_failed")
-    Ok(())
-
 pub fn process_write_stdin_some(pid: i64, data: text, offset: i64, max_bytes: i64) -> i64:
     _process_write_stdin_some_raw(pid, data, data.len(), offset, max_bytes)
 
 pub fn process_read_stdout(pid: i64) -> text:
     _process_read_stdout_raw(pid)
 
-pub fn process_read_stdout_result(pid: i64) -> Result<Option<text>, text>:
-    if pid <= 0: return Err("invalid_process_handle")
-    var status: i32 = 0
-    val chunk = _process_read_stdout_checked_raw(pid, &mut status)
-    if status == 1:
-        if chunk == "": return Err("process_stdout_empty_data_contract")
-        return Ok(Some(chunk))
-    if status == 0: return Ok(nil)
-    if status == 2: return Err("process_stdout_eof")
-    if status == -2: return Err("invalid_process_handle")
-    Err("process_stdout_read_failed")
-
 pub fn process_is_piped_alive(pid: i64) -> bool:
     _process_is_alive_raw(pid)
 
-pub fn process_is_piped_alive_result(pid: i64) -> Result<bool, text>:
-    if pid <= 0: return Err("invalid_process_handle")
-    val status = _process_is_alive_checked_raw(pid)
-    if status == 1: return Ok(true)
-    if status == 0: return Ok(false)
-    if status == -2: return Err("invalid_process_handle")
-    Err("process_liveness_check_failed")
-
 pub fn process_close_piped(pid: i64) -> bool:
     _process_close_piped_raw(pid)
-
-pub fn process_close_piped_result(pid: i64) -> Result<(), text>:
-    if pid <= 0: return Err("invalid_process_handle")
-    if not _process_close_piped_raw(pid): return Err("process_close_failed")
-    Ok(())
 
 fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """Unix implementation using the native async process facade."""
@@ -429,25 +381,11 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stderr_relayed = 0
     var exit_code: i64 = -2
     var relay_error = ""
-    var indeterminate_waits: i64 = 0
     while exit_code == -2 and elapsed_ms < effective_timeout:
         val remaining = effective_timeout - elapsed_ms
         val quantum = if remaining < poll_quantum_ms: remaining else: poll_quantum_ms
         exit_code = _process_wait_raw(pid, quantum)
         elapsed_ms = elapsed_ms + quantum
-        # An INDETERMINATE wait (-1) is not an exit. rt_process_wait returns -1
-        # for an interrupted/errored/untracked wait as well as for a child it
-        # could not classify -- and the old loop broke out on it, reported
-        # "worker wrapper exited abnormally (code -1)", and then killed the
-        # whole session via _process_kill_group. When the spawned session is
-        # demonstrably STILL ALIVE that is a healthy worker being executed for
-        # the wrapper's own bookkeeping failure: three lanes each lost a ~70min
-        # stage1 attempt to it. Keep polling instead; only a session that is
-        # actually gone is treated as a terminal -1.
-        # doc/08_tracking/bug/native_build_wrapper_wait_eintr_misreported_as_abnormal_2026-08-23.md
-        if exit_code == -1 and _process_group_alive(pgid_file):
-            indeterminate_waits = indeterminate_waits + 1
-            exit_code = -2
         val out_size = file_size(stdout_file)
         if out_size > stdout_relayed:
             match file_read_text_at(stdout_file, stdout_relayed, out_size - stdout_relayed):
@@ -479,10 +417,7 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     if timed_out:
         _process_kill_raw(pid)
     proc_slot_release()
-    # Never tear down a session on a bookkeeping-only failure: a terminal -1
-    # whose session is still alive means we lost the child's status, not that
-    # the child died. Reap the group for a real non-zero exit or a timeout.
-    if exit_code != 0 and (timed_out or not _process_group_alive(pgid_file)):
+    if exit_code != 0:
         _process_kill_group(pgid_file)
     if file_exists(pgid_file):
         file_delete(pgid_file)
@@ -498,8 +433,6 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 
     if relay_error != "":
         (stdout, stderr + "\n[ERROR: {relay_error}]", -1)
-    elif exit_code == -1 and indeterminate_waits > 0:
-        (stdout, stderr + "\n[WAIT-INDETERMINATE: lost the child's exit status after {indeterminate_waits} retried wait(s); its session was left intact]", -1)
     elif timed_out:
         val timeout_secs = (effective_timeout + 999) / 1000
         (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
@@ -757,25 +690,6 @@ fn process_kill(pid: i64) -> bool:
 # See doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md
 fn eprint(msg: text):
     rt_stderr_write("{msg}\n")
-
-fn _process_group_alive(pgid_file: text) -> bool:
-    """
-    True when the session recorded in `pgid_file` still has live members.
-
-    Companion to `_process_kill_group`: it answers "is the spawned tree still
-    there?" using the SAME session id (`pkill -0 -s`) the kill path uses, so a
-    wrapper that lost track of its direct child can still tell a live worker
-    from a dead one instead of guessing. Fail-safe direction is deliberate: an
-    unreadable/absent pgid file returns false, i.e. we never claim a session is
-    alive without evidence.
-    """
-    if not file_exists(pgid_file):
-        return false
-    val pgid = rt_file_read_text(pgid_file).trim()
-    if pgid == "":
-        return false
-    val (_out, _err, code) = _process_run_bounded_raw("pkill", ["-0", "-s", "{pgid}"], 2000, 4096)
-    code == 0
 
 fn _process_kill_group(pgid_file: text):
     # Best effort: the session leader recorded its pid (= the SESSION id of the

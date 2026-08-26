@@ -147,9 +147,7 @@ impl NativeProjectBuilder {
             (target.os == simple_common::target::TargetOS::SimpleOS
                 && matches!(
                     target.arch,
-                    simple_common::target::TargetArch::X86_64
-                        | simple_common::target::TargetArch::Aarch64
-                        | simple_common::target::TargetArch::Riscv64
+                    simple_common::target::TargetArch::X86_64 | simple_common::target::TargetArch::Aarch64
                 ))
             .then(|| simpleos_sysroot.join("share/simpleos/simpleos.ld"))
         })
@@ -195,81 +193,31 @@ impl NativeProjectBuilder {
         }
     }
 
-    pub(super) fn simpleos_sysroot_dir(arch: simple_common::target::TargetArch) -> PathBuf {
+    fn simpleos_sysroot_dir(arch: simple_common::target::TargetArch) -> PathBuf {
         if let Ok(explicit) = std::env::var("SIMPLEOS_SYSROOT") {
             return PathBuf::from(explicit);
         }
         match arch {
             // Per-arch sysroots: x86_64 keeps the historical unsuffixed path.
             simple_common::target::TargetArch::Aarch64 => PathBuf::from("build/os/sysroot-aarch64"),
-            simple_common::target::TargetArch::Riscv64 => PathBuf::from("build/os/sysroot-riscv64"),
             _ => PathBuf::from("build/os/sysroot"),
         }
     }
 
-    /// Resolve the target `simple-core` runtime archive for a SimpleOS link.
-    ///
-    /// The sysroot producers (`scripts/os/simpleos-sysroot-{aarch64,riscv64}.shs`)
-    /// install `crt0.o`, `libsimpleos_c.a` and `libsimpleos_all.a` into
-    /// `<sysroot>/lib`, but they do NOT install `libsimple_runtime.a` there --
-    /// the target core archive is produced separately by
-    /// `scripts/os/simpleos-core-archive.shs` into
-    /// `build/os/simple-core-simpleos-<arch>/` and is communicated to the build
-    /// via `SIMPLE_SIMPLE_CORE_PATH` (accepted as either the archive file or its
-    /// containing directory). Consulting only `<sysroot>/lib/libsimple_runtime.a`
-    /// therefore never found a runtime, so the archive the CI resolved and echoed
-    /// as `runtime_archive=` was never placed on the link line, and every
-    /// codegen-emitted `rt_*` came back undefined even though the archive defined
-    /// it. See
-    /// `doc/08_tracking/bug/simpleos_target_build_link_omits_simple_core_archive_2026-08-24.md`.
-    pub(super) fn simpleos_runtime_archive(sysroot: &Path) -> Option<PathBuf> {
-        for env_var in ["SIMPLE_SIMPLE_CORE_PATH", "SIMPLE_CORE_RUNTIME_PATH"] {
-            if let Ok(value) = std::env::var(env_var) {
-                if value.is_empty() {
-                    continue;
-                }
-                if let Some(found) = super::tools::archive_from_path_or_dir(Path::new(&value), "libsimple_runtime") {
-                    return Some(found);
-                }
-            }
-        }
-        let in_sysroot = sysroot.join("lib").join("libsimple_runtime.a");
-        if in_sysroot.exists() {
-            return Some(in_sysroot);
-        }
-        None
-    }
-
-    pub(super) fn simpleos_user_runtime_paths(cross_target: simple_common::target::Target) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    fn simpleos_user_runtime_paths(cross_target: simple_common::target::Target) -> Option<(PathBuf, PathBuf, PathBuf)> {
         if cross_target.os != simple_common::target::TargetOS::SimpleOS
             || !matches!(
                 cross_target.arch,
-                simple_common::target::TargetArch::X86_64
-                    | simple_common::target::TargetArch::Aarch64
-                    | simple_common::target::TargetArch::Riscv64
+                simple_common::target::TargetArch::X86_64 | simple_common::target::TargetArch::Aarch64
             )
         {
             return None;
         }
         let sysroot = Self::simpleos_sysroot_dir(cross_target.arch);
         let crt0 = sysroot.join("lib").join("crt0.o");
-        // Prefer `libsimpleos_all.a` -- the sysroot producers build it as
-        // "SimpleOS libc + the cross-compiled C runtime (src/runtime/*.c)"
-        // (plus the core objects when they were present at sysroot build time).
-        // `libsimpleos_c.a` is libc ALONE, so linking only that left every
-        // C-runtime symbol undefined. Measured 2026-08-24: `libsimpleos_all.a`
-        // defines 761 `rt_*` symbols including `rt_string_new_literal`,
-        // `rt_native_cmp` and `rt_unwrap_or_trap` -- the three the bug record
-        // listed as "genuinely missing". They were never missing; they were
-        // simply in an archive that never reached the link line.
-        let libc_all = sysroot.join("lib").join("libsimpleos_all.a");
-        let libc_only = sysroot.join("lib").join("libsimpleos_c.a");
-        let libc = if libc_all.exists() { libc_all } else { libc_only };
-        // crt0/libc come from the sysroot; the runtime archive is resolved
-        // independently. The old all-or-nothing `crt0 && runtime && libc` test
-        // silently dropped crt0 AND libc too whenever the runtime was missing.
-        let runtime = Self::simpleos_runtime_archive(&sysroot)?;
-        if crt0.exists() && libc.exists() {
+        let runtime = sysroot.join("lib").join("libsimple_runtime.a");
+        let libc = sysroot.join("lib").join("libsimpleos_c.a");
+        if crt0.exists() && runtime.exists() && libc.exists() {
             Some((crt0, runtime, libc))
         } else {
             None
@@ -277,35 +225,17 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
-        // Mach-O POSIX nm prints weak *definitions* as 'T'; weakness only
-        // appears in the `-m` flag field as `weak external`. Request `-m` on
-        // macOS and normalize those lines to "W" so weak/strong classification
-        // matches the GNU/ELF lanes.
-        let output = {
-            let mut cmd = nm_command();
-            cmd.arg("-g").arg("-p");
-            if cfg!(target_os = "macos") {
-                cmd.arg("-m");
-            }
-            cmd.arg(obj).output()
-        }
-        .map_err(|e| format!("nm: {e}"))?;
+        let output = nm_command()
+            .arg("-g")
+            .arg("-p")
+            .arg(obj)
+            .output()
+            .map_err(|e| format!("nm: {e}"))?;
         if !output.status.success() {
             return Ok(Vec::new());
         }
         let mut symbols = Vec::new();
         for line in String::from_utf8_lossy(&output.stdout).lines() {
-            if line.contains(" weak external ") || line.contains(" weak reference ") {
-                if let Some(raw_name) = line.split_whitespace().next_back() {
-                    let name = if cfg!(target_os = "macos") {
-                        raw_name.strip_prefix('_').unwrap_or(raw_name).to_string()
-                    } else {
-                        raw_name.to_string()
-                    };
-                    symbols.push(("W".to_string(), name));
-                }
-                continue;
-            }
             let parts: Vec<&str> = line.split_whitespace().collect();
             let parsed = match parts.as_slice() {
                 [sym_type, name] => Some((*sym_type, *name)),
@@ -1766,35 +1696,6 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
 
         let compiler_rt_builtins = find_compiler_rt_builtins(triple);
         let simpleos_user_runtime = Self::simpleos_user_runtime_paths(cross_target);
-        // Fail closed: a SimpleOS user target whose crt0/libc/runtime could not be
-        // resolved must NOT silently link with none of them -- that is exactly the
-        // defect tracked in
-        // `doc/08_tracking/bug/simpleos_target_build_link_omits_simple_core_archive_2026-08-24.md`,
-        // where the archive was resolved and echoed and then never reached the link
-        // line, and the only symptom was ~1000 undefined `rt_*` references.
-        if simpleos_user_runtime.is_none()
-            && cross_target.os == simple_common::target::TargetOS::SimpleOS
-            && matches!(
-                cross_target.arch,
-                simple_common::target::TargetArch::X86_64
-                    | simple_common::target::TargetArch::Aarch64
-                    | simple_common::target::TargetArch::Riscv64
-            )
-        {
-            let sysroot = Self::simpleos_sysroot_dir(cross_target.arch);
-            return Err(format!(
-                "SimpleOS target {:?} link inputs are incomplete: need {}/lib/crt0.o, \
-                 {}/lib/libsimpleos_all.a (or libsimpleos_c.a), and a simple-core runtime \
-                 archive via SIMPLE_SIMPLE_CORE_PATH (file or directory) or \
-                 {}/lib/libsimple_runtime.a. Build them with \
-                 scripts/os/simpleos-core-archive.shs --target <triple> --backend cranelift \
-                 and scripts/os/simpleos-sysroot-<arch>.shs. Refusing to link without a runtime.",
-                cross_target.arch,
-                sysroot.display(),
-                sysroot.display(),
-                sysroot.display(),
-            ));
-        }
         let effective_linker_script = Self::resolve_freestanding_linker_script(
             self.config.linker_script.as_deref(),
             cross_target,

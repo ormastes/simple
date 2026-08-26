@@ -924,6 +924,12 @@ impl<'a> Parser<'a> {
         })
     }
 
+    // TODO: (gpu) accept `stream:` and `shared:` slots -- `k<<<grid: g, block: b, stream: s,
+    // shared: n>>>(args)`. The runtime already supports both via rt_cuda_launch_kernel_ex,
+    // and std.io `cuda_launch_on` is the interim spelling. Deferred because the pure-Simple
+    // AST variant KernelLaunch(Expr, Expr, Expr, [CallArg]) is positional and every
+    // construction/match site ripples. See
+    // doc/08_tracking/bug/kernel_launch_grammar_no_stream_slot_2026-08-25.md
     /// Parse CUDA kernel launch: kernel<<<grid: expr, block: expr>>>(args)
     /// The `<<<` token has already been seen as the current token.
     fn parse_kernel_launch(&mut self, kernel: Expr) -> Result<Expr, ParseError> {

@@ -6,9 +6,9 @@
 
 | Metric | Count |
 |--------|-------|
-| Total | 770 |
+| Total | 790 |
 | Passed | 0 |
-| Failed | 0 |
+| Failed | 2 |
 | Skipped | 0 |
 
 ## Flaky Tests
@@ -666,51 +666,71 @@ Tests detected as flaky (high variance in execution time):
 - test/01_unit/lib/nogc_async_mut_noalloc/qemu_spec.spl
 - test/01_unit/lib/nogc_async_mut_noalloc/tls/tls_smoke_spec.spl
 - test/01_unit/compiler/type_infer/type_infer_correctness_spec.spl
-- test/01_unit/lib/test_runner/_throwaway_broker_test_spec.spl
-- test/01_unit/lib/test_runner/profile_aware_execution_spec.spl
-- test/01_unit/lib/test_runner/doctest_parser_spec.spl
-- test/01_unit/lib/test_runner/test_classification_system_routing_spec.spl
-- test/01_unit/lib/test_runner/warning_display_owner_spec.spl
-- test/01_unit/lib/test_runner/doctest_runner_find_binary_reroute_spec.spl
-- test/01_unit/lib/test_runner/terminated_vs_crashed_spec.spl
-- test/01_unit/lib/test_runner/gpu_mailbox_spec.spl
-- test/01_unit/lib/test_runner/executor_lanes_split_spec.spl
-- test/01_unit/lib/test_runner/args_parsing_spec.spl
-- test/01_unit/lib/test_runner/random_access_file_owner_behavior_spec.spl
-- test/01_unit/lib/test_runner/source_doctest_runner_spec.spl
-- test/01_unit/lib/test_runner/fork_async_container_parsing_reroute_spec.spl
-- test/01_unit/lib/test_runner/result_wrapper_unit_spec.spl
-- test/01_unit/lib/test_runner/test_config_spec.spl
-- test/01_unit/lib/test_runner/truncated_capture_fail_closed_spec.spl
-- test/01_unit/lib/test_runner/bootstrap_facade_owner_behavior_spec.spl
-- test/01_unit/lib/test_runner/crash_classification_spec.spl
-- test/01_unit/lib/test_runner/_throwaway_import_test_spec.spl
-- test/01_unit/lib/test_runner/test_db_cold_start_spec.spl
+- test/01_unit/lib/common/string_core_char_access_spec.spl
+- failed
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
 
 ## Recent Runs
 
 | Run ID | Status | Tests | Passed | Failed | Timed Out |
 |--------|--------|-------|--------|--------|-----------|
-| run_1787026976138691 | running | 0 | 0 | 0 | 0 |
-| run_1786952237405436 | running | 0 | 0 | 0 | 0 |
-| run_1786952013677874 | running | 0 | 0 | 0 | 0 |
-| run_1786948610656126 | running | 0 | 0 | 0 | 0 |
-| run_1786947929319349 | running | 0 | 0 | 0 | 0 |
-| run_1786947779912230 | running | 0 | 0 | 0 | 0 |
-| run_1786947743653194 | running | 0 | 0 | 0 | 0 |
-| run_1786947575563132 | running | 0 | 0 | 0 | 0 |
-| run_1786947191110735 | running | 0 | 0 | 0 | 0 |
-| run_1786946623229989 | running | 0 | 0 | 0 | 0 |
+| run_1787704774986407 | completed | 1 | 0 | 1 | 0 |
+| run_1787653631798568 | completed | 4 | 10 | 5 | 0 |
+| run_1787653365471017 | completed | 4 | 10 | 5 | 0 |
+| run_1787652453099514 | completed | 3 | 9 | 3 | 0 |
+| run_1787044991418969 | crashed | 0 | 0 | 0 | 0 |
+| run_1787044352338672 | crashed | 0 | 0 | 0 | 0 |
+| run_1786952237405436 | crashed | 0 | 0 | 0 | 0 |
+| run_1786952013677874 | crashed | 0 | 0 | 0 | 0 |
+| run_1786948610656126 | crashed | 0 | 0 | 0 | 0 |
+| run_1786947929319349 | crashed | 0 | 0 | 0 | 0 |
 
 ## Test Details
 
 | Test | Status | Runs | Mean (ms) | p50 (ms) |
 |------|--------|------|-----------|----------|
-| test/01_unit/compiler/async/async_desugar_integration_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/async/async_frame_analysis_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/async/async_desugar_integration_spec.spl | failed | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/async/async_frame_analysis_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/async/async_integration_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/async/async_mir_interpreter_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/async/async_mir_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/async/async_mir_spec.spl | failed | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/async/async_pipeline_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/async/async_reservation_analysis_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/async/async_spawn_analysis_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -718,13 +738,13 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/async/poll_generator_spec.spl | unknown | 1 | 869.0 | 869.0 |
 | test/01_unit/compiler/async/state_enum_spec.spl | unknown | 1 | 543.0 | 543.0 |
 | test/01_unit/compiler/async/suspension_analysis_spec.spl | unknown | 1 | 433.0 | 433.0 |
-| test/02_integration/net/http_content_encoding_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/verify/baremetal_noalloc_constraints_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/verification/cache_correctness_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/verification/deterministic_emission_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/net/http_content_encoding_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/verify/baremetal_noalloc_constraints_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/verification/cache_correctness_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/verification/deterministic_emission_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/verification/lean_basic_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/verification/lean_block_integration_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/verification/lean_codegen_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/verification/lean_codegen_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/verification/lean_workflow_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/verification/memory_capabilities_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/verification/naming_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -736,11 +756,11 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/verification/unified_attrs_spec.spl | unknown | 1 | 586.0 | 586.0 |
 | test/01_unit/compiler/verification/unsupported_construct_spec.spl | unknown | 1 | 546.0 | 546.0 |
 | test/01_unit/compiler/verification/verification_diagnostics_spec.spl | unknown | 1 | 545.0 | 545.0 |
-| test/01_unit/compiler/assurance/assurance_schemas_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/assurance/dynamic_composition_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/assurance/assurance_schemas_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/assurance/dynamic_composition_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/assurance/flight_rules_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/assurance/formal_delivery_gates_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/assurance/formal_interfaces_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/assurance/formal_interfaces_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/assurance/formal_receipt_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/assurance/formal_status_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/assurance/nat_normalizer_receipt_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -749,11 +769,11 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/assurance/proof_dag_spec.spl | unknown | 1 | 543.0 | 543.0 |
 | test/01_unit/compiler/assurance/sha512_integrity_receipt_spec.spl | unknown | 1 | 433.0 | 433.0 |
 | test/01_unit/compiler/assurance/verified_release_gate_spec.spl | unknown | 1 | 480.0 | 480.0 |
-| test/01_unit/compiler/mdsoc/aop_proceed_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/mdsoc/config_multi_dim_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/mdsoc/aop_proceed_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/mdsoc/config_multi_dim_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/mdsoc/config_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/mdsoc/construct_checker_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/mdsoc/construct_types_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/mdsoc/construct_types_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/mdsoc/cross_query_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/mdsoc/doc_validation_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/mdsoc/feature_ports_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -766,64 +786,64 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/mdsoc/vc_import_spec.spl | unknown | 1 | 546.0 | 546.0 |
 | test/01_unit/compiler/mdsoc/vc_static_spec.spl | unknown | 1 | 545.0 | 545.0 |
 | test/01_unit/compiler/mdsoc/weaving_support_spec.spl | unknown | 1 | 1834.0 | 1834.0 |
-| test/02_integration/doctest/discovery_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/07_security/csprng_salt_iv_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/visibility_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/60.mir_opt/general_patterns_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/60.mir_opt/hwir_opt_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/doctest/discovery_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/07_security/csprng_salt_iv_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/visibility_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/60.mir_opt/general_patterns_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/60.mir_opt/hwir_opt_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/60.mir_opt/optimizer_manifest_backend_budget_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/60.mir_opt/pass_descriptor_budget_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/vhdl/hardware_spawn_lower_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/vhdl/vhdl_subprogram_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/vhdl/hardware_spawn_lower_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/vhdl/vhdl_subprogram_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/vhdl/vhdl_testbench_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/vhdl_riscv_gap_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/vhdl_subprogram_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/vhdl_subprogram_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/vhdl_testbench_spec.spl | unknown | 1 | 519.0 | 519.0 |
-| test/01_unit/app/audit/audit_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/app/arch_check_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/rust/meta/comment_only_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/app/auto_coverage_10_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/app/auto_coverage_1_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/app/auto_coverage_11_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/app/audit/audit_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/app/arch_check_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/rust/meta/comment_only_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/app/auto_coverage_10_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/app/auto_coverage_1_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/app/auto_coverage_11_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/app/auto_coverage_12_spec.spl | unknown | 1 | 671.0 | 671.0 |
-| test/01_unit/app/build/build_targets_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/app/build/feature_flags_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/app/build/build_targets_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/app/build/feature_flags_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/app/build/repo_hygiene_gate_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/app/build/change_classifier_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/app/build/action_identity_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/app/build/action_identity_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/app/build/opt_remarks_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/app/build/artifact_receipt_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/app/build/bootstrap_policy_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
 | test/01_unit/app/build/build_explain_spec.spl | unknown | 1 | 476.0 | 476.0 |
 | test/01_unit/app/build_coverage_spec.spl | unknown | 1 | 869.0 | 869.0 |
-| test/03_system/coverage/coverage_check_api_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/03_system/coverage/coverage_core_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/03_system/coverage/coverage_check_api_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/03_system/coverage/coverage_core_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/03_system/coverage/coverage_doc_stats_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/03_system/coverage/coverage_runtime_ffi_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/03_system/coverage/coverage_test_runner_spec.spl | unknown | 1 | 405.0 | 405.0 |
-| test/01_unit/compiler/borrow/borrow_check_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/borrow/iso_move_assign_field_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/03_system/coverage/coverage_test_runner_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
+| test/01_unit/compiler/borrow/borrow_check_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/borrow/iso_move_assign_field_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/borrow/iso_move_pipeline_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/borrow/iso_move_return_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/borrow/iso_move_sites_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/borrow/iso_move_sites_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/borrow/iso_parse_pipeline_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/borrow/iso_use_after_move_e2e_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/borrow/lifetime_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
-| test/02_integration/watcher/watcher_backend_validation_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/watcher/watcher_shb_integration_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/watcher/watcher_backend_validation_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/watcher/watcher_shb_integration_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/02_integration/watcher/watcher_smf_integration_spec.spl | unknown | 1 | 671.0 | 671.0 |
-| test/01_unit/app/auto_coverage_5_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/io/native_ops_dir_create_all_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/io/native_ops_dir_create_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/app/auto_coverage_5_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/io/native_ops_dir_create_all_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/io/native_ops_dir_create_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/02_integration/io/native_ops_dir_recursive_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/02_integration/io/native_ops_file_copy_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/02_integration/io/native_ops_file_read_write_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/02_integration/io/native_ops_file_read_write_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/02_integration/io/native_ops_file_size_spec.spl | unknown | 1 | 519.0 | 519.0 |
-| test/feature/lib/gc_parity/gc_module_loader_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/feature/lib/gc_parity/gc_module_loader_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/feature/lib/gc_parity/otp_behaviours_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/feature/lib/mcp/bootstrap_e2e_test.spl | unknown | 1 | 472.0 | 472.0 |
-| test/feature/lib/mcp/bootstrap_functions_test.spl | unknown | 1 | 405.0 | 405.0 |
+| test/feature/lib/mcp/bootstrap_functions_test.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/feature/lib/mcp/bootstrap_import_test.spl | unknown | 1 | 519.0 | 519.0 |
 | test/feature/lib/mcp/bootstrap_protocol_test.spl | unknown | 1 | 940.0 | 940.0 |
 | test/feature/lib/mcp/core_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -840,11 +860,11 @@ Tests detected as flaky (high variance in execution time):
 | test/feature/lib/std/helpers_example_spec.spl | unknown | 1 | 388.0 | 388.0 |
 | test/feature/lib/import_debug_spec.spl | unknown | 1 | 711.0 | 711.0 |
 | test/feature/lib/minimal_spec.spl | unknown | 1 | 496.0 | 496.0 |
-| test/05_perf/graphics_2d/backend_preference_startup_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/05_perf/graphics_2d/backend_probe_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/05_perf/graphics_2d/backend_preference_startup_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/05_perf/graphics_2d/backend_probe_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/05_perf/graphics_2d/c_vs_simple_2d_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/05_perf/graphics_2d/cpu_simd_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/05_perf/graphics_2d/cuda_smoke_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/05_perf/graphics_2d/cuda_smoke_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/05_perf/graphics_2d/metal_readback_proof_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/05_perf/graphics_2d/metal_smoke_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/05_perf/graphics_2d/no_duplication_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -856,23 +876,23 @@ Tests detected as flaky (high variance in execution time):
 | test/05_perf/graphics_2d/webgpu_real_spec.spl | unknown | 1 | 586.0 | 586.0 |
 | test/05_perf/graphics_2d/wm_frame_pacing_spec.spl | unknown | 1 | 546.0 | 546.0 |
 | test/05_perf/graphics_2d/report_spec.spl | unknown | 1 | 545.0 | 545.0 |
-| test/02_integration/sffi/callback_roundtrip_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/sffi/direction_a_c_roundtrip_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/sffi/callback_roundtrip_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/sffi/direction_a_c_roundtrip_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/02_integration/sffi/direction_a_cpp_roundtrip_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/02_integration/sffi/direction_b_import_roundtrip_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/02_integration/sffi/layout_verification_roundtrip_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/02_integration/sffi/layout_verification_roundtrip_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/02_integration/sffi/rsa_sha512_reference_import_spec.spl | unknown | 1 | 519.0 | 519.0 |
-| test/feature/ml/tensor_dimensions_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/baremetal/allocator_freelist_split_and_underflow_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/baremetal/riscv/sbi_ipi_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/feature/ml/tensor_dimensions_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/baremetal/allocator_freelist_split_and_underflow_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/baremetal/riscv/sbi_ipi_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/baremetal/riscv/dtb_cpu_walker_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/baremetal/allocator_block_header_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/baremetal/allocator_real_memory_spec.spl | unknown | 1 | 405.0 | 405.0 |
-| test/01_unit/lib/blink/html_tree_builder_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/blink/dom_node_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/baremetal/allocator_real_memory_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
+| test/01_unit/lib/blink/html_tree_builder_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/blink/dom_node_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/blink/hit_test_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/blink/document_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/blink/form_paint_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/lib/blink/form_paint_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/lib/blink/css_tokenizer_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/lib/blink/render_lane_pipeline_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/lib/blink/paint_tree_walker_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -911,11 +931,11 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/lib/blink/values_length_spec.spl | unknown | 1 | 449.0 | 449.0 |
 | test/01_unit/lib/blink/table_flow_spec.spl | unknown | 1 | 994.0 | 994.0 |
 | test/01_unit/lib/blink/style_at_rules_spec.spl | unknown | 1 | 728.0 | 728.0 |
-| test/01_unit/compiler/blocks/block_definition_three_level_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/blocks/block_outline_info_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/blocks/block_definition_three_level_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/blocks/block_outline_info_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/blocks/block_skip_policy_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/blocks/builder_api_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/blocks/easy_api_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/blocks/easy_api_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/blocks/pre_lex_info_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/blocks/pre_lex_per_dsl_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/blocks/testing_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -926,24 +946,24 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/blocks/easy_api_basic_spec.spl | unknown | 1 | 480.0 | 480.0 |
 | test/01_unit/compiler/blocks/testing_framework_spec.spl | unknown | 1 | 586.0 | 586.0 |
 | test/01_unit/compiler/blocks/utils_basic_spec.spl | unknown | 1 | 546.0 | 546.0 |
-| test/03_system/game3d/rollball_production_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/debug/hardware/hardware_check_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/debug/hardware/stm32h7_openocd_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/03_system/game3d/rollball_production_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/debug/hardware/hardware_check_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/debug/hardware/stm32h7_openocd_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/02_integration/debug/hardware/stm32h7_stlink_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/02_integration/debug/hardware/stm32wb_openocd_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/02_integration/debug/hardware/stm32wb_stlink_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/02_integration/debug/hardware/stm32wb_stlink_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/02_integration/debug/hardware/t32_gdb_bridge_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/02_integration/debug/hardware/t32_native_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/02_integration/debug/hardware/t32_semihost_hello_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
-| test/feature/mode_filter/all_modes_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/feature/mode_filter/interpreter_only_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/feature/mode_filter/all_modes_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/feature/mode_filter/interpreter_only_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/feature/mode_filter/native_only_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/feature/mode_filter/skip_native_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/bootstrap/ast_native_arena_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/bootstrap/backend_helpers_shared_binding_contract_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/bootstrap/ast_native_arena_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/bootstrap/backend_helpers_shared_binding_contract_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/bootstrap/class_member_parser_parity_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/bootstrap/driver_phase_entry_shared_binding_contract_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/bootstrap/driver_symlink_source_dedup_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/bootstrap/driver_symlink_source_dedup_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/bootstrap/entry_closure_bucket_count_contract_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/bootstrap/entry_closure_module_map_update_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/bootstrap/flattened_linker_symbol_types_contract_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -989,11 +1009,11 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl | unknown | 1 | 624.0 | 624.0 |
 | test/01_unit/compiler/bootstrap/check_entry_target_routing_contract_spec.spl | unknown | 1 | 432.0 | 432.0 |
 | test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl | unknown | 1 | 44078.0 | 44078.0 |
-| test/01_unit/compiler/cache/action_key_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/cache/cache_types_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/cache/action_key_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/cache/cache_types_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/cache/cache_validator_smf_header_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/cache/cache_validator_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/cache/cas_store_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/cache/cas_store_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/cache/compile_options_hash_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/cache/file_stamp_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/cache/lazy_section_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1002,35 +1022,35 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/cache/dirty_closure_spec.spl | unknown | 1 | 543.0 | 543.0 |
 | test/01_unit/compiler/cache/interface_digest_spec.spl | unknown | 1 | 433.0 | 433.0 |
 | test/01_unit/compiler/cache/target_graph_spec.spl | unknown | 1 | 480.0 | 480.0 |
-| test/02_integration/ui/draw_ir_v2_v3_pixel_parity_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/ui/event_backend_matrix_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/ui/draw_ir_v2_v3_pixel_parity_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/ui/event_backend_matrix_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/02_integration/ui/global_menubar_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/02_integration/ui/unified_packed_scene_nesting_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/02_integration/ui/widget_interact_model_spec.spl | unknown | 1 | 405.0 | 405.0 |
-| test/01_unit/compiler/common/attributes_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/common/config_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/ui/widget_interact_model_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
+| test/01_unit/compiler/common/attributes_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/common/config_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/common/di_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/common/driver_manifest_attr_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/common/effects_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/common/effects_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/common/error_types_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/common/gc_config_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/common/task_policy_attr_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
 | test/01_unit/compiler/common/export_attr_spec.spl | unknown | 1 | 476.0 | 476.0 |
-| test/feature/plugin/custom_block_plugin_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/feature/plugin/plugin_startup_block_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/feature/plugin/custom_block_plugin_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/feature/plugin/plugin_startup_block_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/feature/plugin/runtime_api_plugin_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/feature/plugin/sugar_plugin_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/03_system/helpers/text_helpers_p1_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/text/text_index_slice_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/text/text_length_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/03_system/helpers/text_helpers_p1_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/text/text_index_slice_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/text/text_length_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/text/text_search_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/text/utf8_validation_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/di/di_config_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/di/di_lock_phases_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/di/di_config_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/di/di_lock_phases_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/di/di_lock_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/di/di_proxy_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/di/di_runtime_slots_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/di/di_runtime_slots_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/di/di_runtime_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/di/di_validation_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/di/export_as_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1043,21 +1063,21 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/dict_class_field_contains_key_after_insert_spec.spl | unknown | 1 | 546.0 | 546.0 |
 | test/01_unit/compiler/dict_get_miss_returns_nil_spec.spl | unknown | 1 | 545.0 | 545.0 |
 | test/01_unit/compiler/diagnostic_predicate_empty_state_spec.spl | unknown | 1 | 1834.0 | 1834.0 |
-| test/01_unit/lib/driver/fat32_file_io_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/driver/registry_integration_test.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/driver/fat32_file_io_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/driver/registry_integration_test.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/driver/fat32_driver_adapter_test.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/driver/driver_manifest_test.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/driver/null_block_driver_test.spl | unknown | 1 | 405.0 | 405.0 |
-| test/01_unit/lib/ecs/ecs_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/ffi/ffi_wrappers_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/ffi/ffi_basics_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/driver/null_block_driver_test.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
+| test/01_unit/lib/ecs/ecs_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/ffi/ffi_wrappers_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/ffi/ffi_basics_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/ffi/dynamic_versioned_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/ffi/ffi_signature_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/extended/execution_task_unit_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/extended/execution_thread_integration_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/extended/execution_task_unit_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/extended/execution_thread_integration_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/extended/hooks_before_integration_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/extended/memory_arena_unit_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/extended/collections_graph_unit_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/lib/extended/collections_graph_unit_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/lib/extended/torch_loss_unit_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/lib/extended/execution_context_integration_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/lib/extended/cuda_stream_unit_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1127,11 +1147,11 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/lib/extended/gpu_render_unit_spec.spl | unknown | 1 | 0.0 | 0.0 |
 | test/01_unit/lib/extended/cuda_memory_unit_spec.spl | unknown | 1 | 0.0 | 0.0 |
 | test/01_unit/lib/extended/gpu_render_integration_spec.spl | unknown | 1 | 0.0 | 0.0 |
-| test/01_unit/lib/gc_async_immut/root_pmap_native_probe_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/gc_async_immut/facade_resolution_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/gc_async_immut/root_pmap_native_probe_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/gc_async_immut/facade_resolution_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/gc_async_immut/persistent_vec_native_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/gc_async_immut/vector_push_empty_native_probe_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/gc_async_immut/versioned_native_probe_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/lib/gc_async_immut/versioned_native_probe_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/lib/gc_async_immut/native_combinators_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/lib/gc_async_immut/set_facade_native_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/lib/gc_async_immut/vector_empty_native_probe_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1142,29 +1162,29 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/lib/gc_async_immut/trie_facade_native_spec.spl | unknown | 1 | 480.0 | 480.0 |
 | test/01_unit/lib/gc_async_immut/persistent_collections_native_spec.spl | unknown | 1 | 586.0 | 586.0 |
 | test/01_unit/lib/gc_async_immut/root_version_native_probe_spec.spl | unknown | 1 | 546.0 | 546.0 |
-| test/01_unit/compiler/interpreter_extern/sdl3_registration_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/interpreter_extern/opengl_registration_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/interpreter_extern/sdl3_registration_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/interpreter_extern/opengl_registration_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/interpreter_extern/file_char_device_registration_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/interpreter_extern/glfw_registration_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/interpreter_extern/oneapi_registration_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/interpreter_extern/oneapi_registration_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/interpreter_extern/capability_gap_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/interpreter_extern/audio_registration_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/interpreter_extern/fb_image_log_socket_registration_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
-| test/01_unit/compiler/irdsl/parser_validator_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/gc_sync_immut/facade_resolution_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/gc_sync_immut/map_facade_native_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/irdsl/parser_validator_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/gc_sync_immut/facade_resolution_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/gc_sync_immut/map_facade_native_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/gc_sync_immut/native_combinators_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/gc_sync_immut/persistent_collections_native_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/gc_sync_immut/persistent_vec_native_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/lib/gc_sync_immut/persistent_vec_native_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/lib/gc_sync_immut/set_facade_native_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/lib/gc_sync_immut/trie_facade_native_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/lib/gc_sync_immut/trie_root_facade_native_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
-| test/02_integration/svmg/conformance/conformance_suite_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/core/common_compression_framework_facade_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/core/core_integration_10_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/svmg/conformance/conformance_suite_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/core/common_compression_framework_facade_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/core/core_integration_10_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/02_integration/core/core_integration_11_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/02_integration/core/core_integration_12_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/02_integration/core/core_integration_13_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/02_integration/core/core_integration_13_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/02_integration/core/core_integration_14_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/02_integration/core/core_integration_15_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/02_integration/core/core_integration_16_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1211,11 +1231,11 @@ Tests detected as flaky (high variance in execution time):
 | test/02_integration/core/core_integration_7_spec.spl | unknown | 1 | 432.0 | 432.0 |
 | test/02_integration/core/core_integration_8_spec.spl | unknown | 1 | 44078.0 | 44078.0 |
 | test/02_integration/core/core_integration_9_spec.spl | unknown | 1 | 446.0 | 446.0 |
-| test/01_unit/compiler/lint/bare_primitive_internal_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/lint/collection_array_rebuild_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/lint/bare_primitive_internal_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/lint/collection_array_rebuild_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/lint/collection_easy_fix_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/lint/collection_index_mutation_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/lint/const_ref_default_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/lint/const_ref_default_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/lint/critical_file_guard_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/lint/feature_tracking_done_gate_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/lint/lint_profile_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1239,28 +1259,28 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/lint/use_resolution_w0407_severity_spec.spl | unknown | 1 | 993.0 | 993.0 |
 | test/01_unit/compiler/lint/wide_public_spec.spl | unknown | 1 | 594.0 | 594.0 |
 | test/01_unit/compiler/lint/star_export_lint_spec.spl | unknown | 1 | 987.0 | 987.0 |
-| test/02_integration/infra/counterpart/foundation_redteam_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/infra/counterpart/worker_isolation_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
-| test/01_unit/lib/gui/browser_window_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/gui/menu_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/infra/counterpart/foundation_redteam_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/infra/counterpart/worker_isolation_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
+| test/01_unit/lib/gui/browser_window_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/gui/menu_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/gui/pure_core_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/gui/pure_gui_release_lane_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/gui/pure_smf_dynlib_perf_spec.spl | unknown | 1 | 405.0 | 405.0 |
-| test/01_unit/compiler/macros/template_kind_can_follow_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/macros/macro_integration_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/gui/pure_smf_dynlib_perf_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
+| test/01_unit/compiler/macros/template_kind_can_follow_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/macros/macro_integration_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/macros/macro_check_spec.spl | unknown | 1 | 671.0 | 671.0 |
-| test/02_integration/spec/coverage_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/spec/formatter_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/spec/coverage_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/spec/formatter_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/02_integration/spec/mock_policy_execution_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/02_integration/spec/runner_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/host_io/fileio_async_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/host_io/net_async_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/host_io/fileio_async_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/host_io/net_async_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/host_io/stdio_async_spec.spl | unknown | 1 | 671.0 | 671.0 |
-| test/01_unit/lib/hardware/fpga_k26/k26_axi_hp_bridge_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/hardware/fpga_k26/k26_kv260_rv64_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/hardware/fpga_k26/k26_axi_hp_bridge_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/hardware/fpga_k26/k26_kv260_rv64_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/hardware/fpga_k26/k26_soc_top_vexriscv_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/hardware/fpga_k26/k26_wb_axi_hp_bridge_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/hardware/fpga_linux/fpga_synthesis_rv64_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/lib/hardware/fpga_linux/fpga_synthesis_rv64_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/lib/hardware/fpga_linux/product_bus_adapter_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/lib/hardware/fpga_linux/rv64_product_soc_top_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/lib/hardware/fpga_linux/soc_vhdl_gen_rv64_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1285,11 +1305,11 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/lib/hardware/soc_rtl/soc_top_rv32_protected_spec.spl | unknown | 1 | 594.0 | 594.0 |
 | test/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.spl | unknown | 1 | 987.0 | 987.0 |
 | test/01_unit/lib/hardware/vhdl_gen/rv32_trap_completeness_spec.spl | unknown | 1 | 636.0 | 636.0 |
-| test/02_integration/lib/std/improvements/stdlib_improvements_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/02_integration/lib/std/diagram/diagram_integration_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/02_integration/lib/std/improvements/stdlib_improvements_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/02_integration/lib/std/diagram/diagram_integration_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/02_integration/lib/std/ml/simple_math_integration_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/02_integration/lib/std/failsafe/crash_prevention_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/02_integration/lib/std/doctest/discovery_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/02_integration/lib/std/doctest/discovery_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/02_integration/lib/std/screenshot/screenshot_ffi_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/02_integration/lib/persistence_intensive_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/02_integration/lib/database_query_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1308,11 +1328,11 @@ Tests detected as flaky (high variance in execution time):
 | test/02_integration/lib/gpu/gpu_offload_payload_gating_spec.spl | unknown | 1 | 496.0 | 496.0 |
 | test/02_integration/lib/gpu/host_gpu_queue_roundtrip_spec.spl | unknown | 1 | 709.0 | 709.0 |
 | test/02_integration/lib/gpu/cpu_sw_primitive_readback_spec.spl | unknown | 1 | 533.0 | 533.0 |
-| test/01_unit/lib/http/ws/ws_writer_opcode_emission_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/http/ws/ws_frame_round_trip_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/http/ws/ws_writer_opcode_emission_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/http/ws/ws_frame_round_trip_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/http/ws/ws_negative_offset_guard_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/http/ws/ws_opcode_dispatch_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/http/multipart_header_separator_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/lib/http/multipart_header_separator_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/lib/http/request_empty_guard_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/lib/http/response_plain_text_helper_dedup_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/lib/http/response_empty_guard_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1324,11 +1344,11 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/lib/http/h3/h3_negative_offset_guard_spec.spl | unknown | 1 | 586.0 | 586.0 |
 | test/01_unit/lib/http/h3/h3_frame_round_trip_spec.spl | unknown | 1 | 546.0 | 546.0 |
 | test/01_unit/lib/http/chunked_size_overflow_sync_spec.spl | unknown | 1 | 545.0 | 545.0 |
-| test/01_unit/compiler/mir_opt/auto_vectorize_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/mir_opt/bounds_check_elim_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/mir_opt/auto_vectorize_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/mir_opt/bounds_check_elim_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/mir_opt/cipher/cipher_intrinsics_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/mir_opt/cipher/cipher_parity_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/mir_opt/cipher/cipher_rewrite_integration_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/mir_opt/cipher/cipher_rewrite_integration_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/mir_opt/cipher/opt_remark_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/mir_opt/cipher/pattern_dispatch_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/mir_opt/cipher/pattern_engine_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1358,26 +1378,26 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/mir_opt/typed_storage_view_declaration_spec.spl | unknown | 1 | 543.0 | 543.0 |
 | test/01_unit/compiler/mir_opt/typed_storage_view_producer_spec.spl | unknown | 1 | 780.0 | 780.0 |
 | test/01_unit/compiler/mir_opt/var_reassign_analysis_spec.spl | unknown | 1 | 685.0 | 685.0 |
-| test/01_unit/compiler/module_resolver/allowed_families_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/module_resolver/type_domain_resolver_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/module_resolver/allowed_families_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/module_resolver/type_domain_resolver_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/module_resolver/numbered_dir_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/module_resolver/tier_ambiguity_warning_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/module_resolver/var_resolution_spec.spl | unknown | 1 | 405.0 | 405.0 |
-| test/01_unit/compiler/mono/monomorphize/deferred_deserialize_byte_text_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/mono/generic_template_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/module_resolver/var_resolution_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
+| test/01_unit/compiler/mono/monomorphize/deferred_deserialize_byte_text_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/mono/generic_template_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/mono/mold_pure_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/mono/mono_cache_efficiency_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/mono/monomorphization_native_build_regression_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/mono/monomorphization_native_build_regression_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/mono/monomorphize_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/mono/note_sdn_bdd_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/mono/note_sdn_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
 | test/01_unit/compiler/mono/monomorphize_integration_spec.spl | unknown | 1 | 476.0 | 476.0 |
-| test/01_unit/lib/i18n/resource_bundle_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/native/arm_neon_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/native/asm_match_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/i18n/resource_bundle_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/native/arm_neon_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/native/asm_match_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/native/auto_vectorize_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/native/baremetal_syntax_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/native/bitfield_codegen_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/native/bitfield_codegen_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/native/build_native_min_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/native/callconv_bridge_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/native/cli_interpreter_path_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1392,11 +1412,11 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/native/struct_dict_field_map_copy_spec.spl | unknown | 1 | 1834.0 | 1834.0 |
 | test/01_unit/compiler/native/x86_64_simd_spec.spl | unknown | 1 | 458.0 | 458.0 |
 | test/01_unit/compiler/native/x86_simd_register_contract_spec.spl | unknown | 1 | 388.0 | 388.0 |
-| test/01_unit/lib/immut/persistent_trie_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/immut/atom_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/immut/persistent_trie_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/immut/atom_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/immut/persistent_builder_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/immut/persistent_map_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/immut/ref_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/lib/immut/ref_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/lib/immut/actor_snapshot_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/lib/immut/persistent_list_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/lib/immut/persistent_vec_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1406,17 +1426,17 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/lib/immut/integration_spec.spl | unknown | 1 | 433.0 | 433.0 |
 | test/01_unit/lib/immut/combinators_spec.spl | unknown | 1 | 480.0 | 480.0 |
 | test/01_unit/lib/immut/debug_map_spec.spl | unknown | 1 | 586.0 | 586.0 |
-| test/01_unit/compiler/regression/entry_closure_defect_semantics_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/regression/short_circuit_semantics_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/regression/entry_closure_defect_semantics_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/regression/short_circuit_semantics_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/regression/struct_init_omitted_field_nil_fill_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/regression/try_operator_preservation_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/jit/jit_types_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/jit/jit_unified_runner_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
-| test/01_unit/compiler/resource/resource_borrow_pinning_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/resource/resource_decl_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/jit/jit_types_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/jit/jit_unified_runner_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
+| test/01_unit/compiler/resource/resource_borrow_pinning_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/resource/resource_decl_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/resource/resource_drop_exactly_once_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/compiler/resource/resource_family_inference_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/compiler/resource/resource_hir_metadata_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/compiler/resource/resource_hir_metadata_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/compiler/resource/resource_interp_drop_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/compiler/resource/resource_mir_drop_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/compiler/resource/resource_ownership_sigil_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1426,17 +1446,17 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/compiler/resource/resource_with_scoped_mir_drop_spec.spl | unknown | 1 | 433.0 | 433.0 |
 | test/01_unit/compiler/resource/resource_with_scoped_spec.spl | unknown | 1 | 480.0 | 480.0 |
 | test/01_unit/compiler/resource/resource_wrapper_gen_spec.spl | unknown | 1 | 586.0 | 586.0 |
-| test/01_unit/compiler/semantic/self_field_method_resolution_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/compiler/semantic/typed_empty_array_constructor_general_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/compiler/semantic/self_field_method_resolution_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/compiler/semantic/typed_empty_array_constructor_general_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/compiler/semantic/typed_empty_array_constructor_spec.spl | unknown | 1 | 671.0 | 671.0 |
-| test/01_unit/lib/js/js_native_confinement_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/js/json_unicode_escape_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/js/js_native_confinement_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/js/json_unicode_escape_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/js/typeof_builtin_introspection_spec.spl | unknown | 1 | 671.0 | 671.0 |
-| test/01_unit/lib/nogc_async_mut_noalloc/async/poll_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/nogc_async_mut_noalloc/async/response_time_report_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
+| test/01_unit/lib/nogc_async_mut_noalloc/async/poll_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/nogc_async_mut_noalloc/async/response_time_report_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
 | test/01_unit/lib/nogc_async_mut_noalloc/async/scheduler_ravenscar_spec.spl | unknown | 1 | 671.0 | 671.0 |
 | test/01_unit/lib/nogc_async_mut_noalloc/async/scheduler_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/nogc_async_mut_noalloc/async/timing_model_spec.spl | unknown | 1 | 405.0 | 405.0 |
+| test/01_unit/lib/nogc_async_mut_noalloc/async/timing_model_spec.spl | unknown | 3 | 1659.8039215686274 | 611.0 |
 | test/01_unit/lib/nogc_async_mut_noalloc/async/wcet_adapter_spec.spl | unknown | 1 | 519.0 | 519.0 |
 | test/01_unit/lib/nogc_async_mut_noalloc/collections/fixed_array_spec.spl | unknown | 1 | 940.0 | 940.0 |
 | test/01_unit/lib/nogc_async_mut_noalloc/collections/fixed_array_stack_backing_storage_regression_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
@@ -1453,51 +1473,76 @@ Tests detected as flaky (high variance in execution time):
 | test/01_unit/lib/nogc_async_mut_noalloc/path/baremetal_path_spec.spl | unknown | 1 | 388.0 | 388.0 |
 | test/01_unit/lib/nogc_async_mut_noalloc/qemu_spec.spl | unknown | 1 | 711.0 | 711.0 |
 | test/01_unit/lib/nogc_async_mut_noalloc/tls/tls_smoke_spec.spl | unknown | 1 | 496.0 | 496.0 |
-| test/01_unit/compiler/type_infer/type_infer_correctness_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/test_runner/_throwaway_broker_test_spec.spl | unknown | 1 | 364.0 | 364.0 |
-| test/01_unit/lib/test_runner/profile_aware_execution_spec.spl | unknown | 1 | 1248.0 | 1248.0 |
-| test/01_unit/lib/test_runner/doctest_parser_spec.spl | unknown | 1 | 671.0 | 671.0 |
-| test/01_unit/lib/test_runner/test_classification_system_routing_spec.spl | unknown | 1 | 472.0 | 472.0 |
-| test/01_unit/lib/test_runner/warning_display_owner_spec.spl | unknown | 1 | 405.0 | 405.0 |
-| test/01_unit/lib/test_runner/doctest_runner_find_binary_reroute_spec.spl | unknown | 1 | 519.0 | 519.0 |
-| test/01_unit/lib/test_runner/terminated_vs_crashed_spec.spl | unknown | 1 | 940.0 | 940.0 |
-| test/01_unit/lib/test_runner/gpu_mailbox_spec.spl | unknown | 1 | 1483.0 | 1483.0 |
-| test/01_unit/lib/test_runner/executor_lanes_split_spec.spl | unknown | 1 | 476.0 | 476.0 |
-| test/01_unit/lib/test_runner/args_parsing_spec.spl | unknown | 1 | 869.0 | 869.0 |
-| test/01_unit/lib/test_runner/random_access_file_owner_behavior_spec.spl | unknown | 1 | 543.0 | 543.0 |
-| test/01_unit/lib/test_runner/source_doctest_runner_spec.spl | unknown | 1 | 433.0 | 433.0 |
-| test/01_unit/lib/test_runner/fork_async_container_parsing_reroute_spec.spl | unknown | 1 | 480.0 | 480.0 |
-| test/01_unit/lib/test_runner/result_wrapper_unit_spec.spl | unknown | 1 | 586.0 | 586.0 |
-| test/01_unit/lib/test_runner/test_config_spec.spl | unknown | 1 | 546.0 | 546.0 |
-| test/01_unit/lib/test_runner/truncated_capture_fail_closed_spec.spl | unknown | 1 | 545.0 | 545.0 |
-| test/01_unit/lib/test_runner/sdoctest_extractor_spec.spl | unknown | 1 | 1834.0 | 1834.0 |
-| test/01_unit/lib/test_runner/bootstrap_facade_owner_behavior_spec.spl | unknown | 1 | 458.0 | 458.0 |
-| test/01_unit/lib/test_runner/crash_classification_spec.spl | unknown | 1 | 388.0 | 388.0 |
-| test/01_unit/lib/test_runner/_throwaway_import_test_spec.spl | unknown | 1 | 711.0 | 711.0 |
-| test/01_unit/lib/test_runner/test_db_cold_start_spec.spl | unknown | 1 | 496.0 | 496.0 |
-| test/01_unit/lib/test_runner/edition_resolve_spec.spl | unknown | 1 | 709.0 | 709.0 |
+| test/01_unit/compiler/type_infer/type_infer_correctness_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| test/01_unit/lib/common/string_core_char_access_spec.spl | unknown | 10 | 5032.515789473684 | 825.0 |
+| failed | unknown | 2 | 2443.283582089552 | 650.0 |
+|  | unknown | 1 | 671.0 | 671.0 |
+|  | unknown | 1 | 472.0 | 472.0 |
+|  | unknown | 3 | 1659.8039215686274 | 611.0 |
+|  | unknown | 1 | 519.0 | 519.0 |
+|  | unknown | 1 | 940.0 | 940.0 |
+|  | unknown | 1 | 1483.0 | 1483.0 |
+|  | unknown | 1 | 476.0 | 476.0 |
+|  | unknown | 1 | 869.0 | 869.0 |
+|  | unknown | 1 | 543.0 | 543.0 |
+|  | unknown | 1 | 433.0 | 433.0 |
+|  | unknown | 1 | 480.0 | 480.0 |
+|  | unknown | 1 | 586.0 | 586.0 |
+|  | unknown | 1 | 546.0 | 546.0 |
+|  | unknown | 1 | 545.0 | 545.0 |
+|  | unknown | 1 | 1834.0 | 1834.0 |
+|  | unknown | 1 | 458.0 | 458.0 |
+|  | unknown | 1 | 388.0 | 388.0 |
+|  | unknown | 1 | 711.0 | 711.0 |
+|  | unknown | 1 | 496.0 | 496.0 |
+|  | unknown | 10 | 5032.515789473684 | 825.0 |
+|  | unknown | 2 | 2443.283582089552 | 650.0 |
+|  | unknown | 1 | 671.0 | 671.0 |
+|  | unknown | 1 | 472.0 | 472.0 |
+|  | unknown | 3 | 1659.8039215686274 | 611.0 |
+|  | unknown | 1 | 519.0 | 519.0 |
+|  | unknown | 1 | 940.0 | 940.0 |
+|  | unknown | 1 | 1483.0 | 1483.0 |
+|  | unknown | 1 | 476.0 | 476.0 |
+|  | unknown | 1 | 869.0 | 869.0 |
+|  | unknown | 1 | 543.0 | 543.0 |
+|  | unknown | 1 | 433.0 | 433.0 |
+|  | unknown | 1 | 480.0 | 480.0 |
+|  | unknown | 1 | 586.0 | 586.0 |
+|  | unknown | 1 | 546.0 | 546.0 |
+|  | unknown | 1 | 545.0 | 545.0 |
+|  | unknown | 1 | 1834.0 | 1834.0 |
+|  | unknown | 1 | 458.0 | 458.0 |
+|  | unknown | 10 | 5032.515789473684 | 825.0 |
+|  | unknown | 2 | 2443.283582089552 | 650.0 |
+|  | unknown | 10 | 5032.515789473684 | 825.0 |
 
 ## Slowest Tests (p50 > 1s)
 
 | Test | p50 (ms) | Mean (ms) | Runs |
 |------|----------|-----------|------|
-| test/01_unit/compiler/async/async_frame_analysis_spec.spl | 1248.0 | 1248.0 | 1 |
 | test/01_unit/compiler/async/async_spawn_analysis_spec.spl | 1483.0 | 1483.0 | 1 |
-| test/01_unit/compiler/verification/deterministic_emission_spec.spl | 1248.0 | 1248.0 | 1 |
 | test/01_unit/compiler/verification/naming_spec.spl | 1483.0 | 1483.0 | 1 |
-| test/01_unit/compiler/assurance/dynamic_composition_spec.spl | 1248.0 | 1248.0 | 1 |
 | test/01_unit/compiler/assurance/nat_normalizer_receipt_spec.spl | 1483.0 | 1483.0 | 1 |
-| test/01_unit/compiler/mdsoc/config_multi_dim_spec.spl | 1248.0 | 1248.0 | 1 |
 | test/01_unit/compiler/mdsoc/feature_ports_spec.spl | 1483.0 | 1483.0 | 1 |
 | test/01_unit/compiler/mdsoc/weaving_support_spec.spl | 1834.0 | 1834.0 | 1 |
-| test/01_unit/compiler/60.mir_opt/hwir_opt_spec.spl | 1248.0 | 1248.0 | 1 |
-| test/01_unit/compiler/vhdl/vhdl_subprogram_spec.spl | 1248.0 | 1248.0 | 1 |
-| test/01_unit/app/auto_coverage_11_spec.spl | 1248.0 | 1248.0 | 1 |
-| test/01_unit/app/build/feature_flags_spec.spl | 1248.0 | 1248.0 | 1 |
 | test/01_unit/app/build/bootstrap_policy_spec.spl | 1483.0 | 1483.0 | 1 |
-| test/03_system/coverage/coverage_core_spec.spl | 1248.0 | 1248.0 | 1 |
-| test/01_unit/compiler/borrow/iso_move_assign_field_spec.spl | 1248.0 | 1248.0 | 1 |
 | test/01_unit/compiler/borrow/lifetime_spec.spl | 1483.0 | 1483.0 | 1 |
-| test/02_integration/watcher/watcher_shb_integration_spec.spl | 1248.0 | 1248.0 | 1 |
-| test/02_integration/io/native_ops_dir_create_spec.spl | 1248.0 | 1248.0 | 1 |
-| test/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl | 1248.0 | 1248.0 | 1 |
+| test/feature/lib/mcp/core_spec.spl | 1483.0 | 1483.0 | 1 |
+| test/feature/lib/mcp/simple_import_test.spl | 1834.0 | 1834.0 | 1 |
+| test/05_perf/graphics_2d/no_duplication_spec.spl | 1483.0 | 1483.0 | 1 |
+| test/01_unit/lib/blink/paint_tree_walker_spec.spl | 1483.0 | 1483.0 | 1 |
+| test/01_unit/lib/blink/navigation_fetch_spec.spl | 1834.0 | 1834.0 | 1 |
+| test/01_unit/lib/blink/style/user_agent_stylesheet_spec.spl | 2637.0 | 2637.0 | 1 |
+| test/01_unit/lib/blink/render_lane_pixels_spec.spl | 1389.0 | 1389.0 | 1 |
+| test/01_unit/lib/blink/paint/invalidation_spec.spl | 1220.0 | 1220.0 | 1 |
+| test/01_unit/lib/blink/paint/text_paint_spec.spl | 3458.0 | 3458.0 | 1 |
+| test/01_unit/lib/blink/paint/effects_spec.spl | 1059.0 | 1059.0 | 1 |
+| test/01_unit/lib/blink/paint/border_paint_spec.spl | 1178.0 | 1178.0 | 1 |
+| test/01_unit/compiler/blocks/testing_spec.spl | 1483.0 | 1483.0 | 1 |
+| test/02_integration/debug/hardware/t32_semihost_hello_spec.spl | 1483.0 | 1483.0 | 1 |
+
+## Failed Tests
+
+- test/01_unit/compiler/async/async_desugar_integration_spec.spl
+- test/01_unit/compiler/async/async_mir_spec.spl

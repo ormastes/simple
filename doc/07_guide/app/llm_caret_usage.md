@@ -1,6 +1,6 @@
 # LLM Caret — Usage Guide
 
-Date: 2026-07-07
+Date: 2026-07-07 (last revised 2026-08-25)
 
 Production-quality features of the shipped `src/app/llm_caret` path. Pure-Simple;
 UI on the Simple TUI stdlib (`std.tui`).
@@ -56,6 +56,64 @@ Every provider HTTP call is wrapped in `with_retry` (`retry.spl`): retries on
 
 - `LLM_CARET_MAX_RETRIES` — override max attempts (default 4). A hung subprocess
   is killed at the timeout rather than waited on indefinitely.
+
+## Agent workspaces + the `workspace` dev CLI
+
+Each agent gets one **detached git worktree** (`git worktree add --detach`,
+never a branch) plus one tmux window, on a **private tmux socket**
+(`tmux -L caret_ws_<id>`) so the operator's own tmux server is never touched.
+Implementation: `src/app/llm_caret/agent_workspace.spl` (side effects) over the
+model-only `agent_tmux.spl` embed; CLI in `workspace_cli.spl`.
+
+```sh
+bin/simple run src/app/llm_caret/main.spl workspace <id> <cmd> [args] \
+    [--repo <path>] [--root <path>]
+```
+
+`--repo` defaults to the cwd; `--root` defaults to
+`<repo>/build/caret_worktrees/<id>` (gitignored). Worktree paths are resolved
+absolute — `git -C <repo>` would otherwise resolve a relative path against the
+repo, not the cwd.
+
+| command | effect |
+|---|---|
+| `status` | socket, session name, alive flag, worktrees, panes |
+| `attach <agent> [cmd]` | detached worktree + tmux window for `<agent>`; prints both |
+| `detach <agent>` | kill the window and remove the worktree |
+| `add <agent>` / `remove <agent>` | worktree only, no tmux |
+| `list` | worktrees git knows about for `--repo` |
+| `panes` | every pane target in the session |
+| `send <target> <cmd...>` | `send-keys` to one pane |
+| `broadcast <cmd...>` | `send-keys` to **every** pane |
+| `capture <target>` | print a pane's scrollback |
+| `wait <target> <marker> [ms]` | block until `<marker>` appears (default 30000 ms) |
+| `suite <spec> [wait_ms]` | run `bin/simple test <spec>` in a `caret_suite` window; with `wait_ms`, poll for the authoritative `Results:` line and echo the verdict |
+| `kill` | kill the private tmux server |
+
+Exit codes: **0** ok, **1** the command ran and failed (including
+`tmux_unavailable`, `no_panes`, a `wait`/`suite` timeout), **2** usage —
+which includes a bare `workspace <id>`, `workspace <id> help`, an unknown
+command, and a command missing its required positional. `add`, `remove` and
+`list` are the only commands that work without tmux installed.
+
+**Recursion protection.** Every command the workspace spawns is prefixed
+`LLM_CARET_WORKSPACE_DEPTH=<n+1>`. `launch_caret_suite` refuses with
+`recursion_limit` once the depth is at `MAX_DEPTH` (currently **1**), so a
+suite launched inside a workspace cannot launch another. Independently,
+`send_to_each_pane` skips the pane the process itself is running in (read from
+`TMUX_PANE`), so a broadcast never feeds itself. The same idea is implemented
+for shell scripts by `scripts/lib/recursion_guard.shs` — see
+`doc/07_guide/tooling/build_fast_path.md`.
+
+Evidence: `test/01_unit/app/llm_caret/agent_workspace_spec.spl` (throwaway
+`git init` fixture, two-pane broadcast with a per-pane marker oracle),
+`test/03_system/app/llm_caret/workspace_cli_system_spec.spl` (real CLI child
+processes: 3-agent team, worktree isolation, broadcast, nested-suite refusal),
+`agent_team_workspace_system_spec.spl`, `workspace_recovery_system_spec.spl`,
+`workspace_embed_parity_system_spec.spl` and
+`caret_suite_tmux_window_system_spec.spl` (a real suite run inside a tmux
+window). With tmux absent these report `pending("BLOCKED: ...")`, never a
+silent pass.
 
 ## Tool execution + permission gating
 
@@ -130,14 +188,9 @@ Mail hardening (2026-08-25):
   fails the tool call with `mail server timed out after N ms` (default
   budget 15 s per reply; TLS reads use `tls_read_timeout`, plaintext reads
   the fd read-timeout) instead of hanging the caret turn.
-- **STARTTLS (587/143) is negotiation-ready but refused.** The full RFC
-  3207 / RFC 3501 negotiation state machine lives in
-  `app.llm_caret.infra_mail_starttls` and is transcript-proven, but the
-  runtime has no in-place TLS upgrade of a connected fd
-  (`rt_tls_client_from_fd` is missing — see
-  `doc/08_tracking/bug/tls_no_fd_upgrade_blocks_starttls_2026-08-25.md`),
-  so `smtp_port: 587` is refused before connecting with an error naming the
-  missing symbol. Use 465/993 (implicit TLS) or a plaintext port.
+- **STARTTLS (587/143) is negotiation-ready but refused** — the state machine
+  ships in `app.llm_caret.infra_mail_starttls`, the transport does not. See
+  Known limitations.
 
 Specs:
 `test/01_unit/app/llm_caret/infra_tools_spec.spl` (schemas, gating,
@@ -253,16 +306,22 @@ not `text.index_of`/`int()`/`char.to_i64()` — the seed mis-boxes `Option<i64>`
 and cross-module `char.to_i64()`. See
 `doc/08_tracking/bug/llm_caret_index_of_optioni64_tagbox_2026-07-07.md`.
 
-## Related
+## Known limitations
 
-- Architecture: `doc/04_architecture/llm_caret_gui_backends.md`
-- GUI design: `doc/05_design/llm_caret_gui_backends_gui.md`
-- System manual: `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_gui_backends_spec.md`
-- Design: `doc/05_design/llm_caret_claude_cli_full_parity.md`
-- Plan: `doc/03_plan/agent_tasks/llm_caret_claude_cli_full_parity_impl_plan.md`
-- Trace gate (docs-coverage only): `llm_caret_claude_cli_harden.md`
+Every row here is a real, currently-open constraint — not a roadmap item.
 
-### Live infrastructure evidence
+| # | limitation | consequence | unblock condition |
+|---|---|---|---|
+| 1 | **No in-place TLS upgrade of a connected fd.** `rt_tls_client_from_fd` does not exist anywhere in the runtime. | `smtp_port: 587` / `imap_port: 143` are refused *before* connecting, with an error naming the missing symbol. The RFC 3207 / RFC 3501 negotiation state machine (`infra_mail_starttls.spl`) is implemented and transcript-proven, but has no transport. Use 465/993 (implicit TLS) or a plaintext port. | runtime lane backs `rt_tls_client_from_fd`; C-side design in `doc/08_tracking/bug/tls_no_fd_upgrade_blocks_starttls_2026-08-25.md` |
+| 2 | **FTP storage backend is unbacked.** The `rt_ftp_*` externs have no runtime definition. | `backend: ftp` is refused with an explicit error; the FTP row of `infra_servers_system_spec.spl` stays BLOCKED. Only `backend: minio` works. | runtime lane backs `rt_ftp_*`, or a pure-Simple FTP client over `io.tcp` is requested |
+| 3 | **Live infra evidence needs a Docker host.** | On a bare host `check-llm-caret-infra-live.shs` exits **2** with `ERROR`, and the `*_LIVE=1` rows of `infra_servers_system_spec.spl` are honestly skipped. There is no in-repo SMTP/IMAP/S3 server. | a CI runner with Docker |
+| 4 | **Five caret specs are environment-blocked on a Stage 4 CLI**: `cli_cached`, `cli_hidden_cached`, `native_closure`, `tui_pty`, `messaging_phase_cli`. | They need a cached self-hosted caret artifact and `SIMPLE_STAGE3/4_BINARY`; today's binary cannot produce one, so they report BLOCKED rather than passing. | bootstrap redeploy reaching Stage 4; then rerun the caret census |
+| 5 | **All caret evidence to date is on the Rust seed**, not a self-hosted binary. | A green caret suite is not proof of self-hosting. | same Stage 4 redeploy as row 4 |
+| 6 | **The MCP `auto` tool set serves 3 core tools where specs pin 20** (pre-existing at origin). | The `caret_*` tools are reached via the full list; `SIMPLE_MCP_TOOL_SET=all` forces it immediately. | filed as `mcp_core_tool_set_has_3_tools_spec_expects_20_2026-08-25` |
+| 7 | **tmux is required for most `workspace` commands.** | Without it every command except `add`/`remove`/`list` exits 1 with `tmux_unavailable`; the workspace system specs report `pending("BLOCKED: ...")`. | install tmux on the host |
+| 8 | **Assistant replies are non-streaming.** `std.tui` has no incremental re-render. | Replies appear only after completion. | documented upgrade path, not scheduled |
+
+## Live infrastructure evidence
 
 `sh scripts/check/check-llm-caret-infra-live.shs` starts MinIO and greenmail
 in Docker on free localhost ports, writes a temporary `llm_caret.sdn` with
@@ -271,3 +330,12 @@ gates, and tears its own containers down. Verdict is the last stdout line
 (`PASS — 2 live row(s) executed …` / `FAIL` / `ERROR` exit 2 without Docker);
 `--selftest` proves the verdict logic (a run with skipped rows never PASSes).
 ~10 s warm. The FTP row stays BLOCKED until `rt_ftp_*` is backed.
+
+## Related
+
+- Architecture: `doc/04_architecture/llm_caret_gui_backends.md`
+- GUI design: `doc/05_design/llm_caret_gui_backends_gui.md`
+- System manual: `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_gui_backends_spec.md`
+- Design: `doc/05_design/llm_caret_claude_cli_full_parity.md`
+- Plan: `doc/03_plan/agent_tasks/llm_caret_claude_cli_full_parity_impl_plan.md`
+- Trace gate (docs-coverage only): `llm_caret_claude_cli_harden.md`

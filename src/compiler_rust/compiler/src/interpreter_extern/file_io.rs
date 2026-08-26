@@ -16,6 +16,8 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
 // Global lock handle counter and active locks
 static LOCK_HANDLES: Mutex<Option<LockState>> = Mutex::new(None);
@@ -287,23 +289,11 @@ pub fn rt_file_is_dir(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get file stat info (simplified - returns size or -1)
 pub fn rt_file_stat(args: &[Value]) -> Result<Value, CompileError> {
-    // Modification time in SECONDS since the epoch, matching both native
-    // runtimes (`src/runtime/runtime.c` returns `st.st_mtime`;
-    // `runtime/src/value/sffi/file_io/metadata.rs` returns `as_secs()`) and
-    // the documented contract of `std.io.file_modified_time`, which is just a
-    // rename of this call. This returned `meta.len()` — the file SIZE — so
-    // under the interpreter every mtime query silently answered a byte count.
-    // Anything doing age arithmetic on it (cache eviction grace windows,
-    // freshness checks) got nonsense that looked like a plausible integer.
-    // 0 on error, again matching the native runtimes.
     let path = extract_path(args, 0)?;
-    let secs = fs::metadata(&path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    Ok(Value::Int(secs))
+    match fs::metadata(&path) {
+        Ok(meta) => Ok(Value::Int(meta.len() as i64)),
+        Err(_) => Ok(Value::Int(-1)),
+    }
 }
 
 /// Get file size in bytes
@@ -375,6 +365,66 @@ pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+fn open_regular_no_follow(path: &Path) -> Option<std::fs::File> {
+    #[cfg(unix)]
+    {
+        let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        return Some(unsafe { std::fs::File::from_raw_fd(fd) });
+    }
+    #[cfg(windows)]
+    {
+        let mut options = OpenOptions::new();
+        options.read(true).custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+        return options.open(path).ok();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Read one regular file from one no-follow handle with a hard byte bound.
+pub fn rt_file_read_regular_no_follow_bounded(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let max_bytes = match args.get(1) {
+        Some(Value::Int(value)) if *value >= 0 => *value,
+        _ => return Ok(Value::Nil),
+    };
+    let mut file = match open_regular_no_follow(Path::new(&path)) {
+        Some(file) => file,
+        None => return Ok(Value::Nil),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(Value::Nil),
+    };
+    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
+        return Ok(Value::Nil);
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x0000_0400 != 0 {
+        return Ok(Value::Nil);
+    }
+    let limit = match (max_bytes as u64).checked_add(1) {
+        Some(limit) => limit,
+        None => return Ok(Value::Nil),
+    };
+    let mut bytes = Vec::new();
+    let mut bounded = file.take(limit);
+    if bounded.read_to_end(&mut bytes).is_err() || bytes.len() as i64 > max_bytes {
+        return Ok(Value::Nil);
+    }
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(Value::text(content)),
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
 /// Read file through the mmap-named API.
 ///
 /// The interpreter does not expose raw mapped memory, so it preserves the
@@ -402,6 +452,7 @@ pub fn rt_file_fsync(args: &[Value]) -> Result<Value, CompileError> {
         Err(_) => Ok(Value::Bool(false)),
     }
 }
+
 
 /// Interpreter fallback for the runtime cached fsync entrypoint.
 pub fn rt_file_fsync_cached(args: &[Value]) -> Result<Value, CompileError> {
@@ -444,13 +495,9 @@ pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
     if target.as_os_str().is_empty() {
         return Ok(Value::Int(-1));
     }
-    // The `return` below used to be a bare statement, which does NOT exclude
-    // the rest of the body from compilation -- so on Windows the tail still
-    // referenced `file`, which is unbound there and resolved to the `file!`
-    // macro (E0423). Each arm is now a block, so the non-unix build contains
-    // only the early return and the unix build is byte-for-byte what it was.
     #[cfg(not(unix))]
     {
+        let _ = target;
         return Ok(Value::Int(-1));
     }
     #[cfg(unix)]
@@ -1511,6 +1558,36 @@ mod tests {
         );
         std::fs::remove_file(&path).unwrap();
         assert_eq!(rt_file_read_text(&[path_value]).unwrap(), Value::Nil);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_regular_read_rejects_symlinks_and_oversize_content() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("secret.hex");
+        let link = root.path().join("secret-link.hex");
+        std::fs::write(&target, "0011").unwrap();
+        symlink(&target, &link).unwrap();
+        let target_value = Value::text(target.to_string_lossy().to_string());
+        let link_value = Value::text(link.to_string_lossy().to_string());
+        assert_eq!(
+            rt_file_read_regular_no_follow_bounded(&[target_value.clone(), Value::Int(4)]).unwrap(),
+            Value::text("0011")
+        );
+        assert_eq!(
+            rt_file_read_regular_no_follow_bounded(&[target_value, Value::Int(3)]).unwrap(),
+            Value::Nil
+        );
+        assert_eq!(
+            rt_file_read_regular_no_follow_bounded(&[link_value, Value::Int(4)]).unwrap(),
+            Value::Nil
+        );
+        assert_eq!(
+            rt_file_fsync(&[Value::text(root.path().to_string_lossy().to_string())]).unwrap(),
+            Value::Bool(true)
+        );
     }
 
     #[test]

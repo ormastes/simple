@@ -1,6 +1,7 @@
 # SCV delta encoding/decoding using rolling-hash copy/insert instructions.
 
 # Max chain depth enforced at verify and read time.
+use std.scv.alloc_bounds.{scv_bound_delta_target_bytes}
 val SCV_DELTA_MAX_DEPTH: i64 = 10
 
 # Delta wire format opcodes
@@ -79,13 +80,13 @@ fn scv_delta_adler32(data: [u8], pos: i64, window: i64) -> i64:
 # Build a hash table mapping adler32(window) -> offset in base
 # Returns newline-separated "hash offset" pairs
 fn scv_delta_build_hash_index(base: [u8], window: i64) -> text:
-    var index = ""
+    var rows: [text] = []
     var i = 0
     while i + window <= base.len():
         val h = scv_delta_adler32(base, i, window)
-        index = index + "{h} {i}\n"
+        rows.push("{h} {i}\n")
         i = i + 1
-    index
+    rows.join("")
 
 fn scv_delta_lookup_hash(index: text, h: i64) -> i64:
     val needle = "{h} "
@@ -191,6 +192,9 @@ fn scv_delta_decode(base: [u8], delta: [u8]) -> ([u8], text):
 
     val stored_base_size = scv_delta_read_u32_le(delta, 4)
     val target_size = scv_delta_read_u32_le(delta, 8)
+    val target_bound = scv_bound_delta_target_bytes(target_size)
+    if target_bound != "":
+        return ([], target_bound)
 
     if stored_base_size != base.len():
         return ([], "ERROR delta base size mismatch\n")

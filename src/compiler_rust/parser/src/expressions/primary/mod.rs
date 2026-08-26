@@ -12,6 +12,103 @@ mod literals;
 mod math;
 
 impl<'a> Parser<'a> {
+    pub(crate) fn unsafe_block_header_is_valid(&mut self) -> bool {
+        if !self.peek_is(&TokenKind::LParen) {
+            return false;
+        }
+        let mut offset = 2usize;
+        if self.peek_nth(offset).kind == TokenKind::RParen {
+            return self.peek_nth(offset + 1).kind == TokenKind::Colon;
+        }
+        loop {
+            let argument = match self.peek_nth(offset).kind {
+                TokenKind::Identifier { name, .. } if name == "reason" || name == "capabilities" => name,
+                _ => return false,
+            };
+            offset += 1;
+            if self.peek_nth(offset).kind != TokenKind::Colon {
+                return false;
+            }
+            offset += 1;
+            if argument == "reason" {
+                if !matches!(
+                    self.peek_nth(offset).kind,
+                    TokenKind::String(_) | TokenKind::FString(_) | TokenKind::RawString(_)
+                ) {
+                    return false;
+                }
+                offset += 1;
+            } else {
+                if self.peek_nth(offset).kind != TokenKind::LBracket {
+                    return false;
+                }
+                offset += 1;
+                if self.peek_nth(offset).kind != TokenKind::RBracket {
+                    loop {
+                        if !matches!(self.peek_nth(offset).kind, TokenKind::Identifier { .. }) {
+                            return false;
+                        }
+                        offset += 1;
+                        if self.peek_nth(offset).kind == TokenKind::RBracket {
+                            break;
+                        }
+                        if self.peek_nth(offset).kind != TokenKind::Comma {
+                            return false;
+                        }
+                        offset += 1;
+                        if self.peek_nth(offset).kind == TokenKind::RBracket {
+                            break;
+                        }
+                    }
+                }
+                offset += 1;
+            }
+            if self.peek_nth(offset).kind == TokenKind::RParen {
+                return self.peek_nth(offset + 1).kind == TokenKind::Colon;
+            }
+            if self.peek_nth(offset).kind != TokenKind::Comma {
+                return false;
+            }
+            offset += 1;
+            if self.peek_nth(offset).kind == TokenKind::RParen {
+                return self.peek_nth(offset + 1).kind == TokenKind::Colon;
+            }
+        }
+    }
+
+    /// Expression-position `unsafe(...)` / `danger(...)` block, e.g.
+    /// `val v = unsafe(capabilities: [ffi]):`.
+    ///
+    /// Deliberately does NOT accept the bare `unsafe:` form here. A bare
+    /// `unsafe:` block is a STATEMENT (parser_impl/core.rs), and accepting it
+    /// in expression position makes any ordinary variable named `unsafe`
+    /// swallow the enclosing block header's colon:
+    /// `for e in unsafe:` / `while unsafe:` / `if unsafe:` then fail with
+    /// "expected Colon, found If". See
+    /// doc/08_tracking/bug/seed_redeploy_breaks_test_runner_accessor_rewrite_parse_2026-08-25.md
+    pub(crate) fn parse_unsafe_block_primary(&mut self) -> Result<Expr, ParseError> {
+        self.advance();
+        self.expect(&TokenKind::LParen)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.current.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::Eof => {
+                    return Err(ParseError::unexpected_token(
+                        "')' in unsafe block header",
+                        "end of file",
+                        self.current.span,
+                    ));
+                }
+                _ => {}
+            }
+            self.advance();
+        }
+        self.expect(&TokenKind::Colon)?;
+        self.parse_block().map(|block| Expr::UnsafeBlock(block.statements))
+    }
+
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
             // Ellipsis as expression placeholder: `...` is equivalent to pass/unit ()
@@ -69,6 +166,11 @@ impl<'a> Parser<'a> {
             {
                 self.parse_tensor_literal_from_ident()
             }
+            TokenKind::Identifier { ref name, .. }
+                if (name == "unsafe" || name == "danger") && self.unsafe_block_header_is_valid() =>
+            {
+                self.parse_unsafe_block_primary()
+            }
             TokenKind::Result
             | TokenKind::Identifier { .. }
             | TokenKind::Self_
@@ -93,8 +195,6 @@ impl<'a> Parser<'a> {
             | TokenKind::Alias
             | TokenKind::Bounds
             | TokenKind::Default
-            | TokenKind::Case
-            | TokenKind::Invariant
             | TokenKind::From
             | TokenKind::To
             | TokenKind::Loop

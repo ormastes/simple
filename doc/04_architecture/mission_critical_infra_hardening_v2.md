@@ -396,7 +396,13 @@ Rendering evidence additionally records:
   readback provenance where applicable;
 - structured input dispatch, target, semantic state transition, and resulting
   pixels for HTML-backed UI; and
-- valid RenderDoc capture identity/metadata for claims that require it.
+- distinct WM, GUI, Web, and Engine2D RenderDoc capture identities plus replay
+  transcripts; every capture has RDOC magic and a signed hash, and every replay
+  proves Vulkan backend use and binds the admitted DrawIR generation.
+- a distinct headless WM container/QEMU receipt that binds the pinned container
+  image, QEMU compatibility-module hash, QMP screendump hash, exact pixel
+  validation, and the same source/configuration identity. QMP pixels are guest
+  execution evidence, not a substitute for the WM Vulkan RDOC.
 
 Screenshots without interaction/provenance do not pass. CPU/device equality must
 use exact readback where claimed; labels or synthetic handles do not substitute.

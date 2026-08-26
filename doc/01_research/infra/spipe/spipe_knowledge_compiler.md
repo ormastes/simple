@@ -1,6 +1,11 @@
 <!-- codex-research -->
 # SPipe Knowledge Compiler
+
 ## Virtual Documentation Views, Hybrid Search, Traceability, Tree Rebalancing, and Common-Knowledge Promotion
+
+**Research layout note:** This requested infrastructure research artifact
+combines repository-local findings and domain research; no duplicate same-slug
+`local/` or `domain/` companion files currently exist.
 
 **Date:** 2026-08-25  
 **Status:** Final research, architecture, design, and implementation plan  
@@ -2330,3 +2335,46 @@ Normative follow-on artifacts:
 - `doc/05_design/infra/spipe/spipe_knowledge_compiler.md`
 - `doc/05_design/infra/spipe/spipe_knowledge_compiler_mcp_views.md`
 - `doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md`
+
+## 32. 2026-08-26 Native Identity-Model Follow-up
+
+Wave 2's dependency-free JavaScript identity and schema implementation is
+already present on `main` (rewritten upstream commit `deccbce964e`). A review
+therefore rejected duplicating that implementation and instead froze the
+provider-facing native Simple boundary.
+
+The first proposed native slice was deliberately narrowed to typed ASCII
+workspace/project/worktree/artifact/section/edge IDs, content hashes, and
+provisional artifact identity derivation. Semantic keys, revisions, and paths
+remain deferred because current `main` has UTF-8 validation but no importable
+Unicode NFC normalization primitive; accepting an ASCII-only substitute would
+falsify the contract.
+
+A highest-capability review gave the narrowed three-file candidate a static
+PASS. It was not admitted or committed: both available `bin/release` executables
+identify themselves as Rust bootstrap seeds, and repository policy forbids seed
+fallback for normal checks/tests. The candidate is preserved outside the
+worktree at `/tmp/spipe-id-wave2-clean` pending a genuine self-hosted runtime.
+Before admission it still needs focused self-hosted check/test evidence, success
+coverage for every `KnowledgeUid` variant, and an early non-ASCII provisional-ID
+rejection case. No runtime PASS or implementation-complete claim is made.
+
+## 33. 2026-08-26 Raw JavaScript RRF Admission
+
+The dependency-free raw-RRF boundary is separate from exact-identity dominance,
+graph traversal, semantic retrieval, and post-fusion adjustments. An initial
+two-file candidate stopped at syntax `PASS`, focused `10/11`, and high-review
+`FAIL`; it remains historical `NOT-EVIDENCE`.
+
+A fresh session repaired the validation TOCTOU by snapshotting caller-owned
+data descriptors exactly once, rejected accessor/hidden/symbol/unknown shapes,
+preserved phase-specific errors, completed numeric/default/source-identity and
+hostile-object coverage, and corrected the reordered-source oracle. Evidence:
+pre-runtime highest-capability static `PASS`; cycle 1 syntax `PASS` and focused
+`15/16` with one malformed test fixture; cycle 2 syntax `PASS` and focused
+`16/16`; independent final highest-capability `PASS`. The exact two-file kernel
+was pushed as `595ba6e449`.
+
+This admits raw deterministic RRF only. Exact identity dominance, accepted graph
+candidate construction/proximity, bounded post-fusion adjustments, integrated
+stale/deprecated explanations, and full AC-4 remain open.

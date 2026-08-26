@@ -2,7 +2,20 @@
 
 **Date:** 2026-08-24
 **Severity:** MEDIUM (two Phase 5 / Phase 8 exit gates report `ERROR — nothing was checked`, so neither can produce evidence)
-**Status:** OPEN — recorded, not fixed (investigation capped at three cycles)
+**Status:** RESOLVED 2026-08-24 — both gates PASS.
+
+> Resolution: the cause was upstream of both gates — a JIT defect made reading
+> through a `case Some(x)` binding answer as if every key were absent, so
+> `_parse_waivers` found no waivers (`waivers=0`, `parse_fail=0`) and valid
+> manifests failed with `module.extends.schema_abi missing`. Both parsers now
+> hoist the matched node into a `var` first (`6d35617d429`); the JIT defect is
+> filed separately as
+> `jit_option_of_enum_payload_double_unwrap_2026-08-24.md`. Measured after the fix:
+> `check-critical-package-pins` -> `PASS — 1 pinned package(s) checked,
+> advisory-in-critical=0 waiver-without-expiry=0`; `check-completeness-seal` ->
+> `PASS — 2 selected constructor(s) checked, missing-capabilities=0
+> id-collisions=0 dyn-in-critical=0`. The suspicion recorded below that the SDN
+> parser was at fault was correctly NOT acted on — the parser is innocent.
 **Related:** `seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md` (fixed in `1ca19a1e31a`) was masking these — every gate crashed before reaching its own logic, so all three read as the same failure.
 
 ## Measured at the clean tip

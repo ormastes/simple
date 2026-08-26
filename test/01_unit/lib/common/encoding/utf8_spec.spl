@@ -4,6 +4,7 @@ Purpose: Prove that utf8_seq_len.
 Audience: compiler and tooling engineers who maintain this spec.
 """
 # @req: REQ-LIB-COMMON-001 — stable requirement identity for this spec.
+# @cover src/lib/common/encoding/utf8.spl 97%
 
 # UTF-8 Encoding / Decoding Tests
 #
@@ -174,6 +175,32 @@ describe "utf8_decode_one":
         expect(result[0]).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         expect(result[1]).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
+    it "returns error for a negative offset":
+        step("Exercise the lower offset bound independently")
+        expect(utf8_decode_one([0x41], -1)).to_equal([-1, 0])
+
+    it "rejects invalid two-byte payload values and continuation shape":
+        step("Exercise numeric-range and continuation guards")
+        expect(utf8_decode_one([0xC2, -1], 0)).to_equal([0xFFFD, 1])
+        expect(utf8_decode_one([0xC2, 256], 0)).to_equal([0xFFFD, 1])
+        expect(utf8_decode_one([0xC2, 0x41], 0)).to_equal([0xFFFD, 1])
+
+    it "rejects malformed three-byte sequences":
+        step("Exercise payload range, continuation, overlong, and surrogate guards")
+        expect(utf8_decode_one([0xE1, -1, 0x80], 0)).to_equal([0xFFFD, 1])
+        expect(utf8_decode_one([0xE1, 0x80, 256], 0)).to_equal([0xFFFD, 1])
+        expect(utf8_decode_one([0xE1, 0x41, 0x80], 0)).to_equal([0xFFFD, 1])
+        expect(utf8_decode_one([0xE0, 0x80, 0x80], 0)).to_equal([0xFFFD, 3])
+        expect(utf8_decode_one([0xED, 0xA0, 0x80], 0)).to_equal([0xFFFD, 3])
+
+    it "rejects malformed four-byte sequences":
+        step("Exercise payload range, continuation, overlong, and maximum guards")
+        expect(utf8_decode_one([0xF1, -1, 0x80, 0x80], 0)).to_equal([0xFFFD, 1])
+        expect(utf8_decode_one([0xF1, 0x80, 0x80, 256], 0)).to_equal([0xFFFD, 1])
+        expect(utf8_decode_one([0xF1, 0x80, 0x41, 0x80], 0)).to_equal([0xFFFD, 1])
+        expect(utf8_decode_one([0xF0, 0x80, 0x80, 0x80], 0)).to_equal([0xFFFD, 4])
+        expect(utf8_decode_one([0xF4, 0x90, 0x80, 0x80], 0)).to_equal([0xFFFD, 4])
+
     it "decodes at nonzero offset":
         step("Verify: decodes at nonzero offset")
         val result = utf8_decode_one([0x41, 0x42, 0x43], 1)
@@ -185,6 +212,11 @@ describe "utf8_decode_one":
 # ============================================================================
 
 describe "utf8_codepoint_byte_len":
+    it "uses replacement width for negative and out-of-range values":
+        step("Exercise both invalid-range fallbacks")
+        expect(utf8_codepoint_byte_len(-1)).to_equal(3)
+        expect(utf8_codepoint_byte_len(0x110000)).to_equal(3)
+
     it "returns 1 for ASCII":
         step("Verify: returns 1 for ASCII")
         expect(utf8_codepoint_byte_len(0x41)).to_equal(1)  # oracle: 1 — named expected value from the requirement
@@ -370,6 +402,10 @@ describe "text_from_codepoints":
         step("Verify: creates text from ASCII codepoints")
         val result = text_from_codepoints([0x48, 0x69])
         expect(result).to_equal("Hi")
+
+    it "creates text through both ASCII and multibyte paths":
+        step("Exercise both text construction branches")
+        expect(text_from_codepoints([0x41, 0x00E9, 0xD55C, 0x1F600])).to_equal("Aé한😀")
 
 # ============================================================================
 # char_from_code parity with std.string_core.char_from_code

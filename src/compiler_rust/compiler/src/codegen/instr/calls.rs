@@ -2650,6 +2650,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_is_char_device"
         | "rt_file_canonicalize"
         | "rt_file_read_text"
+        | "rt_file_read_regular_no_follow_bounded"
         | "rt_file_size"
         | "rt_file_hash_sha256"
         | "rt_file_fsync"
@@ -2675,6 +2676,8 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_extract_smf_dynlib"
         | "rt_file_create_excl" => Some(&[0, 1]),
         "rt_file_write_bytes" => Some(&[0]),
+        "rt_hosted_safe_artifact_bundle_begin_v1" => Some(&[0, 1, 2, 3, 4]),
+        "rt_hosted_safe_artifact_bundle_stage_scr1_v1" => Some(&[1]),
         // rt_file_open is (path_ptr, path_len, mode: i32) — descriptor.rs:19.
         "rt_file_open" => Some(&[0]),
         // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.

@@ -54,8 +54,12 @@ pub extern "C" fn rt_host_dynlib_open(path_ptr: *const u8, path_len: i64, mode: 
     }
     #[cfg(windows)]
     unsafe {
-        use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
-        LoadLibraryA(path.as_ptr() as *const u8) as i64
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+        let Ok(path_utf8) = path.to_str() else {
+            return 0;
+        };
+        let wide: Vec<u16> = path_utf8.encode_utf16().chain(std::iter::once(0)).collect();
+        LoadLibraryW(wide.as_ptr()) as i64
     }
 }
 
@@ -131,8 +135,12 @@ pub extern "C" fn spl_dlopen(path_rv: RuntimeValue) -> i64 {
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
-        unsafe { LoadLibraryA(buf.as_ptr()) as i64 }
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+        let Ok(path_utf8) = std::str::from_utf8(slice) else {
+            return 0;
+        };
+        let wide: Vec<u16> = path_utf8.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe { LoadLibraryW(wide.as_ptr()) as i64 }
     }
 }
 

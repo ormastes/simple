@@ -1,0 +1,276 @@
+#!/bin/sh
+# check-ssa-block-reach-not-exponential.shs
+#
+# Fences blocker #5 of the io_runtime native-build chain:
+#   doc/08_tracking/bug/native_compile_nonterminating_io_runtime_2026-08-24.md
+#
+# THE DEFECT. `ssa_block_can_reach` in
+# src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl was a RECURSIVE DFS that
+# threaded its `visited` set DOWN each branch:
+#
+#     val seen = visited.push(start_id)
+#     for succ_id in ssa_terminator_successors(...):
+#         if ssa_block_can_reach(blocks, succ_id, target_id, seen): ...
+#
+# Sibling successors therefore never saw each other's marks, so every distinct
+# path through the CFG was re-explored: O(2^branches). It still TERMINATED in
+# principle, which is exactly why it read as a hang and not as a crash --
+# `process_run_timeout_live` (94 blocks, 504 locals) did not finish in 3600s,
+# while small functions were unaffected (callers gate on `blocks.len() < 4`).
+# Measured signature: 100% of one core, FLAT RSS (each branch's copy is freed on
+# return), zero I/O.
+#
+# WHY A PLAIN "does it build" CHECK IS NOT ENOUGH, AND WHY THIS ONE HAS A
+# TIMEOUT. A non-terminating compile has no exit code at all until something
+# kills it. A CI job that simply runs native-build would hang forever rather
+# than fail. So the behavioural half here ALWAYS runs under `timeout` and
+# classifies rc=124 as a distinct HANG verdict -- a timeout is never a pass and
+# never an ordinary failure.
+#
+# TWO CHECKS, both fail-closed:
+#   1. MECHANISM (fast, always runs). `ssa_block_can_reach` must not call
+#      itself. The exponential form is recursive by construction; the fix is an
+#      iterative worklist over a single shared `seen` set. This pins the fix by
+#      its mechanism, so a future edit that reintroduces the per-branch copy is
+#      caught in milliseconds without waiting on a 3-minute build.
+#   2. BEHAVIOUR (opt-in via --with-build, since it costs minutes). native-build
+#      an io_runtime importer under `timeout`; rc=124 is a FAIL.
+#
+# Blocker #6 is open (`explicit panic() -- diverging, must not fall through`),
+# so the behavioural check deliberately asserts NON-HANG, not exit 0, and NAMES
+# the residual exit status in the verdict rather than asserting it away -- the
+# same honest-gate precedent as
+# scripts/check/check-hir-block-tail-and-loadglobal-decode.shs. Pass
+# --require-success to additionally demand exit 0 once blocker #6 lands.
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS  - <n> check(s) ...           exit 0   (n is always > 0)
+#   FAIL  - ...                        exit 1
+#   ERROR - nothing was checked ...    exit 2   (0 checks = ERROR, never a pass)
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+TARGET_REL="src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl"
+FN_NAME="ssa_block_can_reach"
+WITH_BUILD=0
+# FLIPPED TO REQUIRED 2026-08-24. This defaulted to 0 while blocker #7 of the
+# io_runtime native-build chain kept native-build at rc=1 for reasons this gate
+# does not own; it was always meant to become mandatory once the chain reached
+# rc=0, which it now has (two llc-invalid-IR defects fixed: the alloca-slot gate
+# rejecting the erasable ResultMatchSemantic witness, and translate_ref
+# hardcoding native_int for a borrow). `--allow-residual-failure` restores the
+# advisory behaviour for a lane that is knowingly mid-repair; it is an explicit,
+# recorded choice, not a default.
+# See doc/08_tracking/bug/native_compile_unresolved_option_result_io_modules_2026-08-24.md
+REQUIRE_SUCCESS=1
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
+SEED="${SEED:-}"
+
+for arg in "$@"; do
+    case "$arg" in
+        --with-build) WITH_BUILD=1 ;;
+        --require-success) REQUIRE_SUCCESS=1; WITH_BUILD=1 ;;
+        --allow-residual-failure) REQUIRE_SUCCESS=0 ;;
+        --selftest) ;;  # selftest always runs; accepted for symmetry
+        *) ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Extract the body of `fn <name>(...)` from a .spl file.
+# Body = the signature line plus every following line more-indented than `fn`,
+# stopping at the next top-level construct. Printed on stdout.
+# ---------------------------------------------------------------------------
+extract_fn_body() {
+    _file="$1"; _fn="$2"
+    awk -v fn="$_fn" '
+        index($0, "fn " fn "(") == 1 { infn = 1; print; next }
+        infn == 1 {
+            if ($0 ~ /^[^ \t]/ && $0 !~ /^[ \t]*$/) { infn = 0; exit }
+            print
+        }
+    ' "$_file"
+}
+
+# Returns 0 when the function body is EXPONENTIAL (recursive self-call),
+# 1 when it is not, 2 when the function could not be found at all.
+fn_is_recursive() {
+    _file="$1"; _fn="$2"
+    if [ ! -f "$_file" ]; then return 2; fi
+    _body=$(extract_fn_body "$_file" "$_fn")
+    if [ -z "$_body" ]; then return 2; fi
+    # Drop the signature line and comments, then look for a self-call.
+    _calls=$(printf '%s\n' "$_body" \
+        | sed '1d' \
+        | sed 's/#.*$//' \
+        | grep -c "${_fn}(")
+    if [ "$_calls" -gt 0 ]; then return 0; fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST -- runs first, unconditionally, and is FATAL.
+# Every fixture is driven through the REAL checker above.
+# ---------------------------------------------------------------------------
+selftest() {
+    _tmp=$(mktemp -d) || { echo "ERROR - nothing was checked (mktemp failed)"; exit 2; }
+    _fails=0
+    _n=0
+
+    # F1: the FIXED iterative form -- must be classified NOT recursive.
+    cat > "$_tmp/f1.spl" <<'EOF'
+fn ssa_block_can_reach(blocks: [MirBlock], start_id: i64, target_id: i64, visited: [i64]) -> bool:
+    if start_id == target_id:
+        return true
+    var seen = visited.push(start_id)
+    var frontier: [i64] = [start_id]
+    var i = 0
+    while i < frontier.len():
+        val cur_id = frontier[i]
+        i = i + 1
+    false
+
+fn other() -> bool:
+    false
+EOF
+    fn_is_recursive "$_tmp/f1.spl" "$FN_NAME"; _rc=$?
+    _n=$((_n + 1))
+    [ "$_rc" -eq 1 ] || { echo "selftest F1 FAILED: fixed form classified rc=$_rc (want 1)"; _fails=$((_fails + 1)); }
+
+    # F2: the ORIGINAL recursive form -- must be classified recursive (FAIL).
+    #     This replays the incident's exact shape.
+    cat > "$_tmp/f2.spl" <<'EOF'
+fn ssa_block_can_reach(blocks: [MirBlock], start_id: i64, target_id: i64, visited: [i64]) -> bool:
+    if start_id == target_id:
+        return true
+    val seen = visited.push(start_id)
+    if start_opt.?:
+        var reached = false
+        for succ_id in ssa_terminator_successors(start_block.terminator):
+            if ssa_block_can_reach(blocks, succ_id, target_id, seen):
+                reached = true
+        reached
+    else:
+        false
+EOF
+    fn_is_recursive "$_tmp/f2.spl" "$FN_NAME"; _rc=$?
+    _n=$((_n + 1))
+    [ "$_rc" -eq 0 ] || { echo "selftest F2 FAILED: recursive form classified rc=$_rc (want 0)"; _fails=$((_fails + 1)); }
+
+    # F3: function absent -- must be UNKNOWN (2), never a silent pass.
+    printf 'fn unrelated() -> bool:\n    false\n' > "$_tmp/f3.spl"
+    fn_is_recursive "$_tmp/f3.spl" "$FN_NAME"; _rc=$?
+    _n=$((_n + 1))
+    [ "$_rc" -eq 2 ] || { echo "selftest F3 FAILED: absent fn classified rc=$_rc (want 2)"; _fails=$((_fails + 1)); }
+
+    # F4: missing file -- must be UNKNOWN (2).
+    fn_is_recursive "$_tmp/does-not-exist.spl" "$FN_NAME"; _rc=$?
+    _n=$((_n + 1))
+    [ "$_rc" -eq 2 ] || { echo "selftest F4 FAILED: missing file classified rc=$_rc (want 2)"; _fails=$((_fails + 1)); }
+
+    # F5: a self-call that appears ONLY inside a comment must NOT count --
+    #     otherwise the fix's own explanatory comment would fail the gate.
+    cat > "$_tmp/f5.spl" <<'EOF'
+fn ssa_block_can_reach(blocks: [MirBlock], start_id: i64, target_id: i64, visited: [i64]) -> bool:
+    # the old form called ssa_block_can_reach(blocks, succ_id, ...) per branch
+    var seen = visited.push(start_id)
+    false
+EOF
+    fn_is_recursive "$_tmp/f5.spl" "$FN_NAME"; _rc=$?
+    _n=$((_n + 1))
+    [ "$_rc" -eq 1 ] || { echo "selftest F5 FAILED: comment-only self-mention classified rc=$_rc (want 1)"; _fails=$((_fails + 1)); }
+
+    # F6: timeout classification. rc=124 from a real `timeout` must be read
+    #     DIRECTLY into a variable and classified HANG, distinct from rc=1.
+    timeout 1 sh -c 'while : ; do : ; done' >/dev/null 2>&1
+    _hang_rc=$?
+    _n=$((_n + 1))
+    [ "$_hang_rc" -eq 124 ] || { echo "selftest F6 FAILED: spin under timeout gave rc=$_hang_rc (want 124)"; _fails=$((_fails + 1)); }
+
+    # F7: an ordinary non-zero exit must NOT look like a hang.
+    timeout 5 sh -c 'exit 1' >/dev/null 2>&1
+    _err_rc=$?
+    _n=$((_n + 1))
+    [ "$_err_rc" -eq 1 ] || { echo "selftest F7 FAILED: exit 1 under timeout gave rc=$_err_rc (want 1)"; _fails=$((_fails + 1)); }
+
+    rm -rf "$_tmp"
+    if [ "$_fails" -ne 0 ]; then
+        echo "ERROR - nothing was checked (selftest failed: $_fails of $_n fixture(s))"
+        exit 2
+    fi
+    echo "selftest: $_n fixture(s) passed"
+}
+
+selftest
+
+# ---------------------------------------------------------------------------
+# CHECK 1 -- MECHANISM
+# ---------------------------------------------------------------------------
+CHECKS=0
+OFFENDERS=""
+
+TARGET="$REPO_ROOT/$TARGET_REL"
+fn_is_recursive "$TARGET" "$FN_NAME"; MECH_RC=$?
+case "$MECH_RC" in
+    2)
+        echo "ERROR - nothing was checked (could not read \`fn $FN_NAME\` in $TARGET_REL)"
+        exit 2
+        ;;
+    0)
+        CHECKS=$((CHECKS + 1))
+        OFFENDERS="$FN_NAME is recursive again (per-branch \`visited\` copy => O(2^branches))"
+        ;;
+    *)
+        CHECKS=$((CHECKS + 1))
+        ;;
+esac
+
+if [ -n "$OFFENDERS" ]; then
+    echo "FAIL - $CHECKS check(s) run; $OFFENDERS -- see doc/08_tracking/bug/native_compile_nonterminating_io_runtime_2026-08-24.md"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# CHECK 2 -- BEHAVIOUR (opt-in; costs minutes)
+# ---------------------------------------------------------------------------
+BUILD_NOTE="behavioural check not requested (pass --with-build)"
+if [ "$WITH_BUILD" -eq 1 ]; then
+    if [ -z "$SEED" ]; then
+        SEED="$REPO_ROOT/bin/simple"
+    fi
+    if [ ! -x "$SEED" ]; then
+        echo "ERROR - nothing was checked (no runnable compiler at $SEED; set SEED=)"
+        exit 2
+    fi
+    WORK=$(mktemp -d) || { echo "ERROR - nothing was checked (mktemp failed)"; exit 2; }
+    cat > "$WORK/control.spl" <<'EOF'
+use std.nogc_sync_mut.io_runtime
+
+fn main():
+    val v = env_get("HOME")
+    print("control ok")
+EOF
+    # Exit status read DIRECTLY into a variable on the line after the command --
+    # never through a pipe, whose $? is the LAST stage's status.
+    timeout "$BUILD_TIMEOUT" "$SEED" native-build "$WORK/control.spl" -o "$WORK/control.bin" > "$WORK/build.log" 2>&1
+    NB_RC=$?
+    # The worker survives a timeout as a multi-GB 100%-CPU orphan; reap ours.
+    pkill -9 -f "native_build_worker.spl.*$WORK" >/dev/null 2>&1
+    CHECKS=$((CHECKS + 1))
+    if [ "$NB_RC" -eq 124 ]; then
+        rm -rf "$WORK"
+        echo "FAIL - $CHECKS check(s) run; native-build of an io_runtime importer HUNG (timed out at ${BUILD_TIMEOUT}s, rc=124) -- blocker #5 has regressed"
+        exit 1
+    fi
+    if [ "$REQUIRE_SUCCESS" -eq 1 ] && [ "$NB_RC" -ne 0 ]; then
+        rm -rf "$WORK"
+        echo "FAIL - $CHECKS check(s) run; native-build did not hang but exited $NB_RC and --require-success was given"
+        exit 1
+    fi
+    rm -rf "$WORK"
+    BUILD_NOTE="native-build terminated with exit $NB_RC within ${BUILD_TIMEOUT}s (NOT a hang)"
+fi
+
+echo "PASS - $CHECKS check(s) run, \`$FN_NAME\` is iterative (single shared \`seen\`, no per-branch copy); $BUILD_NOTE"
+exit 0

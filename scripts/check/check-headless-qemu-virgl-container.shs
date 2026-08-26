@@ -1,0 +1,49 @@
+#!/bin/sh
+# Prove a pinned containerized QEMU can initialize KVM + EGL + virtio-vga-gl.
+# This is host capability evidence only; it does not claim a guest frame.
+set -eu
+LC_ALL=C; export LC_ALL
+
+image=${HEADLESS_QEMU_VIRGL_IMAGE:-simple-qemu-virgl-headless:8.2.2-ubuntu24.04}
+render_node=${HEADLESS_QEMU_RENDER_NODE:-}
+probe_seconds=${HEADLESS_QEMU_PROBE_SECONDS:-5}
+
+case "$probe_seconds" in ''|0|*[!0-9]*) echo 'headless_qemu_virgl_status=fail'; echo 'headless_qemu_virgl_reason=invalid-probe-seconds'; exit 2;; esac
+command -v docker >/dev/null 2>&1 || { echo 'headless_qemu_virgl_status=blocked'; echo 'headless_qemu_virgl_reason=docker-missing'; exit 1; }
+docker image inspect "$image" >/dev/null 2>&1 || { echo 'headless_qemu_virgl_status=blocked'; echo 'headless_qemu_virgl_reason=image-missing'; echo "headless_qemu_virgl_image=$image"; exit 1; }
+[ -c /dev/kvm ] || { echo 'headless_qemu_virgl_status=blocked'; echo 'headless_qemu_virgl_reason=kvm-device-missing'; exit 1; }
+if [ -z "$render_node" ]; then
+    for candidate in /dev/dri/renderD*; do [ -c "$candidate" ] || continue; render_node=$candidate; break; done
+fi
+[ -n "$render_node" ] && [ -c "$render_node" ] || { echo 'headless_qemu_virgl_status=blocked'; echo 'headless_qemu_virgl_reason=render-node-missing'; exit 1; }
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-qemu-virgl.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+set +e
+docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+    --device /dev/kvm --device "$render_node" \
+    --entrypoint /usr/bin/timeout "$image" "$probe_seconds" \
+    /usr/bin/env LD_PRELOAD=/usr/lib/x86_64-linux-gnu/qemu/ui-opengl.so MESA_SHADER_CACHE_DISABLE=true \
+    /usr/bin/qemu-system-x86_64 -nodefaults -no-user-config -machine q35,accel=kvm \
+    -display "egl-headless,rendernode=$render_node" -device virtio-vga-gl -S \
+    >"$work/qemu.out" 2>&1
+code=$?
+set -e
+
+image_id=$(docker image inspect "$image" --format '{{.Id}}')
+module_sha=$(docker run --rm --network none --read-only --entrypoint sha256sum "$image" /usr/lib/x86_64-linux-gnu/qemu/ui-opengl.so | awk '{print $1}')
+if [ "$code" -eq 124 ] && ! grep -Eiq 'undefined symbol|opengl is not available|no drm render node|render node init failed|failed to initialize|dumped core|permission denied' "$work/qemu.out"; then
+    status=pass; reason=bounded-paused-vm-survived
+else
+    status=fail; reason=qemu-virgl-initialization-failed
+fi
+echo "headless_qemu_virgl_status=$status"
+echo "headless_qemu_virgl_reason=$reason"
+echo "headless_qemu_virgl_image=$image"
+echo "headless_qemu_virgl_image_id=$image_id"
+echo "headless_qemu_virgl_render_node=$render_node"
+echo "headless_qemu_virgl_adapter=packaged-ui-opengl-preload"
+echo "headless_qemu_virgl_adapter_module_sha256=$module_sha"
+echo "headless_qemu_virgl_guest_capture=unclaimed"
+if [ -s "$work/qemu.out" ]; then sed -n '1,20p' "$work/qemu.out" >&2; fi
+[ "$status" = pass ]

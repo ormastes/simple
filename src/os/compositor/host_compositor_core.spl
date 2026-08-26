@@ -612,6 +612,11 @@ class HostCompositor:
     native_pixel_lane: bool
     native_cache_window_ids: [i64]
     native_content_caches: [WebRenderPixelArtifactCache]
+    # Scalar index kept separately from the class-valued cache dictionary:
+    # native code can safely look up the compact i32 slot while the cache
+    # itself remains in the parallel array required by the stage3 backend.
+    # This removes a full cache-id scan for every visible window each frame.
+    native_cache_indices: Dict<i64, i32>
     width: i32
     height: i32
     windows: [HostedWindow]
@@ -714,6 +719,7 @@ class HostCompositor:
             native_pixel_lane: false,
             native_cache_window_ids: [],
             native_content_caches: [],
+            native_cache_indices: {},
             width: size.width as i32,
             height: size.height as i32,
             windows: [],
@@ -816,6 +822,15 @@ class HostCompositor:
             if self.native_cache_window_ids[native_index] == window_id:
                 self.native_cache_window_ids.remove(native_index)
                 self.native_content_caches.remove(native_index)
+                self.native_cache_indices.remove(window_id)
+                # Array removal shifts every following slot left once. Cache
+                # destruction is cold; pay the linear repair here so render
+                # and animation polling retain constant-time lookup.
+                while native_index < self.native_cache_window_ids.len():
+                    self.native_cache_indices[
+                        self.native_cache_window_ids[native_index]
+                    ] = native_index
+                    native_index = native_index + 1
                 return
             native_index = native_index + 1
 
@@ -1196,17 +1211,16 @@ class HostCompositor:
     # correctly a miss+store, not a stale hit.
     me _content_cache_for(window_id: i64, cw: i32, full_h: i32, backend_name: text) -> WebRenderPixelArtifactCache:
         if self.native_pixel_lane:
-            var native_idx = 0
-            while native_idx < self.native_cache_window_ids.len():
-                if self.native_cache_window_ids[native_idx] == window_id:
-                    val native_cache = self.native_content_caches[native_idx]
-                    if native_cache.width == cw and native_cache.height == full_h and native_cache.backend_name == backend_name:
-                        return native_cache
-                    val replacement = web_render_pixel_artifact_cache(cw, full_h, backend_name)
-                    self.native_content_caches[native_idx] = replacement
-                    return replacement
-                native_idx = native_idx + 1
+            if self.native_cache_indices.contains_key(window_id):
+                val native_idx = self.native_cache_indices[window_id]
+                val native_cache = self.native_content_caches[native_idx]
+                if native_cache.width == cw and native_cache.height == full_h and native_cache.backend_name == backend_name:
+                    return native_cache
+                val replacement = web_render_pixel_artifact_cache(cw, full_h, backend_name)
+                self.native_content_caches[native_idx] = replacement
+                return replacement
             val native_fresh = web_render_pixel_artifact_cache(cw, full_h, backend_name)
+            self.native_cache_indices[window_id] = self.native_cache_window_ids.len() as i32
             self.native_cache_window_ids.push(window_id)
             self.native_content_caches.push(native_fresh)
             return native_fresh
@@ -1669,13 +1683,11 @@ class HostCompositor:
             var window_due = false
             if not window.minimized:
                 if self.native_pixel_lane:
-                    var cache_index = 0
-                    while cache_index < self.native_cache_window_ids.len():
-                        if self.native_cache_window_ids[cache_index] == window.id:
-                            window_due = self.native_content_caches[
-                                cache_index
-                            ].animation_frame_due(now_ms)
-                        cache_index = cache_index + 1
+                    if self.native_cache_indices.contains_key(window.id):
+                        val cache_index = self.native_cache_indices[window.id]
+                        window_due = self.native_content_caches[
+                            cache_index
+                        ].animation_frame_due(now_ms)
                 else:
                     if self.content_caches.contains_key(window.id):
                         val cache = self.content_caches[window.id]

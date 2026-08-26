@@ -17,8 +17,6 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_env_get(key: text) -> text
 extern fn rt_time_now_monotonic_ms() -> i64
 extern fn rt_stdout_flush()
-@unsafe(reason: "raw diagnostic flush; provider failure cannot be distinguished from a completed flush", capabilities: [ffi])
-extern fn rt_stderr_flush()
 
 # 0 = not yet probed, 1 = enabled, 2 = disabled.
 var _hir_prof_state: i64 = 0
@@ -60,16 +58,6 @@ var _hir_prof_imported_symbol_calls: i64 = 0
 # materialize_enum) tuple. `reg_imported` counts the ones that actually ran,
 # so the pair is the observable mechanism counter for the memo.
 var _hir_prof_imported_symbol_skips: i64 = 0
-# Scalar-only registration-shape probe.  Stage 3 can grow beyond available
-# memory before a module-end row is reached, so emit at powers of two while
-# retaining no registration keys or other per-attempt heap state.
-var _hir_prof_imported_symbol_attempts: i64 = 0
-var _hir_prof_imported_symbol_completed: i64 = 0
-var _hir_prof_imported_symbol_active_depth: i64 = 0
-var _hir_prof_imported_symbol_max_depth: i64 = 0
-var _hir_prof_imported_symbol_alias_attempts: i64 = 0
-var _hir_prof_imported_symbol_max_key_length: i64 = 0
-var _hir_prof_imported_symbol_next_sample: i64 = 1
 var _hir_prof_enum_lowerings: i64 = 0
 # Qualified-type resolution MISSES: the repeated work the RIS split exists to
 # locate. A miss is what triggers declared/explicit dependency materialization.
@@ -149,44 +137,6 @@ fn hir_phase_profile_count_imported_symbol_skip():
     if hir_phase_profile_enabled():
         _hir_prof_imported_symbol_skips = _hir_prof_imported_symbol_skips + 1
 
-fn hir_phase_profile_imported_symbol_enter(key_len: i64, alias_local: bool):
-    """Enter one registration attempt and sample scalar growth at powers of two."""
-    if _hir_prof_state == 2:
-        return
-    if not hir_phase_profile_enabled():
-        return
-    _hir_prof_imported_symbol_attempts = _hir_prof_imported_symbol_attempts + 1
-    _hir_prof_imported_symbol_active_depth = _hir_prof_imported_symbol_active_depth + 1
-    if _hir_prof_imported_symbol_active_depth > _hir_prof_imported_symbol_max_depth:
-        _hir_prof_imported_symbol_max_depth = _hir_prof_imported_symbol_active_depth
-    if alias_local:
-        _hir_prof_imported_symbol_alias_attempts = _hir_prof_imported_symbol_alias_attempts + 1
-    if key_len > _hir_prof_imported_symbol_max_key_length:
-        _hir_prof_imported_symbol_max_key_length = key_len
-    if _hir_prof_imported_symbol_attempts == _hir_prof_imported_symbol_next_sample:
-        eprint("[hir-prof-reg] attempts={_hir_prof_imported_symbol_attempts}"
-            + " completed={_hir_prof_imported_symbol_completed}"
-            + " skips={_hir_prof_imported_symbol_skips}"
-            + " active={_hir_prof_imported_symbol_active_depth}"
-            + " max_depth={_hir_prof_imported_symbol_max_depth}"
-            + " aliases={_hir_prof_imported_symbol_alias_attempts}"
-            + " max_key_len={_hir_prof_imported_symbol_max_key_length}")
-        unsafe(capabilities: [ffi]):
-            rt_stderr_flush()
-        _hir_prof_imported_symbol_next_sample = _hir_prof_imported_symbol_next_sample * 2
-
-fn hir_phase_profile_imported_symbol_complete():
-    if _hir_prof_state == 2:
-        return
-    if hir_phase_profile_enabled():
-        _hir_prof_imported_symbol_completed = _hir_prof_imported_symbol_completed + 1
-
-fn hir_phase_profile_imported_symbol_exit():
-    if _hir_prof_state == 2:
-        return
-    if hir_phase_profile_enabled() and _hir_prof_imported_symbol_active_depth > 0:
-        _hir_prof_imported_symbol_active_depth = _hir_prof_imported_symbol_active_depth - 1
-
 fn hir_phase_profile_count_qtype(missed: bool):
     # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
     # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
@@ -231,13 +181,6 @@ fn hir_phase_profile_module_begin():
     _hir_prof_glob_expansions = 0
     _hir_prof_imported_symbol_calls = 0
     _hir_prof_imported_symbol_skips = 0
-    _hir_prof_imported_symbol_attempts = 0
-    _hir_prof_imported_symbol_completed = 0
-    _hir_prof_imported_symbol_active_depth = 0
-    _hir_prof_imported_symbol_max_depth = 0
-    _hir_prof_imported_symbol_alias_attempts = 0
-    _hir_prof_imported_symbol_max_key_length = 0
-    _hir_prof_imported_symbol_next_sample = 1
     _hir_prof_enum_lowerings = 0
     _hir_prof_qtype_queries = 0
     _hir_prof_qtype_misses = 0
@@ -302,53 +245,4 @@ fn hir_phase_profile_module_end(module_name: text):
         + " scan={_hir_prof_excl_ms[HIR_PROF_RIS_SCAN]}ms"
         + " fields={_hir_prof_excl_ms[HIR_PROF_RIS_FIELDS]}ms"
         + " project={_hir_prof_excl_ms[HIR_PROF_RIS_PROJECT]}ms")
-    eprint("[hir-prof-reg] module={module_name}"
-        + " attempts={_hir_prof_imported_symbol_attempts}"
-        + " completed={_hir_prof_imported_symbol_completed}"
-        + " skips={_hir_prof_imported_symbol_skips}"
-        + " active={_hir_prof_imported_symbol_active_depth}"
-        + " max_depth={_hir_prof_imported_symbol_max_depth}"
-        + " aliases={_hir_prof_imported_symbol_alias_attempts}"
-        + " max_key_len={_hir_prof_imported_symbol_max_key_length}")
-    unsafe(capabilities: [ffi]):
-        rt_stderr_flush()
     rt_stdout_flush()
-
-# ============================================================================
-# AMBIGDBG -- import/dependency resolution route trace (SIMPLE_AMBIGDBG=1)
-# ============================================================================
-#
-# Retained probe log, default OFF, per doc/07_guide/infra/logging/
-# log_retention_policy.md and .claude/rules/code-style.md ("logs are NOT unused
-# code"). It exists because the resolution path that produces
-# `ambiguous explicit callable dependency` cannot be reached from any small
-# fixture: `register_imported_symbol_inner`'s re-export facade chase
-# (`find_reexport_source_walk`) scans the SAME named and wildcard import rows
-# the ambiguity sweep scans, but is FIRST-MATCH-WINS with no ambiguity notion,
-# so it binds first on every simple graph and the sweep is never consulted.
-# The sweep is reachable only where that chase fails to BIND -- the depth cap,
-# the shared visited-memo, a valid/complete bailout, or a terminal
-# `already_bound and not same_owner` return -- which are properties of a real
-# whole-tree graph. Every one of those exits is traced below, so a sharded
-# stage-1 lane run with SIMPLE_AMBIGDBG=1 records WHY the fast path declined
-# and WHICH candidates the sweep then found.
-# See doc/08_tracking/bug/ambiguous_explicit_callable_dependency_backend_env_2026-08-22.md
-var _hir_ambig_trace_state: i64 = 0
-
-fn hir_ambig_dep_trace_enabled() -> bool:
-    """Cached env verdict, same shape as hir_phase_profile_enabled's PROFOFF
-    fast path: the environment is read ONCE per process, every later call is a
-    single i64 compare.
-
-    Call sites MUST test this before building their message, because string
-    interpolation is evaluated at the CALL SITE, not inside the sink -- an
-    unguarded `hir_ambig_dep_trace("... {expr} ...")` would pay the full
-    formatting cost on a hot path even with tracing off."""
-    if _hir_ambig_trace_state == 0:
-        _hir_ambig_trace_state = if (rt_env_get("SIMPLE_AMBIGDBG") ?? "") == "1": 1 else: 2
-    _hir_ambig_trace_state == 1
-
-fn hir_ambig_dep_trace(message: text):
-    """Emit one trace line. Silent unless SIMPLE_AMBIGDBG=1."""
-    if not hir_ambig_dep_trace_enabled(): return
-    eprint("[ambig-dep] {message}")

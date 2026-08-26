@@ -67,11 +67,11 @@ pub(crate) use interpreter_state::{
     EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, IMMUTABLE_VARS,
     IN_IMMUTABLE_FN_METHOD, INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
     MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER,
-    MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIXES, TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS,
+    MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS,
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS,
     CLASS_OVERLOADS, FUNCTION_MODULE_OWNER, CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
-    report_globals_census, owned_globals_snapshot, owned_global, owned_global_present, owner_has_globals, steal_owned_global,
+    report_globals_census, owned_globals_snapshot, owned_global, owned_global_present, owner_has_globals,
     set_owned_global, seed_owner_globals, reset_owned_globals_from_initial, owner_bindings, record_owner_binding,
 };
 
@@ -130,13 +130,15 @@ mod interpreter_control;
 use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while};
 pub(crate) use interpreter_control::{exec_if_expr, exec_if_core, exec_match_expr, exec_match_core};
 pub(crate) use interpreter_control::exec_with;
-// Restored 2026-08-22: 13d09a45d80 removed this declaration while
-// `expr.rs` still calls `crate::interpreter::dispatch_profile::record`, which
-// left the seed unbuildable (E0433).
-pub(crate) mod dispatch_profile;
-pub(crate) mod sampler;
 mod expr;
 pub(crate) use expr::evaluate_expr;
+
+// `dispatch_profile.rs` is committed and `expr.rs:292` already calls
+// `crate::interpreter::dispatch_profile::record(expr)`, but the module was
+// never declared -- so the seed did not compile at all (E0433: could not find
+// `dispatch_profile` in `interpreter`). Declaring it is the missing half, not a
+// new feature.
+pub(crate) mod dispatch_profile;
 
 mod bitfield_runtime;
 pub(crate) use bitfield_runtime::{instantiate_bitfield, register_bitfield, update_bitfield_field};
@@ -146,7 +148,7 @@ pub(crate) use bitfield_runtime::{instantiate_bitfield, register_bitfield, updat
 mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
     bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
-    create_range_object_opt, create_range_object_step, expand_range_fields, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
+    create_range_object_opt, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
     eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter, eval_dict_for_each, eval_dict_map_values, eval_option_and_then,
     eval_option_filter, eval_option_map, eval_option_or_else, eval_result_and_then, eval_result_map,
     eval_result_map_err, eval_result_or_else, find_and_exec_method, handle_functional_update,
@@ -174,7 +176,6 @@ use interpreter_call::{
 #[path = "../module_cache.rs"]
 mod module_cache;
 pub use module_cache::clear_module_cache;
-pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::clear_module_cache_selective;
 pub(crate) use module_cache::normalize_path_key;
 

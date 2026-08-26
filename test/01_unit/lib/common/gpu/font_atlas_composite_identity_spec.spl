@@ -1,7 +1,18 @@
 use std.spec.{describe, it, expect}
 use std.common.gpu.font_atlas_composite.{
+    FONT_ATLAS_COMPOSITE_ENTRY,
+    FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
     FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION,
-    font_atlas_composite_cache_identity
+    font_atlas_composite_program_version_valid,
+    font_atlas_composite_cache_identity,
+    font_atlas_subrect_pixels,
+    font_destination_origin,
+    font_atlas_composite_opencl_source,
+    font_atlas_composite_hip_source,
+    font_atlas_composite_cuda_source,
+    font_atlas_composite_metal_source,
+    font_atlas_composite_vulkan_glsl_source,
+    font_atlas_composite_vulkan_legacy_glsl_source
 }
 
 fn _identity(material: text, backend: text, device: text, artifact: text, dependency: text) -> text:
@@ -34,3 +45,61 @@ describe "font atlas composite cache identity":
             for prior in keys:
                 expect(key == prior).to_be(false)
             keys.push(key)
+
+describe "font atlas composite reference pixels":
+    it "rejects invalid dimensions, origins, extents, counts, and storage":
+        expect(font_atlas_subrect_pixels([], 0, 1, 0, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([], 1, 0, 0, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([], 1, 1, 0, 0, 0, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([], 1, 1, 0, 0, 1, 0, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 1, 1, -1, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 1, 1, 0, -1, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 1, 1, 2, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 1, 1, 0, 2, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 2, 2, 1, 0, 2, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 2, 2, 0, 1, 1, 2, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([], 50000, 50000, 0, 0, 1, 1, 0u32)).to_equal([])
+        expect(font_atlas_subrect_pixels([0u32], 2, 2, 0, 0, 1, 1, 0u32)).to_equal([])
+
+    it "extracts and tints a valid subrectangle with rounded alpha":
+        val atlas: [u32] = [0u32, 0x80000000u32, 0xFF000000u32, 0x40000000u32]
+        val pixels = font_atlas_subrect_pixels(atlas, 2, 2, 0, 0, 2, 2, 0x80A0B0C0u32)
+        expect(pixels.len()).to_equal(4)
+        expect(pixels[0]).to_equal(0u32)
+        expect(pixels[1]).to_equal(0x40A0B0C0u32)
+        expect(pixels[2]).to_equal(0x80A0B0C0u32)
+        expect(pixels[3]).to_equal(0x20A0B0C0u32)
+
+describe "font destination bounds":
+    it "accepts valid origins and rejects every overflow class":
+        expect(font_destination_origin(10, -3, 4)).to_equal(7)
+        expect(font_destination_origin(0, 0, 0)).to_be_nil()
+        expect(font_destination_origin(-2147483648, -1, 1)).to_be_nil()
+        expect(font_destination_origin(2147483647, 1, 1)).to_be_nil()
+        expect(font_destination_origin(2147483647, 0, 2)).to_be_nil()
+
+describe "font atlas backend source ownership":
+    it "pins the program version and entry point":
+        expect(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION).to_equal(1)
+        expect(font_atlas_composite_program_version_valid(1)).to_equal(true)
+        expect(font_atlas_composite_program_version_valid(0)).to_equal(false)
+        expect(FONT_ATLAS_COMPOSITE_ENTRY).to_equal("simple_font_atlas_composite_v1_u32")
+
+    it "emits all backend sources from the shared semantic owner":
+        val opencl = font_atlas_composite_opencl_source()
+        val hip = font_atlas_composite_hip_source()
+        val cuda = font_atlas_composite_cuda_source()
+        val metal = font_atlas_composite_metal_source()
+        val vulkan = font_atlas_composite_vulkan_glsl_source()
+        val legacy = font_atlas_composite_vulkan_legacy_glsl_source()
+        for source in [opencl, hip, cuda, metal, vulkan, legacy]:
+            expect(source.len()).to_be_greater_than(100)
+        for source in [opencl, hip, cuda, metal]:
+            expect(source).to_contain(FONT_ATLAS_COMPOSITE_ENTRY)
+        expect(hip).to_contain("hip/hip_runtime.h")
+        expect(cuda.contains("hip/hip_runtime.h")).to_equal(false)
+        expect(metal).to_contain("metal_stdlib")
+        expect(vulkan).to_contain("void main()")
+        expect(legacy).to_contain("void main()")
+        expect(vulkan).to_contain("gl_GlobalInvocationID.y")
+        expect(legacy).to_contain("gl_GlobalInvocationID.x")

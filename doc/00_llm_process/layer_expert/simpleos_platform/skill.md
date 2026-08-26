@@ -41,32 +41,3 @@ absent until their production owner exists. Never turn unknown TLS ALPN into
 H1, advertise H3 without QUIC, or bypass SFTP's
 canonical VFS capability gates with ambient host filesystem access. Live server evidence requires admitted target tooling
 and configured credentials.
-
-## Server credential media staging (2026-08-22)
-
-The cross-target disk writer stages KEY/CRT/PK8/MAN through bounded
-descriptor-backed snapshots and verifies the exact FAT bytes before atomic
-no-clobber publication. x86_64, AArch64, and RV64 use the same credential
-contract. Missing, malformed, symlinked, unsafe-mode, changed, mismatched, or
-oversized inputs fail before publishing an image; pre-existing images are
-preserved. Windows intentionally rejects server-secret staging until an
-equivalent no-reparse descriptor boundary is implemented.
-
-## Server-data namespace Phase A contract (2026-08-22)
-
-Syscall ordinals 116–119 are reserved for the future server-data namespace but
-have no dispatcher or callable wrapper. `server_data_namespace_v1.spl` freezes
-pointer-free C-layout IDs, rights, receipts, states, caps, and pure transition
-decisions. Scalar receipts never authorize access: a future kernel owner must
-look up and match its stored task-generation, epoch, lease-generation, and
-128-bit nonce record. Do not advertise readiness before the distinct DBFS
-medium and sole transactional owner from the architecture plan exist.
-
-## Server-data media identity layer (2026-08-22)
-
-OS/QEMU/transport code shares role, serial, UUID, geometry, generation, and
-checksum encoding through `std.common.contracts.os.server_data_media_v1`; it
-must not import an app module or fork these constants. The codec deliberately
-does not attest a host path, durability, uniqueness, attachment, or DBFS
-readiness. Those claims require the future descriptor-owned provisioner and
-transport/owner layers.

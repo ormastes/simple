@@ -195,11 +195,11 @@ argv, environment, stdout, exit status, and smoke evidence, may wrap it in the
 29-field planner admission v2 envelope.
 
 **That producer now exists** (2026-08-17):
-`scripts/bootstrap/bootstrap-from-scratch.sh planner-admission-v2`. It is the only
+`scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs`. It is the only
 supported way to obtain an admissible receipt:
 
 ```text
-scripts/bootstrap/bootstrap-from-scratch.sh planner-admission-v2 \
+scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
   --target=//bootstrap:stage4 --reason=self-host-convergence-check \
   --parent-compiler=build/bootstrap/stage2/<triple>/simple
 ```

@@ -612,15 +612,12 @@ print s.items.len()  # 2
 Run SDoctest examples:
 ```bash
 simple test --sdoctest README.md      # Run verified examples in Markdown/docs
-simple test --spl-doctest src/math.spl # Run file-local source-comment doctests
+simple test --sdoctest src/math.spl   # Run file-local doctest examples
 simple test --sdoctest --tag slow     # Filter by tag
-simple test test --whole              # Release gate: specs/long tests plus configured Markdown and production-source doctests
+simple test test --whole              # Release gate: specs, long tests, source + Markdown doctests
 ```
 
 `--doctest` is still accepted as a compatibility alias, but `--sdoctest` is the clearer name for the implemented path.
-In the canonical release command, the positional `test` selects the spec tree
-only. `--whole` still discovers Markdown from `config/sdoctest.sdn` and comment
-sdoctests from the production `src/lib`, `src/compiler`, and `src/app` roots.
 
 ### Functional Update Operator (`->`)
 
@@ -750,7 +747,7 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 - [Macro System](doc/06_spec/macro.md) - Executable macro spec and status
 - [AOP Support Matrix](doc/05_design/aop_support_matrix.md) - Supported selectors, advice kinds, backends, and error codes
 - [SDN Format](doc/04_architecture/format/note_sdn_index.md) - Note/SDN storage and indexing format
-- [SDoctest](doc/06_spec/03_system/feature/features/sdoctest/sdoctest_spec.md) - Documentation testing and verified examples
+- [SDoctest](doc/06_spec/app/compiler/modules/testing/sdoctest.md) - Documentation testing and verified examples
 - [Feature Documentation](doc/06_spec/feature.md) - Generated feature-doc artifact format
 
 ---

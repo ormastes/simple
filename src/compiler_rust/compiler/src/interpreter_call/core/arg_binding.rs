@@ -52,50 +52,8 @@ fn copy_value_type_in_place(value: &mut Value, classes: &HashMap<String, Arc<Cla
     }
 }
 
-/// Declared array parameter types whose elements can never be a value-type
-/// object: `[text]`, `[i64]`, `[bool]`, ... A `[T]` of a scalar primitive is
-/// the only shape the per-call element scan below can skip EXACTLY -- it
-/// holds no `Value::Object` in any well-typed program, so the scan's answer
-/// is "no value-type element" by construction. Everything else (a named
-/// element type, `[Any]`, a nested array, no annotation) keeps the scan.
-fn array_param_has_scalar_elements(param: &Parameter) -> bool {
-    let Some(Type::Array { element, .. }) = param.ty.as_ref() else {
-        return false;
-    };
-    let Type::Simple(name) = element.as_ref() else {
-        return false;
-    };
-    matches!(
-        name.as_str(),
-        "text" | "str" | "String" | "bool" | "char" | "int" | "float"
-            | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-            | "f32" | "f64"
-    )
-}
-
-fn copy_value_type_params(
-    bound: &mut HashMap<String, Value>,
-    params: &[Parameter],
-    classes: &HashMap<String, Arc<ClassDef>>,
-) {
-    for (name, value) in bound.iter_mut() {
-        // SCALARARR (2026-08-22): the value-type element scan is O(len) per
-        // array argument per call. The lexer passes its whole `source_chars:
-        // [text]` (tens of thousands of entries) to `core_token_text_matches`
-        // once per token, which made interpreted lexing quadratic in the
-        // source (12,590 elements x 5,625 calls = 70M scans for three small
-        // fixture files). A declared scalar element type answers the scan
-        // without reading the array.
-        if let Value::Array(items) = value {
-            if params
-                .iter()
-                .any(|param| param.name == *name && array_param_has_scalar_elements(param))
-            {
-                continue;
-            }
-            crate::perf_counters::trace_array("vt_arg_scan", name, items.len());
-        }
+fn copy_value_type_params(bound: &mut HashMap<String, Value>, classes: &HashMap<String, Arc<ClassDef>>) {
+    for value in bound.values_mut() {
         copy_value_type_in_place(value, classes);
     }
 }
@@ -193,7 +151,7 @@ pub(crate) fn bind_args_with_injected(
     // Check if there's a variadic parameter (should be last)
     let variadic_param_idx = params_to_bind.iter().position(|p| p.variadic);
 
-    let mut bound = HashMap::with_capacity(params_to_bind.len());
+    let mut bound = HashMap::new();
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
 
@@ -438,7 +396,8 @@ pub(crate) fn bind_args_with_injected(
         bound.insert(param.name.clone(), Value::Tuple(variadic_values));
     }
 
-    for param in &params_to_bind {
+    let dbg_all_param_names_tmp: Vec<String> = params_to_bind.iter().map(|p| p.name.clone()).collect();
+    for param in params_to_bind {
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
                 let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
@@ -453,15 +412,10 @@ pub(crate) fn bind_args_with_injected(
                 bound.insert(param.name.clone(), injected_val.clone());
             } else {
                 if std::env::var("SIMPLE_DEBUG_ARG_BINDING").is_ok() {
-                    // Built HERE, on the error path only: hoisted out of the
-                    // loop it allocated one Vec plus one String per parameter
-                    // on EVERY call, for a diagnostic that is off by default.
-                    let all_param_names: Vec<&str> =
-                        params_to_bind.iter().map(|p| p.name.as_str()).collect();
                     eprintln!(
                         "[DEBUG arg_binding TMP] missing param '{}'; full param list={:?}; args given={}",
                         param.name,
-                        all_param_names,
+                        dbg_all_param_names_tmp,
                         args.len()
                     );
                 }
@@ -479,7 +433,7 @@ pub(crate) fn bind_args_with_injected(
         }
     }
 
-    copy_value_type_params(&mut bound, params, classes);
+    copy_value_type_params(&mut bound, classes);
     Ok(bound)
 }
 
@@ -602,170 +556,6 @@ pub(crate) fn bind_args_with_values(
         bound.insert(param.name.clone(), value);
     }
 
-    copy_value_type_params(&mut bound, params, classes);
+    copy_value_type_params(&mut bound, classes);
     Ok(bound)
-}
-
-#[cfg(test)]
-mod scalar_array_param_tests {
-    use super::*;
-    use simple_parser::ast::Mutability;
-    use simple_parser::token::Span;
-
-    fn param(name: &str, ty: Option<Type>) -> Parameter {
-        Parameter {
-            span: Span::new(0, 0, 1, 1),
-            name: name.to_string(),
-            ty,
-            default: None,
-            mutability: Mutability::Immutable,
-            inject: false,
-            variadic: false,
-            call_site_label: None,
-        }
-    }
-
-    fn array_of(elem: Type) -> Type {
-        Type::Array {
-            element: Box::new(elem),
-            size: None,
-        }
-    }
-
-    // SCALARARR: only a declared `[scalar]` element type may skip the
-    // per-call value-type element scan; a named element type, `[Any]`, a
-    // nested array, and an unannotated parameter must all keep it.
-    #[test]
-    fn scalar_element_arrays_skip_the_scan_everything_else_keeps_it() {
-        for scalar in ["text", "str", "String", "bool", "char", "i64", "u8", "f64", "int", "float"] {
-            assert!(
-                array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple(scalar.into()))))),
-                "[{scalar}] must skip"
-            );
-        }
-        assert!(!array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple("Point".into()))))));
-        assert!(!array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple("Any".into()))))));
-        assert!(!array_param_has_scalar_elements(&param(
-            "xs",
-            Some(array_of(array_of(Type::Simple("text".into()))))
-        )));
-        assert!(!array_param_has_scalar_elements(&param("xs", Some(Type::Simple("text".into())))));
-        assert!(!array_param_has_scalar_elements(&param("xs", None)));
-    }
-
-    // The skip must be keyed by PARAMETER NAME: a `[Point]` value-type array
-    // bound next to a `[text]` one is still deep-copied.
-    #[test]
-    fn copy_value_type_params_skips_only_the_scalar_array() {
-        let mut classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
-        let point = ClassDef {
-            span: Span::new(0, 0, 0, 0),
-            name: "Point".to_string(),
-            generic_params: vec![],
-            where_clause: vec![],
-            fields: vec![],
-            methods: vec![],
-            parent: None,
-            visibility: simple_parser::ast::Visibility::Private,
-            effects: vec![],
-            attributes: vec![],
-            doc_comment: None,
-            is_generic_template: false,
-            specialization_of: None,
-            type_bindings: HashMap::new(),
-            invariant: None,
-            macro_invocations: vec![],
-            mixins: vec![],
-            is_value_type: true,
-        };
-        classes.insert("Point".to_string(), Arc::new(point));
-        let fields = Arc::new(HashMap::from([("x".to_string(), Value::Int(1))]));
-        let pt = Value::Object { class: "Point".to_string(), fields: Arc::clone(&fields) };
-        let params = vec![
-            param("chars", Some(array_of(Type::Simple("text".into())))),
-            param("pts", Some(array_of(Type::Simple("Point".into())))),
-        ];
-        let chars = Arc::new(vec![Value::text("a"), Value::text("b")]);
-        let pts = Arc::new(vec![pt]);
-        let mut bound: HashMap<String, Value> = HashMap::new();
-        bound.insert("chars".to_string(), Value::Array(Arc::clone(&chars)));
-        bound.insert("pts".to_string(), Value::Array(Arc::clone(&pts)));
-        copy_value_type_params(&mut bound, &params, &classes);
-        // `[text]`: same Arc, untouched.
-        match &bound["chars"] {
-            Value::Array(a) => assert!(Arc::ptr_eq(a, &chars)),
-            other => panic!("chars became {other:?}"),
-        }
-        // `[Point]`: copied (new array Arc, new field map Arc).
-        match &bound["pts"] {
-            Value::Array(a) => {
-                assert!(!Arc::ptr_eq(a, &pts));
-                match &a[0] {
-                    Value::Object { fields: f, .. } => assert!(!Arc::ptr_eq(f, &fields)),
-                    other => panic!("pts[0] became {other:?}"),
-                }
-            }
-            other => panic!("pts became {other:?}"),
-        }
-    }
-}
-
-/// Permute pre-evaluated argument VALUES into parameter order using the
-/// argument expressions' names.
-///
-/// `bind_args_with_values` takes a bare `&[Value]` and therefore binds purely
-/// positionally -- the names are already gone by the time it runs. Method
-/// calls evaluate their arguments up front and so went through that path,
-/// which silently ignored named-argument reordering: given
-/// `fn subtract(self, minuend, subtrahend)`, the call
-/// `m.subtract(subtrahend=15, minuend=50)` bound 15 to `minuend` and 50 to
-/// `subtrahend` and returned -35 instead of 35. Plain function calls were
-/// unaffected because they keep the `Argument` list and bind by name.
-///
-/// Returns `None` when there is nothing to do (no named arguments) or when the
-/// permutation would not produce a dense prefix -- e.g. a named argument
-/// targeting a defaulted parameter beyond the supplied count. Falling back to
-/// the previous positional behaviour in that case keeps this change strictly
-/// additive.
-pub(crate) fn reorder_named_arg_values(
-    params: &[Parameter],
-    arg_vals: &[Value],
-    arg_exprs: &[Argument],
-    self_mode: SelfMode,
-) -> Option<Vec<Value>> {
-    if arg_exprs.len() != arg_vals.len() || !arg_exprs.iter().any(|a| a.name.is_some()) {
-        return None;
-    }
-    let params_to_bind: Vec<_> = params
-        .iter()
-        .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
-        .collect();
-
-    let mut slots: Vec<Option<Value>> = vec![None; params_to_bind.len()];
-    let mut positional_idx = 0usize;
-    for (i, arg) in arg_exprs.iter().enumerate() {
-        let target = match &arg.name {
-            Some(name) => params_to_bind.iter().position(|p| &p.name == name)?,
-            None => {
-                // Positional arguments fill the first free slots in order.
-                while positional_idx < slots.len() && slots[positional_idx].is_some() {
-                    positional_idx += 1;
-                }
-                let t = positional_idx;
-                positional_idx += 1;
-                t
-            }
-        };
-        if target >= slots.len() || slots[target].is_some() {
-            return None;
-        }
-        slots[target] = Some(arg_vals[i].clone());
-    }
-
-    // Only a dense prefix is safe: bind_args_with_values still binds by index.
-    let filled = slots.iter().take_while(|s| s.is_some()).count();
-    if filled != arg_vals.len() {
-        return None;
-    }
-    Some(slots.into_iter().take(filled).map(|s| s.expect("dense prefix")).collect())
 }

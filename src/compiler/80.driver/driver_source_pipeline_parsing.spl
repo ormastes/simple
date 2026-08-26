@@ -3,8 +3,7 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_stage4_streaming}
-use compiler.driver.bootstrap_api_low_memory.{bootstrap_low_memory_requested}
+use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
 use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
@@ -24,9 +23,7 @@ use compiler.hir.hir_lowering.module_surface.{
     module_surface_canonical_path,
     module_surface_from_owner,
     module_surface_promote,
-    module_surface_promote_last_failure,
     module_surfaces_promote,
-    module_surfaces_rebuild_declaration_authority_carriers_error,
     module_surfaces_retained_alignment_error
 }
 use compiler.driver.driver_source_loading.{
@@ -46,11 +43,7 @@ use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
 use compiler.driver.driver_phase_gates.{bootstrap_entry_source_index}
 use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.io.{file_exists, file_write}
-# Direct owner import: `std.io` re-exports `file_lock`/`file_unlock` from BOTH
-# io/file_ops.spl and sffi/io.spl, so the barrel name is ambiguous. file_ops is
-# the canonical owner ("File mutation stays owned by file_ops", io/__init__.spl).
-use std.io.file_ops.{file_lock, file_unlock}
+use std.io.{file_lock, file_unlock, file_exists, file_write}
 
 extern fn rt_exit(code: i64)
 extern fn rt_stdout_flush()
@@ -184,14 +177,7 @@ fn _driver_parse_shard_claim(queue_dir: text, path: text) -> bool:
         return _driver_parse_shard_owns_static(path)
     var claimed = false
     if not file_exists(marker):
-        # Spec on line 1, claimed path on line 2. Readers compare only the first
-        # line, so this stays wire-compatible with legacy single-line markers.
-        # The path is here because the marker NAME is hash+length and therefore
-        # not invertible: without this line, a shard that dies holding a claim
-        # cannot be attributed to any file, which is precisely the gap that made
-        # run23's spin unpinnable to a module. See
-        # app.cli.parse_shard_queue.parse_shard_release_claims.
-        claimed = file_write(marker, "{_driver_parse_shard_spec()}\n{path}")
+        claimed = file_write(marker, _driver_parse_shard_spec())
     val _unlocked = file_unlock(fd)
     if claimed:
         _driver_parse_shard_claimed = _driver_parse_shard_claimed + 1
@@ -327,14 +313,8 @@ impl CompilerDriver:
             val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed for {source_path}")
         if not module_surface_promote(surface):
-            # Name the exact field that failed to promote. A bare
-            # "promotion failed for <path>" cost a full bootstrap + gdb cycle
-            # to turn back into "surface.friends was nil" on 2026-08-23.
-            val promote_failure = module_surface_promote_last_failure()
             val _ended = driver_end_transient_parse_scope()
-            return Err(
-                "module surface promotion failed for {source_path} " +
-                "(field: {promote_failure})")
+            return Err("module surface promotion failed for {source_path}")
         log_module_surface_stage(source_path, "promote-done")
         # Close and reclaim the parser scope before mutating the persistent
         # registry. Pausing permits promotion; it does not make allocations
@@ -485,19 +465,6 @@ impl CompilerDriver:
             self.ctx.add_error(
                 "Module surface retention scope end failed after phase 2")
             return false
-        # The declaration-authority Dict carriers do not survive the teardown
-        # above (they report len() == -1 while their aligned scalar arrays are
-        # intact).  Rebuild them once, here, on the surviving driver-level heap
-        # -- the frozen authority lookup has no scalar fallback, so a dead
-        # carrier silently misses every lookup.  See
-        # doc/08_tracking/bug/stage3_hir_imports_memory_explosion_driver_riscv_gen2_2026-08-23.md
-        val authority_rebuild_error =
-            module_surfaces_rebuild_declaration_authority_carriers_error(
-                retained_surfaces)
-        if authority_rebuild_error != "":
-            self.ctx.add_error(
-                "Module surface declaration-authority carrier rebuild failed after phase 2 retention: {authority_rebuild_error}; surfaces={retained_surfaces.surfaces.len()}")
-            return false
         val retained_alignment_error = module_surfaces_retained_alignment_error(
             retained_surfaces)
         if retained_alignment_error != "":
@@ -613,43 +580,12 @@ impl CompilerDriver:
                 if not _driver_parse_shard_owns(source.path):
                     progress_parse_done = progress_parse_done + 1
                     continue
-                # Peak RSS of the whole compile is reached at the END of this
-                # loop, not in HIR: measured 73 MB at parse 0/61 rising to
-                # 1020 MB at parse 60/61 on src/app/mcp/main.spl -- about
-                # 1.2 KB of RSS per source BYTE, which is orders of magnitude
-                # more than the live ASTs and is therefore per-file parse
-                # GARBAGE that the no-GC core runtime never reclaims. See
-                # doc/08_tracking/bug/bootstrap_stage4_ast_hir_overlap_memory_2026-07-27.md
-                # The scoped variant parses inside a transient array scope,
-                # deep-promotes the retained ParserModule out of it, then ends
-                # the scope (freeing the garbage) and resets the lexer/AST
-                # arena owners in the load-bearing order documented in
-                # driver_end_transient_parse_scope(). Opt-in only: the default
-                # path is left byte-identical so no bootstrap lane changes
-                # behaviour until this has been exercised across a full
-                # self-compile. Two ways in, because neither alone reaches
-                # every caller: `options.low_memory` (set by the full CLI's
-                # --low-memory) and the pre-existing env opt-in
-                # bootstrap_low_memory_requested() (SIMPLE_BOOTSTRAP=1 +
-                # SIMPLE_BOOTSTRAP_STAGE4=1 + SIMPLE_BOOTSTRAP_LOW_MEMORY=1),
-                # which is the ONLY reachable gate on the bootstrap CLI --
-                # bootstrap_main.spl parses no --low-memory flag, so a
-                # flag-only gate would be dead code there.
-                val entry_module = if (self.ctx.options.low_memory or
-                                       bootstrap_low_memory_requested()):
-                    parse_full_frontend_stage4_streaming(
-                        source.content,
-                        source.path,
-                        source.module_name,
-                        self.ctx.logger
-                    )
-                else:
-                    parse_full_frontend(
-                        source.content,
-                        source.path,
-                        source.module_name,
-                        self.ctx.logger
-                    )
+                val entry_module = parse_full_frontend(
+                    source.content,
+                    source.path,
+                    source.module_name,
+                    self.ctx.logger
+                )
                 log_phase("phase2:parse:file:done {source.path}")
                 if par_had_error_get():
                     # Collect-all default (see driver_hir_pipeline_lowering.spl):
@@ -920,11 +856,7 @@ impl CompilerDriver:
                         arch_rules: [],
                         mock_decls: [],
                         tagged_layer: "",
-                        layer_dag_edges: "",
-                        # Explicit, never defaulted -- see
-                        # doc/08_tracking/bug/stage3_module_surface_promote_nil_authority_arrays_2026-08-23.md
-                        friends: [],
-                        internal_exports: []
+                        layer_dag_edges: ""
                     )
                 boot_idx = boot_idx + 1
             # Same defect class as the entry-closure verdict above: commit in

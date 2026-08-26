@@ -22,6 +22,48 @@ advanced to `phase3:hir_typecheck:start`, where a separate native call-target
 mis-resolution now blocks it. That downstream crash does not weaken the parser
 proof.
 
+## 2026-08-24 re-report was a STALE STAGE BINARY, not a parser regression
+
+A lane re-reported this as a new, unfiled stage-3 blocker
+(`src/app/office/sheets/data_ops.spl:38:33`, phase 2, 3 of 3 runs, "reproduced
+on the working tree AND a pinned snapshot"). It is neither new nor a source
+defect. Evidence:
+
+- Column 33 of that line is the `(` in
+  `if key_col < 0 or key_col > (max_col - min_col):`. The `Tensor<i64, 2>` in
+  the message is canned EXAMPLE text inside the diagnostic string
+  (`parser_expr.spl:882`), not anything present in the source. Reading it as a
+  const-generics feature gap is a misread the message invites.
+- The Rust seed accepts the shape: `bin/simple run` on a minimal fixture
+  exits rc=0 and prints `true`.
+- The pure-Simple source is fixed at `bf440c278b8` (2026-08-22 01:48), whose
+  `const_arg_needs_separator` ratchet branch is ordered ahead of the
+  keyword-as-type-name branch, so `or` (TOK_OR = 56) breaks the walk.
+- The stage binaries on disk predate that fix:
+  `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple` is dated
+  **2026-08-20 23:53**. Running it directly on the minimal fixture
+  (`compile --format=smf`) reproduces exactly: rc=1, `[ERROR] phase 2 FAILED`,
+  two `const generic` occurrences. That is the whole reproduction — including
+  "on a pinned snapshot", since the snapshot pins source, not the binary.
+
+Resolution: no source change. Stage 3 is unblocked by a stage redeploy, not by
+a parser edit and not by rewriting `data_ops.spl` (which is valid Simple and
+must not be normalised around the bug).
+
+Gap this re-report exposed and closes: `bf440c278b8` landed source-only with no
+spec, so nothing pinned the pure-Simple half. Added
+`test/01_unit/compiler/parser_comparison_chain_not_generic_args_spec.spl` —
+the incident shape plus defect-class neighbours (`while` condition, returned
+expression, ident-only chain with no numeric literal, `>>` kept as a shift),
+and an absence control that a genuine `Box2<i64, 2>` const-generic argument is
+still diagnosed. It honours `SIMPLE_BIN`, so aiming it at a pre-fix stage
+binary is the failing-pre-fix run.
+
+Secondary defect, left open deliberately: the diagnostic quotes a fixed
+`Tensor<i64, 2>` example instead of the offending source tokens, which is what
+sent this investigation to "const generics are unimplemented". Worth quoting
+the real tokens if this text is touched again.
+
 ## Symptom
 
 ```

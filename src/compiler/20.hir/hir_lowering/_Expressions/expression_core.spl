@@ -2,7 +2,6 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.assurance.unsafe_capabilities.{unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
@@ -43,13 +42,6 @@ impl HirLowering:
                 match call_callee_t.kind:
                     case ExprKind.Ident(callee_ident):
                         val callee_ident_t: text = callee_ident
-                        if self.constructor_access_for_name(callee_ident_t) == 0:
-                            self.error("aggregate constructor `{callee_ident_t}` is not visible from this module", e.span)
-                            return HirExpr(
-                                kind: HirExprKind.Error,
-                                has_type_: false,
-                                type_: HirType(kind: HirTypeKind.Unit, span: e.span),
-                                span: e.span)
                         if call_args_t.len() == 1 and not call_args_t[0].has_name:
                             val prim_kind = primitive_cast_type_kind(callee_ident_t)
                             if prim_kind.?:
@@ -61,20 +53,6 @@ impl HirLowering:
                                     type_: cast_target,
                                     span: e.span
                                 )
-                    case ExprKind.Field(constructor_base, constructor_name):
-                        var constructor_access = self.constructor_access_for_name(constructor_name)
-                        match constructor_base.kind:
-                            case ExprKind.Ident(constructor_qualifier):
-                                constructor_access = self.qualified_constructor_access(
-                                    constructor_qualifier, constructor_name)
-                            case _: ()
-                        if constructor_access == 0:
-                            self.error("aggregate constructor `{constructor_name}` is not visible from this module", e.span)
-                            return HirExpr(
-                                kind: HirExprKind.Error,
-                                has_type_: false,
-                                type_: HirType(kind: HirTypeKind.Unit, span: e.span),
-                                span: e.span)
                     case _:
                         pass
                 var hir_args: [HirCallArg] = []
@@ -171,81 +149,6 @@ impl HirLowering:
                                         type_: nil,
                                         span: e.span
                                     )
-                    # Type `Dict<K,V>.keys()` as `[K]` and `.values()` as `[V]`
-                    # while the freshly lowered receiver is still local. The
-                    # pure-Simple layer had NO per-method result-type table at
-                    # all -- grepping 20.hir/30.types/35.semantics for "keys"
-                    # or "values" returned zero matches -- so `d.keys()` came
-                    # out of HIR with `type_: nil`, the `for` loop variable got
-                    # no element type, and MIR fell back to i64. On arm64 that
-                    # is the i32-truncated heap ref recorded in
-                    # doc/08_tracking/bug/stage2_hir_codec_segv_is_i32_truncated_heap_ref_2026-08-24.md:
-                    # `for dk3 in node.functions.keys()` unboxed a SymbolId
-                    # struct as an int, so the nil test and the CoW-clone guard
-                    # were emitted at 32-bit width and `and x9, x23, #0xfffffff8`
-                    # destroyed the high half of a live pointer.
-                    #
-                    # Mirrors the Rust seed's own arms at
-                    # src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:1615-1625
-                    # ("keys" -> Array{element:k}, "values" -> Array{element:v},
-                    # ANY when the receiver is not a typed dict) and the Index
-                    # arm's idiom further down this same function, including its
-                    # load-bearing caveat: `has_type_` is the AUTHORITATIVE
-                    # presence bit. Testing `type_ != nil` alone lets a zeroed
-                    # placeholder be interpreted, whose extracted payload is
-                    # stored back as a real type and SIGSEGVs later in the
-                    # 16-byte HirType clone in `lower_hir_block`. Both bits are
-                    # required here, and `has_type_: true` is set on the result.
-                    #
-                    # Written as two returns rather than one with a
-                    # value-position `if` on the element type: that exact shape
-                    # is the defect being fixed in ba3efbee19e / b1225ed14b8
-                    # (a value-position `if` typed from the then arm alone drops
-                    # the array element type), and reintroducing it here would
-                    # undo the fix at the moment of using it.
-                    # MEASURED 2026-08-24: the `has_type_` route alone is DEAD here.
-                    # Instrumenting this exact gate and native-building two
-                    # fixtures through the interpreted pure-Simple compiler
-                    # showed `has_type_=false` for BOTH a local-variable
-                    # receiver (`d.keys()`) and a field receiver
-                    # (`n.functions.keys()`), so the arm added by c9da626ec1c
-                    # never opened and its binaries were byte-identical to the
-                    # unpatched ones. `lower_hir_expr` simply does not populate
-                    # expression types for receivers at this stage.
-                    #
-                    # The declared type IS available, one lookup away: the same
-                    # `_hir_expr_symbol_or_invalid` + `get_symbol_raw` route the
-                    # module-callable check above already uses. For
-                    # `var d: Dict<SymbolId, i64>` it yields
-                    # `HirTypeKind::Dict(Named(...), Int(64, true))` — measured,
-                    # printed from the running compiler, not inferred. So the
-                    # expression type is preferred when present and the symbol's
-                    # declared type is the fallback.
-                    if method_name_t == "keys" or method_name_t == "values":
-                        if hir_args.len() == 0:
-                            var mc_recv_type_opt: HirType? = nil
-                            if mc_lowered_receiver.has_type_ and mc_lowered_receiver.type_ != nil:
-                                mc_recv_type_opt = mc_lowered_receiver.type_
-                            else:
-                                val mc_recv_sym = _hir_expr_symbol_or_invalid(mc_lowered_receiver.kind)
-                                if mc_recv_sym.is_valid():
-                                    if val mc_recv_symbol = self.symbols.get_symbol_raw(mc_recv_sym.id):
-                                        mc_recv_type_opt = mc_recv_symbol.type_
-                            val mc_recv_type = mc_recv_type_opt ?? HirType(kind: HirTypeKind.Error, span: e.span)
-                            match mc_recv_type.kind:
-                                case HirTypeKind.Dict(mc_dict_key, mc_dict_value):
-                                    if method_name_t == "keys":
-                                        return HirExpr(
-                                            kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
-                                            has_type_: true,
-                                            type_: HirType(kind: HirTypeKind.Array(mc_dict_key, nil), span: e.span),
-                                            span: e.span)
-                                    return HirExpr(
-                                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
-                                        has_type_: true,
-                                        type_: HirType(kind: HirTypeKind.Array(mc_dict_value, nil), span: e.span),
-                                        span: e.span)
-                                case _: ()
                     return HirExpr(
                         kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
                         type_: nil,
@@ -366,13 +269,6 @@ impl HirLowering:
                     # falls through to the pre-existing nil/i64-default
                     # behavior unchanged.
                     val fld_base_sym = _hir_expr_symbol_or_invalid(fld_lowered_base.kind)
-                    if self.field_access_for_expr(fld_lowered_base, fld_name_t) == 0:
-                        self.error("field `{fld_name_t}` is not visible from this module", e.span)
-                        return HirExpr(
-                            kind: HirExprKind.Error,
-                            has_type_: false,
-                            type_: HirType(kind: HirTypeKind.Unit, span: e.span),
-                            span: e.span)
                     if fld_base_sym.is_valid():
                         val fld_field_type = self.field_type_for_base_raw(fld_base_sym.id, fld_name_t)
                         match fld_field_type.kind:
@@ -534,19 +430,7 @@ impl HirLowering:
                         # payloads after collection transfer, which is unsafe on
                         # the staged native ABI and left `row.values[0]`
                         # untyped even though `row.values` was `[Cell]`.
-                        # `has_type_` is the AUTHORITATIVE presence bit (see
-                        # HirExpr's docstring). `type_ != nil` is not the same
-                        # test: when `has_type_` is false the `type_` word is a
-                        # placeholder — commonly a freshly allocated, zeroed
-                        # HirType, which is non-nil — so testing nil alone lets
-                        # a placeholder be INTERPRETED. `base_type.kind` is then
-                        # read out of that placeholder and its enum payload
-                        # extracted, yielding a garbage `element`/`value` that
-                        # is stored back as a real `type_` with `has_type_:
-                        # true`. That malformed word later reaches the 16-byte
-                        # HirType clone in `lower_hir_block`'s HirBlock
-                        # construction and SIGSEGVs.
-                        if lowered_base.has_type_ and lowered_base.type_ != nil:
+                        if lowered_base.type_ != nil:
                             val base_type = lowered_base.type_ ?? HirType(kind: HirTypeKind.Error, span: e.span)
                             match base_type.kind:
                                 case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
@@ -629,42 +513,6 @@ impl HirLowering:
                         value: self.lower_hir_expr(marg_t.value),
                         span: marg_t.span
                     ))
-                # Same Dict<K,V>.keys()/.values() typing as the pre-dispatch
-                # MethodCall arm above -- see the full rationale there. Both
-                # arms are patched because the discriminant-gated pre-dispatch
-                # is not guaranteed to fire: a defeated kind pre-dispatch is
-                # exactly what
-                # doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md
-                # localises for statements on Stage 2, and typing that depends
-                # on which of two duplicated arms happens to run is not typing.
-                # Same expression-type-then-symbol-table lookup as arm A above;
-                # see the measurement recorded there for why `has_type_` alone
-                # is not sufficient.
-                if method_name_t == "keys" or method_name_t == "values":
-                    if hir_args.len() == 0:
-                        var fb_recv_type_opt: HirType? = nil
-                        if lowered_method_receiver.has_type_ and lowered_method_receiver.type_ != nil:
-                            fb_recv_type_opt = lowered_method_receiver.type_
-                        else:
-                            val fb_recv_sym = _hir_expr_symbol_or_invalid(lowered_method_receiver.kind)
-                            if fb_recv_sym.is_valid():
-                                if val fb_recv_symbol = self.symbols.get_symbol_raw(fb_recv_sym.id):
-                                    fb_recv_type_opt = fb_recv_symbol.type_
-                        val fb_recv_type = fb_recv_type_opt ?? HirType(kind: HirTypeKind.Error, span: e.span)
-                        match fb_recv_type.kind:
-                            case HirTypeKind.Dict(fb_dict_key, fb_dict_value):
-                                if method_name_t == "keys":
-                                    return HirExpr(
-                                        kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
-                                        has_type_: true,
-                                        type_: HirType(kind: HirTypeKind.Array(fb_dict_key, nil), span: e.span),
-                                        span: e.span)
-                                return HirExpr(
-                                    kind: HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
-                                    has_type_: true,
-                                    type_: HirType(kind: HirTypeKind.Array(fb_dict_value, nil), span: e.span),
-                                    span: e.span)
-                            case _: ()
                 HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, MethodResolution.Unresolved)
 
             case ExprKind.MatchCase(scrutinee, arms):
@@ -723,7 +571,7 @@ impl HirLowering:
                 var hir_params: [HirParam] = []
                 for p in params:
                     val type_ = if p.type_.?: self.lower_type(p.type_) else: HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
-                    val symbol = self.symbols.define(p.name, SymbolKind.Parameter, type_, p.span, Visibility.Private, false, nil)
+                    val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, false, false, nil)
                     hir_params = hir_params.push(HirParam(
                         symbol: symbol,
                         name: p.name,
@@ -786,7 +634,7 @@ impl HirLowering:
                 for clause in clauses:
                     val hir_kind = match clause.kind:
                         case For(var_, iter):
-                            val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, clause.span, Visibility.Private, false, nil)
+                            val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, clause.span, false, false, nil)
                             HirCompClauseKind.For(symbol, self.lower_hir_expr(iter))
                         case If(cond):
                             HirCompClauseKind.If(self.lower_hir_expr(cond))

@@ -32,9 +32,16 @@ the recursion guards between simply and this repo.
 
 ## Open work
 
-1. Future-impl SSpec tests (declare-now specs reporting `planned`).
-2. `simple test --json` status export for the dashboard generator.
-3. Runner-emitted feature grouping + done-% so the dashboard is test-produced.
+1. DONE 2026-08-26 — `planned(name, reason)` marker: runtime body in
+   `src/lib/nogc_sync_mut/spec.spl`, seed BDD arm in
+   `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` (counts as
+   pending, never pass/fail). Spec:
+   `test/01_unit/app/test_runner_group_json_spec.spl`.
+2. DONE 2026-08-26 — `test --json` alias (json_wrapper.spl) and
+   skipped/pending totals in the JSON export (test_runner_output.spl).
+3. DONE 2026-08-26 — runner-emitted `groups` array in the test JSON
+   (per-directory passed/failed/skipped/pending + done_pct), same spec file.
 4. Sibling repos adopt the same registry format for standardized dashboards.
 5. Replace `update_site.sh` with a `.spl` generator once a released `simple`
-   binary is consumable in simply's CI.
+   binary is consumable in simply's CI, and wire simply's daily job to read
+   the `groups`/`total_pending` JSON to flip registry statuses.

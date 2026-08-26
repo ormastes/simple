@@ -1,0 +1,400 @@
+#!/bin/sh
+# check-llvm-abort-terminator-not-unsupported.shs
+#
+# Fences blocker #6 of the io_runtime native-build chain:
+#   `error: explicit panic() -- diverging, must not fall through`
+#
+# DEFECT (2026-08-24): the LLVM backend's `case Abort(message)` arm called
+# `emit_unsupported_panic(message)`. That helper was converted on 2026-08-23
+# (llvm_backend_unlowered_mir_kind_fails_open) from "emit rt_panic IR" into
+# "FAIL THE BUILD" -- correct for the ~100 genuine unsupported-feature call
+# sites, collateral damage for `Abort`, which is a fully SUPPORTED terminator
+# deliberately emitted by MIR for every user `panic()`. Its `message` is a
+# REASON LABEL, not a diagnostic -- which is why the error carried no
+# file/line. Result: every user `panic()` in any co-compiled module became a
+# hard compile error, and `native-build` of an io_runtime importer failed
+# rc=1. The C backend never had the bug (its Abort arm emits `spl_panic`
+# directly) and cranelift emits a trap -- LLVM was the sole offender.
+#
+# Two independent halves, BOTH required, mirroring the two directions a
+# regression can take:
+#   A. STRUCTURAL -- the LLVM Abort arm must NOT route through
+#      `emit_unsupported_panic`, and must emit the diverging trap IR.
+#   B. PRESERVATION -- `emit_unsupported_panic` must STILL fail the build for
+#      genuine unlowerable kinds. A "fix" that reopens the 2026-08-23
+#      fail-open is a regression, not a fix.
+#
+# Verdict convention (last line of stdout, per .claude/rules/vcs.md):
+#   PASS — <n> check(s) ... exit 0   (n is always > 0)
+#   FAIL — ...                       exit 1
+#   ERROR — nothing was checked ...  exit 2
+# A run that checked 0 things is ERROR, never a pass.
+#
+# `--build` additionally runs a real `native-build` of an io_runtime importer
+# under `timeout`, classifying rc=124 as a DISTINCT HANG failure (blocker #5
+# in this same chain was an exponential DFS read as a hang -- a timeout must
+# never be laundered into a plain failure).
+#
+# `--selftest` runs FIRST and is FATAL.
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+LLVM_TERM="src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+LLVM_HELP="src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl"
+C_TERM="src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl"
+
+DO_BUILD=0
+BUILD_TIMEOUT=${BUILD_TIMEOUT:-900}
+# FLIPPED TO REQUIRED 2026-08-24. This defaulted to 0 while blocker #7 of the
+# io_runtime native-build chain kept native-build at rc=1 for reasons this gate
+# does not own; it was always meant to become mandatory once the chain reached
+# rc=0, which it now has (two llc-invalid-IR defects fixed: the alloca-slot gate
+# rejecting the erasable ResultMatchSemantic witness, and translate_ref
+# hardcoding native_int for a borrow). `--allow-residual-failure` restores the
+# advisory behaviour for a lane that is knowingly mid-repair; it is an explicit,
+# recorded choice, not a default.
+# See doc/08_tracking/bug/native_compile_unresolved_option_result_io_modules_2026-08-24.md
+REQUIRE_SUCCESS=1
+
+# ---------------------------------------------------------------- helpers
+
+# Extract the body of the `case Abort(message):` arm from a backend file:
+# from the case line up to (not including) the next `case ` at the same or
+# lesser indentation. Prints the arm body; empty output means "not found".
+#
+# `#` comment lines are STRIPPED. This gate asserts what the arm DOES, and a
+# comment naming `emit_unsupported_panic` -- exactly what the fix's own
+# explanatory comment does, to record why the arm must not call it -- is not
+# a call to it. Without this strip the gate false-positives on the very tree
+# it is meant to certify (measured 2026-08-24).
+extract_abort_arm() {
+    ea_file=$1
+    awk '
+        /^[[:space:]]*case[[:space:]]+Abort\(/ { inarm=1; next }
+        inarm && /^[[:space:]]*case[[:space:]]/  { inarm=0 }
+        inarm && /^[[:space:]]*#/                { next }
+        inarm { print }
+    ' "$ea_file" 2>/dev/null
+}
+
+# ------------------------------------------------------------- structural
+
+# Returns 0 when the tree is clean, 1 when an offender is found.
+# Sets STRUCT_CHECKS (count) and STRUCT_FAILS (newline-separated reasons).
+run_structural_scan() {
+    rs_root=$1
+    STRUCT_CHECKS=0
+    STRUCT_FAILS=""
+
+    rs_llvm="$rs_root/$LLVM_TERM"
+    rs_help="$rs_root/$LLVM_HELP"
+    rs_c="$rs_root/$C_TERM"
+
+    # -- Check 1/2/3: the LLVM Abort arm ---------------------------------
+    if [ ! -f "$rs_llvm" ]; then
+        STRUCT_FAILS="${STRUCT_FAILS}missing file $LLVM_TERM
+"
+    else
+        rs_arm=$(extract_abort_arm "$rs_llvm")
+        if [ -z "$rs_arm" ]; then
+            STRUCT_FAILS="${STRUCT_FAILS}no 'case Abort(' arm found in $LLVM_TERM
+"
+        else
+            # 1. must NOT call the fail-the-build helper
+            STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+            if printf '%s\n' "$rs_arm" | grep -q 'emit_unsupported_panic'; then
+                STRUCT_FAILS="${STRUCT_FAILS}LLVM Abort arm routes through emit_unsupported_panic (a supported terminator treated as unlowerable; every user panic() becomes a compile error)
+"
+            fi
+            # 2. must emit the diverging trap IR
+            STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+            if ! printf '%s\n' "$rs_arm" | grep -q 'emit_panic_trap_ir'; then
+                STRUCT_FAILS="${STRUCT_FAILS}LLVM Abort arm does not emit the diverging trap IR (expected emit_panic_trap_ir)
+"
+            fi
+        fi
+
+        # 3. the trap helper must exist and emit rt_panic + unreachable
+        STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+        if [ ! -f "$rs_help" ]; then
+            STRUCT_FAILS="${STRUCT_FAILS}missing file $LLVM_HELP
+"
+        elif ! grep -q 'me emit_panic_trap_ir' "$rs_help"; then
+            STRUCT_FAILS="${STRUCT_FAILS}emit_panic_trap_ir is not defined in $LLVM_HELP
+"
+        elif ! grep -q 'call void @rt_panic' "$rs_help" || ! grep -q 'unreachable' "$rs_help"; then
+            STRUCT_FAILS="${STRUCT_FAILS}emit_panic_trap_ir does not emit rt_panic + unreachable in $LLVM_HELP
+"
+        fi
+    fi
+
+    # -- Check 4: PRESERVATION — the fail-open must stay closed ----------
+    STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+    if [ ! -f "$rs_help" ]; then
+        : # already reported above
+    elif ! grep -q 'panic("compile error: {message}")' "$rs_help"; then
+        STRUCT_FAILS="${STRUCT_FAILS}emit_unsupported_panic no longer fails the build for genuine unlowerable kinds (reopens the 2026-08-23 fail-open)
+"
+    fi
+
+    # -- Check 5: the C backend twin must keep emitting a direct trap ----
+    STRUCT_CHECKS=$((STRUCT_CHECKS + 1))
+    if [ -f "$rs_c" ]; then
+        rs_carm=$(extract_abort_arm "$rs_c")
+        if [ -n "$rs_carm" ] && printf '%s\n' "$rs_carm" | grep -q 'emit_unsupported_panic'; then
+            STRUCT_FAILS="${STRUCT_FAILS}C backend Abort arm routes through emit_unsupported_panic (same defect as the LLVM arm)
+"
+        fi
+    fi
+
+    [ -z "$STRUCT_FAILS" ]
+}
+
+# ---------------------------------------------------------------- selftest
+
+selftest() {
+    st_tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    st_rc=0
+
+    # -- Fixture A: clean tree (mirrors the fixed shape) must PASS -------
+    st_a="$st_tmp/clean"
+    mkdir -p "$st_a/$(dirname "$LLVM_TERM")" "$st_a/$(dirname "$C_TERM")"
+    cat > "$st_a/$LLVM_TERM" <<'EOF'
+            case Unreachable:
+                self.builder.emit("  unreachable")
+
+            case Abort(message):
+                self.emit_panic_trap_ir(message)
+
+            case CallTerminator(dest, func, args, normal, unwind):
+                pass
+EOF
+    cat > "$st_a/$LLVM_HELP" <<'EOF'
+    me emit_unsupported_panic(message: text):
+        if not allow_unlowered:
+            eprint("error: {message}")
+            panic("compile error: {message}")
+        self.emit_panic_trap_ir(message)
+
+    me emit_panic_trap_ir(message: text):
+        self.builder.emit("  call void @rt_panic(ptr {ptr_name}, i64 {msg_len})")
+        self.builder.emit("  unreachable")
+EOF
+    cat > "$st_a/$C_TERM" <<'EOF'
+            case Abort(message):
+                self.builder.emit(r"spl_panic(")
+EOF
+    if run_structural_scan "$st_a"; then
+        [ "$STRUCT_CHECKS" -gt 0 ] || { echo "selftest FAIL: clean fixture checked 0 things"; st_rc=1; }
+    else
+        echo "selftest FAIL: clean fixture must PASS, got: $STRUCT_FAILS"
+        st_rc=1
+    fi
+
+    # -- Fixture B: INCIDENT REPLAY — Abort -> emit_unsupported_panic ----
+    st_b="$st_tmp/incident"
+    cp -r "$st_a" "$st_b"
+    cat > "$st_b/$LLVM_TERM" <<'EOF'
+            case Abort(message):
+                self.emit_unsupported_panic(message)
+
+            case CallTerminator(dest, func, args, normal, unwind):
+                pass
+EOF
+    if run_structural_scan "$st_b"; then
+        echo "selftest FAIL: incident replay (Abort -> emit_unsupported_panic) must FAIL"
+        st_rc=1
+    else
+        case "$STRUCT_FAILS" in
+            *emit_unsupported_panic*) : ;;
+            *) echo "selftest FAIL: incident replay failed for the wrong reason: $STRUCT_FAILS"; st_rc=1 ;;
+        esac
+    fi
+
+    # -- Fixture C: MUTATION — fail-open reopened must FAIL --------------
+    st_c="$st_tmp/failopen"
+    cp -r "$st_a" "$st_c"
+    cat > "$st_c/$LLVM_HELP" <<'EOF'
+    me emit_unsupported_panic(message: text):
+        self.emit_panic_trap_ir(message)
+
+    me emit_panic_trap_ir(message: text):
+        self.builder.emit("  call void @rt_panic(ptr {ptr_name}, i64 {msg_len})")
+        self.builder.emit("  unreachable")
+EOF
+    if run_structural_scan "$st_c"; then
+        echo "selftest FAIL: reopened fail-open must FAIL"
+        st_rc=1
+    else
+        case "$STRUCT_FAILS" in
+            *"fail-open"*) : ;;
+            *) echo "selftest FAIL: fail-open fixture failed for the wrong reason: $STRUCT_FAILS"; st_rc=1 ;;
+        esac
+    fi
+
+    # -- Fixture D: MUTATION — trap helper deleted must FAIL -------------
+    st_d="$st_tmp/nohelper"
+    cp -r "$st_a" "$st_d"
+    cat > "$st_d/$LLVM_HELP" <<'EOF'
+    me emit_unsupported_panic(message: text):
+        if not allow_unlowered:
+            eprint("error: {message}")
+            panic("compile error: {message}")
+EOF
+    if run_structural_scan "$st_d"; then
+        echo "selftest FAIL: missing emit_panic_trap_ir must FAIL"
+        st_rc=1
+    fi
+
+    # -- Fixture E: C backend regressed to the helper must FAIL ----------
+    st_e="$st_tmp/cbad"
+    cp -r "$st_a" "$st_e"
+    cat > "$st_e/$C_TERM" <<'EOF'
+            case Abort(message):
+                self.emit_unsupported_panic(message)
+EOF
+    if run_structural_scan "$st_e"; then
+        echo "selftest FAIL: C backend routed through the helper must FAIL"
+        st_rc=1
+    fi
+
+    # -- Fixture F2: a comment NAMING the helper must not false-positive --
+    # This is the real tree's shape: the fix carries an explanatory comment
+    # saying why the arm must not call emit_unsupported_panic. Caught live on
+    # 2026-08-24 -- the gate FAILed the very tree it certifies.
+    st_f2="$st_tmp/comment"
+    cp -r "$st_a" "$st_f2"
+    cat > "$st_f2/$LLVM_TERM" <<'EOF'
+            case Abort(message):
+                # Routing this through `emit_unsupported_panic` turned every
+                # user `panic()` into a hard compile error.
+                self.emit_panic_trap_ir(message)
+
+            case CallTerminator(dest, func, args, normal, unwind):
+                pass
+EOF
+    if run_structural_scan "$st_f2"; then
+        :
+    else
+        echo "selftest FAIL: a comment naming emit_unsupported_panic must not FAIL: $STRUCT_FAILS"
+        st_rc=1
+    fi
+
+    # -- Fixture F: empty tree must check >0 but FAIL on missing files ---
+    st_f="$st_tmp/empty"
+    mkdir -p "$st_f"
+    if run_structural_scan "$st_f"; then
+        echo "selftest FAIL: empty tree must not PASS"
+        st_rc=1
+    fi
+
+    rm -rf "$st_tmp"
+    [ "$st_rc" -eq 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+}
+
+# ------------------------------------------------------------------ args
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --build) DO_BUILD=1 ;;
+        --require-success) REQUIRE_SUCCESS=1 ;;
+        --allow-residual-failure) REQUIRE_SUCCESS=0 ;;
+        --timeout=*) BUILD_TIMEOUT=${arg#--timeout=} ;;
+        *) echo "unknown argument: $arg" >&2; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+    esac
+done
+
+# selftest runs FIRST, unconditionally, and is FATAL
+selftest
+if [ "${SELFTEST_ONLY:-0}" = "1" ]; then
+    echo "PASS — 7 selftest fixture(s) checked, selftest only"
+    exit 0
+fi
+
+# --------------------------------------------------------------- real scan
+
+TOTAL_CHECKS=0
+FAILS=""
+
+if ! run_structural_scan "$REPO_ROOT"; then
+    FAILS="$STRUCT_FAILS"
+fi
+TOTAL_CHECKS=$((TOTAL_CHECKS + STRUCT_CHECKS))
+
+if [ "$TOTAL_CHECKS" -eq 0 ]; then
+    echo "ERROR — nothing was checked (structural scan examined 0 sites)"
+    exit 2
+fi
+
+# ------------------------------------------------------- optional real build
+
+BUILD_NOTE=""
+if [ "$DO_BUILD" = "1" ]; then
+    SEED="$REPO_ROOT/src/compiler_rust/target/release/simple"
+    [ -x "$SEED" ] || SEED="$REPO_ROOT/bin/simple"
+    if [ ! -x "$SEED" ]; then
+        echo "ERROR — nothing was checked (no seed binary to run native-build with)"
+        exit 2
+    fi
+
+    BW=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    cat > "$BW/control.spl" <<'EOF'
+use std.nogc_sync_mut.io_runtime
+
+fn main():
+    val v = env_get("HOME")
+    print("control ok")
+EOF
+
+    # Exit status read DIRECTLY into a variable on the line AFTER the
+    # command -- never through a pipe. A pipeline's $? is the last stage's.
+    timeout "$BUILD_TIMEOUT" "$SEED" native-build "$BW/control.spl" -o "$BW/control.bin" > "$BW/out.log" 2> "$BW/err.log"
+    NB_RC=$?
+
+    TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+
+    if [ "$NB_RC" = "124" ]; then
+        # rc=124 is a TIMEOUT: a DISTINCT failure class. Not a pass, not a
+        # crash. Blocker #5 in this chain was an exponential DFS read as a
+        # hang -- never launder a timeout into a plain failure.
+        FAILS="${FAILS}native-build HANG: timed out after ${BUILD_TIMEOUT}s (rc=124)
+"
+        BUILD_NOTE=", native-build HUNG (rc=124)"
+    elif grep -q 'explicit panic() -- diverging, must not fall through' "$BW/err.log" 2>/dev/null; then
+        # The defect's exact signature, regardless of rc.
+        FAILS="${FAILS}native-build emitted the Abort reason label as a compile error: 'explicit panic() -- diverging, must not fall through' (rc=$NB_RC)
+"
+        BUILD_NOTE=", native-build rc=$NB_RC with the blocker-#6 signature"
+    elif [ "$NB_RC" = "0" ]; then
+        BUILD_NOTE=", native-build rc=0"
+    elif [ "$REQUIRE_SUCCESS" = "1" ]; then
+        FB=$(grep -m1 '^error:' "$BW/err.log" 2>/dev/null)
+        FAILS="${FAILS}native-build rc=$NB_RC (--require-success): ${FB:-no error: line}
+"
+        BUILD_NOTE=", native-build rc=$NB_RC"
+    else
+        # Blocker #6's signature is ABSENT, which is what this gate asserts.
+        # A different residual failure is a LATER blocker, named honestly and
+        # not laundered into a pass of something else.
+        FB=$(grep -m1 '^error:' "$BW/err.log" 2>/dev/null)
+        BUILD_NOTE=", native-build rc=$NB_RC but WITHOUT the blocker-#6 signature (residual: ${FB:-none}) -- pass --require-success to make rc=0 mandatory"
+    fi
+
+    rm -rf "$BW"
+fi
+
+# ------------------------------------------------------------------ verdict
+
+if [ -n "$FAILS" ]; then
+    printf '%s' "$FAILS" | while IFS= read -r line; do
+        [ -n "$line" ] && echo "  offender: $line"
+    done
+    NF=$(printf '%s' "$FAILS" | grep -c .)
+    echo "FAIL — $TOTAL_CHECKS check(s) run, $NF offender(s)$BUILD_NOTE"
+    exit 1
+fi
+
+echo "PASS — $TOTAL_CHECKS check(s) run, LLVM Abort terminator lowers to a diverging trap and emit_unsupported_panic still fails the build$BUILD_NOTE"
+exit 0

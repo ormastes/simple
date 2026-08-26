@@ -6,7 +6,6 @@
 
 use std.common.sdn.parser (parse)
 use std.common.sdn.value.{SdnValue}
-use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.cache.integration.shadow_mode.{
     ShadowActionInputs, shadow_enabled, shadow_on_compile_start,
     shadow_on_compile_done, shadow_report
@@ -18,56 +17,37 @@ use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_int
 # File Fingerprinting
 # ============================================================================
 
-@unsafe(reason: "raw cache-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
-@unsafe(reason: "raw file-size query; negative values are the missing or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
-@unsafe(reason: "raw nullable text read; nil is the missing, non-UTF-8, or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
-@unsafe(reason: "raw cache write status; false means the provider did not complete the write", capabilities: [ffi])
+extern fn rt_hash_text(content: text) -> i64
 extern fn rt_file_write_text(path: text, content: text) -> bool
-@unsafe(reason: "raw file digest; empty text is the unreadable or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_hash_sha256(path: text) -> text
-@unsafe(reason: "raw CLI argument array; empty data may mean no args or provider failure", capabilities: [ffi])
 extern fn rt_cli_get_args() -> [text]
-@unsafe(reason: "raw wall clock; negative values are the provider-failure sentinel", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
-@unsafe(reason: "raw process identity; non-positive values are the provider-failure sentinel", capabilities: [ffi])
 extern fn rt_getpid() -> i64
-@unsafe(reason: "raw directory probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_dir_exists(path: text) -> bool
-@unsafe(reason: "raw cache-file delete status; false includes absent or provider failure", capabilities: [ffi])
 extern fn rt_file_delete(path: text) -> bool
-@unsafe(reason: "raw environment lookup; empty text is the unset or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 
 fn incremental_file_exists(path: text) -> bool:
-    var exists = false
-    unsafe(capabilities: [ffi]):
-        exists = rt_file_exists(path)
-    exists
+    rt_file_exists(path)
 
 fn incremental_file_size(path: text) -> i64:
-    var size: i64 = -1
-    unsafe(capabilities: [ffi]):
-        size = rt_file_size(path)
-    size
+    rt_file_size(path)
 
 # nil = file missing/unreadable. Callers MUST treat nil as a cache MISS — never
 # as empty content (an empty text would be hashed/parsed as real content).
 fn incremental_file_read_text(path: text) -> text?:
-    var content: text? = nil
-    unsafe(capabilities: [ffi]):
-        content = rt_file_read_text(path)
-    content
+    rt_file_read_text(path)
 
 fn incremental_parse_file(path: text) -> Result<SdnValue, text>:
     if val content = incremental_file_read_text(path):
         return parse(content)
     Err("cache file missing or unreadable: {path}")
 
-fn incremental_hash_text(content: text) -> text:
-    sha256_text(content)
+fn incremental_hash_text(content: text) -> i64:
+    rt_hash_text(content)
 
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
 
@@ -103,10 +83,7 @@ fn native_build_compiler_source_fingerprint() -> text:
     if _compiler_src_fingerprint_memo != "@@unset@@":
         return _compiler_src_fingerprint_memo
     val root = "src/compiler"
-    var root_exists = false
-    unsafe(capabilities: [ffi]):
-        root_exists = rt_dir_exists(root)
-    if not root_exists:
+    if not rt_dir_exists(root):
         _compiler_src_fingerprint_memo = ""
         return ""
     var lines: [text] = []
@@ -118,37 +95,16 @@ fn native_build_compiler_source_fingerprint() -> text:
         val entries = incremental_sorted_text(dir_list(dir) ?? [])
         for entry in entries:
             val full = dir + "/" + entry
-            var full_is_dir = false
-            unsafe(capabilities: [ffi]):
-                full_is_dir = rt_dir_exists(full)
-            if full_is_dir:
+            if rt_dir_exists(full):
                 dirs = dirs.push(full)
             elif entry.ends_with(".spl"):
-                var size: i64 = -1
-                var digest = ""
-                unsafe(capabilities: [ffi]):
-                    size = rt_file_size(full)
-                unsafe(capabilities: [ffi]):
-                    digest = rt_file_hash_sha256(full)
-                lines = lines.push("{full}|{size}|{digest}")
-    var fingerprint_pid: i64 = -1
-    var fingerprint_now: i64 = -1
-    unsafe(capabilities: [ffi]):
-        fingerprint_pid = rt_getpid()
-    unsafe(capabilities: [ffi]):
-        fingerprint_now = rt_time_now_unix_micros()
-    var fp = "unfingerprintable-{fingerprint_pid}-{fingerprint_now}"
+                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+    var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
     dir_create_all("build")
-    val tmp = "build/.compiler_src_fp.{fingerprint_pid}.tmp"
-    var wrote_manifest = false
-    unsafe(capabilities: [ffi]):
-        wrote_manifest = rt_file_write_text(tmp, lines.join("\n"))
-    if wrote_manifest:
-        var digest = ""
-        unsafe(capabilities: [ffi]):
-            digest = rt_file_hash_sha256(tmp)
-        unsafe(capabilities: [ffi]):
-            rt_file_delete(tmp)
+    val tmp = "build/.compiler_src_fp.{rt_getpid()}.tmp"
+    if rt_file_write_text(tmp, lines.join("\n")):
+        val digest = rt_file_hash_sha256(tmp)
+        rt_file_delete(tmp)
         if digest.len() == 64:
             fp = "{digest.substring(0, 16)}n{lines.len()}"
     _compiler_src_fingerprint_memo = fp
@@ -164,27 +120,16 @@ fn native_build_compiler_executable_hash() -> text:
     # The orchestrator publishes the resolved compiler in SIMPLE_BINARY before
     # spawning anything; hash THAT when present so every process of a build
     # (and every build run by the same compiler) shares one identity.
-    var simple_bin = ""
-    unsafe(capabilities: [ffi]):
-        simple_bin = rt_env_get("SIMPLE_BINARY") ?? ""
-    var simple_bin_exists = false
-    if simple_bin != "":
-        unsafe(capabilities: [ffi]):
-            simple_bin_exists = rt_file_exists(simple_bin)
-    if simple_bin != "" and simple_bin_exists:
-        var bin_hash = ""
-        unsafe(capabilities: [ffi]):
-            bin_hash = rt_file_hash_sha256(simple_bin)
+    val simple_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if simple_bin != "" and rt_file_exists(simple_bin):
+        val bin_hash = rt_file_hash_sha256(simple_bin)
         if bin_hash.len() == 64:
             return bin_hash
-    unsafe(capabilities: [ffi]):
-        val args = rt_cli_get_args()
-        if args.len() > 0:
-            var hash = ""
-            unsafe(capabilities: [ffi]):
-                hash = rt_file_hash_sha256(args[0])
-            if hash.len() == 64:
-                return hash
+    val args = rt_cli_get_args()
+    if args.len() > 0:
+        val hash = rt_file_hash_sha256(args[0])
+        if hash.len() == 64:
+            return hash
     ""
 
 fn native_build_runtime_artifact(path: text) -> bool:
@@ -203,34 +148,13 @@ fn native_build_runtime_provider_fingerprint(runtime_path: text) -> text:
     """
     if runtime_path == "":
         return "embedded"
-    var runtime_file_exists = false
-    unsafe(capabilities: [ffi]):
-        runtime_file_exists = rt_file_exists(runtime_path)
-    var runtime_is_dir = false
-    if runtime_file_exists:
-        unsafe(capabilities: [ffi]):
-            runtime_is_dir = rt_dir_exists(runtime_path)
-    if runtime_file_exists and not runtime_is_dir:
-        var direct_hash = ""
-        unsafe(capabilities: [ffi]):
-            direct_hash = rt_file_hash_sha256(runtime_path)
+    if rt_file_exists(runtime_path) and not rt_dir_exists(runtime_path):
+        val direct_hash = rt_file_hash_sha256(runtime_path)
         if direct_hash.len() == 64:
             return "file-{direct_hash}"
-        var pid: i64 = -1
-        var now: i64 = -1
-        unsafe(capabilities: [ffi]):
-            pid = rt_getpid()
-        unsafe(capabilities: [ffi]):
-            now = rt_time_now_unix_micros()
-        return "unfingerprintable-{pid}-{now}"
-    if not runtime_is_dir:
-        var pid: i64 = -1
-        var now: i64 = -1
-        unsafe(capabilities: [ffi]):
-            pid = rt_getpid()
-        unsafe(capabilities: [ffi]):
-            now = rt_time_now_unix_micros()
-        return "missing-{pid}-{now}"
+        return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    if not rt_dir_exists(runtime_path):
+        return "missing-{rt_getpid()}-{rt_time_now_unix_micros()}"
     var lines: [text] = []
     # Linkers consume providers directly from SIMPLE_RUNTIME_PATH (-L/path and
     # explicit /path/archive names). Do not recurse: bootstrap cache directories
@@ -239,58 +163,21 @@ fn native_build_runtime_provider_fingerprint(runtime_path: text) -> text:
     val entries = incremental_sorted_text(dir_list(runtime_path) ?? [])
     for entry in entries:
         val full = runtime_path + "/" + entry
-        val is_runtime_artifact = native_build_runtime_artifact(full)
-        var full_is_dir = false
-        if is_runtime_artifact:
-            unsafe(capabilities: [ffi]):
-                full_is_dir = rt_dir_exists(full)
-        if is_runtime_artifact and not full_is_dir:
-            var digest = ""
-            unsafe(capabilities: [ffi]):
-                digest = rt_file_hash_sha256(full)
+        if native_build_runtime_artifact(full) and not rt_dir_exists(full):
+            val digest = rt_file_hash_sha256(full)
             if digest.len() != 64:
-                var pid: i64 = -1
-                var now: i64 = -1
-                unsafe(capabilities: [ffi]):
-                    pid = rt_getpid()
-                unsafe(capabilities: [ffi]):
-                    now = rt_time_now_unix_micros()
-                return "unfingerprintable-{pid}-{now}"
-            var size: i64 = -1
-            unsafe(capabilities: [ffi]):
-                size = rt_file_size(full)
-            lines = lines.push("{entry}|{size}|{digest}")
+                return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+            lines = lines.push("{entry}|{rt_file_size(full)}|{digest}")
     if lines.len() == 0:
-        var pid: i64 = -1
-        var now: i64 = -1
-        unsafe(capabilities: [ffi]):
-            pid = rt_getpid()
-        unsafe(capabilities: [ffi]):
-            now = rt_time_now_unix_micros()
-        return "empty-{pid}-{now}"
+        return "empty-{rt_getpid()}-{rt_time_now_unix_micros()}"
     val manifest = lines.join("\n")
-    var tmp_pid: i64 = -1
-    unsafe(capabilities: [ffi]):
-        tmp_pid = rt_getpid()
-    val tmp = "build/.runtime_provider_fp.{tmp_pid}.tmp"
-    var wrote_manifest = false
-    unsafe(capabilities: [ffi]):
-        wrote_manifest = rt_file_write_text(tmp, manifest)
-    if wrote_manifest:
-        var digest = ""
-        unsafe(capabilities: [ffi]):
-            digest = rt_file_hash_sha256(tmp)
-        unsafe(capabilities: [ffi]):
-            rt_file_delete(tmp)
+    val tmp = "build/.runtime_provider_fp.{rt_getpid()}.tmp"
+    if rt_file_write_text(tmp, manifest):
+        val digest = rt_file_hash_sha256(tmp)
+        rt_file_delete(tmp)
         if digest.len() == 64:
             return "dir-{digest.substring(0, 16)}n{lines.len()}"
-    var pid: i64 = -1
-    var now: i64 = -1
-    unsafe(capabilities: [ffi]):
-        pid = rt_getpid()
-    unsafe(capabilities: [ffi]):
-        now = rt_time_now_unix_micros()
-    "unfingerprintable-{pid}-{now}"
+    "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
 pub fn native_build_producer_identity(executable_hash: text, compiler_source_fingerprint: text, runtime_provider_fingerprint: text, runtime_bundle: text) -> text:
     """Canonical cache producer identity; every codegen/ABI authority is bound."""
@@ -301,22 +188,12 @@ fn native_build_compiler_identity() -> text:
     val hash = native_build_compiler_executable_hash()
     if hash != "":
         val compiler_fp = if src_fp == "": "embedded" else: src_fp
-        var runtime_path = ""
-        var runtime_bundle = ""
-        unsafe(capabilities: [ffi]):
-            runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
-        unsafe(capabilities: [ffi]):
-            runtime_bundle = rt_env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+        val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
+        val runtime_bundle = rt_env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
         val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)
         return native_build_producer_identity(hash, compiler_fp, runtime_fp, runtime_bundle)
     # Fail closed: an unknown compiler must not reuse another compiler's cache.
-    var pid: i64 = -1
-    var now: i64 = -1
-    unsafe(capabilities: [ffi]):
-        pid = rt_getpid()
-    unsafe(capabilities: [ffi]):
-        now = rt_time_now_unix_micros()
-    "uncacheable-{pid}-{now}"
+    "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
 pub fn native_build_cache_lane() -> text:
     """Declared private-cache lane for this process.
@@ -331,9 +208,7 @@ pub fn native_build_cache_lane() -> text:
     Unset means `default`, which reproduces the previous single-lane behaviour
     exactly. See doc/05_design/compiler/incremental_build/per_lane_private_caches.md
     """
-    var lane = ""
-    unsafe(capabilities: [ffi]):
-        lane = rt_env_get("SIMPLE_CACHE_SCOPE") ?? ""
+    val lane = rt_env_get("SIMPLE_CACHE_SCOPE") ?? ""
     if lane == "":
         return "default"
     lane
@@ -353,10 +228,7 @@ fn incremental_mkdir_p(path: text) -> bool:
     dir_create_all(path)
 
 fn incremental_file_write_text(path: text, content: text) -> bool:
-    var wrote = false
-    unsafe(capabilities: [ffi]):
-        wrote = rt_file_write_text(path, content)
-    wrote
+    rt_file_write_text(path, content)
 
 fn incremental_parent_dir(path: text) -> text:
     val slash = path.last_index_of("/")
@@ -394,10 +266,9 @@ impl FileFingerprint:
         var hash = ""
         val content_opt = incremental_file_read_text(path)
         if val content = content_opt:
-            hash = incremental_hash_text(content)
+            hash = incremental_hash_text(content).to_text()
         else:
-            unsafe(capabilities: [ffi]):
-                hash = rt_file_hash_sha256(path)
+            hash = rt_file_hash_sha256(path)
             if hash == "":
                 return nil
         val size = incremental_file_size(path)

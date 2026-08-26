@@ -366,15 +366,15 @@ impl SshSession:
             return
         val want_reply = ssh_session_u8_at(payload, request_end) != 0
         val off = request_end + 1
-        val reply_remote_id =
-            if recipient == 0:
-                self.active_remote_channel_id
-            else:
-                val ch = self.channels.find(recipient)
-                if ch != nil:
-                    ch.remote_id
-                else:
-                    0u32
+        # RFC 4254 channel number zero is a valid locally-owned channel, not a
+        # sentinel for the most recently opened channel. Resolve every request
+        # through the canonical channel table so multiplexed replies cannot be
+        # redirected to an unrelated peer channel. Unknown recipients own no
+        # reply route and are ignored fail-closed.
+        val channel = self.channels.find(recipient)
+        if channel == nil:
+            return
+        val reply_remote_id = channel.remote_id
 
         if ssh_channel_request_is_sftp(payload):
             if not ssh_sftp_principal_admitted(
@@ -384,8 +384,7 @@ impl SshSession:
                 if want_reply:
                     self.send_packet(_build_channel_failure_stable(reply_remote_id))
                 return
-            val channel = self.channels.find(recipient)
-            if channel == nil or (self.sftp_enabled and self.sftp_local_channel_id != recipient):
+            if self.sftp_enabled and self.sftp_local_channel_id != recipient:
                 if want_reply:
                     self.send_packet(_build_channel_failure_stable(reply_remote_id))
                 return

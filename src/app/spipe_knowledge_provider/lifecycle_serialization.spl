@@ -1,0 +1,127 @@
+# Cooperative, byte-identical serialization for the lifecycle CAS boundary.
+# Durable record schemas remain owned by durable_records.spl; parity tests bind
+# this bounded emitter to its canonical unbounded compatibility emitter.
+use std.common.search.document.{SearchDocument}
+use std.common.json.serializer.{json_escape_string}
+use std.common.json.parser.{json_parse_with_error}
+use app.spipe_knowledge_provider.durable_records.{ProviderReplayV1, ProviderCandidateV1, receipt_id, stored_text}
+use app.spipe_knowledge_provider.query_clock.{QueryClockPort, query_stop_reason}
+
+fn _check(clock: QueryClockPort, request_id: text,
+          admitted_at_ms: i64, deadline_ms: i64) -> Result<(), text>:
+    val reason = query_stop_reason(clock, request_id, admitted_at_ms, deadline_ms)
+    if reason != "": return Err(reason)
+    Ok(())
+
+fn _nullable(value: text) -> text:
+    if value == "": "null" else: "\"" + json_escape_string(value) + "\""
+
+fn _document_json(document: SearchDocument, scoped_hash: text,
+                  scoped_hash_preimage: text, request_id: text,
+                  admitted_at_ms: i64, deadline_ms: i64,
+                  clock: QueryClockPort) -> Result<text, text>:
+    var fields: [text] = []
+    var i = 0
+    while i < document.fields.len():
+        _check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val field = document.fields[i]
+        fields.push("{\"name\":\"" + json_escape_string(field.name) +
+            "\",\"value\":\"" + json_escape_string(field.value) +
+            "\",\"weight_milli\":" + field.weight_milli.to_text() + "}")
+        _check(clock, request_id, admitted_at_ms, deadline_ms)?
+        i = i + 1
+    var facets: [text] = []
+    i = 0
+    while i < document.metadata.len():
+        _check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val facet = document.metadata[i]
+        facets.push("{\"name\":\"" + json_escape_string(facet.name) +
+            "\",\"value\":\"" + json_escape_string(facet.value) + "\"}")
+        _check(clock, request_id, admitted_at_ms, deadline_ms)?
+        i = i + 1
+    Ok("{\"facets\":[" + facets.join(",") + "],\"fields\":[" +
+        fields.join(",") + "],\"id\":\"" + json_escape_string(document.id) +
+        "\",\"revision\":\"" + json_escape_string(document.revision) +
+        "\",\"scoped_hash\":\"" + json_escape_string(scoped_hash) +
+        "\",\"scoped_hash_preimage\":\"" +
+        json_escape_string(scoped_hash_preimage) + "\"}")
+
+fn _replay_json(row: ProviderReplayV1, workspace: text, snapshot: text,
+                scope_digest: text, request_id: text,
+                admitted_at_ms: i64, deadline_ms: i64,
+                clock: QueryClockPort) -> Result<text, text>:
+    _check(clock, request_id, admitted_at_ms, deadline_ms)?
+    var result = ""
+    if row.receipt != "":
+        result = "{\"operation\":\"" + json_escape_string(row.operation) + "\",\"operation_id\":\"" + json_escape_string(row.operation_id) + "\",\"payload_hash\":\"" + json_escape_string(row.payload_hash) + "\",\"receipt\":\"" + json_escape_string(row.receipt) + "\",\"receipt_id\":\"" + json_escape_string(row.receipt_id) + "\",\"replay_signature\":\"" + json_escape_string(row.replay_signature) + "\",\"request_id\":\"" + json_escape_string(row.request_id) + "\",\"response\":\"" + json_escape_string(row.response) + "\",\"response_hash\":\"" + json_escape_string(row.response_hash) + "\",\"schema\":\"spipe-durable-replay-v1\",\"scope_digest\":\"" + json_escape_string(scope_digest) + "\",\"snapshot\":\"" + json_escape_string(snapshot) + "\",\"workspace\":\"" + json_escape_string(workspace) + "\"}"
+    else:
+        result = "{\"candidate_uid\":\"" + json_escape_string(row.candidate_uid) + "\",\"observed_terminal_receipt_id\":\"" + json_escape_string(row.observed_terminal_receipt_id) + "\",\"observed_terminal_receipt_kind\":\"" + json_escape_string(row.observed_terminal_receipt_kind) + "\",\"observed_terminal_state\":\"" + json_escape_string(row.observed_terminal_state) + "\",\"operation\":\"index_publish\",\"operation_id\":\"" + json_escape_string(row.operation_id) + "\",\"payload_hash\":\"" + json_escape_string(row.payload_hash) + "\",\"recorded_at_ms\":" + row.recorded_at_ms.to_text() + ",\"request_id\":\"" + json_escape_string(row.request_id) + "\",\"response\":\"" + json_escape_string(row.response) + "\",\"response_hash\":\"" + json_escape_string(row.response_hash) + "\",\"schema\":\"spipe-durable-terminal-error-v1\",\"scope_digest\":\"" + json_escape_string(scope_digest) + "\",\"snapshot\":\"" + json_escape_string(snapshot) + "\",\"workspace\":\"" + json_escape_string(workspace) + "\"}"
+    _check(clock, request_id, admitted_at_ms, deadline_ms)?
+    Ok(result)
+
+fn _candidate_json(item: ProviderCandidateV1, workspace: text,
+                   snapshot: text, scope_digest: text, request_id: text,
+                   admitted_at_ms: i64, deadline_ms: i64,
+                   clock: QueryClockPort) -> Result<text, text>:
+    var documents: [text] = []
+    var i = 0
+    while i < item.snapshot.documents.len():
+        _check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val scoped_hash = if i < item.document_hashes.len(): item.document_hashes[i] else: ""
+        val preimage = if i < item.document_hash_preimages.len(): item.document_hash_preimages[i] else: ""
+        documents.push(_document_json(item.snapshot.documents[i], scoped_hash,
+            preimage, request_id, admitted_at_ms, deadline_ms, clock)?)
+        i = i + 1
+    _check(clock, request_id, admitted_at_ms, deadline_ms)?
+    Ok("{\"apply_operation_id\":\"" + json_escape_string(item.apply_operation_id) + "\",\"apply_payload_hash\":\"" + json_escape_string(item.apply_payload_hash) + "\",\"apply_receipt\":\"" + json_escape_string(item.apply_receipt) + "\",\"apply_receipt_id\":\"" + json_escape_string(receipt_id(item.apply_receipt)) + "\",\"base_root\":\"" + json_escape_string(item.base_root) + "\",\"candidate_root\":\"" + json_escape_string(item.candidate_root) + "\",\"candidate_root_preimage\":\"" + json_escape_string(item.candidate_root_preimage) + "\",\"created_at_ms\":" + item.created_at_ms.to_text() + ",\"documents\":[" + documents.join(",") + "],\"expires_at_ms\":" + item.expires_at_ms.to_text() + ",\"schema\":\"spipe-candidate-record-v1\",\"scope_digest\":\"" + json_escape_string(scope_digest) + "\",\"snapshot\":\"" + json_escape_string(snapshot) + "\",\"state\":\"" + json_escape_string(item.state) + "\",\"terminal_at_ms\":" + (if item.terminal_at_ms == 0: "null" else: item.terminal_at_ms.to_text()) + ",\"terminal_operation_id\":" + _nullable(item.terminal_operation_id) + ",\"terminal_receipt\":" + _nullable(item.terminal_receipt) + ",\"terminal_receipt_id\":" + _nullable(receipt_id(item.terminal_receipt)) + ",\"terminal_receipt_kind\":" + _nullable(item.terminal_receipt_kind) + ",\"terminal_result_root\":" + _nullable(item.terminal_result_root) + ",\"uid\":\"" + json_escape_string(item.uid) + "\",\"workspace\":\"" + json_escape_string(workspace) + "\"}")
+
+fn _publication_json(item: ProviderCandidateV1) -> text:
+    val payload_hash = stored_text(json_parse_with_error(
+        item.terminal_receipt).0, "payload_hash")
+    "{\"candidate_uid\":\"" + json_escape_string(item.uid) +
+        "\",\"operation_id\":\"" + json_escape_string(item.terminal_operation_id) +
+        "\",\"operation_receipt_id\":\"" + json_escape_string(receipt_id(
+            item.terminal_receipt)) + "\",\"payload_hash\":\"" +
+        json_escape_string(payload_hash) + "\",\"previous_logical_root\":\"" +
+        json_escape_string(item.base_root) + "\",\"published_at_ms\":" +
+        item.terminal_at_ms.to_text() + ",\"result_logical_root\":\"" +
+        json_escape_string(item.candidate_root) +
+        "\",\"schema\":\"spipe-publication-v1\"}"
+
+fn lifecycle_records_json_controlled(replay: [ProviderReplayV1],
+                          candidates: [ProviderCandidateV1], workspace: text,
+                          snapshot: text, scope_digest: text,
+                          provider_generation: i64,
+                          current_logical_root: text,
+                          request_id: text, admitted_at_ms: i64,
+                          deadline_ms: i64,
+                          clock: QueryClockPort) -> Result<text, text>:
+    var replay_rows: [text] = []
+    var candidate_rows: [text] = []
+    var publications: [text] = []
+    var i = 0
+    while i < replay.len():
+        replay_rows.push(_replay_json(replay[i], workspace, snapshot,
+            scope_digest, request_id, admitted_at_ms, deadline_ms, clock)?)
+        i = i + 1
+    i = 0
+    while i < candidates.len():
+        _check(clock, request_id, admitted_at_ms, deadline_ms)?
+        val candidate = candidates[i]
+        candidate_rows.push(_candidate_json(candidate, workspace, snapshot,
+            scope_digest, request_id, admitted_at_ms, deadline_ms, clock)?)
+        if candidate.state == "published":
+            publications.push(_publication_json(candidate))
+            _check(clock, request_id, admitted_at_ms, deadline_ms)?
+        i = i + 1
+    val result = "{\"candidates\":[" + candidate_rows.join(",") +
+        "],\"current_logical_root\":\"" + json_escape_string(current_logical_root) +
+        "\",\"provider_generation\":" + provider_generation.to_text() +
+        ",\"publications\":[" + publications.join(",") + "],\"replay\":[" +
+        replay_rows.join(",") +
+        "],\"schema\":\"spipe-provider-lifecycle-store-v1\",\"scope_digest\":\"" +
+        json_escape_string(scope_digest) + "\",\"snapshot\":\"" +
+        json_escape_string(snapshot) + "\",\"workspace\":\"" +
+        json_escape_string(workspace) + "\"}"
+    _check(clock, request_id, admitted_at_ms, deadline_ms)?
+    Ok(result)
