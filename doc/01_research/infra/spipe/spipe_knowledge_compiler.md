@@ -2418,3 +2418,21 @@ pushed as `32574ab884`.
 This closes the internal-pool prerequisite only. Producer receipt binding,
 exact identity dominance, accepted graph candidate generation, and exposed
 search/provider orchestration remain open.
+
+## 36. 2026-08-26 Authority-Bound Exact Identity Admission
+
+The exact identity tier is now a standalone dependency-free resolver over an
+authorization-filtered, snapshot-bound lookup projection. Search receipts bind
+workspace, project, worktree, revision, identity snapshot/root, authorization
+scope, policy, and operation before the projection is read. Canonical artifact
+UID queries never fall through; normalized keys and active project-scoped
+`artifact_key` alias projections are unioned without priority-breaking an
+ambiguity. Unauthorized identities are never returned, counted, or explained.
+
+Evidence: syntax checks `PASS`; focused `8/8`; full SPipe suite through the
+final performance gate `PASS`; highest-capability final review `PASS`. The exact
+two-file slice was pushed as `d1b601697f`.
+
+This admits exact resolution and the future pin decision only. It does not yet
+invoke lexical/semantic providers, accepted-edge traversal, fusion, reranking,
+or expose a search command; integrated AC-4 remains open.

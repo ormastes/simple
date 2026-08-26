@@ -47,6 +47,11 @@ is retained as an append-only audit log and must not be read as current truth.
   PASS, including raw-rank-1001 to final-rank-793 promotion. Exact four-file
   commit pushed as `32574ab884`. Identity/graph/provider integration and AC-4
   remain open.
+- implementation-wave4-exact-identity-accepted: Added a snapshot/receipt/scope-
+  bound exact resolver over authorized canonical UID/key/active-alias rows.
+  Evidence: syntax PASS, focused 8/8, full SPipe suite/perf PASS, final xhigh
+  PASS. Exact two-file commit pushed as `d1b601697f`. Graph/provider/fusion
+  orchestration and AC-4 remain open.
 
 ## Raw Request
 `$sp_dev imlldoc/01_research/infra/spipe/spipe_knowledge_compiler.md with pherallel agents with detail guide and higher model review. make design plan details. sync push often gh main`

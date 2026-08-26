@@ -634,3 +634,17 @@ The identity/graph orchestration owner may now depend on v2, but must bind each
 source completeness digest into the search receipt, perform exact identity
 dominance before fusion, fail closed on incomplete accepted-edge traversal, and
 apply the user limit last. This checkpoint alone does not close AC-4.
+
+### 10.10 Authority-bound exact identity admission
+
+The standalone exact resolver is accepted and pushed as `d1b601697f`. It reads
+one receipt-bound authorized identity projection, performs byte-exact canonical
+UID lookup or unioned key/active-alias lookup, fails closed on corrupt bindings,
+and prevents unauthorized identities from affecting cardinality or explanations.
+Syntax, focused 8/8, full package/performance, and final highest-capability gates
+passed.
+
+The integrated search owner must consume this resolver without re-resolving or
+weakening its bindings: a resolved identity is pinned ahead of retrieval and
+removed from every ranked source; ambiguity is reported without a pin; not-found
+continues normally. Graph/provider/RRF orchestration and AC-4 remain open.
