@@ -298,3 +298,11 @@ After a successful external compile, source or generated-output read failure
 now changes the result to a typed runtime error instead of writing an empty
 source map and returning success.  The successful branch retains exactly two
 reads and adds no probe, retry, copy, lookup, or generic dispatch.
+### Compiler interpret-cache authority follow-up
+
+The public interpret API now tags its SMF existence and live-source read
+dependencies `unsafe(ffi)` and confines them to two always-inlined lexical
+owners.  A nullable source-provider failure produces a conservative cache miss
+before interface/hash comparison, while valid empty source remains distinct.
+Cache admission retains one existence query and one source read, with no retry,
+copy, lookup, hash duplication, or generic dispatch added.

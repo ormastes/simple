@@ -1871,3 +1871,10 @@ and unpromoted.
 - [x] Fail a successful compile if source-map input/output cannot be read.
 - [x] Prevent fabricated empty source maps from returning success.
 - [x] Preserve two-read success behavior and add a static ratchet.
+### Completed compiler interpret-cache authority slice
+
+- [x] Tag cache existence and source-read declarations `unsafe(ffi)`.
+- [x] Confine them to two always-inlined lexical owners.
+- [x] Correct live-source reads to nullable text.
+- [x] Convert provider failure to a conservative cache miss.
+- [x] Preserve one-query/one-read admission and add a static ratchet.

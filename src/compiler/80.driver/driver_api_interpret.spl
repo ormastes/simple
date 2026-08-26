@@ -12,8 +12,20 @@ use compiler.driver.cache.cache_types (CacheCheckResult)
 use compiler.driver.cache.compile_options_hash (compile_options_hash_zero)
 use lazy compiler.driver.cache.cache_validator (validate_smf)
 
+@unsafe(reason: "raw SMF cache artifact existence status ABI", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw nullable live-source read for cache admission", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+
+@always_inline
+fn _interpret_cache_exists_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
+
+@always_inline
+fn _interpret_cache_read_raw(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
 
 pub fn interpret_file(path: text) -> CompileResult:
     val cached = try_load_smf_cached(path)
@@ -42,7 +54,7 @@ pub fn try_load_smf_cached(path: text) -> CompileResult?:
         return nil
     val smf_path: text = resolved.smf_path
 
-    if not rt_file_exists(smf_path):
+    if not _interpret_cache_exists_raw(smf_path):
         return nil
 
     # Verify the MANIFEST ROW itself against the live source before trusting
@@ -51,7 +63,10 @@ pub fn try_load_smf_cached(path: text) -> CompileResult?:
     # recorded field was parsed and discarded. Fail closed: a zero/unknown
     # recorded hash, an unreadable source, or any mismatch rejects the cache
     # and falls back to a full interpret.
-    val current_source = rt_file_read_text(path) ?? ""
+    val current_source_raw = _interpret_cache_read_raw(path)
+    if current_source_raw == nil:
+        return nil
+    val current_source = current_source_raw ?? ""
     # Interface-digest verification: level-gated diagnostic only (default
     # off; SIMPLE_IFACE_DIGEST_LOG=1). NOT a rebuild trigger yet — that
     # needs the dependency model (see .claude/rules/commands.md).
