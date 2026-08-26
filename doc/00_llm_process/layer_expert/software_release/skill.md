@@ -11,3 +11,9 @@ Canonical references:
 - `src/app/release/policy.spl`
 
 Protected mutation belongs to the lifecycle/integration gateway; compiler admission belongs to bootstrap owners. This layer must not duplicate either boundary or add raw Git/process/runtime shortcuts.
+
+Review admission prefers a closed, exact-head high-capability/high-effort model
+receipt. The sole-owner fallback is explicit, expiring, audit-bound, and allowed
+only for verifier unavailability with reason `no eligible independent reviewer`.
+Only a pinned dedicated verifier/broker GitHub App may project the admission
+status or custom environment protection; missing App IDs block live apply.

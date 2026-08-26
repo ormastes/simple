@@ -197,6 +197,7 @@ jobs:
             build/convergence-receipt/convergence-receipt.sha256 \
             build/convergence-receipt/forward-port-evidence.json \
             build/convergence-receipt/integration-evidence.json \
+            build/convergence-receipt/review-admission-receipt.json \
             build/convergence-receipt/review-evidence.json \
             build/convergence-receipt/reviewed-convergence-manifest.json; do
             gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" >/dev/null
@@ -298,13 +299,34 @@ jobs:
                  ((.reason // "") == "" and (.owner // "") == "" and
                   (.expires_at // "") == "")
                end))' .github/release-convergence-manifest.json >/dev/null
+          session_id=$(jq -er '.session_id' \
+            build/convergence-receipt/review-admission-receipt.json)
+          scripts/release/github-policy.sh verify-review \
+            build/convergence-receipt/review-admission-receipt.json \
+            "$session_id" "$GITHUB_REPOSITORY"
+          review_receipt_sha256=$(sha256sum \
+            build/convergence-receipt/review-admission-receipt.json | awk '{print $1}')
+          broker_app=$(jq -er '
+            select(.configured == true and .apply_live == true and
+              .implementation_status == "implemented_external_signed_broker" and
+              .signed_receipt_protocol == "implemented") |
+            .github_app_integration_id | select(type == "number" and . > 0)' \
+            .github/review-admission-broker.json)
           jq -e --arg head "$integration_head_sha" \
-            --arg author "$(jq -r '.pr.author.login' build/convergence-receipt/integration-evidence.json)" '
-              .schema == "simple-release-provider-review/1" and
-              .head_sha == $head and (.independent_approvals | length) > 0 and
-              all(.independent_approvals[];
-                  .state == "APPROVED" and .commit_id == $head and
-                  .reviewer_login != $author)' \
+            --arg receipt_sha256 "$review_receipt_sha256" \
+            --arg mode "$(jq -r '.mode' build/convergence-receipt/review-admission-receipt.json)" \
+            --argjson broker_app "$broker_app" '
+              .schema == "simple-release-provider-review/2" and
+              .head_sha == $head and .mode == $mode and
+              .review_receipt_sha256 == $receipt_sha256 and
+              .broker_check.name == "SPipe Review Admission" and
+              .broker_check.app.id == $broker_app and
+              .broker_check.head_sha == $head and
+              .broker_check.status == "completed" and
+              .broker_check.conclusion == "success" and
+              (.audit_artifact.workflow_run_id | type == "number") and
+              (.audit_artifact.artifact_id | type == "number") and
+              (.audit_artifact.digest | test("^sha256:[0-9a-f]{64}$"))' \
             build/convergence-receipt/review-evidence.json >/dev/null
           required_checks=$(jq -cS '
             [.rules[] | select(.type == "required_status_checks") |
@@ -470,6 +492,11 @@ jobs:
              .parameters.required_status_checks[] | {context,integration_id}]' \
             .github/rulesets/spipe-vcs-v3-main.json)
           test "$(jq 'length' <<<"$main_required_checks")" -gt 0
+          broker_app=$(jq -er 'select(
+            .implementation_status == "implemented_external_signed_broker" and
+            .signed_receipt_protocol == "implemented") |
+            .github_app_integration_id |
+            select(type == "number" and . > 0)' .github/review-admission-broker.json)
           while IFS= read -r evidence; do
             source=$(jq -r '.source_commit_sha' <<<"$evidence")
             result=$(jq -r '.result_commit_sha' <<<"$evidence")
@@ -482,8 +509,13 @@ jobs:
             test "$(jq -cS '.required_checks' <<<"$evidence")" = \
               "$(jq -cS . <<<"$main_required_checks")"
             jq -e --arg head "$(jq -r '.pr.head_sha' <<<"$evidence")" \
-              --argjson required "$main_required_checks" '
+              --argjson required "$main_required_checks" --argjson broker_app "$broker_app" '
                 . as $evidence |
+                $evidence.review_admission.name == "SPipe Review Admission" and
+                $evidence.review_admission.app.id == $broker_app and
+                $evidence.review_admission.head_sha == $head and
+                $evidence.review_admission.status == "completed" and
+                $evidence.review_admission.conclusion == "success" and
                 ($evidence.successful_check_runs | length) == ($required | length) and
                 all($evidence.successful_check_runs[];
                     .head_sha == $head and .status == "completed" and

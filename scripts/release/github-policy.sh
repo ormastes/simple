@@ -5,11 +5,114 @@ set -eu
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 2
 RULESET_DIR="$ROOT/.github/rulesets"
 ENVIRONMENT_FILE="$ROOT/.github/release-environment.json"
+REVIEW_BROKER_FILE="$ROOT/.github/review-admission-broker.json"
 DEFAULT_REPO=ormastes/simple
 
 usage() {
-    echo "usage: $0 render | verify-live [owner/repo] | apply-live --yes [owner/repo]" >&2
+    echo "usage: $0 render | review-plan | verify-review RECEIPT SESSION [owner/repo] | verify-live [owner/repo] | apply-live --yes [owner/repo]" >&2
     exit 2
+}
+
+review_plan() {
+    require_tools
+    jq -S '{schema,configured,implementation_status,signed_receipt_protocol,status_context,github_app_integration_id,
+      environment_protection_rule_app_id,planned_ruleset_required_check,
+      planned_environment_custom_protection,authorized_dispatcher,ruleset_profiles,
+      environments,normal_mode,fallback_mode,fallback_reason,apply_live,
+      blocking_reason}' "$REVIEW_BROKER_FILE"
+}
+
+review_ruleset_for_base() {
+    case $1 in
+        main|integration/main) printf '%s\n' "$RULESET_DIR/spipe-vcs-v3-main.json" ;;
+        release/*) printf '%s\n' "$RULESET_DIR/spipe-vcs-v3-release-lines.json" ;;
+        *) echo "github-policy: unsupported protected PR base: $1" >&2; return 1 ;;
+    esac
+}
+
+validate_review_receipt() {
+    _receipt=$1
+    _session=$2
+    _repo=$3
+    require_tools
+    [ -f "$_receipt" ] || { echo "github-policy: review receipt is missing" >&2; return 1; }
+    jq -e '
+      def sha256: type == "string" and test("^[0-9a-f]{64}$");
+      def sha: type == "string" and test("^[0-9a-f]{40}$");
+      def timestamp: type == "string" and
+        test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+      def common_keys: ["audit_receipt_sha256","expires_at","head_sha","issued_at",
+        "mode","pull_request_number","repository","required_checks","schema","session_id"];
+      .schema == "spipe-review-admission/1" and
+      (.mode == "independent_verifier" or .mode == "owner_attested_fallback") and
+      (.repository | type == "string") and
+      (.pull_request_number | type == "number" and . > 0) and
+      (.session_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")) and
+      (.head_sha | sha) and (.required_checks | type == "array" and length > 0) and
+      all(.required_checks[];
+        (keys | sort) == (["context","integration_id"] | sort) and
+        (.context | type == "string" and length > 0) and
+        (.integration_id | type == "number" and . > 0)) and
+      (.issued_at | timestamp) and (.expires_at | timestamp) and
+      (.audit_receipt_sha256 | sha256) and
+      ((.issued_at | fromdateiso8601) <= now) and
+      ((.expires_at | fromdateiso8601) > now) and
+      (((.expires_at | fromdateiso8601) - (.issued_at | fromdateiso8601)) <= 86400) and
+      if .mode == "independent_verifier" then
+        (keys | sort) == ((common_keys + ["review_receipt_sha256","verifier"]) | sort) and
+        (.review_receipt_sha256 | sha256) and
+        (.verifier | keys | sort) == (["effort","identity","kind","verdict"] | sort) and
+        .verifier.kind == "high_capability_model" and
+        (.verifier.identity | type == "string" and length > 0) and
+        (.verifier.effort as $effort |
+          (["high","xhigh","max","ultra"] | index($effort) != null)) and
+        .verifier.verdict == "pass"
+      else
+        (keys | sort) == ((common_keys + ["attestor","reason","unavailable_verifier_receipt_sha256"]) | sort) and
+        .reason == "no eligible independent reviewer" and
+        .attestor == {type:"User",id:2378857} and
+        (.unavailable_verifier_receipt_sha256 | sha256)
+      end' "$_receipt" >/dev/null || {
+        echo "github-policy: invalid closed spipe-review-admission/1 receipt" >&2
+        return 1
+    }
+
+    _pr=$(jq -r '.pull_request_number' "$_receipt")
+    _provider_pr=$(gh api "repos/$_repo/pulls/$_pr") || return 1
+    _head=$(printf '%s' "$_provider_pr" | jq -er '.head.sha') || return 1
+    _base=$(printf '%s' "$_provider_pr" | jq -er '.base.ref') || return 1
+    jq -e --arg repo "$_repo" --arg session "$_session" --arg head "$_head" \
+      --argjson pr "$_pr" '
+        .repository == $repo and .session_id == $session and
+        .pull_request_number == $pr and .head_sha == $head' \
+      "$_receipt" >/dev/null || {
+        echo "github-policy: receipt does not match the server-resolved current PR head/session" >&2
+        return 1
+    }
+
+    _ruleset=$(review_ruleset_for_base "$_base") || return 1
+    _required=$(jq -cS '[.rules[] | select(.type == "required_status_checks") |
+      .parameters.required_status_checks[] |
+      select(.context != "SPipe Review Admission") | {context,integration_id}]' "$_ruleset")
+    jq -e --argjson required "$_required" '.required_checks == $required' \
+      "$_receipt" >/dev/null || {
+        echo "github-policy: receipt required checks do not match the protected base projection" >&2
+        return 1
+    }
+    _checks=$(gh api --paginate --slurp \
+      "repos/$_repo/commits/$_head/check-runs?per_page=100") || return 1
+    printf '%s' "$_checks" | jq -e --arg head "$_head" --argjson required "$_required" '
+      [ .[].check_runs[] |
+        {name,status,conclusion,head_sha,app:{id:.app.id}} ] as $runs |
+      all($required[]; . as $check |
+        ([ $runs[] | select(.name == $check.context and
+          .app.id == $check.integration_id and .head_sha == $head and
+          .status == "completed" and .conclusion == "success") ] | length) == 1)' \
+      >/dev/null || {
+        echo "github-policy: server-resolved PR head lacks an exact configured successful check" >&2
+        return 1
+    }
+    printf '%s\n' "$_head"
 }
 
 require_tools() {
@@ -132,37 +235,22 @@ verify_live() {
 }
 
 apply_live() {
-    _repo=$1
     require_tools
-    _actor=$(gh api user --jq '.id')
-    [ "$_actor" = 2378857 ] || {
-        echo "github-policy: authenticated actor $_actor is not creation authority 2378857" >&2
-        exit 1
-    }
-    for _file in $(manifest_files); do
-        _name=$(jq -r '.name' "$_file")
-        _id=$(live_ruleset_by_name "$_repo" "$_name")
-        if [ -n "$_id" ]; then
-            gh api --method PUT "repos/$_repo/rulesets/$_id" --input "$_file" >/dev/null
-            echo "github-policy: updated ruleset $_name"
-        else
-            gh api --method POST "repos/$_repo/rulesets" --input "$_file" >/dev/null
-            echo "github-policy: created ruleset $_name"
-        fi
-    done
-    for _environment_file in $(environment_files); do
-        _environment=$(basename "$_environment_file" -environment.json)
-        gh api --method PUT "repos/$_repo/environments/$_environment" --input "$_environment_file" >/dev/null
-        echo "github-policy: configured environment $_environment"
-    done
-    gh api --method PUT "repos/$_repo/immutable-releases" >/dev/null
-    echo "github-policy: enabled immutable releases"
-    verify_live "$_repo"
+    echo "github-policy: live apply unsupported until an external signed review broker protocol is implemented" >&2
+    exit 1
 }
 
 case ${1:-} in
     render)
         render
+        ;;
+    review-plan)
+        review_plan
+        ;;
+    verify-review)
+        [ "$#" -ge 3 ] || usage
+        validate_review_receipt "$2" "$3" "${4:-$DEFAULT_REPO}" >/dev/null
+        echo "github-policy: PASS review receipt"
         ;;
     verify-live)
         verify_live "${2:-$DEFAULT_REPO}"

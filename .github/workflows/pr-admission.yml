@@ -106,24 +106,61 @@ jobs:
                  merged_by:{id:$pr.merged_by.id,login:$pr.merged_by.login}}}' \
             > convergence-receipt/integration-evidence.json
 
-          gh api --paginate --slurp \
-            "repos/${GITHUB_REPOSITORY}/pulls/${INTEGRATION_PR_NUMBER}/reviews?per_page=100" \
-            > convergence-receipt/review-pages.json
-          jq -cS --arg head "$head_sha" --arg author "$author_login" '
-            [ .[][] |
-              select(.user.type == "User" and .user.login != $author) ] |
-            sort_by(.user.id, .submitted_at, .id) |
-            group_by(.user.id) | map(last) |
-            map(select(.state == "APPROVED" and .commit_id == $head) |
-                {review_id:.id,reviewer_id:.user.id,reviewer_login:.user.login,
-                 commit_id:.commit_id,state:.state,submitted_at:.submitted_at}) |
-            if length > 0 then
-              {schema:"simple-release-provider-review/1",head_sha:$head,
-               independent_approvals:.}
-            else error("no current independent approval of the exact PR head") end' \
-            convergence-receipt/review-pages.json \
+          broker_app=$(jq -er '
+            select(.configured == true and .apply_live == true and
+              .implementation_status == "implemented_external_signed_broker" and
+              .signed_receipt_protocol == "implemented") |
+            .github_app_integration_id | select(type == "number" and . > 0)' \
+            .github/review-admission-broker.json) || {
+              echo "dedicated review broker is not configured" >&2
+              exit 1
+            }
+          review_checks=$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/commits/${head_sha}/check-runs?per_page=100")
+          admission_check=$(jq -ce --arg head "$head_sha" --argjson app "$broker_app" '
+            [ .[].check_runs[] | select(
+                .name == "SPipe Review Admission" and .app.id == $app and
+                .head_sha == $head and .status == "completed" and
+                .conclusion == "success") ] |
+            if length == 1 then .[0]
+            else error("exact PR head lacks one broker-authenticated review admission") end' \
+            <<<"$review_checks")
+          details_url=$(jq -er '.details_url' <<<"$admission_check")
+          review_run_id=$(sed -nE 's#^.*/actions/runs/([0-9]+)(/.*)?$#\1#p' <<<"$details_url")
+          [[ "$review_run_id" =~ ^[1-9][0-9]*$ ]]
+          artifacts=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${review_run_id}/artifacts")
+          artifact=$(jq -ce --arg pr "$INTEGRATION_PR_NUMBER" --arg head "$head_sha" '
+            [ .artifacts[] | select(.expired == false and
+                (.name | startswith("review-admission-" + $pr + "-" + $head + "-"))) ] |
+            if length == 1 then .[0]
+            else error("review admission run must retain one exact-head audit artifact") end' \
+            <<<"$artifacts")
+          artifact_name=$(jq -r '.name' <<<"$artifact")
+          artifact_id=$(jq -r '.id' <<<"$artifact")
+          artifact_digest=$(jq -er '.digest' <<<"$artifact")
+          gh run download "$review_run_id" --name "$artifact_name" \
+            --dir convergence-receipt/review-admission-audit
+          receipt_path=$(find convergence-receipt/review-admission-audit \
+            -type f -name receipt.json -print)
+          test "$(printf '%s\n' "$receipt_path" | sed '/^$/d' | wc -l)" = 1
+          session_id=$(jq -er '.session_id' "$receipt_path")
+          scripts/release/github-policy.sh verify-review "$receipt_path" \
+            "$session_id" "$GITHUB_REPOSITORY"
+          cp "$receipt_path" convergence-receipt/review-admission-receipt.json
+          review_receipt_sha256=$(sha256sum "$receipt_path" | awk '{print $1}')
+          jq -cnS --arg head "$head_sha" \
+            --arg mode "$(jq -r '.mode' "$receipt_path")" \
+            --arg receipt_sha256 "$review_receipt_sha256" \
+            --argjson check "$admission_check" --arg run_id "$review_run_id" \
+            --arg artifact_id "$artifact_id" --arg artifact_digest "$artifact_digest" \
+            '{schema:"simple-release-provider-review/2",head_sha:$head,
+              mode:$mode,review_receipt_sha256:$receipt_sha256,
+              broker_check:{id:$check.id,name:$check.name,head_sha:$check.head_sha,
+                status:$check.status,conclusion:$check.conclusion,
+                details_url:$check.details_url,app:{id:$check.app.id,slug:$check.app.slug}},
+              audit_artifact:{workflow_run_id:($run_id|tonumber),
+                artifact_id:($artifact_id|tonumber),digest:$artifact_digest}}' \
             > convergence-receipt/review-evidence.json
-          rm convergence-receipt/review-pages.json
 
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/commits/${head_sha}/check-runs?per_page=100" \
@@ -355,20 +392,22 @@ jobs:
               <<<"$pulls")
             pr_number=$(jq -r '.number' <<<"$forward_pr")
             pr_head=$(jq -r '.head.sha' <<<"$forward_pr")
-            pr_author=$(jq -r '.user.login' <<<"$forward_pr")
-            review_pages=$(gh api --paginate --slurp \
-              "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/reviews?per_page=100")
-            approvals=$(jq -ce --arg head "$pr_head" --arg author "$pr_author" '
-              [ .[][] | select(.user.type == "User" and .user.login != $author) ] |
-              sort_by(.user.id, .submitted_at, .id) | group_by(.user.id) | map(last) |
-              map(select(.state == "APPROVED" and .commit_id == $head) |
-                  {review_id:.id,reviewer_id:.user.id,reviewer_login:.user.login,
-                   commit_id:.commit_id,state:.state,submitted_at:.submitted_at}) |
-              if length > 0 then .
-              else error("forward-port PR lacks exact-head independent approval") end' \
-              <<<"$review_pages")
             check_pages=$(gh api --paginate --slurp \
               "repos/${GITHUB_REPOSITORY}/commits/${pr_head}/check-runs?per_page=100")
+            broker_app=$(jq -er '
+              select(.configured == true and .apply_live == true and
+                .implementation_status == "implemented_external_signed_broker" and
+                .signed_receipt_protocol == "implemented") |
+              .github_app_integration_id | select(type == "number" and . > 0)' \
+              .github/review-admission-broker.json)
+            review_admission=$(jq -ce --arg head "$pr_head" --argjson app "$broker_app" '
+              [ .[].check_runs[] | select(
+                  .name == "SPipe Review Admission" and .app.id == $app and
+                  .head_sha == $head and .status == "completed" and
+                  .conclusion == "success") ] |
+              if length == 1 then .[0]
+              else error("forward-port PR lacks one broker-authenticated review admission") end' \
+              <<<"$check_pages")
             checks=$(jq -ce --arg head "$pr_head" --argjson required "$required_checks" '
               [ .[].check_runs[] |
                 {id,name,status,conclusion,head_sha,details_url,
@@ -387,7 +426,7 @@ jobs:
             evidence=$(jq -cnS --arg source "$source" --arg result "$result" \
               --arg source_patch_id "$source_patch_id" --arg result_patch_id "$result_patch_id" \
               --arg target_ref "$target_ref" --argjson pr "$forward_pr" \
-              --argjson approvals "$approvals" --argjson checks "$checks" \
+              --argjson review_admission "$review_admission" --argjson checks "$checks" \
               --argjson required_checks "$required_checks" \
               '{source_commit_sha:$source,result_commit_sha:$result,target_ref:$target_ref,
                 equivalence:"stable_patch_id",source_patch_id:$source_patch_id,
@@ -397,7 +436,12 @@ jobs:
                     base_sha:$pr.base.sha,head_ref:$pr.head.ref,head_sha:$pr.head.sha,
                     author:{id:$pr.user.id,login:$pr.user.login},
                     merged_by:{id:$pr.merged_by.id,login:$pr.merged_by.login}},
-                independent_approvals:$approvals,successful_check_runs:$checks}')
+                review_admission:{id:$review_admission.id,name:$review_admission.name,
+                  head_sha:$review_admission.head_sha,status:$review_admission.status,
+                  conclusion:$review_admission.conclusion,
+                  details_url:$review_admission.details_url,
+                  app:{id:$review_admission.app.id,slug:$review_admission.app.slug}},
+                successful_check_runs:$checks}')
             printf '%s\n' "$evidence" >> convergence-receipt/forward-port-evidence.jsonl
           done < <(jq -r '.release_to_main.forward_ports[] |
                          [.source_commit_sha,.result_commit_sha,.target_ref] | @tsv' "$manifest")
@@ -486,6 +530,7 @@ jobs:
           (cd convergence-receipt && sha256sum \
             backport-evidence.json check-evidence.json classification-evidence.json convergence-receipt.json \
             forward-port-evidence.json integration-evidence.json review-evidence.json \
+            review-admission-receipt.json \
             reviewed-convergence-manifest.json > convergence-receipt.sha256)
           receipt_sha256=$(sha256sum convergence-receipt/convergence-receipt.json | awk '{print $1}')
           echo "receipt_sha256=$receipt_sha256" >> "$GITHUB_OUTPUT"
@@ -510,6 +555,7 @@ jobs:
             convergence-receipt/convergence-receipt.sha256
             convergence-receipt/forward-port-evidence.json
             convergence-receipt/integration-evidence.json
+            convergence-receipt/review-admission-receipt.json
             convergence-receipt/review-evidence.json
             convergence-receipt/reviewed-convergence-manifest.json
 

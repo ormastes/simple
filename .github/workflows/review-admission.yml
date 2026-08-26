@@ -1,0 +1,77 @@
+name: SPipe server-side review request plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request number; current head is resolved server-side
+        required: true
+        type: number
+      session_id:
+        description: Audited feature/session identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+jobs:
+  plan-review-request:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Emit server-resolved blocked request plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+          SESSION_ID: ${{ inputs.session_id }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SESSION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]
+          expected=$(jq -r '.authorized_dispatcher.id' .github/review-admission-broker.json)
+          actual=$(gh api "users/$ACTOR" --jq '.id')
+          test "$actual" = "$expected"
+          provider_pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+          head_sha=$(jq -er '.head.sha' <<<"$provider_pr")
+          base_ref=$(jq -er '.base.ref' <<<"$provider_pr")
+          case "$base_ref" in
+            main|integration/main) ruleset=.github/rulesets/spipe-vcs-v3-main.json ;;
+            release/*) ruleset=.github/rulesets/spipe-vcs-v3-release-lines.json ;;
+            *) echo "unsupported protected PR base" >&2; exit 1 ;;
+          esac
+          required=$(jq -cS '[.rules[] | select(.type == "required_status_checks") |
+            .parameters.required_status_checks[] | {context,integration_id}]' "$ruleset")
+          mkdir -p review-request-plan
+          jq -cnS --arg repository "$GITHUB_REPOSITORY" --argjson pr "$PR_NUMBER" \
+            --arg session "$SESSION_ID" --arg head "$head_sha" --arg base "$base_ref" \
+            --arg actor "$ACTOR" --arg actor_id "$ACTOR_ID" \
+            --argjson checks "$required" \
+            '{schema:"spipe-review-request/1",repository:$repository,
+              pull_request_number:$pr,session_id:$session,server_head_sha:$head,
+              server_base_ref:$base,required_checks:$checks,requested_by:{login:$actor,
+              id:($actor_id|tonumber)},status:"blocked",
+              reason:"external signed verifier/broker protocol is not implemented"}' \
+            > review-request-plan/request.json
+
+      - name: Preserve blocked request audit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: blocked-review-request-${{ inputs.pull_request_number }}-${{ github.run_id }}
+          path: review-request-plan/request.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Fail closed without issuing admission
+        run: |
+          echo "SPipe Review Admission is unsupported until an external signed broker is implemented" >&2
+          exit 1

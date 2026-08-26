@@ -12,6 +12,22 @@ sh -n scripts/release/candidate-ref-create.sh || fail "candidate ref tool does n
 for file in .github/rulesets/spipe-vcs-v3-*.json .github/*-environment.json; do
     jq -e . "$file" >/dev/null || fail "invalid JSON: $file"
 done
+jq -e '
+  .schema == "spipe-review-admission-broker/1" and
+  .configured == false and .apply_live == false and
+  .implementation_status == "unsupported_until_external_signed_broker" and
+  .signed_receipt_protocol == "unimplemented" and
+  .github_app_integration_id == null and
+  .environment_protection_rule_app_id == null and
+  .planned_ruleset_required_check ==
+    {context:"SPipe Review Admission",integration_id:null} and
+  .planned_environment_custom_protection ==
+    {app_id:null,preserve_required_reviewers:true} and
+  .status_context == "SPipe Review Admission" and
+  .authorized_dispatcher == {type:"User",id:2378857} and
+  .fallback_reason == "no eligible independent reviewer"' \
+  .github/review-admission-broker.json >/dev/null ||
+    fail "unconfigured dedicated review broker plan is not fail-closed"
 
 [ "$(find .github -maxdepth 1 -name '*-environment.json' | wc -l)" -eq 3 ] ||
     fail "expected protected-integration, release, and npm-release environments"
@@ -80,6 +96,35 @@ rg -q 'id: 2378857' .spipe/policy/vcs.sdn ||
     fail "canonical environment reviewer identity is stale"
 rg -q 'release_claim: approval_gated' .spipe/policy/vcs.sdn ||
     fail "canonical release claim is stale"
+rg -q 'schema: spipe-review-admission/1' .spipe/policy/vcs.sdn ||
+    fail "closed review admission schema is missing"
+rg -q 'preference: independent_high_capability_model' .spipe/policy/vcs.sdn ||
+    fail "independent high-capability model review is not preferred"
+rg -q 'minimum_effort: high' .spipe/policy/vcs.sdn ||
+    fail "independent review minimum effort is missing"
+rg -q 'reason: no eligible independent reviewer' .spipe/policy/vcs.sdn ||
+    fail "owner fallback reason is not exact"
+rg -q 'unavailable_verifier_receipt_sha256: required' .spipe/policy/vcs.sdn ||
+    fail "owner fallback lacks verifier-unavailability evidence"
+rg -q 'integration_id: provider_config_required' .spipe/policy/vcs.sdn ||
+    fail "dedicated broker App identity is not fail-closed"
+rg -q 'admin_bypass: deny' .spipe/policy/vcs.sdn ||
+    fail "review admission permits an admin bypass"
+rg -q 'live_apply: unsupported_until_external_signed_broker' .spipe/policy/vcs.sdn ||
+    fail "unconfigured review broker does not block live apply"
+rg -q 'workflow_dispatch:' .github/workflows/review-admission.yml ||
+    fail "server-side review dispatch workflow is missing"
+rg -q 'pull_request_number:' .github/workflows/review-admission.yml ||
+    fail "review dispatch does not identify the pull request"
+dispatch_inputs=$(sed -n '/^    inputs:/,/^concurrency:/p' \
+  .github/workflows/review-admission.yml)
+if printf '%s\n' "$dispatch_inputs" | rg -q 'candidate_commit_sha|head_sha:'; then
+    fail "review dispatch must resolve the current PR head instead of accepting a caller SHA"
+fi
+if rg -q 'SPIPE_REVIEW_BROKER_TOKEN|record-review|review_receipt_json' \
+    .github/workflows/review-admission.yml scripts/release/github-policy.sh; then
+    fail "planner-only review flow must not accept receipts or issue broker PASS"
+fi
 
 for environment in protected-integration release npm-release; do
     jq -e '.prevent_self_review == true and
@@ -106,4 +151,4 @@ for environment in protected-integration release npm-release; do
     rg -q "$environment-environment.json" .spipe/policy/vcs.sdn ||
         fail "policy does not bind $environment environment"
 done
-echo "check-github-policy-projection: PASS — seven rulesets, split creation/immutability authority, environment, and immutable-release policy"
+echo "check-github-policy-projection: PASS — active protections preserved; review broker plan is explicit and fail-closed"

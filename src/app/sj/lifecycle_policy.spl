@@ -18,6 +18,20 @@ struct LifecycleVcsPolicy:
     valid: bool
     error: text
 
+struct ReviewAdmissionPolicy:
+    preference: text
+    status_context: text
+    independent_schema: text
+    verifier_class: text
+    minimum_effort: text
+    fallback_schema: text
+    fallback_reason: text
+    authority_id: text
+    max_ttl_seconds: text
+    exact_binding: bool
+    valid: bool
+    error: text
+
 fn _policy_value(line: text) -> text:
     val idx = line.index_of(":")
     if idx < 0:
@@ -29,6 +43,152 @@ fn _policy_indent(line: text) -> i64:
     while count < line.len() and line.char_code_at(count) == 32:
         count = count + 1
     count
+
+fn _review_policy_result(
+    preference: text,
+    status_context: text,
+    independent_schema: text,
+    verifier_class: text,
+    minimum_effort: text,
+    fallback_schema: text,
+    fallback_reason: text,
+    authority_id: text,
+    max_ttl_seconds: text,
+    exact_binding: bool,
+    error: text
+) -> ReviewAdmissionPolicy:
+    ReviewAdmissionPolicy(
+        preference: preference,
+        status_context: status_context,
+        independent_schema: independent_schema,
+        verifier_class: verifier_class,
+        minimum_effort: minimum_effort,
+        fallback_schema: fallback_schema,
+        fallback_reason: fallback_reason,
+        authority_id: authority_id,
+        max_ttl_seconds: max_ttl_seconds,
+        exact_binding: exact_binding,
+        valid: error == "",
+        error: error
+    )
+
+fn parse_review_admission_policy(payload: text) -> ReviewAdmissionPolicy:
+    var in_live_policy = false
+    var in_review_admission = false
+    var area = ""
+    var nested = ""
+    var preference = ""
+    var status_context = ""
+    var independent_schema = ""
+    var verifier_class = ""
+    var minimum_effort = ""
+    var independent_verdict = ""
+    var fallback_schema = ""
+    var fallback_only_when = ""
+    var fallback_reason = ""
+    var authority_type = ""
+    var authority_id = ""
+    var attestor_type = ""
+    var attestor_id = ""
+    var max_ttl_seconds = ""
+    var independent_exact_pr = false
+    var independent_exact_session = false
+    var independent_exact_head = false
+    var independent_exact_checks = false
+    var fallback_exact_pr = false
+    var fallback_exact_session = false
+    var fallback_exact_head = false
+    var fallback_exact_checks = false
+    var independent_time = false
+    var independent_expiry = false
+    var independent_audit = false
+    var fallback_time = false
+    var fallback_expiry = false
+    var fallback_audit = false
+    var fallback_unavailable_receipt = false
+    var server_head = false
+    var caller_head_denied = false
+    var later_push_invalidates = false
+    var audit_artifact = false
+    var admin_bypass_denied = false
+    var provider_projection = false
+    var live_apply_blocked = false
+    for raw in payload.split("\n"):
+        val line = raw.trim()
+        val indent = _policy_indent(raw)
+        if indent == 2:
+            in_live_policy = line == "live_policy:"
+            in_review_admission = false
+            area = ""
+            nested = ""
+        elif in_live_policy and indent == 4:
+            in_review_admission = line == "review_admission:"
+            area = ""
+            nested = ""
+        elif in_review_admission and indent == 6:
+            nested = ""
+            if line == "independent_receipt:": area = "independent"
+            elif line == "owner_attested_fallback:": area = "fallback"
+            elif line == "status_authority:": area = "status_authority"
+            elif line.starts_with("schema:"):
+                independent_schema = _policy_value(line)
+                fallback_schema = independent_schema
+            elif line.starts_with("preference:"): preference = _policy_value(line)
+            elif line.starts_with("status_context:"): status_context = _policy_value(line)
+            elif line == "caller_supplied_head_sha: deny": caller_head_denied = true
+            elif line == "server_resolve_current_pr_head: required": server_head = true
+            elif line == "later_push_invalidates: required": later_push_invalidates = true
+            elif line == "audit_artifact: required": audit_artifact = true
+            elif line == "admin_bypass: deny": admin_bypass_denied = true
+            elif line == "live_apply: unsupported_until_external_signed_broker": live_apply_blocked = true
+        elif in_review_admission and indent == 8:
+            nested = ""
+            if area == "independent":
+                if line.starts_with("verifier_class:"): verifier_class = _policy_value(line)
+                elif line.starts_with("minimum_effort:"): minimum_effort = _policy_value(line)
+                elif line.starts_with("verdict:"): independent_verdict = _policy_value(line)
+                elif line == "pr_number: exact": independent_exact_pr = true
+                elif line == "session_id: exact": independent_exact_session = true
+                elif line == "head_sha: exact": independent_exact_head = true
+                elif line == "required_checks: exact": independent_exact_checks = true
+                elif line == "issued_at: required": independent_time = true
+                elif line == "expires_at: required": independent_expiry = true
+                elif line.starts_with("max_ttl_seconds:"): max_ttl_seconds = _policy_value(line)
+                elif line == "audit_receipt_sha256: required": independent_audit = true
+            elif area == "fallback":
+                if line.starts_with("only_when:"): fallback_only_when = _policy_value(line)
+                elif line.starts_with("reason:"): fallback_reason = _policy_value(line)
+                elif line == "attestor:": nested = "attestor"
+                elif line == "pr_number: exact": fallback_exact_pr = true
+                elif line == "session_id: exact": fallback_exact_session = true
+                elif line == "head_sha: exact": fallback_exact_head = true
+                elif line == "required_checks: exact": fallback_exact_checks = true
+                elif line == "attested_at: required": fallback_time = true
+                elif line == "expires_at: required": fallback_expiry = true
+                elif line.starts_with("max_ttl_seconds:") and max_ttl_seconds != _policy_value(line): max_ttl_seconds = ""
+                elif line == "audit_receipt_sha256: required": fallback_audit = true
+                elif line == "unavailable_verifier_receipt_sha256: required": fallback_unavailable_receipt = true
+            elif area == "status_authority":
+                if line.starts_with("type:"): authority_type = _policy_value(line)
+                elif line.starts_with("integration_id:"): authority_id = _policy_value(line)
+                elif line == "provider_projection: .github/review-admission-broker.json": provider_projection = true
+        elif in_review_admission and indent == 10 and area == "fallback" and nested == "attestor":
+            if line.starts_with("type:"): attestor_type = _policy_value(line)
+            elif line.starts_with("id:"): attestor_id = _policy_value(line)
+    val exact_binding = independent_exact_pr and independent_exact_session and independent_exact_head and independent_exact_checks and fallback_exact_pr and fallback_exact_session and fallback_exact_head and fallback_exact_checks
+    if preference != "independent_high_capability_model":
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "independent high-capability review is not preferred")
+    if independent_schema != "spipe-review-admission/1" or verifier_class != "high_capability_model" or minimum_effort != "high" or independent_verdict != "pass":
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "independent review receipt contract is incomplete")
+    if fallback_schema != "spipe-review-admission/1" or fallback_only_when != "independent_verifier_unavailable" or fallback_reason != "no eligible independent reviewer" or not fallback_unavailable_receipt:
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "owner-attested fallback contract is incomplete")
+    if authority_type != "GitHubApp" or authority_id != "provider_config_required" or not provider_projection or attestor_type != "User" or attestor_id != "2378857":
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "review admission authority is incomplete")
+    if not exact_binding or not independent_time or not independent_expiry or not independent_audit or not fallback_time or not fallback_expiry or not fallback_audit:
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "review admission binding is incomplete")
+    if status_context != "SPipe Review Admission" or max_ttl_seconds != "86400" or not server_head or not caller_head_denied or not later_push_invalidates or not audit_artifact or not admin_bypass_denied or not live_apply_blocked:
+        return _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "review admission provider boundary is incomplete")
+    _review_policy_result(preference, status_context, independent_schema, verifier_class, minimum_effort, fallback_schema, fallback_reason, authority_id, max_ttl_seconds, exact_binding, "")
 
 fn _canonical_clause_error(payload: text) -> text:
     var section = ""
@@ -195,6 +355,10 @@ fn parse_canonical_lifecycle_vcs_policy(payload: text) -> LifecycleVcsPolicy:
     val clause_error = _canonical_clause_error(payload)
     if clause_error != "":
         return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: clause_error)
+    if policy.schema == "spipe-vcs/3":
+        val review_policy = parse_review_admission_policy(payload)
+        if not review_policy.valid:
+            return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: review_policy.error)
     policy
 
-export ProtectedRefPolicy, LifecycleVcsPolicy, parse_lifecycle_vcs_policy, parse_canonical_lifecycle_vcs_policy, lifecycle_policy_ref
+export ProtectedRefPolicy, LifecycleVcsPolicy, ReviewAdmissionPolicy, parse_lifecycle_vcs_policy, parse_canonical_lifecycle_vcs_policy, parse_review_admission_policy, lifecycle_policy_ref

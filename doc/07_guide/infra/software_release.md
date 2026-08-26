@@ -59,6 +59,35 @@ If either protected head changes, discard stale admission and retry from a fresh
 
 Provider evidence accepts only configured required check identities: exact check name, GitHub App integration ID, exact PR head, completed state, and `success` conclusion. Neutral, skipped, unrelated, duplicate, or name-only check runs do not satisfy release admission. The canonical check identities are projected together in `.spipe/policy/vcs.sdn` and the protected branch rulesets.
 
+### Independent review and sole-owner fallback
+
+Normal admission uses a closed `spipe-review-admission/1` receipt from a
+high-capability model running at `high` effort or above. The receipt binds the
+repository, PR number, feature/session identifier, server-resolved current head
+SHA, exact required check identities, PASS verdict, review/audit digests, issue
+time, and an expiry no more than 24 hours later. A later push changes the current
+head and invalidates the receipt and status.
+
+Only when that verifier mechanism is unavailable may the repository owner use
+`mode=owner_attested_fallback`. It has the same exact bindings and additionally
+requires the literal reason `no eligible independent reviewer`, the provider
+owner identity, and a digest of the retained verifier-unavailability receipt.
+It is not an admin bypass, self-review, or permission to omit checks.
+
+An authorized user requests server-side planning with the
+`SPipe server-side review request plan` workflow, supplying only a PR number and
+feature/session identifier—never a head SHA or review receipt. The workflow
+resolves the current PR head and checks from GitHub, retains a blocked audit
+artifact, and issues no PASS. Only a future external signed verifier/broker App
+may provide the closed receipt and publish `SPipe Review Admission`; this
+repository must not hold its token or act as its own broker. GitHub rulesets cannot natively express conditional model
+review versus owner attestation, and environment required reviewers cannot
+represent that alternative. Therefore `.github/review-admission-broker.json`
+is intentionally fail-closed until that external signed protocol, dedicated App,
+and custom environment protection rule exist. Existing protected-integration, release, and npm-release
+reviewers remain enabled; do not remove them or apply a partial projection to
+escape the sole-owner circularity.
+
 Prepare one selected fix with `scripts/release/converge-reviewed-fix.sh`. The
 command requires a create-once `spipe-review-receipt/1` file bound to the exact
 approved commit, change ID, and `kind=fix`; the command snapshots and hashes
@@ -143,6 +172,11 @@ The live GitHub configuration baseline passes
 declared rulesets match their projections, the protected-integration, release,
 and npm-release environments exist with the declared policy, and immutable
 releases are enabled. This is configuration evidence, not release admission.
+The declared environment reviewer is also the sole repository owner, so GitHub
+`prevent_self_review` makes that path circular. The broker projection is not yet
+configured and `github-policy.sh apply-live` consequently fails closed. No
+`SPipe Review Admission` check or environment fallback may be claimed live
+until the dedicated App IDs are installed, pinned, and reverified.
 
 The exact release lineage still lacks admitted Stage 3 and Stage 4 receipts and
 one clean release-grade `bin/simple test test --whole --mode=interpreter` PASS.

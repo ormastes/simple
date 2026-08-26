@@ -23,6 +23,9 @@ Apply this skill to any software repository, adapting provider commands while pr
 - Ask before external pushes/publication.
 - Rollback redeploys; withdrawal preserves identity; correction creates a new version.
 - Missing policy, review, evidence, signer, platform, or provider state blocks the release.
+- Prefer a commit-bound `spipe-review-admission/1` PASS receipt from a high-capability model at high effort or above. Bind repository, PR, feature/session, the server-resolved current head, exact required checks, timestamps/expiry, and audit/review digests; a later push invalidates it.
+- Only when that verifier mechanism is unavailable may the owner use the same closed receipt in `owner_attested_fallback` mode with the exact reason `no eligible independent reviewer`, owner identity, and a verifier-unavailability receipt digest. This is never an admin bypass or permission to omit checks.
+- Server-side review dispatch accepts only PR/session identity, resolves the current head itself, retains a blocked audit artifact, and issues no PASS. Only a future external signed verifier/broker App may provide the receipt and publish `SPipe Review Admission`; this repository must not hold its token. Until that protocol exists, live apply remains unsupported and existing environment reviewers stay enabled.
 
 ## Verification
 
