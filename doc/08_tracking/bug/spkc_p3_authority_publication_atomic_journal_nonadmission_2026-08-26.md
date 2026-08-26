@@ -9,7 +9,7 @@ authority-safe atomic publication contract required after P2. P3 must not use a
 publicly constructible lexical/state object as an authority substitute, nor
 expose a partially staged publication through a convenience recovery path.
 
-Three admission blockers remain after the earlier sealed-record, old-to-new head,
+Four admission blockers remain after the earlier sealed-record, old-to-new head,
 pointer revalidation, and open-reader findings were repaired in the candidate:
 
 1. The authority bridge is duck-typed/forgeable. A caller can currently choose
@@ -36,6 +36,17 @@ pointer revalidation, and open-reader findings were repaired in the candidate:
    `.done` receipt, or a changed claim identity must idempotently return
    completed/retry, never throw or delete a successor claim. This continuation
    race leaves P3 non-admitted even when recovery authority remains fixed.
+4. An orphan-claim cleaner can suffer an ABA path race. Two cleaners may
+   observe the same stale claim path; after one retires/removes it, a recreator
+   may install a new claim at that same path before the delayed cleaner acts.
+   A path-only unlink can then delete the new claim. Cleanup must instead
+   perform an exact-observed-claim identity transition (for example,
+   compare-and-rename into a private quarantine name bound to the observed
+   receipt identity), then revalidate that quarantined identity before removal.
+   `ENOENT`, a changed identity, or a recreated path is a lost race and must
+   return retry/completed without deleting any successor. This ABA condition is
+   separate from ordinary stale-continuation idempotence and keeps P3
+   non-admitted.
 
 The only public ABI names for this slice are exactly:
 
@@ -65,6 +76,17 @@ expected old/current-pointer identity. A reclaimer must re-read and compare the
 same receipt and lock identity immediately before it removes either path; if
 either changed, it loses the race and retries without deletion. The current
 pointer update is authorized only while that exact owner receipt remains live.
+
+Orphan cleanup is an ownership transition, never a path cleanup. A cleaner
+captures the complete observed claim identity (at least receipt digest/nonce,
+generation, and stable filesystem identity where available), atomically moves
+only that exact claim into a cleaner-private quarantine/retiring name, and
+revalidates the moved receipt before deletion. It must not unlink the public
+claim path after its initial observation. If another cleaner has already moved
+or completed the observed claim, or if a recreator has installed a different
+claim at the original path, the delayed cleaner loses and reloads state; it
+cannot infer permission to remove the replacement. The quarantine and its
+parent-directory transitions are durable under the same journal fsync policy.
 
 Recovery is a retrying, idempotent state machine. Following successful stale
 receipt/lock validation, `unlink(lock)` may report `ENOENT` only because a peer
@@ -141,10 +163,18 @@ claims restart or concurrent-reader behavior:
    `ENOENT`, a valid `.done`, or a changed exact identity and returns
    completed/retry; it never throws, removes the winner's successor, or exposes
    an incomplete head.
+9. a deterministic independent-process two-cleaner/recreator barrier pauses
+   both cleaners after they observe the same orphan claim and before either
+   exact-identity retirement. One cleaner may win; before the delayed cleaner
+   resumes, a recreator installs a different claim at the original path. The
+   delayed cleaner must observe its stale identity/`ENOENT`/quarantined winner,
+   return completed or retry, and never unlink, rename, or otherwise mutate the
+   recreated claim. The test verifies the recreated receipt and claim remain
+   readable and authority-valid after both cleaners finish.
 
 Run the focused Node test once after the repair, then obtain an independent
 highest-capability review of the exact three-file diff. Package/full-suite
 results do not replace the restart and independent-process proofs. No source is
-admitted or pushed until all eight cases pass together and the review is PASS.
+admitted or pushed until all nine cases pass together and the review is PASS.
 
 Cross-links: [W5A publisher gates](../../03_plan/sys_test/spipe_knowledge_compiler.md#224-ordered-remediation-gates-blocking-test-execution) and [remediation order](../../03_plan/agent_tasks/spipe_knowledge_compiler.md#wave-5-admission-remediation-execution-order-2026-08-26).
