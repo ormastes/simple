@@ -1609,3 +1609,10 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Reduced initial read capacity to `min(max, 256)` and reused the buffer for
   valid UTF-8; no lookup, retry, extra syscall, or lossy copy was added.
 - Raw Simple caller declarations remain the next confinement slice.
+## 2026-08-26 QMP/SPM raw-call confinement follow-up
+
+- Tagged eight duplicate raw socket declarations across QMP/SPM `unsafe(ffi)`.
+- Confined them to four non-exported always-inline owners per module.
+- Preserved every caller status branch and exact raw call count/order.
+- Added no allocation, copy, hash, lookup, lock, retry, or dynamic dispatch.
+- Native receive descriptor lifting remains explicitly unverified/unsigned.

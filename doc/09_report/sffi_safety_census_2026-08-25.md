@@ -985,3 +985,10 @@ no longer defaults stop/max, fabricates empty text for transport failures, or
 lossily copies UTF-8. A genuine EOF may still produce empty text. Valid reads
 cap initial capacity at `min(max, 256)` and reuse the buffer as `String`,
 reducing zero/small-read memory. Source-reviewed but unverified and unsigned.
+## 2026-08-26 QMP/SPM raw-call confinement follow-up
+
+The four raw client socket declarations in both QMP and SPM are now tagged
+`unsafe(ffi)`. Each module confines them to four non-exported always-inline
+owners; all existing connect/write/read/close calls and status checks remain in
+the same order and count. No allocation, copy, lookup, retry, or extra dispatch
+was added. Native receive lifting remains unverified and unsigned.
