@@ -3,17 +3,8 @@
 # Centralizes executable memory allocation and symbol ownership tracking so
 # loader/module and JIT flows do not duplicate mmap/write/protect lifecycle.
 
-use .smf_mmap_native.{
-    native_alloc_exec_memory,
-    native_alloc_rw_memory,
-    native_write_exec_memory,
-    native_make_executable,
-    native_flush_icache,
-    native_get_function_pointer,
-    native_free_exec_memory,
-    native_reloc_write_i32,
-    native_reloc_write_i64
-}
+use .exec_mapping.{exec_mapping_map_rx, exec_mapping_free}
+use .smf_mmap_native.{native_reloc_write_i32, native_reloc_write_i64}
 use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
 
 struct SharedExecMapperConfig:
@@ -61,34 +52,16 @@ impl SharedExecMapper:
             if not allow_replace:
                 return Err("Symbol already mapped: {symbol}")
             val old = self.records[symbol]
-            val old_freed = unsafe(capabilities: [raw_ptr]):
-                native_free_exec_memory(old.address, old.size)
+            val old_freed = exec_mapping_free(old.address, old.size)
             if not old_freed:
                 return Err("Failed to free existing mapping for {symbol}")
             self.total_bytes = self.total_bytes - old.size
             self.records = self.records.remove(symbol)
 
-        val addr = native_alloc_exec_memory(code_size)
-        if addr == 0:
-            return Err("Executable allocation failed for {symbol} ({code_size} bytes)")
-
-        val written = unsafe(capabilities: [raw_ptr]):
-            native_write_exec_memory(addr, code, 0)
-        if written != code_size:
-            unsafe(capabilities: [raw_ptr]):
-                _ = native_free_exec_memory(addr, code_size)
-            return Err("Failed to copy executable bytes for {symbol}")
-
-        val executable = unsafe(capabilities: [raw_ptr]):
-            native_make_executable(addr, code_size)
-        if not executable:
-            unsafe(capabilities: [raw_ptr]):
-                _ = native_free_exec_memory(addr, code_size)
-            return Err("Failed to switch RW->RX for {symbol}")
-
-        native_flush_icache(addr, code_size)
-        val fn_ptr = unsafe(capabilities: [raw_ptr]):
-            native_get_function_pointer(addr)
+        val mapped = exec_mapping_map_rx(symbol, code)
+        if mapped.is_err():
+            return Err(mapped.unwrap_err())
+        val fn_ptr = mapped.unwrap()
 
         self.generation = self.generation + 1
         self.records[symbol] = SharedExecRecord(
@@ -120,8 +93,7 @@ impl SharedExecMapper:
             return false
 
         val rec = self.records[symbol]
-        val freed = unsafe(capabilities: [raw_ptr]):
-            native_free_exec_memory(rec.address, rec.size)
+        val freed = exec_mapping_free(rec.address, rec.size)
         if not freed:
             return false
 
