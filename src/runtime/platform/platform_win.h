@@ -540,6 +540,12 @@ int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
     else return -1;
     DWORD old_protect;
     if (!VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect)) return -1;
+    if ((prot & 0x4) != 0 &&
+        !FlushInstructionCache(GetCurrentProcess(), (void*)(uintptr_t)addr, (SIZE_T)length)) {
+        DWORD ignored;
+        (void)VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, old_protect, &ignored);
+        return -1;
+    }
     return 0;
 }
 

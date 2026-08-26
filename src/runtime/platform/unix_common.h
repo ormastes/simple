@@ -363,10 +363,32 @@ int64_t rt_munmap_raw(int64_t addr, int64_t length) {
     return (int64_t)munmap((void*)(uintptr_t)addr, (size_t)length);
 }
 
+static bool rt_sync_instruction_cache(int64_t addr, int64_t length) {
+#if defined(__i386__) || defined(__x86_64__)
+    (void)addr;
+    (void)length;
+    return true; /* Unified/coherent instruction and data caches. */
+#elif defined(__GNUC__) || defined(__clang__)
+    uintptr_t start = (uintptr_t)addr;
+    if ((uint64_t)length > (uint64_t)(UINTPTR_MAX - start)) return false;
+    __builtin___clear_cache((char*)start, (char*)(start + (uintptr_t)length));
+    return true;
+#else
+    (void)addr;
+    (void)length;
+    return false;
+#endif
+}
+
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
     if (!addr || length <= 0) return -1;
     if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
-    return (int64_t)mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot);
+    if (mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot) != 0) return -1;
+    if ((prot & PROT_EXEC) != 0 && !rt_sync_instruction_cache(addr, length)) {
+        (void)mprotect((void*)(uintptr_t)addr, (size_t)length, PROT_NONE);
+        return -1;
+    }
+    return 0;
 }
 
 int64_t rt_madvise_raw(int64_t addr, int64_t length, int64_t advice) {

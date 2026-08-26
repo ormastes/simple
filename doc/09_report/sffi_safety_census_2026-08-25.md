@@ -2085,3 +2085,13 @@ hosted non-coherent instruction-cache synchronization remains open.
 Unix and GNU core-C syntax checks pass. The Rust sabotage test is present but
 its crate currently fails earlier on unrelated missing compiler exports and
 lowerer fields, so no Rust test PASS is claimed.
+
+The cache-coherence follow-up moves synchronization into the existing RX
+provider transition. Unix native/core-C providers use the compiler cache-clear
+primitive on non-x86; Windows uses `FlushInstructionCache` and restores the old
+protection on failure. The Rust interpreter rejects non-x86 executable
+transitions before changing protection because that lane has no verified host
+primitive. On x86-64 the helper path is compiled away: assembly retains one
+`mprotect` call and the W^X mask test, with no added allocation, lookup, copy,
+or dispatch. The repeated audit remains 0.07 seconds / 2,560 KiB peak RSS.
+Counts and signed-admission status remain unchanged.

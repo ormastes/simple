@@ -59,6 +59,25 @@ int64_t rt_munmap_raw(int64_t addr, int64_t length) {
 #endif
 }
 
+#if !defined(_WIN32)
+static bool rt_legacy_sync_instruction_cache(int64_t addr, int64_t length) {
+#if defined(__i386__) || defined(__x86_64__)
+    (void)addr;
+    (void)length;
+    return true;
+#elif defined(__GNUC__) || defined(__clang__)
+    uintptr_t start = (uintptr_t)addr;
+    if ((uint64_t)length > (uint64_t)(UINTPTR_MAX - start)) return false;
+    __builtin___clear_cache((char*)start, (char*)(start + (uintptr_t)length));
+    return true;
+#else
+    (void)addr;
+    (void)length;
+    return false;
+#endif
+}
+#endif
+
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
     if (!addr || length <= 0) return -1;
     if ((prot & 0x6) == 0x6) return -1; /* PROT_WRITE | PROT_EXEC */
@@ -71,9 +90,21 @@ int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
     else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
     else return -1;
     DWORD old_protect;
-    return VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect) ? 0 : -1;
+    if (!VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect)) return -1;
+    if ((prot & 0x4) != 0 &&
+        !FlushInstructionCache(GetCurrentProcess(), (void*)(uintptr_t)addr, (SIZE_T)length)) {
+        DWORD ignored;
+        (void)VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, old_protect, &ignored);
+        return -1;
+    }
+    return 0;
 #else
-    return (int64_t)mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot);
+    if (mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot) != 0) return -1;
+    if ((prot & 0x4) != 0 && !rt_legacy_sync_instruction_cache(addr, length)) {
+        (void)mprotect((void*)(uintptr_t)addr, (size_t)length, PROT_NONE);
+        return -1;
+    }
+    return 0;
 #endif
 }
 

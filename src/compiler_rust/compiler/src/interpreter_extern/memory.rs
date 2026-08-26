@@ -900,6 +900,12 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
     if addr <= 0 || length <= 0 || (prot & write_exec) == write_exec {
         return Ok(Value::Int(-1));
     }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    if (prot & i64::from(libc::PROT_EXEC)) != 0 {
+        // No verified cross-platform cache-sync primitive exists in this lane.
+        // Fail before granting execute permission on non-coherent targets.
+        return Ok(Value::Int(-1));
+    }
     let result = unsafe { libc::mprotect(addr as usize as *mut libc::c_void, length as usize, prot as i32) };
     Ok(Value::Int(i64::from(result)))
 }

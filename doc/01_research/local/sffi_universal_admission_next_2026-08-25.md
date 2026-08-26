@@ -6197,3 +6197,21 @@ current workspace is independently missing `read_trace`, import-performance
 counters/lowerer fields, UDP/TLS interpreter exports, and atomic-bool exports;
 none of the emitted diagnostics points at the mmap change. This checkpoint is
 therefore C/provider-audit verified but not a green Rust execution result.
+
+### Cache-coherence follow-up
+
+The no-op `native_flush_icache` API is now a compatibility fence: its existing
+RX transition performs the real synchronization. Unix native providers use
+`__builtin___clear_cache` after successful executable protection on non-x86
+targets and revoke the mapping to `PROT_NONE` if synchronization is unavailable.
+Windows calls `FlushInstructionCache` and restores the previous protection on
+failure. The core-C bootstrap mirrors both policies. The Rust interpreter has
+no independently verified non-x86 primitive, so it rejects executable
+transitions before `mprotect` on those hosts rather than executing stale code.
+
+The same provider audit remains 0.07 seconds and 2,560 KiB peak RSS. Optimized
+x86-64 assembly contains one `mprotect` call and no cache helper call; the
+coherent-architecture branch is eliminated. Unix, GNU core-C, and MinGW syntax
+checks pass. No SFFI symbol, per-call lookup, allocation, copy, or new Simple
+dispatch was added. The Rust interpreter is safe-by-rejection on hosted ARM/
+RISC-V, not feature-complete there, and exact-artifact signing remains absent.

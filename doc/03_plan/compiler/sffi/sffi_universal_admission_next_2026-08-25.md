@@ -589,7 +589,11 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
 - [ ] Execute the focused Rust sabotage test after unrelated compiler workspace
   export/import drift is repaired; the test is authored but compilation blocks
   before reaching it.
-- [ ] Implement and verify instruction-cache synchronization for hosted ARM and
-  RISC-V without adding per-call lookup or allocation.
+- [x] Synchronize native Unix/Windows/core-C RX transitions without a new SFFI
+  symbol, lookup, allocation, copy, or Simple dispatch.
+- [x] Fail closed before execute permission in the Rust interpreter on non-x86
+  hosts until that lane has a verified cache-sync primitive.
+- [ ] Add a verified Rust interpreter cache-sync primitive to enable, rather
+  than reject, hosted ARM/RISC-V executable transitions.
 - [ ] Bind exact runtime/compiler artifacts and ABI registry to a verified
   signature admission job; signed-admitted count remains zero.

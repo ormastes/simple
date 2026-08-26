@@ -49,4 +49,19 @@ grep -q 'prot & 0x6' "$legacy"
 ! grep -q 'PAGE_EXECUTE_READWRITE' "$win"
 ! grep -q 'PAGE_EXECUTE_READWRITE' "$legacy"
 
-echo "mmap provider contract audit: PASS (9 typed interpreter registrations; native providers linked directly; invalid lengths fail closed; Windows madvise unsupported; 4 provider lanes reject W+X)"
+# The existing RX transition owns cache synchronization: no additional SFFI
+# symbol, lookup, or Simple dispatch is added. Windows restores old protection
+# after a flush failure; unsupported non-x86 Rust hosts fail before granting X.
+grep -q '__builtin___clear_cache' "$unix"
+grep -q 'FlushInstructionCache(GetCurrentProcess()' "$win"
+grep -q '__builtin___clear_cache' "$legacy"
+grep -q 'FlushInstructionCache(GetCurrentProcess()' "$legacy"
+grep -A8 '^int64_t rt_mprotect' "$unix" | grep -q 'PROT_NONE'
+grep -A24 '^int64_t rt_mprotect' "$win" | grep -q 'old_protect'
+grep -A32 '^int64_t rt_mprotect' "$legacy" | grep -q 'PROT_NONE'
+grep -q 'cfg(not(any(target_arch = "x86", target_arch = "x86_64")))' "$memory"
+for owner in "$top_loader" "$loader"; do
+    grep -q 'successful RX transition performs cache sync' "$owner"
+done
+
+echo "mmap provider contract audit: PASS (9 typed interpreter registrations; native providers linked directly; invalid lengths fail closed; 4 provider lanes reject W+X; RX transition owns cache sync)"
