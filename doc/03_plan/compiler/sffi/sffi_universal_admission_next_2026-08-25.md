@@ -793,8 +793,8 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   apply `raw_ptr` only to raw mapping address/extent operations.
 - [x] Make every direct raw call lexical-unsafe without changing public API,
   operation count, retry behavior, allocation, copy, lookup, or dispatch.
-- [x] Add a raw-owner annotation guard and record the bootstrap registry/test
-  blockers instead of accepting a fabricated fallback.
+- [x] Add a raw-owner annotation guard and record the stale bootstrap-artifact/
+  test blockers instead of accepting a fabricated fallback.
 - [ ] Replace legacy mmap/hash non-null text and raw integer mapping handles
   with typed nullable/status/owned-resource contracts; register each contract
   in every execution lane and require signed provider admission.

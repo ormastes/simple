@@ -2315,9 +2315,10 @@ existing operation shape. Optimizer analysis reports 51 low-level bounds-check
 and one dead-code opportunity but no general-pattern finding; this tranche adds
 no loop, allocation, copy, lookup, retry, or dispatch.
 
-The source check and new raw-boundary guard pass. The current bootstrap
-interpreter cannot resolve `rt_file_read_regular_no_follow_bounded`, and the
-legacy lock-resource spec imports a missing `FileLock` surface; both failures
-are recorded under `doc/08_tracking/bug/` and are not accepted as a pass. The
-provider remains unsafe, unsigned, and unverified, and legacy non-null
-mmap/hash text contracts remain migration work.
+The source check and new raw-boundary guard pass. The bootstrap artifact chosen
+by the test predates source registration of
+`rt_file_read_regular_no_follow_bounded`, and the legacy lock-resource spec
+imports a missing `FileLock` surface; both failures are recorded under
+`doc/08_tracking/bug/` and are not accepted as a pass. The provider remains
+unsafe, unsigned, and unverified, and legacy non-null mmap/hash text contracts
+remain migration work.

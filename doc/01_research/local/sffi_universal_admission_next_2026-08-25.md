@@ -6491,6 +6491,7 @@ declarations still need a typed nullable/result migration.
 The file-ops authority guard and four-module source check pass. The optimizer
 finds no general source-pattern change, and the edit adds no loop, allocation,
 copy, lookup, retry, or dispatch to any file hot path. The nominal integration
-spec is blocked by the bootstrap registry omitting
-`rt_file_read_regular_no_follow_bounded`; a concrete bug record captures the
-reproduction and requires typed nullable registration rather than a stub.
+spec is blocked because its selected bootstrap artifact predates the existing
+source registration for `rt_file_read_regular_no_follow_bounded`; a concrete
+bug record captures the deployment-parity reproduction rather than asking for
+a stub.
