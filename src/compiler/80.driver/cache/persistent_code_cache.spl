@@ -28,11 +28,7 @@
 use std.crypto.sha256.{sha256_text}
 use compiler.driver.cache.action_key.{canon_str, canon_field, canon_seq, action_key_sort_texts}
 use std.io_runtime.{dir_create_all}
-
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+use std.nogc_sync_mut.io_runtime.{file_write_exact, file_exists, file_delete, file_read_nullable}
 
 # On-disk format stamp. Bump on ANY layout change: an old entry then keys to
 # a different digest and can never be misread as a new one.
@@ -158,12 +154,12 @@ fn pcc_store(root: text, key: PccKey, words: [i64]) -> bool:
     content = content + "checksum=" + sha256_text(body) + "\n"
     content = content + "body=" + body + "\n"
     val tmp = path + ".tmp"
-    if not rt_file_write_text(tmp, content):
+    if not file_write_exact(tmp, content):
         return false
-    if not rt_file_write_text(path, content):
-        rt_file_delete(tmp)
+    if not file_write_exact(path, content):
+        file_delete(tmp)
         return false
-    rt_file_delete(tmp)
+    file_delete(tmp)
     true
 
 fn pcc_field(lines: [text], idx: i64, name: text) -> text?:
@@ -182,9 +178,9 @@ fn pcc_field(lines: [text], idx: i64, name: text) -> text?:
 fn pcc_load(root: text, key: PccKey) -> PccLoad:
     val digest = pcc_key_digest(key)
     val path = pcc_entry_path(root, digest)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return pcc_miss("absent")
-    val raw = rt_file_read_text(path)
+    val raw = file_read_nullable(path) ?? ""
     if raw.len() == 0:
         return pcc_miss("empty")
     val lines = raw.split("\n")
@@ -223,4 +219,4 @@ fn pcc_load(root: text, key: PccKey) -> PccLoad:
 
 # Explicit eviction (over-invalidation is always safe).
 fn pcc_evict(root: text, key: PccKey) -> bool:
-    rt_file_delete(pcc_entry_path(root, pcc_key_digest(key)))
+    file_delete(pcc_entry_path(root, pcc_key_digest(key)))
