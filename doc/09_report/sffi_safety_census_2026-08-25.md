@@ -395,3 +395,11 @@ discriminant sites share one always-inlined lexical `unsafe(ffi)` owner while
 preserving the existing declaration type and runtime ABI.  Environment lookup
 frequency and discriminant call counts remain unchanged, with no cache,
 allocation, copy, lock, hash, boxing, or dispatch table added.
+
+### LLVM target-selection authority follow-up
+
+LLVM target selection no longer declares or calls raw environment SFFI.  Both
+target-policy reads use the canonical nullable, always-inlined `env_get_opt`
+facade, removing the module's local unsafe authority.  The two entrypoints keep
+their existing single lookup and normalization work, with no cache, allocation,
+copy, additional host probe, lock, hash, boxing, or dispatch table added.

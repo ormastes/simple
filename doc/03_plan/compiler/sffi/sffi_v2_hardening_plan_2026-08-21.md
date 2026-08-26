@@ -1949,6 +1949,14 @@ and unpromoted.
 - [x] Preserve lookup/call counts without caching or dispatch machinery.
 - [x] Add a static authority and performance-shape ratchet.
 
+### Completed LLVM target-selection authority slice
+
+- [x] Remove the module-local raw environment declaration and calls.
+- [x] Route both nullable reads through canonical `env_get_opt`.
+- [x] Preserve one lookup and normalization per target-selection entrypoint.
+- [x] Eliminate local `unsafe(ffi)` authority without caching target state.
+- [x] Add a static authority and performance-shape ratchet.
+
 ### Completed compiler DI authority slice
 
 - [x] Remove the module-local raw `rt_env_get` declaration and calls.
