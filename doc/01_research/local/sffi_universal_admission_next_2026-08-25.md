@@ -6167,3 +6167,33 @@ baseline rows are now deleted, and the focused interpreter-gap scan passes with
 238 compiler symbols, zero new, and zero stale.  Broader seed/unbacked/raw
 ratchets remain red from large unrelated concurrent baseline drift; those
 findings were not rewritten or absorbed into this tranche.
+
+## Live executable-memory provider checkpoint (2026-08-26)
+
+Both Simple loader owners already allocate writable, non-executable mappings
+and explicitly transition them to read/execute. The shared native providers
+did not enforce that invariant: Unix accepted any host protection mask, Windows
+translated an executable allocation request to `PAGE_EXECUTE_READWRITE`, the
+core-C bootstrap accepted `0x7`, and the Rust interpreter forwarded RWX to
+`mmap`/`mprotect`.
+
+All four provider lanes now reject any protection containing both WRITE and
+EXEC before invoking the OS. Windows maps only the admitted NONE, R, W/RW, X,
+and RX forms and no longer references `PAGE_EXECUTE_READWRITE`. The legacy
+unmap owner also rejects null or non-positive extents before signed-to-size
+conversion. A Rust sabotage test covers both direct RWX allocation and an
+RW-to-RWX transition.
+
+The provider audit passes in 0.07 seconds at 2,560 KiB peak RSS. Normal RW and
+RX operations retain one syscall and no allocation, copy, lookup, or new
+dispatch; the only added work is a constant-time mask comparison before a
+mapping/protection syscall. This hardens W^X but does not establish
+instruction-cache synchronization on non-coherent architectures, exact-artifact
+signature admission, or whole-SFFI verification.
+
+Focused Unix provider syntax and core-C bootstrap syntax (with the build's GNU
+feature set) pass. The focused Rust sabotage test cannot compile because the
+current workspace is independently missing `read_trace`, import-performance
+counters/lowerer fields, UDP/TLS interpreter exports, and atomic-bool exports;
+none of the emitted diagnostics points at the mmap change. This checkpoint is
+therefore C/provider-audit verified but not a green Rust execution result.

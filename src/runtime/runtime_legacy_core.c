@@ -50,9 +50,9 @@ int64_t rt_thread_available_parallelism(void) {
 }
 
 int64_t rt_munmap_raw(int64_t addr, int64_t length) {
+    if (!addr || length <= 0) return -1;
 #if defined(_WIN32)
     (void)length;
-    if (!addr) return -1;
     return VirtualFree((void*)(uintptr_t)addr, 0, MEM_RELEASE) ? 0 : -1;
 #else
     return (int64_t)munmap((void*)(uintptr_t)addr, (size_t)length);
@@ -60,11 +60,16 @@ int64_t rt_munmap_raw(int64_t addr, int64_t length) {
 }
 
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
+    if (!addr || length <= 0) return -1;
+    if ((prot & 0x6) == 0x6) return -1; /* PROT_WRITE | PROT_EXEC */
 #if defined(_WIN32)
-    DWORD protect = PAGE_READWRITE;
-    if (prot == 0x1) protect = PAGE_READONLY;
+    DWORD protect;
+    if (prot == 0x0) protect = PAGE_NOACCESS;
+    else if (prot == 0x1) protect = PAGE_READONLY;
+    else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
+    else if (prot == 0x4) protect = PAGE_EXECUTE;
     else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
-    else if (prot == 0x7) protect = PAGE_EXECUTE_READWRITE;
+    else return -1;
     DWORD old_protect;
     return VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect) ? 0 : -1;
 #else

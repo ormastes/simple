@@ -6,13 +6,13 @@ unix="$root/src/runtime/platform/unix_common.h"
 win="$root/src/runtime/platform/platform_win.h"
 memory="$root/src/compiler_rust/compiler/src/interpreter_extern/memory.rs"
 file_io="$root/src/compiler_rust/compiler/src/interpreter_extern/file_io.rs"
-registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
 interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
 loader="$root/src/compiler/99.loader/loader/smf_mmap_native.spl"
+top_loader="$root/src/compiler/99.loader/smf_mmap_native.spl"
+legacy="$root/src/runtime/runtime_legacy_core.c"
 
 symbols='rt_mmap_raw rt_munmap_raw rt_mprotect rt_madvise_raw rt_msync_flags rt_mlock rt_munlock rt_open_fd rt_close_fd'
 for symbol in $symbols; do
-    grep -q "RuntimeFuncSpec::new(\"$symbol\"" "$registry"
     grep -q "insert_simple!(\"$symbol\"" "$interpreter"
 done
 
@@ -32,8 +32,21 @@ done
 grep -q 'pub fn rt_open_fd' "$file_io"
 grep -q 'pub fn rt_close_fd' "$file_io"
 
-# Loader allocations remain RW until their explicit RX transition.
+# Both loader owners allocate RW and require an explicit RX transition.
+grep -q '_sffi_mmap_raw(0, size, PROT_READ | PROT_WRITE,' "$top_loader"
 grep -q 'val prot = PROT_READ | PROT_WRITE$' "$loader"
-! grep -q 'val prot = PROT_READ | PROT_WRITE | PROT_EXEC' "$loader"
+for owner in "$top_loader" "$loader"; do
+    ! grep -q 'PROT_READ | PROT_WRITE | PROT_EXEC' "$owner"
+done
 
-echo "mmap provider contract audit: PASS (9 typed/native+interpreter registrations; invalid lengths fail closed; Windows madvise unsupported; W^X retained)"
+# All native/interpreter provider lanes reject direct W+X requests. These are
+# constant-time bit tests before the syscall and introduce no allocation,
+# lookup, copy, or additional dispatch on the loader hot path.
+grep -q 'prot & (PROT_WRITE | PROT_EXEC)' "$unix"
+[ "$(grep -c 'prot & 0x6' "$win")" -eq 2 ]
+grep -q 'prot & 0x6' "$legacy"
+[ "$(grep -c 'prot & write_exec' "$memory")" -eq 2 ]
+! grep -q 'PAGE_EXECUTE_READWRITE' "$win"
+! grep -q 'PAGE_EXECUTE_READWRITE' "$legacy"
+
+echo "mmap provider contract audit: PASS (9 typed interpreter registrations; native providers linked directly; invalid lengths fail closed; Windows madvise unsupported; 4 provider lanes reject W+X)"

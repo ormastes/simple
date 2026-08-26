@@ -2065,3 +2065,23 @@ All four relevant ledgers were narrowed by exactly those 16 entries.  The
 focused interpreter-gap scan now passes (238 checked, zero new/stale).  The
 repository's broader seed, unbacked, and raw-unsafe ratchets still report
 unrelated concurrent drift and are not claimed green by this checkpoint.
+
+### Live executable-memory W^X provider enforcement (2026-08-26)
+
+The loader's RW-to-RX policy is now enforced by the Unix, Windows, core-C
+bootstrap, and Rust interpreter providers rather than trusted only from Simple
+callers. All reject a WRITE+EXEC mask before the OS call; Windows no longer
+contains a `PAGE_EXECUTE_READWRITE` mapping or protection route. Invalid
+legacy unmap extents also fail before conversion to an unsigned platform size.
+
+The strengthened provider audit passes in 0.07 seconds with 2,560 KiB peak RSS.
+Successful normal operations keep the same syscall count and add no allocation,
+copy, lookup, or dispatch. Declaration counts are unchanged: 12,910 total,
+11,286 `rt_`, 3,000 distinct `rt_`, 1,567 incompletely tagged, 1,013 untouched,
+and zero signed-admitted. This is W^X contract enforcement, not evidence that
+the live provider or whole SFFI surface is signed or universally verified;
+hosted non-coherent instruction-cache synchronization remains open.
+
+Unix and GNU core-C syntax checks pass. The Rust sabotage test is present but
+its crate currently fails earlier on unrelated missing compiler exports and
+lowerer fields, so no Rust test PASS is claimed.

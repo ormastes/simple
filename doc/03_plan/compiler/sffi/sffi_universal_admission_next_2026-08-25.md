@@ -576,3 +576,20 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   raw-unsafe ledgers; focused interpreter-gap scan passes.
 - [ ] Continue auditing the live `rt_mmap*` loader boundary separately; deleting
   this dead parallel design does not verify or sign that provider.
+
+### Live executable-memory provider boundary
+
+- [x] Confirm both Simple owners allocate RW and transition explicitly to RX.
+- [x] Reject WRITE+EXEC in Unix and Windows mmap/mprotect providers.
+- [x] Reject WRITE+EXEC in the core-C bootstrap and Rust interpreter providers.
+- [x] Remove the Windows `PAGE_EXECUTE_READWRITE` translation.
+- [x] Add sabotage coverage for direct RWX allocation and RW-to-RWX transition.
+- [x] Repair and pass the provider contract audit across all four lanes.
+- [x] Pass Unix and GNU core-C syntax checks.
+- [ ] Execute the focused Rust sabotage test after unrelated compiler workspace
+  export/import drift is repaired; the test is authored but compilation blocks
+  before reaching it.
+- [ ] Implement and verify instruction-cache synchronization for hosted ARM and
+  RISC-V without adding per-call lookup or allocation.
+- [ ] Bind exact runtime/compiler artifacts and ABI registry to a verified
+  signature admission job; signed-admitted count remains zero.

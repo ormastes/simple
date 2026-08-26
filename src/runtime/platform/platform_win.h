@@ -502,13 +502,19 @@ bool rt_msync(void* addr, int64_t size) {
  * ---------------------------------------------------------------- */
 
 int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags, int64_t fd, int64_t offset) {
-    (void)addr; (void)prot; (void)flags; (void)fd; (void)offset;
+    (void)flags;
     if (length <= 0 || offset < 0) return -1;
+    if ((prot & 0x6) == 0x6) return -1;  /* PROT_WRITE | PROT_EXEC */
     /* Windows doesn't have mmap — use VirtualAlloc for anonymous mappings */
     if (fd == -1) {
         DWORD alloc_type = MEM_COMMIT | MEM_RESERVE;
-        DWORD protect = PAGE_READWRITE;
-        if (prot & 0x4) protect = PAGE_EXECUTE_READWRITE;  /* PROT_EXEC */
+        DWORD protect;
+        if (prot == 0x0) protect = PAGE_NOACCESS;
+        else if (prot == 0x1) protect = PAGE_READONLY;
+        else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
+        else if (prot == 0x4) protect = PAGE_EXECUTE;
+        else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
+        else return -1;
         void* result = VirtualAlloc((void*)(uintptr_t)addr, (SIZE_T)length, alloc_type, protect);
         if (!result) return -1;
         return (int64_t)(uintptr_t)result;
@@ -524,10 +530,14 @@ int64_t rt_munmap_raw(int64_t addr, int64_t length) {
 
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
     if (!addr || length <= 0) return -1;
-    DWORD protect = PAGE_READWRITE;
-    if (prot == 0x1) protect = PAGE_READONLY;           /* PROT_READ */
-    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;  /* PROT_READ|PROT_EXEC */
-    else if (prot == 0x7) protect = PAGE_EXECUTE_READWRITE;
+    if ((prot & 0x6) == 0x6) return -1;  /* PROT_WRITE | PROT_EXEC */
+    DWORD protect;
+    if (prot == 0x0) protect = PAGE_NOACCESS;
+    else if (prot == 0x1) protect = PAGE_READONLY;
+    else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
+    else if (prot == 0x4) protect = PAGE_EXECUTE;
+    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
+    else return -1;
     DWORD old_protect;
     if (!VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect)) return -1;
     return 0;

@@ -351,6 +351,8 @@ bool rt_msync(void* addr, int64_t size) {
 
 int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags, int64_t fd, int64_t offset) {
     if (length <= 0 || offset < 0) return -1;
+    /* SFFI executable mappings must transition RW -> RX; never admit RWX. */
+    if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
     void* result = mmap((void*)(uintptr_t)addr, (size_t)length, (int)prot, (int)flags, (int)fd, (off_t)offset);
     if (result == MAP_FAILED) return -1;
     return (int64_t)(uintptr_t)result;
@@ -363,6 +365,7 @@ int64_t rt_munmap_raw(int64_t addr, int64_t length) {
 
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
     if (!addr || length <= 0) return -1;
+    if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
     return (int64_t)mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot);
 }
 

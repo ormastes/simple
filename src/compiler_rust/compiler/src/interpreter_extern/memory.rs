@@ -836,15 +836,17 @@ pub fn rt_mmap_raw(args: &[Value]) -> Result<Value, CompileError> {
     }
     let addr = args[0].as_int()? as usize as *mut libc::c_void;
     let length = args[1].as_int()?;
+    let prot = args[2].as_int()?;
     let offset = args[5].as_int()?;
-    if length <= 0 || offset < 0 {
+    let write_exec = i64::from(libc::PROT_WRITE | libc::PROT_EXEC);
+    if length <= 0 || offset < 0 || (prot & write_exec) == write_exec {
         return Ok(Value::Int(-1));
     }
     let mapped = unsafe {
         libc::mmap(
             addr,
             length as usize,
-            args[2].as_int()? as i32,
+            prot as i32,
             args[3].as_int()? as i32,
             args[4].as_int()? as i32,
             offset as libc::off_t,
@@ -893,16 +895,12 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
     }
     let addr = args[0].as_int()?;
     let length = args[1].as_int()?;
-    if addr <= 0 || length <= 0 {
+    let prot = args[2].as_int()?;
+    let write_exec = i64::from(libc::PROT_WRITE | libc::PROT_EXEC);
+    if addr <= 0 || length <= 0 || (prot & write_exec) == write_exec {
         return Ok(Value::Int(-1));
     }
-    let result = unsafe {
-        libc::mprotect(
-            addr as usize as *mut libc::c_void,
-            length as usize,
-            args[2].as_int()? as i32,
-        )
-    };
+    let result = unsafe { libc::mprotect(addr as usize as *mut libc::c_void, length as usize, prot as i32) };
     Ok(Value::Int(i64::from(result)))
 }
 
@@ -1042,6 +1040,51 @@ mod ptr_read_u8_tests {
         );
         assert_eq!(
             rt_munmap_raw(&[Value::Int(mapped), Value::Int(4096)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_write_execute_mappings_and_transitions() {
+        let write_exec = libc::PROT_WRITE as i64 | libc::PROT_EXEC as i64;
+        let mapped = rt_mmap_raw(&[
+            Value::Int(0),
+            Value::Int(4096),
+            Value::Int(write_exec),
+            Value::Int(libc::MAP_PRIVATE as i64 | libc::MAP_ANONYMOUS as i64),
+            Value::Int(-1),
+            Value::Int(0),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_eq!(mapped, -1);
+
+        let rw = rt_mmap_raw(&[
+            Value::Int(0),
+            Value::Int(4096),
+            Value::Int(libc::PROT_READ as i64 | libc::PROT_WRITE as i64),
+            Value::Int(libc::MAP_PRIVATE as i64 | libc::MAP_ANONYMOUS as i64),
+            Value::Int(-1),
+            Value::Int(0),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_ne!(rw, -1);
+        assert_eq!(
+            rt_mprotect(&[Value::Int(rw), Value::Int(4096), Value::Int(write_exec)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            -1
+        );
+        assert_eq!(
+            rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)])
                 .unwrap()
                 .as_int()
                 .unwrap(),
