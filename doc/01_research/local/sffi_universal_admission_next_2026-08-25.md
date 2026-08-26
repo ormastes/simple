@@ -6448,3 +6448,17 @@ The existing 13-case ROCm spec passes, including the fail-closed legacy
 kernel-path cases. This metadata-only change adds no draw-path branch,
 allocation, copy, lookup, or dispatch. It does not establish typed span/handle
 contracts, target hardware behavior, artifact identity, or signed admission.
+
+### 3D GPU raw-owner deduplication (2026-08-26)
+
+CUDA, ROCm, Intel, and Vulkan each had an `ffi_*3d` raw module that duplicated
+its corresponding `sffi_*3d` module byte-for-byte. The former now preserves its
+public module path as a compatibility re-export; only the four canonical
+`sffi_*3d` modules retain raw declarations. Their twelve declarations are
+explicitly `unsafe(ffi)` and a source audit enforces the one-owner rule.
+
+This removes twelve declarations and duplicate class implementations without
+adding a render-path branch, allocation, copy, lookup, or dispatch. All eight
+modules source-check, and optimizer analysis reports no general-pattern finding
+for the four canonical owners. The provider identities remain unverified and
+unsigned.

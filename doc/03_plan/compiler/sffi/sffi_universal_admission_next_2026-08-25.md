@@ -764,3 +764,14 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   without changing any GPU call path.
 - [ ] Replace legacy dispatch façades with one typed ROCm ABI, validate array/
   handle ownership and status semantics, and admit an exact signed provider.
+
+### 3D GPU raw-owner deduplication
+
+- [x] Convert the four duplicate `ffi_*3d` raw modules into API-preserving
+  compatibility re-exports of their canonical `sffi_*3d` owners.
+- [x] Mark the twelve remaining CUDA/ROCm/Intel/Vulkan 3D raw declarations
+  `unsafe(ffi)` and add a four-owner authority guard.
+- [x] Source-check all canonical and compatibility modules; run optimizer
+  analysis on every canonical owner without changing runtime dispatch.
+- [ ] Replace the providerless/legacy 3D ABI names with versioned typed
+  contracts and exact signed provider admission.

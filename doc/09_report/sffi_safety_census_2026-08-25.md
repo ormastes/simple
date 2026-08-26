@@ -2276,3 +2276,18 @@ The source-only census remains 12,773 SFFI rows / 11,149 `rt_*` rows, with
 3,286 / 2,965 explicitly unsafe-tagged declarations and zero signed admission.
 ROCm's C source is not equivalent to ABI/null/ownership verification or an
 admitted artifact.
+
+### 3D GPU raw-owner deduplication (2026-08-26)
+
+The four duplicate no-GC `ffi_{cuda,rocm,intel,vulkan}3d` modules are now
+compatibility re-exports of their canonical `sffi_*3d` owners. This removes
+twelve duplicate raw declarations and duplicate class implementations without
+changing public module paths or any GPU call path. The remaining twelve raw
+declarations are explicit `unsafe(ffi)`; the authority guard and eight-file
+source check pass. Optimizer analysis reports no general-pattern finding for
+the four canonical owners.
+
+The source-only census is 12,761 SFFI rows / 11,137 `rt_*` rows, with
+3,298 / 2,977 explicitly unsafe-tagged declarations and zero signed admission.
+This reduces unsafe surface duplication; it does not verify an ABI/provider or
+authorize critical use.
