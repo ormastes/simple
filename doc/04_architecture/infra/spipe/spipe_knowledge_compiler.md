@@ -802,3 +802,84 @@ journal/recovery machinery, parity fixtures, and careful provider/version
 governance. Those costs are accepted because path-based identity, writable
 views, and provider-dependent truth would make refactors and strict evidence
 unsafe.
+
+## 16. Authority-Bound Lexical Source Checkpoint
+
+Commit `9eb667e23b` admits the dependency-free lexical-source capsule. Its only
+public operation is built from exactly four captured synchronous ports:
+
+```text
+verifySearchReceipt(binding) -> frozen exact binding echo
+readLexicalProviderPage(page_request) -> frozen provider page
+authorizeArtifactCandidate(candidate) -> frozen authorization decision
+verifyLexicalEvidence(evidence) -> frozen aggregate evidence decision
+```
+
+The capsule owns request validation, query/binding digests, page-chain
+validation, fixed-count candidate authorization, aggregate evidence, and the
+complete RRF-v2 source envelope. It does not own scoring or provider storage.
+`readLexicalProviderPage` is therefore an untrusted port: provider identity
+must remain `spipe-search-provider/1.0` with analyzer
+`spipe-unicode-lex-v1`, score contract `bm25-fixed-v1`, and one stable
+implementation digest for the entire request.
+
+### 16.1 Cursor and page authority
+
+Every non-null provider cursor hashes under
+`spipe-authorized-lexical-provider-cursor-v1\0` with the request binding digest.
+A page receipt binds the inbound cursor digest, exact requested limit, next
+cursor digest, page digest, and exact-pin exclusion. The next page must echo the
+previous next-cursor digest as its inbound digest. Rank numbering is dense and
+continuous across pages; candidates are ordered by descending non-negative
+fixed-point source score and then unsigned UTF-8 artifact UID. Reused cursors,
+cursor digests, receipts, artifact UIDs, rank gaps, short non-exhausted empty
+pages, or provider-identity changes fail closed.
+
+The complete page evidence list is hashed separately from the complete ordered
+candidate/rank evidence. `verifyLexicalEvidence` runs exactly once only after
+all locally provable page checks and exactly one authorization call per
+candidate. Its receipt and both digests become source identity. No partial or
+unverified page set may enter fusion.
+
+### 16.2 Canonical evidence contract
+
+Digest preimages use restricted `spipe-canonical-json-v1`: strings and record
+keys are Unicode scalar text normalized to NFC; normalized keys must be unique
+and sort by unsigned UTF-8; arrays are dense; records are closed data records;
+numbers are safe integers other than negative zero; and C0 controls are emitted
+as lowercase long escapes (`\u0009` for U+0009). Independent test
+canonicalization is required so digest parity is not self-asserted.
+
+### 16.3 Exact-pin exclusion boundary
+
+The accepted design now requires the provider to apply
+`excludedDocumentUid` before ranking and pagination. The binding, page,
+page-receipt, page-set, rank-evidence, and final evidence receipt all attest the
+same value and `exclusionApplied` decision. Client post-filtering is forbidden:
+after a provider-limited top 1,000 it can supply at most 999 remaining entries
+and cannot prove a complete `sourceK=1000` lexical pool.
+
+This changes no ownership rule: a versioned provider adapter/protocol mapping
+remains a prerequisite before the source can be wired to an implementation.
+The admitted lexical capsule cannot be treated as an adapter or an integrated
+search endpoint.
+
+### 16.4 Non-admitted graph candidate and integration order
+
+The two-file graph candidate in `/tmp/spkc-graph-candidates-4OKnKd` is rejected
+as evidence after the bounded third cycle: focused `13/14` with an uncontracted
+cyclic `workUnits <= 9` oracle. Seven static defects were patched, but the full
+suite and final highest-capability review did not run. It has no commit and
+cannot close graph boost or AC-4.
+
+Integration proceeds only through separately owned, reviewable boundaries:
+
+1. graph generator and its independent oracle;
+2. provider-adapter/protocol interface and ownership freeze, then its parity
+   implementation (filenames are not yet frozen);
+3. standalone cross-source rerank-evidence assembler/verifier;
+4. integrated pipeline consuming admitted exact, lexical, graph, RRF-v2, and
+   pair-based reranker contracts.
+
+Rerank-evidence is not folded into either graph generation or the pipeline;
+separate evidence admission prevents orchestration from manufacturing authority.

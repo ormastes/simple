@@ -2455,3 +2455,59 @@ was pushed as `f89b120be7`.
 This removes the graph-evidence representation blocker. Accepted-edge graph
 candidate generation and integrated search orchestration remain unimplemented,
 and AC-4 remains open.
+
+## 38. 2026-08-26 Authority-Bound Lexical Source Admission
+
+The dependency-free lexical producer is accepted at commit `9eb667e23b`. It
+captures exactly four synchronous capabilities—`verifySearchReceipt`,
+`readLexicalProviderPage`, `authorizeArtifactCandidate`, and
+`verifyLexicalEvidence`—and exposes only `readLexicalSourceV1`. The request and
+every returned page bind the workspace/project/worktree/revision, immutable
+snapshot and lexical root, authorization scope, policy hash/version, search
+receipt, analyzer identity, normalized query digest, requested `sourceK`, and
+optional exact-pin exclusion.
+
+Provider paging is an evidence chain, not a client convenience. Each page binds
+the inbound cursor digest, requested limit, continuous rank start, candidates,
+next cursor digest, exhausted flag, page digest, and unique page receipt. The
+producer rejects rank gaps, cross-page duplicates, repeated cursor/receipt,
+identity drift, an excluded artifact, or a malformed digest before candidate
+authorization. It records bounded page receipts, then binds their page-set
+digest and the complete ordered rank-evidence digest into one final evidence
+verification. Only that verified complete result becomes an RRF-v2 lexical
+source.
+
+All digest preimages use the restricted `spipe-canonical-json-v1` evidence
+contract: Unicode scalar strings and keys are NFC-normalized, normalized keys
+are unique and sorted by unsigned UTF-8 bytes, only safe integers represent
+numbers (`-0` is rejected), and C0 controls use the long lowercase `\u00xx`
+escape, including U+0009 as `\u0009`. The test oracle is an independent encoder
+rather than a call back into production canonicalization.
+
+The design is intentionally stronger than client post-filtering. When exact
+identity resolves to `excludedDocumentUid`, the provider must remove that UID
+**before scoring order and pagination**, and both page and aggregate receipts
+bind the exclusion. Filtering a returned top-1,000 page in the caller could
+yield only 999 lexical candidates and cannot prove the requested complete
+`sourceK=1000` pool under the provider rank cap.
+
+Admission evidence is focused `16/16`; the full package passed `158/158` unit,
+Wave 2 `9/9`, Wave 3 `25/25`, Wave 4 `9/9`, legacy, security, workflow, and
+performance checks; the final highest-capability review passed. This admits
+the producer boundary, not a provider implementation. A concrete adapter must
+still prove `spipe-search-provider/1.0`, `spipe-unicode-lex-v1`,
+`bm25-fixed-v1`, cursor, exclusion, and receipt parity.
+
+The uncommitted graph candidate at `/tmp/spkc-graph-candidates-4OKnKd` is not
+evidence. Its bounded cycle ended focused `13/14`: the remaining cyclic-graph
+test asserts only uncontracted `workUnits <= 9`. Seven static defects were
+patched, but no full-suite run or final highest-capability review followed, so
+none of the two candidate files is admitted and no acceptance criterion is
+satisfied by them.
+
+The exact remaining order is: admit the standalone graph-candidate source/test
+pair; freeze and implement the provider-adapter/protocol ownership boundary;
+admit the standalone rerank-evidence source/test pair; then integrate the
+pipeline source/test pair using the already admitted exact resolver, complete
+RRF-v2 pool, and pair-based reranker. AC-4 remains open until that integrated,
+authority-bound pipeline and its explanations pass.

@@ -862,3 +862,64 @@ and weak independent `Case_Ignorable` final-sigma lowercase coverage.
 Accept none of the bundle. Repair the static defects first, then run complete
 parity once on a capable pure-Simple runtime. The analyzer prerequisite is
 still missing and Wave 4 remains `IN PROGRESS`.
+
+### 13.4 Admitted authority-bound lexical source
+
+Commit `9eb667e23b` is the accepted lexical-source checkpoint. Its focused suite
+passed `16/16`; the package passed `158/158` unit, Wave 2 `9/9`, Wave 3 `25/25`,
+Wave 4 `9/9`, legacy, security, workflow, and performance gates; final
+highest-capability review passed. This evidence covers the dependency-free
+producer only, not a provider adapter or an integrated `spipe search` command.
+
+The producer owns four synchronous boundaries:
+
+| Port | Operational meaning |
+|---|---|
+| `verifySearchReceipt` | Attest the exact snapshot/scope/policy/query/source binding before provider access |
+| `readLexicalProviderPage` | Return one frozen, digest- and receipt-bound provider page |
+| `authorizeArtifactCandidate` | Recheck every collected artifact exactly once without early exit |
+| `verifyLexicalEvidence` | Attest the complete page-set and ordered-rank evidence exactly once |
+
+For troubleshooting pagination, verify the chain rather than inspecting only
+the visible candidates: the first page has a null inbound cursor digest; each
+later page's inbound digest equals the previous page's next-cursor digest; ranks
+remain dense; page receipt, page digest, requested limit, exact exclusion, and
+provider identity do not drift; and no cursor, receipt, or artifact repeats.
+Only an exhausted or `sourceK`-complete chain produces a lexical RRF source.
+
+Digest fixtures must use restricted `spipe-canonical-json-v1`: NFC strings and
+keys, unsigned UTF-8 normalized-key order, dense arrays/closed records, safe
+integers excluding `-0`, and lowercase long C0 escapes. In particular U+0009
+is `\u0009`; a short `\t` spelling produces a different preimage and is not
+valid evidence. Use an independent canonicalizer for parity tests.
+
+If exact identity is pinned, pass it as `excludedDocumentUid` to the provider.
+The provider must exclude it before ranking and pagination and bind it in every
+page and receipt. Do not fetch 1,000 then filter locally: that leaves at most
+999 candidates and falsely labels an incomplete source as `sourceK=1000`.
+
+Provider integration remains gated on an explicit ownership/interface freeze
+and conformance oracle. The adapter must prove
+`spipe-search-provider/1.0`, `spipe-unicode-lex-v1`, `bm25-fixed-v1`, stable
+implementation identity, pre-ranking exclusion, cursor continuity, page
+receipts, and aggregate evidence. No adapter filename is canonical yet.
+
+The graph candidate under `/tmp/spkc-graph-candidates-4OKnKd` is not reusable
+evidence: cycle-cap result `13/14`, with an uncontracted cyclic
+`workUnits <= 9` assertion; seven static repairs but no full package or final
+review; no commit. Keep graph boost and AC-4 open.
+
+Continue only through these owned pairs:
+
+1. `src/search/graph_candidates.js` +
+   `test/unit/search_graph_candidates_test.js`;
+2. the separately frozen provider adapter/protocol + conformance oracle;
+3. `src/search/rerank_evidence.js` +
+   `test/unit/search_rerank_evidence_test.js`;
+4. `src/search/pipeline.js` + `test/unit/search_pipeline_test.js`.
+
+All relative paths in this list are under `examples/05_stdlib/spipe/`. The
+pipeline order is exact identity pin, provider-owned exclusion, complete
+lexical/graph sources, complete-pool RRF-v2, standalone evidence verification,
+pair-based reranking, then user limit. A green standalone lexical test is not an
+integrated-search or AC-4 completion signal.

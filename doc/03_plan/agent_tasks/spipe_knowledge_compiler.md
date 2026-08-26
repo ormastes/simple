@@ -680,3 +680,54 @@ focused 26/26, full package, and final highest-capability gates passed.
 The graph generator is now unblocked. Do not fabricate per-edge receipts, drop
 edges, or replace ordered pairs with the derived unique arrays. Graph boost and
 AC-4 remain open until the standalone graph oracle and integrated search pass.
+
+### 10.12 Authority-bound lexical source admission and exact next ownership
+
+The lexical source product/oracle pair is accepted at `9eb667e23b`:
+
+- `examples/05_stdlib/spipe/src/search/lexical_source.js`
+- `examples/05_stdlib/spipe/test/unit/search_lexical_source_test.js`
+
+It captures exactly `verifySearchReceipt`, `readLexicalProviderPage`,
+`authorizeArtifactCandidate`, and `verifyLexicalEvidence`; validates the full
+cursor/page/receipt chain; authorizes every candidate exactly once; and verifies
+the complete page-set plus ordered-rank evidence once. Its restricted
+`spipe-canonical-json-v1` evidence uses NFC, unsigned UTF-8 key order, and long
+lowercase C0 escapes including U+0009 as `\u0009`.
+
+The accepted design delta is mandatory: a provider removes
+`excludedDocumentUid` before ranking and pagination and its page/aggregate
+receipts attest that choice. Client post-filter is not conforming because a
+provider-capped 1,000-row page cannot still prove 1,000 remaining lexical rows.
+The provider adapter/protocol ownership and filenames remain unfrozen; freeze
+them and the independent conformance oracle before implementation. Require
+`spipe-search-provider/1.0`, analyzer/score identity, exclusion, cursor, page,
+and receipt parity.
+
+Evidence is focused `16/16`; full `158/158` unit, Wave 2 `9/9`, Wave 3 `25/25`,
+Wave 4 `9/9`, legacy, security, workflows, and performance `PASS`; independent
+highest-capability review `PASS`.
+
+Do not admit `/tmp/spkc-graph-candidates-4OKnKd`. It stopped at cycle cap with
+focused `13/14` because its cyclic-graph `workUnits <= 9` expectation is not a
+contracted oracle. All seven reported static defects were patched, but no full
+suite or final highest-capability review followed. There is no commit and no AC
+claim.
+
+Remaining work uses these exact, non-overlapping pairs in order:
+
+1. graph: `examples/05_stdlib/spipe/src/search/graph_candidates.js` and
+   `examples/05_stdlib/spipe/test/unit/search_graph_candidates_test.js`;
+2. provider adapter/protocol: merge owner first freezes interfaces, filenames,
+   ownership, and a separate conformance oracle; no implementation starts from
+   guessed filenames;
+3. rerank evidence: `examples/05_stdlib/spipe/src/search/rerank_evidence.js` and
+   `examples/05_stdlib/spipe/test/unit/search_rerank_evidence_test.js`;
+4. pipeline: `examples/05_stdlib/spipe/src/search/pipeline.js` and
+   `examples/05_stdlib/spipe/test/unit/search_pipeline_test.js`.
+
+The rerank-evidence pair is a standalone prerequisite, not pipeline-owned test
+scaffolding. The pipeline integrates only accepted exact identity, lexical and
+graph sources, complete RRF-v2, rerank evidence, and pair-based reranker in that
+order, with user limit last. Merge owner remains `/root`; final reviewer is the
+best available normal/highest-capability model. AC-4 stays open.

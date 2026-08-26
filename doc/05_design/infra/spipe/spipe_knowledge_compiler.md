@@ -1283,3 +1283,111 @@ All REQ-SPKC-001–030 and NFR-SPKC-001–025 have a design owner and named
 evidence above. Focused designs refine their rows but may not weaken these
 integration invariants. If an implementation discovery changes a contract,
 requirements and architecture are revised before code adopts the change.
+
+## 16. Wave 4 Lexical Source Admission and Remaining Integration Design
+
+### 16.1 Accepted capsule and call sequence
+
+Commit `9eb667e23b` admits
+`examples/05_stdlib/spipe/src/search/lexical_source.js` with its root unit
+oracle. `createAuthorizedLexicalSourceV1` accepts exactly four own data
+capabilities and snapshots their function values once:
+
+1. `verifySearchReceipt` verifies and returns the exact frozen binding;
+2. `readLexicalProviderPage` supplies one frozen, receipt-bearing provider page;
+3. `authorizeArtifactCandidate` rechecks every collected candidate exactly once
+   without early exit;
+4. `verifyLexicalEvidence` verifies the final page-set and ordered-rank digests
+   exactly once.
+
+The returned object is frozen and exposes only `readLexicalSourceV1`. Port
+exceptions collapse to stable public errors; port records are closed and frozen;
+accessors, symbols, hidden fields, sparse arrays, mutation, or identity drift
+are rejected. The hot path performs no tree scan, file reread, process launch,
+network call, retry sleep, clock read, or randomness of its own.
+
+### 16.2 Request and provider-page records
+
+The public request is the exact closed shape
+`{contractVersion,operation,query,context,pin,sourceK,excludedDocumentUid}` with
+operation `lexical_source`. The context/pin bind workspace, project, worktree,
+revision, snapshot/root, scope, policy, search receipt, and analyzer identity.
+`sourceK` is `1..1000`, default `1000`; the query cap is 4,096 UTF-8 bytes.
+
+The provider request is
+`{receipt,bindingDigest,query,queryDigest,excludedDocumentUid,requestedLimit,
+providerCursor}`. Each returned page is the exact frozen shape
+`{schema,bindingDigest,providerIdentity,excludedDocumentUid,exclusionApplied,
+providerCursorDigest,requestedLimit,pageStartRank,candidateCount,candidates,
+nextCursor,nextCursorDigest,exhausted,pageDigest,receipt}`. The page cap is
+1,000 candidates and 524,288 canonical bytes; the request cap is 64 pages and
+2,097,152 aggregate raw-evidence bytes; cursor and document-ID caps are 8,192
+and 512 UTF-8 bytes.
+
+For page `n+1`, `providerCursor` is page `n`'s `nextCursor`, and its
+`providerCursorDigest` must equal page `n`'s `nextCursorDigest`. Both cursor
+digests hash `{bindingDigest,cursor}` under the cursor domain. The page receipt
+attests the binding, exclusion, inbound cursor, requested limit, next cursor,
+and page digest. Page evidence retains exactly
+`{receiptUid,pageDigest,excludedDocumentUid,exclusionApplied,
+providerCursorDigest,requestedLimit,nextCursorDigest,pageStartRank,
+candidateCount,exhausted}` for aggregate verification.
+
+Candidates use `{documentId,sourceRank,sourceScoreMilli}`. Ranks are dense
+across pages; score is descending; ties use unsigned UTF-8 document ID. The
+source completes on provider exhaustion or `sourceK`, then emits a complete
+RRF-v2 lexical source with source identity, candidate digest, evidence identity,
+and bounded counters. It never emits partial candidates.
+
+### 16.3 Restricted canonical JSON oracle
+
+All lexical digests use restricted `spipe-canonical-json-v1`, not ambient
+`JSON.stringify`: NFC scalar strings/keys, duplicate-normalized-key rejection,
+unsigned UTF-8 key ordering, dense arrays, closed data records, safe integer
+numbers excluding `-0`, and lowercase long C0 escapes. U+0009 is therefore
+encoded as `\u0009`, not the short `\t` spelling. Tests construct these
+preimages with an independent restricted encoder and cover page-size invariance.
+
+### 16.4 Provider-owned exclusion
+
+When exact identity is pinned, `excludedDocumentUid` is passed into the provider
+and must be removed before scoring order and pagination. The provider page,
+receipt, binding, page-set digest, rank-evidence digest, evidence decision, and
+source identity bind the exclusion. The producer also rejects the excluded UID
+if returned. Caller post-filter is insufficient because removing an exact UID
+from a provider-capped 1,000-row page cannot yield the requested complete
+1,000-row lexical source.
+
+The provider-adapter/protocol version and ownership mapping must be frozen next;
+no filename is frozen yet. Its conformance oracle must prove pre-ranking
+exclusion, page/cursor continuity, `spipe-search-provider/1.0`,
+`spipe-unicode-lex-v1`, `bm25-fixed-v1`, and receipt parity before pipeline use.
+
+### 16.5 Evidence and non-evidence
+
+The admitted source passed focused `16/16`, full `158/158` unit, Wave 2 `9/9`,
+Wave 3 `25/25`, Wave 4 `9/9`, legacy, security, workflows, performance, and
+final highest-capability review.
+
+The graph candidate at `/tmp/spkc-graph-candidates-4OKnKd` is not admitted.
+After the third bounded cycle it remains `13/14`; its cyclic-graph assertion
+uses an uncontracted `workUnits <= 9` oracle. Although seven static defects were
+patched, neither full-suite nor final highest-capability evidence exists. The
+files have no accepted commit and satisfy no AC.
+
+### 16.6 Frozen remaining source/test ownership
+
+Each future implementation is an indivisible product/oracle pair under
+`examples/05_stdlib/spipe/`:
+
+| Order | Product | Independent oracle | Gate |
+|---:|---|---|---|
+| 1 | `src/search/graph_candidates.js` | `test/unit/search_graph_candidates_test.js` | Exact accepted-edge traversal, contracted work-unit oracle, focused/full/final review |
+| 2 | Provider adapter/protocol filenames pending ownership freeze | Separate conformance oracle pending the same freeze | Version, pre-ranking exclusion, cursor/page/receipt parity |
+| 3 | `src/search/rerank_evidence.js` | `test/unit/search_rerank_evidence_test.js` | Lossless source/evidence assembly and one authority-bound verification |
+| 4 | `src/search/pipeline.js` | `test/unit/search_pipeline_test.js` | Exact pin -> excluded complete sources -> exhaustive graph -> RRF-v2 -> evidence -> rerank -> user limit |
+
+The pipeline may consume only admitted commits. It must not inline graph
+traversal, provider translation, or rerank-evidence verification. AC-4 remains
+open through all standalone prerequisites and closes only with end-to-end
+pipeline and explanation evidence.
