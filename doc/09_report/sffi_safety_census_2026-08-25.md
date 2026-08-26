@@ -1744,3 +1744,10 @@ added but not executed. No branch, allocation, copy, lookup, hash, lock,
 signature check, or generic dispatch was added to the per-operation path.
 The two checked-in x86 example provider snapshots also drop 114 stale matching
 nil/no-op definitions; unrelated architecture helper definitions are retained.
+
+The RV64 follow-up removes another ten CPU declarations and its 91-line
+freestanding C switch/provider implementation. Thirty named direct instructions
+replace the generic CSR and register bridge. Across the bounded privileged CPU
+family, 73 SFFI declarations are removed and 90 operations now carry minimal
+`inline_asm` authority. This improves dispatch shape but remains unsigned and
+hardware/compiler-unverified.

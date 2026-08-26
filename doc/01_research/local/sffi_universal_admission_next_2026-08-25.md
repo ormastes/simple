@@ -5801,3 +5801,18 @@ The 114 matching weak/no-op definitions were also removed from the two
 checked-in x86 SimpleOS example provider snapshots. Six declaration identities
 had no matching snapshot definition; unrelated ARM/RV32 runtime helpers remain
 untouched.
+
+### RISC-V 64 follow-up
+
+The RV64 CPU owner had ten scalar SFFI declarations backed only by its
+freestanding C boot object. Its generic CSR read/write/set/clear provider used
+a runtime switch even though all Simple call sites supplied compile-time CSR
+identities. The owner now emits 30 exact named instructions directly and the
+91-line duplicate C dispatch implementation is removed.
+
+This changes dynamic switch-plus-call CSR operations to one instruction while
+preserving the HAL surface and explicit `inline_asm` authority. Required
+memory clobbers retain compiler ordering without emitting hardware work. No
+allocation, copy, lookup, hash, lock, signature check, or generic dispatch is
+added. The RV64 compiler/privilege/hardware path is still source-reviewed only,
+unsigned, and unverified.

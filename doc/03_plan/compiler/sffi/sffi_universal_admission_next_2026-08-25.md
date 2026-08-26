@@ -356,3 +356,12 @@ audits. Merge owner and final highest-capability reviewer: `/root`.
 
 This tranche improves the hot path by deleting unresolved foreign calls. It
 does not label inline assembly safe or verified.
+
+### RV64 follow-up
+
+- [x] Remove ten CPU SFFI declarations and their duplicate freestanding C
+  switch/provider implementation.
+- [x] Specialize the twelve CSR reads, six writes, four set/clear operations,
+  two targeted fences, and four register moves to direct named instructions.
+- [x] Preserve explicit memory clobbers for translation and interrupt ordering.
+- [ ] Execute cross-target assembly and QEMU evidence on an admitted toolchain.
