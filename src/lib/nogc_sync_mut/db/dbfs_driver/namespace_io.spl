@@ -16,7 +16,10 @@ use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
     dbfs_owner_transaction_begin, dbfs_owner_transaction_end
 }
 use std.fs_driver.error.{FsError}
-use std.fs_driver.types.{FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo}
+use std.fs_driver.types.{
+    FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo,
+    ExecuteFileObservationV1
+}
 
 fn _remove_inode_id_locked(inst_id: i64, inode_id: u64):
     var i: i32 = 0
@@ -38,6 +41,42 @@ fn _namespace_finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:
 
 impl DbFsDriver:
     # --- stat ---
+
+    fn _file_generation_v1_locked(handle: FileHandle) -> Result<u64, FsError>:
+        """Return the exact live content generation under the DBFS owner."""
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.StaleHandle)
+        val generation = _dbfs_inodes[inode_idx].content_generation
+        if generation == 0u64:
+            return Err(FsError.Corrupt)
+        Ok(generation)
+
+    fn _execute_observation_v1_locked(
+        handle: FileHandle
+    ) -> Result<ExecuteFileObservationV1, FsError>:
+        """Observe executable identity, generation, and size in one lease."""
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.StaleHandle)
+        val inode = _dbfs_inodes[inode_idx]
+        if inode.content_generation == 0u64 or inode.size < 0:
+            return Err(FsError.Corrupt)
+        Ok(ExecuteFileObservationV1(
+            contract_version: 1u32,
+            object_identity: inode.id,
+            content_generation: inode.content_generation,
+            size: inode.size as u64))
 
     fn _stat_path_locked(path: Path) -> Result<StatInfo, FsError>:
         """Stat path: look up inode by name in module store."""
@@ -182,6 +221,46 @@ impl DbFsDriver:
 
     # --- pread ---
 
+    fn _pread_bytes_handle_locked(
+        handle: FileHandle, offset: i64, length: i64
+    ) -> Result<[u8], FsError>:
+        """Read a short, byte-exact positioned range without text conversion."""
+        if offset < 0 or length < 0 or offset > 0x7FFFFFFFFFFFFFFF - length:
+            return Err(FsError.InvalidArg)
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.StaleHandle)
+        if length == 0:
+            return Ok([])
+        val inode = _dbfs_inodes[inode_idx]
+        if inode.size < 0:
+            return Err(FsError.Corrupt)
+        if self.arena_base < 0 and inode.content_bytes.len() as i64 != inode.size:
+            return Err(FsError.Corrupt)
+        if offset >= inode.size:
+            return Ok([])
+        val available = inode.size - offset
+        val count = if length < available: length else: available
+        if self.arena_base >= 0:
+            val full = self._read_inode_bytes_from_device_locked(inode.id, offset + count)?
+            var device_out: [u8] = []
+            var device_i: i64 = offset
+            while device_i < offset + count:
+                device_out.push(full[device_i as i32])
+                device_i = device_i + 1
+            return Ok(device_out)
+        var out: [u8] = []
+        var i: i64 = 0
+        while i < count:
+            out.push(inode.content_bytes[(offset + i) as i32])
+            i = i + 1
+        Ok(out)
+
     fn _pread_handle_locked(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
         """Read length chars starting at offset."""
         val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
@@ -289,6 +368,68 @@ impl DbFsDriver:
         Ok(())
 
     # --- pwrite ---
+
+    fn _pwrite_bytes_handle_locked(
+        handle: FileHandle, offset: i64, patch: [u8]
+    ) -> Result<i64, FsError>:
+        """Copy-on-write byte-exact positioned write through the DBFS owner."""
+        val length = patch.len() as i64
+        if offset < 0 or length < 0 or offset > 0x7FFFFFFFFFFFFFFF - length:
+            return Err(FsError.InvalidArg)
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.StaleHandle)
+        val old = _dbfs_inodes[inode_idx]
+        if old.content_generation == 0x7FFFFFFFFFFFFFFFu64:
+            return Err(FsError.TooLarge)
+        if old.size < 0:
+            return Err(FsError.Corrupt)
+        val old_bytes = if old.size == 0:
+            []
+        else if self.arena_base >= 0:
+            self._read_inode_bytes_from_device_locked(old.id, old.size)?
+        else:
+            old.content_bytes
+        if old_bytes.len() as i64 != old.size:
+            return Err(FsError.Corrupt)
+        var new_bytes: [u8] = []
+        var i: i64 = 0
+        while i < offset:
+            if i < old.size:
+                new_bytes.push(old_bytes[i as i32])
+            else:
+                new_bytes.push(0u8)
+            i = i + 1
+        var j: i64 = 0
+        while j < length:
+            new_bytes.push(patch[j as i32])
+            j = j + 1
+        var k: i64 = offset + length
+        while k < old.size:
+            new_bytes.push(old_bytes[k as i32])
+            k = k + 1
+        val new_size = new_bytes.len() as i64
+        val new_inode = DbFsInode(
+            inst_id: old.inst_id, id: old.id,
+            content_generation: old.content_generation + 1u64,
+            kind: old.kind, name: old.name,
+            content: dbfs_bytes_to_text(new_bytes, new_size),
+            content_bytes: dbfs_slice_bytes(new_bytes, new_size),
+            parent: old.parent, size: new_size, unlinked: old.unlinked,
+        )
+        _dbfs_inodes.remove(inode_idx)
+        _dbfs_inodes.push(new_inode)
+        val committed = self._commit_inode_bytes_to_device_locked(
+            old.id, dbfs_slice_bytes(new_bytes, new_size))
+        if committed.is_err():
+            _restore_inode_locked(old)
+            return Err(committed.unwrap_err())
+        Ok(length)
 
     fn _pwrite_handle_locked(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
         """Write patch starting at offset (COW semantics)."""
@@ -509,6 +650,16 @@ impl DbFsDriver:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._stat_locked(path))
 
+    fn file_generation_v1(handle: FileHandle) -> Result<u64, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._file_generation_v1_locked(handle))
+
+    fn execute_observation_v1(
+        handle: FileHandle
+    ) -> Result<ExecuteFileObservationV1, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._execute_observation_v1_locked(handle))
+
     fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._open_path_locked(path, flags))
@@ -533,6 +684,12 @@ impl DbFsDriver:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._pread_handle_locked(handle, offset, length))
 
+    fn pread_bytes_handle(
+        handle: FileHandle, offset: i64, length: i64
+    ) -> Result<[u8], FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._pread_bytes_handle_locked(handle, offset, length))
+
     fn write_handle(handle: FileHandle, content: text) -> Result<(), FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._write_handle_locked(handle, content))
@@ -544,6 +701,12 @@ impl DbFsDriver:
     fn pwrite_handle(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._pwrite_handle_locked(handle, patch, offset))
+
+    fn pwrite_bytes_handle(
+        handle: FileHandle, offset: i64, patch: [u8]
+    ) -> Result<i64, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._pwrite_bytes_handle_locked(handle, offset, patch))
 
     fn close_handle(handle: FileHandle) -> Result<(), FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
