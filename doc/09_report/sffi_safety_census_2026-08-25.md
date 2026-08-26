@@ -258,3 +258,11 @@ source, and explicitly logs missing/unreadable or empty input before selecting
 the pre-existing embedded fallback.  Provider failure can no longer become
 silent empty C code.  The change removes one filesystem probe and adds no
 retry, copy, lookup, or generic dispatch.
+### Compiler source-file authority follow-up
+
+The compiler-common `SourceFile.load` boundary now declares the provider's
+nullable text result accurately, tags it `unsafe(ffi)`, and confines the raw
+call to one always-inlined lexical owner.  Provider `nil` and an existing empty
+source are diagnosed separately.  Loading still performs one read and coverage
+identity reuses the lifted content; no probe, retry, copy, lookup, or generic
+dispatch was added.

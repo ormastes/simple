@@ -1836,3 +1836,10 @@ and unpromoted.
 - [x] Distinguish non-empty source, empty source, and provider failure.
 - [x] Retain the intentional embedded fallback with explicit diagnostics.
 - [x] Add a static authority and one-read ratchet.
+### Completed compiler source-file authority slice
+
+- [x] Correct the compiler-common source read to nullable text.
+- [x] Tag the raw declaration `unsafe(ffi)`.
+- [x] Confine it to one always-inlined lexical owner.
+- [x] Distinguish provider failure from the existing empty-source policy.
+- [x] Preserve one-read behavior and add a static ratchet.
