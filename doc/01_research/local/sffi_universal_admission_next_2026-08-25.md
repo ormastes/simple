@@ -12,6 +12,29 @@ Simple SFFI is **not globally safe, verified, or signed**. The repository has
 useful fail-closed pieces, but no current evidence proves universal production
 admission across interpreter, JIT, native, dynload, and SimpleOS.
 
+## Bootstrap sandbox authority checkpoint — 2026-08-26
+
+The bootstrap sandbox builder exposed 22 untagged raw declarations. Seven were
+unused query/cleanup/overlay declarations and have been removed. Each of the 15
+live reset/configure/apply calls is now explicitly declared FFI-unsafe and
+confined to its own smallest lexical `unsafe(ffi)` expression. The existing
+final `rt_sandbox_apply() -> bool` remains the transaction admission check, so
+provider failure is still returned as `Err` rather than a successful sandbox.
+The exported `apply_sandbox` operation is itself explicitly unsafe because a
+boolean cannot prove rollback, unwind safety, or exact provider identity for an
+irreversible process-global policy change.
+
+The direct topology is unchanged: one reset, at most one scalar mutation per
+selected limit, one mutation per domain/path, and one apply. No lookup, hash,
+signature operation, wrapper frame, retry, allocation, copy, lock, or loop was
+added. The Rust provider and interpreter registrations exist for all 15 live
+symbols. Exact typed-native `RuntimeFuncSpec` entries do not exist, however, so
+prefix tier classification must not be mistaken for ABI verification. Exact
+artifact identity, trusted signature, and proof receipts also remain absent.
+The source-ledger delta is therefore 7 fewer declaration rows, 15 newly tagged
+and contract-documented rows, and zero newly signed/admitted symbols; a future
+full census must measure the new workspace totals.
+
 ## SimpleOS tools-test authority checkpoint
 
 `src/os/tools_test.spl` had sixty ambient calls to its one serial-output

@@ -93,6 +93,17 @@ the prior full-backing scan and are not silently presented as refreshed.
 
 ## Post-census migration note — 2026-08-26
 
+The bootstrap sandbox builder removed seven unused raw declarations and tagged
+and lexically confined its fifteen live reset/configure/apply calls. The
+source-only delta is seven fewer rows, fifteen fewer untouched rows, and fifteen
+more contract-declared unsafe rows. Runtime behavior and complexity are
+unchanged: the builder still performs one mutation per configured scalar or
+domain/path and one final checked apply. The exported transaction is tagged
+unsafe because successful status does not prove rollback or provider identity.
+Typed-native ABI entries, exact artifact evidence, and signatures remain
+absent, so verified-and-signed stays zero and the headline census is not
+rewritten without a fresh full run.
+
 The backward-compatible `src/app/io/mod.spl` hub was narrowed without changing
 its direct-call shape: one unused `rt_env_get` redeclaration was removed, two
 dead nil checks now call the existing nullable `env_get_opt` owner, and all 11

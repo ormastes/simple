@@ -159,6 +159,17 @@ handle contracts.
 
 ### 6. Migrate or isolate every remaining row
 
+Checkpoint: the bootstrap sandbox builder removed seven unused raw declarations
+and confines all fifteen live reset/configure/apply operations to individual
+lexical `unsafe(ffi)` expressions. The Rust provider and interpreter cover the
+live set, and the final boolean apply status remains the sole transaction
+admission result. The exported builder remains unsafe until rollback, unwind,
+and provider identity are proved. No call, allocation, copy, loop, lookup,
+lock, hash, or signature operation was added. Exact native codegen signatures,
+artifact-bound admission, and verification receipts remain open; the focused
+static ratchet therefore deliberately reports this family as unsafe and
+unverified.
+
 Checkpoint: the first source-ledger consolidation removed all 26 duplicate
 Simple `rt_mkdir_p` declaration rows, including mirrored specs, and removed the
 obsolete unconditional LLVM declaration. Callers now use the canonical
