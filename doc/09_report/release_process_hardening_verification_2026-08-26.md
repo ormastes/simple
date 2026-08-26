@@ -53,6 +53,11 @@
 - Direct environment/runtime facade guards: PASS for working and staged scans.
 - Source/workflow safety checks reject direct protected-ref mutation, broad tag
   pushes, rebuild/fallback promotion, and destructive tag rollback.
+- Stage-2 frontend admission now native-builds and executes the exact Stage-3
+  module-name paths, including a non-ASCII workspace prefix, with fallback
+  disabled, an isolated cache, exact stdout, timeouts, log caps, and dead-lexer
+  rejection. Its mocked fail-closed contract passes 8/8 and xhigh review found
+  no P0/P1 defect.
 - Live GitHub policy baseline: PASS. Seven projected rulesets, the declared
   protected-integration/release/npm-release environments, and immutable
   releases pass `scripts/release/github-policy.sh verify-live ormastes/simple`.
@@ -80,7 +85,15 @@
    Stage 2/3 sanity consumer to canonical `release/version.sdn`, the second
    focused cycle admitted artifact SHA-256
    `609c9685ed03f752239de4dc20aba4d5baa97ecb6c6183fb994e9ea1fc76f071`.
-   Neither result updates a protected ref directly.
+   The final immutable-head Stage 2 cycle admitted artifact SHA-256
+   `b06f4eb4f72a36f1b9250f20a9c0537c5aa98a9bb54a93792a947baf940b4511`
+   and produced a verified Stage-3 planner receipt. Stage 3 then failed
+   deterministically because the Stage-2-native module-name helper mapped
+   `src/app/cli/bootstrap_main.spl` and `src/compiler/driver/driver.spl` to
+   the empty name. The trunk correction is Simple PR #31; its exact reviewed
+   admission-probe commit was cherry-picked into beta PR #28. PR #31 and the
+   protected integration of PR #29 remain prerequisites to a fresh release
+   lineage. Neither result updates a protected ref directly.
 2. The GitHub policy configuration row is now PASS, but configuration is not a
    beta release receipt. Exact signed beta promotion, immutable publication of
    its admitted assets, artifact attestations, and byte-identical npm registry
@@ -98,8 +111,11 @@
 
 ## Required next evidence
 
-1. Produce an admitted pure-Simple runtime and run the required lint plus one
-   clean `bin/simple test test --whole --mode=interpreter` confirmation.
+1. Integrate trunk PRs #29 and #31 through protected review, refresh the beta
+   backport from those exact integrated revisions, then start a fresh immutable
+   Stage 2 lineage in a new bounded verification session. Produce admitted
+   Stage 3 and Stage 4 artifacts and run the required lint plus one clean
+   `bin/simple test test --whole --mode=interpreter` confirmation.
 2. Using the verified live policy baseline, exercise one create-once beta
    candidate and promote its exact assets through signing, immutable GitHub
    publication, and byte-identical npm publication receipts.
