@@ -34,4 +34,17 @@ done
 grep -q '^    fn has_glyph(codepoint: i64) -> bool:' "$module"
 grep -q 'val present = spl_wffi_call_i64(self.has_glyph_fp, args, 1) == 1' "$module"
 
-echo "Font SFFI authority audit: PASS (26 calls/8 symbols; 8 unsafe raw declarations + 17 narrow/transitive unsafe owners; 7 both/1 one/0 no-provider; semantic bool preserved; no forced inlining)"
+# Legacy stb_truetype boundary: keep all raw calls confined to the canonical
+# no-GC wrapper without adding work to glyph creation or per-pixel reads.
+legacy="$root/src/lib/nogc_sync_mut/io/font_sffi.spl"
+legacy_symbols='rt_font_load_array rt_font_load rt_font_free rt_font_glyph_bitmap rt_font_glyph_index rt_font_bitmap_width rt_font_bitmap_height rt_font_bitmap_get_pixel rt_font_bitmap_free rt_font_glyph_advance rt_font_line_height rt_font_ascent'
+[ "$(grep -c '^@unsafe(reason: .*capabilities: \[ffi\])$' "$legacy")" -eq 12 ]
+[ "$(grep -c '^    unsafe(capabilities: \[ffi\]):$' "$legacy")" -eq 9 ]
+for symbol in $legacy_symbols; do
+    [ "$(grep -c "${symbol}(" "$legacy")" -eq 2 ]
+done
+[ "$(grep -c 'rt_font_bitmap_get_pixel(self.bitmap_handle, x, y)' "$legacy")" -eq 1 ]
+[ "$(grep -c 'rt_font_glyph_bitmap(font.handle, codepoint, size_px)' "$legacy")" -eq 1 ]
+! grep -q 'export rt_font_' "$legacy"
+
+echo "Font SFFI authority audit: PASS (spl_fonts: 26 calls/8 symbols, 7 both/1 one/0 no-provider; legacy: 12 annotated declarations/9 confined regions; semantic bool preserved; no forced inlining)"

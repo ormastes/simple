@@ -1812,3 +1812,17 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - A future consumer must first introduce a typed non-copying owner with explicit
   close/drop semantics; raw i64 handles must not be re-exported.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 font SFFI authority confinement
+
+- Tagged all twelve raw font/bitmap declarations `unsafe(ffi)` in the canonical
+  no-GC sync owner.
+- Confined all existing calls to nine lexical unsafe regions inside the current
+  high-level font and glyph wrappers; raw symbols remain unexported.
+- Preserved the exact provider-call count and order for load, glyph creation,
+  metrics, pixel reads, and release.
+- Added a static ratchet for declaration/call counts and the one-call pixel and
+  glyph hot paths; no allocation, copy, scan, hash, lookup, or dispatch added.
+- Keep the family unsafe until bitmap handles become typed non-copying owners
+  with generation/liveness validation and provider admission is signed.
+- Status: source-reviewed, deliberately unverified and unsigned.

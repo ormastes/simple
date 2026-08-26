@@ -1184,3 +1184,18 @@ through fail-closed wrappers. C decode validates while producing output and
 frees on rejection; encode/decode remain single-pass with one output allocation
 and no preflight alphabet traversal. Pure-Simple decoder leniency remains a
 separate characterized defect. Source-reviewed but unverified and unsigned.
+
+## 2026-08-26 font handle/bitmap boundary follow-up
+
+The canonical no-GC font owner now tags all twelve raw font/bitmap declarations
+`unsafe(ffi)` and confines their existing calls to nine lexical unsafe regions
+inside the established higher-level wrappers. Font generation liveness,
+selected-asset validation, digest identity, glyph creation, metrics, and release
+behavior are unchanged. The pixel hot path retains exactly one direct provider
+call and glyph creation retains exactly one bitmap allocation call; no registry
+scan, lookup, allocation, copy, branch, hash, or dispatch was added. A static
+authority contract pins declaration/call counts and the pixel/glyph hot-path
+shape. Bitmap handles remain copyable integers without generation validation,
+so this family is unsafe-minimized rather than promoted: it remains unsigned
+and unverified pending a typed non-copying bitmap owner and signed provider
+admission. Source-reviewed only; checks were not executed.
