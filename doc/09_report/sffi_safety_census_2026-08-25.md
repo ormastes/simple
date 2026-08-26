@@ -166,3 +166,12 @@ lowering a second implementation for legacy imports; it adds no runtime
 dispatch, lookup, or copy.  The canonical owner itself now uses the typed
 runtime file-result API and the shared directory owner, eliminating both local
 raw declarations rather than merely relocating them.
+### Process I/O file-authority follow-up
+
+`app.io.process_ops` no longer declares its own raw file-read, positional-read,
+or file-size symbols.  It uses the canonical nullable-result reader, signed
+size owner, and checked positional reader.  Live process output still performs
+one size query per stream per poll and reads only the newly appended suffix, so
+the prior O(total-output) quadratic regression remains excluded.  The change
+adds no extra existence probe, second read, registry lookup, or generic
+dispatch.

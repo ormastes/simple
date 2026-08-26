@@ -1753,3 +1753,10 @@ and unpromoted.
 - [x] Replace the canonical module's two local externs with shared typed owners.
 - [x] Remove duplicate parsing/lowering without adding runtime indirection.
 - [x] Add a static ratchet preventing raw externs from returning to the shim.
+### Completed process file-authority slice
+
+- [x] Remove three duplicate raw file declarations from `app.io.process_ops`.
+- [x] Reuse canonical nullable-result, signed-size, and positional-read owners.
+- [x] Preserve single-read behavior for captured output files.
+- [x] Preserve incremental O(new-bytes) live output relay behavior.
+- [x] Add a static ratchet preventing local raw file declarations/calls.
