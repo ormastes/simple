@@ -5895,3 +5895,30 @@ Rust-interpreter providers simultaneously; the leading combination contains
 5,622 declarations. This is the correct representation for parity analysis and
 must not be collapsed into overlapping per-language totals without an explicit
 multi-provider accounting rule.
+
+## RISC-V cache-maintenance checkpoint
+
+The shared CMO module exposes eight untagged `rt_riscv64_*` instruction leaves.
+RV64 has matching libc-free C providers; RV32 imports the same wrappers but has
+no matching target provider. All eight declarations and calls are now confined
+to explicit `unsafe(ffi)`. The RV32 mismatch remains an open blocker rather than
+being hidden behind a fabricated or generic fallback.
+
+Three pure count helpers previously iterated once per cache line and could loop
+forever when given a zero stride. They now use O(1) ceiling division, return
+zero for disabled/empty/zero-stride inputs, and saturate at `u32::MAX` instead
+of wrapping. RV32/RV64 production range loops now reject wrapping ranges before
+the first CMO and use a last-address termination test that cannot overflow.
+
+The production loop still performs exactly one foreign instruction call per
+covered line. The preflight adds constant work once per range; there is no new
+allocation, copy, registry/name lookup, generic dispatch, lock, hash, signature
+operation, retry, or per-line admission work. Source checks cannot promote
+these unsigned providers to verified or signed.
+
+The focused ratchet passed, all three production modules passed bootstrap-seed
+type checking, and the existing HalCache spec passed 18/18 examples in 150 ms.
+Optimizer analysis reported no allocation or general-pattern finding; the one
+actionable per-line issue, RV64 stride widening, is now hoisted once per range.
+The available tool identified itself as a Rust bootstrap seed, so none of this
+is self-hosted or cross-target verification.

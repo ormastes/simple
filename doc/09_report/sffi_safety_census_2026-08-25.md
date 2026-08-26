@@ -1830,3 +1830,25 @@ declaration with both C and Rust providers appears in one combined row. Provider
 detection does not prove matching ABI, null safety, ownership, or artifact
 identity; only the currently empty signed-admission column represents that
 stronger state.
+
+### RISC-V cache-maintenance authority
+
+Eight shared CMO declarations are newly unsafe-tagged and lexically confined.
+They remain unsigned: RV64 has direct target C instruction leaves, while RV32
+has no matching provider for the imported `rt_riscv64_*` identities. No safe,
+verified, or signed promotion is claimed.
+
+The count-only helpers are now O(1) rather than O(cache lines), handle zero
+stride without hanging, and saturate instead of wrapping. Production RV32/RV64
+loops reject wrapping ranges and retain one direct CMO call per covered line.
+No per-line allocation, copy, lookup, lock, hash, signature check, retry, or
+generic dispatch was introduced. Whole-repository signed admission remains
+zero.
+
+The focused CMO authority/hot-path ratchet passed. Bootstrap-seed type checks
+passed for the shared CMO module and both HAL modules; the canonical HalCache
+spec executed 18/18 examples with zero failures in 150 ms, including the three
+new edge cases. Optimizer analysis found no general-pattern or allocation
+opportunities; RV64 stride widening was hoisted once per range after its
+loop-invariant finding. These are useful source/interpreter results, not
+cross-target assembly, firmware, hardware, RSS, or signed-artifact evidence.

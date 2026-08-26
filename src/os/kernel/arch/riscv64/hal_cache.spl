@@ -104,17 +104,20 @@ fn hal_cache_init_with_isa(isa: text):
 # Test-log seams — production logic without real asm (observable in tests)
 # ============================================================================
 
+fn _hal_cache_line_count(len: u64, stride: u32) -> u32:
+    if len == 0u64 or stride == 0u32:
+        return 0u32
+    val count = 1u64 + (len - 1u64) / stride as u64
+    if count > 0xFFFFFFFFu64: 0xFFFFFFFFu32 else: count as u32
+
 fn hal_cache_sync_icache_with_log(caps: CmoCapSnapshot, addr: u64, len: u64) -> CacheOpLog:
     """Simulate hal_cache_sync_icache: cbo.flush per-line if Zicbom, then fence.i.
     Returns a CacheOpLog with counters populated (avoids parameter-mutation interpreter bug)."""
     val stride: u32 = 64u32
-    var cbo_flush_count: u32 = 0u32
-    if caps.has_zicbom:
-        var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
-            cbo_flush_count = cbo_flush_count + 1u32
-            cur = cur + stride as u64
+    val cbo_flush_count = if caps.has_zicbom:
+        _hal_cache_line_count(len, stride)
+    else:
+        0u32
     CacheOpLog(
         fence_i_count: 1u32,
         cbo_clean_count: 0u32,
@@ -130,11 +133,7 @@ fn hal_cache_clean_dcache_with_log(caps: CmoCapSnapshot, addr: u64, len: u64, st
     var cbo_clean_count: u32 = 0u32
     var diagnostic_emitted: bool = false
     if caps.has_zicbom:
-        var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
-            cbo_clean_count = cbo_clean_count + 1u32
-            cur = cur + stride as u64
+        cbo_clean_count = _hal_cache_line_count(len, stride)
     else:
         diagnostic_emitted = true
     CacheOpLog(
@@ -152,11 +151,7 @@ fn hal_cache_invalidate_dcache_with_log(caps: CmoCapSnapshot, addr: u64, len: u6
     var cbo_inval_count: u32 = 0u32
     var diagnostic_emitted: bool = false
     if caps.has_zicbom:
-        var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
-            cbo_inval_count = cbo_inval_count + 1u32
-            cur = cur + stride as u64
+        cbo_inval_count = _hal_cache_line_count(len, stride)
     else:
         diagnostic_emitted = true
     CacheOpLog(
@@ -184,33 +179,42 @@ fn current_cacheline_stride() -> u32:
 fn hal_cache_sync_icache(addr: u64, len: u64):
     """Sync icache: cbo.flush per-line (if Zicbom) then fence.i."""
     val stride = current_cacheline_stride()
-    if ZICBOM_STATE:
+    val stride64 = stride as u64
+    if ZICBOM_STATE and stride > 0u32 and len > 0u64 and addr <= 0xFFFFFFFFFFFFFFFFu64 - (len - 1u64):
         var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
+        val last_addr = addr + len - 1u64
+        while true:
             cbo_flush(cur)
-            cur = cur + stride as u64
+            if last_addr - cur < stride64:
+                break
+            cur = cur + stride64
     fence_i()
 
 fn hal_cache_clean_dcache(addr: u64, len: u64):
     """Clean dcache: cbo.clean per-line when Zicbom=true, else emit diagnostic."""
     val stride = current_cacheline_stride()
-    if ZICBOM_STATE:
+    val stride64 = stride as u64
+    if ZICBOM_STATE and stride > 0u32 and len > 0u64 and addr <= 0xFFFFFFFFFFFFFFFFu64 - (len - 1u64):
         var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
+        val last_addr = addr + len - 1u64
+        while true:
             cbo_clean(cur)
-            cur = cur + stride as u64
+            if last_addr - cur < stride64:
+                break
+            cur = cur + stride64
 
 fn hal_cache_invalidate_dcache(addr: u64, len: u64):
     """Invalidate dcache: cbo.inval per-line when Zicbom=true, else emit diagnostic."""
     val stride = current_cacheline_stride()
-    if ZICBOM_STATE:
+    val stride64 = stride as u64
+    if ZICBOM_STATE and stride > 0u32 and len > 0u64 and addr <= 0xFFFFFFFFFFFFFFFFu64 - (len - 1u64):
         var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
+        val last_addr = addr + len - 1u64
+        while true:
             cbo_inval(cur)
-            cur = cur + stride as u64
+            if last_addr - cur < stride64:
+                break
+            cur = cur + stride64
 
 # ============================================================================
 # AC-3: export ZICBOM state for compiler backend registry query

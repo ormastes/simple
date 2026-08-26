@@ -413,3 +413,20 @@ does not label inline assembly safe or verified.
   descriptor when its freestanding ABI is available.
 - [ ] Run cross-target compiler, OpenSBI/QEMU, firmware-error sabotage, and
   timing/RSS evidence once the admitted current-source toolchain is available.
+
+## RISC-V cache-maintenance tranche
+
+- [x] Tag eight CMO declarations and confine their raw calls to minimal lexical
+  FFI scopes.
+- [x] Replace linear count-only loops with O(1), zero-stride-safe, saturating
+  ceiling division.
+- [x] Reject RV32/RV64 address-range overflow before issuing cache maintenance.
+- [x] Preserve one direct foreign instruction leaf per covered cache line and
+  exclude allocation, lookup, locking, hashing, signing, and retry work.
+- [x] Record that RV32 currently imports an RV64-only provider family.
+- [ ] Split the target instruction leaf by XLEN or provide a distinct exact RV32
+  ABI, without moving cache policy out of Pure Simple.
+- [ ] Admit capability probes and exact provider/compiler/artifact identities
+  before safe or critical promotion.
+- [ ] Retain cross-target assembler, OpenSBI/QEMU, illegal-instruction sabotage,
+  latency, code-size, and compiler/emulator RSS evidence.
