@@ -1540,6 +1540,18 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Preserved the valid path's existing type match and one release dispatch; no
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 UI WebSocket pure-Simple SHA-1 follow-up
+
+- Removed four app-local raw SHA-1 declarations and their fabricated `0`/empty
+  fallbacks; the write signature was not cross-lane ABI-compatible.
+- Routed accept-key computation through the canonical pure-Simple RFC 6455
+  handshake owner, eliminating foreign handle/return lifting in this app.
+- Kept work O(n) on the bounded connection-handshake input; frame hot paths,
+  network I/O count, and message allocations are unchanged.
+- Routed wall-clock access through the canonical fail-closed time facade,
+  removing the final raw declaration while retaining one provider call.
+- Status: source-reviewed, deliberately unverified; global signed provider
+  admission remains pending.
 ## 2026-08-26 SHA-1 return-contract follow-up
 
 - Aligned `finish(handle) -> text?` and `finish_bytes(handle) -> [u8]?` across

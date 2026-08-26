@@ -1064,3 +1064,17 @@ handle allocation rejects counter exhaustion. Scalar finish uses the first
 eight digest bytes and native publication uses one packed bulk copy, avoiding
 hex formatting and per-element dispatch. Source-reviewed but unverified and
 unsigned; signed artifact admission is still absent.
+## 2026-08-26 UI WebSocket pure-Simple SHA-1 follow-up
+
+`app.ui.web.ws_handler` no longer declares or calls its four mismatched raw
+SHA-1 hooks. Its `write(handle,text)` declaration disagreed with the native
+pointer/length ABI and the exact interpreter arity, while write/finish wrappers
+fabricated `0`/empty text on failure. The app now calls the canonical
+pure-Simple `std.nogc_sync_mut.websocket.handshake.compute_websocket_accept`
+owner once per connection handshake. This removes handle ownership, optional
+lifting, and foreign binary/text transport from the app boundary. Complexity
+remains O(n) over a bounded key-plus-GUID input and no work was added to the
+frame send/receive hot path. Wall-clock access now uses the canonical fail-closed
+time facade, removing the final raw declaration from this module while retaining
+the same provider call and millisecond division. Source-reviewed but unverified;
+broader SFFI signing and admission remain absent.
