@@ -40,6 +40,41 @@ use std.http_server.worker_owner.{
 }
 
 impl Worker:
+    pub(package) fn transport_send_inflight(self, fd: i64) -> bool:
+        """True while this Worker owns one in-flight socket byte write for fd.
+
+        H2Connection already owns its outbound byte buffer.  Keeping later H2
+        frames there until this operation completes preserves byte order
+        without constructing a second worker-side queue.  TLS ciphertext stays
+        in WorkerTransportSendProgress until its original write completes.
+        """
+        for oid in self.op_to_fd.keys():
+            if self.op_to_fd[oid] == fd and self.op_type.contains_key(oid):
+                if self.op_type[oid] == OP_SEND:
+                    return true
+        false
+
+    pub(package) me flush_h2_pending_transport(fd: i64) -> bool:
+        """Submit at most one H2-owned pending byte sequence for this fd.
+
+        The H2 connection is the sole owner of deferred protocol bytes.  This
+        method drains it only when no prior transport send remains, ensuring
+        socket writes cannot overtake each other and avoiding ciphertext
+        regeneration after a TLS short write.
+        """
+        if self.transport_send_inflight(fd) or not self.h2_connections.contains_key(fd):
+            return false
+        var conn = self.h2_connections[fd]
+        self.h2_connections.remove(fd)
+        val out_bytes = conn.take_pending_writes()
+        self.h2_connections[fd] = conn
+        if out_bytes.len() == 0:
+            return false
+        if self.tls_sessions.contains_key(fd):
+            return self.submit_tls_send_bytes(fd, out_bytes)
+        self.submit_transport_send(fd, out_bytes)
+        true
+
     pub(package) me handle_completion(op_id: i64, result: i64, completion_index: i64, now: i64):
         """Handle a non-accept I/O completion."""
         val fd = self.op_to_fd.get(op_id)
@@ -104,6 +139,12 @@ impl Worker:
             progress.advance_after_write(result)
             if not progress.complete():
                 self.submit_transport_send_retry(fd, progress)
+                return
+            if is_h2:
+                # H2Connection retained any frames produced while this write
+                # was in flight.  Submit the next aggregate only now so one
+                # fd never has parallel byte sends.
+                self.flush_h2_pending_transport(fd)
                 return
             # Check if there's a pending sendfile for this fd
             val file_path = worker_sendfile_open_path_for_pending(self.sendfile_pending, fd)
@@ -211,18 +252,13 @@ impl Worker:
             self.connections.remove(fd)
             val peer = tcp_backend_local_addr(fd) ?? "unknown"
             var h2conn = H2Connection.new(fd, peer, now)
-            # Send server SETTINGS (empty = use defaults)
-            var server_settings: [u8] = [0, 0, 0, 4, 0, 0, 0, 0, 0]
-            self.submit_transport_send(fd, server_settings)
-            h2conn.settings_sent = true
-            # Process initial bytes (preface + client SETTINGS)
+            # H2Connection owns the server SETTINGS frame.  Process the
+            # initial client SETTINGS before draining it so SETTINGS and its
+            # ACK form one ordered transport submission.
             h2conn.h2_on_data_received(raw_bytes, now)
             h2conn.consume_frames()
-            # Flush pending writes (SETTINGS ACK from consume_frames)
-            val out = h2conn.take_pending_writes()
-            if out.len() > 0:
-                self.submit_transport_send(fd, out)
             self.h2_connections[fd] = h2conn
+            self.flush_h2_pending_transport(fd)
             val recv_op = self.driver.submit_recv(fd, 8192)
             self.op_to_fd[recv_op] = fd
             self.op_type[recv_op] = OP_RECV
@@ -609,16 +645,12 @@ impl Worker:
                 resp = worker_static_file_fallback_response(resp)
             conn.queue_h2_response(stream_id, request.method, resp)
 
-        # Drain any pending outbound frames (SETTINGS ACK, PING echo, responses)
-        val out_bytes = conn.take_pending_writes()
+        # Publish generated frames in the connection-owned buffer.  A prior
+        # short write may still own ciphertext in WorkerTransportSendProgress;
+        # flush_h2_pending_transport drains only after it completes.
         self.h2_connections[fd] = conn
-
-        if out_bytes.len() > 0:
-            if self.tls_sessions.contains_key(fd):
-                if not self.submit_tls_send_bytes(fd, out_bytes):
-                    return
-            else:
-                self.submit_transport_send(fd, out_bytes)
+        if not self.flush_h2_pending_transport(fd) and not self.h2_connections.contains_key(fd):
+            return
 
         if keep_going and not conn.is_goaway_sent():
             # Continue reading
