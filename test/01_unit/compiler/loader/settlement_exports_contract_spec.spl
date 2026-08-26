@@ -105,6 +105,39 @@ describe "settlement export updates are transactional":
         expect(container.linker.get_export("old") == nil).to_equal(true)
         expect(container.linker.get_export("fresh") != nil).to_equal(true)
 
+    it "deduplicates replay membership while preserving stale and direct ownership semantics":
+        step("Verify: deduplicates replay membership while preserving stale and direct ownership semantics")
+        val container = SettlementContainer.create()
+        expect(container.add_module("A", "/a.smf").is_ok()).to_equal(true)
+        # Exercise the defensive replay path with externally supplied duplicate
+        # and stale module IDs. The stale ID remains a module owner for the
+        # preservation decision even though it cannot be replayed.
+        container.linker.add_module("A")
+        container.linker.add_module("ghost")
+        expect(container.linker.add_export(
+            export_symbol("ghost_owned", 30, "ghost", SymbolBinding.Strong)
+        ).is_ok()).to_equal(true)
+        expect(container.linker.add_export(
+            export_symbol("direct", 40, "__direct__", SymbolBinding.Strong)
+        ).is_ok()).to_equal(true)
+
+        expect(container.set_exports("A", [
+            export_symbol("owned", 20, "A", SymbolBinding.Strong)
+        ]).is_ok()).to_equal(true)
+        expect(container.linker.get_export("ghost_owned") == nil).to_equal(true)
+        match container.linker.get_export("owned"):
+            case Some(symbol):
+                expect(symbol.module_id).to_equal("A")
+                expect(symbol.address).to_equal(20)
+            case nil:
+                expect(false).to_equal(true)
+        match container.linker.get_export("direct"):
+            case Some(symbol):
+                expect(symbol.module_id).to_equal("__direct__")
+                expect(symbol.address).to_equal(40)
+            case nil:
+                expect(false).to_equal(true)
+
     it "preserves fallback exports across an unrelated module update":
         step("Verify: preserves fallback exports across an unrelated module update")
         val container = SettlementContainer.create()
