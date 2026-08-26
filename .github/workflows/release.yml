@@ -48,11 +48,15 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
           ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
           ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
-          EXPECTED_NAME: candidate-${{ inputs.version }}-${{ inputs.candidate_commit }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
           RUN_ID: ${{ inputs.candidate_run_id }}
           COMMIT: ${{ inputs.candidate_commit }}
         run: |
           set -euo pipefail
+          attempt_name=${CANDIDATE_REF##*/}
+          [[ "$attempt_name" =~ ^a[0-9]{3}$ ]]
+          EXPECTED_NAME="candidate-${VERSION}-${attempt_name}-${COMMIT}"
           artifact_json=$(gh api \
             "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")
           test "$(jq -r '.id' <<<"$artifact_json")" = "$ARTIFACT_ID"
@@ -94,6 +98,11 @@ jobs:
           test "$(jq -r '.candidate_ref' candidate/release-admission.json)" = "$CANDIDATE_REF"
           attempt_text=${CANDIDATE_REF##*/a}
           test "$(jq -r '.candidate_attempt' candidate/release-admission.json)" = "$((10#$attempt_text))"
+          test "$(jq -r '.schema' candidate/candidate-manifest.json)" = simple-release-candidate/1
+          test "$(jq -r '.version' candidate/candidate-manifest.json)" = "$VERSION"
+          test "$(jq -r '.candidate_ref' candidate/candidate-manifest.json)" = "$CANDIDATE_REF"
+          test "$(jq -r '.commit_sha' candidate/candidate-manifest.json)" = "$COMMIT"
+          test "$(jq -r '.attempt' candidate/candidate-manifest.json)" = "$((10#$attempt_text))"
           run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")
           test "$(jq -r '.conclusion' <<<"$run_json")" = success
           test "$(jq -r '.head_sha' <<<"$run_json")" = "$COMMIT"
@@ -194,12 +203,21 @@ jobs:
           CANDIDATE_REF: ${{ inputs.candidate_ref }}
           ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
           ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
-          EXPECTED_NAME: candidate-${{ inputs.version }}-${{ inputs.candidate_commit }}
+          VERSION: ${{ inputs.version }}
           RUN_ID: ${{ inputs.candidate_run_id }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$COMMIT"
+          attempt_name=${CANDIDATE_REF##*/}
+          [[ "$attempt_name" =~ ^a[0-9]{3}$ ]]
+          attempt_text=${attempt_name#a}
+          test "$(jq -r '.schema' candidate/candidate-manifest.json)" = simple-release-candidate/1
+          test "$(jq -r '.version' candidate/candidate-manifest.json)" = "$VERSION"
+          test "$(jq -r '.candidate_ref' candidate/candidate-manifest.json)" = "$CANDIDATE_REF"
+          test "$(jq -r '.commit_sha' candidate/candidate-manifest.json)" = "$COMMIT"
+          test "$(jq -r '.attempt' candidate/candidate-manifest.json)" = "$((10#$attempt_text))"
+          EXPECTED_NAME="candidate-${VERSION}-${attempt_name}-${COMMIT}"
           artifact_json=$(gh api \
             "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")
           test "$(jq -r '.id' <<<"$artifact_json")" = "$ARTIFACT_ID"

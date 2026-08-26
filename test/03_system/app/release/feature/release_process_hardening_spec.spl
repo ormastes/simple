@@ -69,6 +69,11 @@ SHA, explicit adaptation reason, result SHA, and renewed evidence digest. Reject
 feature commits, commit ranges, moving refs, stale review, wrong release line,
 or evidence from before the backport was applied.
 
+Protected convergence additionally binds every selected main source SHA to one
+result reachable in the pre-merge release inventory. Source and result must
+have the same stable patch ID and share the exact release PR review/check
+receipt; candidate admission independently replays every binding.
+
 ## Candidate evidence
 
 The candidate binds version, attempt, candidate ref, exact commit, source tree,
@@ -120,7 +125,8 @@ use app.release.policy.{
     check_promotion_plan, check_withdrawal_plan
 }
 use app.release.convergence.{
-    ReviewedBugFix, ConvergenceRequest, plan_release_main_convergence
+    ReviewedBugFix, ConvergenceRequest, ConvergenceAdmissionRequest,
+    plan_release_main_convergence, check_convergence_admission
 }
 
 fn sha_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -349,6 +355,36 @@ describe "Hardened Simple and Spipe software release":
         expect(forward_plan.valid).to_be(true)
         expect(forward_plan.forward_port_required).to_be(true)
         expect(forward_plan.forward_port_target_ref).to_equal("main")
+
+        step("Admit only an exhaustive receipt-bound release-first classification")
+        val convergence_admission = ConvergenceAdmissionRequest(
+            candidate_commit_sha: sha_c(), receipt_candidate_commit_sha: sha_c(),
+            release_ref: "release/1.4", main_head_sha: sha_a(), release_head_sha: sha_c(),
+            receipt_sha256: digest_a(), review_summary_sha256: digest_b(),
+            evidence_receipt_sha256: digest_c(), integration_receipt_sha256: digest_d(),
+            inventory_origin: "protected_integration", graph_independent: true,
+            main_to_release_inventory_shas: [], main_to_release_shared_fix_shas: [],
+            main_to_release_selected_shas: [], main_to_release_backported_shas: [],
+            main_to_release_backport_result_shas: [], main_to_release_backport_target_refs: [],
+            backport_receipt_sha256s: [], release_to_main_inventory_shas: [sha_b()],
+            release_to_main_classified_shas: [sha_b()],
+            release_to_main_classification_kinds: ["fix"],
+            release_to_main_classification_receipt_sha256s: [digest_e()],
+            release_to_main_forward_ported_shas: [sha_b()],
+            release_to_main_forward_port_result_shas: [sha_a()],
+            release_to_main_forward_port_target_refs: ["main"],
+            forward_port_receipt_sha256s: [digest_f()]
+        )
+        expect(check_convergence_admission(convergence_admission).valid).to_be(true)
+        var concealed = convergence_admission
+        concealed.release_to_main_classified_shas = []
+        concealed.release_to_main_classification_kinds = []
+        concealed.release_to_main_classification_receipt_sha256s = []
+        concealed.release_to_main_forward_ported_shas = []
+        concealed.release_to_main_forward_port_result_shas = []
+        concealed.release_to_main_forward_port_target_refs = []
+        concealed.forward_port_receipt_sha256s = []
+        expect(check_convergence_admission(concealed).reason).to_equal("every release-first inventory commit requires an exhaustive receipt-bound classification")
 
         val unsafe_tracking = ConvergenceRequest(
             last_scanned_main_sha: backport.last_scanned_main_sha,

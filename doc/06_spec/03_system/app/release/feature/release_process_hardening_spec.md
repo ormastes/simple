@@ -65,12 +65,27 @@ After protected CAS integration, record a divergence receipt only when a fresh
 fetch proves the source unchanged, the target append-only and equal to the
 reviewed result, and every selected patch represented. `main` must remain a
 separate development trunk and must never track, reset to, or be replaced by the
-release line.
+release line. For `release_to_main`, the release source head must not become an
+ancestor of the resulting `main`; that graph shape is a forbidden whole-line
+merge even when the two heads differ.
+
+Candidate admission recomputes the complete release-only inventory at the
+manifest's exact pre-administration boundary; only manifest changes may follow
+that boundary before the integration merge. Every selected `main` fix must name
+a result in that release inventory, match it by stable patch ID, and carry the
+exact release PR review/check receipt; candidate CI replays every source/result
+binding. Every release-only row must have an aligned
+`fix` or `non_fix` classification receipt. Every `fix` row must additionally
+name a result already represented on `main`, match it by stable patch ID, and
+carry an exact main-targeted forward-port receipt. Every `non_fix` row requires
+a reason, owner, and future RFC 3339 expiry. Named successful provider checks
+must match the configured check name and GitHub App identity. A nonempty
+inventory paired with an empty classification list is rejected.
 
 The executable scenario covers both reviewed directions. A `main` fix produces
 a mutation-free backport plan; a release-first fix requires an explicit
-forward-port target of `main`; and any plan claiming that `main` tracks the
-release line is rejected.
+forward-port target of `main`; concealed release-only inventory and any plan
+claiming that `main` tracks or absorbs the release line are rejected.
 
 ### 5. Freeze and qualify the candidate
 
@@ -114,7 +129,7 @@ and audit history. A correction receives a new beta, RC, or patch identity.
 
 ## Executable scenario coverage
 
-The runnable SSpec currently contains six active scenarios and no placeholders:
+The runnable SSpec currently contains seven active scenarios and no placeholders:
 
 1. canonical policy/version parsing and stale projection rejection;
 2. isolated beta preparation and main-worktree rejection;

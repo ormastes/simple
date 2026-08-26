@@ -1,20 +1,16 @@
 # Release workflow still rebuilds after a tag
 
-**Status:** Open release blocker
+**Status:** Closed in release-process hardening branch; live beta evidence pending
 **Owner:** Release CI maintainers
 
 ## Evidence
 
-`.github/workflows/release.yml` is still initiated from release-tag state and
-contains tolerated/fallback artifact paths. That conflicts with the admitted
-candidate and promote-without-rebuild contract implemented by
-`src/app/release/policy.spl` and documented in
-`doc/07_guide/infra/software_release.md`.
+`.github/workflows/candidate.yml` now builds and qualifies an immutable,
+durably reserved candidate attempt. `.github/workflows/release.yml` consumes
+that exact artifact ID/name/digest and contains no bootstrap/build path.
 
 ## Unblock condition
 
-Split candidate build/qualification from protected promotion. Promotion must
-consume one immutable candidate manifest and exact artifact digests, perform no
-build, reject every required fallback, and publish only one exact signed tag.
-The replacement workflow needs adversarial tests for stale candidate identity,
-changed artifact digest, fallback selection, and rebuild-on-promote.
+Satisfied by the split candidate/promotion workflows and focused adversarial
+source contracts. Closure is implementation evidence only; an actual beta
+promotion remains required for release PASS.

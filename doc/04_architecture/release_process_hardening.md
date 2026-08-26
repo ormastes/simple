@@ -57,6 +57,8 @@ The pure layer parses and validates caller-supplied facts and produces typed pla
 8. Withdrawal preserves identity; correction increments version.
 9. `main` remains the development trunk; a maintenance line is never its upstream, replacement, or tracking target.
 10. Periodic main/release discovery is read-only. Only an explicit reviewed convergence plan may cross a fix between protected lines.
+11. Convergence inventory is computed at a reviewed pre-administration boundary; manifest-only commits and the final integration merge are outside that inventory, avoiding commit self-reference.
+12. Provider evidence is accepted only for configured check-name/App identities, and every backport or forward port must be stable-patch-ID equivalent to its exact source commit with an aligned provider review/check receipt. Adapted equivalence is a separate future authority path.
 
 ## MDSOC evaluation
 
@@ -72,7 +74,7 @@ The command must never accept “latest,” an unqualified branch, a range of co
 
 The bootstrap/release supervisor may run a bounded scheduled discovery task after fetch and at configured qualification checkpoints. The task compares immutable snapshots of `main` and the active `release/X.Y`, classifies reviewed `fix` changes, and emits proposals only. Discovery has no ref-write capability and cannot feed a cherry-pick executor directly.
 
-An operator or integration authority selects an exact proposal. A `main` fix follows the normal backport path into a private release-line work branch. A fix first created on `release/X.Y` follows the symmetric forward-port path into a private `main`-targeted work branch. Adapted patches receive their own review. Both paths rerun focused evidence on the resulting commit and produce a divergence receipt containing source and target refs/SHAs, selected source commit, result commit, direction, review/evidence digests, omitted proposals with reasons, and remaining divergence. The protected integration authority performs the final CAS update. No scheduler, bootstrap worker, or ordinary session pushes a protected ref.
+An operator or integration authority selects an exact proposal. A `main` fix follows the normal backport path into a private release-line work branch. A fix first created on `release/X.Y` follows the symmetric forward-port path into a private `main`-targeted work branch. The current admission path requires exact stable-patch-ID equivalence; adapted patches need a separate future reviewed equivalence authority and fail closed here. Both paths rerun focused evidence on the resulting commit and produce a divergence receipt containing source and target refs/SHAs, selected source commit, result commit, direction, review/evidence digests, omitted proposals with reasons, and remaining divergence. The protected integration authority performs the final CAS update. No scheduler, bootstrap worker, or ordinary session pushes a protected ref.
 
 ## Candidate and promotion boundary
 

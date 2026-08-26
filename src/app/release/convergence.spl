@@ -94,9 +94,12 @@ struct PostIntegrationDivergenceReceipt:
 
 # Immutable decision produced by protected integration and consumed by candidate
 # admission.  Inventory arrays contain every source-only commit observed in each
-# direction; the shared-fix arrays are the reviewed subset that policy says must
-# converge.  Candidate CI independently recomputes the inventories before
-# calling this validator, so an invented empty receipt cannot hide divergence.
+# direction.  Every selected main fix has an aligned release-targeted backport
+# result and receipt, every release-only commit has an aligned kind and
+# classification receipt, and every classified release fix has an aligned
+# main-targeted forward-port result and receipt.  Candidate CI independently
+# recomputes the inventories and patch bindings before calling this validator,
+# so an invented empty receipt cannot hide drift.
 struct ConvergenceAdmissionRequest:
     candidate_commit_sha: text
     receipt_candidate_commit_sha: text
@@ -108,12 +111,21 @@ struct ConvergenceAdmissionRequest:
     evidence_receipt_sha256: text
     integration_receipt_sha256: text
     inventory_origin: text
+    graph_independent: bool
     main_to_release_inventory_shas: [text]
     main_to_release_shared_fix_shas: [text]
     main_to_release_selected_shas: [text]
+    main_to_release_backported_shas: [text]
+    main_to_release_backport_result_shas: [text]
+    main_to_release_backport_target_refs: [text]
+    backport_receipt_sha256s: [text]
     release_to_main_inventory_shas: [text]
-    release_to_main_shared_fix_shas: [text]
+    release_to_main_classified_shas: [text]
+    release_to_main_classification_kinds: [text]
+    release_to_main_classification_receipt_sha256s: [text]
     release_to_main_forward_ported_shas: [text]
+    release_to_main_forward_port_result_shas: [text]
+    release_to_main_forward_port_target_refs: [text]
     forward_port_receipt_sha256s: [text]
 
 struct ConvergenceAdmissionReceipt:
@@ -278,6 +290,21 @@ fn _all_exact_receipts(values: [text]) -> bool:
             return false
     true
 
+fn _all_main_targets(values: [text]) -> bool:
+    for value in values:
+        if value != "main":
+            return false
+    true
+
+fn _all_targets(values: [text], expected: text) -> bool:
+    for value in values:
+        if value != expected:
+            return false
+    true
+
+fn convergence_graph_allowed(source_head_is_ancestor_of_target: bool) -> bool:
+    not source_head_is_ancestor_of_target
+
 fn _admission(request: ConvergenceAdmissionRequest, valid: bool,
               reason: text) -> ConvergenceAdmissionReceipt:
     ConvergenceAdmissionReceipt(
@@ -290,7 +317,7 @@ fn _admission(request: ConvergenceAdmissionRequest, valid: bool,
         main_to_release_selected_count: request.main_to_release_selected_shas.len(),
         release_to_main_inventory_count: request.release_to_main_inventory_shas.len(),
         release_to_main_forward_ported_count: request.release_to_main_forward_ported_shas.len(),
-        main_remains_independent: request.main_head_sha != request.release_head_sha
+        main_remains_independent: request.graph_independent and request.main_head_sha != request.release_head_sha
     )
 
 fn check_convergence_admission(request: ConvergenceAdmissionRequest) -> ConvergenceAdmissionReceipt:
@@ -307,6 +334,8 @@ fn check_convergence_admission(request: ConvergenceAdmissionRequest) -> Converge
         return _admission(request, false, "convergence receipt requires a valid release line")
     if request.main_head_sha == request.release_head_sha:
         return _admission(request, false, "main must remain an independent trunk")
+    if not request.graph_independent:
+        return _admission(request, false, "main and release must remain graph-independent in both directions")
     if (not _sha256_valid(request.receipt_sha256) or
         not _sha256_valid(request.review_summary_sha256) or
         not _sha256_valid(request.evidence_receipt_sha256) or
@@ -316,15 +345,20 @@ fn check_convergence_admission(request: ConvergenceAdmissionRequest) -> Converge
         return _admission(request, false, "convergence inventory must originate from protected integration")
     val all_commits = (request.main_to_release_inventory_shas +
         request.main_to_release_shared_fix_shas + request.main_to_release_selected_shas +
-        request.release_to_main_inventory_shas + request.release_to_main_shared_fix_shas +
-        request.release_to_main_forward_ported_shas)
+        request.main_to_release_backported_shas +
+        request.main_to_release_backport_result_shas +
+        request.release_to_main_inventory_shas + request.release_to_main_classified_shas +
+        request.release_to_main_forward_ported_shas +
+        request.release_to_main_forward_port_result_shas)
     if not _all_exact_commits(all_commits):
         return _admission(request, false, "convergence inventory contains a non-exact commit identity")
     if (_has_duplicates(request.main_to_release_inventory_shas) or
         _has_duplicates(request.main_to_release_shared_fix_shas) or
         _has_duplicates(request.main_to_release_selected_shas) or
+        _has_duplicates(request.main_to_release_backported_shas) or
+        _has_duplicates(request.main_to_release_backport_result_shas) or
         _has_duplicates(request.release_to_main_inventory_shas) or
-        _has_duplicates(request.release_to_main_shared_fix_shas) or
+        _has_duplicates(request.release_to_main_classified_shas) or
         _has_duplicates(request.release_to_main_forward_ported_shas)):
         return _admission(request, false, "convergence inventory and decisions must be unique")
     for shared in request.main_to_release_shared_fix_shas:
@@ -332,15 +366,42 @@ fn check_convergence_admission(request: ConvergenceAdmissionRequest) -> Converge
             return _admission(request, false, "main-to-release shared fix is absent from the reviewed inventory")
     if not _same_set(request.main_to_release_shared_fix_shas, request.main_to_release_selected_shas):
         return _admission(request, false, "every main shared fix must be explicitly selected for backport")
-    for shared in request.release_to_main_shared_fix_shas:
-        if not _contains(request.release_to_main_inventory_shas, shared):
-            return _admission(request, false, "release-to-main shared fix is absent from the reviewed inventory")
-    if not _same_set(request.release_to_main_shared_fix_shas, request.release_to_main_forward_ported_shas):
-        return _admission(request, false, "every release-first shared fix requires a completed forward port to main")
-    if request.forward_port_receipt_sha256s.len() != request.release_to_main_forward_ported_shas.len():
-        return _admission(request, false, "every completed forward port requires one exact receipt")
-    if not _all_exact_receipts(request.forward_port_receipt_sha256s):
-        return _admission(request, false, "forward-port receipt identity is invalid")
+    if not _same_set(request.main_to_release_selected_shas, request.main_to_release_backported_shas):
+        return _admission(request, false, "every selected main fix requires a completed backport to the release line")
+    val backport_count = request.main_to_release_backported_shas.len()
+    if (request.main_to_release_backport_result_shas.len() != backport_count or
+        request.main_to_release_backport_target_refs.len() != backport_count or
+        request.backport_receipt_sha256s.len() != backport_count):
+        return _admission(request, false, "every completed backport requires one result, release target, and exact receipt")
+    if (not _all_targets(request.main_to_release_backport_target_refs, request.release_ref) or
+        not _all_exact_receipts(request.backport_receipt_sha256s)):
+        return _admission(request, false, "every selected main fix requires an exact backport receipt targeting the release line")
+    if not _same_set(request.release_to_main_inventory_shas, request.release_to_main_classified_shas):
+        return _admission(request, false, "every release-first inventory commit requires an exhaustive receipt-bound classification")
+    if (request.release_to_main_classification_kinds.len() != request.release_to_main_classified_shas.len() or
+        request.release_to_main_classification_receipt_sha256s.len() != request.release_to_main_classified_shas.len()):
+        return _admission(request, false, "every release-first classification requires one kind and one exact receipt")
+    if not _all_exact_receipts(request.release_to_main_classification_receipt_sha256s):
+        return _admission(request, false, "release-first classification receipt identity is invalid")
+    var release_first_fix_shas: [text] = []
+    var classification_index = 0
+    while classification_index < request.release_to_main_classification_kinds.len():
+        val kind = request.release_to_main_classification_kinds[classification_index]
+        if kind == "fix":
+            release_first_fix_shas.push(request.release_to_main_classified_shas[classification_index])
+        elif kind != "non_fix":
+            return _admission(request, false, "release-first classification kind must be fix or non_fix")
+        classification_index = classification_index + 1
+    if not _same_set(release_first_fix_shas, request.release_to_main_forward_ported_shas):
+        return _admission(request, false, "every reviewed release-first kind=fix requires a completed forward port to main")
+    val forward_count = request.release_to_main_forward_ported_shas.len()
+    if (request.release_to_main_forward_port_result_shas.len() != forward_count or
+        request.release_to_main_forward_port_target_refs.len() != forward_count or
+        request.forward_port_receipt_sha256s.len() != forward_count):
+        return _admission(request, false, "every completed forward port requires one result, main target, and exact receipt")
+    if (not _all_main_targets(request.release_to_main_forward_port_target_refs) or
+        not _all_exact_receipts(request.forward_port_receipt_sha256s)):
+        return _admission(request, false, "every release-first fix requires an exact forward-port receipt targeting main")
     _admission(request, true, "reviewed bidirectional convergence is admitted")
 
 fn _receipt(request: ConvergenceRequest, valid: bool, ready: bool, reason: text,
@@ -524,6 +585,9 @@ fn record_post_integration_divergence(root: text, session: ReleaseSession,
         return rejected("convergence result is not an append-only descendant of the observed target")
     if target_after == source_after:
         return rejected("main and release line must remain independent after convergence")
+    val source_head_is_ancestor = _is_ancestor(verified.canonical_root, source_after, target_after)
+    if not convergence_graph_allowed(source_head_is_ancestor):
+        return rejected("convergence must not absorb an entire source line into its target")
     for selected in request.selected_bug_fix_shas:
         if (not _is_ancestor(verified.canonical_root, selected, target_after) and
             not _patch_present_in_target(verified.canonical_root, selected, target_after)):
@@ -549,3 +613,4 @@ export ConvergenceAdmissionRequest, ConvergenceAdmissionReceipt
 export plan_release_main_convergence, inspect_release_main_convergence
 export record_post_integration_divergence
 export check_convergence_admission
+export convergence_graph_allowed

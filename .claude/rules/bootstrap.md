@@ -141,19 +141,24 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
 ## Beta release-line convergence
 
 A long-running beta bootstrap lane periodically fetches and inspects `main` for
-new reviewed bug fixes. Discovery is read-only and produces a candidate list;
+new reviewed bug fixes: before each candidate attempt, after repairing a
+bootstrap failure, and before release admission. Discovery is read-only and produces a candidate list;
 it never cherry-picks automatically and never pushes a protected ref. Each
 selected fix must carry exact source SHA, review receipt, target-line base SHA,
 post-application SHA, and renewed focused evidence before the integration
 authority may update `release/X.Y`.
 
-`main` always remains the development trunk; it must not be reset, rebased, or
-made to track a release branch. Normally a fix lands on `main` first and is then
+`main` always remains the development trunk; the protected ref must not be
+rebased or repointed onto a release branch, made to track it, or absorb the
+whole release line. Normally a fix lands on `main` first and is then
 backported. If an emergency fix is developed on `release/X.Y` first, candidate
 qualification remains blocked until an equivalent reviewed forward-port is
-integrated into `main` or an explicit incompatibility waiver identifies the
-owner and expiry. Bootstrap receipts record the last scanned `main` SHA and the
+integrated into `main`. Bug fixes have no waiver. Genuinely release-specific
+compatibility work uses a distinct non-fix classification with reason, owner,
+and expiry. Bootstrap receipts record the last scanned `main` SHA and the
 backport/forward-port change identities so periodic scans are idempotent.
+Shared bug fixes may not remain release-only. The bootstrap worker prepares
+changes but never pushes `main` itself; protected integration authority does.
 
 ## Verification tiering — match the gate to the change
 

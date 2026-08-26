@@ -24,4 +24,8 @@ Policy contracts → pure implementation → focused tests → CLI → plugin/pr
 
 ## External handoff
 
-Live ruleset deployment, signer configuration, promote-only GitHub workflow conversion, and real beta publication remain open until separately authorized. The handoff must name exact commands/receipts and may not claim release PASS.
+Promote-only workflow conversion and the live ruleset/environment baseline are
+implemented and verified. Protected integration of the compiler fixes,
+independent reviewer approval, signer use, creation of the real maintenance
+line, and real beta candidate/publication receipts remain open. The handoff
+must name exact commands/receipts and may not claim release PASS.

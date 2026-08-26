@@ -83,7 +83,9 @@ fn _required_projection_paths() -> [text]:
     [
         "VERSION", "src/app/simple.sdn", "src/lib/simple.sdn",
         "src/compiler/simple.sdn", "src/compiler/00.common/simple.sdn",
-        "src/compiler_rust/simple.sdn", "src/app/cli/bootstrap_identity.spl",
+        "src/compiler_rust/simple.sdn", "src/compiler_rust/Cargo.toml",
+        "src/compiler_rust/Cargo.lock",
+        "src/app/cli/bootstrap_identity.spl",
         "src/app/cli/cli_helpers.spl",
         "src/app/cli/_CliMain/args_and_os_commands.spl",
         "src/app/simple_core/main.spl", "src/app/simpleos_tool/main.spl",
@@ -139,6 +141,46 @@ fn _projection_version(path: text, payload: text) -> text:
                     return "<ambiguous>"
                 json_version = parsed.canonical
         return json_version
+    if path == "src/compiler_rust/Cargo.toml":
+        var in_workspace_package = false
+        var cargo_version = ""
+        for raw in payload.split("\n"):
+            val line = raw.trim()
+            if line.starts_with("[") and line.ends_with("]"):
+                in_workspace_package = line == "[workspace.package]"
+            elif in_workspace_package and line.starts_with("version = "):
+                val value = line.replace("version = ", "").replace("\"", "").trim()
+                val parsed = parse_release_version(value)
+                if parsed.channel == "invalid" or cargo_version != "":
+                    return "<ambiguous>"
+                cargo_version = parsed.canonical
+        return cargo_version
+    if path == "src/compiler_rust/Cargo.lock":
+        val product_packages = [
+            "simple-compiler", "simple-compiler-backfill",
+            "simple-dependency-tracker", "simple-driver",
+            "simple-native-all", "simple-parser", "simple-runtime-abi",
+            "simple-sdn", "simple-simd", "simple-wasm-runtime", "spl_fonts"
+        ]
+        var package_name = ""
+        var lock_version = ""
+        var observed_packages: [text] = []
+        for raw in payload.split("\n"):
+            val line = raw.trim()
+            if line.starts_with("name = \""):
+                package_name = line.replace("name = \"", "").replace("\"", "")
+            elif line.starts_with("version = \"") and product_packages.contains(package_name):
+                val value = line.replace("version = \"", "").replace("\"", "")
+                val parsed = parse_release_version(value)
+                if parsed.channel == "invalid" or observed_packages.contains(package_name):
+                    return "<ambiguous>"
+                if lock_version != "" and lock_version != parsed.canonical:
+                    return "<ambiguous>"
+                lock_version = parsed.canonical
+                observed_packages.push(package_name)
+        if observed_packages.len() != product_packages.len():
+            return "<ambiguous>"
+        return lock_version
     var found = ""
     for raw in payload.split("\n"):
         val line = raw.trim()
@@ -196,7 +238,7 @@ fn _unexpected_version_consumers(root: text, manifest: VersionManifest) -> (bool
     # current tree and exclude the large vendored Rust dependency graph before
     # content matching.
     val roots = ["src/app", "src/lib", "src/compiler", "src/compiler_rust", "tools/mcp-registry", "tools/lsp-mcp-registry"]
-    var argv = ["-l", "-F", "--glob", "*.spl", "--glob", "*.sdn", "--glob", "*.json", "--glob", "!src/compiler_rust/vendor/**", "--", manifest.semver]
+    var argv = ["-l", "-F", "--glob", "*.spl", "--glob", "*.sdn", "--glob", "*.json", "--glob", "*.toml", "--glob", "Cargo.lock", "--glob", "!src/compiler_rust/vendor/**", "--", manifest.semver]
     for source_root in roots:
         argv.push(_root_path(root, source_root))
     val (stdout, stderr, code) = process_run_bounded("rg", argv, 1000, 4194304)
@@ -217,7 +259,7 @@ fn _unexpected_version_consumers(root: text, manifest: VersionManifest) -> (bool
             path = path[prefix.len():]
         if path == "" or path.contains("/vendor/") or path.contains("/build/"):
             continue
-        if not path.ends_with(".spl") and not path.ends_with(".sdn") and not path.ends_with(".json"):
+        if not path.ends_with(".spl") and not path.ends_with(".sdn") and not path.ends_with(".json") and not path.ends_with(".toml") and not path.ends_with("Cargo.lock"):
             continue
         if not manifest.projections.contains(path):
             unexpected.push(path)
@@ -422,6 +464,35 @@ fn _projection_edits(root: text, current: VersionManifest, target: text) -> [Ver
                                 expected_replacements = expected_replacements + 1
                             else:
                                 rendered_lines.push(raw)
+                        else:
+                            rendered_lines.push(raw)
+                elif projection == "src/compiler_rust/Cargo.toml":
+                    var in_workspace_package = false
+                    for raw in payload.split("\n"):
+                        val line = raw.trim()
+                        if line.starts_with("[") and line.ends_with("]"):
+                            in_workspace_package = line == "[workspace.package]"
+                        if in_workspace_package and line == "version = \"" + current.semver + "\"":
+                            rendered_lines.push(raw.replace(current.semver, target))
+                            replacements = replacements + 1
+                        else:
+                            rendered_lines.push(raw)
+                elif projection == "src/compiler_rust/Cargo.lock":
+                    val product_packages = [
+                        "simple-compiler", "simple-compiler-backfill",
+                        "simple-dependency-tracker", "simple-driver",
+                        "simple-native-all", "simple-parser", "simple-runtime-abi",
+                        "simple-sdn", "simple-simd", "simple-wasm-runtime", "spl_fonts"
+                    ]
+                    expected_replacements = product_packages.len()
+                    var package_name = ""
+                    for raw in payload.split("\n"):
+                        val line = raw.trim()
+                        if line.starts_with("name = \""):
+                            package_name = line.replace("name = \"", "").replace("\"", "")
+                        if product_packages.contains(package_name) and line == "version = \"" + current.semver + "\"":
+                            rendered_lines.push(raw.replace(current.semver, target))
+                            replacements = replacements + 1
                         else:
                             rendered_lines.push(raw)
                 else:

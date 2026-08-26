@@ -49,6 +49,16 @@ For `release_to_main`, the target is always `main`, but application occurs on an
 isolated `work/fix/...` or `work/backport/...` branch. Only integration authority
 may CAS-update `main`.
 
+Protected admission reads `release_inventory_head_sha` from the reviewed
+manifest, requires it between the integration base and head, and permits only
+manifest-only commits afterward. It classifies the inventory at that boundary,
+requires reason/owner/future-expiry metadata for `non_fix`, and derives exact
+provider receipts. Every selected main fix names one result in the pre-merge
+release inventory with the same stable patch ID and the release integration
+review/check receipt. A release-first `fix` likewise names one reviewed result
+on `main` with the same stable patch ID. Configured required checks must match
+both check name and GitHub App integration ID with a completed `success` result.
+
 ### Candidate
 
 `CandidateManifest` includes canonical version, attempt, ref, commit,

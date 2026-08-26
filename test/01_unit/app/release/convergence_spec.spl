@@ -1,5 +1,5 @@
 """Release/main convergence is periodic, caller-selected, and never mutates Git."""
-# @req: REQ-004, REQ-005, REQ-006, REQ-009
+# @req: REQ-004, REQ-005, REQ-006, REQ-009, REQ-016
 use std.spec.{describe, it, expect, step}
 use app.release.convergence.{
     ReviewedBugFix, ConvergenceRequest, ConvergenceAdmissionRequest,
@@ -45,13 +45,21 @@ fn admission() -> ConvergenceAdmissionRequest:
         release_ref: "release/1.0", main_head_sha: sha_a(), release_head_sha: sha_b(),
         receipt_sha256: receipt_a(), review_summary_sha256: receipt_b(),
         evidence_receipt_sha256: receipt_c(), integration_receipt_sha256: receipt_c(),
-        inventory_origin: "protected_integration",
+        inventory_origin: "protected_integration", graph_independent: true,
         main_to_release_inventory_shas: [sha_c()],
         main_to_release_shared_fix_shas: [sha_c()],
         main_to_release_selected_shas: [sha_c()],
+        main_to_release_backported_shas: [sha_c()],
+        main_to_release_backport_result_shas: [sha_b()],
+        main_to_release_backport_target_refs: ["release/1.0"],
+        backport_receipt_sha256s: [receipt_c()],
         release_to_main_inventory_shas: [sha_a()],
-        release_to_main_shared_fix_shas: [sha_a()],
+        release_to_main_classified_shas: [sha_a()],
+        release_to_main_classification_kinds: ["fix"],
+        release_to_main_classification_receipt_sha256s: [receipt_b()],
         release_to_main_forward_ported_shas: [sha_a()],
+        release_to_main_forward_port_result_shas: [sha_c()],
+        release_to_main_forward_port_target_refs: ["main"],
         forward_port_receipt_sha256s: [receipt_a()]
     )
 
@@ -121,13 +129,59 @@ describe "Release/main convergence planner":
         expect(checked.valid).to_be(false)
         expect(checked.reason).to_equal("every main shared fix must be explicitly selected for backport")
 
+    it "rejects a selected main fix without an exact release backport binding":
+        var request = admission()
+        request.main_to_release_backported_shas = []
+        request.main_to_release_backport_result_shas = []
+        request.main_to_release_backport_target_refs = []
+        request.backport_receipt_sha256s = []
+        val checked = check_convergence_admission(request)
+        expect(checked.valid).to_be(false)
+        expect(checked.reason).to_equal("every selected main fix requires a completed backport to the release line")
+
+    it "rejects a release backport whose source was not selected":
+        var request = admission()
+        request.main_to_release_backported_shas = [sha_a()]
+        val checked = check_convergence_admission(request)
+        expect(checked.valid).to_be(false)
+        expect(checked.reason).to_equal("every selected main fix requires a completed backport to the release line")
+
+    it "rejects a main backport receipt targeting a different protected line":
+        var request = admission()
+        request.main_to_release_backport_target_refs = ["release/2.0"]
+        val checked = check_convergence_admission(request)
+        expect(checked.valid).to_be(false)
+        expect(checked.reason).to_equal("every selected main fix requires an exact backport receipt targeting the release line")
+
     it "rejects a missing release-first forward port":
         var request = admission()
         request.release_to_main_forward_ported_shas = []
+        request.release_to_main_forward_port_result_shas = []
+        request.release_to_main_forward_port_target_refs = []
         request.forward_port_receipt_sha256s = []
         val checked = check_convergence_admission(request)
         expect(checked.valid).to_be(false)
-        expect(checked.reason).to_equal("every release-first shared fix requires a completed forward port to main")
+        expect(checked.reason).to_equal("every reviewed release-first kind=fix requires a completed forward port to main")
+
+    it "rejects an empty release-first classification that conceals inventory":
+        var request = admission()
+        request.release_to_main_classified_shas = []
+        request.release_to_main_classification_kinds = []
+        request.release_to_main_classification_receipt_sha256s = []
+        request.release_to_main_forward_ported_shas = []
+        request.release_to_main_forward_port_result_shas = []
+        request.release_to_main_forward_port_target_refs = []
+        request.forward_port_receipt_sha256s = []
+        val checked = check_convergence_admission(request)
+        expect(checked.valid).to_be(false)
+        expect(checked.reason).to_equal("every release-first inventory commit requires an exhaustive receipt-bound classification")
+
+    it "requires every classified release-first fix to carry a main receipt":
+        var request = admission()
+        request.release_to_main_forward_port_target_refs = ["release/1.0"]
+        val checked = check_convergence_admission(request)
+        expect(checked.valid).to_be(false)
+        expect(checked.reason).to_equal("every release-first fix requires an exact forward-port receipt targeting main")
 
     it "rejects a receipt not produced by protected integration":
         var request = admission()
@@ -135,3 +189,10 @@ describe "Release/main convergence planner":
         val checked = check_convergence_admission(request)
         expect(checked.valid).to_be(false)
         expect(checked.reason).to_equal("convergence inventory must originate from protected integration")
+
+    it "rejects a graph where either protected line absorbs the other":
+        var request = admission()
+        request.graph_independent = false
+        val checked = check_convergence_admission(request)
+        expect(checked.valid).to_be(false)
+        expect(checked.reason).to_equal("main and release must remain graph-independent in both directions")

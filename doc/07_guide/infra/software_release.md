@@ -34,7 +34,7 @@ Validate each fix with `simple release backport-check` and record:
 - `kind=fix`;
 - review receipt digest;
 - `release/X.Y` and expected target SHA;
-- adaptation reason (`none` is explicit);
+- exact stable patch ID (`adapted` is not admitted by this protocol);
 - post-application result SHA;
 - renewed focused evidence digest for that result.
 
@@ -42,19 +42,22 @@ Apply the commit only on the private work branch, rerun affected tests, and subm
 
 ### Periodic main/release convergence
 
-During a long beta or bootstrap qualification run, schedule an occasional read-only fetch-and-compare checkpoint. `inspect_release_main_convergence` fetches exact remote heads with bounded refspecs, compares at most 256 source-only commits, and verifies that every selected SHA is review-bound, reachable from the source, and not already represented in the target. It must not choose, cherry-pick, merge, or push a fix. Avoid tight polling and do not give the bootstrap worker protected-ref credentials.
+During a long beta or bootstrap qualification run, schedule a bounded read-only fetch-and-compare checkpoint before every candidate attempt, after a bootstrap failure is repaired, and before release admission. `inspect_release_main_convergence` fetches exact remote heads with bounded refspecs, compares at most 256 source-only commits, and verifies that every selected SHA is review-bound, reachable from the source, and not already represented in the target. It must not choose, cherry-pick, merge, or push a fix. Avoid tight polling and do not give the bootstrap worker protected-ref credentials.
 
 For each operator-selected exact commit:
 
 1. From `main` to `release/X.Y`, create a private backport branch/worktree, verify the source review, apply only that commit, renew focused evidence, and submit to the release-line integration authority.
-2. From `release/X.Y` to `main`, create a private forward-port branch/worktree targeting the exact current `main`, apply or adapt only the reviewed fix, obtain review and renewed evidence, and submit to the trunk integration authority.
+2. From `release/X.Y` to `main`, create a private forward-port branch/worktree targeting the exact current `main`, apply the exact patch-equivalent reviewed fix, obtain review and renewed evidence, and submit to the trunk integration authority. An adapted patch fails closed until a separate equivalence protocol is reviewed and implemented.
 3. After protected CAS integration, `record_post_integration_divergence` fetches
    both heads again. It requires an unchanged source, an append-only target equal
    to the reviewed result, representation of every selected patch, and exact
-   review/evidence/integration digests. The receipt proves that `main` and the
-   maintenance line remain distinct.
+   review/evidence/integration digests. For a forward port, it also proves the
+   release source head is not an ancestor of the resulting `main`, rejecting a
+   whole-line merge even when the heads differ.
 
-If either protected head changes, discard stale admission and retry from a fresh snapshot. `main` always remains the development trunk: never reset or repoint it to `release/X.Y`, make the release branch its upstream, merge an entire maintenance line merely to carry one fix, or push either protected ref directly. Release-only compatibility changes may remain on the release line when the divergence receipt explains why; shared bug fixes must be forward-ported unless explicitly rejected by review.
+If either protected head changes, discard stale admission and retry from a fresh snapshot. The reviewed manifest binds the exact current `main_head_sha`; a main advance after review requires a new reviewed integration. `main` always remains the append-only development trunk: never repoint it to `release/X.Y`, make the release branch its upstream, merge or otherwise absorb an entire maintenance line, or push either protected ref directly. The release line likewise must not absorb the whole current `main`; both ancestry directions fail closed. Before candidate admission, the reviewed manifest names an exact `release_inventory_head_sha`. That boundary must extend the integration base, be an ancestor of the reviewed PR head, and be followed only by manifest-only administrative commits, so the inventory never requires a commit to contain its own SHA. Recompute the complete release-only inventory at that boundary and require one receipt-bound `fix` or `non_fix` classification for every commit; a nonempty inventory cannot be paired with an empty classification list. Every selected `main` fix must name a result reachable in the pre-merge release inventory, match it by exact `git patch-id --stable`, and carry the exact release integration review/check receipt. Every release-first `fix` classification must symmetrically name a result represented on `main`, match the same stable patch ID, and carry an exact main-targeted forward-port receipt. Candidate CI replays both source-to-result bindings. Adapted fixes require a future separately reviewed equivalence path and are not admitted by this one. Bug fixes have no waiver. Genuinely release-specific compatibility work may remain release-only only under a distinct non-fix classification with a nonempty reason, accountable owner, and unexpired RFC 3339 expiry.
+
+Provider evidence accepts only configured required check identities: exact check name, GitHub App integration ID, exact PR head, completed state, and `success` conclusion. Neutral, skipped, unrelated, duplicate, or name-only check runs do not satisfy release admission. The canonical check identities are projected together in `.spipe/policy/vcs.sdn` and the protected branch rulesets.
 
 Prepare one selected fix with `scripts/release/converge-reviewed-fix.sh`. The
 command requires a create-once `spipe-review-receipt/1` file bound to the exact

@@ -34,8 +34,8 @@
 
 ## Focused verification recorded in this lane
 
-- Release policy/system SSpec: PASS (6/6 in the recorded focused run).
-- Guarded release CLI: PASS (10/10 in the recorded focused run).
+- Release policy/system SSpec: PASS (7/7 in the recorded focused run).
+- Guarded release CLI: PASS (12/12 in the recorded focused run).
 - Git convergence focused integration: implemented with exact repository
   fixtures; final real-Git test PASS (1/1).
 - Persisted candidate authority: PASS (3/3), covering create-once state,
@@ -47,7 +47,8 @@
   cross-surface checks) across `sj`, Simple JJ sync, both MCP runtime families,
   and their prompts. Raw ref mutation and malformed work-bookmark pushes fail
   closed.
-- Workflow source contracts: whole release gate PASS (2/2) and release archive,
+- Workflow source contracts: whole release gate PASS (4/4), provider-bound PR
+  admission PASS (3/3), and release archive,
   immutable artifact identity, and publication chain PASS (3/3).
 - Spipe release/plugin parity: PASS in the recorded plugin build run.
 - Direct environment/runtime facade guards: PASS for working and staged scans.
@@ -80,7 +81,9 @@
    seven-fix closure admitted Stage 2 with provenance/sanity receipts and
    artifact SHA-256
    `a9c1b931648146c0ccf4f289dd2ab6176e1fd90b0db605338c84bacb406238b1`.
-   The same reviewed fixes were backported to beta PR #28. Its first admission
+   Patch-equivalent copies were prepared in PR #28, which currently targets
+   `main`; they are not protected `release/1.0` backports and no divergence
+   receipt claims otherwise. Its first local bootstrap attempt
    correctly rejected a stale `1.0.0-RC` verifier literal; after binding every
    Stage 2/3 sanity consumer to canonical `release/version.sdn`, the second
    focused cycle admitted artifact SHA-256
@@ -91,7 +94,7 @@
    deterministically because the Stage-2-native module-name helper mapped
    `src/app/cli/bootstrap_main.spl` and `src/compiler/driver/driver.spl` to
    the empty name. The trunk correction is Simple PR #31; its exact reviewed
-   admission-probe commit was cherry-picked into beta PR #28. PR #31 and the
+   admission-probe commit was copied into PR #28. PR #31 and the
    protected integration of PR #29 remain prerequisites to a fresh release
    lineage. Neither result updates a protected ref directly.
 2. The GitHub policy configuration row is now PASS, but configuration is not a
@@ -111,8 +114,9 @@
 
 ## Required next evidence
 
-1. Integrate trunk PRs #29 and #31 through protected review, refresh the beta
-   backport from those exact integrated revisions, then start a fresh immutable
+1. Integrate trunk PRs #29 and #31 through protected review, create the actual
+   protected `release/1.0` line, and backport the selected exact integrated
+   revisions through isolated reviewed sessions with divergence receipts. Then start a fresh immutable
    Stage 2 lineage in a new bounded verification session. Produce admitted
    Stage 3 and Stage 4 artifacts and run the required lint plus one clean
    `bin/simple test test --whole --mode=interpreter` confirmation.

@@ -2,9 +2,9 @@
 
 Follow `doc/07_guide/infra/software_release.md`. The canonical version is `release/version.sdn`; other locations are projections.
 
-Require verified SPipe/manual evidence and one release-bound `bin/simple test test --whole --mode=interpreter` PASS. Work only in one isolated release session with a unique branch and worktree. Beta work targets `release/X.Y` and admits only explicit reviewed bug-fix backports with exact provenance and renewed result-revision evidence.
+Require verified SPipe/manual evidence and one release-bound `bin/simple test test --whole --mode=interpreter` PASS. Work only in one isolated release session with a unique branch and worktree. Beta work targets `release/X.Y` and admits only explicit reviewed bug-fix backports with exact stable patch-ID equivalence, provider-bound review/check receipts, and renewed result-revision evidence. Adapted patches fail closed until a separately reviewed equivalence protocol exists.
 
-At bounded beta/bootstrap checkpoints, fetch once and compare exact `main` and release-line snapshots read-only. Discovery only proposes reviewed fixes. Backport a selected trunk fix or forward-port a release-first fix through its own isolated work branch, renewed evidence, divergence receipt, and protected CAS integration. Keep `main` as development trunk: never reset/repoint it to, track, or replace it with `release/X.Y`.
+Before each candidate attempt, after a bootstrap failure fix, and before release admission, fetch once and compare exact `main` and release-line snapshots read-only. Discovery only proposes reviewed fixes. Backport a selected trunk fix or forward-port a shared release-first fix through its own isolated work branch before candidate admission, with renewed evidence, a divergence receipt, and protected CAS integration. Only a `non_fix` release-specific compatibility classification with reason, owner, and expiry may remain release-only. Keep `main` as development trunk: never reset/repoint it to, track, or replace it with `release/X.Y`.
 
 Create an immutable candidate before builds. Build once, admit exact digests, then perform promotion without rebuilding through one signed annotated exact tag. Ask before external push/publication.
 

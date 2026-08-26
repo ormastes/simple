@@ -5,6 +5,7 @@ use std.test_runner.doctest_runner.{extract_doctests}
 describe "whole release test gate":
     it "builds and qualifies the candidate before promote-only publication":
         val candidate = read_file_text(".github/workflows/candidate.yml") ?? ""
+        val protected_admission = read_file_text(".github/workflows/pr-admission.yml") ?? ""
         val promotion = read_file_text(".github/workflows/release.yml") ?? ""
         val publish = read_file_text(".github/workflows/publish.yml") ?? ""
         val bootstrap = read_file_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
@@ -23,9 +24,30 @@ describe "whole release test gate":
         expect(candidate).to_contain("convergence-admission --json")
         expect(candidate).to_contain("--evidence-receipt-sha256=\"$(jq -r '.evidence_receipt_sha256' \"$receipt\")\"")
         expect(candidate).to_contain("--forward-port-receipts=")
+        expect(candidate).to_contain("--backport-receipts=")
+        expect(candidate).to_contain("--main-backported=")
+        expect(candidate).to_contain("--main-backport-results=")
+        expect(candidate).to_contain("--main-backport-targets=")
+        expect(candidate).to_contain("--release-classified=")
+        expect(candidate).to_contain("--release-classification-kinds=")
+        expect(candidate).to_contain("--release-classification-receipts=")
+        expect(candidate).to_contain("--release-forward-port-results=")
+        expect(candidate).to_contain("--release-forward-port-targets=")
+        expect(candidate).to_contain("git merge-base --is-ancestor \"$release_sha\" \"$main_sha\"")
+        expect(candidate).to_contain("git merge-base --is-ancestor \"$main_sha\" \"$release_sha\"")
+        expect(candidate).to_contain("release_inventory_head_sha")
+        expect(candidate).to_contain("git patch-id --stable")
+        expect(protected_admission).to_contain("classifications")
+        expect(protected_admission).to_contain("classification_receipt_sha256")
+        expect(protected_admission).to_contain("forward_ports")
+        expect(protected_admission).to_contain("backports:$backports")
+        expect(protected_admission).to_contain("backport-evidence.json")
+        expect(protected_admission).to_contain("result_commit_sha")
+        expect(protected_admission).to_contain("git merge-base --is-ancestor \"$release_sha\" \"$main_sha\"")
         expect(candidate.contains("convergence-discover")).to_be(false)
         expect(candidate).to_contain("required_support_passed:true")
         expect(candidate).to_contain("support-receipt.json")
+        expect(candidate).to_contain("steps.freeze.outputs.attempt_name")
         expect(candidate).to_contain("support_matrix:$support_matrix")
         expect(candidate).to_contain(".status == \"unsupported\"")
         expect(candidate).to_contain("admitted:true,rebuild_allowed:false,fallback_used:false")
@@ -79,6 +101,39 @@ describe "whole release test gate":
         expect(disabled_guard).to_be_greater_than(spl_override)
         expect(app_runner).to_contain("if run_spl_doc:")
         expect(app_runner).to_contain("if run_sdoc:")
+
+    it "prevents a fresh dispatch from rebuilding a reserved candidate attempt":
+        val candidate = read_file_text(".github/workflows/candidate.yml") ?? ""
+
+        # Assert the expression in brace-free pieces because GitHub's `${{...}}`
+        # syntax overlaps Simple string interpolation.
+        expect(candidate).to_contain("group: candidate-$")
+        expect(candidate).to_contain("github.event_name == 'workflow_dispatch' && inputs.candidate_ref || github.ref")
+        expect(candidate).to_contain("statuses: write")
+        expect(candidate).to_contain("STATUS_CONTEXT: simple-release/candidate/$")
+        expect(candidate).to_contain("steps.freeze.outputs.version")
+        expect(candidate).to_contain("steps.freeze.outputs.attempt_name")
+        expect(candidate).to_contain("commits/")
+        expect(candidate).to_contain("/statuses?per_page=100")
+        expect(candidate).to_contain("[.[][] | select(.context == $context)] | length")
+        expect(candidate).to_contain("candidate attempt was already reserved; allocate a new candidate attempt")
+        expect(candidate).to_contain("/statuses/")
+        expect(candidate).to_contain("Candidate attempt reserved; rebuilds require a new attempt")
+        expect(candidate).to_contain("steps.create_once.outputs.reserved == 'true'")
+
+    it "binds promotion artifact names to the candidate attempt":
+        val promotion = read_file_text(".github/workflows/release.yml") ?? ""
+
+        expect(promotion).to_contain("attempt_name=")
+        expect(promotion).to_contain("CANDIDATE_REF##*/")
+        # Keep the quantifier out of this Simple string: `{...}` is a Simple
+        # interpolation surface, while the workflow source intentionally uses
+        # a Bash regular-expression quantifier.
+        expect(promotion).to_contain("[[ \"$attempt_name\" =~ ^a[0-9]")
+        expect(promotion).to_contain("EXPECTED_NAME=\"candidate-")
+        expect(promotion).to_contain("attempt_name")
+        expect(promotion).to_contain("test \"$(jq -r '.attempt' candidate/candidate-manifest.json)\" = \"$((10#$attempt_text))\"")
+        expect(promotion.contains("EXPECTED_NAME: candidate-")).to_be(false)
 
     it "discovers code-comment sdoctests":
         val blocks = extract_doctests("src/compiler/00.common/gc_config.spl")

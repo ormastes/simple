@@ -1,12 +1,13 @@
 """Convergence observes real Git refs and records reviewed divergence."""
-# @req: REQ-004, REQ-005, REQ-006, REQ-009
+# @req: REQ-004, REQ-005, REQ-006, REQ-009, REQ-016
 use std.spec.{describe, it, expect, step}
 use app.io.mod.{process_run_bounded, file_write}
 use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
 use app.release.policy.{ReleaseSession}
 use app.release.convergence.{
     ReviewedBugFix, ConvergenceRequest, PostIntegrationDivergenceRequest,
-    inspect_release_main_convergence, record_post_integration_divergence
+    inspect_release_main_convergence, record_post_integration_divergence,
+    convergence_graph_allowed
 }
 
 fn run(command: text, arguments: [text]) -> (text, text, i64):
@@ -21,12 +22,12 @@ fn output(command: text, arguments: [text]) -> text:
 fn git(root: text, arguments: [text]) -> text:
     output("git", ["-C", root] + arguments)
 
-fn session(root: text, main_root: text, target_sha: text) -> ReleaseSession:
+fn session(root: text, main_root: text, target_ref: text, target_sha: text) -> ReleaseSession:
     ReleaseSession(
         session_id: "convergence-spec", workspace_path: root,
         main_workspace_path: main_root,
         work_branch: git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
-        target_ref: "release/1.0", base_sha: git(root, ["rev-parse", "HEAD"]),
+        target_ref: target_ref, base_sha: git(root, ["rev-parse", "HEAD"]),
         expected_target_sha: target_sha,
         policy_sha256: file_hash_sha256(root + "/.spipe/policy/vcs.sdn")
     )
@@ -85,7 +86,7 @@ describe "Git-backed release/main convergence":
             forward_port_target_ref: "", main_tracks_release: false
         )
         val observed = await inspect_release_main_convergence(
-            canonical_worktree, session(canonical_worktree, canonical_main, release_sha), request
+            canonical_worktree, session(canonical_worktree, canonical_main, "release/1.0", release_sha), request
         )
         expect(observed.valid).to_be(true)
         expect(observed.mutation).to_equal("fetch-only")
@@ -98,7 +99,7 @@ describe "Git-backed release/main convergence":
         val result_sha = git(canonical_worktree, ["rev-parse", "HEAD"])
         git(canonical_worktree, ["push", "origin", "HEAD:refs/heads/release/1.0"])
         val receipt = await record_post_integration_divergence(
-            canonical_worktree, session(canonical_worktree, canonical_main, result_sha),
+            canonical_worktree, session(canonical_worktree, canonical_main, "release/1.0", result_sha),
             PostIntegrationDivergenceRequest(
                 direction: "main_to_release", release_ref: "release/1.0",
                 source_head_before: fix_sha, target_head_before: release_sha,
@@ -112,6 +113,22 @@ describe "Git-backed release/main convergence":
         expect(receipt.source_unchanged).to_be(true)
         expect(receipt.target_equals_result).to_be(true)
         expect(receipt.main_remains_independent).to_be(true)
+
+        step("Reject a release-to-main merge that absorbs the entire release line")
+        file_write(canonical_worktree + "/release-first-fix.txt", "reviewed release-first fix\n")
+        git(canonical_worktree, ["add", "release-first-fix.txt"])
+        git(canonical_worktree, ["commit", "-m", "fix: release-first correction"])
+        git(canonical_worktree, ["push", "origin", "HEAD:refs/heads/release/1.0"])
+        val release_first_fix_sha = git(canonical_worktree, ["rev-parse", "HEAD"])
+        git(canonical_main, ["fetch", "--no-tags", "origin", "+refs/heads/release/1.0:refs/remotes/origin/release/1.0"])
+        git(canonical_main, ["merge", "--no-ff", "--no-edit", "refs/remotes/origin/release/1.0"])
+        val absorbed_main_sha = git(canonical_main, ["rev-parse", "HEAD"])
+        git(canonical_main, ["push", "origin", "main"])
+        val (_ancestor_out, _ancestor_err, ancestor_code) = run(
+            "git", ["-C", canonical_worktree, "merge-base", "--is-ancestor", release_first_fix_sha, absorbed_main_sha]
+        )
+        expect(ancestor_code).to_equal(0)
+        expect(convergence_graph_allowed(ancestor_code == 0)).to_be(false)
 
         git(canonical_main, ["worktree", "remove", "--force", canonical_worktree])
         run("rm", ["-rf", "--", temp_root])

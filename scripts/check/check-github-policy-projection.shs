@@ -40,6 +40,54 @@ jq -e '[.rules[].type] | index("pull_request") != null' \
 jq -e '[.rules[].type] | index("pull_request") != null' \
     .github/rulesets/spipe-vcs-v3-release-lines.json >/dev/null || fail "release lines are not PR-only"
 
+required_check='[{"context":"Code Idiom & Structural Ratchet Gates","integration_id":15368}]'
+for profile in main release-lines; do
+    file=".github/rulesets/spipe-vcs-v3-$profile.json"
+    jq -e --argjson required "$required_check" '
+        ([.rules[] | select(.type == "pull_request")][0].parameters |
+          .required_approving_review_count == 1 and
+          .require_code_owner_review == true and
+          .require_last_push_approval == true) and
+        ([.rules[] | select(.type == "required_status_checks")][0].parameters |
+          .strict_required_status_checks_policy == true and
+          .do_not_enforce_on_create == false and
+          .required_status_checks == $required)' "$file" >/dev/null ||
+        fail "$profile review/check projection does not match canonical protected policy"
+done
+
+jq -e '([.rules[] | select(.type == "pull_request")][0].parameters.allowed_merge_methods) == ["merge"]' \
+    .github/rulesets/spipe-vcs-v3-release-lines.json >/dev/null ||
+    fail "release-line admission requires an exact two-parent merge"
+rg -q "branches: \[main, master, develop, 'release/\*\*'\]" \
+    .github/workflows/repo-hygiene.yml ||
+    fail "configured release-line check does not run on release pull requests"
+
+[ "$(rg -c 'approving_reviews: 1' .spipe/policy/vcs.sdn)" -eq 2 ] ||
+    fail "canonical approval counts are stale"
+rg -q 'context: Code Idiom & Structural Ratchet Gates' .spipe/policy/vcs.sdn ||
+    fail "canonical required check name is missing"
+rg -q 'integration_id: 15368' .spipe/policy/vcs.sdn ||
+    fail "canonical required check app identity is missing"
+rg -q 'beta_backport_source_result_equivalence: stable_patch_id' .spipe/policy/vcs.sdn ||
+    fail "canonical backport source/result equivalence is missing"
+rg -q 'beta_backport_provider_receipt: required' .spipe/policy/vcs.sdn ||
+    fail "canonical backport provider receipt requirement is missing"
+rg -q 'current_mode: independent_environment_review' .spipe/policy/vcs.sdn ||
+    fail "canonical environment approval mode is stale"
+rg -q 'prevent_self_review: true' .spipe/policy/vcs.sdn ||
+    fail "canonical self-review policy is stale"
+rg -q 'id: 2378857' .spipe/policy/vcs.sdn ||
+    fail "canonical environment reviewer identity is stale"
+rg -q 'release_claim: approval_gated' .spipe/policy/vcs.sdn ||
+    fail "canonical release claim is stale"
+
+for environment in protected-integration release npm-release; do
+    jq -e '.prevent_self_review == true and
+           .reviewers == [{"type":"User","id":2378857}]' \
+        ".github/$environment-environment.json" >/dev/null ||
+        fail "$environment environment reviewer projection is stale"
+done
+
 for projection in \
     spipe-vcs-v3-main.json \
     spipe-vcs-v3-release-lines.json \
