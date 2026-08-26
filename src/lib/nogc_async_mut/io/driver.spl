@@ -412,6 +412,11 @@ class IoDriver:
         return id
 
     me submit_sendfile(sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
+        # Sendfile is a socket write operation even though its payload is
+        # owned by a file handle.  Register the socket for writable
+        # readiness exactly as submit_send_bytes does; otherwise a blocked
+        # sendfile can bypass the per-fd completion discipline.
+        self._ev_register_write(sock_fd)
         return self._push_op(_OP_SENDFILE, sock_fd, file_fd, "", 0, offset, len, "", 0)
 
     # ---- UDP Operations ----
@@ -731,17 +736,26 @@ class IoDriver:
                 continue
 
             elif ot == _OP_SENDFILE:
-                val content = self._find_file(self._p_fd2[i])
-                val off = self._p_offset[i]
-                var end_pos = off + self._p_length[i]
-                if end_pos > content.len():
-                    end_pos = content.len()
-                val chunk = content.slice(off, end_pos)
-                val res = unsafe(capabilities: [ffi]):
-                    rt_io_tcp_write_text(fd, chunk)
-                self._complete_fd(oid, res, 0, "", fd)
-                i = i + 1
-                continue
+                val send_ready = self._ready_contains(ready_fds, fd)
+                if (not ev_has_results) or send_ready:
+                    val content = self._find_file(self._p_fd2[i])
+                    val off = self._p_offset[i]
+                    var end_pos = off + self._p_length[i]
+                    if end_pos > content.len():
+                        end_pos = content.len()
+                    val chunk = content.slice(off, end_pos)
+                    val res = unsafe(capabilities: [ffi]):
+                        rt_io_tcp_write_text(fd, chunk)
+                    # The Worker owns offset/remaining progress and will
+                    # submit exactly one successor after a short completion.
+                    # Complete zero only after writable readiness so a
+                    # transient would-block result remains pending instead of
+                    # being mistaken for a terminal short write.
+                    if res > 0 or (ev_has_results and send_ready):
+                        self._ev_complete_fd_interest(fd, oid)
+                        self._complete_fd(oid, res, 0, "", fd)
+                        i = i + 1
+                        continue
 
             elif ot == _OP_CLOSE:
                 val is_file = self._find_file(fd).len() > 0
