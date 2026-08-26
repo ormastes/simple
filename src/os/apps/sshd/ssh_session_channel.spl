@@ -8,6 +8,7 @@ use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_KEXINIT}
 use os.apps.sshd.ssh_channel.{ChannelState, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
+use os.apps.sshd.ssh_channel_open_request.{SshChannelOpenRequestKindV1, ssh_channel_open_request_classify_v1, ssh_channel_open_rejection_payload_v1, ssh_channel_open_transport_must_close_v1}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
 use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _copy_bytes_stable, _push_u32_be_stable, _read_u32_stable, _read_text_field_fast, _bytes_to_hex, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
@@ -54,22 +55,6 @@ fn _payload_field_equals_bytes_stable(payload: [u8], field_offset: u64, expected
             return false
         i = i + 1
     true
-
-fn _is_live_channel_open_session(payload: [u8]) -> bool:
-    if payload.len() < 24:
-        return false
-    ssh_session_u8_at(payload, 0) == 90 and
-        ssh_session_u8_at(payload, 1) == 0 and
-        ssh_session_u8_at(payload, 2) == 0 and
-        ssh_session_u8_at(payload, 3) == 0 and
-        ssh_session_u8_at(payload, 4) == 7 and
-        ssh_session_u8_at(payload, 5) == 0x73 and
-        ssh_session_u8_at(payload, 6) == 0x65 and
-        ssh_session_u8_at(payload, 7) == 0x73 and
-        ssh_session_u8_at(payload, 8) == 0x73 and
-        ssh_session_u8_at(payload, 9) == 0x69 and
-        ssh_session_u8_at(payload, 10) == 0x6F and
-        ssh_session_u8_at(payload, 11) == 0x6E
 
 fn _field_range_equals_bytes_stable(payload: [u8], start: u64, end: u64, expected: [u8]) -> bool:
     if end < start:
@@ -332,23 +317,24 @@ impl SshSession:
 
     me _handle_channel_open(payload: [u8]):
         serial_println("[sshd-session] inline channel_open len={payload.len()}")
-        if payload.len() < 24 or ssh_session_u8_at(payload, 0) != 90:
+        val request = ssh_channel_open_request_classify_v1(payload)
+        if ssh_channel_open_transport_must_close_v1(request):
+            # A malformed envelope has no safe peer channel ID to answer and
+            # must not leave this transport able to route later channel data.
+            self.transition_closed()
             return
-        if not _is_live_channel_open_session(payload):
-            serial_println("[sshd-session] inline channel_open unsupported type payload={_bytes_to_hex(payload)}")
+        if request.kind != SshChannelOpenRequestKindV1.Session:
+            # Unsupported forwarding types receive a protocol rejection before
+            # this session allocates channel/window state or forwards any data.
+            val rejected = ssh_channel_open_rejection_payload_v1(request)
+            if rejected.len() > 0u64:
+                self.send_packet(rejected)
             return
-        val next_offset: u64 = 12
-        if next_offset + 12 > payload.len():
-            serial_println("[sshd-session] inline channel_open truncated payload={_bytes_to_hex(payload)}")
-            return
-
-        val remote_id = _read_u32_stable(payload, next_offset)
-        val remote_window = _read_u32_stable(payload, next_offset + 4)
-        val remote_max_packet = _read_u32_stable(payload, next_offset + 8)
-        serial_println("[sshd-session] inline channel open=session remote_id={remote_id} window={remote_window}")
-        val response = self.channels.session_channel_open_response(remote_id, remote_window, remote_max_packet)
+        serial_println("[sshd-session] inline channel open=session remote_id={request.sender_channel} window={request.initial_window}")
+        val response = self.channels.session_channel_open_response(
+            request.sender_channel, request.initial_window, request.maximum_packet)
         if response[0] == 91:
-            self.active_remote_channel_id = remote_id
+            self.active_remote_channel_id = request.sender_channel
             self.capability_channel_opened = true
         serial_println("[sshd-session] inline channel_open response len={response.len()}")
         self.send_packet(response)
