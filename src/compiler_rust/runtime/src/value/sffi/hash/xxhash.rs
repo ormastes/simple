@@ -42,9 +42,12 @@ pub unsafe extern "C" fn rt_xxhash_write(handle: i64, data_ptr: *const u8, data_
     if data_ptr.is_null() {
         return;
     }
+    let Ok(data_len) = usize::try_from(data_len) else {
+        return;
+    };
     let mut map = XXHASH_MAP.lock().unwrap();
     if let Some(hasher) = map.get_mut(&handle) {
-        let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+        let data = std::slice::from_raw_parts(data_ptr, data_len);
         hasher.update(data);
     }
 }

@@ -1027,3 +1027,12 @@ raw declarations are tagged `unsafe(ffi)` and confined to the six existing
 existing interpreter/native semantics. Valid hashing complexity and registry
 operations are unchanged. The seed integer data carrier versus interpreter
 array transport remains unverified and unsigned.
+## 2026-08-26 XXH3 legacy-boundary follow-up
+
+All six XXH3 raw declarations are now tagged `unsafe(ffi)` and confined to the
+six existing `XxHasher` method boundaries. The Rust provider rejects a `u64`
+length that cannot fit `usize` before constructing a slice, removing a 32-bit
+truncation hazard without adding another payload pass, registry lookup, lock,
+allocation, or copy. The legacy finish ABI still maps an invalid handle to `0`,
+which is also a valid digest; this family therefore remains explicitly unsafe,
+unverified, and unsigned until a status/out v2 ABI replaces it.

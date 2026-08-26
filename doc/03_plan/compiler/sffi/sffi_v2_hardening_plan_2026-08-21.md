@@ -1540,6 +1540,17 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Preserved the valid path's existing type match and one release dispatch; no
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 XXH3 legacy-boundary follow-up
+
+- Tagged six raw XXH3 declarations `unsafe(ffi)` and confined their calls to
+  the existing `XxHasher` wrapper methods.
+- Replaced unchecked `u64 -> usize` pointer-length truncation with a checked
+  conversion before slice construction.
+- Preserved one registry operation, one lock, and one payload pass per valid
+  write; added no lookup, allocation, copy, hash pass, or dispatch.
+- Deferred safe publication: the legacy finish ABI aliases an invalid handle
+  with the valid digest `0`; status/out v2 is required to resolve that contract.
+- Status: source-reviewed, deliberately unverified and unsigned.
 ## 2026-08-26 transient-promotion boolean-contract follow-up
 
 - Replaced missing-argument `false` fabrication in the Rust interpreter with a
