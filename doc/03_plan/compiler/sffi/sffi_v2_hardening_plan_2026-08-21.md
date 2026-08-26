@@ -1591,9 +1591,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Tagged and confined the five dedicated-host POSIX mmap/file calls to private
   always-inline owners; validated byte narrowing in the existing single pass
   and made exact size mismatch fail typed lifting.
+- Made the interpreter mmap-byte handler reject arity/read failures as typed
+  errors rather than legacy `Nil`, retaining one `fs::read` and direct buffer
+  lift on success.
+- Checked file-size `u64`-to-`i64` lifting so oversized metadata cannot wrap
+  into a fabricated negative sentinel.
 - Added a static authority contract. This family remains unverified/unsigned
-  because interpreter failure can return `Nil` and no owned native rich-array
-  provider was found.
+  because no owned native rich-array provider was found.
 - Kept MIR/runtime representation unchanged; capability collection is linear in
   the already-parsed header and stores one small vector per unsafe block only
   during compilation.

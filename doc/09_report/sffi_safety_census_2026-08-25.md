@@ -1146,9 +1146,14 @@ returns a typed error instead of narrowing arbitrary integers; preload size is
 checked exactly, including empty files. Valid execution retains one foreign
 call, one conversion pass, and the pre-existing output allocation/copy. A static
 authority contract pins declaration/call confinement and lifting checks.
-Interpreter read failure can still originate as `Nil`, and no owned native
-provider for the rich array symbol was found, so this family remains explicitly
-unverified and unsigned. Source-reviewed only; checks were not executed.
+The interpreter mmap-byte handler now rejects wrong arity and filesystem failure
+with typed errors instead of delegating to the legacy `Nil`-returning reader;
+success still performs one `fs::read` and directly lifts its sole byte buffer.
+File-size lifting now uses checked `u64`-to-`i64` conversion rather than wrapping
+oversized metadata into a negative sentinel.
+No owned native provider for the rich array symbol was found, so this family
+remains explicitly unverified and unsigned. Source-reviewed only; checks were
+not executed.
 
 ## 2026-08-26 Base64/Base64url contract follow-up
 

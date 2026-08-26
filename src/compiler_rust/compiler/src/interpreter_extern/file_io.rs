@@ -291,13 +291,18 @@ pub fn rt_file_is_dir(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_stat(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::metadata(&path) {
-        Ok(meta) => Ok(Value::Int(meta.len() as i64)),
+        Ok(meta) => i64::try_from(meta.len())
+            .map(Value::Int)
+            .map_err(|_| CompileError::runtime("rt_file_size exceeds i64 range")),
         Err(_) => Ok(Value::Int(-1)),
     }
 }
 
 /// Get file size in bytes
 pub fn rt_file_size(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_file_size requires 1 argument"));
+    }
     let path = extract_path(args, 0)?;
     match fs::metadata(&path) {
         Ok(meta) => Ok(Value::Int(meta.len() as i64)),
@@ -1035,7 +1040,16 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Read file bytes through the mmap-named API in interpreter mode.
 pub fn rt_file_mmap_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
-    rt_file_read_bytes(args)
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_file_mmap_read_bytes requires 1 argument",
+        ));
+    }
+    let path = extract_path(args, 0)?;
+    let bytes = fs::read(&path).map_err(|error| {
+        CompileError::runtime(format!("rt_file_mmap_read_bytes failed: {error}"))
+    })?;
+    Ok(Value::byte_array(bytes))
 }
 
 /// Identity function the optimizer must not see through.
@@ -1737,6 +1751,10 @@ mod tests {
             rt_file_size(&[Value::text(path.to_string_lossy().to_string())]).unwrap(),
             Value::Int(-1)
         );
+        assert!(rt_file_size(&[])
+            .expect_err("file size must reject missing arguments")
+            .to_string()
+            .contains("requires 1 argument"));
     }
 
     #[test]
@@ -2118,6 +2136,15 @@ mod tests {
             Value::ByteArray(values) => assert_eq!(values.len(), 11),
             other => panic!("unexpected bytes value: {other:?}"),
         }
+
+        let missing = dir.path().join("missing.bin").to_string_lossy().to_string();
+        let error = rt_file_mmap_read_bytes(&[Value::text(missing)])
+            .expect_err("missing mmap input must not become Nil");
+        assert!(error.to_string().contains("rt_file_mmap_read_bytes failed"));
+
+        let arity = rt_file_mmap_read_bytes(&[])
+            .expect_err("mmap byte reader must reject missing arguments");
+        assert!(arity.to_string().contains("requires 1 argument"));
     }
 
     // Regression coverage for the make_some/make_none latent bug flagged in
