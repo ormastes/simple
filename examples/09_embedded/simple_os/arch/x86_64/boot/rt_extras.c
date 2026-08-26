@@ -3123,20 +3123,9 @@ NOP2(rt_driver_submit_stencil)
  * =================================================================== */
 
 /* ARM32 — 28 functions */
-NOP1(rt_arm32_mcr_cntp_ctl)
-NOP1(rt_arm32_mcr_cntp_tval)
-NOP0(rt_arm32_mrc_cntfrq)
-NOP0(rt_arm32_mrc_cntp_ctl)
 NOP0(rt_arm32_mrc_mpidr)
-NOP0(rt_arm32_mrrc_cntpct_hi)
-NOP0(rt_arm32_mrrc_cntpct_lo)
 
 /* ARM64 — 25 functions */
-NOP0(rt_arm64_mrs_cntfrq_el0)
-NOP0(rt_arm64_mrs_cntp_ctl_el0)
-NOP0(rt_arm64_mrs_cntpct_el0)
-NOP1(rt_arm64_msr_cntp_ctl_el0)
-NOP1(rt_arm64_msr_cntp_tval_el0)
 
 /* RISC-V 32 — 17 functions */
 NOP0(rt_rv32_csrr_mcause)

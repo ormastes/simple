@@ -5816,3 +5816,25 @@ memory clobbers retain compiler ordering without emitting hardware work. No
 allocation, copy, lookup, hash, lock, signature check, or generic dispatch is
 added. The RV64 compiler/privilege/hardware path is still source-reviewed only,
 unsigned, and unverified.
+
+## Architecture context and timer checkpoint
+
+ARM32, ARM64, and RV32 context transfer each retain three target-assembly
+declarations. They are not safe: the current methods pass addresses of by-value
+context copies, so source-state persistence is unproved, and the providers lack
+complete maintained registry and signed-artifact admission. All nine raw
+declarations, nine calls, and nine caller-visible save/restore/switch methods
+now carry explicit `ffi, raw_ptr` authority. RV32 wrong-architecture restore
+now panics instead of silently succeeding. Initial stack pointers are aligned
+once at context construction (8 bytes on ARM32, 16 on ARM64/RV32), adding no
+per-switch work. The by-value ABI remains a recorded blocker, not a fixed or
+verified path.
+
+The ARM timer owners took the opposite route. Thirteen unbacked timer
+declarations are removed and replaced by ten exact direct instructions. ARM32
+CNTPCT is now one MRRC operation with two outputs instead of two foreign calls
+that could observe different counter instants. Twenty-two matching weak nil/no-
+op example definitions are removed. Timer reads/writes remain O(1), allocation-
+free, lookup-free, and direct; memory clobbers add compiler ordering but no
+runtime instruction. Cross-target assembly and hardware behavior remain
+unverified and unsigned.

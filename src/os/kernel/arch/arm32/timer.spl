@@ -25,18 +25,6 @@
 use os.kernel.arch.arm32.console.{uart_writeln}
 
 # ============================================================================
-# ARM Generic Timer cp15 Access (extern — implemented in asm/C runtime)
-# ============================================================================
-
-extern fn rt_arm32_mrc_cntfrq() -> u32
-extern fn rt_arm32_mrrc_cntpct_lo() -> u32
-extern fn rt_arm32_mrrc_cntpct_hi() -> u32
-extern fn rt_arm32_mcr_cntp_tval(value: u32)
-extern fn rt_arm32_mrc_cntp_tval() -> u32
-extern fn rt_arm32_mcr_cntp_ctl(value: u32)
-extern fn rt_arm32_mrc_cntp_ctl() -> u32
-
-# ============================================================================
 # Timer Control Bits (CNTP_CTL)
 # ============================================================================
 
@@ -67,9 +55,49 @@ fn _read_cntpct() -> u64:
     Rt  = low 32 bits (CNTPCT[31:0])
     Rt2 = high 32 bits (CNTPCT[63:32])
     """
-    val lo = rt_arm32_mrrc_cntpct_lo() as u64
-    val hi = rt_arm32_mrrc_cntpct_hi() as u64
-    (hi << 32) | lo
+    var lo: u32 = 0
+    var hi: u32 = 0
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "mrrc p15, 0, {lo}, {hi}, c14",
+            lo = out(reg) lo,
+            hi = out(reg) hi
+        )
+    ((hi as u64) << 32) | (lo as u64)
+
+fn _read_cntfrq() -> u32:
+    var value: u32 = 0
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "mrc p15, 0, {result}, c14, c0, 0",
+            result = out(reg) value
+        )
+    value
+
+fn _write_cntp_tval(value: u32):
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "mcr p15, 0, {operand}, c14, c2, 0",
+            operand = in(reg) value,
+            clobber("memory")
+        )
+
+fn _read_cntp_ctl() -> u32:
+    var value: u32 = 0
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "mrc p15, 0, {result}, c14, c2, 1",
+            result = out(reg) value
+        )
+    value
+
+fn _write_cntp_ctl(value: u32):
+    unsafe(capabilities: [inline_asm]):
+        asm volatile(
+            "mcr p15, 0, {operand}, c14, c2, 1",
+            operand = in(reg) value,
+            clobber("memory")
+        )
 
 # ============================================================================
 # Arm32Timer
@@ -94,7 +122,7 @@ impl Arm32Timer:
         from the hardware register (set by firmware/QEMU).
         """
         # Read hardware counter frequency
-        g_timer_freq = rt_arm32_mrc_cntfrq()
+        g_timer_freq = _read_cntfrq()
         uart_writeln("[TIMER] Counter frequency: {g_timer_freq} Hz")
 
         if g_timer_freq == 0:
@@ -102,7 +130,7 @@ impl Arm32Timer:
             g_timer_freq = frequency_hz as u32
 
         # Disable timer initially (enable when deadline is set)
-        rt_arm32_mcr_cntp_ctl(0)
+        _write_cntp_ctl(0)
 
         uart_writeln("[TIMER] ARM Generic Timer initialized (cp15 interface)")
 
@@ -117,10 +145,10 @@ impl Arm32Timer:
         truncated. For long delays, use repeated shorter deadlines.
         """
         # Set timer value (countdown) — truncate to 32 bits
-        rt_arm32_mcr_cntp_tval(ticks as u32)
+        _write_cntp_tval(ticks as u32)
 
         # Enable timer, unmask interrupt
-        rt_arm32_mcr_cntp_ctl(CTL_ENABLE)
+        _write_cntp_ctl(CTL_ENABLE)
 
     fn set_deadline_us(microseconds: u64):
         """Set a one-shot timer deadline in microseconds."""
@@ -138,15 +166,15 @@ impl Arm32Timer:
 
     fn stop():
         """Stop the timer by disabling it."""
-        rt_arm32_mcr_cntp_ctl(0)
+        _write_cntp_ctl(0)
 
     fn mask():
         """Mask the timer interrupt without disabling the timer."""
-        rt_arm32_mcr_cntp_ctl(CTL_ENABLE | CTL_IMASK)
+        _write_cntp_ctl(CTL_ENABLE | CTL_IMASK)
 
     fn unmask():
         """Unmask the timer interrupt."""
-        rt_arm32_mcr_cntp_ctl(CTL_ENABLE)
+        _write_cntp_ctl(CTL_ENABLE)
 
     fn current_ticks() -> u64:
         """Read the current physical counter value (CNTPCT).
@@ -166,7 +194,7 @@ impl Arm32Timer:
 
     fn is_pending() -> bool:
         """Check if the timer interrupt is pending (ISTATUS bit)."""
-        val ctl = rt_arm32_mrc_cntp_ctl()
+        val ctl = _read_cntp_ctl()
         (ctl & CTL_ISTATUS) != 0
 
     fn elapsed_ns(start_ticks: u64) -> u64:

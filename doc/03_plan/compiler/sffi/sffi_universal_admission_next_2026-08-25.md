@@ -365,3 +365,19 @@ does not label inline assembly safe or verified.
   two targeted fences, and four register moves to direct named instructions.
 - [x] Preserve explicit memory clobbers for translation and interrupt ordering.
 - [ ] Execute cross-target assembly and QEMU evidence on an admitted toolchain.
+
+## Architecture context and timer tranche
+
+- [x] Classify nine context save/restore/switch declarations as raw pointer and
+  FFI authority; confine all calls and make the wrapper obligation visible.
+- [x] Align initial stacks once at construction and reject RV32 architecture
+  mismatch instead of returning successfully.
+- [x] Record the unresolved by-value source-context persistence bug across all
+  architecture context implementations.
+- [x] Remove thirteen ARM timer declarations and 22 fabricated example
+  definitions; replace them with ten direct target instructions.
+- [x] Make ARM32 CNTPCT one coherent two-output MRRC observation.
+- [ ] Redesign context transfer around stable scheduler-owned mutable/borrowed
+  contexts and an exact non-returning, artifact-admitted assembly ABI.
+- [ ] Execute cross-target assembly, QEMU context-resume, and timer monotonicity
+  evidence on an admitted current-source compiler.

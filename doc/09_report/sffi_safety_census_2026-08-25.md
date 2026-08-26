@@ -1751,3 +1751,19 @@ replace the generic CSR and register bridge. Across the bounded privileged CPU
 family, 73 SFFI declarations are removed and 90 operations now carry minimal
 `inline_asm` authority. This improves dispatch shape but remains unsigned and
 hardware/compiler-unverified.
+
+### Architecture context and timer authority
+
+Nine ARM32/ARM64/RV32 context declarations remain because the assembly ABI
+cannot be safely replaced without scheduler ownership redesign. All nine
+declarations, calls, and wrapper methods are now explicitly
+`unsafe(ffi, raw_ptr)`. Stack alignment is established once on construction,
+and RV32 architecture mismatch fails closed. The by-value save-target defect
+is recorded and blocks safe/verified promotion.
+
+Thirteen unbacked ARM timer declarations and 22 weak nil/no-op example
+definitions are removed. Ten direct capability-confined instructions replace
+them; ARM32 uses one coherent MRRC counter read. No per-switch/per-tick
+allocation, copy, lookup, hashing, lock, signature check, or generic dispatch
+is added. The bounded context family remains unsafe and unsigned; timer
+assembly is source-reviewed but hardware/compiler-unverified.
