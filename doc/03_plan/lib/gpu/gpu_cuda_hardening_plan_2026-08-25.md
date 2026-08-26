@@ -49,8 +49,8 @@ copies; CPU emulation is 1-D only.
 |---|---|---|---|---|
 | E0 | Establish what `<<<>>>` does on the native/JIT path (`native_project/discovery.rs`, HIR lowering arm) so the interpreter semantics match, not invent | read + 10-line probe with `SIMPLE_ENGINE_RECEIPT=1` on both engines | written finding in this plan | DONE — `KernelLaunch` has **no HIR lowering arm** (`hir/lower/expr/control.rs:2807` is only the identifier collector) and `native_project/discovery.rs:223` only visits sub-expressions; the interpreter returns `Nil` (`interpreter/expr/calls.rs:94`). So `<<<>>>` is a no-op in the interpreter and unsupported on native/JIT: E1/E3 define the semantics, nothing to match. Also: the shared tree's `src/compiler_rust` does not compile (other sessions' partial `import_loader.rs` edits) — the private build uses the clean origin-tip worktree. |
 | E1 | 3-D CPU emulated launch in `gpu_ops` (`gpu_launch_emulated(grid, block, kernel)`; `gpu_block_id_{y,z}` / `gpu_local_id_{y,z}` / dims honoured) | pure Simple, no rebuild | spec: 2-D `matmul_tiled`-style index math matches CPU reference; tutorial 18/23/24 doctests can use it | DONE — `gpu_ops.spl` `_exec_*` state is now x/y/z, all 18 id/dim builtins read it, `gpu_launch_emulated(grid, block, kernel)` exported from `std.gc_async_mut.gpu`; `test/01_unit/lib/gpu/gpu_launch_emulated_3d_spec.spl` 3/3 on the 08-23 seed |
-| E2 | Runtime streams / events / async copies: `cuStreamCreate/Destroy/Synchronize`, `cuEventCreate/Destroy/Record/Synchronize/ElapsedTime`, `cuMemcpyHtoDAsync/DtoHAsync`, `cuLaunchKernel` with `shared_bytes` + `stream` (`rt_cuda_launch_kernel_ex`) + `std.cuda` `CudaStream`/`CudaEvent` wrappers + `std.io` `cuda_launch_on(kfn, cfg, stream, args)` | Rust runtime (dlopen driver) + Simple wrappers; **requires seed rebuild** — verified on the private build only | spec (gated `SIMPLE_CUDA_TEST=1`): two streams overlap a copy and a kernel, event elapsed > 0, results correct; pre-flight RESOLVED: `extern-backing-census.shs:35` honours `SIMPLE_BIN`, so run the unbacked-extern ratchet at landing with `SIMPLE_BIN=/mnt/data/tmp/claude-1000/cargo-target-gpu/release/simple` (the private build that defines the new `rt_cuda_*`), and state that in the commit message; tutorial 22 rewritten to real overlap | DONE (private build) — runtime `rt_cuda_stream_*`/`rt_cuda_event_*`/`rt_cuda_memcpy_*_async`/`rt_cuda_launch_kernel_ex` + `std.cuda` `CudaStream`/`CudaEvent` + `std.io` `cuda_launch_on`; `cuda_streams_events_spec.spl` 5/5 on the private build (2 streams really overlapped async copies + launches, events, 128 values correct), RED on every deployed seed until rebuild |
-| E3 | Interpreter: `<<<>>>` no longer `Nil` — desugar to the E1 emulated launch when `gpu_ops` is imported, else a hard diagnostic `kernel launch requires std.gc_async_mut.gpu_ops in interpreter mode` | `compiler_rust` interpreter; seed-side | reproduce spec RED on deployed seed (bug record), green on private build; receipt-verified | DONE (private build) — `KernelLaunch` now desugars to `gpu_launch_emulated` (int N → (N,1,1), 3-tuple passthrough) or errors `kernel launch `<<<>>>` requires `use std.gc_async_mut.gpu_ops.*` in interpreter mode`; `kernel_launch_syntax_interpreter_spec.spl` 0/5 on the 08-23 seed → 5/5 on the private build |
+| E2 | Runtime streams / events / async copies: `cuStreamCreate/Destroy/Synchronize`, `cuEventCreate/Destroy/Record/Synchronize/ElapsedTime`, `cuMemcpyHtoDAsync/DtoHAsync`, `cuLaunchKernel` with `shared_bytes` + `stream` (`rt_cuda_launch_kernel_ex`) + `std.cuda` `CudaStream`/`CudaEvent` wrappers + `std.io` `cuda_launch_on(kfn, cfg, stream, args)` | Rust runtime (dlopen driver) + Simple wrappers; **requires seed rebuild** — verified on the private build only | spec (gated `SIMPLE_CUDA_TEST=1`): two streams overlap a copy and a kernel, event elapsed > 0, results correct; pre-flight RESOLVED: `extern-backing-census.shs:35` honours `SIMPLE_BIN`, so run the unbacked-extern ratchet at landing with `SIMPLE_BIN=/mnt/data/tmp/claude-1000/cargo-target-gpu/release/simple` (the private build that defines the new `rt_cuda_*`), and state that in the commit message; tutorial 22 rewritten to real overlap | DONE, VERIFIED ON THE DEPLOYED BINARY 2026-08-26 (see Redeploy verification below) — runtime `rt_cuda_stream_*`/`rt_cuda_event_*`/`rt_cuda_memcpy_*_async`/`rt_cuda_launch_kernel_ex` + `std.cuda` `CudaStream`/`CudaEvent` + `std.io` `cuda_launch_on`; `cuda_streams_events_spec.spl` 5/5 on the private build (2 streams really overlapped async copies + launches, events, 128 values correct), RED on every deployed seed until rebuild |
+| E3 | Interpreter: `<<<>>>` no longer `Nil` — desugar to the E1 emulated launch when `gpu_ops` is imported, else a hard diagnostic `kernel launch requires std.gc_async_mut.gpu_ops in interpreter mode` | `compiler_rust` interpreter; seed-side | reproduce spec RED on deployed seed (bug record), green on private build; receipt-verified | DONE, VERIFIED ON THE DEPLOYED BINARY 2026-08-26 (5/5, was 0/5) — `KernelLaunch` now desugars to `gpu_launch_emulated` (int N → (N,1,1), 3-tuple passthrough) or errors `kernel launch `<<<>>>` requires `use std.gc_async_mut.gpu_ops.*` in interpreter mode`; `kernel_launch_syntax_interpreter_spec.spl` 0/5 on the 08-23 seed → 5/5 on the private build |
 | E4 | Grammar `stream:` / `shared:` slots in `<<<…>>>` | both parsers + positional `KernelLaunch(Expr,Expr,Expr,[CallArg])` ripple in the self-hosted compiler | DEFERRED — `cuda_launch_on` from E2 expresses it; note the interim form in `kernel_launch_grammar_no_stream_slot_2026-08-25.md` | DEFERRED |
 
 Exit criteria for Phase E: E1–E3 green on the private build with receipts, E2 honest about
@@ -79,3 +79,37 @@ Exit criteria for Phase E: E1–E3 green on the private build with receipts, E2 
 - Unbacked-extern ratchet: run with
   `SIMPLE_BIN=/mnt/data/tmp/claude-1000/cargo-target-gpu/release/simple` (the private build that
   defines the new `rt_cuda_*`), per `extern-backing-census.shs:35`.
+
+## Redeploy verification (2026-08-26)
+
+Rows E2 and E3 were "DONE (private build)" and blocked on a seed redeploy: landed code that no
+deployed binary carried, so both specs were RED for users. The 2026-08-26 redeploy (built from
+`origin/main`, deployed to `bin/release/x86_64-unknown-linux-gnu/simple`, previous binary kept as
+`simple.pre-alwaysinline-20260826`) closes that. Measured on the deployed binary, 2-GPU host:
+
+| spec | before | now |
+|---|---|---|
+| `kernel_launch_syntax_interpreter_spec.spl` (E3) | 0/5 | **5/5** |
+| `cuda_streams_events_spec.spl` (E2) | RED, externs absent | **4/5** |
+
+`nm -D` confirms `rt_cuda_stream_create`, `rt_cuda_event_record`, `rt_cuda_memcpy_htod_async` and
+`rt_cuda_launch_kernel_ex` are all defined in the deployed binary.
+
+**Both E2 hardware scenarios pass** — "overlaps two async uploads + kernels on two streams, timed
+by events" and "creates a non-blocking stream and a launch on the default stream still works".
+Real two-stream overlap with event timing works on real hardware. That was E2's exit criterion.
+
+### The remaining 1/5, left RED deliberately
+
+`declares every E2 extern with the runtime's arity` fails with
+`rt_cuda_stream_create: not defined in runtime, ...`. This is **not** a stale spec or a checker
+artifact: those symbols are defined only in the **Rust** runtime
+(`src/compiler_rust/common/src/runtime_symbols.rs`) and in **no** file under `src/runtime/`, the C
+runtime. So the E2 surface is unavailable to any lane linking the C runtime rather than the Rust
+one, and the spec is correctly reporting that. Verified by grep rather than assumed — the hardware
+scenarios passing made a stale-spec explanation tempting, and it is wrong.
+
+Left RED per `.claude/rules/testing.md` ("a correct spec that fails is a legitimate artifact");
+weakening it would hide a real portability gap. Unblock condition: implement the E2 `rt_cuda_*`
+entry points in the C runtime (the honest fix), or scope the arity check to the Rust lane *and*
+file the C-lane gap separately.
