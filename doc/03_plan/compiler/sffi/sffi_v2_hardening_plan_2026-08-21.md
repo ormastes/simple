@@ -1207,6 +1207,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Remove the feature-vector builder's raw-symbol import and call.
 - [x] Preserve one root after its single O(n) weight accumulation.
 
+### Completed MDSOC layer-document read authority slice
+
+- [x] Remove the checker-local non-null raw file-read declaration and calls.
+- [x] Route all four reads through typed `file_read_result`.
+- [x] Return conservative query failure on `Err` without fabricating empty text.
+- [x] Preserve valid empty files, read counts, and search complexity.
+- [x] Keep the bounded typed-result lift outside line-scan loops.
+- [x] Add a static typed-read and fail-closed ratchet.
+
 ### Completed compiler performance CLI authority slice
 
 - [x] Remove both duplicate raw `rt_get_args` declarations and calls.

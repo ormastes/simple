@@ -575,3 +575,13 @@ The feature-vector builder no longer imports or calls the raw square-root
 symbol from `math_utils`; it consumes the confined always-inline owner.  Its
 shape remains one root after one O(n) frequency-weight accumulation, with no
 additional traversal or temporary collection.
+
+### MDSOC layer-document read authority follow-up
+
+The layer documentation checker no longer declares or calls non-null raw
+`rt_file_read_text`.  Its four existing reads use typed `file_read_result`;
+provider failure now returns each query's conservative failure state instead of
+fabricating empty text, while a valid empty file remains `Ok("")`.  The slice
+preserves read counts and search complexity.  Each existing read gains one
+bounded typed-result lift outside inner scan loops; there is no retry, extra
+traversal, file-buffer copy, cache, lock, hash, lookup, or dynamic dispatch.
