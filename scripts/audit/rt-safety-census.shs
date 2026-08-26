@@ -27,7 +27,7 @@ fi
 sh "$root/scripts/audit/sffi-contract-inventory.shs" \
     "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>&1
 
-expected_contract_header='symbol	backing	provider_language	provider_id	source_signature_sha256	file	line	unsafe_tag	contract	cryptographic_admission	evidence	state'
+expected_contract_header='symbol	backing	provider_language	provider_id	source_signature_sha256	file	line	unsafe_tag	contract	cryptographic_admission	evidence	state	scoped_callsite_estimate	backing_first_declaring_file'
 actual_contract_header=$(head -n 1 "$work/contracts.tsv")
 test "$actual_contract_header" = "$(printf '%b' "$expected_contract_header")" || {
     echo 'rt safety census: unsupported SFFI contract-inventory schema' >&2
@@ -165,9 +165,9 @@ awk -F '\t' -v inventory_mode="$inventory_mode" 'BEGIN { OFS="\t" }
         if ($8 == "tagged") { tagged++; tagged_symbol[$1]=1 }
         if ($9 != "missing") { contracted++; contracted_symbol[$1]=1 }
         if ($11 == "claim_present_unverified") claims++
-        if ($13 == "true") verified++
-        if ($14 == "true") signed++
-        if ($15 == "verified_and_signed") { admitted++; admitted_symbol[$1]=1 }
+        if ($15 == "true") verified++
+        if ($16 == "true") signed++
+        if ($17 == "verified_and_signed") { admitted++; admitted_symbol[$1]=1 }
         else {
             unsafe++
             if ($8 == "tagged" && $9 != "missing") {
@@ -180,6 +180,7 @@ awk -F '\t' -v inventory_mode="$inventory_mode" 'BEGIN { OFS="\t" }
             untouched_symbol[$1]=1
         }
         signature[$1 SUBSEP $5]=1
+        if ($13 ~ /^[0-9]+$/) callsite_estimate[$1]=$13
     }
     END {
         for (s in symbol) symbols++
@@ -200,6 +201,10 @@ awk -F '\t' -v inventory_mode="$inventory_mode" 'BEGIN { OFS="\t" }
         for (s in admitted_symbol) admitted_symbols++
         for (s in contract_declared_symbol) contract_declared_symbols++
         for (s in untouched_symbol) untouched_symbols++
+        for (s in callsite_estimate) {
+            scoped_callsites += callsite_estimate[s]
+            if (callsite_estimate[s] > 0) symbols_with_callsites++
+        }
         print "metric", "value"
         print "inventory_mode", inventory_mode
         print "declaration_rows", rows + 0
@@ -226,6 +231,8 @@ awk -F '\t' -v inventory_mode="$inventory_mode" 'BEGIN { OFS="\t" }
         print "untouched_rows", untouched + 0
         print "untouched_distinct_symbols", untouched_symbols + 0
         print "source_signature_variant_symbols", variants + 0
+        print "scoped_callsite_estimate", scoped_callsites + 0
+        print "distinct_symbols_with_scoped_callsites", symbols_with_callsites + 0
     }
 ' "$declarations_out" >"$summary_out"
 
@@ -239,9 +246,9 @@ awk -F '\t' 'BEGIN { OFS="\t" }
         if (!(symbol_key in symbols)) { symbols[symbol_key]=1; symbol_count[family]++ }
         if ($8 == "tagged") tagged[family]++
         if ($9 != "missing") contracted[family]++
-        if ($13 == "true") verified[family]++
-        if ($14 == "true") signed[family]++
-        if ($15 == "verified_and_signed") admitted[family]++
+        if ($15 == "true") verified[family]++
+        if ($16 == "true") signed[family]++
+        if ($17 == "verified_and_signed") admitted[family]++
         else {
             unsafe[family]++
             if ($8 == "tagged" && $9 != "missing") contract_declared[family]++
@@ -277,9 +284,9 @@ awk -F '\t' 'BEGIN { OFS="\t" }
         if (!(symbol_key in symbols)) { symbols[symbol_key]=1; symbol_count[scope]++ }
         if ($8 == "tagged") tagged[scope]++
         if ($9 != "missing") contracted[scope]++
-        if ($13 == "true") verified[scope]++
-        if ($14 == "true") signed[scope]++
-        if ($15 == "verified_and_signed") admitted[scope]++
+        if ($15 == "true") verified[scope]++
+        if ($16 == "true") signed[scope]++
+        if ($17 == "verified_and_signed") admitted[scope]++
         else {
             unsafe[scope]++
             if ($8 == "tagged" && $9 != "missing") contract_declared[scope]++

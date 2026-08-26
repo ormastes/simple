@@ -1550,6 +1550,9 @@ Torch SFFI nor all SFFI may be described as verified safe.
   metrics so provider attribution debt cannot disappear inside generic unsafe.
 - Made symbol-level admission total: every declaration must be admitted before
   the symbol is counted as fully admitted; mixed coverage stays migration debt.
+- Preserved module-scoped textual callsite counts as an explicitly named
+  distinct-symbol estimate for prioritization, never as resolved-call or lexical
+  unsafe-minimization proof.
 - Renamed annotation-derived “minimized” counts to contract-declared unsafe and
   reports lexical minimization as `not_measured` until resolved-call evidence
   exists.

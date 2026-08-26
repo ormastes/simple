@@ -1094,7 +1094,10 @@ admission and remain migration-required.
 It also stops calling `unsafe` tag plus contract metadata “minimized”: that proves
 neither lexical call ownership nor call-site count. It reports contract-declared
 unsafe rows separately and emits `unsafe_minimization_status=not_measured`
-until an authoritative resolved-call graph supplies that evidence. This is an
+until an authoritative resolved-call graph supplies that evidence. The existing
+module-scoped textual callsite count is retained as an explicitly named estimate
+and aggregated once per distinct symbol for migration prioritization; it is not
+treated as resolution or lexical-minimization proof. This is an
 offline source/evidence-tool correction and adds zero runtime work, memory,
 lookup, hashing, or dispatch. Existing numerical tables remain the prior static
 snapshot and were not rerun under the no-verification instruction.
