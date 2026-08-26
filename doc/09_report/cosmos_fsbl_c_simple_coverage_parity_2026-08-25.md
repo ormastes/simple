@@ -2,66 +2,61 @@
 
 ## Current status
 
-**Evidence pending.** The parity infrastructure is implemented, but this update
-was intentionally not executed or verified. It does not contain or imply a new
-PASS receipt. The authoritative result becomes available only when the producer
-finishes and the independent structural checker accepts its retained receipt.
+**Candidate evidence infrastructure; execution and production cutover remain
+open.** This additive change does not contain or imply a new PASS receipt.
+Production firmware continues to compile and link
+`src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c`; the new
+`cosmos_fsbl.spl` is an unadmitted replacement candidate only.
 
 The earlier development run reported 14/14 input-reachable C arcs and seven
-passing semantic vectors, but its raw artifacts were not retained and its
-Pure-Simple run used a Rust bootstrap seed. Those observations are historical
-diagnostics only and are not admissible coverage evidence.
+passing semantic vectors, but retained neither its raw artifacts nor admissible
+Pure-Simple provenance. Those observations remain historical diagnostics.
 
-## Shared semantic input
+## Shared semantics and C-oracle provenance
 
-`test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv` is the single canonical
-decimal TSV consumed by both:
+`test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv` is the single seven-row
+decimal input table consumed by the C host harness and the Simple SSpec. It has
+one all-good row and six rows that independently invalidate SLCR lock, ARM
+clock, DDR clock, PS primary reset, A9 CPU0 reset, or DEVCFG PCFG_DONE.
 
-- `test/02_integration/os/cosmos/cosmos_hal_mmio_test.c`
-- `test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl`
+The test-only `cosmos_fsbl_oracle.c` is an extraction of production C, not a
+second implementation. The direct host runner and coverage producer hash its
+text from the exact first `#include "cosmos_hal.h"` line through EOF and refuse
+to run unless that hash equals the same extraction from production
+`cosmos_fsbl.c`. The retained receipt binds the oracle file, production file,
+and shared semantic hash; the independent checker recomputes all three.
 
-Its seven rows contain one all-good handoff and six rows that independently
-make SLCR lock, ARM clock, DDR clock, PS primary reset, A9 CPU0 reset, or
-DEVCFG PCFG_DONE invalid. The final column is the Boolean expected result.
-There are no copied language-specific vector tables.
+The producer and checker also fail closed unless the candidate's ABI status
+values, MMIO bases/offsets, and decision masks retain their exact C-header
+contracts. The unit contract pins the same mappings independently.
 
-The C and Pure-Simple decision cores evaluate the same six predicates as
-ordered scalar fail-closed guards. This retains the original short-circuit
-order while making each condition outcome directly attributable. Both hot
-paths remain O(1), use scalar register values, perform no allocation or
-aggregate copy, and add no production instrumentation.
+## Candidate evidence commands
 
-## Producing and checking evidence
-
-From the repository root, with a current provenance-admitted full Stage-4
-Pure-Simple CLI:
+With a current provenance-admitted full Stage-4 Pure-Simple CLI:
 
 ```sh
 SIMPLE_BINARY=/absolute/path/to/stage4/simple \
   sh scripts/check/produce-cosmos-fsbl-fail-closed-coverage.shs
 sh scripts/check/check-cosmos-fsbl-fail-closed-coverage-receipt.shs
+SIMPLE_BINARY=/absolute/path/to/stage4/simple \
+  sh test/02_integration/os/cosmos/run_pure_simple_arm32_emit_object_test.shs
 ```
 
-The producer measures the six C guards with GCC/gcov, runs the existing SSpec
-with Simple decision/condition coverage enabled, and writes artifacts below
-`build/evidence/cosmos-fsbl-fail-closed/`. It refuses a missing CLI, missing
-coverage output, invalid Stage-4 provenance, and any Rust bootstrap path.
-
-The checker independently recomputes the helper-bounded C arcs and parses the
-SDN decision and condition sections. It requires exactly six uniquely keyed
-decision rows and six uniquely keyed condition rows on the exact core owner and
-guard lines, with both outcomes nonzero and no unexpected core row. It also
-validates the canonical decimal TSV, all artifact digests, C harness and Simple
-spec identities, the forced profile and Zynq register headers, producer
-identity, exact compiler flags/tool/version, and the live Stage-4
-binary/provenance binding. Both retained run logs are digest-bound and the
-checker independently requires their exact C and Simple PASS verdicts. It fails
-closed if evidence is missing, stale, malformed, duplicated, or moved.
+The coverage producer measures only the six FSBL fail-closed C guards with
+GCC/gcov and the six Simple decision/condition rows. It requires 12/12 C
+branch arcs and dual outcomes for exactly six Simple decisions and six
+conditions. It adds no production instrumentation. The ARM32 runner separately
+requires an ELF32 ARM hard-float ET_REL object for the actual candidate, both
+historical C exports, real consumer relocations, successful `ld.lld -r`
+combination with the two ABI/runtime shims, and no remaining undefined symbols.
 
 ## Claim boundary
 
-An accepted receipt proves host-executable decision parity and full outcomes
-for the six scalar fail-closed guards. It does not prove ARM32 relocatable
-Pure-Simple linkage, physical BootROM/FSBL handoff, clocks, DDR, resets, or PL
-hardware. `doc/08_tracking/bug/pure_simple_arm32_emit_object_ignored_2026-08-24.md`
-remains the firmware-linkage blocker.
+Only a newly produced and independently accepted receipt can prove host-level
+decision parity for these six guards. A passing ARM32 runner would additionally
+admit relocatable linkage of this candidate. Neither proves BootROM handoff,
+physical clocks/DDR/reset/PL behavior, full Cosmos HAL I/O parity, whole-HAL
+branch/condition coverage, or x86 bootstrap reproducibility. Production
+cutover requires a later, separately reviewed build/package change after those
+admissions; `doc/08_tracking/bug/pure_simple_arm32_emit_object_ignored_2026-08-24.md`
+tracks the immediate linkage blocker.

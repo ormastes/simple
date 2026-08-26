@@ -24,6 +24,13 @@ fail() {
     exit 1
 }
 hash_file() { sha256sum "$1" | awk '{print $1}'; }
+semantic_c_hash() {
+    [ "$(grep -c '^#include "cosmos_hal.h"$' "$1")" -eq 1 ] || return 1
+    sed -n '/^#include "cosmos_hal.h"$/,$p' "$1" | sha256sum | awk '{print $1}'
+}
+require_exact_line() {
+    grep -Fxq "$2" "$1" || fail "source-contract-mismatch:$3"
+}
 
 [ -n "$simple" ] || fail stage4-cli-not-specified
 [ -x "$simple" ] || fail stage4-cli-absent-or-not-executable
@@ -40,12 +47,61 @@ stage4_verify_candidate_provenance "$provenance" "$simple" "$root" ||
     fail stage4-provenance-invalid
 
 fixture="$root/test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv"
-c_source="$root/src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c"
+c_source="$root/test/fixtures/os/cosmos/cosmos_fsbl_oracle.c"
+production_c_source="$root/src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c"
 simple_source="$root/src/os/kernel/arch/arm32/cosmos/cosmos_fsbl_decision.spl"
+simple_candidate="$root/src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl"
 spec="$root/test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl"
 c_harness="$root/test/02_integration/os/cosmos/cosmos_hal_mmio_test.c"
 producer="$root/scripts/check/produce-cosmos-fsbl-fail-closed-coverage.shs"
 [ -s "$fixture" ] || fail vector-fixture-absent
+[ -s "$c_source" ] || fail c-oracle-absent
+[ -s "$production_c_source" ] || fail production-c-source-absent
+[ -s "$simple_candidate" ] || fail simple-candidate-absent
+c_oracle_semantic_sha=$(semantic_c_hash "$c_source") || fail c-oracle-extraction-invalid
+production_c_semantic_sha=$(semantic_c_hash "$production_c_source") ||
+    fail production-c-extraction-invalid
+[ "$c_oracle_semantic_sha" = "$production_c_semantic_sha" ] ||
+    fail c-oracle-production-drift
+
+hal_header="$root/src/os/kernel/arch/arm32/cosmos/cosmos_hal.h"
+zynq_header="$root/src/os/kernel/arch/arm32/cosmos/cosmos_zynq_regs.h"
+require_exact_line "$simple_candidate" 'val COSMOS_OK: i32 = 0' simple-status-ok
+require_exact_line "$simple_candidate" 'val COSMOS_UNAVAILABLE: i32 = 1' simple-status-unavailable
+require_exact_line "$simple_candidate" 'val COSMOS_INVALID: i32 = 2' simple-status-invalid
+require_exact_line "$simple_candidate" 'val COSMOS_HW_ERROR: i32 = 4' simple-status-hw-error
+require_exact_line "$hal_header" '    COSMOS_OK = 0,' c-status-ok
+require_exact_line "$hal_header" '    COSMOS_UNAVAILABLE = 1,' c-status-unavailable
+require_exact_line "$hal_header" '    COSMOS_INVALID = 2,' c-status-invalid
+require_exact_line "$hal_header" '    COSMOS_HW_ERROR = 4,' c-status-hw-error
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_BASE: u32 = 0xf8000000u32' simple-slcr-base
+require_exact_line "$simple_candidate" 'val COSMOS_DEVCFG_BASE: u32 = 0xf8007000u32' simple-devcfg-base
+require_exact_line "$hal_header" '#define COSMOS_SLCR_BASE      0xF8000000U' c-slcr-base
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_DEVCFG_BASE            0xF8007000U' c-devcfg-base
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_LOCKSTA_OFFSET: u32 = 0x000cu32' simple-locksta-offset
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_ARM_CLK_OFFSET: u32 = 0x0120u32' simple-arm-clk-offset
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_DDR_CLK_OFFSET: u32 = 0x0124u32' simple-ddr-clk-offset
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_PSS_RST_OFFSET: u32 = 0x0200u32' simple-pss-rst-offset
+require_exact_line "$simple_candidate" 'val COSMOS_SLCR_A9_RST_OFFSET: u32 = 0x0244u32' simple-a9-rst-offset
+require_exact_line "$simple_candidate" 'val COSMOS_DEVCFG_INT_STS_OFFSET: u32 = 0x000cu32' simple-devcfg-int-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_LOCKSTA_OFFSET     0x000CU' c-locksta-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_ARM_CLK_OFFSET     0x0120U' c-arm-clk-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_DDR_CLK_OFFSET     0x0124U' c-ddr-clk-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_PSS_RST_OFFSET     0x0200U' c-pss-rst-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_SLCR_A9_RST_OFFSET      0x0244U' c-a9-rst-offset
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_DEVCFG_INT_STS_OFFSET  0x000CU' c-devcfg-int-offset
+require_exact_line "$simple_source" 'val COSMOS_FSBL_SLCR_LOCKED: u32 = 1u32' simple-lock-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_ARM_CLK_ACTIVE: u32 = 0x1f000000u32' simple-arm-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_DDR_CLK_ACTIVE: u32 = 3u32' simple-ddr-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_PSS_PRIMARY_RESET: u32 = 1u32' simple-pss-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_A9_CPU0_STOPPED: u32 = 0x111u32' simple-a9-mask
+require_exact_line "$simple_source" 'val COSMOS_FSBL_PCFG_DONE: u32 = 4u32' simple-pcfg-mask
+require_exact_line "$production_c_source" '#define COSMOS_SLCR_LOCKED    (1U << 0)' c-lock-mask
+require_exact_line "$production_c_source" '#define COSMOS_ARM_CLK_ACTIVE (0x1FU << 24)' c-arm-mask
+require_exact_line "$production_c_source" '#define COSMOS_DDR_CLK_ACTIVE ((1U << 0) | (1U << 1))' c-ddr-mask
+require_exact_line "$production_c_source" '#define COSMOS_PSS_PRIMARY_RESET (1U << 0)' c-pss-mask
+require_exact_line "$production_c_source" '#define COSMOS_A9_CPU0_STOPPED ((1U << 0) | (1U << 4) | (1U << 8))' c-a9-mask
+require_exact_line "$zynq_header" '#define COSMOS_ZYNQ_DEVCFG_PCFG_DONE       (1U << 2)' c-pcfg-mask
 awk -F '\t' '
     BEGIN {
         expected[1]="1\t520093696\t3\t0\t0\t4\t1"
@@ -75,15 +131,16 @@ cc --version >"$staging/c/compiler.version" 2>&1 || fail c-compiler-version-unav
 [ -s "$staging/c/compiler.version" ] || fail c-compiler-version-empty
 profile="$root/src/os/kernel/arch/arm32/cosmos/cosmos_profile_openssd2_8ch8way_v300.h"
 include="$root/src/os/kernel/arch/arm32/cosmos"
-zynq_header="$include/cosmos_zynq_regs.h"
 cc $cflags -include "$profile" -I"$include" -c \
     "$root/test/02_integration/os/cosmos/cosmos_hal_mmio_test.c" \
     -o "$staging/c/harness.o"
-for unit in cosmos_fsbl cosmos_nfc cosmos_pcie; do
+cc $cflags -include "$profile" -I"$include" -c "$c_source" \
+    -o "$staging/c/cosmos_fsbl_oracle.o"
+for unit in cosmos_nfc cosmos_pcie; do
     cc $cflags -include "$profile" -I"$include" -c "$include/$unit.c" \
         -o "$staging/c/$unit.o"
 done
-cc --coverage "$staging/c/harness.o" "$staging/c/cosmos_fsbl.o" \
+cc --coverage "$staging/c/harness.o" "$staging/c/cosmos_fsbl_oracle.o" \
     "$staging/c/cosmos_nfc.o" "$staging/c/cosmos_pcie.o" \
     -o "$staging/c/cosmos_hal_mmio_test"
 COSMOS_FSBL_VECTOR_TSV="$fixture" "$staging/c/cosmos_hal_mmio_test" 0 \
@@ -92,7 +149,7 @@ grep -Fq 'STATUS: PASS cosmos host mock-MMIO integration' "$staging/c/run.log" |
     fail c-pass-output-absent
 (cd "$staging/c" && gcov -b -c -o . "$c_source") \
     >"$staging/c/gcov.log" 2>&1 || fail c-gcov-failed
-c_gcov="$staging/c/cosmos_fsbl.c.gcov"
+c_gcov="$staging/c/cosmos_fsbl_oracle.c.gcov"
 [ -s "$c_gcov" ] || fail c-gcov-output-absent
 
 start=$(grep -n '^static int cosmos_fsbl_handoff_valid' "$c_source" | cut -d: -f1)
@@ -169,17 +226,22 @@ mv "$staging" "$out_abs"
 trap - EXIT HUP INT TERM
 receipt="$out_abs/receipt.env"
 {
-    echo schema=cosmos-fsbl-fail-closed-coverage-v1
+    echo schema=cosmos-fsbl-fail-closed-coverage-v2
     echo status=pass
     echo measurement_status=measured
     echo fixture_path=test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv
     echo fixture_sha256=$(hash_file "$fixture")
     echo vector_count=7
     echo isolated_fail_closed_vectors=6
-    echo c_source_path=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c
+    echo c_source_path=test/fixtures/os/cosmos/cosmos_fsbl_oracle.c
     echo c_source_sha256=$(hash_file "$c_source")
+    echo c_oracle_semantic_sha256=$c_oracle_semantic_sha
+    echo production_c_source_path=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.c
+    echo production_c_source_sha256=$(hash_file "$production_c_source")
     echo c_harness_path=test/02_integration/os/cosmos/cosmos_hal_mmio_test.c
     echo c_harness_sha256=$(hash_file "$c_harness")
+    echo c_hal_header_path=src/os/kernel/arch/arm32/cosmos/cosmos_hal.h
+    echo c_hal_header_sha256=$(hash_file "$hal_header")
     echo c_zynq_header_path=src/os/kernel/arch/arm32/cosmos/cosmos_zynq_regs.h
     echo c_zynq_header_sha256=$(hash_file "$zynq_header")
     echo c_profile_header_path=src/os/kernel/arch/arm32/cosmos/cosmos_profile_openssd2_8ch8way_v300.h
@@ -191,12 +253,14 @@ receipt="$out_abs/receipt.env"
     echo c_compiler_version_path=$out/c/compiler.version
     echo c_compiler_version_sha256=$(hash_file "$out_abs/c/compiler.version")
     echo c_compiler_flags=$cflags
-    echo c_gcov_path=$out/c/cosmos_fsbl.c.gcov
-    echo c_gcov_sha256=$(hash_file "$out_abs/c/cosmos_fsbl.c.gcov")
+    echo c_gcov_path=$out/c/cosmos_fsbl_oracle.c.gcov
+    echo c_gcov_sha256=$(hash_file "$out_abs/c/cosmos_fsbl_oracle.c.gcov")
     echo c_core_branch_arcs_total=$c_total
     echo c_core_branch_arcs_covered=$c_covered
     echo simple_source_path=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl_decision.spl
     echo simple_source_sha256=$(hash_file "$simple_source")
+    echo simple_candidate_path=src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl
+    echo simple_candidate_sha256=$(hash_file "$simple_candidate")
     echo simple_core_lines=$simple_lines
     echo simple_spec_path=test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl
     echo simple_spec_sha256=$(hash_file "$spec")

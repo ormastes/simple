@@ -1,0 +1,74 @@
+# Pure-Simple Cosmos+ FSBL handoff candidate.
+#
+# Production firmware continues to link cosmos_fsbl.c. This candidate preserves
+# its C ABI and read-only, fixed-work behavior so ARM32 ET_REL/link admission can
+# be completed before a separate production cutover.
+
+use os.kernel.arch.arm32.cosmos.cosmos_fsbl_decision.cosmos_fsbl_handoff_valid_registers
+
+val COSMOS_OK: i32 = 0
+val COSMOS_UNAVAILABLE: i32 = 1
+val COSMOS_INVALID: i32 = 2
+val COSMOS_HW_ERROR: i32 = 4
+
+val COSMOS_SLCR_BASE: u32 = 0xf8000000u32
+val COSMOS_DEVCFG_BASE: u32 = 0xf8007000u32
+val COSMOS_SLCR_LOCKSTA_OFFSET: u32 = 0x000cu32
+val COSMOS_SLCR_ARM_CLK_OFFSET: u32 = 0x0120u32
+val COSMOS_SLCR_DDR_CLK_OFFSET: u32 = 0x0124u32
+val COSMOS_SLCR_PSS_RST_OFFSET: u32 = 0x0200u32
+val COSMOS_SLCR_A9_RST_OFFSET: u32 = 0x0244u32
+val COSMOS_DEVCFG_INT_STS_OFFSET: u32 = 0x000cu32
+
+# These two declarations are the unavoidable target ABI/runtime shims. They
+# own volatile I/O/platform detection, not FSBL validation policy.
+extern fn cosmos_fsbl_mmio_read32(address: u32) -> u32
+extern fn cosmos_fsbl_platform_is_qemu() -> i32
+
+@export("C", name: "cosmos_fsbl_validate_handoff")
+fn cosmos_fsbl_validate_handoff() -> i32:
+    if cosmos_fsbl_platform_is_qemu() != 0:
+        return COSMOS_UNAVAILABLE
+
+    val locksta = cosmos_fsbl_mmio_read32(
+        COSMOS_SLCR_BASE + COSMOS_SLCR_LOCKSTA_OFFSET
+    )
+    val arm_clk = cosmos_fsbl_mmio_read32(
+        COSMOS_SLCR_BASE + COSMOS_SLCR_ARM_CLK_OFFSET
+    )
+    val ddr_clk = cosmos_fsbl_mmio_read32(
+        COSMOS_SLCR_BASE + COSMOS_SLCR_DDR_CLK_OFFSET
+    )
+    val pss_rst = cosmos_fsbl_mmio_read32(
+        COSMOS_SLCR_BASE + COSMOS_SLCR_PSS_RST_OFFSET
+    )
+    val a9_rst = cosmos_fsbl_mmio_read32(
+        COSMOS_SLCR_BASE + COSMOS_SLCR_A9_RST_OFFSET
+    )
+    val devcfg_int_sts = cosmos_fsbl_mmio_read32(
+        COSMOS_DEVCFG_BASE + COSMOS_DEVCFG_INT_STS_OFFSET
+    )
+    if cosmos_fsbl_handoff_valid_registers(
+        locksta, arm_clk, ddr_clk, pss_rst, a9_rst, devcfg_int_sts
+    ):
+        COSMOS_OK
+    else:
+        COSMOS_HW_ERROR
+
+@export("C", name: "cosmos_fsbl_selftest")
+fn cosmos_fsbl_selftest() -> i32:
+    if (COSMOS_SLCR_ARM_CLK_OFFSET != 0x0120u32 or
+        COSMOS_SLCR_DDR_CLK_OFFSET != 0x0124u32):
+        return COSMOS_INVALID
+    if not cosmos_fsbl_handoff_valid_registers(
+        1u32, 0x1f000000u32, 3u32, 0u32, 0u32, 4u32
+    ):
+        return COSMOS_INVALID
+    if cosmos_fsbl_handoff_valid_registers(
+        1u32, 0x1f000000u32, 3u32, 0u32, 0u32, 0u32
+    ):
+        return COSMOS_INVALID
+    COSMOS_OK
+
+fn main() -> i64:
+    cosmos_fsbl_selftest() as i64
