@@ -4,6 +4,23 @@
 
 Prove REQ-001–REQ-020 and NFR-001–NFR-014 through live, fail-closed, nonce-bound evidence. A missing prerequisite produces a `BLOCKED` row with a resume plan and fails the umbrella; no scenario calls `skip()` or converts staging/source presence into PASS.
 
+## Current implementation blocker: boot capability handoff
+
+The x86_64, ARM64, and RV64 authenticated media fixtures now require a real,
+caller-owned `CapabilitySet`; their legacy cap-less routes revoke admission and
+fail closed. The architecture boot entries currently have only scalar root
+identity (`caller=0`), not a root TCB with finite, concrete capabilities.
+Scheduler snapshot leases intentionally reject task zero and ambient/unpledged
+sets. Do not repair this by calling `CapabilitySet.full()`,
+`spawn_recipe_seed_parent_caps`, or an architecture-local synthetic issuer.
+
+The missing production owner is a signed-manifest-bound boot-capability service
+that creates a nonzero root/service TCB, retains provenance-bearing finite
+tokens, and hands a one-shot pinned capability set (or equivalent scheduler
+lease) to the authenticated x86_64/ARM64/RV64 media launch entrypoints. Until
+that interface exists, all corresponding live filesystem-launch rows remain
+`BLOCKED`; source presence and legacy compatibility wrappers are not evidence.
+
 ## Executable specifications
 
 | Spec | Scope |
