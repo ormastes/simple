@@ -1860,7 +1860,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_package_exists",
     "rt_package_extract_tarball",
     "rt_package_file_size",
-    "rt_package_free_string",
     "rt_package_is_dir",
     "rt_package_mkdir_all",
     "rt_package_remove_dir_all",

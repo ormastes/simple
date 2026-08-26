@@ -1583,6 +1583,19 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Remaining production debt: 4,431 unsafe-tag gaps, 6,185 contract gaps, zero
   signed-admitted declarations.
 
+## 2026-08-26 package owner checkpoint
+
+- Consolidate three package declaration owners into one canonical 11-contract
+  owner, one bootstrap mirror, and declaration-free compatibility facades.
+- Retire 38 unused duplicate declarations, all broken Cargo wrappers, and the
+  obsolete `rt_package_free_string` provider/symbol.
+- Preserve hash failure as `text?` and existence/directory provider failure as
+  `bool?`; do not manufacture empty text or false.
+- Confine each retained raw identity to one mandatory-inline thunk and require
+  both native/interpreter registry identities.
+- Remaining production debt: 4,356 unsafe-tag gaps, 6,110 contract gaps, zero
+  signed-admitted declarations.
+
 ## 2026-08-26 repository-wide inventory checkpoint
 
 - Production source currently contains 7,259 declarations / 3,815 symbols;

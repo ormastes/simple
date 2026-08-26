@@ -1345,6 +1345,30 @@ gaps, and 6,172 contract gaps. The `rt_*` subset has 3,284 unsafe-tag gaps and
 dispatch is introduced; all thunks are mandatory-inline. Signed admission and
 runtime verification remain absent.
 
+## 2026-08-26 package SFFI owner consolidation
+
+Package SFFI had three overlapping standard-library owners. The historical
+`sffi/package` and `ffi/package` modules duplicated 38 raw declarations,
+including unused Cargo wrappers with incompatible C/Rust signatures and a
+`cargo_test_doc(package, text)` call bug. They are now declaration-free
+facades over `nogc_sync_mut.package_sffi`. The canonical owner and bootstrap
+mirror each retain the same 11 package contracts.
+
+The obsolete `rt_package_free_string` declaration/provider/symbol entry is
+removed: package hashes have returned runtime-owned Simple text for some time,
+so no valid producer existed for that manual-free operation. Hash failure is
+now `text?`; existence and directory provider errors are `bool?`, preserving
+absence/failure instead of fabricating empty text or false. Every retained raw
+call is confined to a mandatory-inline thunk, and both registries carry every
+identity.
+
+This removes 40 production declarations overall (7,260 to 7,220), moves the
+unsafe-tagged count to 2,864, and reduces unsafe-tag gaps to 4,356 and contract
+gaps to 6,110. The `rt_*` subset falls to 3,222 unsafe-tag gaps and 4,950
+contract gaps. No runtime lookup, allocation, copy, branch, lock, or dispatch
+is added; optional lifting uses only the existing status result. Signed
+admission and semantic verification remain absent.
+
 ## 2026-08-26 public RuntimeValue closure completion
 
 The remaining public `value_eq`, `value_print`, and `value_println` wrappers
