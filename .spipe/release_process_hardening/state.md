@@ -74,8 +74,9 @@ verify-evidence-required
   completed; highest-capability release review requested after reconciliation.
 - session authority: Added canonical linked-worktree verification, exact
   Git/target/policy checks, a locked unique session/workspace/branch registry,
-  and private output/cache ownership. Its final focused integration run exceeded
-  the bounded timeout and therefore still needs a clean PASS.
+  and private output/cache ownership. A focused critical-path lifecycle spec
+  passes 1/1: register, lease, commit, head-CAS advance, verify, cleanup, close,
+  and rejection after close.
 - convergence implementation: Added bounded fetch-only Git discovery, exact
   review/ancestry/patch-equivalence validation, and post-integration divergence
   receipts. `main` remains an independent trunk; no bootstrap worker selects,
@@ -100,6 +101,11 @@ verify-evidence-required
   because the available runtime identifies itself as bootstrap seed-derived.
   The canonical full release bootstrap was attempted and failed closed with
   exit 64 `reason-receipt-required`; no admitted parent/runtime/planner receipt
-  identities are available in this isolated workspace.
-  Live GitHub policy/signing/immutable-publication/npm receipts and a bounded
-  trusted-session integration PASS are also still required.
+  identities are available in this isolated workspace. A sanctioned
+  receipt-free Stage 2 recovery then failed E1034 because the seed resolved
+  `compiler.semantics.const_fold` relative to `src/compiler/80.driver`; no
+  compiler was admitted. A bounded fetch/check of `origin/main` at
+  `e35d34f9eeda1b899abd439c56aa8ecec674a1cf` found no corresponding fix, so the
+  defect must be repaired through the normal isolated `main` fix lane and
+  separately backported if required. Live GitHub
+  policy/signing/immutable-publication/npm receipts are also still required.

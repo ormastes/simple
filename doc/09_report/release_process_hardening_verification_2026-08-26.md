@@ -38,6 +38,9 @@
   fixtures; final real-Git test PASS (1/1).
 - Persisted candidate authority: PASS (3/3), covering create-once state,
   admission binding, status, and promote-without-rebuild planning.
+- Focused trusted-session lifecycle: PASS (1/1), covering register, lease,
+  commit, registered-head compare-and-swap advance, verify, cleanup, close, and
+  rejection of use after close.
 - Protected-ref policy: PASS (28/28 adversarial command cases) and PASS (3/3
   cross-surface checks) across `sj`, Simple JJ sync, both MCP runtime families,
   and their prompts. Raw ref mutation and malformed work-bookmark pushes fail
@@ -57,12 +60,13 @@
    A canonical `--full-bootstrap --release --strategy=full` attempt failed
    closed with exit 64 (`reason-receipt-required`): this workspace has no
    admitted parent/runtime/planner receipt identities, and inventing them would
-   violate the bootstrap trust boundary.
-2. The full trusted-session registry integration spec exceeded its bounded
-   timeout. Source checking and persisted candidate authority pass, but the
-   complete register/lease/head-advance/cleanup/close scenario still requires a
-   fresh bounded PASS.
-3. Repository workflow source is not live-provider evidence. GitHub rulesets,
+   violate the bootstrap trust boundary. The sanctioned receipt-free Stage 2
+   recovery then failed deterministically in
+   `driver_hir_pipeline_lowering.spl`: the seed could not resolve
+   `compiler.semantics.const_fold` (E1034). A bounded fetch/check of
+   `origin/main` at `e35d34f9eeda1b899abd439c56aa8ecec674a1cf` found no fix; the
+   file is identical there. No Stage 2 compiler was admitted.
+2. Repository workflow source is not live-provider evidence. GitHub rulesets,
    protected environments, signing identity, immutable-release configuration,
    artifact attestations, and npm registry publication require successful live
    receipts before a beta can be declared released.
@@ -73,16 +77,14 @@
   release skills, typed release/version/session/convergence implementation,
   Spipe plugin surfaces, candidate/promotion/publish workflows, and focused
   adversarial coverage are present and aligned.
-- Production verification and actual beta release remain **FAIL** until all
-  three evidence gaps above pass. Missing evidence is not a warning and no
+- Production verification and actual beta release remain **FAIL** until both
+  evidence gaps above pass. Missing evidence is not a warning and no
   fallback or inferred success is permitted.
 
 ## Required next evidence
 
 1. Produce an admitted pure-Simple runtime and run the required lint plus one
    clean `bin/simple test test --whole --mode=interpreter` confirmation.
-2. Diagnose the trusted-session timeout and obtain one bounded integration PASS
-   without weakening canonical Git/session checks.
-3. Apply/verify live rulesets and protected environments, then exercise one
+2. Apply/verify live rulesets and protected environments, then exercise one
    create-once beta candidate and promote its exact assets through signing,
    immutable GitHub publication, and byte-identical npm publication receipts.
