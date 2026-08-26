@@ -936,3 +936,10 @@ fabricated `false` for a missing argument; it returns a typed runtime error.
 Valid calls still return the provider boolean directly. Four frontend registry
 owners remain explicitly unsafe and the ABI stays `i64 -> i8/bool`. This slice
 is source-reviewed but unverified and unsigned.
+## 2026-08-26 transient-scope arity follow-up
+
+Rust interpreter providers for transient scope begin/pause/end now reject extra
+arguments before mutating scope state. Valid zero-argument calls still lift the
+provider boolean directly through the registered `() -> i8` ABI. These are
+parse-boundary calls, not token-loop calls. Source-reviewed but unverified and
+unsigned.

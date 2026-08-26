@@ -324,11 +324,21 @@ pub fn rt_heap_live_count_by_kind(args: &[Value]) -> Result<Value, CompileError>
 }
 
 /// Dispatch a hosted-runtime transient parser-array scope operation.
-pub fn rt_transient_array_scope_begin(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_transient_array_scope_begin(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_begin requires 0 arguments",
+        ));
+    }
     Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_begin()))
 }
 
-pub fn rt_transient_array_scope_pause(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_transient_array_scope_pause(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_pause requires 0 arguments",
+        ));
+    }
     Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_pause()))
 }
 
@@ -355,7 +365,12 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Bool(promoted))
 }
 
-pub fn rt_transient_array_scope_end(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_transient_array_scope_end(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_end requires 0 arguments",
+        ));
+    }
     Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_end()))
 }
 
@@ -1628,6 +1643,14 @@ mod tests {
             Ok(Value::Bool(false))
         ));
         assert!(rt_transient_heap_promote(&[]).is_err());
+    }
+
+    #[test]
+    fn transient_scope_operations_reject_extra_arguments() {
+        let extra = [Value::Int(1)];
+        assert!(rt_transient_array_scope_begin(&extra).is_err());
+        assert!(rt_transient_array_scope_pause(&extra).is_err());
+        assert!(rt_transient_array_scope_end(&extra).is_err());
     }
 
     // ========================================================================

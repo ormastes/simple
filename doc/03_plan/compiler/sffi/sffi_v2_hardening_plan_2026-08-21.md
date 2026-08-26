@@ -1550,3 +1550,11 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - The valid path retains one argument bounds decision and the existing provider
   call; no allocation, copy, lookup, hash, lock, or dispatch was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 transient-scope arity follow-up
+
+- Made Rust interpreter scope begin/pause/end reject extra ABI arguments.
+- Preserved valid provider booleans and canonical `() -> i8` C/registry ABI.
+- Added source coverage proving invalid calls fail before scope mutation.
+- Valid parse-boundary calls add one arity branch and retain one provider call;
+  no allocation, copy, lookup, hash, lock, or extra traversal was added.
+- Status: source-reviewed, deliberately unverified and unsigned.
