@@ -1829,3 +1829,10 @@ and unpromoted.
 - [x] Move nested CLI-argument SFFI to an explicit unsafe declaration.
 - [x] Confine CLI-argument access to one always-inlined lexical owner.
 - [x] Add a static ownership and I/O-shape ratchet.
+### Completed C-runtime source authority slice
+
+- [x] Remove the C generator's local raw runtime-source reader.
+- [x] Replace existence/read with one typed read.
+- [x] Distinguish non-empty source, empty source, and provider failure.
+- [x] Retain the intentional embedded fallback with explicit diagnostics.
+- [x] Add a static authority and one-read ratchet.

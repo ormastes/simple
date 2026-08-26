@@ -250,3 +250,11 @@ counts when the provider read fails.  Its previously nested CLI-argument extern
 is now an explicit `unsafe(ffi)` declaration reached through one always-inlined
 lexical owner.  No retry, second read, lookup, copy, or generic dispatch was
 added.
+### C-runtime source authority follow-up
+
+The C code generator no longer declares a raw runtime-source reader or performs
+an existence/read pair.  It makes one typed read, returns non-empty runtime
+source, and explicitly logs missing/unreadable or empty input before selecting
+the pre-existing embedded fallback.  Provider failure can no longer become
+silent empty C code.  The change removes one filesystem probe and adds no
+retry, copy, lookup, or generic dispatch.
