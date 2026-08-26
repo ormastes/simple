@@ -1360,6 +1360,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add a static authority and call-count ratchet.
 - [x] Record the canonical provider as raw, unsigned, and unverified.
 
+### Completed MIR switch/operator environment-authority slice
+
+- [x] Remove the duplicate raw nullable environment declaration.
+- [x] Retain the always-inline helper through canonical `env_get_opt`.
+- [x] Preserve all five environment and 16 discriminant query sites.
+- [x] Update the existing cross-lane audit rather than add a duplicate tool.
+- [x] Add no call, branch, allocation, cache, hash, lock, or dispatch.
+- [x] Record the remaining discriminant provider as unsafe and unverified.
+
 ### Completed MIR literal-lowering dead-authority slice
 
 - [x] Remove unused raw dictionary, environment, and discriminant declarations.

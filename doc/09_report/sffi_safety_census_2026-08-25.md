@@ -753,3 +753,15 @@ outer-scope cache and all eight call sites are unchanged. Unset and empty values
 remain disabled. No read moved into a loop and no allocation, copy, cache, hash,
 signature check, lock, lookup, boxing, generic marshalling, or dispatch was
 added. The canonical runtime provider remains raw, unsigned, and unverified.
+
+### MIR switch/operator environment-authority follow-up
+
+MIR switch/operator/call lowering removed its duplicate raw nullable
+environment declaration and retains its always-inlined `_sffi_env_get` helper
+through canonical `env_get_opt`. The five default-padding, bootstrap, safety-
+profile, and borrow-reference reads remain at their exact call sites with the
+same nullable/default behavior. The existing cross-lane audit now requires the
+canonical environment owner while continuing to pin all 16 discriminant
+projections and five environment queries. No call, branch, allocation, copy,
+cache, hash, signature check, lock, lookup, boxing, marshalling, or dispatch was
+added. The remaining tagged-value provider is unsafe, unsigned, and unverified.
