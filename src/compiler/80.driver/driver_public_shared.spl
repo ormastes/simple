@@ -1,13 +1,11 @@
 use compiler.common.driver_core_types.{CompileResult}
+use std.io_runtime.{env_get_nullable, env_set, process_run}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_path_absolute(path: text) -> text
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
-extern fn rt_env_get(name: text) -> text
-extern fn rt_env_set(name: text, value: text) -> bool
 extern fn rt_getpid() -> i64
 
 struct SharedParam:
@@ -66,7 +64,7 @@ fn _build_wrapped_shared_library(path: text, output: text, parsed: SharedExports
     if not rt_file_write_text(wrapper_cpp, wrapper_source):
         return CompileResult.RuntimeError("failed to write wrapper source: {wrapper_cpp}")
 
-    val (stdout, stderr, exit_code) = rt_process_run("c++", [
+    val (stdout, stderr, exit_code) = process_run("c++", [
         "-std=c++14",
         "-fPIC",
         "-shared",
@@ -92,7 +90,7 @@ fn _build_native_shared_library(path: text, output: text) -> CompileResult:
     if guard_error != "":
         return CompileResult.RuntimeError(guard_error)
     mark_compile_delegated()
-    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path, "--native", "--shared", "--strip", "-o", output])
+    val (stdout, stderr, exit_code) = process_run(simple_bin, ["compile", path, "--native", "--shared", "--strip", "-o", output])
     val combined = clean_child_output(stdout, stderr)
     if exit_code == 0 and rt_file_exists(output):
         return CompileResult.Success(combined)
@@ -542,7 +540,7 @@ fn _basename_without_so(name: text) -> text:
     name
 
 pub fn find_simple_binary() -> text:
-    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    val env_bin = env_get_nullable("SIMPLE_BINARY") ?? ""
     if env_bin != "":
         return env_bin
     if rt_file_exists("bin/release/simple"):
@@ -553,7 +551,7 @@ pub fn find_simple_binary() -> text:
         return "src/compiler_rust/target/release/simple"
     if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
         return "src/compiler_rust/target/bootstrap/simple"
-    val os_env = rt_env_get("OS") ?? ""
+    val os_env = env_get_nullable("OS") ?? ""
     if os_env.contains("Windows"):
         if rt_file_exists("src/compiler_rust/target/release/simple.exe"):
             return "src/compiler_rust/target/release/simple.exe"
@@ -632,7 +630,7 @@ pub fn compile_delegation_guard_decision(op_desc: text, marker: text, resolved_b
     ""
 
 fn _current_exe_path_for_guard() -> text:
-    val os_env = rt_env_get("OS") ?? ""
+    val os_env = env_get_nullable("OS") ?? ""
     if os_env.contains("Windows"):
         return ""
     # Canonicalize IN-PROCESS (std::fs::canonicalize). Never shell out: a
@@ -646,16 +644,16 @@ fn _current_exe_path_for_guard() -> text:
     ""
 
 # Returns "" when the spawn is safe, or an error message when it must be
-# refused. Call before every `rt_process_run(simple_bin, ...)` delegation.
+# refused. Call before every `process_run(simple_bin, ...)` delegation.
 pub fn check_compile_delegation_guard(op_desc: text, resolved_bin: text) -> text:
-    val marker = rt_env_get("SIMPLE_COMPILE_DELEGATED") ?? ""
+    val marker = env_get_nullable("SIMPLE_COMPILE_DELEGATED") ?? ""
     val current_exe = _current_exe_path_for_guard()
     compile_delegation_guard_decision(op_desc, marker, resolved_bin, current_exe)
 
 # Call right before every legitimate external-compile spawn so a re-entrant
 # child refuses to delegate again instead of forking without bound.
 pub fn mark_compile_delegated() -> bool:
-    rt_env_set("SIMPLE_COMPILE_DELEGATED", "1")
+    env_set("SIMPLE_COMPILE_DELEGATED", "1")
 
 pub fn clean_child_output(stdout: text, stderr: text) -> text:
     val combined = if stderr.trim() != "":
