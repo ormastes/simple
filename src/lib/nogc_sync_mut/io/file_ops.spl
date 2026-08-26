@@ -5,9 +5,11 @@
 
 use std.io_runtime.{read_file_text, read_file_text_result, file_read_result, file_delete, file_copy}
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
-extern fn rt_file_mmap_read_text(path: text) -> text
+@unsafe(reason: "raw nullable mmap text ABI; nil means mapping or read failure", capabilities: [ffi])
+extern fn rt_file_mmap_read_text(path: text) -> text?
 @unsafe(reason: "raw nullable mmap byte-array ABI; nil means mapping or read failure", capabilities: [ffi])
 extern fn rt_file_mmap_read_bytes(path: text) -> [i64]?
+@unsafe(reason: "raw file digest ABI; non-64-byte text is a read or provider failure sentinel", capabilities: [ffi])
 extern fn rt_file_hash_sha256(path: text) -> text
 @unsafe(reason: "acquires an OS-owned file descriptor that must be released exactly once", capabilities: [ffi])
 extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
@@ -25,8 +27,24 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
 # extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
 extern fn rt_file_atomic_write(path: text, content: text) -> bool
+@unsafe(reason: "raw file-size ABI; negative values are failure sentinels", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_stat(path: text) -> i64
+
+@always_inline
+fn _file_mmap_read_text_raw(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_file_mmap_read_text(path)
+
+@always_inline
+fn _file_hash_sha256_raw(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_file_hash_sha256(path)
+
+@always_inline
+fn _file_size_raw(path: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_file_size(path)
 
 # --- Shell helpers (local copies to avoid circular imports) ---
 # These are minimal copies needed for file operations.
@@ -70,8 +88,15 @@ fn file_is_regular_no_follow(path: text) -> bool:
     # artifacts; replace with no-follow open/fstat/hash-on-fd for hostile races.
     rt_file_is_regular_no_follow(path)
 
+@unsafe(reason: "legacy file-size API exposes the raw negative failure sentinel", capabilities: [ffi])
 fn file_size_raw(path: text) -> i64:
-    rt_file_size(path)
+    _file_size_raw(path)
+
+fn file_size_checked(path: text) -> Result<i64, text>:
+    val size = _file_size_raw(path)
+    if size < 0:
+        return Err("file size failed: {path}")
+    Ok(size)
 
 fn file_read_text_bounded(path: text, size: i64) -> text?:
     if path == "" or size < 0 or size > 67108864: return nil
@@ -110,9 +135,11 @@ fn _timestamp_str() -> text:
 
 # reason positional io file_ops API
 fn file_append(path: text, content: text) -> bool:
-    val current_size = rt_file_size(path)
-    val offset = if current_size > 0: current_size else: 0
-    rt_file_write_text_at(path, offset, content) >= 0
+    val size_result = file_size_checked(path)
+    match size_result:
+        case Err(_): false
+        case Ok(current_size):
+            rt_file_write_text_at(path, current_size, content) >= 0
 
 fn file_stat(path: text) -> i64:
     # Get file modification time in seconds since epoch (direct SFFI).
@@ -127,8 +154,15 @@ fn file_modified_time(path: text) -> i64:
 fn file_remove(path: text) -> bool:
     file_delete(path)
 
+@unsafe(reason: "legacy digest API exposes the raw empty or malformed failure sentinel", capabilities: [ffi])
 fn file_hash_sha256(path: text) -> text:
-    rt_file_hash_sha256(path)
+    _file_hash_sha256_raw(path)
+
+fn file_hash_sha256_checked(path: text) -> Result<text, text>:
+    val digest = _file_hash_sha256_raw(path)
+    if digest.len() != 64:
+        return Err("SHA-256 file digest failed: {path}")
+    Ok(digest)
 
 fn file_read_lines(path: text) -> Result<[text], text>:
     match read_file_text_result(path):
@@ -157,8 +191,9 @@ fn file_unlock(handle: i64) -> bool:
 # infinite mutual recursion under last-definition-wins dispatch. Same defect
 # class as file_read/read_file_text -- see
 # doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md
+@unsafe(reason: "legacy file-size API exposes the raw negative failure sentinel", capabilities: [ffi])
 fn file_size(path: text) -> i64:
-    rt_file_size(path)
+    _file_size_raw(path)
 
 # --- Memory-Mapped File I/O (SFFI wrappers) ---
 
@@ -169,8 +204,15 @@ fn file_read_text(path: text) -> text:
 use std.io_runtime.{file_read_bytes}
 export file_read_bytes
 
+@unsafe(reason: "legacy mmap-text API collapses mapping failure to empty text", capabilities: [ffi])
 fn file_mmap_read_text(path: text) -> text:
-    rt_file_mmap_read_text(path)
+    _file_mmap_read_text_raw(path) ?? ""
+
+fn file_mmap_read_text_checked(path: text) -> Result<text, text>:
+    val value = _file_mmap_read_text_raw(path)
+    if value == nil:
+        return Err("file mmap text read failed: {path}")
+    Ok(value)
 
 # `rt_file_mmap_read_bytes` delegates to rt_file_read_bytes, which yields nil
 # on any fs::read error (missing/unreadable path). TOTAL with the documented

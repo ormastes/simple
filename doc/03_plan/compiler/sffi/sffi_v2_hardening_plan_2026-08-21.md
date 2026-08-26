@@ -1722,3 +1722,12 @@ and unpromoted.
 - [x] Add checked snapshot APIs and mark legacy empty-list collapse unsafe.
 - [x] Ratchet the two lanes without introducing allocation, copying, maps,
   locks, hashes, or dynamic dispatch.
+
+#### Completed production slice: file size/digest/mmap text (2026-08-26)
+
+- [x] Make mmap-text failure nullable and expose a checked `Result` API.
+- [x] Add checked file-size and SHA-256 APIs for negative/malformed sentinels.
+- [x] Make append fail closed when size lookup fails instead of writing at
+  offset zero and potentially overwriting existing content.
+- [x] Preserve exactly one always-inline direct owner per provider and add no
+  lookup, allocation, lock, hash-on-call, or conversion layer.

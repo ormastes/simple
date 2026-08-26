@@ -131,3 +131,10 @@ across the sync and async variable/path/platform implementations confine the
 raw operations. Both lanes expose a checked snapshot API; legacy list APIs are
 explicitly unsafe when they collapse allocation failure to `[]`. No conversion,
 lookup table, or dispatch layer was introduced.
+
+The first `rt_file` slice corrected mmap-text nullability and added checked
+size/SHA-256/mmap-text APIs. Most importantly, append no longer maps a failed
+size lookup (`-1`) to offset zero and overwrites from the beginning; it returns
+false before issuing a write. Each of the three providers has one direct
+always-inline owner. The checked success paths add only sentinel/length/null
+checks and no lookup or allocation.
