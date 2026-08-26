@@ -7,8 +7,17 @@
 #
 # Compiled-mode and SQLite FFI benchmarks are separate (compiled_db_baseline.spl).
 # Run: bin/simple test test/perf/bench/db_benchmark_suite.spl
+#
+# Purpose and audience: head-to-head timing evidence for PureDatabase's SQL
+# path vs the direct typed API vs bitmap-accelerated scan_range, for database
+# engineers tracking per-workload speedups. Scope: interpreter-mode W1-W6.
+#
+# @req REQ-PERF-DB-SUITE
+# lifecycle: doc/03_plan/lib/database/db_perf_beat_sqlite_postgre_plan_2026-05-27.md ;
+#            doc/03_plan/compiler/optimization/db_hardening_optimization_plan_2026-05-26.md
 
 use std.spec
+use std.spec.step
 use std.io_runtime.{getpid, time_now_unix_micros}
 use std.database.sql.types.{DbValue, DbRow}
 use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
@@ -34,8 +43,11 @@ fn make_row2(a: i64, b: text) -> [DbValue]:
     r
 
 describe "Phase 8: Head-to-Head Benchmark Suite":
+    # @manual PureDatabase head-to-head benchmark evidence
     describe "W1: Bulk INSERT 200 — SQL vs Direct API":
         it "compares SQL INSERT vs put() for 200 rows":
+            # @req REQ-PERF-DB-SUITE
+            step("insert 200 rows via SQL and via put(), compare timings")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w1_sql (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
             db.exec_sql("CREATE TABLE w1_api (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
@@ -60,11 +72,16 @@ describe "Phase 8: Head-to-Head Benchmark Suite":
             print("[W1-SQL] INSERT 200: " + elapsed_ms(t0_sql, t1_sql).to_text() + " ms")
             print("[W1-API] put() 200:  " + elapsed_ms(t0_api, t1_api).to_text() + " ms")
             print("[W1] Speedup: " + (elapsed_ms(t0_sql, t1_sql) / (elapsed_ms(t0_api, t1_api) + 1)).to_text() + "x")
-            expect(true).to_equal(true)
+            # Real oracle: both insert paths landed the same final row.
+            # oracle: id 199 is the last row inserted by BOTH the SQL and API loops.
+            expect(db.get("w1_sql", "id", DbValue.Integer(value: 199)).unwrap() != nil).to_equal(true)
+            expect(db.get("w1_api", "id", DbValue.Integer(value: 199)).unwrap() != nil).to_equal(true)
             db.close().unwrap()
 
     describe "W2: Point SELECT — SQL vs get() (hash index)":
         it "compares SQL PK lookup vs direct API get()":
+            # @req REQ-PERF-DB-SUITE
+            step("time 100 SQL point SELECTs vs 100 hash-indexed get() calls")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w2 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
             var i = 0
@@ -100,6 +117,8 @@ describe "Phase 8: Head-to-Head Benchmark Suite":
 
     describe "W3: Range Scan — SQL vs scan_range() (RowBitmap)":
         it "compares SQL range vs bitmap-accelerated scan_range()":
+            # @req REQ-PERF-DB-SUITE
+            step("time 100 SQL range scans vs 100 scan_range() bitmap scans")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w3 (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
             var i = 0
@@ -128,10 +147,16 @@ describe "Phase 8: Head-to-Head Benchmark Suite":
             print("[W3-SQL] Range scan x100: " + elapsed_ms(t0_sql, t1_sql).to_text() + " ms (" + sql_us.to_text() + " us)")
             print("[W3-API] scan_range x100: " + elapsed_ms(t0_api, t1_api).to_text() + " ms (" + api_us.to_text() + " us)")
             print("[W3] Speedup: " + (sql_us / (api_us + 1)).to_text() + "x")
+            # Real oracle: the bitmap scan returns the scanned rows.
+            # oracle: range [50,150) over ids 0..199 must yield 100 rows.
+            val scanned = db.scan_range("w3", "id", DbValue.Integer(value: 50), DbValue.Integer(value: 150)).unwrap()
+            expect(scanned.len()).to_equal(100)
             db.close().unwrap()
 
     describe "W4: Full Scan — SQL vs scan_all()":
         it "compares SQL SELECT * vs typed scan_all()":
+            # @req REQ-PERF-DB-SUITE
+            step("time 100 SQL full scans vs 100 typed scan_all() calls")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w4 (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
             var i = 0
@@ -160,10 +185,15 @@ describe "Phase 8: Head-to-Head Benchmark Suite":
             print("[W4-SQL] SELECT * x100: " + elapsed_ms(t0_sql, t1_sql).to_text() + " ms (" + sql_us.to_text() + " us)")
             print("[W4-API] scan_all x100: " + elapsed_ms(t0_api, t1_api).to_text() + " ms (" + api_us.to_text() + " us)")
             print("[W4] Speedup: " + (sql_us / (api_us + 1)).to_text() + "x")
+            # Real oracle: scan_all sees every inserted row.
+            # oracle: 200 rows were put() in the setup loop.
+            expect(db.scan_all("w4").unwrap().len()).to_equal(200)
             db.close().unwrap()
 
     describe "W5: Delete — SQL vs delete_by_key()":
         it "compares SQL DELETE vs direct delete_by_key()":
+            # @req REQ-PERF-DB-SUITE
+            step("time 50 SQL DELETEs vs 50 delete_by_key() calls")
             var db_sql = PureDatabase.memory_deferred().unwrap()
             db_sql.exec_sql("CREATE TABLE w5s (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
             var db_api = PureDatabase.memory_deferred().unwrap()
@@ -196,11 +226,17 @@ describe "Phase 8: Head-to-Head Benchmark Suite":
             print("[W5-SQL] DELETE x50: " + elapsed_ms(t0_sql, t1_sql).to_text() + " ms (" + sql_us.to_text() + " us)")
             print("[W5-API] delete_by_key x50: " + elapsed_ms(t0_api, t1_api).to_text() + " ms (" + api_us.to_text() + " us)")
             print("[W5] Speedup: " + (sql_us / (api_us + 1)).to_text() + "x")
+            # Real oracle: deleted keys are gone on both paths.
+            # oracle: ids 0..49 were deleted; id 50 must survive, id 0 must not.
+            expect(db_sql.get("w5s", "id", DbValue.Integer(value: 0)).unwrap() == nil).to_equal(true)
+            expect(db_api.get("w5a", "id", DbValue.Integer(value: 50)).unwrap() != nil).to_equal(true)
             db_sql.close().unwrap()
             db_api.close().unwrap()
 
     describe "W6: Mixed OLTP (80% read, 20% write)":
         it "measures mixed workload with typed API":
+            # @req REQ-PERF-DB-SUITE
+            step("run 500 mixed OLTP ops (80% get, 20% put) and time them")
             var db = PureDatabase.memory_deferred().unwrap()
             db.exec_sql("CREATE TABLE w6 (id INTEGER PRIMARY KEY, name TEXT, counter INTEGER)").unwrap()
             var i = 0
@@ -225,5 +261,7 @@ describe "Phase 8: Head-to-Head Benchmark Suite":
             val t1 = bench_now_ns()
 
             print("[W6] Mixed OLTP 500 ops (80R/20W): " + elapsed_ms(t0, t1).to_text() + " ms (" + elapsed_us(t0, t1).to_text() + " us)")
-            expect(true).to_equal(true)
+            # Real oracle: the write fraction landed new rows.
+            # oracle: every 5th op (op%5==0) inserts id 200+op; op 500 excluded, so id 695 is the last write.
+            expect(db.get("w6", "id", DbValue.Integer(value: 695)).unwrap() != nil).to_equal(true)
             db.close().unwrap()
