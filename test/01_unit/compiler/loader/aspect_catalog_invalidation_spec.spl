@@ -14,11 +14,11 @@ use compiler.loader.module_loader_compat.{
 }
 use compiler.driver.smf_writer.{generate_aspect_pack_smf}
 use std.common.aspect_pack.{
-    ApkModuleSourceV2, ApkCatalogEntryV2, apk_build_pack_v2,
-    apk_build_catalog_v2, APK_ENTRY_FACET, APK_ACT_LAZY_FACET,
+    ApkModuleSourceV2, ApkCatalogEntryV2, ApkProfileRecordV1, apk_build_pack_v2,
+    apk_build_catalog_v2, apk_build_catalog_v3, APK_ENTRY_FACET, APK_ACT_LAZY_FACET,
     apk_loader_packs_opened, apk_loader_modules_decompressed,
     apk_loader_bytes_decompressed, apk_activation_stack_enter_v1,
-    apk_activation_stack_exit_v1
+    apk_activation_stack_exit_v1, apk_loader_select_profile, apk_loader_profile
 }
 use std.common.string_core.{text_to_bytes}
 use std.io_runtime.{file_write_bytes, mkdir_p}
@@ -99,6 +99,43 @@ describe "visible aspect catalog digest and invalidation":
         expect(new_ref.load.generation).to_be_greater_than(old_generation)
         expect(new_ref.release()).to_equal(true)
 
+    it "published profile index resolves repeated adversarial keys and invalidates on switch":
+        var loader = loader_with_pack()
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "Widget\0/Debuggable",
+            pack_path: catalog_pack_path(), module_id: "debug.core",
+            entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
+            abi_hash: "abi-debug-1"))
+        entries.push(ApkCatalogEntryV2(facet_key: "Noise\0/Facet",
+            pack_path: catalog_pack_path(), module_id: "debug.core",
+            entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
+            abi_hash: "abi-debug-1"))
+        entries.push(ApkCatalogEntryV2(facet_key: "Widget\0/Debuggable",
+            pack_path: catalog_pack_path(), module_id: "trace.spans",
+            entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
+            abi_hash: "abi-trace-1"))
+        var profiles: [ApkProfileRecordV1] = []
+        profiles.push(ApkProfileRecordV1(
+            profile_id: "small\0profile", entry_start: 0, entry_count: 2))
+        profiles.push(ApkProfileRecordV1(
+            profile_id: "large\0profile", entry_start: 1, entry_count: 2))
+        match loader.install_aspect_catalog(apk_build_catalog_v3(entries, profiles).bytes):
+            case Ok(_): pass
+            case Err(message): panic(message)
+        val handle = moduleloader_aspect_loader_handle(loader)
+        apk_loader_select_profile(handle, "large\0profile")
+        var large = loader.aspect_facet_visible("Widget\0/Debuggable")
+        expect(large.load.module_id).to_equal("trace.spans")
+        apk_loader_select_profile(handle, "small\0profile")
+        expect(apk_loader_profile(handle)).to_equal("large\0profile")
+        expect(large.is_live()).to_equal(true)
+        expect(large.release()).to_equal(true)
+        apk_loader_select_profile(handle, "small\0profile")
+        expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
+        var small = loader.aspect_facet_visible("Widget\0/Debuggable")
+        expect(small.load.module_id).to_equal("debug.core")
+        expect(small.release()).to_equal(true)
+
     it "compatibility acquisition honors each supplied catalog before resident lookup":
         var loader = loader_with_pack()
         var old_ref = loader.aspect_facet(
@@ -134,6 +171,11 @@ describe "visible aspect catalog digest and invalidation":
         expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
         expect(pinned.is_live()).to_equal(true)
         expect(pinned.release()).to_equal(true)
+        # Refusal retains the old bytes and their correlated route index as one
+        # snapshot; the rejected replacement must not leak its module route.
+        var retained = loader.aspect_facet_visible("Widget/Debuggable")
+        expect(retained.load.module_id).to_equal("debug.core")
+        expect(retained.release()).to_equal(true)
 
     it "activating facet blocks update without invalidation or generation churn":
         var loader = loader_with_pack()

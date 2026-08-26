@@ -3,7 +3,7 @@
 # A facet routes THROUGH the catalog to its pack and module, and the module
 # loads correctly (byte-exact payload) from the kind=aspect_pack container.
 
-use std.common.aspect_pack.{ApkModuleSourceV3, ApkProfileRecordV1, apk_build_pack_v3, apk_build_catalog_v3, APK_CHUNK_DEBUG, apk_catalog_profile_ids_v1, apk_catalog_select_profile_v1, apk_catalog_route_in_profile_v1, apk_loader_select_profile, apk_loader_profile, apk_load_cluster_v1, apk_cluster_member_v1, apk_pack_cluster_of_v1, apk_pack_chunk_of_v1, apk_loader_set_expected_core_layout, apk_unload_facet_v1, apk_facet_pin_v1, apk_facet_unpin_v1, apk_facet_state_v1, apk_facet_refcount_v1, apk_loader_unloads, apk_try_facet, APK_CHUNK_CODE, APK_CHUNK_FLAG_NONE, APK_CHUNK_FLAG_STORED, APK_FC_BOUND, APK_FC_QUIESCING, APK_FC_UNLOADED, ApkModuleSourceV1, ApkModuleSourceV2, ApkCatalogEntryV1, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2, apk_build_catalog_v2_checked, apk_catalog_route_joinpoint_v1, apk_catalog_startup_keys_v1, apk_activate_startup, APK_ENTRY_FACET, APK_ENTRY_JOINPOINT, APK_ACT_LAZY_FACET, APK_ACT_LAZY_PATCHABLE, APK_ACT_STARTUP, apk_build_pack_v1, apk_open_pack_v1, apk_load_module_v1, apk_build_catalog_v1, apk_open_catalog_v1, apk_catalog_route_v1, apk_loader_new, apk_loader_register_pack, apk_load_facet, apk_loader_packs_opened, apk_loader_modules_decompressed, apk_loader_generation, apk_loader_set_expected_core_abi, apk_loader_set_expected_variant_fingerprint, apk_facet_key_parts_v1, apk_try_facet_binding_v1, APK_FLAG_ASPECT_PACK, APK_HEADER_SIZE_V1}
+use std.common.aspect_pack.{ApkModuleSourceV3, ApkProfileRecordV1, apk_build_pack_v3, apk_build_catalog_v3, APK_CHUNK_DEBUG, apk_catalog_profile_ids_v1, apk_catalog_select_profile_v1, apk_catalog_route_in_profile_v1, apk_loader_select_profile, apk_loader_profile, apk_loader_catalog_invalidations_v1, apk_load_cluster_v1, apk_cluster_member_v1, apk_pack_cluster_of_v1, apk_pack_chunk_of_v1, apk_loader_set_expected_core_layout, apk_unload_facet_v1, apk_facet_pin_v1, apk_facet_unpin_v1, apk_facet_state_v1, apk_facet_refcount_v1, apk_loader_unloads, apk_try_facet, APK_CHUNK_CODE, APK_CHUNK_FLAG_NONE, APK_CHUNK_FLAG_STORED, APK_FC_BOUND, APK_FC_QUIESCING, APK_FC_UNLOADED, ApkModuleSourceV1, ApkModuleSourceV2, ApkCatalogEntryV1, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2, apk_build_catalog_v2_checked, apk_catalog_route_joinpoint_v1, apk_catalog_startup_keys_v1, apk_activate_startup, APK_ENTRY_FACET, APK_ENTRY_JOINPOINT, APK_ACT_LAZY_FACET, APK_ACT_LAZY_PATCHABLE, APK_ACT_STARTUP, apk_build_pack_v1, apk_open_pack_v1, apk_load_module_v1, apk_build_catalog_v1, apk_open_catalog_v1, apk_catalog_route_v1, apk_loader_new, apk_loader_register_pack, apk_load_facet, apk_loader_packs_opened, apk_loader_modules_decompressed, apk_loader_generation, apk_loader_set_expected_core_abi, apk_loader_set_expected_variant_fingerprint, apk_facet_key_parts_v1, apk_try_facet_binding_v1, APK_FLAG_ASPECT_PACK, APK_HEADER_SIZE_V1}
 use std.common.string_core.{text_to_bytes, bytes_to_text}
 
 fn _payload(tag: text, repeats: i64) -> [u8]:
@@ -252,6 +252,37 @@ describe "aspect-pack SMF container and Aspect Catalog":
         expect(absent.ok).to_equal(true)
         expect(absent.found).to_equal(false)
 
+    it "REQ-APK-12 profile routes preserve overlapping slices and adversarial NUL keys":
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "x\0/Facet", pack_path: "p0.apk",
+            module_id: "m0", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "noise/One", pack_path: "noise.apk",
+            module_id: "n1", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "x\0/Facet", pack_path: "p2.apk",
+            module_id: "m2", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "noise/Two", pack_path: "noise.apk",
+            module_id: "n3", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "x\0/Facet", pack_path: "p4.apk",
+            module_id: "m4", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        var profiles: [ApkProfileRecordV1] = []
+        profiles.push(ApkProfileRecordV1(profile_id: "left\0profile", entry_start: 0, entry_count: 2))
+        profiles.push(ApkProfileRecordV1(profile_id: "middle", entry_start: 1, entry_count: 3))
+        profiles.push(ApkProfileRecordV1(profile_id: "right\0profile", entry_start: 3, entry_count: 2))
+        val cat = apk_build_catalog_v3(entries, profiles)
+        expect(cat.ok).to_equal(true)
+        val handle = apk_open_catalog_v1(cat.bytes)
+        expect(apk_catalog_route_in_profile_v1(
+            cat.bytes, handle, "left\0profile", "x\0/Facet").module_id).to_equal("m0")
+        val middle = apk_catalog_route_in_profile_v1(
+            cat.bytes, handle, "middle", "x\0/Facet")
+        expect(middle.module_id).to_equal("m2")
+        expect(apk_catalog_select_profile_v1(
+            cat.bytes, handle, "middle").profiles_examined).to_equal(2)
+        expect(apk_catalog_route_in_profile_v1(
+            cat.bytes, handle, "right\0profile", "x\0/Facet").module_id).to_equal("m4")
+        expect(apk_catalog_route_in_profile_v1(
+            cat.bytes, handle, "middle", "absent\0/Facet").found).to_equal(false)
+
     it "REQ-APK-13 §9.6 a loader routes through its selected profile":
         var mods: [ApkModuleSourceV1] = []
         mods.push(ApkModuleSourceV1(module_id: "debug.core", aspect_id: "debug", payload: _payload("debug.core", 20)))
@@ -274,6 +305,11 @@ describe "aspect-pack SMF container and Aspect Catalog":
         val got_small = apk_load_facet(ld_small, cat.bytes, "x/Facet")
         expect(got_small.ok).to_equal(true)
         expect(got_small.module_id).to_equal("debug.core")
+        apk_loader_select_profile(ld_small, "big")
+        expect(apk_loader_profile(ld_small)).to_equal("big")
+        expect(apk_loader_catalog_invalidations_v1(ld_small)).to_equal(0)
+        val switched = apk_load_facet(ld_small, cat.bytes, "x/Facet")
+        expect(switched.module_id).to_equal("trace.spans")
         val ld_big = apk_loader_new()
         expect(apk_loader_register_pack(ld_big, "aspect/obs.apk", built.bytes)).to_equal(true)
         apk_loader_select_profile(ld_big, "big")

@@ -15,10 +15,11 @@ use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec
 use compiler.loader.aspect_pack_section.{smf_validate_optional_aspect_pack, smf_register_validated_aspect_pack}
 use std.common.aspect_pack.{
     ApkFacetLoadV1, APK_ACT_OFF, APK_FC_BOUND, APK_FC_QUIESCING,
-    apk_loader_new, apk_loader_unregister_pack, apk_load_facet, apk_try_facet,
+    apk_loader_new, apk_loader_unregister_pack, apk_try_facet,
     apk_facet_pin_v1, apk_facet_unpin_v1, apk_facet_state_v1,
     apk_facet_generation_v1, apk_open_catalog_v1, apk_validate_catalog_v1,
-    apk_loader_invalidate_catalog_v1, apk_loader_catalog_invalidations_v1
+    apk_loader_invalidate_catalog_v1, apk_loader_catalog_invalidations_v1,
+    _ApkCatalogIndexV1, _apk_index_catalog_v1, _apk_load_facet_indexed_v1
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.io_runtime.{file_read_bytes}
@@ -204,6 +205,36 @@ enum SymbolResult:
     NotFound(name: text)
     Error(message: text)
 
+struct _ModuleAspectCatalogSnapshotV1:
+    bytes: [u8]
+    digest: text
+    index: _ApkCatalogIndexV1
+
+# Private immutable content-addressed publication owners. ModuleLoader keeps
+# its established public fields/layout; this registry correlates each digest
+# with the exact validated bytes and index used by the hot route.
+var _module_aspect_catalog_snapshots: Dict<text, _ModuleAspectCatalogSnapshotV1> = {}
+var _module_aspect_catalog_snapshot_refs: Dict<text, i64> = {}
+
+fn _module_aspect_snapshot_retain(snapshot: _ModuleAspectCatalogSnapshotV1):
+    val digest = snapshot.digest
+    if _module_aspect_catalog_snapshot_refs.has(digest):
+        _module_aspect_catalog_snapshot_refs[digest] = _module_aspect_catalog_snapshot_refs[digest] + 1
+    else:
+        _module_aspect_catalog_snapshot_refs[digest] = 1
+    if not _module_aspect_catalog_snapshots.has(digest):
+        _module_aspect_catalog_snapshots[digest] = snapshot
+
+fn _module_aspect_snapshot_release(digest: text):
+    if not _module_aspect_catalog_snapshot_refs.has(digest):
+        return
+    val refs = _module_aspect_catalog_snapshot_refs[digest]
+    if refs <= 1:
+        _module_aspect_catalog_snapshot_refs = _module_aspect_catalog_snapshot_refs.remove(digest)
+        _module_aspect_catalog_snapshots = _module_aspect_catalog_snapshots.remove(digest)
+    else:
+        _module_aspect_catalog_snapshot_refs[digest] = refs - 1
+
 struct ModuleLoader:
     config: ModuleLoaderConfig
     modules: Dict<text, LoadedModule>
@@ -324,15 +355,29 @@ impl ModuleLoader:
             return Err("invalid visible aspect catalog: " + validation_error)
         val digest = sha256_u8_hex(catalog)
         self.aspect_catalog_digest_computations = self.aspect_catalog_digest_computations + 1
+        var old_digest: text = ""
         if self.aspect_catalog_digest_cell.has(0):
-            if self.aspect_catalog_digest_cell[0] == digest:
+            old_digest = self.aspect_catalog_digest_cell[0]
+            if old_digest == digest:
+                if not _module_aspect_catalog_snapshots.has(digest):
+                    _module_aspect_catalog_snapshots[digest] = _ModuleAspectCatalogSnapshotV1(
+                        bytes: catalog, digest: digest,
+                        index: _apk_index_catalog_v1(catalog, opened))
+                if not _module_aspect_catalog_snapshot_refs.has(digest):
+                    _module_aspect_catalog_snapshot_refs[digest] = 1
                 return Ok(digest)
             if self.aspect_loader_cell.has(0):
                 if not apk_loader_invalidate_catalog_v1(self.aspect_loader_cell[0]):
                     return Err("visible aspect catalog update refused while bindings are live")
+        val snapshot = _ModuleAspectCatalogSnapshotV1(
+            bytes: catalog, digest: digest,
+            index: _apk_index_catalog_v1(catalog, opened))
+        _module_aspect_snapshot_retain(snapshot)
         self.aspect_catalog_cell[0] = catalog
         self.aspect_catalog_digest_cell[0] = digest
         self.aspect_catalog_generation = self.aspect_catalog_generation + 1
+        if old_digest != "":
+            _module_aspect_snapshot_release(old_digest)
         Ok(digest)
 
     fn aspect_facet_visible(facet_key: text) -> ModuleFacetRefV1:
@@ -341,12 +386,23 @@ impl ModuleLoader:
             return _moduleloader_facet_ref(
                 _moduleloader_aspect_result(false, facet_key, "APK_CATALOG_MISSING",
                     "no visible aspect catalog is installed"), -1)
+        if not self.aspect_catalog_digest_cell.has(0):
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key, "APK_CATALOG_INDEX_MISSING",
+                    "visible aspect catalog digest is unavailable"), -1)
         if not self.aspect_loader_cell.has(0):
             return _moduleloader_facet_ref(
                 _moduleloader_aspect_result(false, facet_key, "APK_PACK_MISSING",
                     "no aspect pack has been admitted by this module loader"), -1)
         val owner = self.aspect_loader_cell[0]
-        _moduleloader_facet_ref(apk_load_facet(owner, self.aspect_catalog_cell[0], facet_key), owner)
+        val digest = self.aspect_catalog_digest_cell[0]
+        if not _module_aspect_catalog_snapshots.has(digest):
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key, "APK_CATALOG_INDEX_MISSING",
+                    "visible aspect catalog index is unavailable"), -1)
+        val snapshot = _module_aspect_catalog_snapshots[digest]
+        _moduleloader_facet_ref(_apk_load_facet_indexed_v1(
+            owner, snapshot.bytes, snapshot.index, facet_key), owner)
 
     me aspect_facet(catalog: [u8], facet_key: text) -> ModuleFacetRefV1:
         """Acquire the exact catalog key through this loader's admitted packs.
