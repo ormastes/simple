@@ -1599,3 +1599,17 @@ signature cases. This is load-time-only admission work: it adds no per-call
 hashing, lookup, allocation, copy, loop, or dispatch. Repository-wide signed
 admission remains zero because no exact provider artifact job has yet been
 supplied.
+
+### AES-XTS raw boundary containment (2026-08-26)
+
+`os.crypto.aes_xts` has three direct runtime ABI declarations: byte-array
+access, capacity allocation, and inverse AES block transformation. All are now
+explicitly `unsafe(ffi)` and their sixteen uses are lexical FFI scopes. The
+new authority audit fixes this exact declaration/call inventory, confirms the
+Rust inverse-block export, and rejects per-call hash, signature, lookup, or
+generic-dispatch additions. The source check passes. Optimizer review reports
+113 existing MIR opportunities and zero general patterns; no copy, allocation,
+loop, data-layout, or direct-call behavior was changed. The existing IEEE 1619
+KAT is still blocked upstream by interpreter `u8` array lifting, so this is
+boundary containment only—not behavioral cryptographic proof, artifact signing,
+or global SFFI verification.

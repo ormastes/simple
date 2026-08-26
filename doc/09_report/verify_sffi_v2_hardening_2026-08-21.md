@@ -99,3 +99,15 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): this hardens the verifier but supplies no exact
   signed provider artifact job, so the repository-wide signed-admitted count
   remains zero and SFFI is not globally verified.
+
+## Follow-up: AES-XTS raw boundary (2026-08-26)
+
+- PASS (source/static): three raw declarations and sixteen call sites are
+  explicit lexical `unsafe(ffi)`; the owner audit also confirms the Rust
+  inverse-block provider and no call-time admission/generic dispatch.
+- PASS (performance review): direct calls and allocation shape are unchanged;
+  optimizer reports 113 MIR-only opportunities and zero general patterns.
+- WARN (behavior): the existing IEEE 1619 KAT remains blocked by the known
+  upstream interpreter `u8` array-lifting defect, so it was not rerun here.
+- FAIL (global admission): this provides neither a signed artifact job nor
+  cross-lane proof; global SFFI admission remains zero.

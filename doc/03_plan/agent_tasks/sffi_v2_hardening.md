@@ -264,3 +264,9 @@ passing placeholder.
     Ed25519 provider and reject a trusted RSA key. This check is load-time-only
     and must not add call-time work. It strengthens the future admission gate;
     it does not create a provider artifact job or change the zero signed count.
+47. Contain the direct AES-XTS runtime ABI without replacing its fixed-size
+    native block path. Keep the three raw declarations and all sixteen uses
+    lexical `unsafe(ffi)`, require bounds/round preconditions in their owner,
+    and guard the absence of per-call admission or generic dispatch. Preserve
+    direct allocation and AES call shape; the pending interpreter `u8` lifting
+    bug blocks XTS KAT evidence, and artifact-bound admission remains zero.
