@@ -1822,3 +1822,10 @@ and unpromoted.
 - [x] Fail frozen and ordinary installs closed on corrupt lock state.
 - [x] Preserve one probe plus one read for the optional file.
 - [x] Add a static contract and I/O-shape ratchet.
+### Completed package CLI authority slice
+
+- [x] Remove the package CLI's local raw manifest reader.
+- [x] Replace dry-run existence/read with one typed read.
+- [x] Move nested CLI-argument SFFI to an explicit unsafe declaration.
+- [x] Confine CLI-argument access to one always-inlined lexical owner.
+- [x] Add a static ownership and I/O-shape ratchet.

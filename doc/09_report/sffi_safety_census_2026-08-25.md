@@ -242,3 +242,11 @@ failure to “no lock.”  Its type is now `Result<LockFile?, text>`: absence is
 Frozen and ordinary installs both stop on those errors.  Optional-file loading
 remains one existence probe plus one read, with no retry, second read, lookup,
 or generic dispatch.
+### Package CLI authority follow-up
+
+The package CLI no longer declares a raw manifest reader.  Dry-run JSON uses
+one typed read instead of an existence/read pair and fails before reporting
+counts when the provider read fails.  Its previously nested CLI-argument extern
+is now an explicit `unsafe(ffi)` declaration reached through one always-inlined
+lexical owner.  No retry, second read, lookup, copy, or generic dispatch was
+added.
