@@ -1859,6 +1859,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cuda_mem_free", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memset", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memcpy_dtoh", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_memcpy_dtod", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memcpy_htod_array", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_module_load_data", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module
     RuntimeFuncSpec::new("rt_cuda_module_load_data_bytes", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module
@@ -1879,7 +1880,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64, I64, I64, I64, I64, I64, I64, I64, I64],
         &[I64],
     ), // module, packed name, grid_xyz, block_xyz, args_ptr
+    RuntimeFuncSpec::new(
+        "rt_cuda_launch_kernel_ex",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ), // module, name_ptr, name_len, grid_xyz, block_xyz, shared, stream, args_ptr
     RuntimeFuncSpec::new("rt_cuda_sync", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_get_error_string", &[I64], &[I64]),
     // =========================================================================
     // Bootstrap Self-Hosting SFFI
     // =========================================================================

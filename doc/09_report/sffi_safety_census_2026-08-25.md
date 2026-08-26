@@ -1269,6 +1269,30 @@ facades. Provider coverage remains incomplete and WebSocket empty/failure
 ambiguity remains explicit, so the family is unsafe, unsigned, and unverified.
 Source-reviewed only; checks were not executed.
 
+## 2026-08-26 CUDA owner authority and provider closure
+
+The 25-declaration `nogc_sync_mut` CUDA I/O owner now has explicit
+`unsafe(ffi)` authority and a machine-readable `contract:` statement on every
+raw declaration. Two pointer-write declarations were corrected from a false
+`i64` result to the provider's exact unit-returning ABI. The missing native
+registry rows for device-to-device copy, extended launch, and error text were
+added, and the already-implemented extended-launch interpreter handler is now
+registered. All 25 identities are consequently present in both registry
+lanes; this is provider closure, not signed admission.
+
+The feature-enabled interpreter launch paths now pass the borrowed function
+name span directly to the Rust provider instead of first allocating a
+temporary `CString` that the provider immediately copied again. CUDA error
+text now comes from static C strings rather than allocating and permanently
+leaking one `CString` per call. These changes remove allocation/memory costs;
+they add no per-call hashing, lookup, dispatch, or synchronization.
+
+The production-source census moves to 2,789 unsafe-tagged declarations, 4,470
+unsafe-tag gaps, and 6,224 contract gaps. The `rt_*` subset has 3,307 unsafe-tag
+gaps and 5,035 contract gaps. Signed-admitted declarations remain zero without
+exact-artifact admission jobs. Source-reviewed; no build or runtime
+verification claim.
+
 ## 2026-08-26 public RuntimeValue closure completion
 
 The remaining public `value_eq`, `value_print`, and `value_println` wrappers

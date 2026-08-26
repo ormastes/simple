@@ -1825,13 +1825,13 @@ pub fn rt_cuda_launch_kernel_ex_fn(args: &[Value]) -> Result<Value, CompileError
     let shared_bytes = arg_i64(args, 8, "rt_cuda_launch_kernel_ex", N)?;
     let stream = arg_i64(args, 9, "rt_cuda_launch_kernel_ex", N)?;
     let args_ptr = arg_i64(args, 10, "rt_cuda_launch_kernel_ex", N)?;
-    let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel_ex")?;
     #[cfg(feature = "cuda")]
     {
+        let name = func_name.as_bytes();
         return Ok(Value::Int(rt_cuda_launch_kernel_ex(
             module,
-            c_name.as_ptr() as *const u8,
-            c_name.as_bytes().len() as u64,
+            name.as_ptr(),
+            name.len() as u64,
             grid_x,
             grid_y,
             grid_z,
@@ -1849,6 +1849,7 @@ pub fn rt_cuda_launch_kernel_ex_fn(args: &[Value]) -> Result<Value, CompileError
             return Ok(Value::Int(-1));
         }
         if let Some(fns) = get_cuda_dl() {
+            let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel_ex")?;
             let ctx_rc = dl_ensure_context(fns);
             if ctx_rc != 0 {
                 return Ok(Value::Int(ctx_rc));
@@ -2303,11 +2304,11 @@ pub fn rt_cuda_launch_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
     let args_ptr = arg_i64(args, 8, "rt_cuda_launch_kernel", 9)?;
     #[cfg(feature = "cuda")]
     {
-        let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel")?;
+        let name = func_name.as_bytes();
         return Ok(Value::Int(rt_cuda_launch_kernel(
             module,
-            c_name.as_ptr() as *const u8,
-            c_name.as_bytes().len() as u64,
+            name.as_ptr(),
+            name.len() as u64,
             grid_x,
             grid_y,
             grid_z,

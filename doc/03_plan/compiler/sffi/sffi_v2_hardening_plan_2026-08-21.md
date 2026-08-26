@@ -1541,6 +1541,21 @@ Torch SFFI nor all SFFI may be described as verified safe.
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
 
+## 2026-08-26 CUDA I/O owner checkpoint
+
+- Tag and contract all 25 raw CUDA declarations at the canonical I/O owner.
+- Reconcile pointer-write returns with the exact unit-returning C/Rust ABI.
+- Close native/interpreter identity coverage for device-to-device copy,
+  extended launch, and error text using compiler-owned typed registrations.
+- Reuse the existing extended-launch interpreter implementation rather than
+  adding a duplicate dispatch path.
+- Remove redundant feature-path name allocation and the per-call CUDA error
+  text allocation/leak; retain direct typed calls and existing validation.
+- Add a source-only owner ratchet that checks exact writes, both-lane identity,
+  and static error text without claiming signature admission.
+- Remaining production debt: 4,470 unsafe-tag gaps, 6,224 contract gaps, and
+  zero signed-admitted declarations.
+
 ## 2026-08-26 repository-wide inventory checkpoint
 
 - Production source currently contains 7,259 declarations / 3,815 symbols;

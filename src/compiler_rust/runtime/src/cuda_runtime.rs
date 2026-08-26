@@ -3098,23 +3098,20 @@ pub extern "C" fn rt_cuda_sync() -> i64 {
 /// Get error string for CUDA error code
 #[no_mangle]
 pub extern "C" fn rt_cuda_get_error_string(error_code: i64) -> *const c_char {
-    let msg = match error_code {
-        0 => "CUDA_SUCCESS",
-        -1 => "CUDA_ERROR_INVALID_VALUE",
-        -2 => "CUDA_ERROR_OUT_OF_MEMORY",
-        -3 => "CUDA_ERROR_NOT_INITIALIZED",
-        -100 => "CUDA_ERROR_NO_DEVICE",
-        -200 => "CUDA_ERROR_INVALID_IMAGE",
-        -218 => "CUDA_ERROR_INVALID_PTX",
-        -301 => "CUDA_ERROR_FILE_NOT_FOUND",
-        -500 => "CUDA_ERROR_NOT_FOUND",
-        -700 => "CUDA_ERROR_ILLEGAL_ADDRESS",
-        -701 => "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES",
-        _ => "CUDA_ERROR_UNKNOWN",
-    };
-    // Return static string - no allocation needed
-    let cstr = CString::new(msg).unwrap_or_default();
-    cstr.into_raw() // Leaked intentionally for SFFI
+    match error_code {
+        0 => c"CUDA_SUCCESS".as_ptr(),
+        -1 => c"CUDA_ERROR_INVALID_VALUE".as_ptr(),
+        -2 => c"CUDA_ERROR_OUT_OF_MEMORY".as_ptr(),
+        -3 => c"CUDA_ERROR_NOT_INITIALIZED".as_ptr(),
+        -100 => c"CUDA_ERROR_NO_DEVICE".as_ptr(),
+        -200 => c"CUDA_ERROR_INVALID_IMAGE".as_ptr(),
+        -218 => c"CUDA_ERROR_INVALID_PTX".as_ptr(),
+        -301 => c"CUDA_ERROR_FILE_NOT_FOUND".as_ptr(),
+        -500 => c"CUDA_ERROR_NOT_FOUND".as_ptr(),
+        -700 => c"CUDA_ERROR_ILLEGAL_ADDRESS".as_ptr(),
+        -701 => c"CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES".as_ptr(),
+        _ => c"CUDA_ERROR_UNKNOWN".as_ptr(),
+    }
 }
 
 #[cfg(test)]

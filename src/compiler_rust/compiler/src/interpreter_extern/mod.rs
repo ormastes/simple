@@ -988,6 +988,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_get_error_string", gpu::rt_cuda_get_error_string_fn);
     insert_simple!("rt_cuda_init", gpu::rt_cuda_init_fn);
     insert_simple!("rt_cuda_launch_kernel", gpu::rt_cuda_launch_kernel_fn);
+    insert_simple!("rt_cuda_launch_kernel_ex", gpu::rt_cuda_launch_kernel_ex_fn);
     insert_simple!("rt_cuda_mem_alloc", gpu::rt_cuda_mem_alloc_fn);
     insert_simple!("rt_cuda_memcpy_dtod", gpu::rt_cuda_memcpy_dtod_fn);
     insert_simple!("rt_cuda_memcpy_dtoh", gpu::rt_cuda_memcpy_dtoh_fn);
