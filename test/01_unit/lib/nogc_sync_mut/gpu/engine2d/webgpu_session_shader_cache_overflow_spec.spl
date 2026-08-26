@@ -1,27 +1,9 @@
 # @cover src/lib/nogc_sync_mut/gpu/engine2d/webgpu_session.spl 50%
 # @tag: unit, gpu, engine2d, webgpu, session, cache, leak
 #
-# SIBLING-BACKEND DRIFT (doc/08_tracking/bug/chrome_vs_simple_gpu_offload_comparison_2026-08-08.md):
-# CudaSession and MetalSession each grew a bounded 4-slot resource cache with
-# counted rejection to close a real unbounded-native-handle leak.
-# WebGpuSession had NO shader cache at all: `load_shader(wgsl_source)`
-# re-invoked `rt_wgpu_create_shader` on every call, even for WGSL source it
-# had already compiled, leaking one native WGPUShaderModule per call.
-#
-# Fix: `WebGpuShaderCache` (same 4 slots, same "cache_full" sentinel, same
-# fail-closed `find_shader`) plus `WebGpuSession.record_shader(key, handle)`,
-# which captures the cache return and, on "cache_full", increments
-# `cache_reject_count` and records `last_cache_rejection`. The cache key is
-# the WGSL source text itself -- the only identity `load_shader` is given.
-#
-# This spec drives `record_shader()` / the cache directly with synthetic
-# handles because every session-level WebGPU extern in that file
-# (`rt_wgpu_create_instance`, `rt_wgpu_create_shader`, ...) is registered
-# ONLY for the JIT/native codegen path, not the tree-walk interpreter
-# `bin/simple test` runs on -- the same pre-existing engine gap the CUDA,
-# Metal, and Vulkan cache specs beside this one work around.
-# `record_shader()` is the exact production bookkeeping `load_shader()`
-# calls, so this is a real (not reimplemented) proof.
+# `WebGpuSession` is intentionally a pure bounded shader-cache owner. This
+# suite proves its overflow accounting and cache identity behavior; it does
+# not exercise a foreign WebGPU provider.
 
 use std.spec
 use std.nogc_sync_mut.gpu.engine2d.webgpu_session.{WebGpuSession, WebGpuShaderCache}
@@ -45,7 +27,7 @@ describe "WebGpuShaderCache overflow contract (pure, no hardware)":
         # The 5th source was never stored -- a lookup must fail closed (0).
         assert_equal(cache.find_shader("@compute fn e() {}"), 0)
 
-describe "WebGpuSession.record_shader overflow is an observed, counted event":
+describe "WebGpuSession.record_shader overflow is an observed, counted cache event":
 
     it "counts the 5th distinct WGSL source as a rejection instead of discarding it":
         var session = WebGpuSession.create("auto")

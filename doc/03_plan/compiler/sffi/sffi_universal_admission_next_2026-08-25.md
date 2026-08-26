@@ -708,3 +708,14 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   read from its own stdout pipe.
 - [ ] Define a versioned serial status/out ABI, validate text/handle ownership,
   and bind C/Rust provider artifacts to signed admission evidence.
+
+### WebGPU raw-owner consolidation
+
+- [x] Remove the unused duplicate `webgpu_ffi` owner and the no-import,
+  providerless `WebGpuSession` execution façade.
+- [x] Preserve only pure bounded shader-cache bookkeeping and add an authority
+  audit that rejects reintroduced raw calls/declarations.
+- [x] Mark the eleven still-active `webgpu_sffi` declarations `unsafe(ffi)`
+  without adding rendering-loop work, copies, or dispatch.
+- [ ] Replace active WebGPU bool/handle/text contracts with versioned typed
+  status/out contracts and admit the exact C/Rust provider artifact.

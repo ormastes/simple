@@ -2204,3 +2204,15 @@ source-only census reports 12,816 SFFI rows, 11,192 `rt_*` rows, 1,514
 incompletely unsafe-tagged `rt_*` symbols, and zero signed-admitted symbols.
 The source-only mode deliberately has no observed provider-language evidence;
 the serial provider remains unsafe, unsigned, and unverified.
+
+### Providerless legacy WebGPU-session removal (2026-08-26)
+
+Eleven providerless `rt_wgpu_*` declarations in the no-import legacy
+`WebGpuSession` are removed, retaining only its fixed four-slot shader cache
+and rejection accounting. The unused parallel `webgpu_ffi` raw owner is also
+deleted. The remaining active `webgpu_sffi` owner has eleven explicit unsafe
+declarations; its rendering call shape is unchanged. The pure cache spec passes
+2/2, source checks and owner guard pass, and optimizer analysis reports only
+existing low-level opportunities. The current source-only census is 12,794
+SFFI rows and 11,170 `rt_*` rows, with zero signed-admitted declarations.
+Active WebGPU remains unsafe, unsigned, and unverified.

@@ -6375,3 +6375,19 @@ The inventory tool's default stdout mode also now spools the TSV privately
 before aggregation, fixing its former self-pipe hang.  Neither change signs or
 verifies the runtime serial provider; it remains unsafe, unsigned, and
 unverified.
+
+### Providerless legacy WebGPU-session removal (2026-08-26)
+
+The legacy `WebGpuSession` declared eleven `rt_wgpu_*` functions for an
+instance/adapter/device execution chain. No C, C++, or Rust provider was found,
+and no production import exists; its sole consumer tests the four-slot shader
+cache. The execution façade is removed rather than leaving handles and text
+results vulnerable to a missing-provider fallback. The retained module is pure
+bounded cache/rejection accounting. A second unused duplicate owner,
+`webgpu_ffi.spl`, is also removed.
+
+The active `webgpu_sffi` rendering boundary remains because production backends
+use it; its eleven declarations are now explicit `unsafe(ffi)`. The direct call
+shape and buffer behavior are unchanged. Source checks, pure cache spec, owner
+audit, and optimizer analysis pass. This is not ABI, null/ownership, artifact,
+or signature verification of the active WebGPU provider.
