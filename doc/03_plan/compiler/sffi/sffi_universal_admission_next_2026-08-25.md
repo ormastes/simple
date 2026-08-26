@@ -159,6 +159,13 @@ handle contracts.
 
 ### 6. Migrate or isolate every remaining row
 
+Stop-the-line checkpoint: bootstrap atomics cannot be promoted by unsafe tags.
+Their source/provider argument counts and boolean/compare-exchange results
+diverge, flag inspection mutates state, spin-loop closure is incomplete, and
+the provider is mutex/map-backed rather than lock-free. Fix the ABI and boolean
+semantics first under the single-call hot-path gate documented in
+`doc/08_tracking/bug/bootstrap_atomic_sffi_abi_and_semantics_2026-08-26.md`.
+
 Checkpoint: the bootstrap sandbox builder removed seven unused raw declarations
 and confines all fifteen live reset/configure/apply operations to individual
 lexical `unsafe(ffi)` expressions. The Rust provider and interpreter cover the

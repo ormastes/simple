@@ -35,6 +35,18 @@ The source-ledger delta is therefore 7 fewer declaration rows, 15 newly tagged
 and contract-documented rows, and zero newly signed/admitted symbols; a future
 full census must measure the new workspace totals.
 
+## Bootstrap atomic stop-the-line checkpoint — 2026-08-26
+
+The next untouched family was not mass-tagged. Static comparison of
+`compiler_rust/lib/std/src/infra/atomic.spl`, the exact native registry, the
+interpreter registrations, and the Rust provider found argument-count and
+boolean ABI mismatches, fabricated compare-exchange decoding, mutating flag
+inspection, a missing spin-loop closure, and a mutex/map implementation exposed
+as “lock-free.” The exact evidence and semantics-preserving repair order are in
+`doc/08_tracking/bug/bootstrap_atomic_sffi_abi_and_semantics_2026-08-26.md`.
+This boundary remains unsafe and untouched until the ABI is fixed; annotations
+must not hide a hot-path mis-call.
+
 ## SimpleOS tools-test authority checkpoint
 
 `src/os/tools_test.spl` had sixty ambient calls to its one serial-output
