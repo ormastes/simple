@@ -1560,6 +1560,21 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Tooling remains offline; no runtime hot path gains hashes, signature checks,
   provider lookup, allocation, or dispatch.
 - Status: source-reviewed, deliberately unverified; census was not executed.
+
+## 2026-08-26 multiline unsafe-authority lint follow-up
+
+- Fixed the pure-Simple lint to recognize bounded multiline
+  `@unsafe(... capabilities: [ffi])` annotations for declarations and helpers.
+- Replaced substring authority checks with exact `ffi` capability-list token
+  parsing, preventing reason text from granting foreign authority.
+- Added regression specifications for both forms without widening authority or
+  adding runtime work.
+- The scan is capped at 32 annotation lines per item and stops before ordinary
+  source, preserving linear lint complexity and bounded transient state.
+- Remaining blocker: Rust-seed `UnsafeBlock` HIR retains no capability list, so
+  it cannot yet produce capability-specific minimization evidence.
+- Status: source-reviewed, deliberately unverified; tests were not executed.
+
 ## 2026-08-26 UI WebSocket pure-Simple SHA-1 follow-up
 
 - Removed four app-local raw SHA-1 declarations and their fabricated `0`/empty

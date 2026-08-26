@@ -76,6 +76,21 @@ fn _rsc_calls_name(line: text, name: text) -> bool:
         line.contains("," + needle) or line.contains("=" + needle) or
         line.contains(": " + needle)
 
+fn _rsc_line_has_ffi_capability(line: text) -> bool:
+    val capability_key = line.find("capabilities")
+    if capability_key < 0:
+        return false
+    val capability_text = line.substring(capability_key, line.len())
+    val open = capability_text.find("[")
+    val close = capability_text.find("]")
+    if open < 0 or close <= open:
+        return false
+    val values = capability_text.substring(open + 1, close).split(",")
+    for value in values:
+        if value.trim() == "ffi":
+            return true
+    false
+
 fn _rsc_add_import_names(fragment: text, existing: [text]) -> [text]:
     var externs = existing
     for raw_part in fragment.split(","):
@@ -112,18 +127,48 @@ fn _rsc_collect_imported_raw_names(
                 in_sffi_use = false
     externs
 
-fn _rsc_has_ffi_unsafe_boundary(
-    snapshot: RawSffiCodeSnapshot, header_index: i64
+fn _rsc_previous_ffi_unsafe_annotation(
+    snapshot: RawSffiCodeSnapshot, item_index: i64
 ) -> bool:
-    var i = header_index - 1
-    while i >= 0:
+    # Attribute blocks are bounded so lint cost stays linear even in generated
+    # or malformed input. Walk only contiguous annotations/blank separators;
+    # never inherit an @unsafe from a preceding declaration or function body.
+    var i = item_index - 1
+    var remaining = 32
+    while i >= 0 and remaining > 0:
         val previous = snapshot.lines[i].trimmed
+        remaining = remaining - 1
         if previous == "":
             i = i - 1
             continue
-        return previous.starts_with("@unsafe(") and previous.contains("capabilities") and
-            previous.contains("ffi")
+        if previous.starts_with("@unsafe("):
+            return _rsc_line_has_ffi_capability(previous)
+        if previous.starts_with("@"):
+            i = i - 1
+            continue
+        if previous == ")" or previous == "),":
+            var has_ffi_capability = false
+            i = i - 1
+            while i >= 0 and remaining > 0:
+                val attribute_line = snapshot.lines[i].trimmed
+                remaining = remaining - 1
+                if _rsc_line_has_ffi_capability(attribute_line):
+                    has_ffi_capability = true
+                if attribute_line.starts_with("@"):
+                    if attribute_line.starts_with("@unsafe("):
+                        return has_ffi_capability or
+                            _rsc_line_has_ffi_capability(attribute_line)
+                    i = i - 1
+                    break
+                i = i - 1
+            continue
+        return false
     false
+
+fn _rsc_has_ffi_unsafe_boundary(
+    snapshot: RawSffiCodeSnapshot, header_index: i64
+) -> bool:
+    _rsc_previous_ffi_unsafe_annotation(snapshot, header_index)
 
 fn _rsc_has_ffi_unsafe_declaration(
     snapshot: RawSffiCodeSnapshot, declaration_index: i64
@@ -132,18 +177,7 @@ fn _rsc_has_ffi_unsafe_declaration(
     if declaration.starts_with("unsafe extern fn ") or
         declaration.starts_with("pub unsafe extern fn "):
         return true
-    var i = declaration_index - 1
-    while i >= 0 and declaration_index - i <= 8:
-        val previous = snapshot.lines[i].trimmed
-        if previous == "":
-            i = i - 1
-            continue
-        if previous.starts_with("@unsafe("):
-            return previous.contains("capabilities") and previous.contains("ffi")
-        if not previous.starts_with("@"):
-            return false
-        i = i - 1
-    false
+    _rsc_previous_ffi_unsafe_annotation(snapshot, declaration_index)
 
 fn _rsc_check_declarations(
     snapshot: RawSffiCodeSnapshot
@@ -195,8 +229,8 @@ fn _rsc_check_calls(snapshot: RawSffiCodeSnapshot) -> [RawSffiCallFinding]:
                 if inline_ffi_indent >= 0 and body_indent <= inline_ffi_indent:
                     inline_ffi_indent = -1
                 if body.trimmed.contains("unsafe(") and
-                    body.trimmed.contains("capabilities") and
-                    body.trimmed.contains("ffi") and body.trimmed.ends_with(":"):
+                    _rsc_line_has_ffi_capability(body.trimmed) and
+                    body.trimmed.ends_with(":"):
                     inline_ffi_indent = body_indent
                     j = j + 1
                     continue

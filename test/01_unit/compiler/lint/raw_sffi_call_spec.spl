@@ -31,6 +31,12 @@ describe "SFFI009: raw calls require minimal ffi-unsafe scope":
         val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
         expect(findings.len()).to_equal(0)
 
+    it "accepts a multiline ffi-unsafe helper annotation":
+        """Canonical formatted attributes retain ffi authority without forcing
+        callers to collapse metadata onto one line."""
+        val source = "extern fn rt_widget_open() -> i64\n\n@unsafe(\n    reason: \"raw widget ABI\",\n    capabilities: [ffi]\n)\nfn _open_raw() -> i64:\n    rt_widget_open()\n"
+        expect(check_raw_sffi_calls(source, "src/app/demo.spl").len()).to_equal(0)
+
     it "accepts only calls nested in a lexical ffi-unsafe block":
         """An inline block avoids an extra hot-path helper call while keeping
         the validation and lift code outside foreign authority."""
@@ -49,6 +55,11 @@ describe "SFFI009: raw calls require minimal ffi-unsafe scope":
         val source = "extern fn rt_widget_open() -> i64\n\n@unsafe(reason: \"memory only\", capabilities: [raw_ptr])\nfn _open_raw() -> i64:\n    rt_widget_open()\n"
         val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
         expect(findings.len()).to_equal(1)
+
+    it "does not infer ffi capability from annotation reason text":
+        """Only an exact token inside capabilities grants foreign authority."""
+        val source = "extern fn rt_widget_open() -> i64\n\n@unsafe(reason: \"ffi is not granted\", capabilities: [raw_ptr])\nfn _open_raw() -> i64:\n    rt_widget_open()\n"
+        expect(check_raw_sffi_calls(source, "src/app/demo.spl").len()).to_equal(1)
 
     it "does not confuse a longer identifier with the extern name":
         """Identifier matching must avoid false positives on ordinary functions."""
@@ -87,6 +98,17 @@ describe "SFFI009: raw calls require minimal ffi-unsafe scope":
         """The declaration carries authority independently of its safe wrapper."""
         val source = "@unsafe(reason: \"foreign ABI\", capabilities: [ffi])\nextern fn rt_widget_open() -> i64\n"
         expect(check_raw_sffi_declarations(source, "src/app/demo.spl").len()).to_equal(0)
+
+    it "accepts a multiline ffi-unsafe extern declaration":
+        """Formatting the declaration contract must not erase its authority."""
+        val source = "@unsafe(\n    reason: \"foreign ABI\",\n    capabilities: [ffi]\n)\nextern fn rt_widget_open() -> i64\n"
+        expect(check_raw_sffi_declarations(source, "src/app/demo.spl").len()).to_equal(0)
+
+    it "does not infer declaration authority from reason text":
+        """A raw-pointer declaration remains missing ffi authority even when
+        its explanation contains the letters ffi."""
+        val source = "@unsafe(reason: \"ffi deliberately excluded\", capabilities: [raw_ptr])\nextern fn rt_widget_open() -> i64\n"
+        expect(check_raw_sffi_declarations(source, "src/app/demo.spl").len()).to_equal(1)
 
     it "checks attribute-style foreign declarations":
         """Legacy @extern syntax cannot bypass the same declaration policy."""

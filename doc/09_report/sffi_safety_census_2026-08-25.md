@@ -1101,6 +1101,20 @@ treated as resolution or lexical-minimization proof. This is an
 offline source/evidence-tool correction and adds zero runtime work, memory,
 lookup, hashing, or dispatch. Existing numerical tables remain the prior static
 snapshot and were not rerun under the no-verification instruction.
+
+## 2026-08-26 multiline unsafe-authority lint follow-up
+
+The pure-Simple raw-SFFI lint now recognizes canonical multiline
+`@unsafe(... capabilities: [ffi])` annotations on both raw declarations and
+minimal helper functions. Its backward annotation walk is capped at 32 lines,
+stops at non-annotation source, and therefore adds bounded compile-time work
+without changing generated or runtime code. Regression specifications cover
+multiline declarations and helpers. Capability parsing now requires the exact
+`ffi` list token; `ffi` appearing only in reason text cannot grant authority.
+This was source-reviewed only; tests were
+not executed. Rust-seed HIR still erases the capability list from `UnsafeBlock`,
+so cross-compiler capability-specific minimization evidence remains incomplete.
+
 ## 2026-08-26 Base64/Base64url contract follow-up
 
 Interpreter Base64/Base64url handlers now enforce exact arity, explicit bounded
