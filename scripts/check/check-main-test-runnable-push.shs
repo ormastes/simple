@@ -130,7 +130,10 @@ run_fixture_in() {
     elif [ "$_rc" -eq 124 ]; then
         echo "fail:timed out after ${TEST_TIMEOUT}s"
     else
-        _first=$(echo "$_out" | grep -m1 -E '^(error|.*error:)' | cut -c1-200)
+        # Prefer a real top-level `error:` line. The looser pattern alone picked up
+        # `[jit-fallback] ... error:` noise, which names a demotion rather than the cause.
+        _first=$(echo "$_out" | grep -m1 -E '^error' | cut -c1-200)
+        [ -n "$_first" ] || _first=$(echo "$_out" | grep -m1 -E '^(error|.*error:)' | cut -c1-200)
         [ -n "$_first" ] || _first=$(echo "$_out" | tail -1 | cut -c1-200)
         echo "fail:rc=$_rc: $_first"
     fi
@@ -146,13 +149,12 @@ selftest() {
     _st_root=$(mktemp -d) || { echo "SELFTEST FAIL: mktemp"; return 1; }
     _st_fail=0
 
-    # A -- clean tip must PASS. This is also the only fixture that proves the runner can
-    #      produce a green at all; without it, a runner that always failed would make
-    #      fixtures B and C pass vacuously.
-    _a_verdict=$(run_fixture_in "$REPO_ROOT" "$SIMPLE_BIN")
-    if [ "$_a_verdict" != "ok" ]; then
-        echo "SELFTEST FAIL: A — the working tree cannot run the fixture, so no verdict here is trustworthy: $_a_verdict" >&2
-        _st_fail=1
+    # A -- report whether the working tree can run the fixture. NOT fatal: this used to require
+    # a green, which meant a genuinely broken tree disabled the guard instead of letting it
+    # report the breakage. Anti-vacuity now rests on B (a missing fixture must fail) and on C1/C2
+    # being a DIFFERENTIAL, neither of which needs the tree to be healthy.
+    if [ "$(run_fixture_in "$REPO_ROOT" "$SIMPLE_BIN")" != "ok" ]; then
+        echo "$SELF: note — the working tree does not currently run the fixture; selftest continues (verdicts come from materialised worktrees, not this tree)" >&2
     fi
 
     # B -- missing fixture must FAIL, not silently succeed
@@ -186,15 +188,21 @@ selftest() {
     elif git -C "$REPO_ROOT" worktree add --detach "$_c" "$_c_rev" >/dev/null 2>&1; then
         _victim="$_c/src/app/io/env_access_host.spl"
         if [ -f "$_victim" ]; then
-            # C1 -- the SAME freshly materialised worktree must run green BEFORE the injection.
-            # Without this, C2 below is vacuous: a worktree fails for many boring reasons (the
-            # missing bin/simple symlink did exactly that, and briefly made this guard misreport
-            # a healthy origin/main as broken), and "it failed" would prove nothing about parsing.
-            _c1_verdict=$(run_fixture_in "$_c" "$SIMPLE_BIN")
-            if [ "$_c1_verdict" != "ok" ]; then
-                echo "SELFTEST FAIL: C1 — a clean materialised worktree does not run green, so a FAIL after injection would prove nothing: $_c1_verdict" >&2
-                _st_fail=1
-            fi
+            # C1 -- record how the SAME freshly materialised worktree behaves BEFORE injection.
+            # C2 below is a DIFFERENTIAL against this, not an absolute "must be green" check.
+            # An absolute check was tried first and was wrong: when main is genuinely red for an
+            # unrelated reason (measured 2026-08-26, `unknown decorator @always_inline` on the
+            # startup path), it turned this guard into "selftest failed" and suppressed the real
+            # FAIL it was built to report -- a guard that stops working exactly when the tree is
+            # broken is worse than no guard. The differential still refuses to be vacuous: if the
+            # clean run ALREADY fails with a parse diagnostic, injection proves nothing and that
+            # is an honest SELFTEST FAIL.
+            _c_clean=$(run_fixture_in "$_c" "$SIMPLE_BIN")
+            case "$_c_clean" in
+                *parse*|*Comma*|*env_access_host*)
+                    echo "SELFTEST FAIL: C1 — the clean worktree already fails with a parse diagnostic ($_c_clean), so injecting one proves nothing" >&2
+                    _st_fail=1 ;;
+            esac
             # C2 -- now inject the incident's exact shape (a call whose closing paren never
             # arrives, so the parser meets the next `pub fn`) and require a FAIL that NAMES the
             # parse error. Matching the detail, not merely the non-zero status, is what keeps
@@ -203,7 +211,7 @@ selftest() {
             _c_verdict=$(run_fixture_in "$_c" "$SIMPLE_BIN")
             case "$_c_verdict" in
                 *parse*|*Comma*|*env_access_host*) : ;;
-                fail:*) echo "SELFTEST FAIL: C2 — failed, but not with a parse diagnostic: $_c_verdict" >&2
+                fail:*) echo "SELFTEST FAIL: C2 — failed, but not with a parse diagnostic (clean was: $_c_clean; injected: $_c_verdict)" >&2
                         _st_fail=1 ;;
                 *) echo "SELFTEST FAIL: C2 — an unparseable env_access_host.spl still ran green; the binary is not reading the tree under test" >&2
                    _st_fail=1 ;;
@@ -237,6 +245,27 @@ selftest() {
         MARKER_DIR=$_saved
     fi
 
+    # F -- binary resolution must survive a linked worktree with no bin/ of its own. This is
+    # the landing path (plumbing commit in a throwaway worktree), and the first version of this
+    # guard ERRORed on it, blocking its own push. Asserts the fallback chain finds a binary
+    # there; it does NOT assert a particular binary, only that resolution does not come up empty.
+    _f=$_st_root/f
+    if git -C "$REPO_ROOT" worktree add --detach "$_f" HEAD >/dev/null 2>&1; then
+        rm -rf "$_f/bin"
+        # Resolution is checked IN PROCESS. Re-invoking this script would recurse (its selftest
+        # runs this fixture, which would invoke it again); a recursive pre-push probe has hung
+        # this host before, so the fallback chain is exercised directly instead.
+        _f_common=$(git -C "$_f" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+        _f_main=${_f_common%/.git}
+        if [ ! -x "$_f/bin/simple" ] \
+           && { [ -z "$_f_common" ] || [ "$_f_main" = "$_f_common" ] || [ ! -x "$_f_main/bin/simple" ]; } \
+           && ! command -v simple >/dev/null 2>&1; then
+            echo "SELFTEST FAIL: F — a linked worktree with no bin/simple resolves no binary; this guard would block every worktree landing" >&2
+            _st_fail=1
+        fi
+        git -C "$REPO_ROOT" worktree remove --force "$_f" >/dev/null 2>&1
+    fi
+
     rm -rf "$_st_root"
     return $_st_fail
 }
@@ -244,8 +273,28 @@ selftest() {
 # ---------------------------------------------------------------- main
 [ -n "$REPO_ROOT" ] || err "not inside a git repository"
 
-SIMPLE_BIN=${SIMPLE_BIN:-$REPO_ROOT/bin/simple}
-[ -x "$SIMPLE_BIN" ] || err "no executable simple binary at $SIMPLE_BIN"
+# Resolving the binary must survive a LINKED WORKTREE, because that is the normal landing
+# path here: commits are built in a throwaway `git worktree add` off a fresh origin tip, and
+# such a tree has no bin/simple -- that symlink is gitignored and exists only in the main
+# checkout. Defaulting to $REPO_ROOT/bin/simple made this guard ERROR on every worktree push,
+# i.e. it blocked exactly the workflow it ships in (caught by its own first landing). Try, in
+# order: an explicit override, this tree, the MAIN worktree of the same repo, then PATH.
+# Finding none is still ERROR -- absence of a binary is absence of evidence, never a pass.
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    :
+else
+    SIMPLE_BIN=$REPO_ROOT/bin/simple
+    if [ ! -x "$SIMPLE_BIN" ]; then
+        _common=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+        _main_root=${_common%/.git}
+        if [ -n "$_common" ] && [ "$_main_root" != "$_common" ] && [ -x "$_main_root/bin/simple" ]; then
+            SIMPLE_BIN=$_main_root/bin/simple
+        elif command -v simple >/dev/null 2>&1; then
+            SIMPLE_BIN=$(command -v simple)
+        fi
+    fi
+fi
+[ -x "$SIMPLE_BIN" ] || err "no executable simple binary (tried \$SIMPLE_BIN, $REPO_ROOT/bin/simple, the main worktree, and PATH)"
 [ -f "$REPO_ROOT/$FIXTURE" ] || err "fixture $FIXTURE not present in this checkout"
 
 REV=""
@@ -273,7 +322,7 @@ if [ "$SELFTEST_ONLY" -eq 1 ] || [ -z "$ST_DIGEST" ] || [ ! -f "$ST_MARKER" ]; t
     [ -n "$ST_DIGEST" ] && { mkdir -p "$MARKER_DIR" 2>/dev/null; date -u '+%Y-%m-%dT%H:%M:%SZ' >"$ST_MARKER" 2>/dev/null; }
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "$SELF: PASS — 6 selftest fixture(s) checked, scan not requested"
+    echo "$SELF: PASS — 7 selftest fixture(s) checked, scan not requested"
     exit 0
 fi
 

@@ -36,3 +36,35 @@ an `export use`/glob through `gpu/__init__.spl` apparently resolves the `extern 
 declarations to a different (stub) provider than the direct module path does. Compare with
 `runtime_native_gpu_stub.c` / `runtime_hosted_gpu_stubs.c` symbol precedence.
 Unblocks the `use std.gpu.*` tutorial modules; until then examples import the concrete module.
+
+## Correction (2026-08-25): this diagnosis is WRONG — not a dispatch defect
+
+**Status: NOT A BUG in package import.** The heading, the table, and the "Where to look" section
+above misattribute the cause. Superseded by
+`doc/08_tracking/bug/deployed_binary_reads_stdlib_from_its_build_worktree_2026-08-25.md`.
+
+The deployed binary reads `src/lib` from `/mnt/data/worktrees/parsefix-iso` — the worktree it was
+built in — as well as from the tree you are working in, proven by strace (32 opens under the
+foreign tree, 40 under the local one) and by 775 baked `parsefix-iso` strings in the binary.
+`parsefix-iso`'s copy of `gpu_runtime/mod.spl` is the **pre-fix** version that gates on
+`rt_torch_cuda_available()`. This host has CUDA but no PyTorch, so that probe answers false,
+`gpu_available()` is false, device count is 0, and compute capability falls through to the `-3`
+"no CUDA" sentinel. Every number in the table above is the old code's output, executed from
+another tree.
+
+So:
+- The torch-gate fix (plan row 3) is correct and landed; nothing binds to a stub.
+- `use std.gpu.*` vs. the direct module import differ only because they reach different files in
+  the two trees, not because package re-export resolves externs differently.
+- There is nothing to fix in `interpreter_module/` for this symptom, and
+  `runtime_native_gpu_stub.c` symbol precedence is not involved.
+
+What made the original diagnosis look solid was that the divergence was reproducible and
+name-correlated. Four resolution hypotheses were tested and refuted before the cause was found —
+stale `.smf` shadowing, a same-named class method colliding, the `torch.sffi` import, and module
+caching. The test that settles it in one step is a **sentinel**: change the stdlib function to
+return an impossible value and see whether it appears. It did not, which proves the file is not
+being read and makes every resolution hypothesis moot.
+
+Re-verify this symptom only with a binary built from the tree under test, or after checking
+`strings -a <binary> | grep -c <other-worktree>`.
