@@ -19,11 +19,14 @@ import { canonicalJson } from '../storage/canonical.js';
 
 export const RERANK_CONTRACT_V1 = 'rrf-bounded-rerank-v1';
 export const RERANK_CONTRACT_V2 = 'rrf-bounded-rerank-v2';
+export const RERANK_CONTRACT_V3 = 'rrf-bounded-rerank-v3';
+export const RERANK_EVIDENCE_CONTRACT_V3 = 'rerank-pair-evidence-v1';
 export const RERANK_POLICY_V1 = 'spipe-rerank-policy-v1';
 export const MAX_HITS = 1000;
 export const MAX_POOL_HITS_V2 = RRF_MAX_POOL_HITS_V2;
 export const MAX_OUTPUT_HITS_V2 = RRF_MAX_PUBLIC_HITS_V2;
 export const MAX_EVIDENCE_IDS = 16;
+export const MAX_ACCEPTED_EDGE_EVIDENCE_V3 = MAX_EVIDENCE_IDS;
 
 const MAX_TEXT_BYTES = 512;
 const MAX_EPOCH_DAY = 3_652_058;
@@ -59,6 +62,8 @@ const EVIDENCE_IDENTITY_FIELDS = [
 ];
 const RECORD_FIELDS = ['documentId', 'acceptedTrace', 'featureMatch', 'componentMatch', 'recency', 'status'];
 const TRACE_FIELDS = ['distance', 'evidenceEdgeUids', 'authorityReceiptUids'];
+const TRACE_FIELDS_V3 = ['distance', 'acceptedEdgeEvidence'];
+const ACCEPTED_EDGE_EVIDENCE_FIELDS_V3 = ['edgeUid', 'authorityReceiptUid'];
 const CLASSIFICATION_FIELDS = ['matched', 'queryClassificationUids', 'artifactClassificationUids', 'evidenceEdgeUids'];
 const RECENCY_FIELDS = ['documentRevisionEpochDay', 'evidenceUid'];
 const STATUS_FIELDS = ['value', 'evidenceUid'];
@@ -72,6 +77,10 @@ const SOURCE_FIELDS_V2 = [
 const SOURCE_POOL_DOMAIN_V2 = 'spipe-rrf-source-pool-v1\0';
 const COMPLETE_SOURCE_SET_DOMAIN_V2 = 'spipe-rrf-complete-source-set-v1\0';
 const COMPLETE_OUTPUT_DOMAIN_V2 = 'spipe-rrf-complete-output-v1\0';
+const RERANK_EVIDENCE_DOMAIN_V3 = 'spipe-rerank-pair-evidence-v1\0';
+const EVIDENCE_IDENTITY_FIELDS_V3 = [
+  ...EVIDENCE_IDENTITY_FIELDS, 'evidenceContractVersion', 'authorityVerifierDigest',
+];
 
 function fail(code) {
   return Object.freeze({ ok: false, error: Object.freeze({ code }) });
@@ -435,6 +444,63 @@ function normalizeTrace(value) {
   return Object.freeze({ distance: trace.distance, evidenceEdgeUids: edges, authorityReceiptUids: receipts });
 }
 
+function normalizeTraceV3(value) {
+  const trace = recordSnapshot(value, TRACE_FIELDS_V3);
+  if (trace === null) return null;
+  const evidenceRefs = arraySnapshot(trace.acceptedEdgeEvidence);
+  // The allocation cap is checked before semantic distance/cardinality rules.
+  if (evidenceRefs === null || evidenceRefs.length > MAX_ACCEPTED_EDGE_EVIDENCE_V3) return null;
+  if (!(trace.distance === null || [1, 2, 3].includes(trace.distance))
+      || evidenceRefs.length !== (trace.distance === null ? 0 : trace.distance)) return null;
+  const acceptedEdgeEvidence = [];
+  const seenEdges = new Set();
+  const receiptSet = new Set();
+  for (const evidenceRef of evidenceRefs) {
+    const evidence = recordSnapshot(evidenceRef, ACCEPTED_EDGE_EVIDENCE_FIELDS_V3);
+    if (evidence === null || !validText(evidence.edgeUid)
+        || !validText(evidence.authorityReceiptUid) || seenEdges.has(evidence.edgeUid)) return null;
+    seenEdges.add(evidence.edgeUid);
+    receiptSet.add(evidence.authorityReceiptUid);
+    acceptedEdgeEvidence.push(Object.freeze({
+      edgeUid: evidence.edgeUid,
+      authorityReceiptUid: evidence.authorityReceiptUid,
+    }));
+  }
+  const evidenceEdgeUids = [...seenEdges].sort(unsignedUtf8CompareV1);
+  const authorityReceiptUids = [...receiptSet].sort(unsignedUtf8CompareV1);
+  return Object.freeze({
+    distance: trace.distance,
+    acceptedEdgeEvidence: Object.freeze(acceptedEdgeEvidence),
+    evidenceEdgeUids: Object.freeze(evidenceEdgeUids),
+    authorityReceiptUids: Object.freeze(authorityReceiptUids),
+  });
+}
+
+function traceForEvidenceDigestV3(trace) {
+  return Object.freeze({
+    distance: trace.distance,
+    acceptedEdgeEvidence: trace.acceptedEdgeEvidence,
+  });
+}
+
+function evidenceDigestV3(identity, records) {
+  const identityWithoutDigest = Object.freeze(Object.fromEntries(
+    Object.entries(identity).filter(([key]) => key !== 'evidenceDigest'),
+  ));
+  const digestRecords = records.map((record) => Object.freeze({
+    documentId: record.documentId,
+    acceptedTrace: traceForEvidenceDigestV3(record.acceptedTrace),
+    featureMatch: record.featureMatch,
+    componentMatch: record.componentMatch,
+    recency: record.recency,
+    status: record.status,
+  }));
+  return canonicalDigestV2(RERANK_EVIDENCE_DOMAIN_V3, Object.freeze({
+    identity: identityWithoutDigest,
+    records: Object.freeze(digestRecords),
+  }));
+}
+
 function normalizeClassification(value) {
   const item = recordSnapshot(value, CLASSIFICATION_FIELDS);
   if (item === null || typeof item.matched !== 'boolean') return null;
@@ -496,6 +562,41 @@ function calculateRanked(normalizedRecords, evidenceIdentity, rawHits) {
       }) });
   }
   return Object.freeze({ ok: true, value: ranked });
+}
+
+function finishCompletePoolRerank(rawResult, evidenceIdentity, normalizedRecords, outputLimit,
+  identityAdditions) {
+  const rankedResult = calculateRanked(normalizedRecords, evidenceIdentity, rawResult.value.hits);
+  if (!rankedResult.ok) return rankedResult;
+  const ranked = rankedResult.value;
+  ranked.sort((left, right) => left.adjustedScoreUnits !== right.adjustedScoreUnits
+    ? right.adjustedScoreUnits - left.adjustedScoreUnits
+    : left.rawScoreUnits !== right.rawScoreUnits
+      ? right.rawScoreUnits - left.rawScoreUnits
+      : unsignedUtf8CompareV1(left.documentId, right.documentId));
+  const outputCount = Math.min(outputLimit, ranked.length);
+  const hits = ranked.slice(0, outputCount).map((hit, index) => Object.freeze({
+    documentId: hit.documentId,
+    finalRank: index + 1,
+    rawHit: hit.rawHit,
+    adjustedScoreUnits: hit.adjustedScoreUnits,
+    rerankExplanation: Object.freeze({
+      ...hit.explanation,
+      tieBreak: Object.freeze({
+        adjustedScoreUnits: hit.adjustedScoreUnits,
+        rawScoreUnits: hit.rawScoreUnits,
+        documentId: hit.documentId,
+      }),
+    }),
+  }));
+  return Object.freeze({ ok: true, value: Object.freeze({
+    identity: Object.freeze({
+      ...rawResult.value.identity,
+      ...identityAdditions,
+      outputLimit,
+    }),
+    hits: Object.freeze(hits),
+  }) });
 }
 
 export function createRrfBoundedRerankerV1({ verifyEvidencePage } = {}) {
@@ -750,32 +851,9 @@ export function createRrfBoundedRerankerV2({ verifyEvidencePage } = {}) {
         return fail('invalid_evidence_authority');
       }
 
-      const rankedResult = calculateRanked(normalizedRecords, evidenceIdentity, rawResult.value.hits);
-      if (!rankedResult.ok) return rankedResult;
-      const ranked = rankedResult.value;
-      ranked.sort((left, right) => left.adjustedScoreUnits !== right.adjustedScoreUnits
-        ? right.adjustedScoreUnits - left.adjustedScoreUnits
-        : left.rawScoreUnits !== right.rawScoreUnits
-          ? right.rawScoreUnits - left.rawScoreUnits
-          : unsignedUtf8CompareV1(left.documentId, right.documentId));
-      const outputCount = Math.min(root.outputLimit, ranked.length);
-      const hits = ranked.slice(0, outputCount).map((hit, index) => Object.freeze({
-        documentId: hit.documentId,
-        finalRank: index + 1,
-        rawHit: hit.rawHit,
-        adjustedScoreUnits: hit.adjustedScoreUnits,
-        rerankExplanation: Object.freeze({
-          ...hit.explanation,
-          tieBreak: Object.freeze({
-            adjustedScoreUnits: hit.adjustedScoreUnits,
-            rawScoreUnits: hit.rawScoreUnits,
-            documentId: hit.documentId,
-          }),
-        }),
-      }));
-      return Object.freeze({ ok: true, value: Object.freeze({
-        identity: Object.freeze({
-          ...rawResult.value.identity,
+      return finishCompletePoolRerank(
+        rawResult, evidenceIdentity, normalizedRecords, root.outputLimit,
+        Object.freeze({
           rerankContractVersion: RERANK_CONTRACT_V2,
           policyVersion: RERANK_POLICY_V1,
           internalPoolCount: rawResult.value.hits.length,
@@ -784,10 +862,156 @@ export function createRrfBoundedRerankerV2({ verifyEvidencePage } = {}) {
           recencyEpochDay: evidenceIdentity.recencyEpochDay,
           authorityReceiptUid: evidenceIdentity.authorityReceiptUid,
           evidenceDigest: evidenceIdentity.evidenceDigest,
-          outputLimit: root.outputLimit,
         }),
-        hits: Object.freeze(hits),
-      }) });
+      );
+    },
+  });
+}
+
+export function createRrfBoundedRerankerV3(options = {}) {
+  const config = recordSnapshot(options, ['verifyEvidencePage', 'authorityVerifierDigest']);
+  if (config === null || Reflect.ownKeys(config).length !== 2
+      || typeof config.verifyEvidencePage !== 'function'
+      || !validSha256(config.authorityVerifierDigest)) {
+    throw new TypeError('V3 reranker requires verifyEvidencePage and authorityVerifierDigest');
+  }
+  const { verifyEvidencePage, authorityVerifierDigest } = config;
+  return Object.freeze({
+    rerankRrfCompletePoolV3(request) {
+      const root = recordSnapshot(request, REQUEST_FIELDS);
+      if (root === null) return fail('invalid_request');
+      const rawResult = normalizeRawV2(root.rawFusion);
+      if (!rawResult.ok) return rawResult;
+
+      const evidence = recordSnapshot(root.evidencePage, EVIDENCE_FIELDS);
+      const evidenceIdentity = evidence === null
+        ? null : recordSnapshot(evidence.identity, EVIDENCE_IDENTITY_FIELDS_V3);
+      if (evidenceIdentity === null
+          || EVIDENCE_IDENTITY_FIELDS_V3.some((field) => evidenceIdentity[field] === undefined)
+          || ['workspaceId', 'snapshotId', 'authorizationScopeDigest', 'queryReceipt',
+            'graphSnapshotId', 'authorityReceiptUid']
+            .some((field) => !validText(evidenceIdentity[field]))
+          || !validSha256(evidenceIdentity.rawFusionDigest)
+          || !validSha256(evidenceIdentity.evidenceDigest)
+          || evidenceIdentity.evidenceContractVersion !== RERANK_EVIDENCE_CONTRACT_V3
+          || !validSha256(evidenceIdentity.authorityVerifierDigest)
+          || !Number.isSafeInteger(evidenceIdentity.graphPolicyVersion)
+          || evidenceIdentity.graphPolicyVersion < 0
+          || evidenceIdentity.graphPolicyVersion > 0xffffffff
+          || !(evidenceIdentity.recencyEpochDay === null
+            || (Number.isSafeInteger(evidenceIdentity.recencyEpochDay)
+              && evidenceIdentity.recencyEpochDay >= 0
+              && evidenceIdentity.recencyEpochDay <= MAX_EPOCH_DAY))) {
+        return fail('invalid_evidence_identity');
+      }
+      if (evidenceIdentity.authorityVerifierDigest !== authorityVerifierDigest) {
+        return fail('authority_verifier_mismatch');
+      }
+      if (evidenceIdentity.rawFusionDigest !== rawResult.value.identity.rawFusionDigest) {
+        return fail('raw_fusion_digest_mismatch');
+      }
+      for (const field of ['workspaceId', 'snapshotId', 'authorizationScopeDigest', 'queryReceipt']) {
+        if (evidenceIdentity[field] !== rawResult.value.identity.context[field]) {
+          return fail('context_mismatch');
+        }
+      }
+      if (root.policy === undefined || recordSnapshot(root.policy, Object.keys(POLICY)) === null) {
+        return fail('invalid_policy');
+      }
+      if (!equalPolicy(root.policy)) return fail('policy_mismatch');
+      if (!Number.isSafeInteger(root.outputLimit)
+          || root.outputLimit < 1 || root.outputLimit > MAX_OUTPUT_HITS_V2) {
+        return fail('invalid_output_limit');
+      }
+      const records = arraySnapshot(evidence.records);
+      if (records === null || records.length !== rawResult.value.hits.length) {
+        return fail('invalid_evidence_page');
+      }
+      const recordShapes = [];
+      for (const record of records) {
+        const shape = recordSnapshot(record, RECORD_FIELDS);
+        if (shape === null) return fail('invalid_evidence_page');
+        recordShapes.push(shape);
+      }
+      for (let index = 0; index < recordShapes.length; index += 1) {
+        if (recordShapes[index].documentId !== rawResult.value.hits[index].documentId) {
+          return fail('record_identity_mismatch');
+        }
+      }
+      const traces = [];
+      for (const shape of recordShapes) {
+        const trace = normalizeTraceV3(shape.acceptedTrace);
+        if (trace === null) return fail('invalid_accepted_trace');
+        traces.push(trace);
+      }
+      const features = [];
+      const components = [];
+      for (const shape of recordShapes) {
+        const feature = normalizeClassification(shape.featureMatch);
+        const component = normalizeClassification(shape.componentMatch);
+        if (feature === null || component === null) return fail('invalid_classification');
+        features.push(feature);
+        components.push(component);
+      }
+      const recencies = [];
+      for (const shape of recordShapes) {
+        if (shape.recency === null) {
+          recencies.push(null);
+          continue;
+        }
+        const item = recordSnapshot(shape.recency, RECENCY_FIELDS);
+        if (item === null || evidenceIdentity.recencyEpochDay === null
+            || !Number.isSafeInteger(item.documentRevisionEpochDay)
+            || item.documentRevisionEpochDay < 0
+            || item.documentRevisionEpochDay > evidenceIdentity.recencyEpochDay
+            || !validText(item.evidenceUid)) return fail('invalid_recency');
+        recencies.push(Object.freeze({ ...item }));
+      }
+      const statuses = [];
+      for (const shape of recordShapes) {
+        const status = recordSnapshot(shape.status, STATUS_FIELDS);
+        if (status === null || !['active', 'stale', 'deprecated'].includes(status.value)
+            || !validText(status.evidenceUid)) return fail('invalid_status');
+        statuses.push(Object.freeze({ ...status }));
+      }
+      const normalizedRecords = recordShapes.map((shape, index) => Object.freeze({
+        documentId: shape.documentId,
+        acceptedTrace: traces[index],
+        featureMatch: features[index],
+        componentMatch: components[index],
+        recency: recencies[index],
+        status: statuses[index],
+      }));
+      if (evidenceDigestV3(evidenceIdentity, normalizedRecords) !== evidenceIdentity.evidenceDigest) {
+        return fail('evidence_digest_mismatch');
+      }
+      const normalizedEvidencePage = Object.freeze({
+        identity: Object.freeze({ ...evidenceIdentity }),
+        records: Object.freeze(normalizedRecords),
+      });
+      try {
+        if (verifyEvidencePage(Object.freeze({
+          rawFusion: root.rawFusion,
+          evidencePage: normalizedEvidencePage,
+        })) !== true) return fail('invalid_evidence_authority');
+      } catch (_error) {
+        return fail('invalid_evidence_authority');
+      }
+      return finishCompletePoolRerank(
+        rawResult, evidenceIdentity, normalizedRecords, root.outputLimit,
+        Object.freeze({
+          rerankContractVersion: RERANK_CONTRACT_V3,
+          evidenceContractVersion: RERANK_EVIDENCE_CONTRACT_V3,
+          authorityVerifierDigest,
+          policyVersion: RERANK_POLICY_V1,
+          internalPoolCount: rawResult.value.hits.length,
+          graphSnapshotId: evidenceIdentity.graphSnapshotId,
+          graphPolicyVersion: evidenceIdentity.graphPolicyVersion,
+          recencyEpochDay: evidenceIdentity.recencyEpochDay,
+          authorityReceiptUid: evidenceIdentity.authorityReceiptUid,
+          evidenceDigest: evidenceIdentity.evidenceDigest,
+        }),
+      );
     },
   });
 }
