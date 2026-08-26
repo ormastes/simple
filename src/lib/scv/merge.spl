@@ -6,6 +6,9 @@ use std.scv.core.{scv_object_path, scv_chunk_path, scv_state_private, scv_line_s
 use std.scv.store.{scv_hash_text, scv_write_text, scv_write_chunk_from_file, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op, scv_commit_tree}
 use std.scv.identity_merge.{scv_identity_merge_groups}
 use std.scv.structural_match.{scv_default_match_config, scv_compute_edit_script, scv_parser_index_root_node, scv_text_block_names, scv_structural_merge_from_text}
+use std.scv.region_merge.{scv_region_merge_text}
+use std.scv.merge_validation.{scv_merge_validation_accept}
+use std.scv.conflict_v2.{scv_conflict_v2_payload, scv_conflict_v2_write, scv_conflict_v2_classify}
 
 # ---------------------------------------------------------------------------
 # Structural merge helpers
@@ -61,6 +64,9 @@ fn scv_try_structural_merge(root: text, rel: text, base_line: text, left_line: t
         return ""
     val merged = scv_structural_merge_from_text(base_text, left_text, right_text)
     if merged == "":
+        return ""
+    # SCV-IMPL-D-06: aggressive output is validated before acceptance.
+    if not scv_merge_validation_accept(merged):
         return ""
     scv_write_merged_line_file(root, rel, merged)
 
@@ -160,6 +166,32 @@ fn scv_add_paths_from_tree(tree_content: text, paths: text) -> text:
         if rel != "" and not scv_line_set_contains(out, rel):
             out = out + rel + "\n"
     out
+
+# SCV-IMPL-D-07 — v2 typed conflict emission for content conflicts. Reads the
+# three sides, classifies signature_conflict vs content_overlap over the
+# region parser's view, and records the attempted algorithms. v1 objects stay
+# byte-stable; v2 lives in objects/conflicts_v2.
+fn scv_write_conflict_v2_content(root: text, rel: text, base_line: text, left_line: text, right_line: text, attempted: text) -> text:
+    var kind = "content_overlap"
+    val base_path = scv_chunk_path(root, scv_tree_line_chunk_id(base_line))
+    val left_path = scv_chunk_path(root, scv_tree_line_chunk_id(left_line))
+    val right_path = scv_chunk_path(root, scv_tree_line_chunk_id(right_line))
+    if file_exists(base_path) and file_exists(left_path) and file_exists(right_path):
+        kind = scv_conflict_v2_classify(file_read(base_path), file_read(left_path), file_read(right_path))
+    val payload = scv_conflict_v2_payload(rel, kind, "", base_line, left_line, right_line, attempted, "no non-conflicting merge found by the attempted algorithms")
+    scv_conflict_v2_write(root, payload)
+
+# True when `side_tree` carries a path absent from `base_tree` — for the D-07
+# entity_identity_ambiguous detection in the identity pre-pass.
+fn scv_tree_has_added_path(side_tree: text, base_tree: text) -> bool:
+    for line in side_tree.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val rel = scv_tree_line_path(trimmed)
+        if rel != "" and scv_tree_line_for_path(base_tree, rel) == "":
+            return true
+    false
 
 fn scv_write_conflict(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     val payload = "path: {rel}\nbase: {base_line}\nleft: {left_line}\nright: {right_line}\ntime_ms: {current_time_ms()}\n"
@@ -261,6 +293,29 @@ fn scv_try_syntax_node_merge(root: text, rel: text, base_line: text, left_line: 
     val merged_text = scv_apply_line_side(left_applied, right_text, right_changes)
     scv_write_merged_line_file(root, rel, merged_text)
 
+# SCV-IMPL-D-05 — semistructured region merge, attempted only where every
+# earlier rung failed and a conflict would otherwise be written. Its output is
+# validated by the D-06 ladder's always-available rungs before acceptance.
+fn scv_try_region_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
+    if base_line == "" or left_line == "" or right_line == "":
+        return ""
+    val base_path = scv_chunk_path(root, scv_tree_line_chunk_id(base_line))
+    val left_path = scv_chunk_path(root, scv_tree_line_chunk_id(left_line))
+    val right_path = scv_chunk_path(root, scv_tree_line_chunk_id(right_line))
+    if not file_exists(base_path) or not file_exists(left_path) or not file_exists(right_path):
+        return ""
+    val base_text = file_read(base_path)
+    val left_text = file_read(left_path)
+    val right_text = file_read(right_path)
+    if base_text.contains("\u0000") or left_text.contains("\u0000") or right_text.contains("\u0000"):
+        return ""
+    val merged = scv_region_merge_text(base_text, left_text, right_text)
+    if merged == "":
+        return ""
+    if not scv_merge_validation_accept(merged):
+        return ""
+    scv_write_merged_line_file(root, rel, merged)
+
 fn scv_try_line_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     if base_line == "" or left_line == "" or right_line == "":
         return ""
@@ -329,7 +384,13 @@ fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, 
         val merged_line = scv_try_line_merge(root, rel, base_line, left_line, right_line)
         if merged_line != "":
             return (merged_line, "", "structural-fallback-line")
+        # SCV-IMPL-D-05: last aggressive rung before conflict — semistructured
+        # region merge (validated by the D-06 gate inside the helper).
+        val region_line = scv_try_region_merge(root, rel, base_line, left_line, right_line)
+        if region_line != "":
+            return (region_line, "", "region-merge")
         val conflict_id = scv_write_conflict(root, rel, base_line, left_line, right_line)
+        scv_write_conflict_v2_content(root, rel, base_line, left_line, right_line, "structural-anchor,syntax-node,line,region")
         return (left_line, conflict_id, "conflict-data")
     val syntax_merged_line2 = scv_try_syntax_node_merge(root, rel, base_line, left_line, right_line)
     if syntax_merged_line2 != "":
@@ -338,6 +399,7 @@ fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, 
     if merged_line2 != "":
         return (merged_line2, "", "line-fallback")
     val conflict_id2 = scv_write_conflict(root, rel, base_line, left_line, right_line)
+    scv_write_conflict_v2_content(root, rel, base_line, left_line, right_line, "syntax-node,line")
     (left_line, conflict_id2, "conflict-data")
 
 # SCV-IMPL-D-04 — identity-aware pre-pass. Groups are entities the path/chunk
@@ -368,15 +430,29 @@ fn scv_apply_identity_group(root: text, group: text, base_tree: text, left_tree:
     val source = scv_tree_line_path(f[4])
     if kind == "rename_edit":
         val (picked, conflict_id, strategy) = scv_pick_merge_line(root, target, base_tree, left_tree, right_tree, base_line, left_line, right_line)
-        val rows = "{source}: identity-rename-source\n{target}: identity-rename-edit ({strategy}) entity={entity}\n"
+        val rows = "{source}: identity-rename-source\n{target}: identity-rename-clobbered ({strategy}) entity={entity}\n"
         return (picked, conflict_id, rows, consumed)
     if kind == "rename_rename":
         val conflict_id = scv_write_conflict_kind(root, target, "entity_identity_ambiguous", entity, f[4], f[5], f[6])
+        scv_conflict_v2_write(root, scv_conflict_v2_payload(target, "entity_identity_ambiguous", entity, f[4], f[5], f[6], "identity-prepass", "both sides renamed entity {entity} to different paths"))
         val rows = "{source}: identity-rename-source\n{target}: identity-rename-rename conflict entity={entity}\n"
         return (left_line, conflict_id, rows, consumed)
     if kind == "rename_delete":
         val kept = if left_line != "": left_line else: right_line
         val conflict_id = scv_write_conflict_kind(root, target, "entity_rename_delete", entity, f[4], f[5], f[6])
+        # SCV-IMPL-D-07: name the D-04 store ceiling properly. The linear
+        # identity store attributes only ONE accepted rename per EntityId, so
+        # a rename-vs-rename surfaces here as rename-vs-"delete" with the
+        # second rename left as an unattributed ADDED path on the deleting
+        # side. When that added path exists, the v2 kind is
+        # entity_identity_ambiguous; v1 keeps its store's-eye label.
+        val deleting_tree = if left_line == "": left_tree else: right_tree
+        var v2_kind = "entity_rename_delete"
+        var v2_diag = "entity {entity} renamed on one side and deleted on the other"
+        if scv_tree_has_added_path(deleting_tree, base_tree):
+            v2_kind = "entity_identity_ambiguous"
+            v2_diag = "identity store attributes only one accepted rename per EntityId; the deleting side carries an unattributed added path that may be a second rename of entity {entity}"
+        scv_conflict_v2_write(root, scv_conflict_v2_payload(target, v2_kind, entity, f[4], f[5], f[6], "identity-prepass", v2_diag))
         val rows = "{source}: identity-rename-source\n{target}: identity-rename-delete conflict entity={entity}\n"
         return (kept, conflict_id, rows, consumed)
     ("", "", "", "")

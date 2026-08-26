@@ -324,3 +324,44 @@ run is FAIL. Step scripts are committed unsigned and signed by a human with
 - Ledger: 9 rows appended (week 7, due 2026-10-27); step scripts PQ-signed
   (WOTS leaves 50..58) and flipped by the signed checker at
   --now 2026-10-27T12:00:00Z → 51/51 done.
+
+## Wave 4 — COMPLETE 2026-08-26 (closeout lane)
+- SCV-IMPL E-08, E-09, P-07, G-06, D-05, D-06, D-07, I-05, I-06, B-05 landed
+  by four lanes; all nine acceptance specs green at expected counts (closeout
+  sweep 2026-08-26, binary bin/release/x86_64-unknown-linux-gnu/simple
+  60744944B 2026-08-26 01:16, seed): watchman-adapter 6/6, editor-ipc 6/6,
+  nvim-protocol 7/7, build-invalidation 5/5, region-merge 5/5,
+  merge-validation 5/5, conflict-v2 4/4, identity-corrections 3/3,
+  shadow-write 3/3. Gate: check-scv-identity-precision.shs PASS 100.0% on the
+  34-case identity corpus. Regressions held: mvp 11/11, merge 5/5,
+  dual-write 4/4, file-identity 8/8, event-source 4/4, hir-fingerprint 3/3,
+  incremental-parse 9/9; structural_match >=5/8 baseline; crash harness PASS
+  (store.spl was edited by lane D's B-05 trigger), mission-critical PASS.
+- Findings:
+  1. UDS extern shape mismatch: the `.spl` externs in
+     src/lib/nogc_sync_mut/service/extern.spl declare text-shaped
+     rt_unix_socket_* while the Rust runtime (net_uds.rs) implements a
+     (ptr,len)/out-param ABI with rt_unix_socket_free_buf; listen/connect
+     return -22 EINVAL, recv core-dumps. E-09 uses a pipe-spool transport
+     meanwhile. Bug record:
+     doc/08_tracking/bug/rt_unix_socket_extern_shape_mismatch_2026-08-26.md
+  2. watchman absent on this host: E-08 adapter is protocol-complete but
+     verified against a replay/fake endpoint; the spec exercises the wire
+     protocol, not a live watchman daemon.
+  3. dependency_model unavailable ceiling: build invalidation (G-06) reports
+     dependency-closure invalidation as unavailable until a real dependency
+     model exists (no BuildTarget/dep traversal in 80.driver); file-level
+     invalidation only.
+  4. validated_partial ceiling: merge validation (D-06) can only validate the
+     merged regions it can parse; unparsed remainder is published as
+     validated_partial, never silently promoted to validated.
+  5. one-rename-per-EntityId ceiling is now emitted honestly as
+     entity_identity_ambiguous (I-05/I-06) instead of picking a winner;
+     precision stays 100% on the 34-case corpus because ambiguity is reported,
+     not guessed.
+  6. B-05 shadow-write trigger is config-gated and OFF by default; store.spl
+     carries the trigger hook only, crash harness re-verified green on the
+     edited store.
+- Ledger: 10 rows appended (week 8, due 2026-11-10); step scripts PQ-signed
+  (WOTS leaves 59..68, key scv-migration-root-abdba82f4ac2) and flipped by the
+  signed checker at --now 2026-11-10T12:00:00Z -> 61/61 done.

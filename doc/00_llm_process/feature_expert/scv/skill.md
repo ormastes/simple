@@ -139,3 +139,37 @@ second-granular so warm status only trusts reads whose post-read stat matches
 the pre-read stat. Ledger 51/51 done (week-7 rows due 2026-10-27, signed step
 scripts SCV-IMPL-{E-06,E-07,P-06,G-05,D-01,I-04,D-03,D-04,G-04}). B-01/B-02
 remain blocked on sj repair (`sj --version` rc=139 on 2026-08-26).
+
+## Post-Wave-4 (2026-08-26)
+
+Wave 4 landed ten items across four lanes: E-08 watchman adapter
+(`src/lib/scv/watchman_adapter.spl`, protocol-complete, verified against a
+replay endpoint — watchman is absent on this host), E-09 editor IPC and P-07 nvim
+`scv/editor/v1` protocol (`editor_ipc.spl`, `nvim_protocol.spl`; transport is a
+pipe-spool because the `rt_unix_socket_*` externs are shape-mismatched
+against the Rust runtime's (ptr,len)/out-param ABI — listen/connect return
+-22 EINVAL, recv core-dumps; bug record
+`doc/08_tracking/bug/rt_unix_socket_extern_shape_mismatch_2026-08-26.md`),
+G-06 interface-driven build invalidation (`build_invalidation.spl`;
+syntactic_interface_id drives downstream invalidation in SCV metadata;
+dependency-closure invalidation is reported `unavailable` until a real
+compiler dependency model exists, so the comment-only codegen skip stays
+BLOCKED — file-level invalidation only), D-05/D-06/D-07 region
+merge + merge validation + conflict v2 (`region_merge.spl`,
+`merge_validation.spl`, `conflict_v2.spl`; unparsed remainder publishes as
+`validated_partial`, never promoted), I-05 calibration corpus + oracle and I-06 identity
+corrections CLI (`identity_corrections.spl`, scv identity
+link|unlink|split|merge|trace; the one-rename-per-EntityId ceiling is now
+emitted as `entity_identity_ambiguous` instead of guessing a winner), and
+B-05 shadow-write trigger (`shadow_write.spl` + a config-gated hook in
+`store.spl`, OFF by default; crash harness re-verified green on the edited
+store). Acceptance sweep 2026-08-26: watchman 6/6, editor-ipc 6/6,
+nvim 7/7, build-invalidation 5/5, region-merge 5/5, merge-validation 5/5,
+conflict-v2 4/4, identity-corrections 3/3, shadow-write 3/3;
+`check-scv-identity-precision.shs` PASS 100.0% on the 34-case corpus
+(`test/fixtures/scv_identity_corpus/`); regressions held (mvp 11/11,
+merge 5/5, dual-write 4/4, file-identity 8/8, event-source 4/4,
+hir-fingerprint 3/3, incremental-parse 9/9). Ledger 61/61 done (week-8 rows
+due 2026-11-10, signed step scripts
+SCV-IMPL-{E-08,E-09,P-07,G-06,D-05,D-06,D-07,I-05,I-06,B-05}, WOTS leaves
+59..68).
