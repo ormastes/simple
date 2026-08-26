@@ -2095,3 +2095,17 @@ primitive. On x86-64 the helper path is compiled away: assembly retains one
 `mprotect` call and the W^X mask test, with no added allocation, lookup, copy,
 or dispatch. The repeated audit remains 0.07 seconds / 2,560 KiB peak RSS.
 Counts and signed-admission status remain unchanged.
+
+### Signed-admission receipt pipeline repair (2026-08-26)
+
+The shell verifier formerly emitted no `provider_id`, although both inventory
+consumers required one and the Simple parser required a framed v1 receipt. A
+cryptographically valid job therefore could not join any declaration. The
+verifier now emits canonical `simple.sffi-admission.v1`, and the contract test
+proves the full provider/source-signature join reaches `reverified` while all
+seven existing sabotage cases remain rejected.
+
+The expanded ephemeral fixture passes in 1.5 seconds. This is one-time
+admission/census work and adds zero per-call instructions or memory. The test
+key is intentionally not a production trust root, so declaration statistics
+remain 12,910 total, 11,286 `rt_`, and zero production signed-admitted rows.

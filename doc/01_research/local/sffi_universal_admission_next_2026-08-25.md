@@ -6215,3 +6215,26 @@ coherent-architecture branch is eliminated. Unix, GNU core-C, and MinGW syntax
 checks pass. No SFFI symbol, per-call lookup, allocation, copy, or new Simple
 dispatch was added. The Rust interpreter is safe-by-rejection on hosted ARM/
 RISC-V, not feature-complete there, and exact-artifact signing remains absent.
+
+## Signed-admission receipt join repair (2026-08-26)
+
+The cryptographic admission verifier successfully checked hashes, the
+provider-scoped Ed25519 trust root, and the manifest signature, but emitted a
+flat five-column table. Both census consumers immediately searched that output
+for a unique `provider_id`, while the canonical Simple parser expected
+`simple.sffi-admission.v1` framing. Therefore every configured admission job
+failed after cryptographic verification and could never become `reverified`.
+
+The verifier now emits the canonical framed receipt: provider, target, signer,
+artifact/ABI/signed-manifest/report digests, symbol count, and sorted verified
+symbol rows. The contract test now feeds that receipt through the real
+`SFFI_ADMISSION_JOBS` inventory join using an owned `@sffi(provider: ...)`
+declaration and exact source-signature hash. It passes, as do tampered artifact,
+stale/failed report, untrusted/duplicate key, noncanonical manifest, and
+substituted-signature rejection controls.
+
+This is admission-time tooling only; it changes no provider call path. The
+expanded fixture completes in 1.5 seconds. It deliberately generates ephemeral
+test trust material and does not count as production signed admission. A real
+external trust policy and exact production build inputs are still required, so
+the repository-wide signed-admitted count remains zero.

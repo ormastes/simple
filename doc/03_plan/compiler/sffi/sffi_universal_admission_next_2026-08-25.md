@@ -597,3 +597,15 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   than reject, hosted ARM/RISC-V executable transitions.
 - [ ] Bind exact runtime/compiler artifacts and ABI registry to a verified
   signature admission job; signed-admitted count remains zero.
+
+### Signed-admission receipt join
+
+- [x] Repair the verifier output to canonical `simple.sffi-admission.v1`.
+- [x] Bind provider, target, signer, artifact, ABI, manifest, report, and symbol
+  signatures in the emitted receipt.
+- [x] Exercise a freshly verified receipt through `SFFI_ADMISSION_JOBS` and the
+  exact provider/signature inventory join.
+- [x] Retain all signature, hash, canonicalization, trust, and failed-report
+  sabotage controls.
+- [ ] Provision an external production trust policy and exact runtime evidence
+  inputs; fixture-generated keys must never promote production census rows.
