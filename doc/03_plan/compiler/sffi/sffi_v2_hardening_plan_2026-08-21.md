@@ -1548,6 +1548,8 @@ Torch SFFI nor all SFFI may be described as verified safe.
   provider ID; missing/mismatched provider metadata fails closed.
 - Added provider-declared, provider-missing, and multi-provider-symbol census
   metrics so provider attribution debt cannot disappear inside generic unsafe.
+- Made symbol-level admission total: every declaration must be admitted before
+  the symbol is counted as fully admitted; mixed coverage stays migration debt.
 - Renamed annotation-derived “minimized” counts to contract-declared unsafe and
   reports lexical minimization as `not_measured` until resolved-call evidence
   exists.

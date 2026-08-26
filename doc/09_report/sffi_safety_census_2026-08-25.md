@@ -1088,6 +1088,9 @@ provider, or a declaration without provider identity, cannot inherit admission.
 The census
 reports provider-declared rows, provider-missing rows, and symbols naming more
 than one provider so attribution debt and provider conflicts remain visible.
+Symbol aggregation now calls a symbol fully admitted only when every declaration
+row is admitted; mixed admitted/unadmitted declarations are reported as partial
+admission and remain migration-required.
 It also stops calling `unsafe` tag plus contract metadata “minimized”: that proves
 neither lexical call ownership nor call-site count. It reports contract-declared
 unsafe rows separately and emits `unsafe_minimization_status=not_measured`
