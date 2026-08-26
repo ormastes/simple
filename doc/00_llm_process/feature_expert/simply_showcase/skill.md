@@ -45,3 +45,17 @@ the recursion guards between simply and this repo.
 5. Replace `update_site.sh` with a `.spl` generator once a released `simple`
    binary is consumable in simply's CI, and wire simply's daily job to read
    the `groups`/`total_pending` JSON to flip registry statuses.
+
+## Update 2026-08-26
+
+- `test --json` is native on every seed dispatch lane (`193af515043`,
+  `590a2676e8e`); simply's `data/test_results.json` is verbatim output.
+- simply gained `doc/plan/completion_criteria.md` (three gates + status
+  ladder) and `data/tests.sdn` (id|kind|path test lists).
+- Full `test/01_unit` sweep drives a fix campaign; landed so far:
+  `b1ded64c8e4` (sha1_x4 tuple annotation + module import), `8d8d11097a0`
+  (`expect_not` export, layout/installer imports), `88fe280bb0f` (tmux
+  `to_int_or`), `05b134ac502` (`invalid_node_id` fixtures). Recurring defect
+  classes: wrong import module path, missing export, bad tuple annotation,
+  auto-id-0 DOM fixtures, stale-API specs from the sspec-modernization waves.
+- Process state: `.spipe/simply_showcase/state.md`.
