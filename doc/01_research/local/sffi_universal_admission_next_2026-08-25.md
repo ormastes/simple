@@ -6276,3 +6276,20 @@ unsafe tagging, 1,002 untouched `rt_` symbols, and zero signed-admitted rows or
 symbols. This removes exactly four declaration rows and one providerless
 symbol. It does not verify or sign the canonical process provider or wider
 SFFI estate.
+
+### Unimplemented interpreter debug hooks are unsafe capability gaps (2026-08-26)
+
+The `rt_hook_*` family has 14 distinct symbols and 42 declarations across the
+sync DAP library, async DAP mirror, and SFFI-generator specification. The
+backing-aware inventory finds no C, Rust, interpreter, or native provider.
+Every declaration is now explicitly `unsafe(ffi)`, and the Rust interpreter
+maps an unresolved `rt_hook_*` call to the existing typed capability-gap error
+rather than a generic unresolved-extern value. The focused source census is
+42/42 unsafe-tagged rows, 14/14 completely tagged symbols, and zero signed
+admissions. The targeted Rust unit test passes 3/3; the installed compatibility
+runner predates this Rust dispatch and is therefore not counted as verification.
+
+This is classification and fail-closed error routing, not a provider
+implementation, nullability proof, cryptographic admission, or full lexical
+call-site proof. It changes only the unknown-extern error path: normal provider
+dispatch, allocation, copying, and hot-call complexity are unchanged.

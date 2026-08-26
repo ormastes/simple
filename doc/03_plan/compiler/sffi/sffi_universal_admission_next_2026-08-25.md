@@ -632,3 +632,18 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   runtime; bootstrap-seed execution is compatibility evidence only.
 - [ ] Bind the canonical process provider to exact signed admission evidence;
   repository-wide signed admission remains zero.
+
+### Unimplemented interpreter debug hooks
+
+- [x] Inventory the 14 `rt_hook_*` identities across the three DAP/generator
+  declaration surfaces; none has an observed provider.
+- [x] Mark all 42 raw declarations `unsafe(ffi)` and add a focused authority
+  guard that rejects missing annotations or missing capability-gap wiring.
+- [x] Route unresolved `rt_hook_*` symbols through the typed interpreter
+  capability-gap family and cover it with the targeted Rust unit suite (3/3).
+- [x] Confirm the focused census: 42/42 rows and 14/14 symbols are explicitly
+  unsafe-tagged; signed admission remains zero.
+- [ ] Implement a versioned typed debug-hook provider or remove each raw API;
+  current annotations do not prove null/ownership safety or provider admission.
+- [ ] Execute the capability-gap fixture using a current admitted Simple runtime;
+  the installed compatibility runner predates this Rust dispatch.

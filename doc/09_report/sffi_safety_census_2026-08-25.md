@@ -2135,3 +2135,14 @@ declarations, 2,986 distinct `rt_` symbols, 1,553 incompletely unsafe-tagged
 symbols, 1,002 untouched `rt_` symbols, and zero signed-admitted rows or
 symbols. The tranche removes four rows and one distinct providerless symbol;
 the retained process provider and wider estate remain unsigned and unverified.
+
+### Interpreter debug-hook gap classification (2026-08-26)
+
+`rt_hook_*` has 42 production declaration rows for 14 distinct symbols in the
+sync DAP, async DAP, and generator surfaces. No provider is observed. The
+focused source census now reports 42 unsafe-tagged rows, 14 fully tagged
+symbols, zero incomplete symbols, and zero signed-admitted rows. The interpreter
+classifies an unresolved hook as a typed capability gap; the Rust unit suite
+passes 3/3. This remains unsafe and unverified: no provider, artifact signature,
+or null/ownership validation exists, and the installed compatibility runner is
+too old to count as runtime evidence for this new dispatch.
