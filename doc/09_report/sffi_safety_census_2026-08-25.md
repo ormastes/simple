@@ -1269,6 +1269,23 @@ facades. Provider coverage remains incomplete and WebSocket empty/failure
 ambiguity remains explicit, so the family is unsafe, unsigned, and unverified.
 Source-reviewed only; checks were not executed.
 
+## 2026-08-26 dead RuntimeValue container-constructor removal
+
+The providerless `rt_value_array_new` and `rt_value_dict_new` families had no
+consumer: every occurrence was a declaration, direct wrapper, re-export, or
+generator template. They were removed from the canonical no-GC owner, its
+async facade, the compiler-minimal duplicate, the compiler backend re-export,
+and both mirrored generator specifications. This prevents a later generation
+pass from recreating the dead raw-pointer API.
+
+The canonical RuntimeValue owner is reduced from 32 to 30 raw declarations,
+with closure 11 both lanes, 3 one-lane, and 16 providerless. The compiler
+minimal facade is reduced from 41 to 39 declarations, with closure 20 both, 3
+native-only, 0 interpreter-only, and 16 providerless. Because no callsite
+existed, the removal changes no runtime call, allocation, copy, lookup, branch,
+hash, dispatch, or memory layout. Remaining boundaries are still unsafe and
+unsigned. Source-reviewed only; checks were not executed.
+
 ## 2026-08-26 SQLite duplicate-boundary removal
 
 Both app SQLite modules are now high-level-only facades over the canonical

@@ -1541,6 +1541,21 @@ Torch SFFI nor all SFFI may be described as verified safe.
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
 
+## 2026-08-26 dead RuntimeValue container-constructor removal
+
+- Remove `rt_value_array_new` and `rt_value_dict_new` from both active owners,
+  facades/re-exports, and mirrored SFFI generator specifications after proving
+  that no consumer exists.
+- Prefer deletion over implementing providers for unused copyable raw handles.
+- Reduce canonical RuntimeValue closure to 11 both, 3 one-lane, and 16
+  providerless; reduce compiler-minimal closure to 20 both, 3 native-only, 0
+  interpreter-only, and 16 providerless.
+- Preserve performance and memory behavior: there was no callsite, and no new
+  call, allocation, copy, lookup, branch, hash, dispatch, or layout is added.
+- Continue classifying the remaining 16 providerless declarations by actual
+  consumers before deciding whether to remove or implement them.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
 ## 2026-08-26 file-delete ABI reconciliation
 
 - Remove the unused raw `file_delete_ptr` compiler-minimal declaration and
