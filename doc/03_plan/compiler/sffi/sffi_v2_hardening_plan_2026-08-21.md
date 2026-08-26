@@ -1588,3 +1588,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Valid diagnostic calls add one arity branch before unchanged provider work;
   no allocation, copy, lookup, hash, lock, retry, or traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 Unix-socket service contract follow-up
+
+- Tagged all six raw service socket declarations `unsafe(ffi)`.
+- Corrected close from fabricated boolean shape to its `i32` errno contract.
+- Enforced exact interpreter arity/types for listen/accept/send/recv/close and
+  rejected negative receive sizes before allocation.
+- Replaced receive failure/invalid-UTF-8 empty fabrication with typed errors;
+  valid UTF-8 now reuses the allocated buffer instead of lossy-copying it.
+- Preserved valid-path matches, locks, syscalls, and allocation count; no hash,
+  registry lookup, retry, or extra network dispatch was added.
+- Kept native recv pointer/out-length versus Simple text lifting explicitly
+  unverified/unsigned pending a generated descriptor wrapper.

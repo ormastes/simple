@@ -192,21 +192,30 @@ const NEG_EIO: i64 = -5;
 
 /// `rt_unix_socket_listen(path: text, backlog: i32) -> i64`
 pub fn rt_unix_socket_listen(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_listen requires 2 arguments (path, backlog)",
+        ));
+    }
+    let Value::Str(path) = &args[0] else {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_listen requires a text path",
+        ));
+    };
+    let backlog = args[1].as_int()?;
+    if backlog < i32::MIN as i64 || backlog > i32::MAX as i64 {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_listen backlog is outside i32 range",
+        ));
+    }
     #[cfg(unix)]
     {
-        let path = match args.first() {
-            Some(Value::Str(s)) => s.clone(),
-            _ => return Ok(Value::Int(NEG_EINVAL)),
-        };
         if path.is_empty() {
             return Ok(Value::Int(NEG_EINVAL));
         }
-        let _backlog = match args.get(1) {
-            Some(Value::Int(n)) => *n,
-            _ => 16,
-        };
-        let _ = std::fs::remove_file(&*path); // best-effort stale cleanup
-        match UnixListener::bind(&*path) {
+        let _backlog = backlog as i32;
+        let _ = std::fs::remove_file(path.as_ref()); // best-effort stale cleanup
+        match UnixListener::bind(path.as_ref()) {
             Ok(listener) => {
                 if listener.set_nonblocking(true).is_err() {
                     return Ok(Value::Int(NEG_EIO));
@@ -225,19 +234,21 @@ pub fn rt_unix_socket_listen(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
+        let _ = (path, backlog);
         Ok(Value::Int(NEG_EIO))
     }
 }
 
 /// `rt_unix_socket_accept(fd: i64) -> i64`
 pub fn rt_unix_socket_accept(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_accept requires 1 argument (fd)",
+        ));
+    }
+    let fd = args[0].as_int()?;
     #[cfg(unix)]
     {
-        let fd = match args.first() {
-            Some(Value::Int(n)) => *n,
-            _ => return Ok(Value::Int(NEG_EINVAL)),
-        };
         let mut lguard = LISTENERS.lock().unwrap();
         let listener = match lguard.as_mut().and_then(|m| m.get(&fd)) {
             Some(l) => l,
@@ -262,7 +273,7 @@ pub fn rt_unix_socket_accept(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
+        let _ = fd;
         Ok(Value::Int(NEG_EIO))
     }
 }
@@ -270,16 +281,19 @@ pub fn rt_unix_socket_accept(args: &[Value]) -> Result<Value, CompileError> {
 /// `rt_unix_socket_send(fd: i64, data: [u8]) -> i64`
 /// Bytes are encoded as Value::Str (raw bytes, not UTF-8) — same convention as rt_fd_write.
 pub fn rt_unix_socket_send(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_send requires 2 arguments (fd, data)",
+        ));
+    }
+    let fd = args[0].as_int()?;
+    let Value::Str(data) = &args[1] else {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_send requires text data",
+        ));
+    };
     #[cfg(unix)]
     {
-        let fd = match args.first() {
-            Some(Value::Int(n)) => *n,
-            _ => return Ok(Value::Int(NEG_EINVAL)),
-        };
-        let data = match args.get(1) {
-            Some(Value::Str(s)) => s.clone(),
-            _ => return Ok(Value::Int(NEG_EINVAL)),
-        };
         let mut guard = CONNS.lock().unwrap();
         let table = match guard.as_mut() {
             Some(t) => t,
@@ -297,58 +311,80 @@ pub fn rt_unix_socket_send(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
+        let _ = (fd, data);
         Ok(Value::Int(NEG_EIO))
     }
 }
 
 /// `rt_unix_socket_recv(fd: i64, max_len: i64) -> [u8]`
-/// Returns Value::Str (raw bytes; empty on EOF or EAGAIN or error).
+/// Returns validated UTF-8 text; only a genuine zero-byte read is empty.
 pub fn rt_unix_socket_recv(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_recv requires 2 arguments (fd, max_len)",
+        ));
+    }
+    let fd = args[0].as_int()?;
+    let max_len = args[1].as_int()?;
+    if max_len < 0 {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_recv max_len must be non-negative",
+        ));
+    }
+    let max = max_len as usize;
     #[cfg(unix)]
     {
-        let fd = match args.first() {
-            Some(Value::Int(n)) => *n,
-            _ => return Ok(Value::text(String::new())),
-        };
-        let max = match args.get(1) {
-            Some(Value::Int(n)) => *n as usize,
-            _ => 65536,
-        };
         let mut guard = CONNS.lock().unwrap();
         let table = match guard.as_mut() {
             Some(t) => t,
-            None => return Ok(Value::text(String::new())),
+            None => {
+                return Err(CompileError::runtime(
+                    "rt_unix_socket_recv has no active socket registry",
+                ))
+            }
         };
         let stream = match table.streams.get_mut(&fd) {
             Some(s) => s,
-            None => return Ok(Value::text(String::new())),
+            None => {
+                return Err(CompileError::runtime(
+                    "rt_unix_socket_recv received an unknown fd",
+                ))
+            }
         };
         let mut buf = vec![0u8; max];
         match stream.read(&mut buf) {
             Ok(n) => {
                 buf.truncate(n);
-                Ok(Value::text(String::from_utf8_lossy(&buf).into_owned()))
+                let text = String::from_utf8(buf).map_err(|_| {
+                    CompileError::runtime("rt_unix_socket_recv returned invalid UTF-8")
+                })?;
+                Ok(Value::text(text))
             }
-            Err(_) => Ok(Value::text(String::new())),
+            Err(error) => Err(CompileError::runtime(format!(
+                "rt_unix_socket_recv failed: {error}"
+            ))),
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
-        Ok(Value::text(String::new()))
+        let _ = (fd, max);
+        Err(CompileError::runtime(
+            "rt_unix_socket_recv is unavailable on this platform",
+        ))
     }
 }
 
 /// `rt_unix_socket_close(fd: i64) -> i32`
 /// Returns 0 on success, NEG_EBADF if fd unknown.
 pub fn rt_unix_socket_close(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_close requires 1 argument (fd)",
+        ));
+    }
+    let fd = args[0].as_int()?;
     #[cfg(unix)]
     {
-        let fd = match args.first() {
-            Some(Value::Int(n)) => *n,
-            _ => return Ok(Value::Int(NEG_EINVAL)),
-        };
         // Try listener registry first.
         let mut lguard = LISTENERS.lock().unwrap();
         if let Some(map) = lguard.as_mut() {
@@ -368,7 +404,27 @@ pub fn rt_unix_socket_close(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
+        let _ = fd;
         Ok(Value::Int(NEG_EBADF))
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn server_socket_handlers_reject_invalid_transport_before_io() {
+        assert!(rt_unix_socket_listen(&[]).is_err());
+        assert!(rt_unix_socket_listen(&[
+            Value::text("unused"),
+            Value::Int(i64::MAX),
+        ])
+        .is_err());
+        assert!(rt_unix_socket_accept(&[Value::Bool(false)]).is_err());
+        assert!(rt_unix_socket_send(&[Value::Int(1), Value::Bool(false)]).is_err());
+        assert!(rt_unix_socket_recv(&[Value::Int(1), Value::Int(-1)]).is_err());
+        assert!(rt_unix_socket_recv(&[Value::Int(i64::MAX), Value::Int(0)]).is_err());
+        assert!(rt_unix_socket_close(&[]).is_err());
     }
 }

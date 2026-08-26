@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+decl=src/lib/nogc_sync_mut/service/extern.spl
+provider=src/compiler_rust/compiler/src/interpreter_extern/qmp_socket.rs
+native=src/compiler_rust/runtime/src/value/net_uds.rs
+registration=src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+
+test "$(rg -c '^@unsafe\(' "$decl")" -eq 6
+test "$(rg -c '^extern fn rt_unix_socket_' "$decl")" -eq 6
+rg -q '^extern fn rt_unix_socket_close\(fd: i64\) -> i32$' "$decl"
+rg -q '^extern fn rt_unix_socket_listen\(path: text, backlog: i32\) -> i64$' "$decl"
+! rg -q '^extern fn rt_unix_socket_close.*-> bool$' "$decl"
+
+for spec in listen:2 accept:1 send:2 recv:2 close:1; do
+    name=${spec%%:*}
+    arity=${spec##*:}
+    body="$(sed -n "/^pub fn rt_unix_socket_${name}/,/^}/p" "$provider")"
+    printf '%s\n' "$body" | rg -q "if args.len\(\) != ${arity}"
+    printf '%s\n' "$body" | rg -q 'return Err\(CompileError::runtime'
+    rg -q "insert_simple!\(\"rt_unix_socket_${name}\"" "$registration"
+done
+
+listen_body="$(sed -n '/^pub fn rt_unix_socket_listen/,/^}/p' "$provider")"
+printf '%s\n' "$listen_body" | rg -q 'backlog < i32::MIN as i64 || backlog > i32::MAX as i64'
+
+recv_body="$(sed -n '/^pub fn rt_unix_socket_recv/,/^}/p' "$provider")"
+printf '%s\n' "$recv_body" | rg -q 'if max_len < 0'
+! printf '%s\n' "$recv_body" | rg -q '_ => 65536'
+! printf '%s\n' "$recv_body" | rg -q 'return Ok\(Value::text\(String::new\(\)\)\)'
+! printf '%s\n' "$recv_body" | rg -q 'from_utf8_lossy'
+printf '%s\n' "$recv_body" | rg -q 'String::from_utf8\(buf\)\.map_err'
+
+rg -q '^pub extern "C" fn rt_unix_socket_close\(fd: i64\) -> i32' "$native"
+rg -q '^pub unsafe extern "C" fn rt_unix_socket_recv\(fd: i64, max_len: i64, out_len: \*mut i64\) -> i64' "$native"
+
+echo "Unix-socket service SFFI contract audit: PASS (raw declarations unsafe; close status aligned; recv failures typed and UTF-8 validated; native recv lane split unverified)"

@@ -966,3 +966,14 @@ arguments: harden-check, guard-stats, profile ABI version, and feature bits.
 Valid paths retain their genuine results and provider work. None has typed
 native registry/header coverage, so interpreter registration is not treated as
 cross-lane verification. Source-reviewed but unverified and unsigned.
+## 2026-08-26 Unix-socket service contract follow-up
+
+All six service socket declarations are now explicitly `unsafe(ffi)`. Close is
+aligned from incorrect `bool` to the native/interpreter `i32` errno contract.
+Five server interpreter handlers enforce exact arity/types; recv also rejects a
+negative length before allocation. Unknown descriptors, unavailable platforms,
+read failures, and invalid UTF-8 now return typed errors rather than fabricated
+empty text. Valid UTF-8 conversion reuses the receive buffer instead of making
+a lossy owned copy. Native recv remains a pointer/out-length ABI while
+Simple/interpreter expose text, so that lane split is explicitly unverified and
+unsigned rather than safe.
