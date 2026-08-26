@@ -1938,3 +1938,19 @@ Torch SFFI nor all SFFI may be described as verified safe.
   contracts before safe promotion, then require signed exact-artifact
   admission.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 RuntimeValue boolean registry closure
+
+- Add exact native `[I64] -> [I8]` registry contracts for boolean extraction
+  and the four RuntimeValue type predicates whose Rust exports and interpreter
+  handlers already exist.
+- Preserve semantic `bool`; do not widen the Simple API to an integer
+  workaround.
+- Add only compile-time signature rows, with no hot-path branch, conversion,
+  allocation, copy, lookup, hashing, or dispatch.
+- Remaining minimal-facade closure is 20 both lanes, 3 native-only, 1
+  interpreter-only, and 18 neither; next reconcile the one `rt_file_delete`
+  pointer/length versus text ABI before registration.
+- Keep all functions unsafe and unsigned until exact-artifact admission and
+  cross-lane semantic evidence exist.
+- Status: source-reviewed, deliberately unverified and unsigned.

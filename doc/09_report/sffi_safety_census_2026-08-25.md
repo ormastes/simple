@@ -1319,3 +1319,18 @@ branch, or per-call registry work. Only 15 symbols have both native-codegen and
 interpreter registration; 3 are native-only, 6 interpreter-only, and 18 have
 neither. The facade therefore remains explicitly unsafe, unsigned, and
 unverified. Source-reviewed only; checks were not executed.
+
+## 2026-08-26 RuntimeValue boolean registry closure
+
+Native codegen now carries exact `[I64] -> [I8]` signatures for
+`rt_value_as_bool` and the nil, integer, float, and boolean RuntimeValue
+predicates. Their Rust C-ABI exports and interpreter handlers already existed;
+the missing registry rows were the only closure gap for this group. The
+minimal facade therefore improves from 15 to 20 symbols present in both
+registry lanes, leaving 3 native-only, 1 interpreter-only, and 18 in neither.
+The canonical 32-symbol RuntimeValue owner improves from 6/8/18 to 11/3/18 for
+both/one/neither. This changes compile-time signature metadata only: no call,
+branch, conversion, allocation, copy, lookup, hash, or generic dispatch was
+added. The functions remain unsafe and unsigned because registration is not
+artifact admission or semantic verification. Source-reviewed only; checks were
+not executed.
