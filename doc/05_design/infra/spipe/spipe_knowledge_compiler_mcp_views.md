@@ -177,7 +177,7 @@ Directory reads return generated Markdown with counts, relevant artifacts,
 lifecycle grouping, and trace gaps. Limits are:
 
 - no more than 100 direct entries per response;
-- no more than 200 Markdown lines or approximately 6,000 model tokens;
+- no more than 200 Markdown lines or 6,000 `spipe-markdown-token-v1@1` tokens;
 - cursor pagination before either bound would be exceeded.
 
 A cursor is an opaque, versioned `CursorReceiptV1`, signed by the same admitted
@@ -286,7 +286,7 @@ Defaults are configurable downward but cannot be disabled in production:
 - method name: 128 bytes; URI: 8 KiB; query text: 4 KiB; filter values: 256;
 - decoded JSON string: 256 KiB and aggregate arguments: 512 KiB;
 - list limit: 100; search candidates: 1,000; trace depth: 8 and nodes: 2,000;
-- read response: 1 MiB; generated Markdown: 200 lines/~6,000 model tokens;
+- read response: 1 MiB; generated Markdown: 200 lines/<=6,000 `spipe-markdown-token-v1@1` tokens;
 - at most 16 in-flight requests per connection and a configured global/tenant
   budget; excess work returns a retryable resource-limit error;
 - parser CPU deadline and request wall deadline are explicit, cancellation is
@@ -583,7 +583,7 @@ read-only projection. Their exact operations are:
 ```text
 SnapshotAuthorityPortV1.openBoundSnapshot(
   {workspaceUid, projectUidOrNull, worktreeUid, baseSnapshotUid,
-   authoritySnapshotUid, revisionId}
+   authoritySnapshotUid, revisionId, registryRevisionId}
 ) -> Result<SnapshotAuthorityViewV1, SnapshotAuthorityError>
 SnapshotAuthorityPortV1.resolveCanonicalTarget(
   view, {targetKind, targetUid}
@@ -656,11 +656,12 @@ HTTP, notifications, editor VFS, or FUSE/ProjFS.
 
 `TargetInventoryManifestV1` has canonical bytes for `{version, scopeKind,
 workspaceUid, projectUidOrNull, worktreeUid, baseSnapshotUid, revisionId,
-entries, aliasIndex, projectionRoot, contributingProjectRoots, rootDigest}`.
+registryRevisionId, entries, aliasIndex, projectionRoot, contributingProjectRoots, rootDigest}`.
 `rootDigest` is recomputed
 over canonical bytes excluding itself. A separate content-addressed
 `AuthorityManifestV1.authoritySnapshotUid` commits the base snapshot UID,
-inventory root, scope tuple, and `contributingProjectRoots`. Read bindings,
+inventory root, scope tuple including `registryRevisionId`, and
+`contributingProjectRoots`. Read bindings,
 grants, and receipts carry both `baseSnapshotUid` (the exact immutable
 SnapshotStore open) and `authoritySnapshotUid` (the authority
 manifest/inventory lookup). This avoids a
@@ -715,15 +716,16 @@ Only branded composition-root `WorkspaceRegistryV1`, `SnapshotStoreV1`, and
 `W-<opaque-base32>` only. The exact operations are
 `WorkspaceRegistryV1.resolveExactWorkspaceWorktreeV1({workspaceUid,worktreeUid})`,
 `SnapshotStoreV1.openExactSnapshotV1({workspaceUid,projectUidOrNull,worktreeUid,baseSnapshotUid,revisionId,registryRevisionId})`,
-`TargetInventoryStoreV1.publishAuthorityInventoryV1(build)`, and
+`TargetInventoryStoreV1.publishAuthorityInventoryV1({permit,build})`, and
 `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1(exactBinding)`.
 `exactBinding` is the closed `{workspaceUid, projectUidOrNull, worktreeUid,
-baseSnapshotUid, authoritySnapshotUid, revisionId}` tuple: SnapshotStore opens
+baseSnapshotUid, authoritySnapshotUid, revisionId, registryRevisionId}` tuple: SnapshotStore opens
 only `baseSnapshotUid`, while the inventory store uses `authoritySnapshotUid`
 to locate the matching content-addressed authority manifest. Neither identity
 is inferred from the other.
-`publishAuthorityInventoryV1` belongs only to the production commit flow and
-requires its branded, non-forgeable `AuthorityInventoryPublishPermitV1`; strings,
+`publishAuthorityInventoryV1({permit,build})` belongs only to the production commit flow and
+requires its branded, non-forgeable `AuthorityInventoryPublishPermitV1` minted
+while the transaction fixes `registryRevisionId`; strings,
 structural substitutes, and caller-selected aggregate roots deny. That
 transaction selects all and only complete project roots for the exact registry
 revision.
@@ -732,7 +734,8 @@ revision.
 registry plus snapshot revision before returning a view. The production KnowledgeCompiler
 snapshot-commit path alone publishes complete project/aggregate roots and the
 matching authority manifests. Directory requests accept only `1..100` and
-produce <=100 entries, <=200 Markdown lines, and roughly <=6,000 tokens.
+produce <=100 entries, <=200 Markdown lines, and <=6,000
+`spipe-markdown-token-v1@1` tokens.
 
 `CursorReceiptKeyPolicyStoreV1` persists the single §21.2 logical policy as
 an append-only policy/key/issuer/rotation/revocation record family. It must fsync
@@ -742,3 +745,36 @@ Admission needs production clean/incremental parity for artifact, section,
 directory, and aggregate plus restart/fault injection at create/write/fsync/
 rename/CAS. Mocks, raw fixtures, and rejected sealed-read drafts are
 `NOT-EVIDENCE`.
+
+### 12.4 Production implementation sequencing correction
+
+Before an adapter receives `SnapshotAuthorityViewV1`, the authority store loads
+by closed dual-snapshot binding, validates canonical inventory/manifest roots,
+and revalidates the live exact registry and snapshot revisions after open. A
+cache record, serialized view, caller map, or manifest assertion cannot replace
+this sequence.
+
+The commit root owns closure-branded `AuthorityInventoryPublishPermitV1`; its
+transaction selects every registry contributor and publishes only
+schema-complete ordered project roots, aggregate root, and authority manifest.
+No URI/MCP/materializer caller can choose, omit, add, or reorder roots.
+
+`DirectoryInventoryEntryV1` canonically seals `{childTargetUids,
+orderingVersion,maxPageLimit,tokenBudget}`. `tokenBudget`
+is `{tokenizerId:"spipe-markdown-token-v1",tokenizerVersion:1,unicodeVersion:"15.1.0",maxTokens:6000}`:
+reject invalid UTF-8, normalize CRLF/bare CR to LF, then split scalar runs on
+ASCII `U+0009..U+000D,U+0020`, Unicode-15.1 White_Space
+`U+0085,U+00A0,U+1680,U+2000..U+200A,U+2028,U+2029,U+202F,U+205F,U+3000`, and
+ASCII punctuation `U+0021..U+002F,U+003A..U+0040,U+005B..U+0060,U+007B..U+007E`.
+`continuationDomain` is derived only after both manifests pass canonical digest,
+schema, exact-binding, and live-revision verification. It is SHA-256 of
+canonical `{authorityManifestDigest,targetUid,orderingVersion,maxPageLimit,
+tokenBudget}` and is never stored in an inventory/manifest, root, or authority
+digest. The frozen cursor ABI remains unchanged: existing signed
+manifest/target/ordering/limit claims rederive and bind the domain at issue and
+verification, preventing a self-dependent manifest digest. Listing requires
+`1..100`, returns only unique sealed children in sealed order, and accepts
+continuation only for the same bound domain, position, and limit. The policy
+ledger uses cross-process CAS, atomic write/rename, file/parent fsync, schema
+validation, and contiguous-log recovery. These foundations require
+production-oracle PASS before cursor or URI/MCP/projection admission.

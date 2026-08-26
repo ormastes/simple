@@ -386,7 +386,7 @@ Keep generated index pages bounded. Default limits:
 
 - at most 100 direct entries per page;
 - at most 200 Markdown lines;
-- at most roughly 6,000 model tokens;
+- at most 6,000 `spipe-markdown-token-v1@1` tokens;
 - cursor/page resources for larger directories.
 
 ---
@@ -2866,7 +2866,7 @@ The viable first slice is deliberately read-only: deterministic
 `spipe_list`, `spipe_read`, `spipe_search`, `spipe_resolve`, `spipe_trace`, and
 `spipe_diagnostics` tools over a snapshot-pinned URI resolver. It must preserve
 all six legacy tools and `spipe://skill`, paginate before the 100-entry,
-200-line/~6,000-token bounds, and make a cursor bind snapshot, view, filters,
+200-line/<=6,000-`spipe-markdown-token-v1@1` bounds, and make a cursor bind snapshot, view, filters,
 authorization scope, sort key, and limit. The `spipe://` URI families and
 single-decode traversal/NFC/Windows-path rejection matrix are part of the
 security boundary, not presentation polish.
@@ -2962,7 +2962,7 @@ until the following port is delivered and tested.
 targetInventoryStore })`; it returns opaque `SnapshotAuthorityViewV1` values
 and rejects structural substitutes. A view is bound to exactly
 `{workspaceUid, projectUidOrNull, worktreeUid, baseSnapshotUid,
-authoritySnapshotUid, revisionId}` and
+authoritySnapshotUid, revisionId, registryRevisionId}` and
 to a verified immutable manifest digest. It exposes only:
 
 ```text
@@ -3014,7 +3014,7 @@ it does not weaken receipt verification or authorize a compatibility fallback.
 
 `TargetInventoryManifestV1` is the missing trust anchor. Its canonical bytes
 contain `{version, scopeKind, workspaceUid, projectUidOrNull, worktreeUid,
-baseSnapshotUid, revisionId, entries, aliasIndex, projectionRoot,
+baseSnapshotUid, revisionId, registryRevisionId, entries, aliasIndex, projectionRoot,
 contributingProjectRoots, rootDigest}`.
 `entries` contains artifact/section/aggregate/directory membership and each
 locator's content digest; `aliasIndex` maps normalized legacy aliases to one
@@ -3025,7 +3025,7 @@ The authority seal is non-cyclic. Existing `baseSnapshotUid` remains the
 content-addressed identity of the pre-existing base tuple. A separate,
 content-addressed `AuthorityManifestV1` has `authoritySnapshotUid` and commits exactly
 `{baseSnapshotUid, targetInventoryRoot, workspaceUid, projectUidOrNull,
-worktreeUid, revisionId, scopeKind, contributingProjectRoots}`. Read bindings,
+worktreeUid, revisionId, registryRevisionId, scopeKind, contributingProjectRoots}`. Read bindings,
 grants, and receipts carry both immutable `baseSnapshotUid` and content-addressed
 `authoritySnapshotUid`: the former opens the exact SnapshotStore tuple and the
 latter selects the matching AuthorityManifest/inventory. `openBoundSnapshot`
@@ -3114,12 +3114,14 @@ composition root admits only branded interfaces:
 WorkspaceRegistryV1.resolveExactWorkspaceWorktreeV1({workspaceUid,worktreeUid})
 SnapshotStoreV1.openExactSnapshotV1({workspaceUid,projectUidOrNull,worktreeUid,
   baseSnapshotUid,revisionId,registryRevisionId})
-TargetInventoryStoreV1.publishAuthorityInventoryV1(ProductionInventoryBuildV1)
+TargetInventoryStoreV1.publishAuthorityInventoryV1({permit: AuthorityInventoryPublishPermitV1,
+  build: ProductionInventoryBuildV1})
 TargetInventoryStoreV1.openPublishedAuthorityInventoryV1(ExactAuthorityBindingV1)
 ```
 
 `ExactAuthorityBindingV1` is closed over `{workspaceUid, projectUidOrNull,
-worktreeUid, baseSnapshotUid, authoritySnapshotUid, revisionId}`. The
+worktreeUid, baseSnapshotUid, authoritySnapshotUid, revisionId,
+registryRevisionId}`. The
 SnapshotStore receives only `baseSnapshotUid`; the inventory store receives the
 complete binding and uses `authoritySnapshotUid` to locate the matching
 content-addressed authority manifest. Neither port may infer one identity from
@@ -3138,7 +3140,8 @@ results, or select roots. Publishing requires a branded, non-forgeable
 strings, structural objects, and a caller-selected aggregate are denied.
 
 Directories are sealed targets. Their requested limit is `1..100`; a page has
-at most 100 entries, 200 Markdown lines, and approximately 6,000 tokens, with
+at most 100 entries, 200 Markdown lines, and 6,000
+`spipe-markdown-token-v1@1` tokens, with
 continuation only through authenticated position. The durable policy store
 fsyncs its initial directory and every policy/key/issuer/revocation record
 before acknowledgement, uses monotonic CAS `policyVersion`, and makes each
@@ -3148,3 +3151,48 @@ clean/incremental parity for artifact, section, directory, and aggregate;
 revision-change revalidation; and restart/fault/crash injection at directory
 creation, write, fsync, rename, and CAS. Rejected sealed-read implementations
 remain non-admitted and provide no Wave 5a/5c evidence.
+
+### 43.2 Rejected implementation findings: complete authority publication contract (2026-08-26)
+
+**Status: non-admitted until implemented and independently reviewed.** The
+published authority tuple is a proof, not a cache key. A reader binds loaded
+manifest and inventory bytes to the exact `{workspaceUid, projectUidOrNull,
+worktreeUid, baseSnapshotUid, authoritySnapshotUid, revisionId,
+registryRevisionId}` tuple, recomputes canonical digests, and rejects
+substitution before target lookup. It revalidates the *live exact registry
+record* and opened snapshot revision after inventory open; copied records,
+manifest claims, and latest-but-different records do not suffice.
+
+The commit transaction alone mints closure-branded
+`AuthorityInventoryPublishPermitV1`; it cannot be string-built, serialized, or
+accepted from an adapter. The exact publish call is
+`publishAuthorityInventoryV1({permit, build})`; the permit is minted while the
+commit transaction fixes `registryRevisionId` and its contributor selection.
+It selects the registry-complete contributor set and publishes the full ordered
+project roots, aggregate root, and manifest. Missing, extra, substituted,
+reordered, or schema-incomplete contributors deny.
+
+Directory entries seal child membership, ordering version, maximum page limit,
+and `tokenBudget`. `continuationDomain` is derived only *after* both the
+`AuthorityManifestV1` and `TargetInventoryManifestV1` have passed canonical
+digest, schema, exact-binding, and live-revision verification. It is never a
+manifest entry, root, authority-digest input, or stored value: SHA-256 of
+canonical `{authorityManifestDigest,targetUid,orderingVersion,maxPageLimit,
+tokenBudget}`. Therefore no manifest or inventory digest commits a value that
+depends on itself. The frozen cursor ABI gains no field: existing signed
+manifest digest, target, ordering, and limit claims rederive and bind this
+domain identically at issuance and verification. `tokenBudget` is
+`{tokenizerId:"spipe-markdown-token-v1",tokenizerVersion:1,unicodeVersion:"15.1.0",maxTokens:6000}`.
+The tokenizer first rejects invalid UTF-8, normalizes CRLF and bare CR to LF,
+then splits scalar runs on exactly ASCII `U+0009..U+000D,U+0020`, Unicode-15.1
+White_Space `U+0085,U+00A0,U+1680,U+2000..U+200A,U+2028,U+2029,U+202F,U+205F,U+3000`,
+and ASCII punctuation `U+0021..U+002F,U+003A..U+0040,U+005B..U+0060,U+007B..U+007E`.
+Duplicate/unlisted children, reordered output, limit widening,
+malformed/foreign cursor, and unbounded listing deny. The policy ledger
+acknowledges only after atomic temp-write/rename plus file and parent fsync; it
+uses cross-process monotonic CAS, schema validation, operation-UID idempotence,
+and contiguous-valid-prefix recovery. The production oracle covers
+clean/incremental parity, revision windows, aggregate substitution, directory
+bounds, cross-process races, and fault injection at
+create/write/fsync/rename/CAS/recovery. Mock or in-memory passing tests are not
+admission evidence.

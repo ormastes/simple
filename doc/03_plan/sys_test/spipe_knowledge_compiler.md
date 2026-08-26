@@ -307,7 +307,7 @@ limit and limit-plus-one for: frame 1 MiB, headers 32 KiB, JSON depth 16,
 262,144 lexical tokens, 65,536 aggregate object-pair/array-element members,
 method 128 bytes, URI 8 KiB, query 4 KiB, decoded string 256 KiB, aggregate
 arguments 512 KiB, list 100, candidates 1,000, trace depth 8/nodes 2,000,
-response 1 MiB, generated manual 200 lines/about 6,000 tokens, and 16 in-flight
+response 1 MiB, generated manual 200 lines/<=6,000 `spipe-markdown-token-v1@1` tokens, and 16 in-flight
 requests. Expected typed protocol-envelope failures are `frame_too_large`,
 `limit_exceeded`, or `invalid_request`; any attempted read admission is the
 single public `not_found_or_unauthorized` class before protected effects.
@@ -1613,9 +1613,22 @@ or stale targets.
 | W5A-17 | Change registry or snapshot revision between open and final revalidation | Bounded denial; no view, grant, or ProjectionPort call |
 | W5A-18 | Publish project and aggregate through production publisher; supply string/structural permit or caller-selected aggregate | Reader sees either no manifest or fully recomputable roots; aggregate has all and only selected complete contributors; only the non-forgeable publisher permit succeeds |
 | W5A-19 | Clean rebuild versus equivalent incremental commit for artifact, section, directory, aggregate | Byte-identical roots, pages, and projection bytes |
-| W5A-20 | Request limits 0, 101, 1, and 100 | Invalid denies; valid page <=100 entries, <=200 lines/~6k tokens, authenticated continuation |
+| W5A-20 | Request limits 0, 101, 1, and 100 | Invalid denies; valid page <=100 entries, <=200 lines, <=6,000 `spipe-markdown-token-v1@1` tokens, authenticated continuation |
 | W5C-11 | Crash at initial policy-directory create and at write/fsync/rename/CAS of each policy, key, issuer, rotation, and revocation record | Restart sees prior complete state or one complete monotonic state, never partial/ambiguous; no acknowledgement precedes durable state |
 | W5C-12 | Replay same operation UID for every record class; alter bytes; use stale policy version | Equal replay idempotent; altered/stale denies without second durable transition |
 
 Fake registry/store, raw fixture manifest, mock projection, or a rejected
 sealed-read implementation is `NOT-EVIDENCE`.
+
+### 22.2 Sealed-publication and durable-policy production oracles
+
+| ID | Setup/action | Required oracle |
+|---|---|---|
+| W5A-21 | Substitute manifest/inventory bytes, or bind a copied/stale registry record after exact open | Canonical roots and live registry/snapshot revalidation deny before target lookup or ProjectionPort |
+| W5A-22 | Forge/serialize publisher permit; omit/add/reorder/substitute an aggregate contributor; provide incomplete root schema | Only commit-root brand publishes; reader admits all-and-only registry-complete ordered schema-valid roots |
+| W5A-23 | Duplicate/unlisted directory child, reorder page, widen limit, change continuation domain/position, or use foreign/malformed token | Bounded denial or sealed deterministic page; no leak, gap, duplicate, or unbounded output |
+| W5A-24 | Make both `issueCursorReceiptV1` and `verifyCursorReceiptV1` independently recompute `continuationDomain` only after AuthorityManifest/TargetInventoryManifest verification; exercise `spipe-markdown-token-v1@1` (Unicode 15.1 separator table) at exact 6,000/6,001 boundaries; mutate signed manifest/target/order/limit inputs | Only canonical derived domain and <=6,000 deterministic tokens pass; no manifest entry/root/digest contains the domain, no new grant/cursor field exists, and mutated existing binding denies before list/render |
+| W5C-13 | Race processes at each policy operation with same/different UID and expected version | One monotonic durable transition; equal replay same result; altered/stale input creates no record |
+| W5C-14 | Crash at temp creation, write, file fsync, rename, parent fsync, or recovery with malformed record | Restart observes old complete state or one schema-valid contiguous prefix; acknowledgement never precedes durability |
+
+These are prerequisites for W5C-01..10 and all URI/MCP/materializer tests.

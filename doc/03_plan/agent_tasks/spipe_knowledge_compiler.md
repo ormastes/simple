@@ -988,6 +988,29 @@ tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### 11.2 Wave 5a sealed-publication repair gate (2026-08-26)
+
+1. **Status/ownership.** The rejected pre-cursor authority candidate is
+   forensic-only and `NON-ADMITTED`. W5A-A owns authority; W5A-C owns oracle
+   fixtures; W5C/URI/MCP/materializer cannot edit until both independently PASS.
+2. **Foundation.** W5A-A binds loaded manifest/inventory bytes to the exact
+   dual-snapshot/registry tuple, recomputes roots, and revalidates live registry
+   plus snapshot revision after open. The commit root alone mints a
+   non-forgeable publisher permit through the sole
+   `publishAuthorityInventoryV1({permit,build})` ABI and selects all-and-only schema-complete
+   aggregate contributors.
+3. **Directory/policy.** W5A-A seals ordered unique children, bounds, and a
+   continuation domain derived only after manifest/inventory verification; no
+   manifest root or digest commits it. W5C-A uses cross-process monotonic CAS
+   and atomic rename with file/parent fsync, validates every schema, and
+   recovers only a contiguous valid log.
+4. **Evidence.** W5A-C/W5C-A must pass W5A-21..24 and W5C-13..14: substitution,
+   revision windows, permits/aggregate completeness, page adversaries,
+   cross-process races, and fault/restart recovery. Mock maps or in-memory
+   tests are not evidence.
+5. **Merge/review.** Merge owner `/root`; independent normal/highest-capability
+   reviewer. Commit only after focused tests and PASS; do not push from this lane.
+
 ### 12.1 Wave 5a/5c production-authority correction (2026-08-26)
 
 **Both prior sealed-read implementation attempts are non-admitted.** Do not
@@ -1001,7 +1024,7 @@ revalidates exact registry and snapshot revisions after published-manifest open.
 | Lane | Additional owned deliverable | Admission evidence |
 |---|---|---|
 | W5A-A | non-forgeable production commit publisher and complete aggregate roots | atomic visibility; clean/incremental artifact/section/directory/aggregate parity; strings/structural permits deny |
-| W5A-B | bounded directory page `1..100`, <=100 entries, <=200 lines/~6k tokens | sealed child identity/order/page bounds and authenticated continuation |
+| W5A-B | bounded directory page `1..100`, <=100 entries, <=200 lines, <=6,000 `spipe-markdown-token-v1@1` tokens | sealed child identity/order/page bounds and authenticated continuation |
 | W5C-A | fsynced policy directory; monotonic CAS single-policy append-only policy/key/issuer/rotation/revocation family | restart plus create/write/fsync/rename/CAS faults |
 | W5A-C/W5C-D | independent real-port oracle | W5A-16…20 and W5C-11…12 PASS |
 
@@ -1073,7 +1096,7 @@ The integration owner freezes these exact methods before sidecars work:
 `ProjectionPortV1.list(authorityView,directoryTarget,verifiedReadGrant,verifiedCursorGrantOrNull)`.
 The authority binding is exactly `{workspaceUid,
 projectUidOrNull, worktreeUid, baseSnapshotUid, authoritySnapshotUid,
-revisionId}`. `baseSnapshotUid` opens the exact immutable SnapshotStore tuple;
+revisionId, registryRevisionId}`. `baseSnapshotUid` opens the exact immutable SnapshotStore tuple;
 `authoritySnapshotUid` selects the matching content-addressed authority
 manifest/inventory; the exact inventory-open binding carries both and neither
 identity may be inferred from the other. The final reviewer

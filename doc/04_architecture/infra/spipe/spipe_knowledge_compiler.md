@@ -519,8 +519,8 @@ directory flush, validation, manifest publish, and receipt publish boundary.
 
 The authoritative URI space is `spipe://workspace/...` and
 `spipe://project/.../artifact/{uid}`. Directory reads are bounded generated
-indexes; pages contain at most 100 entries, 200 Markdown lines, and an
-approximately 6,000-token payload. Collision suffixes use a deterministic short
+indexes; pages contain at most 100 entries, 200 Markdown lines, and at most
+6,000 `spipe-markdown-token-v1@1` tokens. Collision suffixes use a deterministic short
 UID and every generated entry declares canonical UID/path.
 
 Every virtual entry/page has `ProjectionUid = spkp1-<lowercase sha256>`, where
@@ -1404,7 +1404,8 @@ ResourceResolver
 ```
 
 The binding is exactly `{workspaceUid, projectUidOrNull, worktreeUid,
-baseSnapshotUid, authoritySnapshotUid, revisionId}`. `openBoundSnapshot` verifies all six fields against
+baseSnapshotUid, authoritySnapshotUid, revisionId, registryRevisionId}`.
+`openBoundSnapshot` verifies all seven fields against
 the registry and immutable manifest, validates the manifest digest, and
 returns an opaque view. `resolveCanonicalAlias` returns only an unrenderable
 canonical candidate; `resolveCanonicalTarget` then proves
@@ -1627,10 +1628,45 @@ a branded, non-forgeable `AuthorityInventoryPublishPermitV1` minted only by
 that transaction; strings, structural substitutes, and caller-selected
 aggregate roots deny. `listDirectoryTarget`
 permits request limits `1..100`, with <=100 entries, <=200 Markdown lines, and
-roughly <=6,000 tokens; continuation is authenticated and no unbounded
+<=6,000 `spipe-markdown-token-v1@1` tokens; continuation is authenticated and no unbounded
 directory projection exists. Authorization's child policy store fsyncs the
 initial directory, uses monotonic CAS policy versions and immutable operation
 UIDs for policy/key/issuer/rotation/revocation records, and recovers only contiguous durable
 state. Mock stores, old `WT-*` fixtures, or in-memory fault-free evidence are
 non-admitted; production clean/incremental parity, revision revalidation, and
 create/write/fsync/rename/CAS crash evidence are required.
+
+### 21.4 Sealed publication and durable-ledger invariants
+
+`openPublishedAuthorityInventoryV1` recomputes canonical manifest/inventory
+digests and proves all fields against the loaded live registry and exact
+snapshot, then rereads the same registry and snapshot revisions after inventory
+open. Substituted bytes, copied registry records, or revision changes deny
+before target lookup.
+
+`AuthorityInventoryPublishPermitV1` is a closure brand owned only by the
+KnowledgeCompiler commit root, never data accepted through an adapter. The only
+publish ABI is `publishAuthorityInventoryV1({permit, build})`, where `permit`
+is minted within the transaction that fixes `registryRevisionId`. That
+transaction selects and publishes all-and-only registry-complete,
+schema-complete ordered roots, aggregate root, and authority manifest. Readers
+reject missing, extra, reordered, substituted, or incomplete roots.
+
+Each directory record commits ordered unique children, ordering version, page
+bound, and `tokenBudget`. After `AuthorityManifestV1` and
+`TargetInventoryManifestV1` verification, `continuationDomain` is derived but
+is never a committed entry, root, digest input, or new grant/cursor field: it
+is SHA-256 of canonical `{authorityManifestDigest,targetUid,orderingVersion,
+maxPageLimit,tokenBudget}`. Existing signed manifest/target/ordering/limit
+claims must rederive the same domain at cursor issuance and verification. Thus
+no manifest or inventory digest commits a value depending on itself.
+`tokenBudget` fixes `spipe-markdown-token-v1@1`, Unicode 15.1.0, at 6,000
+tokens: reject invalid UTF-8, normalize CRLF/bare CR to LF, then split scalar
+runs on ASCII `U+0009..U+000D,U+0020`, Unicode-15.1 White_Space
+`U+0085,U+00A0,U+1680,U+2000..U+200A,U+2028,U+2029,U+202F,U+205F,U+3000`, and
+ASCII punctuation `U+0021..U+002F,U+003A..U+0040,U+005B..U+0060,U+007B..U+007E`.
+Listing cannot add/reorder/widen or accept a continuation outside that domain.
+Policy persistence is atomic replacement plus file and parent-directory fsync
+under cross-process monotonic CAS. Loading validates schemas and only a
+contiguous durable operation sequence; equal operation UID/payload replays,
+altered payloads and stale CAS fail.
