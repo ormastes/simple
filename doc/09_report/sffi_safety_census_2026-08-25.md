@@ -198,3 +198,12 @@ text>`.  Explicit sidecar, default sidecar, native trailer, and content-hash
 reads fail closed rather than parsing or hashing fabricated empty input.  Each
 selected input is still read once; no retry, read-back, lookup, or generic
 dispatch was added.
+### Simple Portal authority follow-up
+
+The Simple Portal content database and server no longer declare raw file-read
+or directory-create symbols.  Database startup now performs four typed reads
+instead of four existence probes plus four reads, reducing syscall work while
+failing closed.  Static serving rejects provider read failure rather than
+hashing and serving fabricated empty content, and playground audit-directory
+creation failure is no longer ignored.  No retry, read-back, registry lookup,
+or generic dispatch was added.

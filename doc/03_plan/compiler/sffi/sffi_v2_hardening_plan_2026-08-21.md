@@ -1780,3 +1780,10 @@ and unpromoted.
 - [x] Make metadata selection return a typed error on provider read failure.
 - [x] Fail closed before parsing or hashing fabricated empty input.
 - [x] Preserve one-read behavior and add a static ownership ratchet.
+### Completed Simple Portal authority slice
+
+- [x] Remove duplicate raw file/directory declarations from portal modules.
+- [x] Replace eight database probe/read syscalls with four typed reads.
+- [x] Fail closed on static-content provider read failure.
+- [x] Reject playground audit-storage creation failure.
+- [x] Add a static ratchet for raw authority and database read complexity.
