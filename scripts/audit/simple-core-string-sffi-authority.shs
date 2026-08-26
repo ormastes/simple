@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+# Source-only authority and ABI gate for bootstrap string/Any primitives.
+# This does not claim provider signatures are signed or semantically verified.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+string="$root/src/runtime/simple_core/core_string.spl"
+any_ops="$root/src/runtime/simple_core/core_any_ops.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+rust_values="$root/src/compiler_rust/runtime/src/value/sffi/value_ops.rs"
+runtime_h="$root/src/runtime/runtime.h"
+
+check_owner() {
+    module=$1
+    expected=$2
+    [ "$(grep -c '^extern fn ' "$module")" -eq "$expected" ]
+    [ "$(grep -c '^@unsafe(' "$module")" -eq "$expected" ]
+    [ "$(grep -c '^@unsafe(reason: .*contract:' "$module")" -eq "$expected" ]
+}
+
+check_owner "$string" 35
+check_owner "$any_ops" 4
+
+grep -q '^extern fn rt_value_float(value: f64) -> i64$' "$string"
+grep -q '^extern fn rt_value_float(value: f64) -> i64$' "$any_ops"
+! grep -q 'rt_value_float(spl_f64_to_bits' "$string" "$any_ops"
+grep -q 'RuntimeFuncSpec::new("rt_value_float", &\[F64\], &\[I64\])' "$registry"
+grep -q 'pub extern "C" fn rt_value_float(f: f64)' "$rust_values"
+grep -q 'int64_t  rt_value_float(double value_f64);' "$runtime_h"
+
+echo "simple-core string SFFI authority: PASS (35 string + 4 Any declarations tagged; exact f64 register class)"

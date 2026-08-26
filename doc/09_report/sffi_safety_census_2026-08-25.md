@@ -1302,6 +1302,23 @@ gaps and 5,035 contract gaps. Signed-admitted declarations remain zero without
 exact-artifact admission jobs. Source-reviewed; no build or runtime
 verification claim.
 
+## 2026-08-26 simple-core string and Any ABI authority
+
+The bootstrap string and dynamic-Any owners now classify all 39 raw
+declarations as `unsafe(ffi)` with explicit contracts (35 string, 4 Any). A
+provider comparison found that both owners declared `rt_value_float` as an
+integer-bit argument and called it through `spl_f64_to_bits`, while the C
+provider, Rust provider, and native registry all require an `f64` argument.
+Both declarations and calls now use exact `f64`, removing the conversion and
+the integer/floating register-class mismatch.
+
+This is zero-cost declaration authority plus an ABI correction; no lookup,
+allocation, copy, branch, lock, or generic dispatch is added. The production
+census moves to 2,828 unsafe-tagged declarations, 4,431 unsafe-tag gaps, and
+6,185 contract gaps. The `rt_*` subset has 3,287 unsafe-tag gaps and 5,015
+contract gaps. Lexical confinement of the bootstrap implementation's raw calls
+is still pending and these artifacts remain unsigned and unverified.
+
 ## 2026-08-26 public RuntimeValue closure completion
 
 The remaining public `value_eq`, `value_print`, and `value_println` wrappers

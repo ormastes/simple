@@ -1559,6 +1559,19 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Remaining production debt: 4,470 unsafe-tag gaps, 6,224 contract gaps, and
   zero signed-admitted declarations.
 
+## 2026-08-26 simple-core string/Any checkpoint
+
+- Reconcile `rt_value_float` with the exact C/Rust/native `[F64] -> [I64]`
+  contract and remove the raw-bit integer workaround.
+- Tag and contract 35 bootstrap string declarations and four dynamic-Any
+  declarations without changing their direct call algorithms.
+- Ratchet exact provider signatures so future register-class drift fails a
+  source audit.
+- Next minimize lexical unsafe scope around the raw bootstrap calls; declaration
+  tagging alone is not safe-wrapper verification.
+- Remaining production debt: 4,431 unsafe-tag gaps, 6,185 contract gaps, zero
+  signed-admitted declarations.
+
 ## 2026-08-26 repository-wide inventory checkpoint
 
 - Production source currently contains 7,259 declarations / 3,815 symbols;
