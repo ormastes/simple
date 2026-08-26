@@ -1366,3 +1366,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Introduce no replacement wrapper or duplicate authority.
 - [x] Preserve generated MIR, loops, dispatch, calls, and allocations exactly.
 - [x] Add a static no-raw-authority ratchet.
+
+### Completed MIR method-lowering authority and trace-cost slice
+
+- [x] Remove dead raw dictionary and duplicate environment declarations.
+- [x] Tag and confine both live discriminant projections `unsafe(ffi)`.
+- [x] Replace eight repeated debug reads with two one-read tri-state gates.
+- [x] Preserve default-off boolean behavior without integer API substitution.
+- [x] Reduce provider calls and add no allocation, hash, lock, or dispatch.
+- [x] Add a static authority, call-count, and cache-shape ratchet.
+- [x] Record both providers as unsafe, unsigned, and unverified.

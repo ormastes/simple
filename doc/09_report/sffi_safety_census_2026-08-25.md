@@ -728,3 +728,17 @@ so no wrapper or replacement authority was introduced. Generated MIR, loop and
 dispatch complexity, call counts, branches, allocations, copies, caches, locks,
 hashes, lookups, boxing, and marshalling are unchanged; the module now exposes
 no raw `rt_*` declaration at all.
+
+### MIR method-lowering authority and trace-cost follow-up
+
+MIR method lowering removed an unused raw dictionary declaration and its
+duplicate raw environment declaration. The two live HIR type discriminant
+projections are tagged `unsafe(ffi)` and confined to one always-inlined lexical
+owner. Three dictionary-element and five conversion-log gates now share two
+process-lifetime tri-state caches, matching the module's existing method-trace
+policy: each flag performs at most one nullable provider read instead of one
+read per qualifying method path, then uses one integer branch. Default-off and
+boolean behavior are preserved without numeric API substitution. No allocation,
+copy, hash, signature check, lock, lookup, boxing, generic marshalling, or extra
+dynamic dispatch was added. The discriminant/environment providers remain
+unsafe, unsigned, and unverified.
