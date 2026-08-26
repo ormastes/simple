@@ -2,6 +2,32 @@
 
 Covers asynchronous programming in Simple: lambdas, futures, async/await, generators, and the actor model.
 
+## Current V1 foundation and status
+
+SimpleRing/task/profile V1 is a pure-Simple contract foundation. It is not a
+replacement runtime and it does not change the meaning of the existing
+`Future`, `async`, `await`, green-thread, or OS-thread APIs.
+
+| Contract | Current owner | What is covered now |
+|----------|---------------|---------------------|
+| `SimpleRing<Op, Cpl>` | `src/lib/nogc_async_mut/async_ring/simple_ring.spl` | Fixed-capacity, single-owner lifecycle, metadata/payload leases, cancellation, batches, and bounded latency/occupancy telemetry |
+| Ring/task vocabulary | `src/lib/common/contracts/execution/simple_ring_async_v1.spl` | Tokens, typed completions, operation metadata, payload ownership, trace events, and callable `StacklessAsyncTask.poll` validation |
+| Profile vocabulary | `src/lib/common/contracts/execution/async_profile_v1.spl` | `common`, `script`, `server`, `mission_alloc`, and `mission_pool` configuration records, fail-closed validation, canonical text, and fingerprints |
+| Reference provider and mission evidence | `src/lib/nogc_async_mut/async_ring/software_provider.spl`, `mission_adapter.spl` | Bounded software mapping and hosted capacity admission; not a native or link-time-static mission runtime |
+| Trace storage | `src/lib/nogc_async_mut_noalloc/async/async_trace_ring.spl` | Fixed-capacity, owner-bound trace records with explicit overflow policy; static placement is not proven |
+
+The V1 contracts describe an explicit `poll(frame, context)` boundary and a
+typed `Pending(wait_token)` result. They do not provide implicit-await
+compiler lowering, a generated task-frame ABI, an executor migration, native
+`io_uring` integration, or mission static task storage. The profile records are
+configuration and validation data; a `mission_alloc` or `mission_pool` preset
+does not itself allocate static storage or prove a mission runtime.
+
+Existing `Future`/`HostFuture` values, async executors, cooperative green
+queues, `task_spawn`, and `thread_spawn` remain compatibility or distinct
+execution-model surfaces. They may be adapted to the V1 contracts later, but
+none is silently promoted to the canonical V1 executor or task ABI.
+
 ---
 
 ## Lambda Expressions
@@ -45,6 +71,11 @@ val sum = items.reduce(\acc, x: acc + x, 0)
 ---
 
 ## Futures and Await
+
+The examples in this section document the established Future/await surface.
+They are not evidence that V1 implicit suspension or compiler-generated frame
+lowering is available. `await` remains an explicit compatibility language/API
+surface until an executable compiler and runtime gate admits a new lowering.
 
 Futures represent values that will be available later. `await` blocks until the future completes.
 
@@ -177,6 +208,9 @@ actor Supervisor:
 
 ## Async Runtime
 
+This section describes existing runtime-oriented vocabulary. The V1 foundation
+adds value contracts around it; it does not select or replace a scheduler.
+
 ### Task ID Allocation
 
 ```simple
@@ -242,16 +276,25 @@ enum Poll<T>:
 
 ## Limitations
 
-- `async`, `await`, `yield`, `spawn`, `generator` keywords work in the compiler but are not yet in the runtime parser
+- Historical `async`, `await`, `yield`, `spawn`, and `generator` examples may
+  be accepted by some compiler/parser paths, but that is not SimpleRing V1
+  implicit-await or compiler-generated task-frame evidence
 - Lambda capture is read-only
 - Generators are single-use (exhausted after one iteration)
 - No structured concurrency yet (no automatic cancellation of child tasks)
+- SimpleRing V1 does not claim implicit-await insertion or compiler-generated task-frame lowering
+- SimpleRing V1 has no canonical migrated executor, native `io_uring` provider, or proven link-time-static mission storage
+- Existing Future, cooperative-green, pool-task, and OS-thread paths remain distinct until an adapter has executable parity evidence
 
 ---
 
 ## Related Files
 
 - Async SFFI: `src/lib/nogc_async_mut/async_sffi.spl`
+- SimpleRing/task contract: `src/lib/common/contracts/execution/simple_ring_async_v1.spl`
+- SimpleRing implementation: `src/lib/nogc_async_mut/async_ring/simple_ring.spl`
+- Async profiles: `src/lib/common/contracts/execution/async_profile_v1.spl`
+- V1 unit specs: `test/01_unit/lib/nogc_async_mut/async_ring/simple_ring_spec.spl`, `test/01_unit/lib/common/contracts/execution/simple_ring_async_v1_spec.spl`, and `test/01_unit/lib/common/contracts/execution/async_profile_v1_spec.spl`
 - Async tests: `test/03_system/feature/async_features_spec.spl`
 - Actor tests: `test/03_system/feature/actor_model_spec.spl`
 - Syntax reference: `doc/07_guide/quick_reference/syntax_quick_reference.md`

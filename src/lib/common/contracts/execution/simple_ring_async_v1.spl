@@ -1,0 +1,312 @@
+# Pure-Simple V1 contract vocabulary shared by ring providers and stackless
+# task implementations. This module intentionally defines no SimpleRing
+# storage, provider, scheduler, or profile implementation.
+
+pub const SIMPLE_RING_ASYNC_V1: i64 = 1
+
+pub struct RingGeneration:
+    value: u64
+
+pub struct RingToken:
+    ring_id: u64
+    slot: u64
+    generation: RingGeneration
+
+pub enum RingMappingGrade:
+    Direct
+    Translated
+    Software
+    Emulated
+
+pub enum RingAdmissionStatus:
+    Admitted
+    Full
+    Rejected
+    Fallback
+
+pub struct RingAdmission:
+    status: RingAdmissionStatus
+    token: RingToken?
+    admitted_count: i64
+
+pub enum RingTerminalKind:
+    Success
+    Failure
+    Cancelled
+
+pub enum RingPayloadOwnership:
+    CallerOwned
+    RegisteredLease
+
+pub struct RingPayloadLease:
+    ownership: RingPayloadOwnership
+    owner_id: u64
+    handle: u64
+    generation: RingGeneration
+    byte_length: u64
+
+pub struct RingOperationMetadata:
+    resource_handle: u64
+    task_key: u64
+    priority: i64
+    deadline: u64
+    dependency_value: u64
+    flags: u64
+    payload_lease: RingPayloadLease
+    trace_id: u64
+
+pub struct RingCompletion<Cpl>:
+    token: RingToken
+    task_key: u64
+    kind: RingTerminalKind
+    value: Cpl?
+    error: text
+
+pub struct AsyncTaskFrame:
+    task_id: u64
+    parent_task_id: u64
+    supervisor_capability: u64
+    detached: bool
+    state: i64
+    cancellation_key: u64
+    wait_token: RingToken?
+    priority: i64
+    deadline: u64
+    trace: text
+    profile_fingerprint: text
+
+# This TaskContext is scoped to the SimpleRing async ABI. Consumers must
+# import this qualified module rather than relying on an unqualified
+# TaskContext that could refer to an OS scheduler or host runtime type.
+pub struct TaskContext:
+    executor_id: u64
+    current_time: u64
+    deadline: u64
+    budget: i64
+    wake_key: u64
+    profile_fingerprint: text
+
+pub enum TaskPollResult<T>:
+    Ready(T)
+    Pending(RingToken)
+
+# The canonical callable task seam. Implementations retain typed live state in
+# their own frame type and return immediately; executors must never wait here.
+pub trait StacklessAsyncTask<T>:
+    fn poll(frame: AsyncTaskFrame, context: TaskContext) -> TaskPollResult<T>
+
+pub enum AsyncTraceEventKind:
+    TaskSpawn
+    TaskReady
+    TaskRun
+    RingReserve
+    RingSubmit
+    ProviderStart
+    ProviderComplete
+    TaskWake
+    TaskResume
+    TaskComplete
+    TaskCancel
+
+pub struct AsyncTraceEvent:
+    kind: AsyncTraceEventKind
+    task_id: u64
+    parent_task_id: u64
+    ring_id: u64
+    operation_token: RingToken?
+    provider_id: u64
+    trace_id: u64
+    sequence: u64
+
+pub enum RingContractError:
+    None
+    InvalidGeneration
+    InvalidRingId
+    InvalidAdmission
+    InvalidTaskKey
+    InvalidCompletion
+    InvalidPayloadLease
+    InvalidOperationMetadata
+    InvalidTaskFrame
+    InvalidTaskContext
+    InvalidProfileFingerprint
+
+pub struct RingContractCheck:
+    ok: bool
+    error: RingContractError
+
+pub fn simple_ring_async_v1_version() -> i64:
+    SIMPLE_RING_ASYNC_V1
+
+pub fn simple_ring_async_v1_canonical_text() -> text:
+    "simple-ring-async-v1"
+
+pub fn ring_generation_initial() -> RingGeneration:
+    RingGeneration(value: 1u64)
+
+pub fn ring_generation_validate(generation: RingGeneration) -> RingContractCheck:
+    if generation.value == 0u64:
+        return _ring_reject(RingContractError.InvalidGeneration)
+    _ring_ok()
+
+pub fn ring_token_validate(token: RingToken) -> RingContractCheck:
+    if token.ring_id == 0u64:
+        return _ring_reject(RingContractError.InvalidRingId)
+    val generation_check = ring_generation_validate(token.generation)
+    if not generation_check.ok:
+        return generation_check
+    _ring_ok()
+
+pub fn ring_mapping_grade_canonical_text(grade: RingMappingGrade) -> text:
+    match grade:
+        case RingMappingGrade.Direct: "direct"
+        case RingMappingGrade.Translated: "translated"
+        case RingMappingGrade.Software: "software"
+        case RingMappingGrade.Emulated: "emulated"
+
+pub fn ring_admission_status_canonical_text(status: RingAdmissionStatus) -> text:
+    match status:
+        case RingAdmissionStatus.Admitted: "admitted"
+        case RingAdmissionStatus.Full: "full"
+        case RingAdmissionStatus.Rejected: "rejected"
+        case RingAdmissionStatus.Fallback: "fallback"
+
+pub fn ring_terminal_kind_canonical_text(kind: RingTerminalKind) -> text:
+    match kind:
+        case RingTerminalKind.Success: "success"
+        case RingTerminalKind.Failure: "failure"
+        case RingTerminalKind.Cancelled: "cancelled"
+
+pub fn ring_admission_validate(admission: RingAdmission) -> RingContractCheck:
+    match admission.status:
+        case RingAdmissionStatus.Admitted:
+            if admission.admitted_count <= 0:
+                return _ring_reject(RingContractError.InvalidAdmission)
+            if val token = admission.token:
+                return ring_token_validate(token)
+            _ring_reject(RingContractError.InvalidAdmission)
+        case RingAdmissionStatus.Full:
+            _ring_non_admitting_status_valid(admission)
+        case RingAdmissionStatus.Rejected:
+            _ring_non_admitting_status_valid(admission)
+        case RingAdmissionStatus.Fallback:
+            _ring_non_admitting_status_valid(admission)
+
+pub fn ring_completion_validate<Cpl>(completion: RingCompletion<Cpl>) -> RingContractCheck:
+    val token_check = ring_token_validate(completion.token)
+    if not token_check.ok:
+        return token_check
+    if completion.task_key == 0u64:
+        return _ring_reject(RingContractError.InvalidTaskKey)
+    match completion.kind:
+        case RingTerminalKind.Success:
+            if completion.value == nil or completion.error != "":
+                return _ring_reject(RingContractError.InvalidCompletion)
+        case RingTerminalKind.Failure:
+            if completion.value != nil or completion.error.trim() == "":
+                return _ring_reject(RingContractError.InvalidCompletion)
+        case RingTerminalKind.Cancelled:
+            if completion.value != nil or completion.error.trim() == "":
+                return _ring_reject(RingContractError.InvalidCompletion)
+    _ring_ok()
+
+pub fn ring_payload_lease_validate(lease: RingPayloadLease) -> RingContractCheck:
+    if lease.owner_id == 0u64:
+        return _ring_reject(RingContractError.InvalidPayloadLease)
+    match lease.ownership:
+        case RingPayloadOwnership.CallerOwned:
+            if lease.handle != 0u64 or lease.byte_length != 0u64:
+                return _ring_reject(RingContractError.InvalidPayloadLease)
+        case RingPayloadOwnership.RegisteredLease:
+            if lease.handle == 0u64 or lease.byte_length == 0u64:
+                return _ring_reject(RingContractError.InvalidPayloadLease)
+    val generation_check = ring_generation_validate(lease.generation)
+    if not generation_check.ok:
+        return _ring_reject(RingContractError.InvalidPayloadLease)
+    _ring_ok()
+
+pub fn ring_operation_metadata_validate(metadata: RingOperationMetadata) -> RingContractCheck:
+    if metadata.task_key == 0u64 or metadata.priority < 0 or metadata.trace_id == 0u64:
+        return _ring_reject(RingContractError.InvalidOperationMetadata)
+    val lease_check = ring_payload_lease_validate(metadata.payload_lease)
+    if not lease_check.ok:
+        return _ring_reject(RingContractError.InvalidOperationMetadata)
+    _ring_ok()
+
+pub fn async_task_frame_validate(frame: AsyncTaskFrame) -> RingContractCheck:
+    if frame.task_id == 0u64 or frame.cancellation_key == 0u64 or
+        frame.state < 0 or frame.priority < 0 or frame.trace.trim() == "":
+        return _ring_reject(RingContractError.InvalidTaskFrame)
+    if frame.detached and frame.supervisor_capability == 0u64:
+        return _ring_reject(RingContractError.InvalidTaskFrame)
+    val fingerprint_check = _ring_profile_fingerprint_validate(frame.profile_fingerprint)
+    if not fingerprint_check.ok:
+        return fingerprint_check
+    if val token = frame.wait_token:
+        return ring_token_validate(token)
+    _ring_ok()
+
+pub fn task_context_validate(context: TaskContext) -> RingContractCheck:
+    if context.executor_id == 0u64 or context.wake_key == 0u64 or
+        context.budget <= 0 or
+        (context.deadline != 0u64 and context.deadline < context.current_time):
+        return _ring_reject(RingContractError.InvalidTaskContext)
+    _ring_profile_fingerprint_validate(context.profile_fingerprint)
+
+pub fn task_poll_result_validate<T>(result: TaskPollResult<T>) -> RingContractCheck:
+    match result:
+        case TaskPollResult.Ready(_): _ring_ok()
+        case TaskPollResult.Pending(token): ring_token_validate(token)
+
+pub fn task_poll_result_is_ready<T>(result: TaskPollResult<T>) -> bool:
+    match result:
+        case TaskPollResult.Ready(_): true
+        case TaskPollResult.Pending(_): false
+
+pub fn task_poll_result_is_pending<T>(result: TaskPollResult<T>) -> bool:
+    not task_poll_result_is_ready(result)
+
+pub fn task_poll_result_wait_token<T>(result: TaskPollResult<T>) -> RingToken?:
+    match result:
+        case TaskPollResult.Ready(_): nil
+        case TaskPollResult.Pending(token): token
+
+pub fn async_trace_event_validate(event: AsyncTraceEvent) -> RingContractCheck:
+    if event.task_id == 0u64 or event.trace_id == 0u64 or event.sequence == 0u64:
+        return _ring_reject(RingContractError.InvalidTaskFrame)
+    if val token = event.operation_token:
+        return ring_token_validate(token)
+    _ring_ok()
+
+fn _ring_ok() -> RingContractCheck:
+    RingContractCheck(ok: true, error: RingContractError.None)
+
+fn _ring_reject(error: RingContractError) -> RingContractCheck:
+    RingContractCheck(ok: false, error: error)
+
+fn _ring_non_admitting_status_valid(admission: RingAdmission) -> RingContractCheck:
+    if admission.admitted_count != 0 or admission.token != nil:
+        return _ring_reject(RingContractError.InvalidAdmission)
+    _ring_ok()
+
+fn _ring_profile_fingerprint_validate(fingerprint: text) -> RingContractCheck:
+    if fingerprint.trim() == "":
+        return _ring_reject(RingContractError.InvalidProfileFingerprint)
+    _ring_ok()
+
+export SIMPLE_RING_ASYNC_V1
+export RingGeneration, RingToken, RingMappingGrade
+export RingAdmissionStatus, RingAdmission, RingTerminalKind, RingCompletion
+export RingPayloadOwnership, RingPayloadLease, RingOperationMetadata
+export AsyncTaskFrame, TaskContext, TaskPollResult, StacklessAsyncTask
+export AsyncTraceEventKind, AsyncTraceEvent
+export RingContractError, RingContractCheck
+export simple_ring_async_v1_version, simple_ring_async_v1_canonical_text
+export ring_generation_initial, ring_generation_validate, ring_token_validate
+export ring_mapping_grade_canonical_text, ring_admission_status_canonical_text
+export ring_terminal_kind_canonical_text, ring_admission_validate
+export ring_completion_validate, async_task_frame_validate, task_context_validate
+export ring_payload_lease_validate, ring_operation_metadata_validate
+export async_trace_event_validate
+export task_poll_result_validate, task_poll_result_is_ready
+export task_poll_result_is_pending, task_poll_result_wait_token

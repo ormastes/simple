@@ -224,6 +224,25 @@ execution model:
 | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Lower-level task facade that reuses `multicore_green_spawn` for runtime-pool execution and inline fallback; not the named cross-language M:N profile row |
 | `channel_new` / `channel_from_id` | `src/lib/nogc_sync_mut/concurrent/channel.spl` re-exported through `std.concurrent.channel` | Native compatibility channel: validated inline transfer packets, capacity 256, and fail-closed full/closed/non-transferable sends. Heap graphs require future typed frozen/owned/encoded payload support. |
 
+### SimpleRing/task/profile V1 foundation
+
+The V1 async foundation is a contract and bounded-lifecycle layer, not a new
+executor. Keep these surfaces distinct from the Future/green/thread APIs above:
+
+| API/contract | Path | Model and current boundary |
+|---|---|---|
+| `SimpleRing<Op, Cpl>` | `src/lib/nogc_async_mut/async_ring/simple_ring.spl` | Fixed-capacity, single-owner lifecycle with metadata/payload leases, batches, cancellation state, and bounded telemetry; no scheduler or native provider |
+| `RingToken`, `StacklessAsyncTask`, `AsyncTaskFrame`, `TaskContext`, `TaskPollResult` | `src/lib/common/contracts/execution/simple_ring_async_v1.spl` | Versioned ring/task values and callable nonblocking poll contract; not compiler-generated lowering |
+| `AsyncProfile` V1 presets | `src/lib/common/contracts/execution/async_profile_v1.spl` | Configuration, fail-closed validation, canonical text, and fingerprints; mission presets do not implement static storage or a migrated executor |
+| Software provider, hosted mission adapter, trace ring | `src/lib/nogc_async_mut/async_ring`, `src/lib/nogc_async_mut_noalloc/async/async_trace_ring.spl` | Bounded reference mechanisms whose explicit proof flags do not claim native mapping, allocation freedom, or link-time-static placement |
+
+The V1 foundation does not make `Future`, `HostFuture`, `cooperative_green_spawn`,
+`multicore_green_spawn`, `task_spawn`, or `thread_spawn` canonical. Adapters
+must preserve each surface's blocking, fallback, ownership, cancellation, and
+completion facts before it can be used as V1 evidence. Do not claim implicit
+await/compiler frame lowering, native `io_uring`, mission static storage, or
+migrated executors without executable gates.
+
 Use `cooperative_green_spawn` for lightweight cooperative scheduling tests, and
 `cooperative_green_spawn_value` when a direct-run benchmark needs to exercise
 the queue without delayed function-valued storage. Function-valued parameters
