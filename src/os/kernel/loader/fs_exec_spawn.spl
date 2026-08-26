@@ -6,7 +6,7 @@
 # optional live handoff hook.
 
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.loader.cap_exec_gate.{exec_cap_check}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check, exec_cap_check_caps}
 use os.kernel.loader.byte_utils.{byte_len}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{
@@ -29,10 +29,15 @@ use os.kernel.loader.spawn_authority.{
     spawn_authority_spawn_caps
 }
 use os.kernel.loader.spawn_recipes.{
-    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps,
+    spawn_recipe_launch_contract_valid
 }
 use os.kernel.types.task_types.{TaskId, TaskPriority, scheduler_flat_topology}
 use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_errno, executable_launch_arguments_v1_validate
+}
+use os.kernel.scheduler.process_execution_observation.{SchedulerExecutionEvidenceTokenV1}
 
 extern fn serial_println(msg: text)
 
@@ -113,6 +118,11 @@ pub struct FsExecPrepareResult:
     scheduler: Scheduler
     pid: i64
     entry: i64
+
+pub struct FsExecAuthenticatedRunResultV1:
+    exit_code: i64
+    evidence: SchedulerExecutionEvidenceTokenV1?
+    scheduler: Scheduler
 
 fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
     """Create the one-CPU scheduler state fs-exec needs without importing the full scheduler hub."""
@@ -229,6 +239,54 @@ pub fn fs_exec_adopt_authenticated_v1(
         owner.adopt_authenticated_executable_pid_v1(
             table, authorities, token, consumer, entry_point,
             TaskPriority.Normal, caps)
+    if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
+        return FsExecPrepareResult(scheduler: owner, pid: -13, entry: 0)
+    FsExecPrepareResult(
+        scheduler: owner, pid: adopted.pid as i64, entry: entry_point as i64)
+
+pub fn fs_exec_adopt_authenticated_with_launch_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    caller_caps: CapabilitySet,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> FsExecPrepareResult:
+    """Publish one exact authenticated image with its admitted initial stack.
+
+    Unlike the compatibility adoption seam this never recreates a parent
+    capability set or drops argv/envp.  The scheduler retains the mapped image
+    and the exact launch stack after the registry token is consumed.
+    """
+    val launch_result = executable_launch_arguments_v1_validate(path, argv, envp)
+    if launch_result.is_err():
+        return FsExecPrepareResult(
+            scheduler: scheduler,
+            pid: executable_launch_arguments_v1_errno(
+                launch_result.unwrap_err()) as i64,
+            entry: 0)
+    val launch = launch_result.unwrap()
+    if not spawn_recipe_launch_contract_valid(
+        recipe, launch.path, launch.argv, launch.envp):
+        return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
+    val gate = exec_cap_check_caps(caller_caps, launch.path)
+    if gate != 0:
+        return FsExecPrepareResult(scheduler: scheduler, pid: gate as i64, entry: 0)
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0:
+        return FsExecPrepareResult(scheduler: scheduler, pid: allowed as i64, entry: 0)
+    val caps = spawn_authority_spawn_caps(caller, recipe, caller_caps)
+    var owner = scheduler
+    val adopted: SchedulerExecutableAdoptionResultV1 =
+        owner.adopt_authenticated_executable_pid_with_launch_v1(
+            table, authorities, token, consumer, entry_point,
+            TaskPriority.Normal, caps, launch.path, launch.argv, launch.envp)
     if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
         return FsExecPrepareResult(scheduler: owner, pid: -13, entry: 0)
     FsExecPrepareResult(
