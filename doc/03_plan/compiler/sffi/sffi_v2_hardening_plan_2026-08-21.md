@@ -1216,6 +1216,14 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Keep the bounded typed-result lift outside line-scan loops.
 - [x] Add a static typed-read and fail-closed ratchet.
 
+### Completed MDSOC module-storage contract slice
+
+- [x] Replace the untyped source callback with a typed `Result` function.
+- [x] Remove raw disk-read authority and delegate once to `file_read_result`.
+- [x] Preserve registered empty memory sources as `Ok("")` and return `Err` for
+  absence.
+- [x] Add no read or registry-scan work and add a static contract ratchet.
+
 ### Completed compiler performance CLI authority slice
 
 - [x] Remove both duplicate raw `rt_get_args` declarations and calls.

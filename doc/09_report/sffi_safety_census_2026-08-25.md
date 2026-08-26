@@ -576,6 +576,16 @@ symbol from `math_utils`; it consumes the confined always-inline owner.  Its
 shape remains one root after one O(n) frequency-weight accumulation, with no
 additional traversal or temporary collection.
 
+### MDSOC module-storage contract follow-up
+
+`ModuleStoragePort` now requires `fn(text) -> Result<text,text>` instead of an
+untyped callback whose contract fabricated empty text on failure.  Disk storage
+delegates once to typed `file_read_result`; memory storage returns `Ok(source)`
+for registered values, including empty text, and `Err` for absence.  The port
+has no current consumers, so the contract was corrected before runtime fan-out.
+There is no extra file read, registry scan, copy, cache, lock, hash, lookup,
+boxing layer, or dynamic dispatch.
+
 ### MDSOC layer-document read authority follow-up
 
 The layer documentation checker no longer declares or calls non-null raw
