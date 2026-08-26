@@ -1727,3 +1727,20 @@ Native C deliberately rejects `https://` with a typed transport error because
 its core provider implements plain HTTP only; the Rust interpreter uses its TLS
 HTTP provider. HTTPS parity therefore remains open, but neither lane silently
 downgrades HTTPS or manufactures a successful response.
+
+### Privileged CPU providerless-boundary removal
+
+ARM32, ARM64, and RV32 CPU owners no longer declare 63 genuinely unbacked
+`rt_*` identities. They contain 60 direct target instructions, each confined
+to its own `inline_asm` capability block. Three unused ARM32 declarations were
+removed; ARM32 MPIDR is now one coherent register read instead of two missing
+half-word calls, and ARM64 interrupt masks use exact immediate instructions.
+
+This bounded family now has zero raw SFFI declarations and therefore zero
+unsigned provider calls. It has not become generally safe: privileged inline
+assembly remains unsafe, source review is not compiler/hardware proof, and no
+artifact signature/admission evidence exists. The focused static ratchet was
+added but not executed. No branch, allocation, copy, lookup, hash, lock,
+signature check, or generic dispatch was added to the per-operation path.
+The two checked-in x86 example provider snapshots also drop 114 stale matching
+nil/no-op definitions; unrelated architecture helper definitions are retained.

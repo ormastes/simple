@@ -338,3 +338,21 @@ contract-declared, 10,567 untouched, and zero signed/admitted.
 
 Read-only research sidecars were used for compiler, library, and documentation
 audits. Merge owner and final highest-capability reviewer: `/root`.
+
+## Privileged CPU direct-instruction tranche
+
+- [x] Remove 63 providerless ARM32/ARM64/RV32 `rt_*` declarations from the
+  target CPU owners.
+- [x] Preserve the public HAL surface while lowering each primitive to one
+  direct target instruction and one minimal `inline_asm` authority region.
+- [x] Replace the split ARM32 MPIDR read with one architectural MRC operation.
+- [x] Encode ARM64 DAIF set/clear using constant architectural immediates.
+- [x] Add a static ratchet for declaration absence, exact instruction count,
+  capability confinement, and hot-path allocation/lookup/dispatch exclusion.
+- [ ] Execute cross-target compiler/assembler checks when an admitted current
+  self-hosted toolchain is available.
+- [ ] Prove privilege-level preconditions and bind compiler/hardware evidence
+  to a signed artifact before any verified/critical promotion.
+
+This tranche improves the hot path by deleting unresolved foreign calls. It
+does not label inline assembly safe or verified.

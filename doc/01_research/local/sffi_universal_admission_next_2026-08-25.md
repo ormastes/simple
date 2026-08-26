@@ -5772,3 +5772,32 @@ buffer allocation/copy, lookup, lock, hash, signature operation, or generic
 dispatch was added. The image providers and produced artifact are still not
 cryptographically admitted by this source change; verified-and-signed remains
 0.
+
+## Privileged CPU SFFI removal checkpoint
+
+The ARM32, ARM64, and RV32 CPU owners declared 63 `rt_*` functions for system
+register access, barriers, TLB invalidation, interrupt masking, and wait
+instructions. The authoritative extern census classified sampled identities
+as genuinely missing, while generated x86 example providers retained weak
+nil/no-op substitutes. The declarations therefore described neither a safe
+nor a functional portable ABI.
+
+The three target owners now emit 60 direct target instructions inside one
+`inline_asm` capability region per operation. Three unused ARM32 FIQ-only
+declarations disappear, and the two-call split ARM32 MPIDR reconstruction is
+replaced by the architecture's single 32-bit MRC read. ARM64 DAIF changes use
+their required immediate forms instead of pretending that immediate is a
+general scalar ABI.
+
+This removes foreign dispatch rather than adding validation to a hot path:
+each operation remains O(1), allocation-free, copy-free, lookup-free, and
+lock-free, with no per-call hashing or signature work. It does not prove the
+instruction is legal at the caller's exception level, compiler operand
+lowering, or hardware behavior. Each operation remains explicitly unsafe at
+the smallest `inline_asm` boundary and is not a signed/admitted artifact. The
+focused ratchet is source-reviewed only and was not executed in this tranche.
+
+The 114 matching weak/no-op definitions were also removed from the two
+checked-in x86 SimpleOS example provider snapshots. Six declaration identities
+had no matching snapshot definition; unrelated ARM/RV32 runtime helpers remain
+untouched.
