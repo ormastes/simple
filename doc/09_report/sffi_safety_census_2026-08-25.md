@@ -790,3 +790,16 @@ wrong-signature receipt fails closed instead of upgrading unrelated source.
 This is census-only logic with no compiler, loader, or runtime-path cost.
 Provider-to-artifact closure remains a separate admission requirement; source
 annotations alone are still never treated as signed evidence.
+
+### Frontend parse-cache authority follow-up
+
+The frontend parse cache removed nine raw environment, file, directory,
+process-id, hash, move, and delete declarations. It now uses canonical owners
+while preserving four configuration reads, two existence probes, one exact
+non-shelling hash, one typed read, one exact write, one move, and at most one
+failed-move cleanup. Provider failure remains a cache miss; invalid hashes
+remain empty keys; invalid process identity fails closed before temp-file
+publication. The canonical hash owner performs the sole 64-byte validation, so
+no second digest check or shell fallback was added. Disk I/O counts, cache
+complexity, and stored data layout are unchanged, with no new scan, retry,
+allocation, copy, lock, lookup, generic dispatch, or per-hit admission work.

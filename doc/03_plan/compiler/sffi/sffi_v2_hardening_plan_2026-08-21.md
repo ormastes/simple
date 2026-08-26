@@ -1369,6 +1369,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add a static regression assertion for the composite join key.
 - [x] Add zero compiler, loader, admission-hot-path, or per-call runtime work.
 
+### Completed frontend parse-cache authority slice
+
+- [x] Remove all nine cache-local raw SFFI declarations.
+- [x] Preserve four env reads, two existence probes, and one typed file read.
+- [x] Preserve one non-shell hash, exact write, move, and failure cleanup.
+- [x] Fail closed on invalid PID and keep provider failures as cache misses.
+- [x] Avoid duplicate digest validation, extra retry, scan, lock, or dispatch.
+- [x] Add a static authority and exact operation-count ratchet.
+
 ### Completed MIR switch/operator environment-authority slice
 
 - [x] Remove the duplicate raw nullable environment declaration.
