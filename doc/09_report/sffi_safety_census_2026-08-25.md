@@ -2233,3 +2233,18 @@ The post-change source-only census is 12,784 SFFI declaration rows and 11,160
 `rt_*` rows; it reports zero signed-admitted rows or symbols.  The removed
 legacy façade lowers the raw declaration count, but 8,034 `rt_*` declaration
 rows remain untouched and the broader estate is not safe or verified.
+
+### Intel Engine2D raw-owner consolidation (2026-08-26)
+
+The GC Engine2D kernel helper no longer owns eleven duplicate raw
+`rt_intel_engine2d_*` declarations; it imports the matching no-GC owner
+wrappers while retaining the same helper names and one-call operation shape.
+Both remaining Intel owners now explicitly tag all 21 raw declarations as
+`unsafe(ffi)`, and the authority audit confirms 42 tagged rows with none in
+the active backend. The focused uninitialized text-fallback spec passes 2/2;
+source checks pass, and optimizer analysis reports no general-pattern finding.
+
+The post-change source-only census is 12,773 SFFI declaration rows and 11,149
+`rt_*` rows, with 3,241/2,920 explicitly unsafe-tagged respectively and zero
+signed-admitted declarations. This is declaration containment, not an ABI,
+ownership, nullability, performance-on-device, or cryptographic verification.

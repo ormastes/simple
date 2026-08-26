@@ -6406,3 +6406,19 @@ the providerless guard prevents raw declarations/calls from returning, and the
 optimizer reports only existing local dead-code observations.  This deletes a
 dead unsafe execution surface without adding a loop, allocation, copy, lookup,
 or dispatch to the cache path.
+
+### Intel Engine2D raw-owner consolidation (2026-08-26)
+
+The active GC Intel Engine2D kernel helper redeclared eleven raw
+`rt_intel_engine2d_*` functions even though the no-GC Intel SFFI owner already
+provided matching wrappers. The backend now imports those wrappers under its
+existing local helper names, preserving one direct call at each argument-set
+or upload/download site. No loop, allocation, copy, lookup, or extra dispatch
+is introduced to the render path.
+
+Both retained raw Intel declaration surfaces (`sffi_intel` and compatibility
+`ffi_intel`) now mark all 21 declarations `unsafe(ffi)`. The owner audit
+confirms 42 tagged raw declaration rows and none in the active GC consumer.
+This records the still-unverified Level Zero/Engine2D ABI boundary; it does not
+prove pointer/array layout, nullability, ownership, artifact identity, or a
+signature-admitted provider.

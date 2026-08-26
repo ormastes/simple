@@ -731,3 +731,14 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
 - [ ] Migrate any future engine2d Metal compute execution through an admitted
   typed owner with versioned ABI and artifact/signature evidence; do not revive
   this cache module as an execution boundary.
+
+### Intel Engine2D raw-owner consolidation
+
+- [x] Remove the eleven raw `rt_intel_engine2d_*` declarations from the active
+  GC backend and import the canonical no-GC wrapper functions instead.
+- [x] Mark all 21 declarations in each remaining Intel raw-owner surface as
+  `unsafe(ffi)` and add an authority audit covering 42 raw rows.
+- [x] Preserve existing backend helper names and one-call render-path shape;
+  run focused source checks, existing fallback spec, and optimizer analysis.
+- [ ] Replace both legacy Intel owners with one versioned typed Level Zero ABI;
+  then validate pointer/array layouts and admit a signed exact provider.
