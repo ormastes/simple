@@ -2,29 +2,45 @@
 use os.kernel.fs.fat32.*
 
     fn _write_fat_entry(self, dev: BlockDevice, cluster: u32, value: u32) -> Result<(), text>:
-        """Write a 28-bit FAT32 entry for cluster to the FAT region on dev.
+        """Write a 28-bit FAT32 entry to the selected FAT copy/copies.
 
         Preserves the top 4 reserved bits of the existing on-disk word.
-        value must already be a 28-bit quantity (top 4 bits ignored).
+        Mirrored volumes first require all existing entries to agree, then
+        update and reread every copy. Mirroring-disabled volumes touch only
+        the ExtFlags-selected active FAT.
         """
+        if self.fat_count == 0u32:
+            return Err("fat32: volume has no FAT copies")
+        # Do not repair or overwrite a detected split-brain FAT during a
+        # normal mutation. The caller must fail closed before any copy changes.
+        val old = self._read_fat_entry(dev, cluster)
+        if old.is_err():
+            return Err(old.unwrap_err())
         val fat_offset = cluster * 4u32
-        val fat_sector = self.fat_start_sector.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
         val entry_off  = (fat_offset % self.bytes_per_sector).to_i32()
-        # Read the current sector so we can preserve the top 4 reserved bits.
-        val sec_result = dev.read_sector(fat_sector)
-        if sec_result.is_err():
-            return Err("fat32: failed to read FAT sector for write to cluster {cluster}")
-        var sec = sec_result.unwrap()
-        # Preserve bits 28-31 of the existing entry; replace bits 0-27 with value.
-        val existing_top = sec[entry_off + 3].to_u32() & 0xF0u32
         val masked = value & 0x0FFFFFFFu32
-        sec[entry_off]     = (masked & 0xFFu32).to_u8()
-        sec[entry_off + 1] = ((masked >> 8u32)  & 0xFFu32).to_u8()
-        sec[entry_off + 2] = ((masked >> 16u32) & 0xFFu32).to_u8()
-        sec[entry_off + 3] = (existing_top | ((masked >> 24u32) & 0x0Fu32)).to_u8()
-        val wr = dev.write_sector(fat_sector, sec)
-        if wr.is_err():
-            return Err("fat32: failed to write FAT sector for cluster {cluster}")
+        val first_copy = if self.fat_mirroring_enabled: 0u32 else: self.active_fat_index
+        val copy_limit = if self.fat_mirroring_enabled: self.fat_count else: first_copy + 1u32
+        var copy = first_copy
+        while copy < copy_limit:
+            val fat_sector = self.fat_start_sector.to_u64() + copy.to_u64() * self.fat_size_sectors.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
+            val sec_result = dev.read_sector(fat_sector)
+            if sec_result.is_err():
+                return Err("fat32: failed to read FAT sector for write to cluster {cluster}")
+            var sec = sec_result.unwrap()
+            # Preserve each copy's reserved nibble independently.
+            val existing_top = sec[entry_off + 3].to_u32() & 0xF0u32
+            sec[entry_off]     = (masked & 0xFFu32).to_u8()
+            sec[entry_off + 1] = ((masked >> 8u32)  & 0xFFu32).to_u8()
+            sec[entry_off + 2] = ((masked >> 16u32) & 0xFFu32).to_u8()
+            sec[entry_off + 3] = (existing_top | ((masked >> 24u32) & 0x0Fu32)).to_u8()
+            val wr = dev.write_sector(fat_sector, sec)
+            if wr.is_err():
+                return Err("fat32: failed to write FAT sector for cluster {cluster}")
+            copy = copy + 1u32
+        val reread = self._read_fat_entry(dev, cluster)
+        if reread.is_err() or reread.unwrap() != masked:
+            return Err("fat32: FAT write did not verify for cluster {cluster}")
         Ok(())
 
     fn allocate_cluster(self, dev: BlockDevice) -> Result<u32, i32>:
@@ -304,4 +320,3 @@ use os.kernel.fs.fat32.*
         if c.is_err():
             return Err(EIO)
         Ok(c.unwrap())
-
