@@ -6479,3 +6479,18 @@ no render-loop allocation, copy, lookup, dispatch, or retry was added, and the
 optimizer found no general source-pattern regression. The OpenGL provider is
 still unsafe, unsigned, and unverified; these changes do not prove buffer
 extent, handle ownership, ABI identity, or artifact admission.
+
+### File-operations raw-boundary classification (2026-08-26)
+
+The shared no-GC `file_ops` owner retains nineteen required raw filesystem and
+mmap hooks. Every declaration is now explicit `unsafe(ffi)` (with `raw_ptr`
+for mapping address/extent operations), and every direct call is lexical-unsafe.
+This is a containment step, not a safe-wrapper claim: legacy mmap/hash text
+declarations still need a typed nullable/result migration.
+
+The file-ops authority guard and four-module source check pass. The optimizer
+finds no general source-pattern change, and the edit adds no loop, allocation,
+copy, lookup, retry, or dispatch to any file hot path. The nominal integration
+spec is blocked by the bootstrap registry omitting
+`rt_file_read_regular_no_follow_bounded`; a concrete bug record captures the
+reproduction and requires typed nullable registration rather than a stub.

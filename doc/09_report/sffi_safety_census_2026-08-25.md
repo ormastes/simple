@@ -2305,3 +2305,19 @@ no loop, allocation, copy, lookup, retry, or dispatch to the rendering path.
 The OpenGL provider remains unsigned and unverified. This classification does
 not establish typed buffer extent, handle ownership, ABI conformance, artifact
 identity, or cryptographic admission.
+
+### File-operations raw-boundary classification (2026-08-26)
+
+The common no-GC file owner has nineteen explicit `unsafe(ffi)` raw
+declarations, with `raw_ptr` limited to mmap address/extent calls. Its direct
+foreign calls are lexical-unsafe and public file-operation APIs retain their
+existing operation shape. Optimizer analysis reports 51 low-level bounds-check
+and one dead-code opportunity but no general-pattern finding; this tranche adds
+no loop, allocation, copy, lookup, retry, or dispatch.
+
+The source check and new raw-boundary guard pass. The current bootstrap
+interpreter cannot resolve `rt_file_read_regular_no_follow_bounded`, and the
+legacy lock-resource spec imports a missing `FileLock` surface; both failures
+are recorded under `doc/08_tracking/bug/` and are not accepted as a pass. The
+provider remains unsafe, unsigned, and unverified, and legacy non-null
+mmap/hash text contracts remain migration work.
