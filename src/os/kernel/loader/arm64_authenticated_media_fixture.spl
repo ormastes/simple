@@ -22,9 +22,13 @@ use os.kernel.loader.executable_crypto_authority.{
     ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize
 }
 use os.kernel.loader.executable_load_plan_v1.{executable_load_consumer_new_v1}
-use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn_authenticated_v1}
+use os.kernel.loader.arm64_fs_exec_spawn.{
+    arm64_fs_exec_spawn_authenticated_v1,
+    arm64_fs_exec_spawn_authenticated_with_launch_v1
+}
 use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.arm64_authenticated_media_policy.{arm64_authenticated_media_root_matches_pin_v1}
 use arm64_auth_trust_config.{
     arm64_authenticated_pinned_key_id_v1,
@@ -32,8 +36,9 @@ use arm64_auth_trust_config.{
     arm64_authenticated_pinned_public_key_hash_v1
 }
 
-pub fn arm64_authenticated_media_execute_server_v1(
-    scheduler: Scheduler, table: MountTable
+fn _arm64_authenticated_media_execute_server_v1(
+    scheduler: Scheduler, table: MountTable, caller: i64,
+    caller_caps: CapabilitySet?, argv: [text], envp: [text]
 ) -> i64:
     """Execute `/SERVERS.ELF` only from one authenticated execute-open snapshot."""
     var owner = table
@@ -124,9 +129,32 @@ pub fn arm64_authenticated_media_execute_server_v1(
         ExecutableLoaderCryptographicProofV1(
             signer_key_id: key_id, signature: signature_bytes))
     if admitted.is_err(): return -13
+    # A cap-less compatibility caller cannot prove its launch ceiling.  Let
+    # the retired ABI revoke the opaque token; never reconstruct a pouch here.
+    if caller_caps.?:
+        return arm64_fs_exec_spawn_authenticated_with_launch_v1(
+            scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
+            executable_load_consumer_new_v1("simpleos", "aarch64", "simpleos"),
+            admitted.unwrap().entry_point, caller, caller_caps.unwrap(), "/SERVERS.ELF",
+            argv, envp, SPAWN_RECIPE_APP_LAUNCHER).exit_code
     arm64_fs_exec_spawn_authenticated_v1(
         scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
         executable_load_consumer_new_v1("simpleos", "aarch64", "simpleos"),
-        admitted.unwrap().entry_point, 0, "/SERVERS.ELF", SPAWN_RECIPE_APP_LAUNCHER)
+        admitted.unwrap().entry_point, caller, "/SERVERS.ELF", SPAWN_RECIPE_APP_LAUNCHER)
+
+pub fn arm64_authenticated_media_execute_server_v1(
+    scheduler: Scheduler, table: MountTable
+) -> i64:
+    """Legacy cap-less fixture: fail closed and revoke its admitted token."""
+    _arm64_authenticated_media_execute_server_v1(scheduler, table, 0, nil, [], [])
+
+pub fn arm64_authenticated_media_execute_server_with_caps_v1(
+    scheduler: Scheduler, table: MountTable, caller: i64,
+    caller_caps: CapabilitySet, argv: [text], envp: [text]
+) -> i64:
+    """Launch the authenticated ARM64 server with real caller capabilities."""
+    _arm64_authenticated_media_execute_server_v1(
+        scheduler, table, caller, caller_caps, argv, envp)
 
 export arm64_authenticated_media_execute_server_v1
+export arm64_authenticated_media_execute_server_with_caps_v1
