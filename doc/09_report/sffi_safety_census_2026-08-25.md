@@ -1269,6 +1269,23 @@ facades. Provider coverage remains incomplete and WebSocket empty/failure
 ambiguity remains explicit, so the family is unsafe, unsigned, and unverified.
 Source-reviewed only; checks were not executed.
 
+## 2026-08-26 dead RuntimeValue inspection/clone removal
+
+Five additional providerless families—string/array/dictionary predicates,
+raw string projection, and raw clone—had no consumer outside declarations,
+facades, exports, and mirrored generator templates. They were removed from all
+of those surfaces. The generated string-constructor test retains its live
+nonnull construction and release assertions without depending on the removed
+inspection APIs.
+
+The canonical RuntimeValue owner is reduced from 30 to 25 raw declarations,
+with closure 11 both lanes, 3 one-lane, and 11 providerless. Compiler-minimal
+is reduced from 39 to 34 declarations, with closure 20 both, 3 native-only, 0
+interpreter-only, and 11 providerless. No executable callsite was removed or
+adapted, so there is no runtime call, branch, allocation, copy, lookup, hash,
+dispatch, or layout change. Remaining APIs stay unsafe and unsigned.
+Source-reviewed only; checks were not executed.
+
 ## 2026-08-26 dead RuntimeValue container-constructor removal
 
 The providerless `rt_value_array_new` and `rt_value_dict_new` families had no

@@ -1541,6 +1541,21 @@ Torch SFFI nor all SFFI may be described as verified safe.
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
 
+## 2026-08-26 dead RuntimeValue inspection/clone removal
+
+- Remove unused string/array/dictionary predicates, raw string projection, and
+  raw clone from active owners, facades/exports, and both generator mirrors.
+- Preserve the live string-constructor generation test with nonnull creation
+  and release coverage only.
+- Reduce canonical RuntimeValue closure to 11 both, 3 one-lane, and 11
+  providerless; reduce compiler-minimal closure to 20 both, 3 native-only, 0
+  interpreter-only, and 11 providerless.
+- Add no runtime operation, allocation, copy, lookup, branch, hash, dispatch,
+  or layout change because the removed APIs had no consumer.
+- Next classify the providerless arithmetic/string/GC remainder against its
+  real consumers; do not delete the live arithmetic and string paths.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
 ## 2026-08-26 dead RuntimeValue container-constructor removal
 
 - Remove `rt_value_array_new` and `rt_value_dict_new` from both active owners,
