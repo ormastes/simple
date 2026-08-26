@@ -838,3 +838,16 @@ successful empty content retains the existing empty-header rejection. Each
 import still performs exactly one read and one bounded result lift before C
 parsing, with no retry, extra scan, allocation, copy, cache, hash, lock, lookup,
 boxing, marshalling, or dynamic dispatch.
+
+### Lazy module-loader authority follow-up
+
+The lazy interpreter module loader removed raw file-read and environment
+declarations. `_lazy_try_read` now returns `Result<text,text>` through canonical
+`file_read_result`; unreadable and empty candidate sources remain explicit
+fallback conditions rather than fabricated successful text. The lazy-mode flag
+still reads once, and `SIMPLE_LIB` now uses a resettable process-state cache so
+candidate construction performs at most one provider read between loader
+resets. Each requested candidate still receives at most one file read and the
+outline scanner runs once on the selected source. No additional directory
+search, source scan, allocation, copy, hash, signature check, lock, lookup,
+boxing, generic marshalling, or dynamic dispatch was added.

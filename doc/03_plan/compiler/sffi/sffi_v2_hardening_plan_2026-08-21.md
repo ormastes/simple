@@ -1299,6 +1299,16 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add no retry, scan, allocation, cache, hash, lock, or dispatch.
 - [x] Add a static typed-contract and call-count ratchet.
 
+### Completed lazy module-loader authority slice
+
+- [x] Remove raw file-read and environment declarations.
+- [x] Make candidate file transport typed `Result<text,text>`.
+- [x] Preserve unreadable/empty-source eager fallback behavior.
+- [x] Cache `SIMPLE_LIB` once between existing lazy-loader resets.
+- [x] Preserve at most one file read per requested candidate and one scan.
+- [x] Add no extra search, scan, allocation, hash, lock, or dispatch.
+- [x] Add a static typed-contract, call-count, and cache-shape ratchet.
+
 ### Completed MIR bulk-ops flag spec authority slice
 
 - [x] Remove the spec-local raw environment setter declaration and calls.
