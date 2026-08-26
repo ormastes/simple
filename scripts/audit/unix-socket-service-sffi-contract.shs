@@ -34,4 +34,26 @@ printf '%s\n' "$recv_body" | rg -q 'String::from_utf8\(buf\)\.map_err'
 rg -q '^pub extern "C" fn rt_unix_socket_close\(fd: i64\) -> i32' "$native"
 rg -q '^pub unsafe extern "C" fn rt_unix_socket_recv\(fd: i64, max_len: i64, out_len: \*mut i64\) -> i64' "$native"
 
-echo "Unix-socket service SFFI contract audit: PASS (raw declarations unsafe; close status aligned; recv failures typed and UTF-8 validated; native recv lane split unverified)"
+# Client/QMP provider transport is strict as well; its Simple declarations are
+# intentionally left for the next unsafe-confinement slice.
+for spec in unix_socket_connect:1 fd_write:3 fd_read_until:3 fd_close:1; do
+    name=${spec%%:*}
+    arity=${spec##*:}
+    body="$(sed -n "/^pub fn rt_${name}/,/^}/p" "$provider")"
+    printf '%s\n' "$body" | rg -q "if args.len\(\) != ${arity}"
+    printf '%s\n' "$body" | rg -q 'return Err\(CompileError::runtime'
+    rg -q "insert_simple!\(\"rt_${name}\"" "$registration"
+done
+
+write_body="$(sed -n '/^pub fn rt_fd_write/,/^}/p' "$provider")"
+printf '%s\n' "$write_body" | rg -q 'usize::try_from\(args\[2\]\.as_int\(\)\?\)'
+printf '%s\n' "$write_body" | rg -q 'if len > data.len\(\)'
+! printf '%s\n' "$write_body" | rg -q 'len.min\(data.len\(\)\)'
+
+read_body="$(sed -n '/^pub fn rt_fd_read_until/,/^}/p' "$provider")"
+printf '%s\n' "$read_body" | rg -q 'usize::try_from\(args\[2\]\.as_int\(\)\?\)'
+printf '%s\n' "$read_body" | rg -q 'Vec::with_capacity\(max.min\(256\)\)'
+printf '%s\n' "$read_body" | rg -q 'String::from_utf8\(buf\).map_err'
+! printf '%s\n' "$read_body" | rg -q 'from_utf8_lossy|_ => 65536'
+
+echo "Unix-socket SFFI contract audit: PASS (server/client transport strict; receive failures typed and UTF-8 validated; raw client declarations pending confinement)"

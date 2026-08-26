@@ -1600,3 +1600,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
   registry lookup, retry, or extra network dispatch was added.
 - Kept native recv pointer/out-length versus Simple text lifting explicitly
   unverified/unsigned pending a generated descriptor wrapper.
+## 2026-08-26 QMP/client socket provider follow-up
+
+- Enforced exact transport for connect/write/read-until/close.
+- Rejected negative/out-of-range buffer lengths and stop bytes before I/O.
+- Replaced read errors/invalid UTF-8 empty fabrication with typed errors while
+  retaining genuine EOF empty text and genuine `-1`/`false` OS outcomes.
+- Reduced initial read capacity to `min(max, 256)` and reused the buffer for
+  valid UTF-8; no lookup, retry, extra syscall, or lossy copy was added.
+- Raw Simple caller declarations remain the next confinement slice.

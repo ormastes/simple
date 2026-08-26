@@ -977,3 +977,11 @@ empty text. Valid UTF-8 conversion reuses the receive buffer instead of making
 a lossy owned copy. Native recv remains a pointer/out-length ABI while
 Simple/interpreter expose text, so that lane split is explicitly unverified and
 unsigned rather than safe.
+## 2026-08-26 QMP/client socket provider follow-up
+
+The four client socket interpreter handlers now enforce exact arity/types and
+buffer bounds. Write no longer defaults/truncates an invalid length; read-until
+no longer defaults stop/max, fabricates empty text for transport failures, or
+lossily copies UTF-8. A genuine EOF may still produce empty text. Valid reads
+cap initial capacity at `min(max, 256)` and reuse the buffer as `String`,
+reducing zero/small-read memory. Source-reviewed but unverified and unsigned.

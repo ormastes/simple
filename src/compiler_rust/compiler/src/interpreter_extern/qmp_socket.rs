@@ -41,13 +41,19 @@ static CONNS: Mutex<Option<ConnTable>> = Mutex::new(None);
 /// `rt_unix_socket_connect(path: text) -> i64`
 /// Returns a pseudo-fd (≥100) on success, -1 on failure.
 pub fn rt_unix_socket_connect(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_connect requires 1 argument (path)",
+        ));
+    }
+    let Value::Str(path) = &args[0] else {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_connect requires a text path",
+        ));
+    };
     #[cfg(unix)]
     {
-        let path = match args.first() {
-            Some(Value::Str(s)) => s.clone(),
-            _ => return Ok(Value::Int(-1)),
-        };
-        match UnixStream::connect(&*path) {
+        match UnixStream::connect(path.as_ref()) {
             Ok(stream) => {
                 let mut guard = CONNS.lock().unwrap();
                 let table = guard.get_or_insert_with(ConnTable::new);
@@ -61,7 +67,7 @@ pub fn rt_unix_socket_connect(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
+        let _ = path;
         Ok(Value::Int(-1))
     }
 }
@@ -69,22 +75,26 @@ pub fn rt_unix_socket_connect(args: &[Value]) -> Result<Value, CompileError> {
 /// `rt_fd_write(fd: i64, data: text, len: i64) -> i64`
 /// Returns bytes written, or -1 on error.
 pub fn rt_fd_write(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "rt_fd_write requires 3 arguments (fd, data, len)",
+        ));
+    }
+    let fd = args[0].as_int()?;
+    let Value::Str(data) = &args[1] else {
+        return Err(CompileError::runtime("rt_fd_write requires text data"));
+    };
+    let len = usize::try_from(args[2].as_int()?).map_err(|_| {
+        CompileError::runtime("rt_fd_write len is outside usize range")
+    })?;
+    if len > data.len() {
+        return Err(CompileError::runtime(
+            "rt_fd_write len is outside the data bounds",
+        ));
+    }
+    let bytes = &data.as_bytes()[..len];
     #[cfg(unix)]
     {
-        let fd = match args.first() {
-            Some(Value::Int(n)) => *n,
-            _ => return Ok(Value::Int(-1)),
-        };
-        let data = match args.get(1) {
-            Some(Value::Str(s)) => s.clone(),
-            _ => return Ok(Value::Int(-1)),
-        };
-        let len = match args.get(2) {
-            Some(Value::Int(n)) => *n as usize,
-            _ => data.len(),
-        };
-        let bytes = &data.as_bytes()[..len.min(data.len())];
-
         let mut guard = CONNS.lock().unwrap();
         if let Some(table) = guard.as_mut() {
             if let Some(stream) = table.streams.get_mut(&fd) {
@@ -98,7 +108,7 @@ pub fn rt_fd_write(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
+        let _ = (fd, bytes);
         Ok(Value::Int(-1))
     }
 }
@@ -106,57 +116,73 @@ pub fn rt_fd_write(args: &[Value]) -> Result<Value, CompileError> {
 /// `rt_fd_read_until(fd: i64, stop_byte: i64, max: i64) -> text`
 /// Reads bytes one-at-a-time until stop_byte or max bytes consumed.
 pub fn rt_fd_read_until(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "rt_fd_read_until requires 3 arguments (fd, stop_byte, max)",
+        ));
+    }
+    let fd = args[0].as_int()?;
+    let stop_byte = args[1].as_int()?;
+    if !(0..=255).contains(&stop_byte) {
+        return Err(CompileError::runtime(
+            "rt_fd_read_until stop_byte is outside u8 range",
+        ));
+    }
+    let max = usize::try_from(args[2].as_int()?).map_err(|_| {
+        CompileError::runtime("rt_fd_read_until max is outside usize range")
+    })?;
+    let stop = stop_byte as u8;
     #[cfg(unix)]
     {
-        let fd = match args.first() {
-            Some(Value::Int(n)) => *n,
-            _ => return Ok(Value::text(String::new())),
-        };
-        let stop = match args.get(1) {
-            Some(Value::Int(n)) => *n as u8,
-            _ => b'\n',
-        };
-        let max = match args.get(2) {
-            Some(Value::Int(n)) => *n as usize,
-            _ => 65536,
-        };
-
         let mut guard = CONNS.lock().unwrap();
-        if let Some(table) = guard.as_mut() {
-            if let Some(stream) = table.streams.get_mut(&fd) {
-                let mut buf = Vec::with_capacity(256);
-                let mut byte = [0u8; 1];
-                while buf.len() < max {
-                    match stream.read_exact(&mut byte) {
-                        Ok(_) => {
-                            buf.push(byte[0]);
-                            if byte[0] == stop {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+        let table = guard.as_mut().ok_or_else(|| {
+            CompileError::runtime("rt_fd_read_until has no active socket registry")
+        })?;
+        let stream = table.streams.get_mut(&fd).ok_or_else(|| {
+            CompileError::runtime("rt_fd_read_until received an unknown fd")
+        })?;
+        let mut buf = Vec::with_capacity(max.min(256));
+        let mut byte = [0u8; 1];
+        while buf.len() < max {
+            match stream.read_exact(&mut byte) {
+                Ok(_) => {
+                    buf.push(byte[0]);
+                    if byte[0] == stop {
+                        break;
                     }
                 }
-                return Ok(Value::text(String::from_utf8_lossy(&buf).into_owned()));
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(error) => {
+                    return Err(CompileError::runtime(format!(
+                        "rt_fd_read_until failed: {error}"
+                    )))
+                }
             }
         }
-        Ok(Value::text(String::new()))
+        let text = String::from_utf8(buf).map_err(|_| {
+            CompileError::runtime("rt_fd_read_until returned invalid UTF-8")
+        })?;
+        Ok(Value::text(text))
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
-        Ok(Value::text(String::new()))
+        let _ = (fd, stop, max);
+        Err(CompileError::runtime(
+            "rt_fd_read_until is unavailable on this platform",
+        ))
     }
 }
 
 /// `rt_fd_close(fd: i64) -> bool`
 pub fn rt_fd_close(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_fd_close requires 1 argument (fd)",
+        ));
+    }
+    let fd = args[0].as_int()?;
     #[cfg(unix)]
     {
-        let fd = match args.first() {
-            Some(Value::Int(n)) => *n,
-            _ => return Ok(Value::Bool(false)),
-        };
         let mut guard = CONNS.lock().unwrap();
         if let Some(table) = guard.as_mut() {
             if table.streams.remove(&fd).is_some() {
@@ -167,7 +193,7 @@ pub fn rt_fd_close(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = args;
+        let _ = fd;
         Ok(Value::Bool(false))
     }
 }
@@ -424,7 +450,30 @@ mod contract_tests {
         assert!(rt_unix_socket_accept(&[Value::Bool(false)]).is_err());
         assert!(rt_unix_socket_send(&[Value::Int(1), Value::Bool(false)]).is_err());
         assert!(rt_unix_socket_recv(&[Value::Int(1), Value::Int(-1)]).is_err());
-        assert!(rt_unix_socket_recv(&[Value::Int(i64::MAX), Value::Int(0)]).is_err());
+        assert!(
+            rt_unix_socket_recv(&[Value::Int(i64::MAX), Value::Int(0)]).is_err()
+        );
         assert!(rt_unix_socket_close(&[]).is_err());
+    }
+
+    #[test]
+    fn client_socket_handlers_reject_invalid_transport_before_io() {
+        assert!(rt_unix_socket_connect(&[]).is_err());
+        assert!(
+            rt_fd_write(&[Value::Int(1), Value::text("x"), Value::Int(2)]).is_err()
+        );
+        assert!(rt_fd_read_until(&[
+            Value::Int(1),
+            Value::Int(256),
+            Value::Int(1),
+        ])
+        .is_err());
+        assert!(rt_fd_read_until(&[
+            Value::Int(1),
+            Value::Int(10),
+            Value::Int(-1),
+        ])
+        .is_err());
+        assert!(rt_fd_close(&[]).is_err());
     }
 }
