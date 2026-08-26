@@ -10,7 +10,10 @@ use compiler.loader.module_loader_compat.{
     moduleloader_visible_aspect_catalog_digest,
     moduleloader_visible_aspect_catalog_generation,
     moduleloader_aspect_catalog_digest_computations,
-    moduleloader_aspect_catalog_invalidations
+    moduleloader_aspect_catalog_invalidations,
+    moduleloader_retained_aspect_snapshot_count_v1,
+    moduleloader_retained_aspect_snapshot_capacity_v1,
+    moduleloader_unload_aspect_facet
 }
 use compiler.driver.smf_writer.{generate_aspect_pack_smf}
 use std.common.aspect_pack.{
@@ -70,6 +73,9 @@ describe "visible aspect catalog digest and invalidation":
             case Err(message): panic(message)
         expect(first.len()).to_equal(64)
         expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
+        val retained_after_first = moduleloader_retained_aspect_snapshot_count_v1()
+        expect(retained_after_first).to_be_less_than(
+            moduleloader_retained_aspect_snapshot_capacity_v1() + 1)
         val second = match loader.install_aspect_catalog(catalog):
             case Ok(digest): digest
             case Err(message): panic(message)
@@ -77,6 +83,56 @@ describe "visible aspect catalog digest and invalidation":
         expect(moduleloader_visible_aspect_catalog_digest(loader)).to_equal(first)
         expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
         expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
+        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(
+            retained_after_first)
+
+    it "explicit owner teardown releases its retained catalog snapshot":
+        var loader = ModuleLoader.with_defaults()
+        val before = moduleloader_retained_aspect_snapshot_count_v1()
+        val unique_catalog = catalog_bytes_for(
+            "snapshot.close.owner", "abi-close-owner")
+        match loader.install_aspect_catalog(unique_catalog):
+            case Ok(_): pass
+            case Err(message): panic(message)
+        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(
+            before + 1)
+        var copied_loader = loader
+        expect(copied_loader.close_aspect_state()).to_equal(true)
+        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(before)
+        expect(moduleloader_visible_aspect_catalog_digest(loader)).to_equal("")
+        expect(moduleloader_visible_aspect_catalog_digest(
+            copied_loader)).to_equal("")
+
+    it "snapshot retention fails closed at capacity and teardown restores slots":
+        val before = moduleloader_retained_aspect_snapshot_count_v1()
+        val capacity = moduleloader_retained_aspect_snapshot_capacity_v1()
+        var owners: [ModuleLoader] = []
+        var slot = before
+        while slot < capacity:
+            var owner = ModuleLoader.with_defaults()
+            val catalog = catalog_bytes_for(
+                "snapshot.capacity.{before}.{slot}",
+                "abi-snapshot-capacity-{before}-{slot}")
+            match owner.install_aspect_catalog(catalog):
+                case Ok(_): pass
+                case Err(message): panic(message)
+            owners.push(owner)
+            slot = slot + 1
+        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(
+            capacity)
+        var overflow = ModuleLoader.with_defaults()
+        match overflow.install_aspect_catalog(catalog_bytes_for(
+                "snapshot.capacity.overflow.{before}", "abi-overflow-{before}")):
+            case Err(_): pass
+            case Ok(_): panic("snapshot capacity admitted an unowned slot")
+        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(
+            capacity)
+        var owner_index = 0
+        while owner_index < owners.len():
+            var retained_owner = owners[owner_index]
+            expect(retained_owner.close_aspect_state()).to_equal(true)
+            owner_index = owner_index + 1
+        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(before)
 
     it "changed catalog invalidates resident routing before publication":
         var loader = loader_with_pack()
@@ -176,6 +232,22 @@ describe "visible aspect catalog digest and invalidation":
         var retained = loader.aspect_facet_visible("Widget/Debuggable")
         expect(retained.load.module_id).to_equal("debug.core")
         expect(retained.release()).to_equal(true)
+
+    it "owner unload quiesces a pinned facet and reclaims only after release":
+        var loader = loader_with_pack()
+        match loader.install_aspect_catalog(catalog_bytes_for("debug.core", "abi-debug-1")):
+            case Ok(_): pass
+            case Err(message): panic(message)
+        var pinned = loader.aspect_facet_visible("Widget/Debuggable")
+        val unload = moduleloader_unload_aspect_facet(
+            loader, "Widget/Debuggable")
+        expect(unload.ok).to_equal(true)
+        expect(unload.quiescing).to_equal(true)
+        expect(unload.released).to_equal(false)
+        expect(pinned.is_live()).to_equal(true)
+        expect(loader.try_aspect_facet("Widget/Debuggable").load.found).to_equal(false)
+        expect(pinned.release()).to_equal(true)
+        expect(pinned.is_live()).to_equal(false)
 
     it "activating facet blocks update without invalidation or generation churn":
         var loader = loader_with_pack()

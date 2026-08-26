@@ -101,6 +101,11 @@ val APK_FC_BOUND: i64 = 0
 val APK_FC_QUIESCING: i64 = 1
 val APK_FC_UNLOADED: i64 = 2
 
+# Unload history is diagnostic lifecycle state, not an ownership root.  Keep
+# only a bounded FIFO window so repeated unload/reload cannot grow resident
+# tombstones forever.  A live binding always takes precedence over history.
+val APK_MAX_RETAINED_TOMBSTONES_V1: i64 = 1024
+
 # design §11.2 ChunkEntry.kind: a pack frame is either ordinary code/data or
 # the design's separately-split COLD debug/source metadata chunk (§12.2).
 val APK_CHUNK_CODE: i64 = 0
@@ -1700,9 +1705,13 @@ var _fc_generation: [i64] = []
 # freed only when nothing still holds it.
 var _fc_state: [i64] = []
 var _fc_refs: [i64] = []
-# Compact history ledger: preserves the public UNLOADED observation without
-# retaining payloads or full tombstone rows. One row per loader/key.
+# Compact bounded history ledger: preserves recent public UNLOADED observations
+# without retaining payloads or full binding rows.  `_fc_unloaded_order` is a
+# fixed-capacity FIFO ring once full; the Dict therefore never exceeds the
+# declared capacity.
 var _fc_unloaded: Dict<text, bool> = {}
+var _fc_unloaded_order: [text] = []
+var _fc_unloaded_head: i64 = 0
 
 # Exact facet-key -> global SoA row, partitioned by loader. The old hot path
 # scanned every binding from every loader. Dict lookup is average O(1); each
@@ -2019,19 +2028,43 @@ fn apk_load_aspect_manual(ld: i64, catalog: [u8], facet_key: text) -> ApkFacetLo
 
 fn apk_activate_startup(ld: i64, catalog: [u8]) -> i64:
     """Bind every `startup` route before the application publishes itself
-    (design §9.4). Returns the number bound; the first failure stops and is
-    left in apk_loader_last_error."""
+    (design §9.4). Publication is transactional: only bindings created by this
+    call are recorded, and the first failure releases them in reverse order
+    and restores the pre-call activation epoch.  Already-resident bindings are
+    never claimed by or rolled back with this transaction."""
+    _ld_last_error[ld] = ""
     val cat = apk_open_catalog_v1(catalog)
     if not cat.ok:
         _ld_last_error[ld] = cat.error_message
         return 0
     val keys = apk_catalog_startup_keys_v1(catalog, cat)
+    val generation_before = _ld_generation[ld]
+    var published_keys: [text] = []
     var bound = 0
     var i = 0
     while i < keys.len():
         val got = _apk_acquire_facet(ld, catalog, keys[i], true)
-        if not got.ok:
-            return bound
+        if not got.ok or not got.found:
+            val activation_error = if _ld_last_error[ld] != "":
+                _ld_last_error[ld]
+            else:
+                "startup route did not resolve a facet: " + keys[i]
+            var rollback_error = ""
+            var rollback = published_keys.len()
+            while rollback > 0:
+                rollback = rollback - 1
+                val released = apk_unload_facet_v1(ld, published_keys[rollback])
+                if (not released.ok or not released.released) and rollback_error == "":
+                    rollback_error = "startup rollback could not release " +
+                        published_keys[rollback]
+            if rollback_error == "":
+                _ld_generation[ld] = generation_before
+                _ld_last_error[ld] = activation_error
+            else:
+                _ld_last_error[ld] = activation_error + "; " + rollback_error
+            return 0
+        if got.found and not got.from_cache:
+            published_keys.push(keys[i])
         bound = bound + 1
         i = i + 1
     bound
@@ -2313,7 +2346,25 @@ fn apk_facet_unpin_v1(ld: i64, facet_key: text) -> bool:
     true
 
 fn _apk_record_unloaded(ld: i64, key: text):
-    _fc_unloaded["{ld}\0{key}"] = true
+    val tombstone = "{ld}\0{key}"
+    if _fc_unloaded.has(tombstone):
+        return
+    if _fc_unloaded_order.len() < APK_MAX_RETAINED_TOMBSTONES_V1:
+        _fc_unloaded_order.push(tombstone)
+    else:
+        val evicted = _fc_unloaded_order[_fc_unloaded_head]
+        _fc_unloaded = _fc_unloaded.remove(evicted)
+        _fc_unloaded_order[_fc_unloaded_head] = tombstone
+        _fc_unloaded_head = (
+            _fc_unloaded_head + 1) % APK_MAX_RETAINED_TOMBSTONES_V1
+    _fc_unloaded[tombstone] = true
+
+fn apk_retained_tombstone_count_v1() -> i64:
+    """Current process-wide unload-history rows; always at or below capacity."""
+    _fc_unloaded.keys().len() as i64
+
+fn apk_retained_tombstone_capacity_v1() -> i64:
+    APK_MAX_RETAINED_TOMBSTONES_V1
 
 fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, all_loader: bool):
     """design §14.7 step 5: free the binding. Only ever reached with a zero

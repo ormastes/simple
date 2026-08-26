@@ -13,12 +13,19 @@ use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.obj_taker.{SymbolType}
 use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
 use compiler.loader.aspect_pack_section.{smf_validate_optional_aspect_pack, smf_register_validated_aspect_pack}
+use compiler.loader.aspect_lifecycle_gate.{
+    AspectLifecycleGateAdmissionV1,
+    aspect_lifecycle_identity_new_v1,
+    aspect_lifecycle_gate_enter_v1,
+    aspect_lifecycle_gate_exit_v1
+}
 use std.common.aspect_pack.{
-    ApkFacetLoadV1, APK_ACT_OFF, APK_FC_BOUND, APK_FC_QUIESCING,
+    ApkFacetLoadV1, ApkUnloadResultV1, APK_ACT_OFF, APK_FC_BOUND, APK_FC_QUIESCING,
     apk_loader_new, apk_loader_unregister_pack, apk_try_facet,
     apk_facet_pin_v1, apk_facet_unpin_v1, apk_facet_state_v1,
     apk_facet_generation_v1, apk_open_catalog_v1, apk_validate_catalog_v1,
     apk_loader_invalidate_catalog_v1, apk_loader_catalog_invalidations_v1,
+    apk_unload_facet_v1, apk_activate_startup, apk_loader_last_error,
     _ApkCatalogIndexV1, _apk_index_catalog_v1, _apk_load_facet_indexed_v1
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -210,6 +217,8 @@ struct _ModuleAspectCatalogSnapshotV1:
     digest: text
     index: _ApkCatalogIndexV1
 
+val MODULE_ASPECT_MAX_RETAINED_SNAPSHOTS_V1: i64 = 64
+
 # Private immutable content-addressed publication owners. ModuleLoader keeps
 # its established public fields/layout; this registry correlates each digest
 # with the exact validated bytes and index used by the hot route.
@@ -235,6 +244,58 @@ fn _module_aspect_snapshot_release(digest: text):
     else:
         _module_aspect_catalog_snapshot_refs[digest] = refs - 1
 
+fn _module_aspect_snapshot_can_retain(digest: text, replaced_digest: text) -> bool:
+    if _module_aspect_catalog_snapshots.has(digest):
+        return true
+    if _module_aspect_catalog_snapshots.keys().len() <
+            MODULE_ASPECT_MAX_RETAINED_SNAPSHOTS_V1:
+        return true
+    # A replacement may reuse the outgoing slot only when this loader owns
+    # its final reference.  Shared snapshots stay retained for their owners.
+    if (replaced_digest != "" and
+            _module_aspect_catalog_snapshot_refs.has(replaced_digest)):
+        return _module_aspect_catalog_snapshot_refs[replaced_digest] == 1
+    false
+
+fn _module_aspect_gate_key_v1(
+        loader_identity: i64, operation: text, identity: text = "") -> text:
+    "{loader_identity}\0{operation}\0{identity}"
+
+fn _module_aspect_gate_exit_v1(
+        admission: AspectLifecycleGateAdmissionV1) -> bool:
+    aspect_lifecycle_gate_exit_v1(
+        admission.owner_token)
+
+fn moduleloader_retained_aspect_snapshot_count_v1() -> i64:
+    val admission = aspect_lifecycle_gate_enter_v1(
+        _module_aspect_gate_key_v1(0, "snapshot-count"))
+    if not admission.acquired:
+        return -1
+    val count = _module_aspect_catalog_snapshots.keys().len() as i64
+    if not _module_aspect_gate_exit_v1(admission):
+        return -1
+    count
+
+fn moduleloader_retained_aspect_snapshot_capacity_v1() -> i64:
+    MODULE_ASPECT_MAX_RETAINED_SNAPSHOTS_V1
+
+class _ModuleAspectOwnerV1:
+    """Reference-semantic owner shared by every value copy of ModuleLoader."""
+    identity: i64
+    loader_cell: Dict<i64, i64>
+    pack_paths: Dict<text, bool>
+    catalog_cell: Dict<i64, [u8]>
+    catalog_digest_cell: Dict<i64, text>
+    catalog_generation: i64
+    catalog_digest_computations: i64
+
+fn _module_aspect_owner_new_v1() -> _ModuleAspectOwnerV1:
+    _ModuleAspectOwnerV1(
+        identity: aspect_lifecycle_identity_new_v1(),
+        loader_cell: {}, pack_paths: {}, catalog_cell: {},
+        catalog_digest_cell: {}, catalog_generation: 0,
+        catalog_digest_computations: 0)
+
 struct ModuleLoader:
     config: ModuleLoaderConfig
     modules: Dict<text, LoadedModule>
@@ -245,17 +306,10 @@ struct ModuleLoader:
     semantic_dependencies: Dict<text, [text]>
     semantic_fingerprints: Dict<text, text>
     dependency_semantic_fingerprints: Dict<text, Dict<text, text>>
-    # Lazily-created single lifecycle owner for every aspect pack admitted by
-    # this loader. Ordinary source/SMF loads allocate no aspect state.
-    aspect_loader_cell: Dict<i64, i64>
-    aspect_pack_paths: Dict<text, bool>
-    # One validated visible catalog, retained as a reference-backed COW array.
-    # Assignment does not copy its bytes, and later caller mutation detaches
-    # rather than changing the loader-owned snapshot.
-    aspect_catalog_cell: Dict<i64, [u8]>
-    aspect_catalog_digest_cell: Dict<i64, text>
-    aspect_catalog_generation: i64
-    aspect_catalog_digest_computations: i64
+    # Reference-semantic lifecycle owner. ModuleLoader itself is a value
+    # struct, so keeping these fields in a class prevents a copy from silently
+    # duplicating one snapshot lease without incrementing its global refcount.
+    aspect_owner: _ModuleAspectOwnerV1
 
 fn _moduleloader_aspect_result(found: bool, facet_key: text, code: text, message: text) -> ApkFacetLoadV1:
     var empty: [u8] = []
@@ -263,32 +317,63 @@ fn _moduleloader_aspect_result(found: bool, facet_key: text, code: text, message
         facet_key: facet_key, pack_path: "", module_id: "", aspect_id: "",
         activation: APK_ACT_OFF, from_cache: false, payload: empty, generation: 0)
 
+fn _moduleloader_unload_result_error(facet_key: text, code: text,
+        message: text) -> ApkUnloadResultV1:
+    ApkUnloadResultV1(ok: false, error_code: code, error_message: message,
+        facet_key: facet_key, quiescing: false, released: false,
+        refcount: -1, generation: 0)
+
 class ModuleFacetRefV1:
     """Explicit lifetime token for one loader-owned facet generation.
 
     A successful acquisition pins the binding until `release` is called.
     `is_live` checks both the exact key and activation generation, so a released
     handle cannot silently become valid again after unload/reload publishes a
-    newer generation. This is a single-owner runtime contract; it does not
-    claim concurrent acquisition safety or compiler `facet<T>` lowering.
+    newer generation. Product calls are serialized by the loader-owned
+    lifecycle gate. The lower aspect container remains a single-owner
+    implementation and compiler `facet<T>` lowering is a separate concern.
     """
     load: ApkFacetLoadV1
     owner_handle: i64
     active: bool
 
     fn is_live() -> bool:
-        if not self.active or not self.load.found or self.owner_handle < 0:
+        if self.owner_handle < 0:
+            return false
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.owner_handle, "facet-ref-live", self.load.facet_key))
+        if not admission.acquired:
+            return false
+        if not self.active or not self.load.found:
+            _module_aspect_gate_exit_v1(admission)
             return false
         val state = apk_facet_state_v1(self.owner_handle, self.load.facet_key)
-        if state != APK_FC_BOUND and state != APK_FC_QUIESCING:
+        val live = (
+            (state == APK_FC_BOUND or state == APK_FC_QUIESCING) and
+            apk_facet_generation_v1(self.owner_handle, self.load.facet_key) ==
+                self.load.generation
+        )
+        if not _module_aspect_gate_exit_v1(admission):
             return false
-        apk_facet_generation_v1(self.owner_handle, self.load.facet_key) == self.load.generation
+        live
 
     me release() -> bool:
-        if not self.active:
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.owner_handle, "facet-ref-release", self.load.facet_key))
+        if not admission.acquired:
             return false
-        self.active = false
-        apk_facet_unpin_v1(self.owner_handle, self.load.facet_key)
+        if not self.active or not self.load.found or self.owner_handle < 0:
+            _module_aspect_gate_exit_v1(admission)
+            return false
+        val released = apk_facet_unpin_v1(
+            self.owner_handle, self.load.facet_key)
+        if released:
+            self.active = false
+        if not _module_aspect_gate_exit_v1(admission):
+            return false
+        released
 
 fn _moduleloader_facet_ref(load: ApkFacetLoadV1, owner_handle: i64) -> ModuleFacetRefV1:
     var pinned = false
@@ -333,13 +418,41 @@ impl ModuleLoader:
         the lazy owner absent. The result object itself is not claimed to be
         allocation-free.
         """
-        if not self.aspect_loader_cell.has(0):
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.aspect_owner.identity, "facet-try", facet_key))
+        if not admission.acquired:
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key,
+                    "APK_LIFECYCLE_WAIT_TIMEOUT",
+                    "bounded wait for aspect lifecycle owner expired"), -1)
+        val result = self._try_aspect_facet_owned(facet_key)
+        if not _module_aspect_gate_exit_v1(admission):
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key,
+                    "APK_LIFECYCLE_OWNER_LOST",
+                    "aspect lifecycle owner token was lost before release"), -1)
+        result
+
+    fn _try_aspect_facet_owned(facet_key: text) -> ModuleFacetRefV1:
+        if not self.aspect_owner.loader_cell.has(0):
             return _moduleloader_facet_ref(
                 _moduleloader_aspect_result(false, facet_key, "", ""), -1)
-        val owner = self.aspect_loader_cell[0]
+        val owner = self.aspect_owner.loader_cell[0]
         _moduleloader_facet_ref(apk_try_facet(owner, facet_key), owner)
 
     me install_aspect_catalog(catalog: [u8]) -> Result<text, text>:
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.aspect_owner.identity, "catalog-install"))
+        if not admission.acquired:
+            return Err("bounded wait for aspect lifecycle owner expired")
+        val result = self._install_aspect_catalog_owned(catalog)
+        if not _module_aspect_gate_exit_v1(admission):
+            return Err("aspect lifecycle owner token was lost before release")
+        result
+
+    me _install_aspect_catalog_owned(catalog: [u8]) -> Result<text, text>:
         """Validate and atomically install/update the visible aspect catalog.
 
         SHA-256 is computed only at this explicit configuration boundary.
@@ -354,48 +467,91 @@ impl ModuleLoader:
         if validation_error != "":
             return Err("invalid visible aspect catalog: " + validation_error)
         val digest = sha256_u8_hex(catalog)
-        self.aspect_catalog_digest_computations = self.aspect_catalog_digest_computations + 1
+        self.aspect_owner.catalog_digest_computations =
+            self.aspect_owner.catalog_digest_computations + 1
         var old_digest: text = ""
-        if self.aspect_catalog_digest_cell.has(0):
-            old_digest = self.aspect_catalog_digest_cell[0]
+        if self.aspect_owner.catalog_digest_cell.has(0):
+            old_digest = self.aspect_owner.catalog_digest_cell[0]
             if old_digest == digest:
-                if not _module_aspect_catalog_snapshots.has(digest):
-                    _module_aspect_catalog_snapshots[digest] = _ModuleAspectCatalogSnapshotV1(
-                        bytes: catalog, digest: digest,
-                        index: _apk_index_catalog_v1(catalog, opened))
-                if not _module_aspect_catalog_snapshot_refs.has(digest):
-                    _module_aspect_catalog_snapshot_refs[digest] = 1
+                if (not _module_aspect_catalog_snapshots.has(digest) or
+                        not _module_aspect_catalog_snapshot_refs.has(digest)):
+                    return Err("visible aspect catalog snapshot ownership is inconsistent")
                 return Ok(digest)
-            if self.aspect_loader_cell.has(0):
-                if not apk_loader_invalidate_catalog_v1(self.aspect_loader_cell[0]):
-                    return Err("visible aspect catalog update refused while bindings are live")
+        if not _module_aspect_snapshot_can_retain(digest, old_digest):
+            return Err("visible aspect catalog snapshot capacity exhausted")
+        if old_digest != "" and self.aspect_owner.loader_cell.has(0):
+            if not apk_loader_invalidate_catalog_v1(
+                    self.aspect_owner.loader_cell[0]):
+                return Err("visible aspect catalog update refused while bindings are live")
         val snapshot = _ModuleAspectCatalogSnapshotV1(
             bytes: catalog, digest: digest,
             index: _apk_index_catalog_v1(catalog, opened))
-        _module_aspect_snapshot_retain(snapshot)
-        self.aspect_catalog_cell[0] = catalog
-        self.aspect_catalog_digest_cell[0] = digest
-        self.aspect_catalog_generation = self.aspect_catalog_generation + 1
         if old_digest != "":
             _module_aspect_snapshot_release(old_digest)
+        _module_aspect_snapshot_retain(snapshot)
+        self.aspect_owner.catalog_cell[0] = catalog
+        self.aspect_owner.catalog_digest_cell[0] = digest
+        self.aspect_owner.catalog_generation =
+            self.aspect_owner.catalog_generation + 1
         Ok(digest)
 
     fn aspect_facet_visible(facet_key: text) -> ModuleFacetRefV1:
-        """Acquire through the installed catalog without hashing or copying it."""
-        if not self.aspect_catalog_cell.has(0):
+        """Acquire through the installed catalog without hashing or copying it.
+
+        CAS elects one process-wide owner.  A waiter that observes the owner's
+        successful publication returns the resident binding; if that owner
+        failed, the waiter returns APK_SINGLEFLIGHT_RETRY and never performs an
+        implicit second load in the same call.
+        """
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.aspect_owner.identity, "facet-visible", facet_key))
+        if not admission.acquired:
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key,
+                    "APK_LIFECYCLE_WAIT_TIMEOUT",
+                    "bounded wait for aspect lifecycle owner expired"), -1)
+        if admission.waited_same_operation:
+            val resident = self._try_aspect_facet_owned(facet_key)
+            if resident.load.found:
+                if not _module_aspect_gate_exit_v1(admission):
+                    return _moduleloader_facet_ref(
+                        _moduleloader_aspect_result(false, facet_key,
+                            "APK_LIFECYCLE_OWNER_LOST",
+                            "aspect lifecycle owner token was lost before release"), -1)
+                return resident
+            if not _module_aspect_gate_exit_v1(admission):
+                return _moduleloader_facet_ref(
+                    _moduleloader_aspect_result(false, facet_key,
+                        "APK_LIFECYCLE_OWNER_LOST",
+                        "aspect lifecycle owner token was lost before release"), -1)
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key,
+                    "APK_SINGLEFLIGHT_RETRY",
+                    "the elected first-use owner did not publish this facet; retry explicitly"), -1)
+        val result = self._aspect_facet_visible_owned(facet_key)
+        if not _module_aspect_gate_exit_v1(admission):
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key,
+                    "APK_LIFECYCLE_OWNER_LOST",
+                    "aspect lifecycle owner token was lost before release"), -1)
+        result
+
+    fn _aspect_facet_visible_owned(facet_key: text) -> ModuleFacetRefV1:
+        if not self.aspect_owner.catalog_cell.has(0):
             return _moduleloader_facet_ref(
                 _moduleloader_aspect_result(false, facet_key, "APK_CATALOG_MISSING",
                     "no visible aspect catalog is installed"), -1)
-        if not self.aspect_catalog_digest_cell.has(0):
+        if not self.aspect_owner.catalog_digest_cell.has(0):
             return _moduleloader_facet_ref(
                 _moduleloader_aspect_result(false, facet_key, "APK_CATALOG_INDEX_MISSING",
                     "visible aspect catalog digest is unavailable"), -1)
-        if not self.aspect_loader_cell.has(0):
+        if not self.aspect_owner.loader_cell.has(0):
             return _moduleloader_facet_ref(
                 _moduleloader_aspect_result(false, facet_key, "APK_PACK_MISSING",
                     "no aspect pack has been admitted by this module loader"), -1)
-        val owner = self.aspect_loader_cell[0]
-        val digest = self.aspect_catalog_digest_cell[0]
+        val owner = self.aspect_owner.loader_cell[0]
+        val digest = self.aspect_owner.catalog_digest_cell[0]
         if not _module_aspect_catalog_snapshots.has(digest):
             return _moduleloader_facet_ref(
                 _moduleloader_aspect_result(false, facet_key, "APK_CATALOG_INDEX_MISSING",
@@ -403,6 +559,44 @@ impl ModuleLoader:
         val snapshot = _module_aspect_catalog_snapshots[digest]
         _moduleloader_facet_ref(_apk_load_facet_indexed_v1(
             owner, snapshot.bytes, snapshot.index, facet_key), owner)
+
+    fn unload_aspect_facet(facet_key: text) -> ApkUnloadResultV1:
+        """Owner-authoritative facet unload.
+
+        Publication and new pins are excluded by the lifecycle gate.  A live
+        pin therefore forces QUIESCING; byte-state reclamation occurs only
+        after the final gated ModuleFacetRef.release.
+
+        This releases only the payload bytes owned by std.common.aspect_pack.
+        It does NOT claim executable unmap.  Aspect-pack SMFs are currently
+        admitted only when non-executable, and no executable mapping receipt
+        crosses from SegmentMapper/SharedExecMapper into this owner.  Supporting
+        executable aspects requires a typed mapping receipt plus an existing-
+        direction owner callback that invokes mapper unmap after final unpin;
+        calling native_free_exec_memory here without that receipt is forbidden.
+        """
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.aspect_owner.identity, "facet-unload", facet_key))
+        if not admission.acquired:
+            return _moduleloader_unload_result_error(
+                facet_key, "APK_LIFECYCLE_WAIT_TIMEOUT",
+                "bounded wait for aspect lifecycle owner expired")
+        if not self.aspect_owner.loader_cell.has(0):
+            if not _module_aspect_gate_exit_v1(admission):
+                return _moduleloader_unload_result_error(
+                    facet_key, "APK_LIFECYCLE_OWNER_LOST",
+                    "aspect lifecycle owner token was lost before release")
+            return _moduleloader_unload_result_error(
+                facet_key, "APK_UNLOAD_NOT_BOUND",
+                "no aspect loader owns this facet")
+        val result = apk_unload_facet_v1(
+            self.aspect_owner.loader_cell[0], facet_key)
+        if not _module_aspect_gate_exit_v1(admission):
+            return _moduleloader_unload_result_error(
+                facet_key, "APK_LIFECYCLE_OWNER_LOST",
+                "aspect lifecycle owner token was lost before release")
+        result
 
     me aspect_facet(catalog: [u8], facet_key: text) -> ModuleFacetRefV1:
         """Acquire the exact catalog key through this loader's admitted packs.
@@ -413,12 +607,94 @@ impl ModuleLoader:
         catalog. This compatibility cost includes one catalog digest. Hot
         callers install explicitly and use aspect_facet_visible instead.
         """
-        match self.install_aspect_catalog(catalog):
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.aspect_owner.identity, "catalog-facet", facet_key))
+        if not admission.acquired:
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key,
+                    "APK_LIFECYCLE_WAIT_TIMEOUT",
+                    "bounded wait for aspect lifecycle owner expired"), -1)
+        match self._install_aspect_catalog_owned(catalog):
             case Err(message):
+                if not _module_aspect_gate_exit_v1(admission):
+                    return _moduleloader_facet_ref(
+                        _moduleloader_aspect_result(false, facet_key,
+                            "APK_LIFECYCLE_OWNER_LOST",
+                            "aspect lifecycle owner token was lost before release"), -1)
                 return _moduleloader_facet_ref(
                     _moduleloader_aspect_result(false, facet_key, "APK_CATALOG_INVALID", message), -1)
             case Ok(_): pass
-        self.aspect_facet_visible(facet_key)
+        val result = self._aspect_facet_visible_owned(facet_key)
+        if not _module_aspect_gate_exit_v1(admission):
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key,
+                    "APK_LIFECYCLE_OWNER_LOST",
+                    "aspect lifecycle owner token was lost before release"), -1)
+        result
+
+    me activate_startup_aspects() -> Result<i64, text>:
+        """Publish every startup binding as one owner-authored transaction.
+
+        `apk_activate_startup` performs the byte-state rollback.  This product
+        bridge supplies the missing exclusion boundary so no lookup or unload
+        can observe the temporary bindings created before a later route fails.
+        """
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.aspect_owner.identity, "startup-activate"))
+        if not admission.acquired:
+            return Err("bounded wait for aspect lifecycle owner expired")
+        if not self.aspect_owner.catalog_cell.has(0):
+            if not _module_aspect_gate_exit_v1(admission):
+                return Err("aspect lifecycle owner token was lost before release")
+            return Err("no visible aspect catalog is installed")
+        if not self.aspect_owner.loader_cell.has(0):
+            if not _module_aspect_gate_exit_v1(admission):
+                return Err("aspect lifecycle owner token was lost before release")
+            return Err("no aspect pack has been admitted by this module loader")
+        val owner = self.aspect_owner.loader_cell[0]
+        val bound = apk_activate_startup(
+            owner, self.aspect_owner.catalog_cell[0])
+        val activation_error = apk_loader_last_error(owner)
+        if not _module_aspect_gate_exit_v1(admission):
+            return Err("aspect lifecycle owner token was lost before release")
+        if activation_error != "":
+            return Err(activation_error)
+        Ok(bound)
+
+    me close_aspect_state() -> bool:
+        """Release this loader's retained catalog and registered pack bytes.
+
+        The common aspect container has no destroy primitive, so the stable
+        loader handle is intentionally retained for reuse.  Snapshot bytes,
+        live facet payloads, and registered pack bytes are released only after
+        the lower owner proves there are no activations or pins.
+        """
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.aspect_owner.identity, "aspect-close"))
+        if not admission.acquired:
+            return false
+        if self.aspect_owner.loader_cell.has(0):
+            val owner = self.aspect_owner.loader_cell[0]
+            if not apk_loader_invalidate_catalog_v1(owner):
+                _module_aspect_gate_exit_v1(admission)
+                return false
+            val paths = self.aspect_owner.pack_paths.keys()
+            for path in paths:
+                if not apk_loader_unregister_pack(owner, path):
+                    _module_aspect_gate_exit_v1(admission)
+                    return false
+            self.aspect_owner.pack_paths = {}
+        if self.aspect_owner.catalog_digest_cell.has(0):
+            _module_aspect_snapshot_release(
+                self.aspect_owner.catalog_digest_cell[0])
+            self.aspect_owner.catalog_generation =
+                self.aspect_owner.catalog_generation + 1
+        self.aspect_owner.catalog_cell = {}
+        self.aspect_owner.catalog_digest_cell = {}
+        _module_aspect_gate_exit_v1(admission)
 
     # NOTE: the body below is inlined directly (rather than delegating to a
     # free helper function) because the interpreter used by `bin/simple`
@@ -584,13 +860,26 @@ impl ModuleLoader:
                     # executable symbols were partially published. If combined
                     # executable+aspect artifacts become legal, this point must
                     # gain transaction rollback before that invariant changes.
-                    if not self.aspect_loader_cell.has(0):
-                        self.aspect_loader_cell[0] = apk_loader_new()
-                    match smf_register_validated_aspect_pack(self.aspect_loader_cell[0], path, aspect_candidate):
+                    val admission = aspect_lifecycle_gate_enter_v1(
+                        _module_aspect_gate_key_v1(
+                            self.aspect_owner.identity, "pack-register", path))
+                    if not admission.acquired:
+                        return LoadResult.Error(
+                            message: "aspect-pack commit timed out waiting for lifecycle owner: " + path)
+                    if not self.aspect_owner.loader_cell.has(0):
+                        self.aspect_owner.loader_cell[0] = apk_loader_new()
+                    var aspect_commit_error = ""
+                    match smf_register_validated_aspect_pack(
+                            self.aspect_owner.loader_cell[0], path, aspect_candidate):
                         case Err(message):
-                            return LoadResult.Error(message: "aspect-pack commit failed {path}: {message}")
+                            aspect_commit_error = message
                         case Ok(_):
-                            self.aspect_pack_paths[path] = true
+                            self.aspect_owner.pack_paths[path] = true
+                    if not _module_aspect_gate_exit_v1(admission):
+                        return LoadResult.Error(
+                            message: "aspect-pack commit lost lifecycle ownership: " + path)
+                    if aspect_commit_error != "":
+                        return LoadResult.Error(message: "aspect-pack commit failed {path}: {aspect_commit_error}")
 
                 val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1)
                 self.modules[path] = m
@@ -609,11 +898,22 @@ impl ModuleLoader:
     me unload(path: text):
         if not self.modules.has(path):
             return
-        if self.aspect_loader_cell.has(0) and self.aspect_pack_paths.has(path):
-            val removed_pack = apk_loader_unregister_pack(self.aspect_loader_cell[0], path)
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(
+                self.aspect_owner.identity, "pack-unregister", path))
+        if not admission.acquired:
+            return
+        if (self.aspect_owner.loader_cell.has(0) and
+                self.aspect_owner.pack_paths.has(path)):
+            val removed_pack = apk_loader_unregister_pack(
+                self.aspect_owner.loader_cell[0], path)
             if not removed_pack:
+                _module_aspect_gate_exit_v1(admission)
                 return
-            self.aspect_pack_paths = self.aspect_pack_paths.remove(path)
+            self.aspect_owner.pack_paths =
+                self.aspect_owner.pack_paths.remove(path)
+        if not _module_aspect_gate_exit_v1(admission):
+            return
         val remove_jit = _collect_unload_jit_symbols(self, path)
         for sym_name in remove_jit:
             self.jit.drop_cached_symbol(sym_name)
@@ -787,37 +1087,73 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             semantic_dependencies: {},
             semantic_fingerprints: {},
             dependency_semantic_fingerprints: {},
-            aspect_loader_cell: {},
-            aspect_pack_paths: {},
-            aspect_catalog_cell: {},
-            aspect_catalog_digest_cell: {},
-            aspect_catalog_generation: 0,
-            aspect_catalog_digest_computations: 0
+            aspect_owner: _module_aspect_owner_new_v1()
     )
 
 fn moduleloader_aspect_loader_handle(self: ModuleLoader) -> i64:
-    if self.aspect_loader_cell.has(0):
-        return self.aspect_loader_cell[0]
-    -1
+    val admission = aspect_lifecycle_gate_enter_v1(
+        _module_aspect_gate_key_v1(
+            self.aspect_owner.identity, "loader-handle-read"))
+    if not admission.acquired:
+        return -1
+    var handle = -1
+    if self.aspect_owner.loader_cell.has(0):
+        handle = self.aspect_owner.loader_cell[0]
+    if not _module_aspect_gate_exit_v1(admission):
+        return -1
+    handle
 
 me moduleloader_install_aspect_catalog(self: ModuleLoader, catalog: [u8]) -> Result<text, text>:
     self.install_aspect_catalog(catalog)
 
 fn moduleloader_visible_aspect_catalog_digest(self: ModuleLoader) -> text:
-    if self.aspect_catalog_digest_cell.has(0):
-        return self.aspect_catalog_digest_cell[0]
-    ""
+    val admission = aspect_lifecycle_gate_enter_v1(
+        _module_aspect_gate_key_v1(
+            self.aspect_owner.identity, "catalog-digest-read"))
+    if not admission.acquired:
+        return ""
+    var digest = ""
+    if self.aspect_owner.catalog_digest_cell.has(0):
+        digest = self.aspect_owner.catalog_digest_cell[0]
+    if not _module_aspect_gate_exit_v1(admission):
+        return ""
+    digest
 
 fn moduleloader_visible_aspect_catalog_generation(self: ModuleLoader) -> i64:
-    self.aspect_catalog_generation
+    val admission = aspect_lifecycle_gate_enter_v1(
+        _module_aspect_gate_key_v1(
+            self.aspect_owner.identity, "catalog-generation-read"))
+    if not admission.acquired:
+        return -1
+    val generation = self.aspect_owner.catalog_generation
+    if not _module_aspect_gate_exit_v1(admission):
+        return -1
+    generation
 
 fn moduleloader_aspect_catalog_digest_computations(self: ModuleLoader) -> i64:
-    self.aspect_catalog_digest_computations
+    val admission = aspect_lifecycle_gate_enter_v1(
+        _module_aspect_gate_key_v1(
+            self.aspect_owner.identity, "catalog-digest-count-read"))
+    if not admission.acquired:
+        return -1
+    val computations = self.aspect_owner.catalog_digest_computations
+    if not _module_aspect_gate_exit_v1(admission):
+        return -1
+    computations
 
 fn moduleloader_aspect_catalog_invalidations(self: ModuleLoader) -> i64:
-    if not self.aspect_loader_cell.has(0):
-        return 0
-    apk_loader_catalog_invalidations_v1(self.aspect_loader_cell[0])
+    val admission = aspect_lifecycle_gate_enter_v1(
+        _module_aspect_gate_key_v1(
+            self.aspect_owner.identity, "catalog-invalidations-read"))
+    if not admission.acquired:
+        return -1
+    var invalidations = 0
+    if self.aspect_owner.loader_cell.has(0):
+        invalidations = apk_loader_catalog_invalidations_v1(
+            self.aspect_owner.loader_cell[0])
+    if not _module_aspect_gate_exit_v1(admission):
+        return -1
+    invalidations
 
 fn moduleloader_try_aspect_facet(self: ModuleLoader, facet_key: text) -> ModuleFacetRefV1:
     self.try_aspect_facet(facet_key)
@@ -827,6 +1163,17 @@ me moduleloader_aspect_facet(self: ModuleLoader, catalog: [u8], facet_key: text)
 
 fn moduleloader_aspect_facet_visible(self: ModuleLoader, facet_key: text) -> ModuleFacetRefV1:
     self.aspect_facet_visible(facet_key)
+
+fn moduleloader_unload_aspect_facet(self: ModuleLoader,
+        facet_key: text) -> ApkUnloadResultV1:
+    self.unload_aspect_facet(facet_key)
+
+me moduleloader_activate_startup_aspects(
+        self: ModuleLoader) -> Result<i64, text>:
+    self.activate_startup_aspects()
+
+me moduleloader_close_aspect_state(self: ModuleLoader) -> bool:
+    self.close_aspect_state()
 
 fn modulefacetref_is_live(self: ModuleFacetRefV1) -> bool:
     self.is_live()
