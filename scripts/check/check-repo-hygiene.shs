@@ -15,16 +15,31 @@ sha256_file() {
     fi
 }
 
+sha256_symlink_target() {
+    symlink_target=$(readlink "$1") || {
+        echo "ERROR: cannot read symlink target: $1" >&2
+        return 1
+    }
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$symlink_target" | sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$symlink_target" | shasum -a 256 | awk '{print $1}'
+    else
+        echo "ERROR: SHA-256 tool unavailable (need sha256sum or shasum)" >&2
+        return 1
+    fi
+}
+
 scan_forbidden_extension_files() {
     {
-        find . -type f -name '*.py' \
+        find . \( -type f -o -type l \) -name '*.py' \
             -not -path './.git/*' \
             -not -path './.jj/*' \
             -not -path '*/vendor/*' \
             -not -path '*/node_modules/*' \
             -not -path '*/__pycache__/*' \
             -not -path '*/build/*'
-        find . -type f \( -name '*.bash' -o -name '*.sh' \) \
+        find . \( -type f -o -type l \) \( -name '*.bash' -o -name '*.sh' \) \
             -not -path './.git/*' \
             -not -path './.jj/*' \
             -not -path '*/vendor/*' \
@@ -39,7 +54,16 @@ scan_forbidden_extension_files() {
 fingerprint_forbidden_extension_files() {
     while IFS= read -r file; do
         [ -n "$file" ] || continue
-        printf '%s  %s\n' "$(sha256_file "$file")" "$file"
+        if [ -L "$file" ]; then
+            fingerprint=$(sha256_symlink_target "$file") || return 1
+            printf 'symlink:%s  %s\n' "$fingerprint" "$file"
+        elif [ -f "$file" ]; then
+            fingerprint=$(sha256_file "$file") || return 1
+            printf 'file:%s  %s\n' "$fingerprint" "$file"
+        else
+            echo "ERROR: forbidden-extension path changed type during scan: $file" >&2
+            return 1
+        fi
     done
 }
 
@@ -68,6 +92,7 @@ selftest() {
     fixture_dir=$(mktemp -d) || return 1
     mkdir -p "$fixture_dir/scripts/bootstrap" "$fixture_dir/vendor/pkg" "$fixture_dir/build/out"
     printf 'print("known")\n' > "$fixture_dir/known.py"
+    ln -s known.py "$fixture_dir/linked.py"
     printf '#!/bin/sh\n' > "$fixture_dir/new.sh"
     printf '#!/bin/sh\n' > "$fixture_dir/allowed.shs"
     printf '#!/bin/sh\n' > "$fixture_dir/scripts/bootstrap/bootstrap-seed.sh"
@@ -77,23 +102,25 @@ selftest() {
     (cd "$fixture_dir" && scan_forbidden_extension_files) > "$fixture_dir/files"
     SELFTEST_FAILURES=0
     selftest_assert_equal "scanner finds exactly forbidden fixture paths" \
-        "./known.py ./new.sh" \
+        "./known.py ./linked.py ./new.sh" \
         "$(tr '\n' ' ' < "$fixture_dir/files" | sed 's/ $//')"
 
-    printf './known.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
+    printf './known.py\n./linked.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
         | LC_ALL=C sort > "$fixture_dir/baseline"
     (cd "$fixture_dir" && fingerprint_forbidden_extension_files < "$fixture_dir/files") \
         | LC_ALL=C sort > "$fixture_dir/current"
     classify_forbidden_extension_debt "$fixture_dir/current" "$fixture_dir/baseline" \
         "$fixture_dir/new" "$fixture_dir/stale" "$fixture_dir/known"
-    selftest_assert_equal "exact path/hash is known debt" 1 "$(wc -l < "$fixture_dir/known" | tr -d ' ')"
+    selftest_assert_equal "exact type/path/hash is known debt" 2 "$(wc -l < "$fixture_dir/known" | tr -d ' ')"
+    selftest_assert_equal "symlink target has an explicit fingerprint type" symlink \
+        "$(sed -n '/linked\.py$/s/:.*//p' "$fixture_dir/known")"
     selftest_assert_equal "new forbidden path is rejected" "./new.sh" \
-        "$(sed -n 's/^[0-9a-f]*  //p' "$fixture_dir/new")"
+        "$(sed -n 's/^[^ ]*  //p' "$fixture_dir/new")"
     selftest_assert_equal "unchanged baseline has no stale rows" 0 \
         "$(wc -l < "$fixture_dir/stale" | tr -d ' ')"
 
     printf 'print("modified")\n' > "$fixture_dir/known.py"
-    printf './known.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
+    printf './known.py\n./linked.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
         | LC_ALL=C sort > "$fixture_dir/modified"
     classify_forbidden_extension_debt "$fixture_dir/modified" "$fixture_dir/baseline" \
         "$fixture_dir/modified_new" "$fixture_dir/modified_stale" "$fixture_dir/modified_known"
@@ -102,22 +129,46 @@ selftest() {
     selftest_assert_equal "old content hash becomes stale" 1 \
         "$(wc -l < "$fixture_dir/modified_stale" | tr -d ' ')"
 
+    grep '  \./linked\.py$' "$fixture_dir/baseline" > "$fixture_dir/symlink_baseline"
+    ln -snf new.sh "$fixture_dir/linked.py"
+    printf './linked.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
+        | LC_ALL=C sort > "$fixture_dir/retargeted"
+    classify_forbidden_extension_debt "$fixture_dir/retargeted" "$fixture_dir/symlink_baseline" \
+        "$fixture_dir/retargeted_new" "$fixture_dir/retargeted_stale" "$fixture_dir/retargeted_known"
+    selftest_assert_equal "retargeted forbidden symlink is new debt" 1 \
+        "$(wc -l < "$fixture_dir/retargeted_new" | tr -d ' ')"
+    selftest_assert_equal "old symlink-target fingerprint becomes stale" 1 \
+        "$(wc -l < "$fixture_dir/retargeted_stale" | tr -d ' ')"
+
+    grep '  \./known\.py$' "$fixture_dir/baseline" > "$fixture_dir/regular_baseline"
     printf 'print("known")\n' > "$fixture_dir/renamed.py"
     printf './renamed.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
         | LC_ALL=C sort > "$fixture_dir/substitution"
-    classify_forbidden_extension_debt "$fixture_dir/substitution" "$fixture_dir/baseline" \
+    classify_forbidden_extension_debt "$fixture_dir/substitution" "$fixture_dir/regular_baseline" \
         "$fixture_dir/substitution_new" "$fixture_dir/substitution_stale" "$fixture_dir/substitution_known"
     selftest_assert_equal "same-hash path substitution is new debt" "./renamed.py" \
-        "$(sed -n 's/^[0-9a-f]*  //p' "$fixture_dir/substitution_new")"
+        "$(sed -n 's/^[^ ]*  //p' "$fixture_dir/substitution_new")"
     selftest_assert_equal "same-hash path substitution leaves stale debt" "./known.py" \
-        "$(sed -n 's/^[0-9a-f]*  //p' "$fixture_dir/substitution_stale")"
+        "$(sed -n 's/^[^ ]*  //p' "$fixture_dir/substitution_stale")"
+
+    printf 'print("known")\n' > "$fixture_dir/source"
+    rm "$fixture_dir/known.py"
+    ln -s source "$fixture_dir/known.py"
+    printf './known.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
+        | LC_ALL=C sort > "$fixture_dir/type_changed"
+    classify_forbidden_extension_debt "$fixture_dir/type_changed" "$fixture_dir/regular_baseline" \
+        "$fixture_dir/type_new" "$fixture_dir/type_stale" "$fixture_dir/type_known"
+    selftest_assert_equal "regular-file to symlink substitution is new debt" 1 \
+        "$(wc -l < "$fixture_dir/type_new" | tr -d ' ')"
+    selftest_assert_equal "regular-file fingerprint becomes stale after symlink substitution" 1 \
+        "$(wc -l < "$fixture_dir/type_stale" | tr -d ' ')"
 
     rm -rf "$fixture_dir"
     if [ "$SELFTEST_FAILURES" -ne 0 ]; then
         echo "check-repo-hygiene: SELFTEST FAILED ($SELFTEST_FAILURES assertion(s))"
         return 1
     fi
-    echo "check-repo-hygiene: selftest 8/8 fixtures correct"
+    echo "check-repo-hygiene: selftest 13/13 fixtures correct"
     return 0
 }
 
@@ -147,9 +198,10 @@ log_warning() {
 }
 
 # --- Check 1: Forbidden file types across entire repo ---
-# The tree has historical .py/.sh debt. Freeze it by exact path AND content hash:
-# count-only baselines allow an old offender to be replaced by a new one while the
-# total stays flat. New paths, renamed copies, and modified bytes must all fail.
+# The tree has historical .py/.sh debt. Freeze it by exact object type, path,
+# and content/link-target hash: count-only baselines allow an old offender to be
+# replaced by a new one while the total stays flat. New paths, renamed copies,
+# retargeted symlinks, type changes, and modified bytes must all fail.
 FORBIDDEN_BASELINE="scripts/check/repo_hygiene_forbidden_extensions_baseline.txt"
 FORBIDDEN_TMP=$(mktemp -d)
 trap 'rm -rf "$FORBIDDEN_TMP"' 0 1 2 3 15
@@ -164,7 +216,7 @@ if [ ! -f "$FORBIDDEN_BASELINE" ]; then
 else
     sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$FORBIDDEN_BASELINE" \
         > "$FORBIDDEN_TMP/baseline_raw"
-    INVALID_BASELINE=$(grep -Ev '^[0-9a-f]{64}  \./[^[:cntrl:]]+$' \
+    INVALID_BASELINE=$(grep -Ev '^(file|symlink):[0-9a-f]{64}  \./[^[:cntrl:]]+$' \
         "$FORBIDDEN_TMP/baseline_raw" || true)
     if [ -n "$INVALID_BASELINE" ]; then
         while IFS= read -r entry; do
@@ -192,21 +244,21 @@ classify_forbidden_extension_debt \
 
 KNOWN_FORBIDDEN_COUNT=$(wc -l < "$FORBIDDEN_TMP/known" | tr -d ' ')
 if [ "$KNOWN_FORBIDDEN_COUNT" -gt 0 ]; then
-    log_warning "$KNOWN_FORBIDDEN_COUNT pre-existing forbidden-extension file(s) match the exact path/hash baseline"
+    log_warning "$KNOWN_FORBIDDEN_COUNT pre-existing forbidden-extension file(s) match the exact type/path/hash baseline"
     while IFS= read -r entry; do
         [ -n "$entry" ] || continue
-        echo "BASELINED DEBT: ${entry#*  } (sha256 ${entry%%  *})"
+        echo "BASELINED DEBT: ${entry#*  } (fingerprint ${entry%%  *})"
     done < "$FORBIDDEN_TMP/known"
 fi
 
 while IFS= read -r entry; do
     [ -n "$entry" ] || continue
-    log_violation "new or modified forbidden-extension file: ${entry#*  } (sha256 ${entry%%  *})"
+    log_violation "new or modified forbidden-extension file: ${entry#*  } (fingerprint ${entry%%  *})"
 done < "$FORBIDDEN_TMP/new"
 
 while IFS= read -r entry; do
     [ -n "$entry" ] || continue
-    log_violation "stale forbidden-extension baseline row: ${entry#*  } (remove it after debt cleanup; sha256 ${entry%%  *})"
+    log_violation "stale forbidden-extension baseline row: ${entry#*  } (remove it after debt cleanup; fingerprint ${entry%%  *})"
 done < "$FORBIDDEN_TMP/stale"
 
 # --- Check 2: Stale .smf placeholders (179 bytes = empty stub) ---
