@@ -1214,3 +1214,10 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Preserve mutation-visible trace/bootstrap reads and the one-read
   verify-each cache.
 - [x] Add a static authority, call-count, and cache-shape ratchet.
+
+### Completed MIR bulk-ops flag spec authority slice
+
+- [x] Remove the spec-local raw environment setter declaration and calls.
+- [x] Route all three setup mutations through canonical `env_set`.
+- [x] Assert every boolean setter status before checking optimizer behavior.
+- [x] Keep compiler-runtime and optimizer hot paths unchanged.

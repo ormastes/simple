@@ -526,6 +526,15 @@ bootstrap policy remain mutation-visible at their existing query sites, while
 verify-each retains its one-read process cache.  No environment read, pass-loop
 work, allocation, copy, lock, hash, boxing, or dispatch was added.
 
+### MIR bulk-ops flag spec authority follow-up
+
+The quarantined bulk-ops behavioral spec no longer declares or calls raw
+`rt_env_set`; setup uses canonical `env_set`.  Each of its three
+boolean setter results is now asserted before optimizer behavior is inspected,
+so a failed environment mutation cannot fabricate a passing disabled-path test.
+This changes test setup only and adds no compiler-runtime or optimizer hot-path
+work.
+
 ### SSA and AOP environment-authority follow-up
 
 Variable-reassignment SSA and driver AOP weaving no longer declare or call raw
