@@ -99,7 +99,12 @@ SECTIONS
      * 0x950a cascading fault. */
     .stack ALIGN(4K) (NOLOAD) :
     {
-        . = . + 8M;  /* 8MB stack — Simple code uses large stack frames */
+        /* The production desktop entry currently has a roughly 60 MiB native
+         * frame once the WM, GUI, web, and Engine2D lanes are admitted into
+         * one entry closure. Keep enough bounded headroom for the BGA call
+         * chain instead of letting the first port write cross the stack
+         * boundary and triple-fault the guest. */
+        . = . + 128M;
         _stack_top = .;
     }
 

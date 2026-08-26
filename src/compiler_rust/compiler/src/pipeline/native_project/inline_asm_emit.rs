@@ -24,6 +24,36 @@ fn target_uses_x86_intel_asm(target: Option<(&str, &str, &str)>) -> bool {
         .unwrap_or(false)
 }
 
+fn block_matches_target(instructions: &[String], target: Option<(&str, &str, &str)>) -> bool {
+    let Some((triple, _, _)) = target else {
+        return true;
+    };
+    if triple.contains("x86_64") || triple.starts_with("i386") || triple.starts_with("i686") {
+        // Full entry-closure discovery may visit architecture-specific modules
+        // whose @cfg functions are not selected for this target. The inline-asm
+        // registry is process-global, so reject unmistakably ARM/RISC-V blocks
+        // before emitting the one target-specific C translation unit.
+        return !instructions.iter().any(|instruction| {
+            let text = instruction.trim_start();
+            text.starts_with(".option ")
+                || text.starts_with("mv ")
+                || text.starts_with("addi ")
+                || text.starts_with("sw ")
+                || text.starts_with("lw ")
+                || text.starts_with("li ")
+                || text.starts_with("la ")
+                || text.starts_with("csrr")
+                || text.starts_with("csrw")
+                || text.starts_with("sfence.vma")
+                || text == "sret"
+                || text == "wfi"
+                || text.contains(" cr3, pd")
+                || text.contains("out, cr3")
+        });
+    }
+    true
+}
+
 fn has_unresolved_simple_operand(instruction: &str) -> bool {
     let directive = instruction
         .split_once('=')
@@ -63,6 +93,9 @@ pub(crate) fn write_inline_asm_c_for_target(
     let path = temp_dir.join("simple_asm_blocks.c");
     let mut code = String::from("/* Auto-generated Simple raw asm blocks. */\n\n");
     for block in blocks {
+        if !block_matches_target(&block.instructions, target) {
+            continue;
+        }
         code.push_str(&format!("__attribute__((used)) void {}(void) {{\n", block.symbol));
         code.push_str("    __asm__ volatile (\n");
         if use_intel_syntax {

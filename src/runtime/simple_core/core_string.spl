@@ -1016,6 +1016,63 @@ pub fn rt_string_to_int(value: i64) -> i64:
 # rt_string_to_int() above. Named distinctly so the Rust-native
 # `simple-runtime` crate's stricter, whole-string-match rt_string_to_int()
 # (used by .to_int()/.parse_int()/to_i64() there) stays unaffected.
+# Strict optional integer parser used by text.parse_int/parse_i64. The native
+# optional ABI is an unboxed tagged integer on success and NIL on failure.
+pub fn rt_string_parse_int(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return 3
+    val data = string_data_ptr_value(ptr)
+    val len = string_len_ptr(ptr)
+    var begin = 0
+    var finish = len
+    while begin < finish and is_space_byte(spl_load_u8(data, begin)) > 0:
+        begin = begin + 1
+    while finish > begin and is_space_byte(spl_load_u8(data, finish - 1)) > 0:
+        finish = finish - 1
+    if begin >= finish:
+        return 3
+    var negative = false
+    val sign = spl_load_u8(data, begin)
+    if sign == 43 or sign == 45:
+        negative = sign == 45
+        begin = begin + 1
+    if begin >= finish:
+        return 3
+    val limit: u64 = if negative: 9223372036854775808u64 else: 9223372036854775807u64
+    var magnitude: u64 = 0u64
+    var i = begin
+    while i < finish:
+        val byte = spl_load_u8(data, i)
+        if byte < 48 or byte > 57:
+            return 3
+        val digit = (byte - 48) as u64
+        if magnitude > (limit - digit) / 10u64:
+            return 3
+        magnitude = magnitude * 10u64 + digit
+        i = i + 1
+    if negative:
+        if magnitude == 9223372036854775808u64:
+            return rt_value_int(-9223372036854775807 - 1)
+        return rt_value_int(-(magnitude as i64))
+    rt_value_int(magnitude as i64)
+
+pub fn rt_string_is_digit(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return 0
+    val data = string_data_ptr_value(ptr)
+    val len = string_len_ptr(ptr)
+    if len < 1:
+        return 0
+    var i = 0
+    while i < len:
+        val byte = spl_load_u8(data, i)
+        if byte < 48 or byte > 57:
+            return 0
+        i = i + 1
+    1
+
 pub fn rt_string_to_int_lenient(value: i64) -> i64:
     val ptr = string_ptr(value)
     if ptr < 1:
