@@ -535,6 +535,16 @@ so a failed environment mutation cannot fabricate a passing disabled-path test.
 This changes test setup only and adds no compiler-runtime or optimizer hot-path
 work.
 
+### Compiler performance-clock authority follow-up
+
+Profiler, trace, and benchmark tools now tag monotonic-clock declarations
+`unsafe(ffi)` and confine them to file-local always-inlined owners.  Benchmark
+timestamp text is likewise explicitly unsafe-minimized because its provider is
+not status-bearing, signed, or admitted.  Every sampling site retains exactly
+one direct clock call; no validation branch, allocation, copy, cache, lock,
+hash, formatting step, lookup, boxing, or dispatch table was added to timing
+paths.
+
 ### SSA and AOP environment-authority follow-up
 
 Variable-reassignment SSA and driver AOP weaving no longer declare or call raw

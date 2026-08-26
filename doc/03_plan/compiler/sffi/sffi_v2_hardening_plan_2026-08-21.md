@@ -1221,3 +1221,11 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Route all three setup mutations through canonical `env_set`.
 - [x] Assert every boolean setter status before checking optimizer behavior.
 - [x] Keep compiler-runtime and optimizer hot paths unchanged.
+
+### Completed compiler performance-clock authority slice
+
+- [x] Tag profiler, trace, and benchmark monotonic clocks `unsafe(ffi)`.
+- [x] Confine each clock to a file-local always-inline lexical owner.
+- [x] Tag and confine non-status-bearing benchmark timestamp text.
+- [x] Preserve one direct provider call per sample and add no timing-path work.
+- [x] Add a static authority and call-count ratchet.
