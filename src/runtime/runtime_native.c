@@ -7165,6 +7165,26 @@ int64_t spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value, int64_t narg
     return spl_wffi_i64_checked_result(SPL_WFFI_OK, spl_wffi_call_i64(fptr, args_value, nargs));
 }
 
+int64_t spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
+                                  int64_t nargs, int64_t* out_value) {
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (fptr == 0) return SPL_WFFI_NULL_FUNCTION;
+    if (nargs < 0) return SPL_WFFI_INVALID_ARGUMENT;
+    if (nargs > 8) return SPL_WFFI_UNSUPPORTED_SIGNATURE;
+    RtCoreArray* args = rt_core_as_array(args_value);
+    if (!args || (args->flags & RT_CORE_ARRAY_FLAG_BYTES) || !args->data || nargs > args->len) {
+        return SPL_WFFI_INVALID_ARGUMENT;
+    }
+    for (int64_t i = 0; i < nargs; i++) {
+        if (!rt_core_is_int(((int64_t*)args->data)[i])) {
+            return SPL_WFFI_INVALID_ARGUMENT;
+        }
+    }
+    *out_value = spl_wffi_call_i64(fptr, args_value, nargs);
+    return SPL_WFFI_OK;
+}
+
 int64_t rt_array_header_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array : 0;

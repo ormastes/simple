@@ -20,6 +20,8 @@ extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 extern fn spl_wffi_call_f64(fptr: i64, args: [f64], nargs: i64) -> f64
 @unsafe(reason: "checked integer transport cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64_checked(fptr: i64, args: [i64], nargs: i64) -> [i64]
+@unsafe(reason: "allocation-free checked integer status/out ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_try_call_i64_out(fptr: i64, args: [i64], nargs: i64, out_value: *mut i64) -> i64
 @unsafe(reason: "checked float transport cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_f64_checked(fptr: i64, args: [f64], nargs: i64) -> [i64]
 @unsafe(reason: "raw IEEE-754 bit lift ABI", capabilities: [ffi])
@@ -33,9 +35,10 @@ fn _plugin_call_i64_raw(fptr: i64, args: [i64]) -> i64:
 fn _plugin_call_f64_raw(fptr: i64, args: [f64]) -> f64:
     spl_wffi_call_f64(fptr, args, args.len())
 
-@unsafe(reason: "minimal raw FFI scope; caller validates transport status and result shape", capabilities: [ffi, raw_ptr])
-fn _plugin_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
-    spl_wffi_call_i64_checked(fptr, args, args.len())
+@unsafe(reason: "minimal allocation-free raw status/out scope", capabilities: [ffi, raw_ptr])
+fn _plugin_try_call_i64_out(fptr: i64, args: [i64], out_value: *mut i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_try_call_i64_out(fptr, args, args.len(), out_value)
 
 @unsafe(reason: "minimal raw FFI scope; caller validates transport status and IEEE-754 bits", capabilities: [ffi, raw_ptr])
 fn _plugin_call_f64_raw_checked(fptr: i64, args: [f64]) -> [i64]:
@@ -122,12 +125,11 @@ fn plugin_call_i64_checked(symbol: text, args: [i64]) -> Result<i64, text>:
     val fptr = match _plugin_resolve_checked(symbol):
         case Ok(value): value
         case Err(error): return Err(error)
-    val result = _plugin_call_i64_raw_checked(fptr, args)
-    if result.len() != 2:
-        return Err("E-SFFI-017: corrupt integer plugin transport")
-    if result[0] != 0:
-        return Err("E-SFFI-014: integer plugin bridge status {result[0]}")
-    Ok(result[1])
+    var value: i64 = 0
+    val status = _plugin_try_call_i64_out(fptr, args, &mut value)
+    if status != 0:
+        return Err("E-SFFI-014: integer plugin bridge status {status}")
+    Ok(value)
 
 @unsafe(reason: "legacy generic float plugin API cannot prove the selected ABI", capabilities: [ffi, raw_ptr])
 fn plugin_call_f64(symbol: text, args: [f64]) -> f64:

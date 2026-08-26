@@ -402,7 +402,7 @@ pub use wsffi_native::{
     spl_wffi_call_bool0_checked, spl_wffi_call_bool1_checked, spl_wffi_call_f64,
     spl_wffi_call_f64_checked, spl_wffi_call_i64, spl_wffi_call_i64_checked,
     spl_wffi_call_i64_with_bytes,
-    spl_wffi_call_i64_with_bytes_checked, spl_wffi_try_call_i64,
+    spl_wffi_call_i64_with_bytes_checked, spl_wffi_try_call_i64, spl_wffi_try_call_i64_out,
 };
 
 // Re-export file I/O SFFI functions

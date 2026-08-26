@@ -390,6 +390,27 @@ pub extern "C" fn spl_wffi_try_call_i64(fptr: i64, args_rv: RuntimeValue, nargs:
     }
 }
 
+/// Allocation-free checked integer transport using caller-owned scalar output.
+#[no_mangle]
+pub extern "C" fn spl_wffi_try_call_i64_out(
+    fptr: i64,
+    args_rv: RuntimeValue,
+    nargs: i64,
+    out_value: *mut i64,
+) -> i64 {
+    if out_value.is_null() {
+        return WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_value.write(0) };
+    match try_call_i64_value(fptr, args_rv, nargs) {
+        Ok(value) => {
+            unsafe { out_value.write(value) };
+            WFFI_OK
+        }
+        Err(status) => status,
+    }
+}
+
 #[inline]
 fn try_call_i64_value(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> Result<i64, i64> {
     if fptr == 0 {

@@ -480,6 +480,8 @@ int64_t  rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
 int8_t   rt_array_push_i64_raw(SplArray* array, int64_t value);
 int64_t  spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value,
                                     int64_t nargs);
+int64_t  spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
+                                    int64_t nargs, int64_t* out_value);
 int64_t  spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value);
 int64_t  spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0,
                                      int8_t* out_value);

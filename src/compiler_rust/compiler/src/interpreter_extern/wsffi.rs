@@ -278,14 +278,8 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("spl_wffi_call_i64: null function pointer"));
     }
 
-    let call_args: Vec<i64> = match &args[1] {
-        Value::Array(arr) => arr
-            .iter()
-            .map(|v| match v {
-                Value::Int(n) => Ok(*n),
-                _ => Err(CompileError::runtime("spl_wffi_call_i64: args must be integers")),
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+    let supplied = match &args[1] {
+        Value::Array(arr) => arr,
         _ => return Err(CompileError::runtime("spl_wffi_call_i64: args must be an array")),
     };
 
@@ -298,10 +292,17 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     if nargs > 8 {
         return Err(CompileError::runtime("spl_wffi_call_i64: max 8 arguments supported"));
     }
-    if nargs > call_args.len() {
+    if nargs > supplied.len() {
         return Err(CompileError::runtime(
             "spl_wffi_call_i64: nargs exceeds supplied argument array",
         ));
+    }
+    let mut call_args = [0i64; 8];
+    for (index, value) in supplied.iter().take(nargs).enumerate() {
+        call_args[index] = match value {
+            Value::Int(number) => *number,
+            _ => return Err(CompileError::runtime("spl_wffi_call_i64: args must be integers")),
+        };
     }
 
     // Safety: we trust the caller has provided a valid function pointer
@@ -453,6 +454,45 @@ pub fn spl_wffi_call_i64_checked(args: &[Value]) -> Result<Value, CompileError> 
     }
     let value = spl_wffi_call_i64(args)?;
     Ok(Value::array(vec![Value::Int(0), value]))
+}
+
+/// Allocation-free checked integer transport with caller-owned scalar output.
+pub fn spl_wffi_try_call_i64_out(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Ok(Value::Int(1));
+    }
+    let output = match &args[3] {
+        Value::BorrowMut(value) => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    *output.inner_mut() = Value::Int(0);
+    if !matches!(args[0], Value::Int(pointer) if pointer != 0) {
+        return Ok(Value::Int(2));
+    }
+    let supplied = match &args[1] {
+        Value::Array(values) if values.iter().all(|value| matches!(value, Value::Int(_))) => values.len(),
+        _ => return Ok(Value::Int(1)),
+    };
+    let nargs = match args[2] {
+        Value::Int(value) => match usize::try_from(value) {
+            Ok(value) => value,
+            Err(_) => return Ok(Value::Int(1)),
+        },
+        _ => return Ok(Value::Int(1)),
+    };
+    if nargs > 8 {
+        return Ok(Value::Int(3));
+    }
+    if nargs > supplied {
+        return Ok(Value::Int(1));
+    }
+    match spl_wffi_call_i64(&args[..3])? {
+        Value::Int(value) => {
+            *output.inner_mut() = Value::Int(value);
+            Ok(Value::Int(0))
+        }
+        _ => Ok(Value::Int(1)),
+    }
 }
 
 /// Call a function pointer with f64 arguments and return an f64 result.
