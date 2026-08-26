@@ -144,3 +144,52 @@ Fail-closed rule: the checker never executes a step script whose signature does 
 verify via `scripts/trust/verify-script.shs`; such steps are `blocked/unsigned` and the
 run is FAIL. Step scripts are committed unsigned and signed by a human with
 `sign-script.shs --name scv-migration-root`.
+
+## W4 scaffold (lane C, 2026-08-25)
+
+- SCV-MIG-24 (dual-write comparison gate, S4 entry):
+  - `src/lib/scv/native_shadow.spl` — `scv_dual_write_verify(root, dest)`
+    (shadow-sync via MIG-16's scv_shadow_sync, then INDEPENDENT compare:
+    recomputed hashes for immutable kinds, byte ref/head agreement, field-wise
+    change-object compare, commit parent-DAG; per-kind counts) and
+    `scv_dual_write_fsck(dest)` (shadow-store object integrity; scv_fsck is
+    hardwired to `<root>/.scv` + rebuildable state, so its per-object
+    primitives are reused instead — noted in the module header).
+  - Spec: `test/integration/app/scv_dual_write_spec.spl` (4 examples; the
+    month plan row names scv_dual_write_compare_spec.spl — SCV-MIG-24.shs maps
+    the id to the landed name).
+  - Step: `scripts/scv-migration/steps/SCV-MIG-24.shs` (UNSIGNED).
+- SCV-MIG-25 (S4 review): `doc/03_plan/app/tools/scv_s4_review.md`;
+  step `scripts/scv-migration/steps/SCV-MIG-25.shs` (UNSIGNED, mechanical:
+  doc exists + MIG-21..24 done in ledger + checker dry-run) — honest FAIL
+  until W4 siblings land. 30-day shadow-usage clock starts at this review.
+- Root-caused (NOT a flake): `bin/simple run /tmp/…/drv.spl` executed with cwd
+  inside a temp repo cannot resolve ANY `std.scv.*` module — std.* resolves
+  from the project stdlib roots, derived from cwd/importing-file, and a /tmp
+  driver has neither. Fix pattern (used in scv_dual_write_spec.spl): run the
+  driver with `cd "$REPO"`; temp-repo paths are baked into the driver as
+  absolute literals via an unquoted heredoc.
+
+## W4 + Wave 1 — COMPLETE 2026-08-26 (closeout lane)
+- W4 (SCV-MIG-21..25) COMPLETE: quarantine GC, recover levels, dual-write
+  compare, shadow replication verified green; S4 review doc
+  `doc/03_plan/app/tools/scv_s4_review.md` landed (30-day shadow-usage clock
+  starts at that review). All five step scripts signed (leaves 27..31) and
+  flipped done by the signed checker at --now 2026-09-15T12:00:00Z.
+- Wave 1 (SCV-IMPL-E-01..03, P-02, P-03, I-02, D-02, G-01) COMPLETE: event
+  watch/source/journal, hardened WASM shim contract, true incremental parse,
+  file-history snapshot integration, three-view diff, explicit-commit parse
+  policy — all specs green at expected counts (see closeout sweep 2026-08-26:
+  mvp 11/11, quarantine 3/3, recover 6/6, dual-write 4/4, file-history 7/7,
+  three-view 5/5, commit-parse 5/5, event-journal 4/4, event-watch 5/5,
+  event-source 4/4, wasm-shim 8/8, incremental-parse 9/9, shadow 3/3).
+  Step scripts signed (leaves 32..39), flipped done at --now 2026-09-29 after extending the signed checker to accept SCV-IMPL rows (it structurally ignored them — see doc/08_tracking/bug/scv_migration_checker_ignored_impl_rows_2026-08-26.md; checker re-signed, leaf 40).
+- Drills: check-scv-restore-drills.shs PASS — 6 drill(s) recovered, 0 failures.
+  Crash harness: PASS — 9 crash point(s) survived, 0 corruptions.
+- parser_wasm honest status: 7/12 (pre-existing red, matches baseline; strace
+  confirms zero resolution from /home/ormastes/dev/pub/simple — no
+  nested-tree contamination in this tree).
+- Gaps to S5 / Wave 2: Rust notify bridge in src/runtime/fswatch/ still TODO
+  (E-01 pure-Simple half only); SCV-IMPL-B-01 blocked on sj repair;
+  pre-existing reds unchanged (storage, structural_match 5/9, merge 1/5,
+  parser_incremental 0/1, parser_cache 0/1, wasm_executor, gates 4/10).

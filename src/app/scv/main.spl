@@ -5,13 +5,13 @@ use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod (cwd)
 use std.scv.store.{scv_init_repo, scv_restore_op, scv_mark_current_state, scv_new_change, scv_close_change}
 use std.scv.stabilize.{scv_checkpoint, scv_checkpoint_verify, scv_checkpoint_list, scv_doctor, scv_verify_backends_git}
-use std.scv.journal.{scv_rebuild_db}
+use std.scv.journal.{scv_rebuild_db, scv_event_batch_record, scv_event_batch_commit, scv_event_batch_replay, scv_event_log}
 use std.scv.working_copy.{scv_snapshot, scv_auto_snapshot, scv_watch, scv_status, scv_log, scv_log_branch, scv_op_log}
 use std.scv.parser.{scv_parse_gate, scv_parse_index}
 use std.scv.parser_registry.{scv_parsers, scv_parser_install, scv_parser_verify, scv_langmap, scv_langmap_set}
 use std.scv.diff.{scv_diff}
 use std.scv.gates.{scv_compile_gate, scv_test_gate, scv_public_ready}
-use std.scv.maintenance.{scv_stats, scv_export_tree, scv_export_manifest, scv_import_manifest, scv_rebuild_object_index, scv_gc_dry_run, scv_gc_prune, scv_gc}
+use std.scv.maintenance.{scv_stats, scv_export_tree, scv_export_manifest, scv_import_manifest, scv_rebuild_object_index, scv_gc_dry_run, scv_gc_prune}
 use std.scv.fast_import.{scv_export_git_fast_import, scv_import_git_fast_import}
 use std.scv.integrity.{scv_fsck}
 use std.scv.pack.{scv_pack_status, scv_pack_write, scv_pack_verify, scv_pack_import, scv_private_sync, scv_private_sync_verify, scv_private_sync_import}
@@ -22,12 +22,17 @@ use std.scv.merge.{scv_merge_commits, scv_conflicts, scv_resolve_conflict}
 use std.scv.refs.{scv_bookmarks, scv_bookmark_set, scv_tag_list, scv_tag_set}
 use std.scv.backend_git.{scv_backend_status, scv_backend_map, scv_backend_verify, scv_promote_verify}
 use std.scv.shadow.{scv_shadow_sync}
+use std.scv.gc.{scv_gc_command}
+use std.scv.recover.{scv_recover}
+use std.scv.file_history.{scv_snapshot_with_identity, scv_file_history}
+use std.scv.three_view_diff.{scv_diff_views}
+use std.scv.commit_policy.{scv_commit_parse_policy}
 
 extern fn rt_stdout_write(data: [u8]) -> i64
 
 fn scv_help() -> text:
     var lines: [text] = []
-    lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set|new-change|close-change|checkpoint|doctor|verify-backends|backend|rebuild-db|promote-verify|shadow-sync>")
+    lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set|new-change|close-change|checkpoint|doctor|verify-backends|backend|rebuild-db|promote-verify|shadow-sync|gc|recover|file-history|commit-policy|event-record|event-commit|event-replay|events>")
     lines.push("")
     lines.push("Shared log options:")
     for line in log_options_help():
@@ -126,7 +131,19 @@ fn main() -> i64:
         case "init":
             return scv_cli_result(scv_init_repo(root))
         case "snapshot":
-            return scv_cli_result(scv_snapshot(root))
+            # I-02: FileEntityId resolved on every implicit snapshot;
+            # optional editor-txn rename hints: --rename <old> <new>
+            var snap_hints: [text] = []
+            var snap_i = 1
+            while snap_i < args.len():
+                if args[snap_i] == "--rename":
+                    if snap_i + 2 >= args.len():
+                        print "ERROR snapshot --rename requires <old> <new>"
+                        return 1
+                    snap_hints.push("{args[snap_i + 1]}|{args[snap_i + 2]}")
+                    snap_i = snap_i + 2
+                snap_i = snap_i + 1
+            return scv_cli_result(scv_snapshot_with_identity(root, snap_hints))
         case "auto-snapshot":
             return scv_cli_result(scv_auto_snapshot(root))
         case "watch":
@@ -147,8 +164,35 @@ fn main() -> i64:
                 return 1
             return scv_cli_result(scv_restore_op(root, args[1]))
         case "diff":
+            # D-02: `scv diff --view raw|syntax|entity|semantic|all [--git-patch]`
+            var diff_view = ""
+            var diff_git_patch = false
+            var diff_i = 1
+            while diff_i < args.len():
+                if args[diff_i] == "--view":
+                    if diff_i + 1 >= args.len():
+                        print "ERROR diff --view requires a view name"
+                        return 1
+                    diff_view = args[diff_i + 1]
+                    diff_i = diff_i + 1
+                elif args[diff_i] == "--git-patch":
+                    diff_git_patch = true
+                diff_i = diff_i + 1
+            if diff_view != "" or diff_git_patch:
+                val view = if diff_view != "": diff_view else: "raw"
+                return scv_cli_result(scv_diff_views(root, view, diff_git_patch))
             val mode = if args.len() >= 2: args[1] else: "--raw"
             return scv_cli_result(scv_diff(root, mode))
+        case "file-history":
+            if args.len() < 2:
+                print "ERROR file-history requires a path or file id"
+                return 1
+            return scv_cli_result(scv_file_history(root, args[1]))
+        case "commit-policy":
+            if args.len() < 2:
+                print "ERROR commit-policy requires a path"
+                return 1
+            return scv_cli_result(scv_commit_parse_policy(root, args[1]))
         case "parse-gate":
             if args.len() < 2:
                 print "ERROR parse-gate requires a path"
@@ -315,7 +359,11 @@ fn main() -> i64:
         case "gc-prune":
             return scv_cli_result(scv_gc_prune(root))
         case "gc":
-            return scv_cli_result(scv_gc(root))
+            # MIG-21: dry run by default; --prune --checkpoint <id> to quarantine
+            return scv_cli_verdict(scv_gc_command(root, args))
+        case "recover":
+            # MIG-22: staged recovery levels 0..5
+            return scv_cli_verdict(scv_recover(root, args))
         case "merge-commits":
             if args.len() < 4:
                 print "ERROR merge-commits requires base, left, and right commits"
@@ -517,6 +565,30 @@ fn main() -> i64:
                 print "ERROR shadow-sync requires --dest <dir>"
                 return 1
             return scv_cli_verdict(scv_shadow_sync(root, ss_dest))
+        case "event-record":
+            if args.len() < 4:
+                print "ERROR event-record requires batch id, kind, and path"
+                return 1
+            val ev_related = if args.len() >= 5: args[4] else: ""
+            if scv_event_batch_record(root, args[1], args[2], args[3], ev_related):
+                print "recorded batch={args[1]}"
+                return 0
+            print "ERROR event-record failed for batch {args[1]}"
+            return 1
+        case "event-commit":
+            if args.len() < 2:
+                print "ERROR event-commit requires a batch id"
+                return 1
+            if scv_event_batch_commit(root, args[1]):
+                print "committed batch={args[1]}"
+                return 0
+            print "ERROR event-commit failed for batch {args[1]} (no pending batch)"
+            return 1
+        case "event-replay":
+            print "replayed {scv_event_batch_replay(root)}"
+            return 0
+        case "events":
+            return scv_cli_result(scv_event_log(root))
         case _:
             print scv_help()
             return 1

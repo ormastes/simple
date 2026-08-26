@@ -1,0 +1,194 @@
+# SCV persistent parser session — SCV-IMPL-P-03.
+#
+# ParserSession contract: open / apply_edit / changed_ranges / checkpoint,
+# with exact TSInputEdit records (start_byte / old_end_byte / new_end_byte
+# plus row,col points) computed for every edit.
+#
+# HONEST BOUNDED FALLBACK (authorized by the plan): true parse-with-old-tree
+# (retained TSTree + ts_tree_edit + ts_tree_get_changed_ranges) is BLOCKED on
+# this host — the wasmtime shim (src/runtime/scv_wasm_shim.c) exposes no
+# retained-tree API (`wasm_rt_parse_incremental` does not exist) and the
+# build host has no wasmtime/tree-sitter dev headers, so the shim cannot be
+# compiled at all.  Until that lands, apply_edit does a FULL reparse through
+# scv_wasm_parse with structural node-ID dedup (unchanged subtrees reuse
+# their object-store entries), and changed_ranges is derived by diffing old
+# vs new root children byte spans.  The session reports
+# mode=fallback-full-reparse — it never claims tree reuse it did not do.
+# Provenance labels are unchanged (the executor decides those).
+# TODO(SCV-IMPL-P-03): switch to retained-TSTree incremental parse once
+# `wasm_rt_parse_incremental` exists in the shim and wasmtime headers are
+# available; the TSInputEdit records produced here are already exact and
+# feed that API unchanged.
+
+use app.io.mod (file_exists, file_read, dir_create)
+use std.scv.core.{scv_objects_dir}
+use std.scv.core.{scv_object_path}
+use std.scv.store.{scv_write_text, scv_hash_text}
+use std.scv.parser.{scv_syntax_node_children}
+use std.scv.wasm_executor.{scv_wasm_parse}
+
+# ---------------------------------------------------------------------------
+# TSInputEdit computation (exact bytes + points)
+# ---------------------------------------------------------------------------
+
+# Row,col (0-based) of a byte offset in source.  col is bytes since the last
+# newline, matching tree-sitter's TSPoint convention.
+fn scv_point_at(source: text, offset: i64) -> (i64, i64):
+    val bounded = if offset > source.len(): source.len() else: offset
+    val prefix = source.slice(0, bounded)
+    val parts = prefix.split("\n")
+    val row = parts.len() - 1
+    val col = parts[parts.len() - 1].len()
+    (row, col)
+
+# Exact TSInputEdit record for splicing new_text over [start_byte, old_end_byte).
+# new_source must be the post-edit text (for the new_end point).
+fn scv_input_edit_record(old_source: text, new_source: text,
+                         start_byte: i64, old_end_byte: i64,
+                         new_text: text) -> text:
+    val new_end_byte = start_byte + new_text.len()
+    val (sr, sc) = scv_point_at(old_source, start_byte)
+    val (oer, oec) = scv_point_at(old_source, old_end_byte)
+    val (ner, nec) = scv_point_at(new_source, new_end_byte)
+    "start_byte={start_byte} old_end_byte={old_end_byte} new_end_byte={new_end_byte} start_point={sr},{sc} old_end_point={oer},{oec} new_end_point={ner},{nec}"
+
+# ---------------------------------------------------------------------------
+# Session blob encoding
+# ---------------------------------------------------------------------------
+# Header key: value lines, then a literal "source:" line, then the raw source.
+
+fn _scv_session_header(session: text) -> text:
+    val idx = session.split("\nsource:\n")
+    idx[0]
+
+fn scv_session_source(session: text) -> text:
+    val idx = session.split("\nsource:\n")
+    if idx.len() < 2:
+        return ""
+    idx[1]
+
+fn _scv_session_field(session: text, key: text) -> text:
+    for line in _scv_session_header(session).split("\n"):
+        if line.starts_with(key + ": "):
+            return line.slice(key.len() + 2, line.len())
+    ""
+
+fn scv_session_tree_root(session: text) -> text:
+    _scv_session_field(session, "tree_root")
+
+fn scv_session_prev_root(session: text) -> text:
+    _scv_session_field(session, "prev_root")
+
+fn scv_session_mode(session: text) -> text:
+    _scv_session_field(session, "mode")
+
+fn scv_session_edit_count(session: text) -> i64:
+    _scv_session_field(session, "edits").to_i64() ?? 0
+
+fn scv_session_last_edit(session: text) -> text:
+    _scv_session_field(session, "last_edit")
+
+fn _scv_session_blob(root_id: text, prev_root: text, edits: i64,
+                     last_edit: text, language: text, grammar: text,
+                     version: text, parser_hash: text, source: text) -> text:
+    "mode: fallback-full-reparse\ntree_root: {root_id}\nprev_root: {prev_root}\nedits: {edits}\nlast_edit: {last_edit}\nlanguage: {language}\ngrammar: {grammar}\nversion: {version}\nparser_hash: {parser_hash}\nsource:\n{source}"
+
+# ---------------------------------------------------------------------------
+# open / apply_edit
+# ---------------------------------------------------------------------------
+
+# Open a session: parse source, retain the root node id.
+fn scv_parser_session_open(root: text, language: text, grammar: text,
+                           version: text, parser_hash: text,
+                           source: text) -> text:
+    val (root_id, _err) = scv_wasm_parse(root, language, grammar, version,
+                                         parser_hash, source)
+    _scv_session_blob(root_id, "", 0, "", language, grammar, version,
+                      parser_hash, source)
+
+# Apply one edit (splice new_text over [start_byte, old_end_byte)), record
+# the exact TSInputEdit, reparse (bounded fallback: full reparse + structural
+# dedup), and return the updated session blob.
+fn scv_parser_session_apply_edit(root: text, session: text, start_byte: i64,
+                                 old_end_byte: i64, new_text: text) -> text:
+    val old_source = scv_session_source(session)
+    if start_byte < 0 or old_end_byte < start_byte or old_end_byte > old_source.len():
+        return session
+    val new_source = old_source.slice(0, start_byte) + new_text +
+                     old_source.slice(old_end_byte, old_source.len())
+    val edit = scv_input_edit_record(old_source, new_source, start_byte,
+                                     old_end_byte, new_text)
+    val language = _scv_session_field(session, "language")
+    val grammar = _scv_session_field(session, "grammar")
+    val version = _scv_session_field(session, "version")
+    val parser_hash = _scv_session_field(session, "parser_hash")
+    val (new_root_id, _err) = scv_wasm_parse(root, language, grammar, version,
+                                             parser_hash, new_source)
+    val prev = scv_session_tree_root(session)
+    val edits = scv_session_edit_count(session) + 1
+    _scv_session_blob(new_root_id, prev, edits, edit, language, grammar,
+                      version, parser_hash, new_source)
+
+# ---------------------------------------------------------------------------
+# changed_ranges
+# ---------------------------------------------------------------------------
+
+# Read "byte_start"/"byte_end" out of a stored syntax node payload.
+fn _scv_node_byte_range(root: text, node_id: text) -> (i64, i64):
+    val path = scv_object_path(root, "syntax", node_id)
+    if not file_exists(path):
+        return (-1, -1)
+    var bs: i64 = -1
+    var be: i64 = -1
+    for line in file_read(path).split("\n"):
+        if line.starts_with("byte_start: "):
+            bs = line.slice(12, line.len()).to_i64() ?? -1
+        if line.starts_with("byte_end: "):
+            be = line.slice(10, line.len()).to_i64() ?? -1
+    (bs, be)
+
+# Byte ranges of the last edit's structural change: every child of the new
+# root whose structural id is NOT shared with the previous root.  One line
+# per range, "start..end".  Empty when no edit was applied yet or nothing
+# structurally changed.
+fn scv_parser_session_changed_ranges(root: text, session: text) -> text:
+    val prev = scv_session_prev_root(session)
+    val cur = scv_session_tree_root(session)
+    if prev == "" or cur == "" or prev == cur:
+        return ""
+    val old_children = scv_syntax_node_children(root, prev)
+    val new_children = scv_syntax_node_children(root, cur)
+    var out = ""
+    var i = 0
+    while i < new_children.len():
+        val nc = new_children[i]
+        var found = false
+        var j = 0
+        while j < old_children.len():
+            if old_children[j] == nc:
+                found = true
+                j = old_children.len()
+            j = j + 1
+        if not found:
+            val (bs, be) = _scv_node_byte_range(root, nc)
+            if bs >= 0 and be >= bs:
+                out = out + "{bs}..{be}\n"
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# checkpoint
+# ---------------------------------------------------------------------------
+
+# Persist the session state (minus raw source — source is content-hashed) as
+# an object-store entry.  Returns the checkpoint id.
+fn scv_parser_session_checkpoint(root: text, session: text) -> text:
+    val source = scv_session_source(session)
+    val source_hash = scv_hash_text("session_source", source)
+    val payload = _scv_session_header(session) + "\nsource_hash: {source_hash}\n"
+    val ck_id = scv_hash_text("parser_session", payload)
+    dir_create("{scv_objects_dir(root)}/session", true)
+    val path = scv_object_path(root, "session", ck_id)
+    if not file_exists(path):
+        scv_write_text(path, payload)
+    ck_id

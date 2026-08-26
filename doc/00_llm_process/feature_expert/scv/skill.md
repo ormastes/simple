@@ -21,19 +21,8 @@ parser-aware version-control tool (`src/lib/scv/`, CLI `src/app/scv/main.spl`).
 - Source: `src/lib/scv/` (store, working_copy, integrity*, stabilize, parser*,
   pack*, merge, refs, fast_import, remotes), `src/app/scv/main.spl`
 - Specs: `test/integration/app/scv_*_spec.spl`
-- Plan: `doc/03_plan/app/tools/scv_complete_impl_plan.md` (+ `_tldr.md`,
-  6 tracks / 44 items — the post-migration completion roadmap)
 
-## Status (2026-08-25, post week-3)
-
-- Migration weeks W1–W3 are DONE: ledger steps SCV-MIG-01..20 all `done` in
-  `.spipe/scv-migration/todo.sdn` (20/20 green; 21–25 = W4, still `pending`).
-- Gap work landed: `FileEntityId` (stable per-file identity,
-  `src/lib/scv/identity.spl`), parser provenance, and structural roots.
-- Next: W4 of the month plan (SCV-MIG-21..25), then Wave 1 of the
-  complete-impl plan (6 tracks / 44 `SCV-IMPL-*` items) — both pending.
-
-## P0 Foundation (2026-08-25, landed earlier)
+## Current State (2026-08-25, P0 foundation landed)
 
 - Persistent logical ChangeId: snapshot path carries the open change id across
   re-snapshots (`scv_write_commit_carry`, store.spl); allocation is
@@ -75,3 +64,21 @@ bin/simple test test/integration/app/scv_fault_injection_spec.spl
 
 When SCV research/design/impl/spec artifacts change, update this skill's links
 and handoff notes in the same change.
+
+## Post-W4 / Wave-1 status (2026-08-26)
+Week 4 (SCV-MIG-21..25) and Wave 1 (SCV-IMPL-E-01..03, P-02, P-03, I-02,
+D-02, G-01) are landed and green. New capabilities: conservative quarantine
+GC (`src/lib/scv/gc.spl`), leveled recovery (`stabilize.spl`), dual-write
+independent compare + shadow replication, S4 review
+(`doc/03_plan/app/tools/scv_s4_review.md`, 30-day shadow clock started),
+file-system event watch/source (`src/lib/nogc_async_mut/file_system/`),
+event journal on the W2 WAL, hardened WASM shim contract
+(`src/runtime/scv_wasm_shim.c` + `test/integration/runtime/scv_wasm_shim_contract_spec.spl`),
+true incremental parse (persistent ParserSession), file-history CLI
+(`scv file-history`, `src/lib/scv/file_history.spl`), three-view diff, and
+explicit-commit parse policy. All 13 step scripts PQ-signed (WOTS leaves
+27..39; checker re-signed at leaf 40 after being extended to accept SCV-IMPL rows, see doc/08_tracking/bug/scv_migration_checker_ignored_impl_rows_2026-08-26.md); ledger `.spipe/scv-migration/todo.sdn` shows MIG-01..25 + 8 Wave-1
+rows done. Known gaps: Rust notify bridge (src/runtime/fswatch/) TODO;
+SCV-IMPL-B-01 blocked on sj repair; pre-existing reds unchanged
+(parser_wasm 7/12, structural_match 5/9, merge 1/5, gates 4/10, storage,
+parser_incremental, parser_cache, wasm_executor).

@@ -1,0 +1,35 @@
+#!/bin/sh
+# SCV-MIG-25 — S4 gate review + month retrospective, priority 4. Mechanical:
+# verifies the S4 review doc exists, SCV-MIG-21..24 are all `done` in the
+# ledger, and the checker's dry-run passes. Honest FAIL until siblings land.
+# S5 is explicitly NOT in scope (see the review doc's gate section).
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# Committed UNSIGNED: sign with
+#   sh scripts/trust/sign-script.shs --name scv-migration-root scripts/scv-migration/steps/SCV-MIG-25.shs
+set -u
+DOC="doc/03_plan/app/tools/scv_s4_review.md"
+LEDGER=".spipe/scv-migration/todo.sdn"
+CHECKER="scripts/check/check-scv-migration-todo.shs"
+[ -f "$LEDGER" ] || { echo "ERROR — nothing was checked (missing ledger: $LEDGER)"; exit 2; }
+[ -f "$CHECKER" ] || { echo "ERROR — nothing was checked (missing checker: $CHECKER)"; exit 2; }
+checked=0
+missing=""
+[ -f "$DOC" ] || missing="$missing review-doc($DOC)"
+checked=$((checked + 1))
+for id in SCV-MIG-21 SCV-MIG-22 SCV-MIG-23 SCV-MIG-24; do
+  checked=$((checked + 1))
+  grep -E "^[[:space:]]*$id, [0-9]+, [0-9-]+, done," "$LEDGER" >/dev/null 2>&1 || missing="$missing $id(not-done)"
+done
+DRY_OUT="${TMPDIR:-/tmp}/SCV-MIG-25.$$.dry"
+sh "$CHECKER" --dry-run > "$DRY_OUT" 2>&1
+dry_rc=$?
+rm -f "$DRY_OUT"
+checked=$((checked + 1))
+[ "$dry_rc" -eq 0 ] || missing="$missing checker-dry-run(rc=$dry_rc)"
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -z "$missing" ]; then
+  echo "PASS — $checked check(s): S4 review doc present, SCV-MIG-21..24 done, checker dry-run clean"
+  exit 0
+fi
+echo "FAIL — $checked check(s), unmet:$missing"
+exit 1

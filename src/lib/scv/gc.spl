@@ -1,0 +1,60 @@
+# SCV quarantine GC command (MIG-21, stabilization §9).
+#
+# `scv gc` is a DRY RUN by default: it lists would-delete unreachable objects
+# and deletes nothing. Real pruning requires `scv gc --prune --checkpoint <id>`
+# and only proceeds when ALL of the following hold, otherwise it FAILs naming
+# the unmet condition:
+#   - fsck is clean
+#   - the named checkpoint verifies
+#   - objects have been unreachable longer than SCV_GC_QUARANTINE_DAYS days
+# Pruned objects are MOVED to .scv/quarantine/<date>/ (recoverable), never
+# unlinked. Removing quarantine content is deliberately out of scope.
+
+use std.scv.store.{scv_repo_exists}
+use std.scv.integrity.{scv_fsck}
+use std.scv.stabilize.{scv_checkpoint_verify}
+use std.scv.maintenance.{SCV_GC_QUARANTINE_DAYS, scv_gc_roots_reachable, scv_gc_unreachable_rows, scv_gc_quarantine}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn scv_gc_command(root: text, args: [text]) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR — nothing was checked (repository not initialized)\n"
+    var prune = false
+    var checkpoint = ""
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--prune":
+            prune = true
+        elif arg == "--checkpoint" and i + 1 < args.len():
+            checkpoint = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--checkpoint="):
+            checkpoint = arg[13:]
+        else:
+            return "FAIL — unknown gc option: {arg}\n"
+        i = i + 1
+    val reachable = scv_gc_roots_reachable(root)
+    val rows = scv_gc_unreachable_rows(root, reachable)
+    var out_rows: [text] = []
+    for row in rows:
+        val parts = row.split("|")
+        val name_parts = parts[1].split("/")
+        out_rows.push("would-delete {parts[0]}/{name_parts[name_parts.len() - 1]}\n")
+    out_rows.push("unreachable_total={rows.len()}\n")
+    var out = out_rows.join("")
+    if not prune:
+        return out + "PASS — gc dry run, nothing deleted ({rows.len()} unreachable object(s) listed)\n"
+    if checkpoint == "":
+        return out + "FAIL — prune requires --checkpoint <verified-checkpoint-id>\n"
+    val fsck = scv_fsck(root)
+    if not fsck.starts_with("OK"):
+        return out + fsck + "FAIL — fsck not clean, refusing to prune\n"
+    val verify = scv_checkpoint_verify(root, checkpoint)
+    if not verify.starts_with("OK"):
+        return out + verify + "FAIL — checkpoint {checkpoint} did not verify, refusing to prune\n"
+    val (moved, young, qdir) = scv_gc_quarantine(root, reachable, SCV_GC_QUARANTINE_DAYS, current_time_ms())
+    out = out + "quarantined={moved} kept_young={young} quarantine_dir={qdir}\n"
+    if rows.len() > 0 and moved == 0:
+        return out + "FAIL — retention age not met (SCV_GC_QUARANTINE_DAYS={SCV_GC_QUARANTINE_DAYS}): 0 of {rows.len()} unreachable object(s) past quarantine age\n"
+    out + "PASS — gc pruned {moved} object(s) to quarantine ({young} kept, younger than retention)\n"

@@ -17,6 +17,7 @@ use std.nogc_sync_mut.sffi.{DynLib, sffi_lib_path}
 use std.scv.store.{scv_write_text, scv_hash_text}
 use std.scv.core.{scv_object_path}
 use std.io_runtime.{env_get}
+use std.scv.wasm_shim_contract.{scv_wasm_input_within_bounds, scv_wasm_blob_validate}
 
 # ---------------------------------------------------------------------------
 # Availability probe
@@ -31,6 +32,14 @@ fn scv_wasm_executor_available() -> bool:
         return false
     val wasmtime_path = sffi_lib_path("wasmtime")
     val shim_path = sffi_lib_path("scv_wasm")
+    # Existence pre-check: spl_dlopen on a MISSING file raises a hard
+    # E-SFFI-001 runtime error (it does not return <=0 as DynLib.load
+    # assumes), which crashed every caller on hosts without the shim.
+    # A probe must be able to answer "no" without dying.
+    if not file_exists(wasmtime_path):
+        return false
+    if not file_exists(shim_path):
+        return false
     val wt_lib = DynLib.load(wasmtime_path)
     if val Some(wt) = wt_lib:
         wt.close()
@@ -244,6 +253,9 @@ fn scv_wasm_parse(root: text, language: text, grammar: text, version: text,
                   parser_hash: text, source: text) -> (text, text):
     if not scv_wasm_executor_available():
         return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
+    # Hardened shim contract (SCV-IMPL-P-02): refuse oversized inputs.
+    if not scv_wasm_input_within_bounds(source.len()):
+        return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
     # Build grammar artifact path: .scv/parsers/<parser_hash>.wasm
     val grammar_path = "{root}/.scv/parsers/{parser_hash}.wasm"
     if not file_exists(grammar_path):
@@ -251,6 +263,10 @@ fn scv_wasm_parse(root: text, language: text, grammar: text, version: text,
     # Load grammar + parse via the ffi-unsafe boundary wrapper
     val blob = _scv_wasm_parse_blob(grammar_path, source, source.len())
     if blob == "":
+        return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
+    # Hardened shim contract (SCV-IMPL-P-02): a malformed blob is rejected
+    # wholesale — never turned into a half-built tree.
+    if scv_wasm_blob_validate(blob, source.len()) != "":
         return scv_wasm_simulate_line_walk(root, source, language, grammar, version, parser_hash)
     # Walk the blob and write tree-sitter-wasm nodes
     val root_id = _scv_parse_node_blob(root, blob, source, language, grammar, version, parser_hash)

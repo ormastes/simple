@@ -19,7 +19,7 @@
 # The ledger is rewritten atomically (tmp in the same dir + mv) and one line per run is
 # appended to .spipe/scv-migration/runs.log. --dry-run mutates nothing.
 #
-# --selftest runs first and is fatal (6 fixtures). Inside selftest ONLY, --verify-cmd
+# --selftest runs first and is fatal (7 fixtures). Inside selftest ONLY, --verify-cmd
 # substitutes a fixture verifier; outside selftest the option is refused so the real
 # path always calls the real trust script.
 #
@@ -102,7 +102,7 @@ run_ledger() {
   total=0; done_all=0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      "    SCV-MIG-"*) ;;
+      "    SCV-MIG-"*|"    SCV-IMPL-"*) ;;
       *) printf '%s\n' "$line" >> "$tmp"; continue ;;
     esac
     body="${line#    }"
@@ -123,7 +123,7 @@ run_ledger() {
     if [ "$status" = "done" ]; then
       d=$((d+1)); printf '%s\n' "$line" >> "$tmp"; continue
     fi
-    step="$(printf '%s' "$cmd" | grep -o 'scripts/scv-migration/steps/SCV-MIG-[0-9][0-9]*\.shs' | head -n 1)"
+    step="$(printf '%s' "$cmd" | grep -o 'scripts/scv-migration/steps/SCV-\(MIG-[0-9][0-9]*\|IMPL-[A-Z]-[0-9][0-9]*\)\.shs' | head -n 1)"
     if [ -z "$step" ]; then
       status="blocked"; reason="bad_check_cmd"; b=$((b+1)); blocked_names="$blocked_names $id($reason)"
     elif ! verify_step "$ROOT/$step"; then
@@ -257,17 +257,27 @@ EOF
   case "$v" in "PASS — 0 step(s) due, nothing to do (0 done, 2 pending)") ;; *) echo "selftest F6 FAIL: $v"; fails=$((fails+1)) ;; esac
   [ "$rc" -eq 0 ] || { echo "selftest F6 exit FAIL: $rc"; fails=$((fails+1)); }
   cmp -s "$L" "$L.f6before" || { echo "selftest F6 mutated ledger"; fails=$((fails+1)); }
+  # F7: SCV-IMPL rows are processed exactly like SCV-MIG rows (signed PASS -> done)
+  mk_step SCV-IMPL-X-01 'echo "PASS — impl fixture green"; exit 0'
+  sign SCV-IMPL-X-01
+  {
+    echo 'steps |id, week, due, status, check_cmd, last_run_utc, last_verdict, blocked_reason|'
+    echo '    SCV-IMPL-X-01, 5, 2026-01-01, pending, "sh scripts/scv-migration/steps/SCV-IMPL-X-01.shs", , , '
+  } > "$L"
+  v="$(SCV_MIG_SELFTEST=1 sh "$SCRIPT_PATH" $common 2>&1 | tail -n 1)"
+  case "$v" in "PASS — 1 step(s) checked, 1 done, 0 active, 0 blocked") ;; *) echo "selftest F7 FAIL: $v"; fails=$((fails+1)) ;; esac
+  grep -q '^    SCV-IMPL-X-01, 5, 2026-01-01, done, ' "$L" || { echo "selftest F7 ledger FAIL"; sed -n 2p "$L"; fails=$((fails+1)); }
   rm -rf "$fx"
   if [ "$fails" -gt 0 ]; then
     echo "ERROR — nothing was checked (selftest failed: $fails fixture(s))"
     exit 2
   fi
-  echo "selftest: 6 fixture(s) OK"
+  echo "selftest: 7 fixture(s) OK"
 }
 
 if [ "$SELFTEST" -eq 1 ]; then selftest; fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-  echo "PASS — 6 selftest fixture(s) checked, 0 failed"
+  echo "PASS — 7 selftest fixture(s) checked, 0 failed"
   exit 0
 fi
 run_ledger

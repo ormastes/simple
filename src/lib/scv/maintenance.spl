@@ -8,6 +8,12 @@ use std.common.string_core.{char_from_code}
 use std.scv.core.{scv_objects_dir, scv_object_path, scv_chunk_path, scv_object_index_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe, scv_parser_index_path}
 use std.scv.store.{scv_repo_exists, scv_read_workspace_commit, scv_workspace_parent_error, scv_commit_tree, scv_object_field, scv_content_id_for_file, scv_create_parent_dir, scv_i64_bytes_to_u8, scv_hash_text, scv_write_text, scv_write_file_object_from_bytes, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op}
 use std.scv.integrity.{scv_current_tree_content}
+use std.nogc_sync_mut.io.file_ops.{file_rename, file_modified_time}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+# MIG-21: retention age for quarantine GC (stabilization §9). Objects must be
+# unreachable for MORE than this many days before --prune may quarantine them.
+val SCV_GC_QUARANTINE_DAYS = 30
 
 fn scv_count_files_under(path: text) -> i64:
     if not file_exists(path):
@@ -535,6 +541,191 @@ fn scv_gc_prune_packs(root: text, reachable: text) -> i64:
                 file_delete(manifest_path)
             pruned = pruned + 1
     pruned
+
+# ─── MIG-21 quarantine GC (stabilization §9) ────────────────────────────────
+# GC roots: heads, refs (bookmarks/tags), changes, checkpoints, conflict
+# objects, identity metadata — on top of the base reachability walk.
+
+fn scv_gc_add_root_line(root: text, reachable: text, id: text) -> text:
+    var out = reachable
+    if id == "" or scv_line_set_contains(out, id):
+        return out
+    if id.starts_with("commit_"):
+        out = scv_add_reachable_from_commit(root, id, out)
+    elif id.starts_with("tree_"):
+        out = scv_add_reachable_from_tree(root, id, out)
+    elif id.starts_with("file_"):
+        out = scv_add_reachable_from_file_object(root, id, out)
+    else:
+        out = out + id + "\n"
+    out
+
+fn scv_gc_roots_reachable(root: text) -> text:
+    var reachable = scv_reachable_object_ids(root)
+    # pack delta base ids stay pinned
+    for bid in scv_pack_reachable_base_ids(root).split("\n"):
+        val b = bid.trim()
+        if b != "" and not scv_line_set_contains(reachable, b):
+            reachable = reachable + b + "\n"
+    # refs: current bookmarks and tags (name|commit rows)
+    for rel in ["meta/bookmarks.sdn", "meta/tags.sdn"]:
+        val path = "{root}/.scv/{rel}"
+        if file_exists(path):
+            for line in file_read(path).split("\n"):
+                val parts = line.trim().split("|")
+                if parts.len() >= 2:
+                    reachable = scv_gc_add_root_line(root, reachable, parts[1].trim())
+    # changes: every change object plus its latest/predecessor commits
+    val changes_dir = "{scv_objects_dir(root)}/changes"
+    if file_exists(changes_dir):
+        for path in dir_walk(changes_dir):
+            val id = scv_object_id_from_path(path)
+            if not scv_line_set_contains(reachable, id):
+                reachable = reachable + id + "\n"
+            val content = file_read(path)
+            reachable = scv_gc_add_root_line(root, reachable, scv_object_field(content, "latest"))
+            for pred in scv_object_field(content, "predecessors").split(","):
+                reachable = scv_gc_add_root_line(root, reachable, pred.trim())
+    # conflicts: never collect conflict objects or what they reference
+    val conflicts_dir = "{scv_objects_dir(root)}/conflicts"
+    if file_exists(conflicts_dir):
+        for path in dir_walk(conflicts_dir):
+            val id = scv_object_id_from_path(path)
+            if not scv_line_set_contains(reachable, id):
+                reachable = reachable + id + "\n"
+            for line in file_read(path).split("\n"):
+                val trimmed = line.trim()
+                val sep = trimmed.index_of(":")
+                if sep > 0:
+                    reachable = scv_gc_add_root_line(root, reachable, trimmed[sep + 1:].trim())
+    # checkpoints: manifest head_op + commit are roots
+    val checkpoints_dir = "{root}/.scv/checkpoints"
+    if file_exists(checkpoints_dir):
+        for path in dir_walk(checkpoints_dir):
+            if path.ends_with("/manifest.sdn"):
+                val content = file_read(path)
+                reachable = scv_gc_add_root_line(root, reachable, scv_object_field(content, "commit"))
+                reachable = scv_gc_add_root_line(root, reachable, scv_object_field(content, "head_op"))
+    # identity metadata: created commits referenced by identity rows/edges
+    for rel in ["meta/file_identity.sdn", "meta/identity_edges.sdn"]:
+        val path = "{root}/.scv/{rel}"
+        if file_exists(path):
+            for line in file_read(path).split("\n"):
+                for part in line.trim().split("|"):
+                    val p = part.trim()
+                    if p.starts_with("commit_"):
+                        reachable = scv_gc_add_root_line(root, reachable, p)
+    reachable
+
+fn scv_gc_kinds() -> [text]:
+    ["chunks", "files", "trees", "commits", "syntax"]
+
+# All unreachable loose objects, as "kind|path" rows.
+fn scv_gc_unreachable_rows(root: text, reachable: text) -> [text]:
+    var rows: [text] = []
+    for kind in scv_gc_kinds():
+        val dir = "{scv_objects_dir(root)}/{kind}"
+        if not file_exists(dir):
+            continue
+        for path in dir_walk(dir):
+            if not scv_line_set_contains(reachable, scv_object_id_from_path(path)):
+                rows.push("{kind}|{path}")
+    rows
+
+fn scv_gc_civil_date(now_ms: i64) -> text:
+    # days-from-civil inverse (Howard Hinnant's civil_from_days), UTC
+    var z = now_ms / 86400000
+    z = z + 719468
+    val era = if z >= 0: z / 146097 else: (z - 146096) / 146097
+    val doe = z - era * 146097
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    val y = yoe + era * 400
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp = (5 * doy + 2) / 153
+    val d = doy - (153 * mp + 2) / 5 + 1
+    val m = if mp < 10: mp + 3 else: mp - 9
+    val year = if m <= 2: y + 1 else: y
+    val mm = if m < 10: "0{m}" else: "{m}"
+    val dd = if d < 10: "0{d}" else: "{d}"
+    "{year}-{mm}-{dd}"
+
+fn scv_gc_object_age_days(path: text, now_ms: i64) -> i64:
+    val mtime = file_modified_time(path)
+    if mtime <= 0:
+        return 0
+    (now_ms / 1000 - mtime) / 86400
+
+fn scv_gc_quarantine_move(root: text, qdir: text, kind: text, path: text) -> bool:
+    val parts = path.split("/")
+    val name = parts[parts.len() - 1]
+    val dst = "{qdir}/{kind}/{name}"
+    scv_create_parent_dir(dst)
+    file_rename(path, dst)
+
+# Move unreachable loose objects past the retention age into quarantine.
+# Returns (moved, kept_young, quarantine_dir).
+fn scv_gc_quarantine(root: text, reachable: text, min_age_days: i64, now_ms: i64) -> (i64, i64, text):
+    val qdir = "{root}/.scv/quarantine/{scv_gc_civil_date(now_ms)}"
+    var moved = 0
+    var young = 0
+    for row in scv_gc_unreachable_rows(root, reachable):
+        val parts = row.split("|")
+        val kind = parts[0]
+        val path = parts[1]
+        if scv_gc_object_age_days(path, now_ms) > min_age_days:
+            if scv_gc_quarantine_move(root, qdir, kind, path):
+                moved = moved + 1
+        else:
+            young = young + 1
+    # packs: quarantine (never delete) packs with no reachable entry, same age gate
+    val pack_dir = "{scv_objects_dir(root)}/packs"
+    if file_exists(pack_dir):
+        for path in dir_walk(pack_dir):
+            if not path.ends_with(".pack.gz"):
+                continue
+            if scv_gc_pack_any_reachable(path, reachable):
+                continue
+            if scv_gc_object_age_days(path, now_ms) > min_age_days:
+                val pack_id = scv_pack_id_from_path_m(path)
+                if scv_gc_quarantine_move(root, qdir, "packs", path):
+                    moved = moved + 1
+                val manifest_path = "{pack_dir}/{pack_id}.manifest"
+                if file_exists(manifest_path):
+                    scv_gc_quarantine_move(root, qdir, "packs", manifest_path)
+            else:
+                young = young + 1
+    (moved, young, qdir)
+
+# True when any entry (full or delta, incl. delta base) in the pack is reachable.
+fn scv_gc_pack_any_reachable(path: text, reachable: text) -> bool:
+    val compressed = file_read_bytes(path) ?? []
+    val payload = gzip_decompress(compressed)
+    val v2_header = "format: scv-pack-payload-v2\n".bytes()
+    if payload.len() < v2_header.len() or payload[0:v2_header.len()] != v2_header:
+        return true
+    var pos = v2_header.len()
+    while pos < payload.len():
+        val (line, line_end) = scv_pack_bytes_line_m(payload, pos)
+        val trimmed = line.trim()
+        if trimmed == "":
+            pos = line_end + 1
+            continue
+        if trimmed.starts_with("entry ") or trimmed.starts_with("entry-delta "):
+            val parts = trimmed.split(" ")
+            val id = if parts.len() >= 3: parts[2] else: ""
+            if id != "" and scv_line_set_contains(reachable, id):
+                return true
+            if trimmed.starts_with("entry-delta ") and parts.len() >= 4 and scv_line_set_contains(reachable, parts[3]):
+                return true
+            val size_index = if trimmed.starts_with("entry-delta "): 5 else: 3
+            val size = if parts.len() > size_index: (parts[size_index].to_i64() ?? -1) else: -1
+            if size < 0:
+                pos = line_end + 1
+                continue
+            pos = line_end + 1 + size + "\nendentry\n".bytes().len()
+        else:
+            pos = line_end + 1
+    false
 
 fn scv_pack_id_from_path_m(path: text) -> text:
     val parts = path.split("/")

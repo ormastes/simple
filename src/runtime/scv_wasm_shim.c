@@ -54,6 +54,14 @@
 
 #define HANDLE_MAGIC 0x5C5700A5  /* "SCV\0" + sentinel */
 
+/* Hardened contract constants — mirrored on the Simple side in
+ * src/lib/scv/wasm_shim_contract.spl (the enforced-today half).  */
+#define SCV_WASM_MAX_INPUT_BYTES  (16 * 1024 * 1024)  /* per-parse source cap  */
+#define SCV_WASM_FUEL_BUDGET      1000000000ULL       /* instructions per parse */
+#define SCV_WASM_MAX_MEMORY_BYTES (64 * 1024 * 1024)  /* store linear-mem cap  */
+#define SCV_WASM_ABI_MIN          13                  /* TS language ABI range */
+#define SCV_WASM_ABI_MAX          15
+
 typedef struct {
     uint32_t          magic;
     wasmtime_engine_t *engine;
@@ -240,7 +248,12 @@ int64_t wasm_rt_load(const char *grammar_path) {
     }
     fclose(f);
 
-    wasmtime_engine_t *engine = wasmtime_engine_new();
+    /* Fuel metering is configured at the engine so every store created from
+     * it (probe and future parse stores alike) is budgeted.  */
+    wasm_config_t *config = wasm_config_new();
+    if (!config) { free(wasm_bytes); return 0; }
+    wasmtime_config_consume_fuel_set(config, true);
+    wasmtime_engine_t *engine = wasmtime_engine_new_with_config(config);
     if (!engine) { free(wasm_bytes); return 0; }
 
     wasmtime_error_t *err = NULL;
@@ -262,6 +275,11 @@ int64_t wasm_rt_load(const char *grammar_path) {
         return 0;
     }
     wasmtime_context_t *ctx = wasmtime_store_context(probe_store);
+    /* Memory bound + fuel budget for the probe instantiation. */
+    wasmtime_store_limiter(probe_store, SCV_WASM_MAX_MEMORY_BYTES,
+                           -1 /* table elems */, -1 /* instances */,
+                           -1 /* tables */, -1 /* memories */);
+    wasmtime_context_set_fuel(ctx, SCV_WASM_FUEL_BUDGET);
 
     wasmtime_linker_t *linker = wasmtime_linker_new(engine);
     if (!linker) {
@@ -325,6 +343,13 @@ int64_t wasm_rt_load(const char *grammar_path) {
     }
 
     wasmtime_store_delete(probe_store);
+
+    /* ABI check: refuse grammars outside the supported tree-sitter language
+     * ABI range — a silently mis-ABI'd grammar is worse than no grammar.  */
+    if (lang) {
+        uint32_t abi = ts_language_version(lang);
+        if (abi < SCV_WASM_ABI_MIN || abi > SCV_WASM_ABI_MAX) lang = NULL;
+    }
 
     if (!lang) {
         wasmtime_module_delete(module);
@@ -432,6 +457,8 @@ static void walk_cursor(TSTreeCursor *cursor, const char *source,
 const char *wasm_rt_parse_all(int64_t handle, const char *source, int64_t source_len) {
     ScvWasmHandle *sh = handle_from_i64(handle);
     if (!sh || !source || source_len <= 0) return "";
+    /* Input bound: refuse oversized sources (mirrors the Simple-side gate). */
+    if (source_len > SCV_WASM_MAX_INPUT_BYTES) return "";
 
     /* Reset output buffer */
     if (sh->output_buf) sh->output_buf[0] = '\0';
