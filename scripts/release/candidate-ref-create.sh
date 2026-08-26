@@ -6,7 +6,7 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 2
 POLICY_TOOL="$ROOT/scripts/release/github-policy.sh"
 
 usage() {
-    echo "usage: $0 --yes <owner/repo> <candidate/vX.Y.Z[-pre.N]/aNNN> <40-hex-commit> <main|release/X.Y>" >&2
+    echo "usage: $0 --yes <owner/repo> <candidate/vX.Y.Z[-pre.N]/aNNN> <40-hex-commit> <release/X.Y>" >&2
     exit 2
 }
 

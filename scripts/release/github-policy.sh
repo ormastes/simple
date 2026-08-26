@@ -37,7 +37,7 @@ normalize_environment() {
     jq -S '{
         wait_timer:(([.protection_rules[]? | select(.type == "wait_timer") | .wait_timer] | first) // 0),
         prevent_self_review:(([.protection_rules[]? | select(.type == "required_reviewers") | .prevent_self_review] | first) // false),
-        reviewers:([.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]? | {type,id:.reviewer.id}]),
+        reviewers:([.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]? | {type,id:.reviewer.id}] | sort_by(.type,.id)),
         deployment_branch_policy
     }' "$1"
 }
