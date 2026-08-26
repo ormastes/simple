@@ -329,8 +329,17 @@ fn hpack_huffman_encode(payload: [u8]) -> [u8]:
 fn hpack_huffman_decode(bytes: [u8], offset: i64, length: i64) -> Result<[u8], text>:
     if offset < 0 or length < 0:
         return Err("hpack_huffman_decode: negative offset or length")
-    if offset + length > bytes.len():
+    # Do not form `offset + length` before proving it fits.  HPACK lengths
+    # originate on the wire and a wrapped addition could otherwise admit a
+    # range outside the supplied header block.
+    if offset > bytes.len() or length > bytes.len() - offset:
         return Err("hpack_huffman_decode: range out of bounds")
+    # Appendix B's shortest non-EOS code is five bits.  A valid stream can
+    # therefore produce no more than floor(8 * length / 5) octets.  Compute
+    # this without multiplying an attacker-controlled length, and enforce it
+    # before every append so a corrupted table or future decoder change fails
+    # closed instead of expanding an HPACK field without a derived bound.
+    val max_output = (length / 5) * 8 + ((length % 5) * 8) / 5
     val table = huffman_table()
     # Build a decode tree from the table.
     val tree = _build_decode_tree(table)
@@ -351,6 +360,8 @@ fn hpack_huffman_decode(bytes: [u8], offset: i64, length: i64) -> Result<[u8], t
                 case Ok(sym):
                     if sym == 256:
                         return Err("hpack_huffman_decode: EOS symbol in stream")
+                    if out.len() >= max_output:
+                        return Err("hpack_huffman_decode: decoded length exceeds RFC bound")
                     out.push(sym.to_u8())
                     node = 0     # back to root
                     partial = 0  # reset partial counter
