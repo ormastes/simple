@@ -1286,6 +1286,27 @@ dispatch. The retained SFFI remains unsafe and unsigned: provider parity is
 not semantic verification or signed artifact admission. Source-reviewed only;
 checks were not executed.
 
+## 2026-08-26 repository-wide source census and Cranelift contracts
+
+The authoritative source-only inventory reports 7,259 production-source
+declarations across 3,815 symbols. Of these, 2,764 declarations are explicitly
+tagged unsafe and 4,495 still lack an FFI unsafe tag; after the Cranelift
+update, 6,249 lack a recognized
+return/error contract. The `rt_*` subset contains 5,806 declarations across
+3,051 symbols, with 3,332 unsafe-tag gaps and 5,060 contract gaps. No
+declaration is cryptographically admitted because no exact-artifact admission
+jobs were supplied. These are source inventory facts, not verification claims.
+
+The 78-declaration Cranelift SFFI owner was the largest production owner whose
+declarations were all already unsafe-tagged but contract-unclassified. Its
+annotations now distinguish the valid empty-string zero representation from
+the Cranelift handle/value convention, where zero or false is the failure or
+invalid-input sentinel and invalid void operations are ignored. All 78 rows
+are consequently machine-classified as unsafe with a declared contract. No
+signature, wrapper body, branch, allocation, copy, lookup, lock, or dispatch
+changed; this is zero-cost contract metadata. The bridge remains unsafe,
+unsigned, and semantically unverified.
+
 ## 2026-08-26 providerless no-GC API removal
 
 The no-GC runtime is reference-counted and has no `rt_gc_init`,

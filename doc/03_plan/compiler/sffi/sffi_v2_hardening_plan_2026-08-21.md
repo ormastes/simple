@@ -1541,6 +1541,26 @@ Torch SFFI nor all SFFI may be described as verified safe.
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
 
+## 2026-08-26 repository-wide inventory checkpoint
+
+- Production source currently contains 7,259 declarations / 3,815 symbols;
+  4,495 declarations lack an FFI unsafe tag and, after the Cranelift update,
+  6,249 lack a recognized
+  return/error contract.
+- The `rt_*` production subset contains 5,806 declarations / 3,051 symbols;
+  3,332 lack an unsafe tag, 5,060 lack a contract, and zero are signed-admitted
+  without configured exact-artifact admission jobs.
+- First close owners that are already centralized and fully unsafe-tagged;
+  their contract metadata can be corrected without widening runtime hot paths.
+- Cranelift checkpoint: classify all 78 declarations as unsafe with explicit
+  empty-string or zero/false/ignored-operation semantics; retain the current
+  direct wrapper shape and add no runtime work.
+- Next prioritize live production declarations lacking unsafe authority,
+  grouped by owner/provider rather than mechanically tagging test fixtures or
+  unrelated language-level extern declarations.
+- Status: source-censused; no build, runtime, signature, or semantic
+  verification claim.
+
 ## 2026-08-26 public RuntimeValue closure completion
 
 - Remove the unused public equality and print RuntimeValue wrappers rather

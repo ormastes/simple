@@ -339,6 +339,41 @@ awk -F '\t' 'NR > 1 {
         rt_declarations + 0, rt_unsafe_tagged + 0, rt_signed_admitted + 0, rt_untouched + 0
 }' "$out" >&2
 
+# Keep production and test debt separate without changing the stable TSV
+# schema. Duplicate fixtures are useful coverage, but must not inflate the
+# answer to "how much shipped SFFI remains unsafe or unsigned?".
+awk -F '\t' 'NR > 1 {
+    scope = ($6 ~ /^test\//) ? "test" : (($6 ~ /^src\//) ? "production" : "other")
+    declarations[scope]++
+    if ($8 == "tagged") unsafe_tagged[scope]++
+    if ($10 == "reverified") signed_admitted[scope]++
+    if ($8 == "missing" && $9 == "missing" && $11 == "missing") untouched[scope]++
+    if ($1 ~ /^rt_/) {
+        rt_declarations[scope]++
+        if ($8 == "tagged") rt_unsafe_tagged[scope]++
+        if ($10 == "reverified") rt_signed_admitted[scope]++
+        if ($8 == "missing" && $9 == "missing" && $11 == "missing") rt_untouched[scope]++
+    }
+    if ($1 ~ /^(rt_|spl_)/) {
+        raw_declarations[scope]++
+        if ($8 == "tagged") raw_unsafe_tagged[scope]++
+        if ($10 == "reverified") raw_signed_admitted[scope]++
+        if ($8 == "missing" && $9 == "missing" && $11 == "missing") raw_untouched[scope]++
+    }
+} END {
+    for (scope in declarations) {
+        printf "SFFI scope stats: scope=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+            scope, declarations[scope], unsafe_tagged[scope] + 0, \
+            signed_admitted[scope] + 0, untouched[scope] + 0
+        printf "SFFI rt_scope stats: scope=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+            scope, rt_declarations[scope] + 0, rt_unsafe_tagged[scope] + 0, \
+            rt_signed_admitted[scope] + 0, rt_untouched[scope] + 0
+        printf "SFFI raw_scope stats: scope=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+            scope, raw_declarations[scope] + 0, raw_unsafe_tagged[scope] + 0, \
+            raw_signed_admitted[scope] + 0, raw_untouched[scope] + 0
+    }
+}' "$out" | sort >&2
+
 if [ -n "$symbols_out" ]; then
     source_signature_variants=$(awk -F '\t' 'NR > 1 && $10 == "source_signature_variants" { n++ } END { print n + 0 }' "$symbols_out")
     # `untouched` is a more precise subset of migration debt, not an exemption
