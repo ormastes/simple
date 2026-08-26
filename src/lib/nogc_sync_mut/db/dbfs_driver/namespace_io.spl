@@ -258,42 +258,26 @@ impl DbFsDriver:
         Ok(out)
 
     fn _pread_handle_locked(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
-        """Read length chars starting at offset."""
-        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
-        if inode_idx < 0:
-            return Err(FsError.NotFound)
-        if self.arena_base >= 0:
-            val device = self._read_inode_bytes_from_device_locked(_dbfs_inodes[inode_idx].id, offset + length)
-            match device:
-                Ok(bytes):
-                    val full = dbfs_bytes_to_text(bytes, bytes.len() as i64)
-                    var device_result: text = ""
-                    var di: i64 = offset
-                    val device_end: i64 = if offset + length < full.len(): offset + length else: full.len()
-                    while di < device_end:
-                        device_result = device_result + full[di:di + 1]
-                        di = di + 1
-                    var device_pad: i64 = device_end - offset
-                    while device_pad < length:
-                        device_result = device_result + "\0"
-                        device_pad = device_pad + 1
-                    return Ok(device_result)
-                Err(error):
-                    return Err(error)
-        val content = _dbfs_inodes[inode_idx].content
-        var result: text = ""
-        var i: i64 = offset
-        val end_pos: i64 = offset + length
-        val content_end: i64 = if end_pos < content.len(): end_pos else: content.len()
-        while i < content_end:
-            result = result + content[i:i + 1]
+        """Read a padded text window through the canonical byte pread path.
+
+        The byte path owns handle validation, overflow checks, and the
+        device-backed subrange read.  Keeping text pread here prevents this
+        compatibility API from allocating an ``offset + length`` prefix.
+        """
+        if offset < 0 or length < 0 or offset > 0x7FFFFFFFFFFFFFFF - length:
+            return Err(FsError.InvalidArg)
+        val bytes = self._pread_bytes_handle_locked(handle, offset, length)?
+        var chars: [text] = []
+        var i: i64 = 0
+        while i < bytes.len() as i64:
+            chars.push(bytes[i as i32].chr())
             i = i + 1
-        # Pad with null chars if beyond content length
-        var pad: i64 = content_end - offset
-        while pad < length:
-            result = result + "\0"
-            pad = pad + 1
-        Ok(result)
+        # POSIX-compatible text pread retains the historical fixed-size result
+        # by padding a short byte window without repeated string allocation.
+        while i < length:
+            chars.push("\0")
+            i = i + 1
+        Ok(chars.join(""))
 
     # --- write ---
 
