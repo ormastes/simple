@@ -22,14 +22,21 @@ src/compiler_rust/target/debug/simple run src/app/cli/native_build_worker.spl \
 
 The current seed includes the restored named-function closure boxing path, so
 the prior `x64_lower_const` named-function JIT refusal no longer appears.
-Instead, after the normal warning prelude it produces no `source_closure` line
-or cache object for more than four minutes. At interruption, the worker had
-five threads, was waiting at `futex_wait_queue`, used 2.59 GiB RSS (3.61 GiB
-peak virtual memory), and the preserved cache still contained 893 files.
+With `SIMPLE_JIT_STAGE_TRACE=1`, the worker reaches:
+
+```text
+[jit-stage] compile_all:start functions=12611 globals=14814
+```
+
+before any `source_closure` line or cache object. Thus the direct parse shard
+attempts to JIT-compile the complete compiler prelude instead of first running
+the slim closure planner. At interruption, the worker had five threads, was
+waiting at `futex_wait_queue`, used 2.59 GiB RSS (3.61 GiB peak virtual
+memory), and the preserved cache still contained 893 files.
 
 ## Required follow-up
 
-Add low-overhead JIT stage progress around module compilation and a bounded
-worker receipt for this pre-source-closure wait. Diagnose the waiting worker
-thread before changing renderer or QEMU evidence logic. No Vulkan showcase or
+Keep the stage markers, then route parse-shard closure planning through a slim
+entry that does not JIT the 12,611-function worker prelude. Add a bounded
+worker receipt for this pre-source-closure wait. No Vulkan showcase or
 guest-frame claim may be admitted from a seed-only run.
