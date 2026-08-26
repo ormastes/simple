@@ -16,18 +16,29 @@ fn env_cwd() -> text:
 fn cwd() -> text:
     io_runtime_cwd()
 
-@unsafe(reason: "raw runtime-owned home-directory text ABI; empty text is ambiguous", capabilities: [ffi])
-extern fn rt_env_home() -> text
+@unsafe(reason: "raw nullable runtime-owned home-directory text ABI", capabilities: [ffi])
+extern fn rt_env_home() -> text?
+
+@always_inline
+fn _env_home_raw() -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_home()
 
 @unsafe(reason: "empty runtime-owned home text does not distinguish failure", capabilities: [ffi])
 @always_inline
 fn env_home() -> text:
-    rt_env_home()
+    _env_home_raw() ?? ""
 
 @unsafe(reason: "empty runtime-owned home text does not distinguish failure", capabilities: [ffi])
 @always_inline
 fn home() -> text:
-    rt_env_home()
+    _env_home_raw() ?? ""
+
+fn env_home_checked() -> Result<text, text>:
+    val value = _env_home_raw()
+    if value == nil or value == "":
+        return Err("rt_env_home returned no home directory")
+    Ok(value)
 
 # Same defect class as `flat_bridge_env_get` in
 # src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl: `rt_env_get`
@@ -60,13 +71,24 @@ fn env_remove(key: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_env_remove(key)
 
-@unsafe(reason: "raw environment snapshot and owned tuple-array ABI", capabilities: [ffi])
-extern fn rt_env_vars() -> [(text, text)]
+@unsafe(reason: "raw nullable environment snapshot and owned tuple-array ABI", capabilities: [ffi])
+extern fn rt_env_vars() -> [(text, text)]?
+
+@always_inline
+fn _env_vars_raw() -> [(text, text)]?:
+    unsafe(capabilities: [ffi]):
+        rt_env_vars()
 
 @unsafe(reason: "environment snapshot ownership is not represented by the facade type", capabilities: [ffi])
 @always_inline
 fn env_vars() -> [(text, text)]:
-    rt_env_vars()
+    _env_vars_raw() ?? []
+
+fn env_vars_checked() -> Result<[(text, text)], text>:
+    val values = _env_vars_raw()
+    if values == nil:
+        return Err("rt_env_vars failed to allocate an environment snapshot")
+    Ok(values)
 
 # --- Program Arguments ---
 
@@ -201,25 +223,58 @@ fn process_kill(pid: i64) -> bool:
 extern fn rt_getpid() -> i64
 
 @always_inline
-fn getpid() -> i64:
+fn _getpid_raw() -> i64:
     unsafe(capabilities: [ffi]):
         rt_getpid()
 
-@unsafe(reason: "raw runtime-owned hostname text ABI; empty text is ambiguous", capabilities: [ffi])
-extern fn rt_hostname() -> text
+@unsafe(reason: "legacy process-id API exposes the raw non-positive failure sentinel", capabilities: [ffi])
+@always_inline
+fn getpid() -> i64:
+    _getpid_raw()
+
+fn getpid_checked() -> Result<i64, text>:
+    val pid = _getpid_raw()
+    if pid <= 0:
+        return Err("rt_getpid returned a non-positive process identifier")
+    Ok(pid)
+
+@unsafe(reason: "raw nullable runtime-owned hostname text ABI", capabilities: [ffi])
+extern fn rt_hostname() -> text?
+
+@always_inline
+fn _hostname_raw() -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_hostname()
 
 @unsafe(reason: "empty runtime-owned hostname text does not distinguish failure", capabilities: [ffi])
 @always_inline
 fn hostname() -> text:
-    rt_hostname()
+    _hostname_raw() ?? ""
+
+fn hostname_checked() -> Result<text, text>:
+    val value = _hostname_raw()
+    if value == nil or value == "":
+        return Err("rt_hostname returned no hostname")
+    Ok(value)
 
 @unsafe(reason: "raw host CPU-count ABI; nonpositive return is failure", capabilities: [ffi])
 extern fn rt_cpu_count() -> i64
 
 @always_inline
-fn cpu_count() -> i64:
+fn _cpu_count_raw() -> i64:
     unsafe(capabilities: [ffi]):
         rt_cpu_count()
+
+@unsafe(reason: "legacy CPU-count API exposes the raw non-positive failure sentinel", capabilities: [ffi])
+@always_inline
+fn cpu_count() -> i64:
+    _cpu_count_raw()
+
+fn cpu_count_checked() -> Result<i64, text>:
+    val count = _cpu_count_raw()
+    if count <= 0:
+        return Err("rt_cpu_count returned a non-positive count")
+    Ok(count)
 
 @unsafe(reason: "raw host-target discriminant ABI; failure sentinel is untyped", capabilities: [ffi])
 extern fn rt_get_host_target_code() -> i64

@@ -115,3 +115,10 @@ remain for compatibility but are explicitly unsafe and preserve their legacy
 sentinels. Each provider is still called through one direct always-inline raw
 owner; success adds only the required comparison/null check and allocates
 nothing. `scripts/audit/sysinfo-ops-sffi-authority.shs` ratchets the shape.
+
+The canonical sync/async `sffi.system` facade now mirrors the same contract:
+home, environment-snapshot, and hostname raw returns are nullable; checked
+`Result` APIs reject absence/allocation failure and non-positive PID/CPU
+sentinels. Legacy total spellings retain their old empty/zero behavior only
+behind explicit unsafe annotations. The existing system authority ratchet was
+strengthened to pin these checked contracts and all direct lexical owners.

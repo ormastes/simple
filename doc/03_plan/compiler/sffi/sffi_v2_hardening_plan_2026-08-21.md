@@ -1702,3 +1702,12 @@ and unpromoted.
 - [x] Keep legacy infallible APIs explicitly unsafe for compatibility.
 - [x] Preserve one always-inline direct owner per provider; success performs
   only its required check and no allocation, lookup, lock, or copy.
+
+#### Completed production slice: canonical system facade (2026-08-26)
+
+- [x] Make home, environment snapshot, and hostname raw returns nullable.
+- [x] Add checked `Result` APIs for home, snapshot, PID, hostname, and CPU count
+  and export them through sync and async SFFI facades.
+- [x] Keep legacy empty/non-positive sentinel spellings explicitly unsafe.
+- [x] Preserve direct always-inline raw owners and strengthen the existing
+  system authority ratchet; no admission or lookup work enters the hot path.
