@@ -885,3 +885,13 @@ the existing `module_loader_init`, reducing repeated provider reads without
 changing warning behavior. No extra path normalization, candidate search, file
 read, source scan, allocation, copy, hash, signature check, lock, lookup,
 boxing, marshalling, or dynamic dispatch was added.
+
+### Interpreter declaration-profile authority follow-up
+
+Interpreter declaration evaluation removed its raw non-null environment
+declaration and now seeds the assurance profile once through canonical nullable
+`env_get_opt`. Unset, explicitly empty, and provider-failure states retain the
+same default-profile input, while callers can still reapply an already resolved
+policy later. Initialization retains exactly one read and one policy application
+with no loop work, allocation, copy, cache, hash, signature check, lock, lookup,
+boxing, marshalling, or dynamic dispatch added.

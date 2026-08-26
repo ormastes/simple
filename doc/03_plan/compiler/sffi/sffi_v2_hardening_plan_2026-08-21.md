@@ -1336,6 +1336,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add no path normalization, search, scan, allocation, lock, or dispatch.
 - [x] Add a static typed-contract, call-count, and cache-reset ratchet.
 
+### Completed interpreter declaration-profile authority slice
+
+- [x] Remove the duplicate raw non-null environment declaration.
+- [x] Seed the assurance profile through canonical nullable `env_get_opt`.
+- [x] Preserve one initialization read and later explicit policy reapplication.
+- [x] Preserve default behavior for unset, empty, or failed provider input.
+- [x] Add no loop work, allocation, cache, hash, lock, or dispatch.
+- [x] Add a static one-read authority ratchet.
+
 ### Completed MIR bulk-ops flag spec authority slice
 
 - [x] Remove the spec-local raw environment setter declaration and calls.
