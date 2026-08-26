@@ -7,7 +7,25 @@ export async function runCli(argv = process.argv.slice(2)) {
     return;
   }
   if (command === "--version" || command === "-v") {
-    console.log("0.1.0");
+    console.log("0.2.0");
+    return;
+  }
+  if (command === "release-guide") {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const here = dirname(fileURLToPath(import.meta.url));
+    console.log(readFileSync(join(here, "../../doc/00_llm_process/skill_command/command/release.md"), "utf8"));
+    return;
+  }
+  if (command === "release-capabilities") {
+    console.log("schema.vcs_policy=spipe-vcs/3");
+    console.log("schema.session=spipe-session/1");
+    console.log("schema.release=spipe-release/1");
+    console.log("schema.candidate=spipe-candidate/1");
+    console.log("capability.isolated_sessions=true");
+    console.log("capability.reviewed_beta_backports=true");
+    console.log("capability.promote_without_rebuild=true");
     return;
   }
   const { runHostCommand } = await import("./host_commands.js");

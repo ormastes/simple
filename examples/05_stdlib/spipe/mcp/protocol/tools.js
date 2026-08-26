@@ -15,7 +15,9 @@ export const tools = Object.freeze([
   },
   { name: "spipe_fine_tune_guide", description: "Read the SPipe LLM fine-tune process guide.", inputSchema: { type: "object", properties: {} } },
   { name: "spipe_fine_tune_model_guide", description: "Read the SPipe LLM model research and architecture guide.", inputSchema: { type: "object", properties: {} } },
-  { name: "spipe_fine_tune_template", description: "Read the SPipe LLM fine-tune attempt record template.", inputSchema: { type: "object", properties: {} } }
+  { name: "spipe_fine_tune_template", description: "Read the SPipe LLM fine-tune attempt record template.", inputSchema: { type: "object", properties: {} } },
+  { name: "spipe_release_guide", description: "Read the canonical protected software-release and beta-backport guide.", inputSchema: { type: "object", properties: {} } },
+  { name: "spipe_release_capabilities", description: "Return declared release/session/candidate schemas and safe planning capabilities.", inputSchema: { type: "object", properties: {} } }
 ]);
 
 function text(content) {
@@ -74,5 +76,15 @@ export function callTool(moduleRoot, name, args = {}) {
   if (name === "spipe_fine_tune_guide") return text(readDoc(moduleRoot, "doc/00_llm_process/spipe/llm_finetune.md"));
   if (name === "spipe_fine_tune_model_guide") return text(readDoc(moduleRoot, "doc/00_llm_process/spipe/llm_model_research.md"));
   if (name === "spipe_fine_tune_template") return text(readDoc(moduleRoot, "doc/00_llm_process/spipe/llm_finetune_attempt_template.sdn"));
+  if (name === "spipe_release_guide") return text(readDoc(moduleRoot, "doc/00_llm_process/skill_command/command/release.md"));
+  if (name === "spipe_release_capabilities") return text([
+    "vcs_policy=spipe-vcs/3",
+    "session=spipe-session/1",
+    "release=spipe-release/1",
+    "candidate=spipe-candidate/1",
+    "isolated_sessions=true",
+    "reviewed_beta_backports=true",
+    "promote_without_rebuild=true"
+  ].join("\n"));
   throw new Error(`unknown tool: ${name}`);
 }

@@ -35,6 +35,10 @@ fn _canonical_clause_error(payload: text) -> text:
     var subsection = ""
     var jj_workspace = false
     var remote_branch = false
+    var unique_workspace = false
+    var unique_branch = false
+    var branch_pattern = false
+    var main_worktree = false
     var direct_update = false
     var raw_default = false
     var authority = false
@@ -59,14 +63,19 @@ fn _canonical_clause_error(payload: text) -> text:
         elif indent == 6 and section == "authoring" and subsection == "ordinary_change":
             if line == "jj_workspace: preferred": jj_workspace = true
             elif line == "remote_branch: not_required": remote_branch = true
+            elif line == "unique_workspace: required": unique_workspace = true
+            elif line == "unique_branch: required": unique_branch = true
+            elif line == "branch_pattern: work/*": branch_pattern = true
+            elif line == "main_worktree: read_only": main_worktree = true
             elif line == "direct_protected_ref_update: deny": direct_update = true
         elif indent == 6 and section == "raw_mutation" and subsection == "break_glass":
             if line == "authority: maintainer": authority = true
             elif line == "reason: required": reason = true
             elif line == "audit: required": audit = true
             elif line == "expiry: required": expiry = true
-    if not jj_workspace: return "required authoring clause is missing: jj_workspace: preferred"
-    if not remote_branch: return "required authoring clause is missing: remote_branch: not_required"
+    val legacy_authoring = jj_workspace and remote_branch
+    val isolated_authoring = unique_workspace and unique_branch and branch_pattern and main_worktree
+    if not legacy_authoring and not isolated_authoring: return "required isolated authoring clauses are missing"
     if not direct_update: return "required authoring clause is missing: direct_protected_ref_update: deny"
     if not raw_default: return "required raw-mutation clause is missing: default: deny"
     if not authority: return "required break-glass clause is missing: authority: maintainer"
@@ -110,7 +119,7 @@ fn parse_lifecycle_vcs_policy(payload: text) -> LifecycleVcsPolicy:
             server_enforcement_required = _policy_value(line) == "true"
     if ref_pattern != "":
         refs.push(ProtectedRefPolicy(ref_pattern: ref_pattern, mutator: mutator, update: update, force: force, gate_profile: gate_profile, server_enforcement_required: server_enforcement_required))
-    if schema != "spipe-vcs/2":
+    if schema != "spipe-vcs/2" and schema != "spipe-vcs/3":
         return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "unsupported or missing schema")
     if refs.len() == 0:
         return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "no protected refs declared")
@@ -129,8 +138,10 @@ fn parse_lifecycle_vcs_policy(payload: text) -> LifecycleVcsPolicy:
             return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "local integration ref must use compare-and-swap")
         if ref_policy.ref_pattern.starts_with("refs/tags/") and ref_policy.update != "immutable_annotated_signed":
             return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "release tags must be immutable, annotated, and signed")
-        if (ref_policy.ref_pattern == "review/*" or ref_policy.ref_pattern == "candidate/*") and ref_policy.update != "compare_and_swap":
-            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "ephemeral review and candidate refs must use compare-and-swap")
+        if ref_policy.ref_pattern == "review/*" and ref_policy.update != "compare_and_swap":
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "review refs must use compare-and-swap")
+        if ref_policy.ref_pattern == "candidate/*" and ((schema == "spipe-vcs/2" and ref_policy.update != "compare_and_swap") or (schema == "spipe-vcs/3" and ref_policy.update != "create_once")):
+            return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "candidate ref update policy does not match its schema")
         if ref_policy.ref_pattern == "recovery/*" and ref_policy.update != "append_only":
             return LifecycleVcsPolicy(schema: schema, digest: digest, refs: refs, valid: false, error: "recovery refs must be append-only")
         if not ref_policy.server_enforcement_required:
@@ -176,7 +187,8 @@ fn parse_canonical_lifecycle_vcs_policy(payload: text) -> LifecycleVcsPolicy:
         return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "release-tag policy does not match the canonical protected contract")
     if review.mutator != "sj.publish_review_ref" or review.update != "compare_and_swap" or review.force != "lease_only" or review.gate_profile != "review_projection":
         return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "review-ref policy does not match the canonical protected contract")
-    if candidate.mutator != "sj.stage_release_candidate" or candidate.update != "compare_and_swap" or candidate.force != "deny" or candidate.gate_profile != "release":
+    val expected_candidate_update = if policy.schema == "spipe-vcs/3": "create_once" else: "compare_and_swap"
+    if candidate.mutator != "sj.stage_release_candidate" or candidate.update != expected_candidate_update or candidate.force != "deny" or candidate.gate_profile != "release":
         return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "candidate-ref policy does not match the canonical protected contract")
     if recovery.mutator != "sj.recover" or recovery.update != "append_only" or recovery.force != "deny" or recovery.gate_profile != "recovery":
         return LifecycleVcsPolicy(schema: policy.schema, digest: policy.digest, refs: policy.refs, valid: false, error: "recovery-ref policy does not match the canonical protected contract")

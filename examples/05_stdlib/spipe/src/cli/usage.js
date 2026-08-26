@@ -10,6 +10,8 @@ Commands:
                        Create or update host .spipe/doc link.
   doctor [host]        Check module files and host link status.
   skill                Print the SPipe skill guide.
+  release-guide        Print the protected software-release operator guide.
+  release-capabilities Print release/session/candidate schemas and capabilities.
   fine-tune-guide      Print the LLM fine-tune process guide.
   fine-tune-model-guide
                        Print the LLM base-model research guide.

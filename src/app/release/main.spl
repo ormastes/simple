@@ -8,6 +8,13 @@ use std.log.{error}
 use app.release.github.{
     create_github_release, default_repo, default_token, read_body_file
 }
+use app.release.policy.{
+    ReleaseCheck, ReleaseSession, BackportRequest, CandidateManifest,
+    ReleaseAdmission, PromotionPlan, parse_release_version,
+    check_version_channel, check_version_projection, check_beta_preparation,
+    check_backport_admission, check_candidate_manifest, candidate_identity,
+    check_candidate_create_once, check_promotion_plan, check_withdrawal_plan
+}
 
 
 fn print_help():
@@ -15,6 +22,12 @@ fn print_help():
     print ""
     print "Commands:"
     print "  plan                 Show the migration plan to remove shell/Node release paths"
+    print "  version-check        Validate canonical SemVer/channel and one projection"
+    print "  beta-prepare         Validate an isolated beta release session"
+    print "  backport-check       Validate one reviewed bug-fix backport"
+    print "  candidate-check      Validate one immutable candidate manifest"
+    print "  promote-check        Validate promote-without-rebuild inputs"
+    print "  withdraw-check       Validate non-destructive rollback/withdrawal"
     print "  github               Create a GitHub release and upload assets"
     print ""
     print "GitHub release options:"
@@ -83,6 +96,110 @@ fn has_flag(args: [text], key: text) -> bool:
         if arg == flag:
             return true
     false
+
+fn _print_release_check(command: text, check: ReleaseCheck, as_json: bool) -> i64:
+    if as_json:
+        val reason_json = _json_escape(check.reason)
+        val status = if check.valid: "ok" else: "rejected"
+        print "{\"command\":\"release {command}\",\"status\":\"{status}\",\"reason\":\"{reason_json}\"}"
+    elif check.valid:
+        print "Release {command}: PASS"
+    else:
+        error("release", check.reason)
+    if check.valid: 0 else: 1
+
+fn run_version_check(args: [text], as_json: bool) -> i64:
+    val version = parse_release_version(arg_value(args, "version"))
+    var check = check_version_channel(version, arg_value(args, "channel"))
+    val projection = arg_value(args, "projection")
+    if check.valid and projection != "":
+        check = check_version_projection(version.canonical, projection, arg_value(args, "observed"))
+    _print_release_check("version-check", check, as_json)
+
+fn _session_from_args(args: [text]) -> ReleaseSession:
+    ReleaseSession(
+        session_id: arg_value(args, "session"),
+        workspace_path: arg_value(args, "workspace"),
+        main_workspace_path: arg_value(args, "main-workspace"),
+        work_branch: arg_value(args, "branch"),
+        target_ref: arg_value(args, "target"),
+        base_sha: arg_value(args, "base-sha"),
+        expected_target_sha: arg_value(args, "target-sha"),
+        policy_sha256: arg_value(args, "policy-sha256")
+    )
+
+fn run_beta_prepare(args: [text], as_json: bool) -> i64:
+    val check = check_beta_preparation(parse_release_version(arg_value(args, "version")), _session_from_args(args))
+    _print_release_check("beta-prepare", check, as_json)
+
+fn run_backport_check(args: [text], as_json: bool) -> i64:
+    val request = BackportRequest(
+        source_commit_sha: arg_value(args, "source-sha"),
+        change_id: arg_value(args, "change-id"),
+        work_id: arg_value(args, "work-id"),
+        change_kind: arg_value(args, "kind"),
+        review_receipt_sha256: arg_value(args, "review-sha256"),
+        target_line: arg_value(args, "target"),
+        expected_target_sha: arg_value(args, "target-sha"),
+        adaptation_reason: arg_value(args, "adaptation"),
+        evidence_sha256: arg_value(args, "evidence-sha256"),
+        result_commit_sha: arg_value(args, "result-sha")
+    )
+    _print_release_check("backport-check", check_backport_admission(request), as_json)
+
+fn _candidate_from_args(args: [text]) -> CandidateManifest:
+    CandidateManifest(
+        version: arg_value(args, "version"),
+        attempt: arg_value(args, "attempt").to_int() ?? -1,
+        candidate_ref: arg_value(args, "candidate-ref"),
+        commit_sha: arg_value(args, "commit-sha"),
+        source_tree_sha256: arg_value(args, "source-sha256"),
+        policy_sha256: arg_value(args, "policy-sha256"),
+        version_manifest_sha256: arg_value(args, "version-sha256"),
+        toolchain_manifest_sha256: arg_value(args, "toolchain-sha256"),
+        support_manifest_sha256: arg_value(args, "support-sha256"),
+        evidence_manifest_sha256: arg_value(args, "evidence-sha256")
+    )
+
+fn run_candidate_check(args: [text], as_json: bool) -> i64:
+    val candidate = _candidate_from_args(args)
+    var check = check_candidate_manifest(candidate)
+    if check.valid:
+        check = check_candidate_create_once(arg_value(args, "existing-identity"), candidate)
+    if as_json and check.valid:
+        val identity_json = _json_escape(candidate_identity(candidate))
+        print "{\"command\":\"release candidate-check\",\"status\":\"ok\",\"candidate_identity\":\"{identity_json}\"}"
+        return 0
+    _print_release_check("candidate-check", check, as_json)
+
+fn run_promote_check(args: [text], as_json: bool) -> i64:
+    val admission = ReleaseAdmission(
+        candidate_identity: arg_value(args, "candidate-identity"),
+        candidate_commit_sha: arg_value(args, "candidate-commit-sha"),
+        artifact_manifest_sha256: arg_value(args, "admitted-artifact-sha256"),
+        evidence_manifest_sha256: arg_value(args, "evidence-sha256"),
+        admitted: has_flag(args, "admitted")
+    )
+    val plan = PromotionPlan(
+        tag: arg_value(args, "tag"),
+        target_commit_sha: arg_value(args, "target-sha"),
+        candidate_commit_sha: arg_value(args, "candidate-commit-sha"),
+        artifact_manifest_sha256: arg_value(args, "artifact-sha256"),
+        admitted_artifact_manifest_sha256: arg_value(args, "admitted-artifact-sha256"),
+        signed_tag: has_flag(args, "signed"),
+        annotated_tag: has_flag(args, "annotated"),
+        exact_tag_push: has_flag(args, "exact-push"),
+        rebuild: has_flag(args, "rebuild"),
+        fallback_artifact: has_flag(args, "fallback")
+    )
+    _print_release_check("promote-check", check_promotion_plan(admission, plan), as_json)
+
+fn run_withdraw_check(args: [text], as_json: bool) -> i64:
+    val check = check_withdrawal_plan(
+        has_flag(args, "delete-tag"), has_flag(args, "move-tag"),
+        has_flag(args, "reuse-version"), arg_value(args, "redeploy")
+    )
+    _print_release_check("withdraw-check", check, as_json)
 
 fn run_github(args: [text], as_json: bool) -> i64:
     var repo = arg_value(args, "repo")
@@ -179,6 +296,18 @@ fn main() -> i64:
             else:
                 print_plan()
             return 0
+        case "version-check":
+            return run_version_check(sub_args, as_json)
+        case "beta-prepare":
+            return run_beta_prepare(sub_args, as_json)
+        case "backport-check":
+            return run_backport_check(sub_args, as_json)
+        case "candidate-check":
+            return run_candidate_check(sub_args, as_json)
+        case "promote-check":
+            return run_promote_check(sub_args, as_json)
+        case "withdraw-check":
+            return run_withdraw_check(sub_args, as_json)
         case "github":
             return run_github(sub_args, as_json)
         case "-h" | "--help" | "help":

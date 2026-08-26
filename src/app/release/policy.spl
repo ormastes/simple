@@ -1,0 +1,250 @@
+# codex-impl
+# Pure release policy: validates plans before any VCS, build, signing, or hosting adapter runs.
+
+struct ReleaseCheck:
+    valid: bool
+    reason: text
+
+struct ReleaseVersion:
+    canonical: text
+    line: text
+    channel: text
+    sequence: i64
+
+struct ReleaseSession:
+    session_id: text
+    workspace_path: text
+    main_workspace_path: text
+    work_branch: text
+    target_ref: text
+    base_sha: text
+    expected_target_sha: text
+    policy_sha256: text
+
+struct BackportRequest:
+    source_commit_sha: text
+    change_id: text
+    work_id: text
+    change_kind: text
+    review_receipt_sha256: text
+    target_line: text
+    expected_target_sha: text
+    adaptation_reason: text
+    evidence_sha256: text
+    result_commit_sha: text
+
+struct CandidateManifest:
+    version: text
+    attempt: i64
+    candidate_ref: text
+    commit_sha: text
+    source_tree_sha256: text
+    policy_sha256: text
+    version_manifest_sha256: text
+    toolchain_manifest_sha256: text
+    support_manifest_sha256: text
+    evidence_manifest_sha256: text
+
+struct ReleaseAdmission:
+    candidate_identity: text
+    candidate_commit_sha: text
+    artifact_manifest_sha256: text
+    evidence_manifest_sha256: text
+    admitted: bool
+
+struct PromotionPlan:
+    tag: text
+    target_commit_sha: text
+    candidate_commit_sha: text
+    artifact_manifest_sha256: text
+    admitted_artifact_manifest_sha256: text
+    signed_tag: bool
+    annotated_tag: bool
+    exact_tag_push: bool
+    rebuild: bool
+    fallback_artifact: bool
+
+fn release_pass() -> ReleaseCheck:
+    ReleaseCheck(valid: true, reason: "")
+
+fn release_fail(reason: text) -> ReleaseCheck:
+    ReleaseCheck(valid: false, reason: reason)
+
+fn _decimal_identifier_valid(value: text, allow_zero: bool) -> bool:
+    if value == "":
+        return false
+    if value.len() > 1 and value.starts_with("0"):
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 48 or code > 57:
+            return false
+        i = i + 1
+    val number = value.to_int() ?? -1
+    number >= 0 and (allow_zero or number > 0)
+
+fn parse_release_version(value: text) -> ReleaseVersion:
+    var canonical = value.trim()
+    if canonical.starts_with("v"):
+        canonical = canonical[1:]
+    val dash_parts = canonical.split("-")
+    if dash_parts.len() > 2:
+        return ReleaseVersion(canonical: "", line: "", channel: "invalid", sequence: -1)
+    val core = dash_parts[0].split(".")
+    if core.len() != 3:
+        return ReleaseVersion(canonical: "", line: "", channel: "invalid", sequence: -1)
+    for part in core:
+        if not _decimal_identifier_valid(part, true):
+            return ReleaseVersion(canonical: "", line: "", channel: "invalid", sequence: -1)
+    val line = core[0] + "." + core[1]
+    if dash_parts.len() == 1:
+        return ReleaseVersion(canonical: canonical, line: line, channel: "stable", sequence: 0)
+    val prerelease = dash_parts[1].split(".")
+    if prerelease.len() != 2:
+        return ReleaseVersion(canonical: "", line: "", channel: "invalid", sequence: -1)
+    val channel = prerelease[0]
+    if channel != "alpha" and channel != "beta" and channel != "rc":
+        return ReleaseVersion(canonical: "", line: "", channel: "invalid", sequence: -1)
+    if not _decimal_identifier_valid(prerelease[1], false):
+        return ReleaseVersion(canonical: "", line: "", channel: "invalid", sequence: -1)
+    ReleaseVersion(canonical: canonical, line: line, channel: channel, sequence: prerelease[1].to_int() ?? -1)
+
+fn check_version_channel(version: ReleaseVersion, channel: text) -> ReleaseCheck:
+    if version.channel == "invalid":
+        return release_fail("release version must use stable SemVer or lowercase numbered alpha, beta, or rc")
+    if version.channel != channel:
+        return release_fail("release version channel does not match the declared channel")
+    release_pass()
+
+fn check_version_projection(expected: text, projection_name: text, observed: text) -> ReleaseCheck:
+    val version = parse_release_version(expected)
+    if version.channel == "invalid":
+        return release_fail("canonical release version is invalid")
+    if projection_name == "":
+        return release_fail("version projection name is required")
+    if observed != version.canonical:
+        return release_fail("version projection is stale: " + projection_name)
+    release_pass()
+
+fn validate_release_session(session: ReleaseSession) -> ReleaseCheck:
+    if session.session_id == "" or session.workspace_path == "":
+        return release_fail("release mutation requires a session id and workspace")
+    if session.main_workspace_path == "" or session.workspace_path == session.main_workspace_path:
+        return release_fail("release mutation is forbidden in the main worktree")
+    if not session.work_branch.starts_with("work/"):
+        return release_fail("release session must own a work branch")
+    if session.target_ref != "main" and not session.target_ref.starts_with("release/"):
+        return release_fail("release session target must be main or a release line")
+    if session.base_sha == "" or session.expected_target_sha == "" or session.policy_sha256 == "":
+        return release_fail("release session requires exact base, target, and policy identities")
+    release_pass()
+
+fn check_beta_preparation(version: ReleaseVersion, session: ReleaseSession) -> ReleaseCheck:
+    val session_check = validate_release_session(session)
+    if not session_check.valid:
+        return session_check
+    if version.channel != "beta":
+        return release_fail("beta preparation requires a numbered beta version")
+    if session.target_ref != "release/" + version.line:
+        return release_fail("beta target release line does not match the version")
+    release_pass()
+
+fn check_backport_admission(request: BackportRequest) -> ReleaseCheck:
+    if request.source_commit_sha == "" or request.result_commit_sha == "":
+        return release_fail("backport requires exact source and result commits")
+    if request.change_id == "" or request.work_id == "":
+        return release_fail("backport requires stable change and work identities")
+    if request.change_kind != "fix":
+        return release_fail("beta backports accept reviewed bug fixes only")
+    if request.review_receipt_sha256 == "":
+        return release_fail("backport requires a review receipt")
+    if not request.target_line.starts_with("release/"):
+        return release_fail("backport target must be a release line")
+    if request.expected_target_sha == "":
+        return release_fail("backport requires the exact expected target revision")
+    if request.adaptation_reason == "":
+        return release_fail("backport adaptation reason must be none or an explanation")
+    if request.evidence_sha256 == "":
+        return release_fail("backport requires renewed focused evidence")
+    if request.result_commit_sha == request.expected_target_sha:
+        return release_fail("backport evidence must bind the post-application revision")
+    release_pass()
+
+fn expected_candidate_ref(version: text, attempt: i64) -> text:
+    var suffix = attempt.to_text()
+    if attempt > 0 and attempt < 10:
+        suffix = "00" + suffix
+    elif attempt < 100:
+        suffix = "0" + suffix
+    "candidate/v" + version + "/a" + suffix
+
+fn check_candidate_manifest(candidate: CandidateManifest) -> ReleaseCheck:
+    val version = parse_release_version(candidate.version)
+    if version.channel == "invalid":
+        return release_fail("candidate version is invalid")
+    if candidate.attempt <= 0:
+        return release_fail("candidate attempt must be positive")
+    if candidate.candidate_ref != expected_candidate_ref(version.canonical, candidate.attempt):
+        return release_fail("candidate ref does not match version and attempt")
+    if candidate.commit_sha == "" or candidate.source_tree_sha256 == "":
+        return release_fail("candidate requires exact commit and source identities")
+    if candidate.policy_sha256 == "" or candidate.version_manifest_sha256 == "":
+        return release_fail("candidate requires policy and version manifest identities")
+    if candidate.toolchain_manifest_sha256 == "" or candidate.support_manifest_sha256 == "":
+        return release_fail("candidate requires toolchain and support manifest identities")
+    if candidate.evidence_manifest_sha256 == "":
+        return release_fail("candidate requires an evidence manifest identity")
+    release_pass()
+
+fn candidate_identity(candidate: CandidateManifest) -> text:
+    candidate.version + "|" + candidate.attempt.to_text() + "|" + candidate.candidate_ref + "|" +
+        candidate.commit_sha + "|" + candidate.source_tree_sha256 + "|" + candidate.policy_sha256 + "|" +
+        candidate.version_manifest_sha256 + "|" + candidate.toolchain_manifest_sha256 + "|" +
+        candidate.support_manifest_sha256 + "|" + candidate.evidence_manifest_sha256
+
+fn check_candidate_create_once(existing_identity: text, candidate: CandidateManifest) -> ReleaseCheck:
+    val candidate_check = check_candidate_manifest(candidate)
+    if not candidate_check.valid:
+        return candidate_check
+    if existing_identity != "" and existing_identity != candidate_identity(candidate):
+        return release_fail("candidate identity is create-once and cannot be mutated")
+    release_pass()
+
+fn check_promotion_plan(admission: ReleaseAdmission, plan: PromotionPlan) -> ReleaseCheck:
+    if not admission.admitted:
+        return release_fail("release candidate has not been admitted")
+    if admission.candidate_commit_sha == "" or admission.candidate_identity == "":
+        return release_fail("release admission identity is incomplete")
+    if plan.target_commit_sha != admission.candidate_commit_sha or plan.candidate_commit_sha != admission.candidate_commit_sha:
+        return release_fail("promotion target does not match the admitted candidate commit")
+    if plan.artifact_manifest_sha256 == "" or plan.artifact_manifest_sha256 != admission.artifact_manifest_sha256:
+        return release_fail("promotion artifacts do not match the admitted manifest")
+    if plan.admitted_artifact_manifest_sha256 != admission.artifact_manifest_sha256:
+        return release_fail("promotion admission binding is stale")
+    val tag_version = parse_release_version(plan.tag)
+    if tag_version.channel == "invalid" or plan.tag != "v" + tag_version.canonical:
+        return release_fail("promotion requires one canonical SemVer release tag")
+    if not plan.signed_tag or not plan.annotated_tag:
+        return release_fail("promotion tag must be signed and annotated")
+    if not plan.exact_tag_push:
+        return release_fail("promotion must push exactly one tag ref")
+    if plan.rebuild:
+        return release_fail("promotion must not rebuild admitted artifacts")
+    if plan.fallback_artifact:
+        return release_fail("promotion must not use fallback artifacts")
+    release_pass()
+
+fn check_withdrawal_plan(delete_tag: bool, move_tag: bool, reuse_version: bool, redeploy_version: text) -> ReleaseCheck:
+    if delete_tag or move_tag or reuse_version:
+        return release_fail("withdrawal must preserve published release identity")
+    if redeploy_version != "" and parse_release_version(redeploy_version).channel == "invalid":
+        return release_fail("rollback redeploy version is invalid")
+    release_pass()
+
+export ReleaseCheck, ReleaseVersion, ReleaseSession, BackportRequest
+export CandidateManifest, ReleaseAdmission, PromotionPlan
+export parse_release_version, check_version_channel, check_version_projection
+export validate_release_session, check_beta_preparation, check_backport_admission
+export expected_candidate_ref, check_candidate_manifest, candidate_identity
+export check_candidate_create_once, check_promotion_plan, check_withdrawal_plan
