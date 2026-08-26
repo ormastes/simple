@@ -1198,6 +1198,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
   process-probe behavior.
 - [x] Add a static authority and call-count ratchet.
 
+### Completed compiler performance CLI authority slice
+
+- [x] Remove both duplicate raw `rt_get_args` declarations and calls.
+- [x] Route both entrypoints through the canonical explicitly unsafe CLI owner.
+- [x] Preserve one argument-array fetch per process entrypoint.
+- [x] Keep benchmark and optimizer loops unchanged and add a static ratchet.
+
 ### Completed SSA and AOP environment-authority slice
 
 - [x] Remove both module-local raw environment declarations and calls.

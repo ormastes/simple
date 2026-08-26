@@ -545,6 +545,14 @@ one direct clock call; no validation branch, allocation, copy, cache, lock,
 hash, formatting step, lookup, boxing, or dispatch table was added to timing
 paths.
 
+### Compiler performance CLI authority follow-up
+
+The performance command and standalone optimizer no longer declare or call
+raw `rt_get_args`; each imports the canonical CLI owner, whose argument-array
+provider remains explicitly unsafe and unsigned.  Both entrypoints retain one
+startup argument fetch.  No benchmark sample, project scan, allocation, copy,
+cache, lock, hash, lookup, boxing, or dispatch work was added.
+
 ### SSA and AOP environment-authority follow-up
 
 Variable-reassignment SSA and driver AOP weaving no longer declare or call raw
