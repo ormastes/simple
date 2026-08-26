@@ -211,3 +211,11 @@ failing closed.  Static serving rejects provider read failure rather than
 hashing and serving fabricated empty content, and playground audit-directory
 creation failure is no longer ignored.  No retry, read-back, registry lookup,
 or generic dispatch was added.
+### Release-installer authority follow-up
+
+The release installer no longer declares raw byte-read or directory-create
+symbols.  Font and notice hashing uses typed one-read results, every directory
+creation and source/library/header copy is checked, and the installer cannot
+print success after a partial copy.  Hash helpers still read each selected file
+once; no retry, read-back beyond the existing post-copy integrity check,
+registry lookup, or generic dispatch was added.

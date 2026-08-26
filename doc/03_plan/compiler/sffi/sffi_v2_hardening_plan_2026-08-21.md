@@ -1794,3 +1794,10 @@ and unpromoted.
       untouched declarations, and verified-and-signed admission.
 - [x] Refresh source-only row and implementation-language statistics.
 - [x] Keep cryptographic admission fail closed at zero without evidence.
+### Completed release-installer authority slice
+
+- [x] Remove raw byte-read and directory-create declarations.
+- [x] Use typed one-read hashes that fail closed on provider errors.
+- [x] Check every directory and source/library/header copy operation.
+- [x] Prevent a partial installation from reporting success.
+- [x] Add a static ownership and one-read hash ratchet.
