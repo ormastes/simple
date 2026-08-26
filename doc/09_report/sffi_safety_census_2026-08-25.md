@@ -508,3 +508,12 @@ owners.  Diagnostic promotion still evaluates all three parallel owners and
 returns their boolean conjunction; the driver still fails closed on false.
 No call-count, allocation, copy, cache, lock, hash, boxing, or dispatch-table
 change was introduced.
+
+### Header shared-library flags authority follow-up
+
+Shared-library flag generation no longer declares or calls raw `rt_env_get`.
+Its local nullable helper delegates to canonical always-inlined `env_get_opt`.
+MinGW detection retains exactly the existing `MSYSTEM` lookup followed, when
+needed, by `SIMPLE_LINKER_FLAVOR`; platform process probes are unchanged.  No
+new allocation, copy, cache, lock, hash, boxing, subprocess, or dispatch was
+introduced.

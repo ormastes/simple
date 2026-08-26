@@ -1188,3 +1188,12 @@ it does not claim libtorch reductions are allocation-free or synchronization-
 free. Next harden the bounded piped-process family, then implement real signed
 evidence admission. Current global admission remains zero, so neither all
 Torch SFFI nor all SFFI may be described as verified safe.
+
+### Completed header shared-library flags authority slice
+
+- [x] Remove the module-local raw environment declaration and call.
+- [x] Retain the local nullable API through canonical always-inline
+  `env_get_opt`.
+- [x] Preserve both conditional MinGW environment lookups and all platform
+  process-probe behavior.
+- [x] Add a static authority and call-count ratchet.
