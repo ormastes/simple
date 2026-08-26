@@ -757,6 +757,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 || name == "alloc"
                                 || name == "no_alloc"
                                 || name == "no_mangle"
+                                || name == "inline"
+                                || name == "always_inline"
+                                || name == "force_inline"
                                 || name == "gpu"
                                 // Inlining hints. These are REAL and honoured: the LLVM
                                 // backend reads all three and applies the `alwaysinline`
