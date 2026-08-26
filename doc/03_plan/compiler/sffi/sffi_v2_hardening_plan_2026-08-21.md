@@ -1323,3 +1323,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Preserve empty/zero scalar fallback without fabricating successful data.
 - [x] Add no vector-loop work, admission, hashing, cache, lock, or dispatch.
 - [x] Record sentinel-bearing providers as unsafe, unsigned, and unverified.
+
+### Completed MIR statement-lowering authority slice
+
+- [x] Remove unused raw dictionary and duplicate environment declarations.
+- [x] Route both debug reads through canonical nullable `env_get_opt`.
+- [x] Tag and confine discriminant and payload projections `unsafe(ffi)`.
+- [x] Correct the expression payload contract to nullable and reject nil.
+- [x] Preserve projection counts and statement-dispatch complexity.
+- [x] Add no admission, hashing, allocation, cache, lock, or extra dispatch.
+- [x] Record the tagged runtime provider as unsafe, unsigned, and unverified.

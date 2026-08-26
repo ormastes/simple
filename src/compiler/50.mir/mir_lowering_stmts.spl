@@ -16,14 +16,24 @@ use compiler.frontend.resource_registry.{resource_is_declared}
 use compiler.mir.mir_types.{LocalId, mir_type_probe_text}  # explicit: a glob is not an import-origin for surface projection
 use std.common.mcdc.model.{mcdc_authored_path_v1, mcdc_runtime_decision_id_v1, mcdc_path_in_instrumentation_scope}
 use compiler.semantics.rt_hal_tag.{rt_hal_compilation_requires_finalize}
+use std.io_runtime.{env_get_opt}
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
-extern fn rt_dict_contains(dict: i64, key: Any) -> bool
+@unsafe(reason: "raw tagged HIR statement discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
-extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr
-@unsafe(reason: "raw debug-environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable tagged HIR statement payload ABI", capabilities: [ffi])
+extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr?
+
+@always_inline
+fn _sffi_hir_stmt_discriminant(value: HirStmtKind) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+@always_inline
+fn _sffi_hir_stmt_payload(value: HirStmtKind) -> HirExpr?:
+    unsafe(capabilities: [ffi]):
+        rt_enum_payload(value)
 
 # Cached `SIMPLE_TRACE_DICT_ELEM` gate (-1 unknown, 0 off, 1 on). Default OFF.
 # Companion of the probe in _MirLoweringExpr/method_calls_literals.spl: that one
@@ -36,10 +46,7 @@ var mir_for_elem_trace_state: i64 = -1
 
 fn mir_for_elem_trace_on() -> bool:
     if mir_for_elem_trace_state < 0:
-        var configured = ""
-        unsafe(capabilities: [ffi]):
-            configured = rt_env_get("SIMPLE_TRACE_DICT_ELEM")
-        if configured == "1":
+        if env_get_opt("SIMPLE_TRACE_DICT_ELEM") == Some("1"):
             mir_for_elem_trace_state = 1
         else:
             mir_for_elem_trace_state = 0
@@ -123,7 +130,7 @@ fn mir_stmt_local_id_value(local: LocalId) -> i64:
     local.id
 
 fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
-    rt_enum_discriminant(k)
+    _sffi_hir_stmt_discriminant(k)
 
 fn mir_hir_let_symbol(k: HirStmtKind) -> SymbolId:
     match k:
@@ -144,10 +151,7 @@ fn mir_hir_let_init(k: HirStmtKind, fallback: HirExpr) -> HirExpr:
 # OFF, zero cost on a normal run — mirrors mir_lower_garbage_debug_enabled()
 # in _MirLoweringExpr/expr_dispatch.spl.
 fn mir_stmt_caller_debug_enabled() -> bool:
-    var configured = ""
-    unsafe(capabilities: [ffi]):
-        configured = rt_env_get("SIMPLE_MIR_STMT_CALLER_DEBUG")
-    configured == "1"
+    env_get_opt("SIMPLE_MIR_STMT_CALLER_DEBUG") == Some("1")
 
 var mir_stmt_caller_debug_state: i64 = -1
 
@@ -1173,7 +1177,7 @@ impl MirLowering:
                     # in a qualified match even after exact discriminator
                     # dispatch. Read the already-validated enum payload
                     # directly and reject a malformed producer loudly.
-                    val expr: HirExpr = rt_enum_payload(stmt_kind_value)
+                    val expr = _sffi_hir_stmt_payload(stmt_kind_value)
                     if expr == nil:
                         self.error("empty HIR expression-statement payload", Some(span))
                         return
@@ -1374,7 +1378,7 @@ impl MirLowering:
                         # accumulates rather than aborting, so a single stray
                         # statement still yields a normal driver diagnostic
                         # rather than a bare signal.
-                        val unknown_stmt_disc = rt_enum_discriminant(stmt_kind_value)
+                        val unknown_stmt_disc = _sffi_hir_stmt_discriminant(stmt_kind_value)
                         self.error("E-MIR-STMT-Unknown: MIR lowering has no arm for this statement kind (discriminant {unknown_stmt_disc}); the statement would otherwise be silently dropped", Some(span))
                         eprint("[mir-lower-stmt] E-MIR-STMT-Unknown disc={unknown_stmt_disc} at={span.file}:{span.line}:{span.col}\n")
 

@@ -672,3 +672,16 @@ zero capability fallback on provider failure. These are detection-time paths,
 not vector inner loops, and no retry, extra scan, hash, signature check, cache,
 lock, generic marshalling, or dynamic dispatch was added. Sentinel-bearing
 providers remain explicitly unsafe, unsigned, and unverified.
+
+### MIR statement-lowering authority follow-up
+
+MIR statement lowering removed an unused raw dictionary declaration and its
+duplicate raw environment declaration. Its two debug gates now use the
+canonical nullable environment facade with the same one-read behavior at each
+existing call site. Tagged statement discriminant and payload projections are
+tagged `unsafe(ffi)` and confined to always-inlined lexical owners; the payload
+contract is now nullable and the existing expression-statement path rejects
+nil before lowering it. Direct projection counts and statement dispatch
+complexity are unchanged, with no admission, hash, cache, lock, allocation,
+copy, boxing, generic marshalling, or additional dynamic dispatch. The tagged
+runtime provider remains unsafe, unsigned, and unverified.
