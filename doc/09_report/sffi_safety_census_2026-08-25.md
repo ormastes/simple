@@ -1226,10 +1226,14 @@ owner and confine exactly one provider call each inside lexical `unsafe(ffi)`
 branch, allocation, lookup, copy, or dispatch, and the host audio/GPU daemon
 paths retain their direct native operation shape.
 
-This is deliberately not a safety promotion. The canonical generic API still
-contains eight untagged raw declarations and hardcoded false availability that
-fabricates zero reads/no-op writes and barriers through fallback functions.
-The new authority ratchet counts that debt instead of hiding it. Those generic
-operations require a capability-correct fail-closed migration across HAL/DMA
-consumers before they can be described as safe. Providers remain unsigned and
+Follow-up provider tracing confirmed all eleven operations in native/Rust lanes
+and found interpreter implementations for all three fences that were not
+registered. The interpreter registry now publishes those fences, all eleven raw
+declarations are explicitly tagged, and every generic/native-required wrapper
+performs one confined provider operation. The hardcoded false availability and
+eleven zero/no-op fallbacks were removed; `has_runtime_volatiles` is truthful,
+and a missing provider now fails during interpreter resolution or native
+link/admission. This also removes one runtime availability branch per generic
+operation. Raw addresses remain caller-trusted, so the family is
+unsafe-minimized rather than memory-safe; providers remain unsigned and
 unverified. Source-reviewed only; checks were not executed.

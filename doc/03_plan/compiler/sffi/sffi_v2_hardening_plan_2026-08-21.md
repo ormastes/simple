@@ -1851,9 +1851,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
   `raw_ptr` authority.
 - Preserved one direct provider operation for each host daemon call and added no
   runtime branch, allocation, lookup, copy, hash, or dispatch.
-- Added a static ratchet that prevents a raw app boundary and explicitly counts
-  the remaining eight untagged declarations plus fabricated fallback behavior.
-- Next migrate HAL/DMA consumers to capability-correct fail-closed volatile
-  APIs, remove zero/no-op fallback providers, and keep signed admission off the
-  MMIO hot path.
+- Registered the three already-implemented interpreter fences, tagged all
+  eleven raw declarations, and confined all generic/native-required calls.
+- Removed hardcoded-unavailable branching and all eleven fabricated zero/no-op
+  fallbacks; missing providers now fail at resolution/link/admission.
+- Reduced each generic hot path from availability branch plus fallback/provider
+  call to exactly one provider call, with no allocation, lookup, copy, or hash.
+- Next migrate raw-address callers to capability-correct MMIO owners and add
+  signed admission while keeping verification off the MMIO hot path.
 - Status: source-reviewed, deliberately unverified and unsigned.
