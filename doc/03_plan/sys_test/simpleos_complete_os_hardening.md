@@ -21,6 +21,17 @@ lease) to the authenticated x86_64/ARM64/RV64 media launch entrypoints. Until
 that interface exists, all corresponding live filesystem-launch rows remain
 `BLOCKED`; source presence and legacy compatibility wrappers are not evidence.
 
+The server/DBFS path has a separate prerequisite: scheduler adoption and the
+DBD startup syscall reference `server_data_launch_grant_registry`, but that
+owner is absent. Its historical design requires a sealed executable image to
+carry canonical source path and protected server role; the current
+`ExecutableImageHandleV1` intentionally carries neither field. Recreating the
+registry from pathname input or a second DBD token would split authority. The
+required implementation is one atomic contract migration: bind canonical path
+and server role to the execute-open image handle at admission, restore the
+bounded scheduler registry over those sealed coordinates, then pass only its
+one-shot task/lifecycle/exec-generation grant to the namespace/DBD owner.
+
 ## Executable specifications
 
 | Spec | Scope |
