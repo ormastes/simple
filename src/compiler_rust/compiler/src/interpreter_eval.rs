@@ -758,6 +758,18 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 || name == "no_alloc"
                                 || name == "no_mangle"
                                 || name == "gpu"
+                                // Inlining hints. These are REAL and honoured: the LLVM
+                                // backend reads all three and applies the `alwaysinline`
+                                // attribute (codegen/llvm/backend_core.rs:134). Only this
+                                // interpreter skip-list omitted them, so 84 files' worth of
+                                // legitimate `@always_inline` -- 18 of them in `src/lib`, on
+                                // the compiler's own startup path -- were rejected as
+                                // "unknown decorator" the moment `bin/simple test` loaded
+                                // them, making `main` un-test-runnable.
+                                // doc/08_tracking/bug/origin_main_not_test_runnable_always_inline_decorator_2026-08-26.md
+                                || name == "always_inline"
+                                || name == "inline"
+                                || name == "force_inline"
                             {
                                 continue;
                             }
