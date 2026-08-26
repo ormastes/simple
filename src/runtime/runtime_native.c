@@ -11344,6 +11344,49 @@ int8_t rt_io_udp_set_read_timeout(int64_t fd, int64_t ms) {
 int8_t rt_io_udp_close(int64_t fd) { return close((int)fd) == 0; }
 int8_t rt_io_udp_set_nonblocking(int64_t fd, int8_t e) { return rt_io_tcp_set_nonblocking(fd, e) != 0; }
 
+int8_t rt_io_udp_set_multicast_loop(int64_t fd, int8_t enabled) {
+    struct sockaddr_storage local;
+    socklen_t local_len = sizeof(local);
+    if (getsockname((int)fd, (struct sockaddr*)&local, &local_len) != 0) return 0;
+    int flag = enabled ? 1 : 0;
+    if (local.ss_family == AF_INET6) {
+        return setsockopt((int)fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP,
+                          &flag, sizeof(flag)) == 0;
+    }
+    return setsockopt((int)fd, IPPROTO_IP, IP_MULTICAST_LOOP,
+                      &flag, sizeof(flag)) == 0;
+}
+
+static int8_t rt_io_udp_multicast_membership(int64_t fd, int64_t addr_val,
+                                              int join) {
+    const char* address = rt_extract_cstr(addr_val);
+    if (!address) return 0;
+    if (strchr(address, ':')) {
+        struct ipv6_mreq request;
+        memset(&request, 0, sizeof(request));
+        if (inet_pton(AF_INET6, address, &request.ipv6mr_multiaddr) != 1) return 0;
+        request.ipv6mr_interface = 0;
+        return setsockopt((int)fd, IPPROTO_IPV6,
+                          join ? IPV6_JOIN_GROUP : IPV6_LEAVE_GROUP,
+                          &request, sizeof(request)) == 0;
+    }
+    struct ip_mreq request;
+    memset(&request, 0, sizeof(request));
+    if (inet_pton(AF_INET, address, &request.imr_multiaddr) != 1) return 0;
+    request.imr_interface.s_addr = htonl(INADDR_ANY);
+    return setsockopt((int)fd, IPPROTO_IP,
+                      join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP,
+                      &request, sizeof(request)) == 0;
+}
+
+int8_t rt_io_udp_join_multicast(int64_t fd, int64_t addr_val) {
+    return rt_io_udp_multicast_membership(fd, addr_val, 1);
+}
+
+int8_t rt_io_udp_leave_multicast(int64_t fd, int64_t addr_val) {
+    return rt_io_udp_multicast_membership(fd, addr_val, 0);
+}
+
 int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
     if (size < 0 || size > 65535) return rt_core_nil();
     SplArray* arr = rt_byte_array_new((uint64_t)size);
@@ -11411,6 +11454,9 @@ int8_t rt_io_udp_set_broadcast(int64_t f, int8_t e) { (void)f; (void)e; return 0
 int8_t rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
 int8_t rt_io_udp_close(int64_t f) { (void)f; return 0; }
 int8_t rt_io_udp_set_nonblocking(int64_t f, int8_t e) { (void)f; (void)e; return 0; }
+int8_t rt_io_udp_set_multicast_loop(int64_t f, int8_t e) { (void)f; (void)e; return 0; }
+int8_t rt_io_udp_join_multicast(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
+int8_t rt_io_udp_leave_multicast(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
 int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
 #endif /* !_WIN32 */
 

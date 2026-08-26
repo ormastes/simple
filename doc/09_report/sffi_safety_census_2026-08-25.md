@@ -1642,3 +1642,21 @@ and 2,865 unsafe-tagged declarations; unsafe-tag gaps remain 4,268, contract
 gaps remain 6,072, and signed admission remains zero. The older fourteen
 providerless `udp_socket_*` identities are not yet removed by this closure.
 Source-reviewed only; checks were not executed.
+
+### Legacy UDP providerless-surface removal
+
+The canonical UDP owner now also supplies multicast loop, join, and leave for
+IPv4/IPv6 with typed boolean provider contracts. The historical `std.net.udp`
+module is a compile-time facade over its typed `Result` API, and both network
+SFFI owners have removed all fourteen `udp_socket_*` high-level-object extern
+declarations. This removes 28 providerless declarations and prevents a
+`UdpSocket` object from crossing the raw ABI.
+
+Each option/membership operation performs one handle lookup and one OS socket
+operation. C address parsing is stack-only; no wrapper object, per-call
+registry lookup beyond that canonical handle lookup, hash, signature check,
+generic dispatch, or payload copy is added. Production now has 7,108
+declarations, 2,868 unsafe-tagged declarations,
+4,240 unsafe-tag gaps, 6,058 contract gaps, and zero signed-admitted
+declarations. `http_request` is the sole remaining providerless identity in
+this legacy network family. Source-reviewed only; checks were not executed.

@@ -1099,6 +1099,55 @@ pub fn rt_io_udp_set_nonblocking_interp(args: &[Value]) -> Result<Value, Compile
     ))
 }
 
+pub fn rt_io_udp_set_multicast_loop_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let enabled = extract_bool(args, 1)?;
+    Ok(Value::Bool(with_udp_socket(handle, |socket| {
+        match socket.local_addr()?.ip() {
+            std::net::IpAddr::V4(_) => socket.set_multicast_loop_v4(enabled),
+            std::net::IpAddr::V6(_) => socket.set_multicast_loop_v6(enabled),
+        }
+    }).is_ok()))
+}
+
+fn rt_io_udp_multicast_membership_interp(
+    args: &[Value],
+    join: bool,
+) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let address = match args.get(1) {
+        Some(Value::Str(address)) => address.parse::<std::net::IpAddr>().ok(),
+        _ => None,
+    };
+    let Some(address) = address else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(with_udp_socket(handle, |socket| match address {
+        std::net::IpAddr::V4(address) => {
+            if join {
+                socket.join_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED)
+            } else {
+                socket.leave_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED)
+            }
+        }
+        std::net::IpAddr::V6(address) => {
+            if join {
+                socket.join_multicast_v6(&address, 0)
+            } else {
+                socket.leave_multicast_v6(&address, 0)
+            }
+        }
+    }).is_ok()))
+}
+
+pub fn rt_io_udp_join_multicast_interp(args: &[Value]) -> Result<Value, CompileError> {
+    rt_io_udp_multicast_membership_interp(args, true)
+}
+
+pub fn rt_io_udp_leave_multicast_interp(args: &[Value]) -> Result<Value, CompileError> {
+    rt_io_udp_multicast_membership_interp(args, false)
+}
+
 fn extract_udp_payload_size(args: &[Value], idx: usize) -> Result<Option<usize>, CompileError> {
     let size = args
         .get(idx)

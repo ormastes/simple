@@ -563,11 +563,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_io_udp_close", crate::interpreter_native_net::rt_io_udp_close_interp);
     insert_simple!("rt_io_udp_connect", crate::interpreter_native_net::rt_io_udp_connect_interp);
     insert_simple!("rt_io_udp_local_addr", crate::interpreter_native_net::rt_io_udp_local_addr_interp);
+    insert_simple!("rt_io_udp_join_multicast", crate::interpreter_native_net::rt_io_udp_join_multicast_interp);
+    insert_simple!("rt_io_udp_leave_multicast", crate::interpreter_native_net::rt_io_udp_leave_multicast_interp);
     insert_simple!("rt_io_udp_recv", crate::interpreter_native_net::rt_io_udp_recv_interp);
     insert_simple!("rt_io_udp_recv_from", crate::interpreter_native_net::rt_io_udp_recv_from_interp);
     insert_simple!("rt_io_udp_send", crate::interpreter_native_net::rt_io_udp_send_interp);
     insert_simple!("rt_io_udp_send_to", crate::interpreter_native_net::rt_io_udp_send_to_interp);
     insert_simple!("rt_io_udp_set_broadcast", crate::interpreter_native_net::rt_io_udp_set_broadcast_interp);
+    insert_simple!("rt_io_udp_set_multicast_loop", crate::interpreter_native_net::rt_io_udp_set_multicast_loop_interp);
     insert_simple!("rt_io_udp_set_nonblocking", crate::interpreter_native_net::rt_io_udp_set_nonblocking_interp);
     insert_simple!("rt_io_udp_set_read_timeout", crate::interpreter_native_net::rt_io_udp_set_read_timeout_interp);
     insert_simple!("panic", process::panic);

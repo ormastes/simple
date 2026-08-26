@@ -2188,3 +2188,18 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Next migrate/remove the fourteen providerless `udp_socket_*` identities,
   then address multicast API compatibility without duplicating raw owners.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+#### Legacy UDP surface removal
+
+- Add typed multicast loop/join/leave contracts to the canonical scalar-handle
+  owner across C, Rust, interpreter, JIT registry, headers, and linker closure.
+- Replace `std.net.udp` with a compile-time facade over the typed `Result` API;
+  remove all 28 providerless `udp_socket_*` declaration occurrences.
+- Preserve one handle lookup plus one socket operation for membership/options;
+  use stack-only C address parsing and add no wrapper allocation, registry
+  lookup beyond the canonical handle lookup, hash, signature check, generic
+  dispatch, or payload copy.
+- Remaining legacy network providerless identities: one (`http_request`).
+  Remaining production debt: 4,240 unsafe-tag gaps, 6,058 contract gaps, and
+  zero signed-admitted declarations.
+- Status: source-reviewed, deliberately unverified and unsigned.

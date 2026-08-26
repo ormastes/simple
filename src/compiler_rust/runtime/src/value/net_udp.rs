@@ -229,6 +229,71 @@ pub extern "C" fn rt_io_udp_set_nonblocking(handle: i64, enabled: bool) -> bool 
     socket.set_nonblocking(enabled).is_ok()
 }
 
+#[no_mangle]
+pub extern "C" fn rt_io_udp_set_multicast_loop(handle: i64, enabled: bool) -> bool {
+    let registry = SOCKET_REGISTRY.lock().unwrap();
+    let Some(SocketEntry::UdpSocket(socket)) = registry.get(&handle) else {
+        return false;
+    };
+    match socket.local_addr().map(|address| address.ip()) {
+        Ok(std::net::IpAddr::V4(_)) => socket.set_multicast_loop_v4(enabled).is_ok(),
+        Ok(std::net::IpAddr::V6(_)) => socket.set_multicast_loop_v6(enabled).is_ok(),
+        Err(_) => false,
+    }
+}
+
+fn runtime_multicast_addr(value: crate::value::RuntimeValue) -> Option<std::net::IpAddr> {
+    let (ptr, len) = runtime_text_ptr_len(value)?;
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    std::str::from_utf8(bytes).ok()?.parse().ok()
+}
+
+fn rt_io_udp_multicast_membership(
+    handle: i64,
+    multicast_addr: crate::value::RuntimeValue,
+    join: bool,
+) -> bool {
+    let Some(multicast_addr) = runtime_multicast_addr(multicast_addr) else {
+        return false;
+    };
+    let registry = SOCKET_REGISTRY.lock().unwrap();
+    let Some(SocketEntry::UdpSocket(socket)) = registry.get(&handle) else {
+        return false;
+    };
+    match multicast_addr {
+        std::net::IpAddr::V4(address) => {
+            if join {
+                socket.join_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED).is_ok()
+            } else {
+                socket.leave_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED).is_ok()
+            }
+        }
+        std::net::IpAddr::V6(address) => {
+            if join {
+                socket.join_multicast_v6(&address, 0).is_ok()
+            } else {
+                socket.leave_multicast_v6(&address, 0).is_ok()
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_udp_join_multicast(
+    handle: i64,
+    multicast_addr: crate::value::RuntimeValue,
+) -> bool {
+    rt_io_udp_multicast_membership(handle, multicast_addr, true)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_io_udp_leave_multicast(
+    handle: i64,
+    multicast_addr: crate::value::RuntimeValue,
+) -> bool {
+    rt_io_udp_multicast_membership(handle, multicast_addr, false)
+}
+
 /// Get broadcast option.
 /// Returns (broadcast, error_code)
 #[no_mangle]
