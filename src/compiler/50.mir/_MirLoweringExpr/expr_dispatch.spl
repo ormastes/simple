@@ -1929,9 +1929,12 @@ impl MirLowering:
         else:
             false
         val gpu_raw_pointer = raw_pointer_base and (self.current_gpu_kernel_target == "vulkan" or self.current_gpu_kernel_target == "cuda")
-        if not gpu_raw_pointer:
-            self.emit_bounds_check_for_index(base.type_, base_local, index_local)
-        elif self.current_gpu_kernel_target == "vulkan":
+        # Runtime-array bounds are emitted after resolving the element type.
+        # A typed `[u8]` read must preserve `rt_bytes_u8_at`'s checked contract
+        # (including zero for an invalid index), whereas the generic MIR
+        # bounds intrinsic traps before the byte owner can apply that policy.
+        # Raw GPU pointers keep their target-specific index normalization.
+        if gpu_raw_pointer and self.current_gpu_kernel_target == "vulkan":
             index_local = self.vulkan_u32_local(index_local)
         var is_tuple_base = false
         var tuple_field_mir_types: [MirType] = []
@@ -2060,6 +2063,10 @@ impl MirLowering:
             if result_disc == _sffi_enum_discriminant(MirTypeKind.I64) or (noted_is_array and not result_is_array):
                 result_type = noted_elem_type
         val runtime_array = self.local_is_runtime_array(base_local)
+        val typed_u8_runtime_read = (runtime_array and
+            rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.U8))
+        if not gpu_raw_pointer and not typed_u8_runtime_read:
+            self.emit_bounds_check_for_index(base.type_, base_local, index_local)
         # Bug (native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02,
         # gap (a) follow-up, part 2): a tuple's physical storage is a raw
         # rt_alloc(field_count*8) block with NO rt_array header
@@ -2079,14 +2086,28 @@ impl MirLowering:
         # (`is_tuple_base` was already computed above from the same
         # base_mir_type match -- no need to re-scan self.builder.locals.)
         if (runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1") and not is_tuple_base:
+            # `[u8]` has two runtime layouts: packed bytes from byte-producing
+            # APIs and tagged word slots from ordinary array construction.
+            # `rt_array_get` returns those representations differently, so
+            # feeding its result to decode_runtime_value(U8) corrupts packed
+            # values (`0x80 >> 3`). The checked byte accessor normalizes both
+            # layouts to one raw octet, preserves negative indexing and the
+            # legacy out-of-bounds-zero behavior, and remains O(1),
+            # allocation-free, and one direct runtime dispatch.
+            val getter_name = if typed_u8_runtime_read: "rt_bytes_u8_at" else: "rt_array_get"
             val getter = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_array_get"),
+                MirConstValue.Str(getter_name),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(result_type, false), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
             ))
             var bg = self.builder
             val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], MirType.i64())
             self.builder = bg
             if val getter_local = getter_result:
+                if typed_u8_runtime_read:
+                    var b_byte = self.builder
+                    val byte_value = b_byte.emit_cast(mir_operand_copy(getter_local), result_type)
+                    self.builder = b_byte
+                    return byte_value
                 # Bug s54/s54c/s54d: array_element_struct_syms is
                 # registered (lower_array_lit for local literals,
                 # function_lowering.spl's param-array Named-element

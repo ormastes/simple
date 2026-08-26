@@ -520,7 +520,10 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => {
                     let raw_idx = require_integer_index_value(&idx_val, "array")?;
                     let len = arr.len() as i64;
-                    // Support negative indexing
+                    // Support negative indexing. Direct language indexing is
+                    // bounds checked for every array element type; the legacy
+                    // zero-on-OOB byte policy belongs only to the explicit
+                    // `rt_bytes_u8_at` extern.
                     let idx = if raw_idx < 0 {
                         (len + raw_idx) as usize
                     } else {
@@ -565,7 +568,8 @@ pub(super) fn eval_collection_expr(
                         .ok_or_else(|| {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("byte array has {} element(s)", len));
+                                .with_help(format!("byte array has {} element(s)", len))
+                                .with_note("ensure the index is within bounds");
                             CompileError::semantic_with_context(
                                 format!("array index out of bounds: index is {} but length is {}", raw_idx, len),
                                 ctx,
@@ -1176,5 +1180,37 @@ val pair = Ok((13, 17))
 main = pair.0
 "#;
         assert_eq!(run(src), 13);
+    }
+
+    #[test]
+    fn typed_u8_index_preserves_valid_negative_index_without_widening_u32() {
+        let src = r#"
+val bytes: [u8] = [0x2du8, 0xfeu8]
+val words: [u32] = [45u32, 254u32]
+var result_ = 1
+if bytes[-1] == 0xfeu8 and words[-1] == 254u32:
+    result_ = 0
+main = result_
+"#;
+        assert_eq!(run(src), 0);
+    }
+
+    #[test]
+    fn direct_array_oob_reports_an_interpreter_error_for_u8_and_wider_arrays() {
+        for src in [
+            "val bytes: [u8] = [45u8]\nmain = bytes[1].to_i64()\n",
+            "val bytes: [u8] = [45u8]\nmain = bytes[-2].to_i64()\n",
+            "extern fn rt_byte_array_new(capacity: i64) -> [u8]\nval bytes = rt_byte_array_new(1)\nmain = bytes[1].to_i64()\n",
+            "extern fn rt_byte_array_new(capacity: i64) -> [u8]\nval bytes = freeze(rt_byte_array_new(1))\nmain = bytes[-2].to_i64()\n",
+            "val words: [u32] = [45u32]\nmain = words[1].to_i64()\n",
+        ] {
+            let mut parser = Parser::new(src);
+            let module = parser.parse().expect("parse direct array OOB fixture");
+            let err = evaluate_module(&module.items).expect_err("direct indexing must reject OOB");
+            let CompileError::SemanticWithContext(contextual) = err else {
+                panic!("direct indexing must report a contextual semantic error");
+            };
+            assert_eq!(contextual.context.code.as_deref(), Some(codes::INDEX_OUT_OF_BOUNDS));
+        }
     }
 }

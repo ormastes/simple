@@ -187,10 +187,17 @@ pub fn rt_bytes_u8_at_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     match arr {
         Value::ByteArray(vec) | Value::FrozenByteArray(vec) => {
-            Ok(Value::Int(vec.get(idx as usize).copied().map(i64::from).unwrap_or(0)))
+            let byte = normalized_byte_index(idx, vec.len())
+                .and_then(|normalized| vec.get(normalized))
+                .copied()
+                .map(i64::from)
+                .unwrap_or(0);
+            Ok(Value::Int(byte))
         }
         Value::Array(vec) | Value::FrozenArray(vec) => {
-            let byte_val = vec.get(idx as usize).unwrap_or(&Value::Int(0));
+            let byte_val = normalized_byte_index(idx, vec.len())
+                .and_then(|normalized| vec.get(normalized))
+                .unwrap_or(&Value::Int(0));
             Ok(Value::Int(interpreter_byte_at(byte_val)))
         }
         Value::Int(raw) => {
@@ -788,6 +795,29 @@ mod tests {
         let arr = Value::array(vec![Value::UInt { value: 0x2d, width: 8 }]);
         let result = rt_bytes_u8_at_fn(&[arr, Value::Int(0)]).expect("byte lookup should succeed");
         assert_eq!(result, Value::Int(0x2d));
+    }
+
+    #[test]
+    fn rt_bytes_u8_at_normalizes_negative_and_oob_for_both_layouts() {
+        let word_backed = Value::array(vec![
+            Value::UInt { value: 0x2d, width: 8 },
+            Value::UInt { value: 0xfe, width: 8 },
+        ]);
+        let packed = Value::byte_array(vec![0x2d, 0xfe]);
+        for array in [word_backed, packed] {
+            assert_eq!(
+                rt_bytes_u8_at_fn(&[array.clone(), Value::Int(-1)]).expect("negative byte lookup"),
+                Value::Int(0xfe)
+            );
+            assert_eq!(
+                rt_bytes_u8_at_fn(&[array.clone(), Value::Int(2)]).expect("high oob byte lookup"),
+                Value::Int(0)
+            );
+            assert_eq!(
+                rt_bytes_u8_at_fn(&[array, Value::Int(-3)]).expect("low oob byte lookup"),
+                Value::Int(0)
+            );
+        }
     }
 
     #[test]
