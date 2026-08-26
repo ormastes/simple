@@ -1,32 +1,15 @@
-# metal_smoke_spec
+# Metal Smoke Specification
 
-test/05_perf/graphics_2d/metal_smoke_spec.spl
+> Tests covering backend_metal — AC-4: Metal macOS-gated, Metal probe identity, MTLComputePipelineState, correctness via sync_readback.
 
-## At a Glance
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 12 | 12 | 0 | 0 |
 
-| Field | Value |
-|-------|-------|
-| Feature IDs | AC-4 — Metal backend macOS-gated correctness verification |
-| Category | Graphics \| Backend \| Metal |
-| Status | Pending implementation (Phase 5) |
-| Source | `test/05_perf/graphics_2d/metal_smoke_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+<details>
+<summary>Full Scenario Manual</summary>
 
-test/05_perf/graphics_2d/metal_smoke_spec.spl
-
-Verifies that the Metal backend:
-  - Wires MTLComputePipelineState and dispatch
-  - Correctness verified via sync_readback pixel hash match
-  - Test is gated: only runs when macOS and Metal are available
-  - probe() reports shader_format == "msl"
-
-Note: on non-macOS hosts, the probe result status is Failed and
-the it blocks that check pixel hash are skipped at runtime by the
-implementation — the spec still declares the expected behavior.
-
-@cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl
-@cover src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl
+# Metal Smoke Specification
 
 ## Scenarios
 
@@ -36,13 +19,19 @@ implementation — the spec still declares the expected behavior.
 
 #### AC-4: Metal probe reports backend name metal
 
-<details>
-<summary>Executable SPipe</summary>
+- verify Metal probe reports backend name metal
+   - Expected: s.backend equals `METAL_BACKEND_NAME`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify Metal probe reports backend name metal")
 val s: MetalSmokeSentinel = make_metal_smoke_ok()
 expect(s.backend).to_equal(METAL_BACKEND_NAME)
 ```
@@ -51,13 +40,19 @@ expect(s.backend).to_equal(METAL_BACKEND_NAME)
 
 #### AC-4: Metal probe reports shader_format msl
 
-<details>
-<summary>Executable SPipe</summary>
+- verify Metal probe reports shader_format msl
+   - Expected: s.shader_format equals `METAL_SHADER_FORMAT`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify Metal probe reports shader_format msl")
 val s: MetalSmokeSentinel = make_metal_smoke_ok()
 expect(s.shader_format).to_equal(METAL_SHADER_FORMAT)
 ```
@@ -66,13 +61,19 @@ expect(s.shader_format).to_equal(METAL_SHADER_FORMAT)
 
 #### AC-4: Metal probe reports api_name metal
 
-<details>
-<summary>Executable SPipe</summary>
+- verify Metal probe reports api_name metal
+   - Expected: s.api_name equals `METAL_API_NAME`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify Metal probe reports api_name metal")
 val s: MetalSmokeSentinel = make_metal_smoke_ok()
 expect(s.api_name).to_equal(METAL_API_NAME)
 ```
@@ -81,13 +82,19 @@ expect(s.api_name).to_equal(METAL_API_NAME)
 
 #### AC-4: Metal status is Ok when available
 
-<details>
-<summary>Executable SPipe</summary>
+- verify Metal status is Ok when available
+   - Expected: s.status equals `Ok`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify Metal status is Ok when available")
 val s: MetalSmokeSentinel = make_metal_smoke_ok()
 expect(s.status).to_equal("Ok")
 ```
@@ -96,13 +103,19 @@ expect(s.status).to_equal("Ok")
 
 #### AC-4: Metal status is Failed when not on macOS
 
-<details>
-<summary>Executable SPipe</summary>
+- verify Metal status is Failed when not on macOS
+   - Expected: s.status equals `Failed`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify Metal status is Failed when not on macOS")
 val s: MetalSmokeSentinel = make_metal_unavailable()
 expect(s.status).to_equal("Failed")
 ```
@@ -113,13 +126,19 @@ expect(s.status).to_equal("Failed")
 
 #### AC-4: pipeline_state_ok is true when Metal is available
 
-<details>
-<summary>Executable SPipe</summary>
+- verify pipeline_state_ok is true when Metal is available
+   - Expected: s.pipeline_state_ok is true
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify pipeline_state_ok is true when Metal is available")
 val s: MetalSmokeSentinel = make_metal_smoke_ok()
 expect(s.pipeline_state_ok).to_equal(true)
 ```
@@ -128,13 +147,19 @@ expect(s.pipeline_state_ok).to_equal(true)
 
 #### AC-4: dispatch_ok is true when pipeline state is ready
 
-<details>
-<summary>Executable SPipe</summary>
+- verify dispatch_ok is true when pipeline state is ready
+   - Expected: s.dispatch_ok is true
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify dispatch_ok is true when pipeline state is ready")
 val s: MetalSmokeSentinel = make_metal_smoke_ok()
 expect(s.dispatch_ok).to_equal(true)
 ```
@@ -143,13 +168,19 @@ expect(s.dispatch_ok).to_equal(true)
 
 #### AC-4: pipeline_state_ok is false when Metal is unavailable
 
-<details>
-<summary>Executable SPipe</summary>
+- verify pipeline_state_ok is false when Metal is unavailable
+   - Expected: s.pipeline_state_ok is false
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify pipeline_state_ok is false when Metal is unavailable")
 val s: MetalSmokeSentinel = make_metal_unavailable()
 expect(s.pipeline_state_ok).to_equal(false)
 ```
@@ -160,13 +191,19 @@ expect(s.pipeline_state_ok).to_equal(false)
 
 #### AC-4: sync_readback completes when Metal is available
 
-<details>
-<summary>Executable SPipe</summary>
+- verify sync_readback completes when Metal is available
+   - Expected: s.readback_completed is true
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify sync_readback completes when Metal is available")
 val s: MetalSmokeSentinel = make_metal_smoke_ok()
 expect(s.readback_completed).to_equal(true)
 ```
@@ -175,13 +212,19 @@ expect(s.readback_completed).to_equal(true)
 
 #### AC-4: Metal pixel hash matches CPU reference hash
 
-<details>
-<summary>Executable SPipe</summary>
+- verify Metal pixel hash matches CPU reference hash
+   - Expected: metal_hashes_match(s) is true
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify Metal pixel hash matches CPU reference hash")
 val s: MetalSmokeSentinel = make_metal_smoke_ok()
 expect(metal_hashes_match(s)).to_equal(true)
 ```
@@ -190,13 +233,19 @@ expect(metal_hashes_match(s)).to_equal(true)
 
 #### AC-4: metal_pixel_hash equals cpu_pixel_hash exactly
 
-<details>
-<summary>Executable SPipe</summary>
+- verify metal_pixel_hash equals cpu_pixel_hash exactly
+   - Expected: s.metal_pixel_hash equals `s.cpu_pixel_hash`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify metal_pixel_hash equals cpu_pixel_hash exactly")
 val s: MetalSmokeSentinel = make_metal_smoke_ok()
 expect(s.metal_pixel_hash).to_equal(s.cpu_pixel_hash)
 ```
@@ -205,18 +254,42 @@ expect(s.metal_pixel_hash).to_equal(s.cpu_pixel_hash)
 
 #### AC-4: readback is not completed when Metal is unavailable
 
-<details>
-<summary>Executable SPipe</summary>
+- verify readback is not completed when Metal is unavailable
+   - Expected: s.readback_completed is false
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-PERF-METAL-SMOKE
+step("verify readback is not completed when Metal is unavailable")
 val s: MetalSmokeSentinel = make_metal_unavailable()
 expect(s.readback_completed).to_equal(false)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Performance |
+| Status | Active |
+| Source | `test/perf/graphics_2d/metal_smoke_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering backend_metal — AC-4: Metal macOS-gated, Metal probe identity, MTLComputePipelineState, correctness via sync_readback.
+- backend_metal — AC-4: Metal macOS-gated
+- Metal probe identity
+- MTLComputePipelineState
+- correctness via sync_readback
 
 ## Scenario Summary
 
@@ -228,3 +301,56 @@ expect(s.readback_completed).to_equal(false)
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-PERF-METAL-SMOKE`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `87aa4728af413626323abd54a3ac49b2354f4c96e2fb77fa85d14a8cd9717174`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `87aa4728af413626323abd54a3ac49b2354f4c96e2fb77fa85d14a8cd9717174`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `87aa4728af413626323abd54a3ac49b2354f4c96e2fb77fa85d14a8cd9717174`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+
+SSpec documentization score: 91/100
+source: test/perf/graphics_2d/metal_smoke_spec.spl
+mirror: doc/06_spec/perf/graphics_2d/metal_smoke_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=60
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/perf/graphics_2d/metal_smoke_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/perf/graphics_2d/metal_smoke_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/perf/graphics_2d/metal_smoke_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
+  why: Reviewers need selected lifecycle evidence, not inferred project state.
+  improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
+test/perf/graphics_2d/metal_smoke_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-4: Metal probe reports backend name metal' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/perf/graphics_2d/metal_smoke_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-4: Metal probe reports shader_format msl' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/perf/graphics_2d/metal_smoke_spec.spl:91:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-4: Metal probe reports api_name metal' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->
