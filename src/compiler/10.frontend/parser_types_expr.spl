@@ -129,72 +129,80 @@ fn parser_type_kind_tuple_elements(kind: TypeKind) -> [Type]:
         case TypeKind.Tuple(elements): elements
         case _: []
 
-fn parser_type_named_dependencies(type_: Type) -> [text]:
-    """Collect every named type recursively from one parser-owned type.
+fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
+    """Append named types from one parser-owned type to ``names``.
 
     Multi-field ``TypeKind`` values are decoded only in this owner module via
     their typed discriminant/payload ABI. This avoids colliding staged-native
     matches in HIR scopes that also import ``HirTypeKind``.
+
+    The caller-owned accumulator keeps the recursive walk linear: nested type
+    nodes do not allocate result arrays and then copy them into their parents.
     """
     val kind = type_.kind
     val disc = rt_enum_discriminant(kind)
     if disc == rt_enum_discriminant(TypeKind.Named("", [])):
         val name = parser_type_kind_named_name(kind)
-        var names: [text] = []
-        if name != "": names = names.push(name)
+        if name != "": names.push(name)
         for arg in parser_type_kind_named_args(kind):
-            for nested in parser_type_named_dependencies(arg):
-                names = names.push(nested)
-        return names
+            parser_type_named_dependencies_into(arg, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Tuple([])):
-        var names: [text] = []
         for element in parser_type_kind_tuple_elements(kind):
-            for nested in parser_type_named_dependencies(element):
-                names = names.push(nested)
-        return names
+            parser_type_named_dependencies_into(element, names)
+        return
 
     val placeholder = Type(kind: TypeKind.Infer, span: type_.span)
     if disc == rt_enum_discriminant(TypeKind.Array(placeholder, nil)):
-        return parser_type_named_dependencies(
-            parser_type_kind_array_element(kind, placeholder))
+        parser_type_named_dependencies_into(
+            parser_type_kind_array_element(kind, placeholder), names)
+        return
     val payload = rt_enum_payload(kind)
-    if payload == nil: return []
+    if payload == nil: return
     if disc == rt_enum_discriminant(TypeKind.Function([], placeholder)):
         val params: [Type] = rt_tuple_get(payload, 0)
         val return_type: Type = rt_tuple_get(payload, 1)
-        var names: [text] = []
         for param in params:
-            for nested in parser_type_named_dependencies(param):
-                names = names.push(nested)
-        for nested in parser_type_named_dependencies(return_type):
-            names = names.push(nested)
-        return names
+            parser_type_named_dependencies_into(param, names)
+        parser_type_named_dependencies_into(return_type, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Optional(placeholder)):
         val inner: Type = payload
-        return parser_type_named_dependencies(inner)
+        parser_type_named_dependencies_into(inner, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Reference(placeholder, false)):
         val inner: Type = rt_tuple_get(payload, 0)
-        return parser_type_named_dependencies(inner)
+        parser_type_named_dependencies_into(inner, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Atomic(placeholder)):
         val inner: Type = payload
-        return parser_type_named_dependencies(inner)
+        parser_type_named_dependencies_into(inner, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Isolated(placeholder)):
         val inner: Type = payload
-        return parser_type_named_dependencies(inner)
+        parser_type_named_dependencies_into(inner, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Weak(placeholder)):
+        val inner: Type = payload
+        parser_type_named_dependencies_into(inner, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Union([])):
         val members: [Type] = payload
-        var names: [text] = []
         for member in members:
-            for nested in parser_type_named_dependencies(member):
-                names = names.push(nested)
-        return names
+            parser_type_named_dependencies_into(member, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Projection(placeholder, "")):
         val base: Type = rt_tuple_get(payload, 0)
-        return parser_type_named_dependencies(base)
+        parser_type_named_dependencies_into(base, names)
+        return
     if disc == rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
         val inner: Type = rt_tuple_get(payload, 0)
-        return parser_type_named_dependencies(inner)
-    []
+        parser_type_named_dependencies_into(inner, names)
+
+fn parser_type_named_dependencies(type_: Type) -> [text]:
+    var names: [text] = []
+    parser_type_named_dependencies_into(type_, names)
+    names
 
 # ============================================================================
 # Tensor Suffix
