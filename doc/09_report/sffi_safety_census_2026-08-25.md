@@ -487,3 +487,13 @@ reads use the canonical nullable, always-inlined environment facade.  The
 outer-scope snapshot still performs one lookup and nested scopes perform none,
 while an unscoped query retains one lookup.  Its packed scalar state remains
 allocation-free, with no added cache, lock, copy, hash, boxing, or dispatch.
+
+### Frontend registry-promotion authority follow-up
+
+Aspect, effect, layer-equivalence, and RT-criticality registries now tag their
+raw transient-owner promotion declaration `unsafe(ffi)` and confine calls to
+one always-inlined lexical owner per module.  The foreign result remains a
+boolean and every existing failure check is preserved; no numeric workaround
+or fabricated success was introduced.  Promotion counts and eager/short-circuit
+evaluation shapes are unchanged, and registry lookup paths gain no foreign
+call, allocation, copy, cache, lock, hash, boxing, or dispatch table.

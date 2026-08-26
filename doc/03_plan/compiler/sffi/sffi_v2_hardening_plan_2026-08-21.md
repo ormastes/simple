@@ -2010,6 +2010,14 @@ and unpromoted.
   an unscoped query.
 - [x] Preserve packed allocation-free state and add a static call-count ratchet.
 
+### Completed frontend registry-promotion authority slice
+
+- [x] Tag raw transient-owner promotion in all four mirrored registries.
+- [x] Confine each declaration to one always-inline lexical `unsafe(ffi)` owner.
+- [x] Preserve boolean results and all existing failure propagation.
+- [x] Preserve promotion call counts and eager/short-circuit evaluation shapes.
+- [x] Keep lookup hot paths unchanged and add a family-wide static ratchet.
+
 ### Completed MIR target-context authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.
