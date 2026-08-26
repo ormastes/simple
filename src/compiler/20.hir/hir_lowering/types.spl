@@ -10,11 +10,19 @@ use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.io_runtime.{env_get_opt}
 
-extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw enum discriminant bridge", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
+@unsafe(reason: "raw transient-owner promotion; false is provider failure", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
+@unsafe(reason: "raw heap-reference formation probe; false is not a liveness proof", capabilities: [ffi])
 extern fn rt_heap_ref_wellformed(value: Any) -> bool
+
+@always_inline
+fn _hir_diagnostic_promote_raw(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
 
 # FORMATION probe for a heap-typed field word, wrapped once here so consumers
 # in layer 20 do not each add a direct `rt_*` call site (no_direct_rt ratchet).
@@ -25,6 +33,7 @@ extern fn rt_heap_ref_wellformed(value: Any) -> bool
 # untagged pointer (2026-08-24). It is a formation check, NOT a liveness
 # proof, so it can never false-reject a live object; equally it cannot catch a
 # wild pointer that happens to be large.
+@always_inline
 fn hir_heap_ref_wellformed(value: Any) -> bool:
     unsafe(capabilities: [ffi]):
         return rt_heap_ref_wellformed(value)
@@ -40,12 +49,13 @@ fn hir_heap_ref_wellformed(value: Any) -> bool:
 # probes in _Expressions/block_and_asm_lowering.spl) and do the field read on
 # the runtime side.
 
-# `rt_env_get` yields nil for an UNSET variable, so both the extern and this
-# wrapper are OPTIONAL — every call site below already uses the optional-safe
+# The canonical environment facade yields nil for an UNSET variable, so this
+# wrapper remains OPTIONAL — every call site below already uses the optional-safe
 # `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
 # Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
+@always_inline
 fn hir_type_env_get(key: text) -> text?:
-    rt_env_get(key)
+    env_get_opt(key)
 
 # SEED-PARITY helper (2026-08-01): the seed spells this
 # `name.chars().all(|ch| ch.is_ascii_uppercase())` (type_resolver.rs:141),
@@ -56,8 +66,10 @@ fn _seed_parity_is_ascii_upper(name: text) -> bool:
     val code = name.char_code_at(0)
     code >= 65 and code <= 90
 
+@always_inline
 fn hir_type_kind_disc(k: TypeKind) -> i64:
-    rt_enum_discriminant(k)
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(k)
 
 # Local placeholder for the module resolver port used in FR-COMPILER-003 A2.
 # The actual 85.mdsoc implementation will be wired by the A2 agent at call sites.
@@ -631,9 +643,9 @@ impl HirLowering:
         # These parallel owners form one diagnostic record stream. Promote all
         # three or fail closed; promoting only errors leaves scalar projections
         # dangling after the per-file lowering scope ends.
-        val errors_ok = rt_transient_heap_promote(self.errors)
-        val messages_ok = rt_transient_heap_promote(self.diagnostic_messages)
-        val recovered_ok = rt_transient_heap_promote(self.diagnostic_recovered)
+        val errors_ok = _hir_diagnostic_promote_raw(self.errors)
+        val messages_ok = _hir_diagnostic_promote_raw(self.diagnostic_messages)
+        val recovered_ok = _hir_diagnostic_promote_raw(self.diagnostic_recovered)
         errors_ok and messages_ok and recovered_ok
 
     me lower_type(t: Type) -> HirType:

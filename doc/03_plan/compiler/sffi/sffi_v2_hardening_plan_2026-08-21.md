@@ -2018,6 +2018,16 @@ and unpromoted.
 - [x] Preserve promotion call counts and eager/short-circuit evaluation shapes.
 - [x] Keep lookup hot paths unchanged and add a family-wide static ratchet.
 
+### Completed HIR lowering types authority slice
+
+- [x] Remove raw environment authority and retain the shared nullable helper
+  through canonical always-inlined `env_get_opt`.
+- [x] Tag enum, heap-formation, and transient-promotion declarations unsafe.
+- [x] Confine all three primitives to always-inline lexical owners.
+- [x] Preserve scalar/boolean contracts, call counts, and driver fail-closed
+  diagnostic-promotion handling.
+- [x] Add a static authority and performance-shape ratchet.
+
 ### Completed MIR target-context authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.

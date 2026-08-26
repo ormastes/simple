@@ -497,3 +497,14 @@ boolean and every existing failure check is preserved; no numeric workaround
 or fabricated success was introduced.  Promotion counts and eager/short-circuit
 evaluation shapes are unchanged, and registry lookup paths gain no foreign
 call, allocation, copy, cache, lock, hash, boxing, or dispatch table.
+
+### HIR lowering types authority follow-up
+
+HIR lowering types no longer declares raw environment SFFI; its shared
+nullable helper delegates to canonical always-inlined `env_get_opt`.  Enum
+discriminant, heap-reference formation, and transient diagnostic promotion are
+tagged `unsafe(ffi)` and confined to existing or new always-inlined scalar
+owners.  Diagnostic promotion still evaluates all three parallel owners and
+returns their boolean conjunction; the driver still fails closed on false.
+No call-count, allocation, copy, cache, lock, hash, boxing, or dispatch-table
+change was introduced.
