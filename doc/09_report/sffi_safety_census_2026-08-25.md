@@ -147,3 +147,12 @@ allocation, copy, or dispatch.  The native walk compatibility API is tagged
 unsafe because its current array-only return cannot distinguish provider
 failure from a legitimate empty directory.  A static ratchet pins the owner
 count and prevents raw calls from spreading outside those owners.
+### File resource and mapping authority follow-up
+
+The canonical file-operations compatibility module now confines raw file-lock
+and memory-mapping calls to six always-inlined lexical `unsafe(ffi)` owners.
+APIs that expose descriptors or process addresses are explicitly unsafe because
+sentinel checking alone cannot prove address bounds, lifetime, mapping identity,
+or exactly-once release.  The existing `SffiFileLock` resource wrapper remains
+the safe lock path.  The change adds no registry lookup, allocation, copy,
+hashing, or generic dispatch to these calls.

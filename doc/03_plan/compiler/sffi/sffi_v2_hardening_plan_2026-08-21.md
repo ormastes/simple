@@ -1738,3 +1738,10 @@ and unpromoted.
 - [x] Preserve boolean status behavior without adding hot-path work.
 - [x] Tag the ambiguous native directory-walk compatibility API unsafe.
 - [x] Add a static source-shape ratchet for raw-call ownership.
+### Completed file-resource authority slice
+
+- [x] Confine file-lock and mmap-family raw calls to six direct inline owners.
+- [x] Mark descriptor- and address-returning compatibility APIs unsafe.
+- [x] Keep `SffiFileLock` as the safe exactly-once lock ownership surface.
+- [x] Preserve the raw direct-call cost model without lookup or allocation.
+- [x] Add a static source-shape ratchet for owner and call-site counts.

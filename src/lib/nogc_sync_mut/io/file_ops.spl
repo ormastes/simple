@@ -18,9 +18,13 @@ extern fn rt_file_unlock(handle: i64) -> bool
 @unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
 extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+@unsafe(reason: "raw mmap ABI returns a process address or zero failure sentinel", capabilities: [ffi])
 extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: i64) -> i64
+@unsafe(reason: "raw munmap ABI consumes a caller-owned process address", capabilities: [ffi])
 extern fn rt_munmap(addr: i64, size: i64) -> bool
+@unsafe(reason: "raw madvise ABI accepts an unvalidated process address and extent", capabilities: [ffi])
 extern fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool
+@unsafe(reason: "raw msync ABI accepts an unvalidated process address and extent", capabilities: [ffi])
 extern fn rt_msync(addr: i64, size: i64) -> bool
 use std.io_runtime.{process_run}
 extern fn rt_file_exists(path: text) -> bool
@@ -45,6 +49,36 @@ fn _file_hash_sha256_raw(path: text) -> text:
 fn _file_size_raw(path: text) -> i64:
     unsafe(capabilities: [ffi]):
         rt_file_size(path)
+
+@always_inline
+fn _file_lock_raw(path: text, timeout_secs: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_file_lock(path, timeout_secs)
+
+@always_inline
+fn _file_unlock_raw(handle: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_unlock(handle)
+
+@always_inline
+fn _file_mmap_raw(path: text, size: i64, offset: i64, readonly: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_mmap(path, size, offset, readonly)
+
+@always_inline
+fn _file_munmap_raw(addr: i64, size: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_munmap(addr, size)
+
+@always_inline
+fn _file_madvise_raw(addr: i64, size: i64, advice: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_madvise(addr, size, advice)
+
+@always_inline
+fn _file_msync_raw(addr: i64, size: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_msync(addr, size)
 
 # --- Shell helpers (local copies to avoid circular imports) ---
 # These are minimal copies needed for file operations.
@@ -173,17 +207,13 @@ fn file_read_lines(path: text) -> Result<[text], text>:
                 Ok(content.split("\n"))
         Err(error): Err(error)
 
+@unsafe(reason: "legacy API returns a raw OS lock descriptor; prefer file_lock_acquire", capabilities: [ffi])
 fn file_lock(path: text, timeout_secs: i64) -> i64:
-    var handle: i64 = -1
-    unsafe(capabilities: [ffi]):
-        handle = rt_file_lock(path, timeout_secs)
-    handle
+    _file_lock_raw(path, timeout_secs)
 
+@unsafe(reason: "legacy API consumes a caller-owned raw OS lock descriptor", capabilities: [ffi])
 fn file_unlock(handle: i64) -> bool:
-    var released = false
-    unsafe(capabilities: [ffi]):
-        released = rt_file_unlock(handle)
-    released
+    _file_unlock_raw(handle)
 
 # Call the extern directly, not the sibling forwarder: `file_size_raw` also has
 # a definition in std.io_runtime that forwards back to `file_size`, and both
@@ -256,24 +286,28 @@ fn file_fsync_cached(path: text) -> bool:
 # --- Memory-Mapped File I/O ---
 
 # reason positional io file_ops API
+@unsafe(reason: "returns a raw process address whose bounds and lifetime remain caller-owned", capabilities: [ffi])
 fn file_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64:
     # Memory-map a file into process address space.
-    rt_mmap(path, size, offset, if readonly: 1 else: 0)
+    _file_mmap_raw(path, size, offset, if readonly: 1 else: 0)
 
 # reason positional io file_ops API
+@unsafe(reason: "consumes a caller-owned raw mapping address and extent", capabilities: [ffi])
 fn file_munmap(addr: i64, size: i64) -> bool:
     # Unmap a memory-mapped file region.
-    rt_munmap(addr, size)
+    _file_munmap_raw(addr, size)
 
 # reason positional io file_ops API
+@unsafe(reason: "accepts a caller-owned raw mapping address, extent, and platform advice", capabilities: [ffi])
 fn file_madvise(addr: i64, size: i64, advice: i64) -> bool:
     # Give advice about memory access patterns.
-    rt_madvise(addr, size, advice)
+    _file_madvise_raw(addr, size, advice)
 
 # reason positional io file_ops API
+@unsafe(reason: "accepts a caller-owned raw mapping address and extent", capabilities: [ffi])
 fn file_msync(addr: i64, size: i64) -> bool:
     # Synchronize mapped memory with file on disk.
-    rt_msync(addr, size)
+    _file_msync_raw(addr, size)
 
 # --- Additional File Functions ---
 
