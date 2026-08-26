@@ -286,9 +286,8 @@ fn compile_c_runtime_sources() {
         // baremetal object and the freestanding sysroot archives never get the
         // hosted one, so neither lane needs -z muldefs. Do NOT add
         // startup/baremetal/runtime_log.c to this list), and the standalone
-        // rt_socket_set_nonblocking
-        // extraction (see that file's header comment for why the whole
-        // async_linux_epoll.c it was extracted from is not linked here).
+        // prepare/commit/mask syscall shim used by the canonical Pure-Simple
+        // rt_socket_set_nonblocking owner.
         // runtime_framebuffer.c (rt_fb_*, 2 names) already appears above in
         // this same list -- only its interpreter dispatch entry was missing.
         "runtime_image.c",

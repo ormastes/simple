@@ -1331,6 +1331,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_io_tcp_set_reuseaddr", &[I64, I8], &[I8]),
     RuntimeFuncSpec::new("rt_io_tcp_set_reuseport", &[I64, I8], &[I8]),
     RuntimeFuncSpec::new("rt_io_tcp_set_nonblocking", &[I64, I8], &[I8]),
+    // Canonical Pure-Simple public ABI plus primitive-only hosted shims.
+    RuntimeFuncSpec::new("rt_socket_set_nonblocking", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_socket_nonblock_prepare", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_socket_nonblock_commit", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_socket_nonblock_mask", &[], &[I64]),
     RuntimeFuncSpec::new("rt_io_tcp_set_nodelay", &[I64, I8], &[I8]),
     RuntimeFuncSpec::new("rt_io_tcp_bind_fd", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_io_tcp_listen", &[I64, I64], &[I8]),

@@ -31,17 +31,10 @@ After the `rt_audio_*` lane fixed 31 of bucket (a)'s 51
   from the real baremetal implementation in
   `src/runtime/startup/baremetal/runtime_log.c` (never compiled here). Only
   the hosted file was absent from the interpreter crate's C sources.
-- `platform/async_linux_epoll.c` (`rt_socket_set_nonblocking` -- 1 name):
-  the whole file is gated `#if defined(__linux__)` and pulls in
-  `spl_array_new_i64`/`spl_array_push_i64` (defined in `runtime.c`, not
-  compiled by this crate) via a sibling function, `rt_epoll_wait` --
-  the same problem `rt_audio_play_pcm_f32` had. Its only caller
-  (`src/lib/nogc_sync_mut/fs/nvfs_posix/posix_driver.spl`) is hosted POSIX
-  code, not baremetal, so this is a real gap. The single, dependency-free
-  function body was extracted verbatim into
-  `src/runtime/runtime_socket_nonblock.c` (portable to any non-Windows
-  target, matching the `runtime_native_gpu_stub.c` partial-extraction
-  precedent), rather than linking the whole epoll-backed file.
+- `rt_socket_set_nonblocking` policy and public ABI are owned by canonical
+  Pure Simple. `runtime_socket_nonblock.c` now contains only its internal
+  POSIX prepare/commit/mask and Windows ioctl/layout shims; the interpreter
+  registers those primitive names rather than duplicating public policy.
 
 This spec proves the error TEXT changed (the resolution oracle -- exit
 status alone is fail-open), not merely that the process exits non-zero,
@@ -128,9 +121,9 @@ describe "rt_simpleos_log_*/rt_log_target_* interpreter registration":
         assert_true(err.contains("unknown hosted log-lib"))
         assert_equal(err.contains("unknown extern function"), false)
 
-describe "rt_socket_set_nonblocking interpreter registration":
+describe "rt_socket_set_nonblocking Pure-Simple interpreter API":
 
-    it "resolves through to the linked C implementation instead of failing to resolve":
+    it "routes policy through the canonical module and resolves its internal shim":
         step("Run the socket nonblock probe fixture under the interpreter")
         val (out, err, _code) = run_probe_child("test/fixture/interpreter_extern/socket_nonblock_probe.spl", "socket_nonblock_result=")
         assert_true(out.contains("socket_nonblock_result=false"))
