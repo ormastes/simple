@@ -985,6 +985,27 @@ tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### 12.1 Wave 5a/5c production-authority correction (2026-08-26)
+
+**Both prior sealed-read implementation attempts are non-admitted.** Do not
+reuse their mocked source/evidence. Freeze branded production
+`WorkspaceRegistryV1.resolveExactWorkspaceWorktreeV1`,
+`SnapshotStoreV1.openExactSnapshotV1`, and
+`TargetInventoryStoreV1.publishAuthorityInventoryV1/openPublishedAuthorityInventoryV1`.
+Worktree UID grammar is `W-<opaque-base32>` only; `WT-*` denies. The authority
+revalidates exact registry and snapshot revisions after published-manifest open.
+
+| Lane | Additional owned deliverable | Admission evidence |
+|---|---|---|
+| W5A-A | production commit publisher and complete aggregate roots | atomic visibility; clean/incremental artifact/section/directory/aggregate parity |
+| W5A-B | bounded directory page `1..100`, <=100 entries, <=200 lines/~6k tokens | stable order and authenticated continuation |
+| W5C-A | fsynced policy directory; monotonic CAS single-policy append-only policy/key/issuer/rotation/revocation family | restart plus create/write/fsync/rename/CAS faults |
+| W5A-C/W5C-D | independent real-port oracle | W5A-16…20 and W5C-11…12 PASS |
+
+Only KnowledgeCompiler's production commit path publishes inventory. Durable
+operations use immutable UIDs: exact replay is idempotent; altered/stale input
+fails closed. URI/MCP/materializer stays blocked until all listed gates pass.
+
 ## 12. Cursor authorization prerequisite (2026-08-26)
 
 **Status: design frozen; implementation non-admitted.** The existing concrete
@@ -998,6 +1019,13 @@ create a parallel signer or alter Trust/Edge receipt semantics.
 | W5C-B authority/projection | SnapshotAuthority + `src/view` integration owner | trusted expected read binding and sole ProjectionPort ABI | no raw authority claim or Projection call before proof |
 | W5C-C URI/MCP | view/MCP owner | inbound/outbound cursor adapter | blocked on W5C-A/B PASS |
 | W5C-D evidence | independent reviewer | real-port restart/rotation/fault matrix | W5C-01…W5C-10 PASS |
+
+**Required ordering:** W5A-A/B/C first delivers and independently admits the
+sealed production authority, ProjectionPort ABI, and W5A-01…20 evidence. Only
+then does W5C-A extend AuthorizationPort against W5A's branded bindings and
+pass W5C-01…12. W5C-B is an authority/projection-to-authorization integration
+check, not a second authority/projection implementation, and cannot overlap
+W5A-A/B ownership. W5C-C URI/MCP starts only after W5A and W5C-A/B PASS.
 
 The only projection operations are
 `render(authorityView,canonicalTarget,verifiedReadGrant)` and

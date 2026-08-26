@@ -3075,13 +3075,53 @@ only because `AuthorizationPortV1` copies all three from the sealed
 issue derives its complete binding from this grant and signs the worktree. This
 removes the unsafe alternative of a later adapter deriving worktree identity.
 
-Key rotation is durable policy, not a cache replacement. The one policy record
-and its uniquely replay-safe rotation records transition `pending`, `current`,
+Key rotation is durable policy, not a cache replacement. The one logical policy
+is persisted through an append-only policy/key/issuer/rotation/revocation record
+family, whose uniquely replay-safe rotations transition `pending`, `current`,
 verification-only `grace`, and permanently `revoked` keys; only the due-
 transition operation advances the current cursor revocation epoch. Pending keys
 cannot verify, current keys sign and verify, grace keys verify only, and
 revoked keys cannot be used. Restart reloads this durable state and fails
-closed without the current private signing handle. The exact ABI, fields,
+closed without the current private signing handle. Initial directory creation
+and each record write/rename/fsync complete before acknowledgement; recovery
+accepts only a contiguous consistent monotonic record chain. The exact ABI, fields,
 canonical bytes, and transition rules are architecture §21 and MCP detail
 design §5/§12; they are acceptance prerequisites rather than proof that Wave 5
 resources exist.
+
+### 43.1 Production-authority correction and implementation admission (2026-08-26)
+
+**Status: implementation remains non-admitted.** The prior boundary wording
+does not license synthetic maps or duck-typed stores. The production worktree
+identity is `W-<opaque-base32>`; `WT-*` is rejected, not normalized. The
+composition root admits only branded interfaces:
+
+```text
+WorkspaceRegistryV1.resolveExactWorkspaceWorktreeV1({workspaceUid,worktreeUid})
+SnapshotStoreV1.openExactSnapshotV1({workspaceUid,projectUidOrNull,worktreeUid,
+  snapshotUid,revisionId,registryRevisionId})
+TargetInventoryStoreV1.publishAuthorityInventoryV1(ProductionInventoryBuildV1)
+TargetInventoryStoreV1.openPublishedAuthorityInventoryV1(ExactAuthorityBindingV1)
+```
+
+`openBoundSnapshot` performs the exact registry lookup, exact snapshot open,
+and published-manifest open, then revalidates the registry and snapshot
+revisions before branding its view. Any changed/absent revision denies; latest
+lookup, cache-only validation, or ProjectionPort revalidation is not a
+substitute. `KnowledgeCompiler`'s production snapshot-commit path is the sole
+inventory writer: it publishes project roots and the exact registry-selected
+**complete** aggregate contributor set, then the matching authority manifest.
+Request adapters cannot write, omit unavailable contributors, lazily add query
+results, or select roots.
+
+Directories are sealed targets. Their requested limit is `1..100`; a page has
+at most 100 entries, 200 Markdown lines, and approximately 6,000 tokens, with
+continuation only through authenticated position. The durable policy store
+fsyncs its initial directory and every policy/key/issuer/revocation record
+before acknowledgement, uses monotonic CAS `policyVersion`, and makes each
+transition replay-idempotent by immutable operation UID. Recovery admits only
+the highest contiguous consistent log. Required production-oracle evidence is
+clean/incremental parity for artifact, section, directory, and aggregate;
+revision-change revalidation; and restart/fault/crash injection at directory
+creation, write, fsync, rename, and CAS. Rejected sealed-read implementations
+remain non-admitted and provide no Wave 5a/5c evidence.

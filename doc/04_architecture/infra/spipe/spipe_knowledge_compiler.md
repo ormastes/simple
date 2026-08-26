@@ -295,11 +295,11 @@ fatal. `Behavior`, `TestRun`, `TestResult`,
 
 New canonical namespaces are `RQ-` for requirements, `NFR-` for non-functional
 requirements, `SS-` for scenarios, `SY-` for source symbols, `WS-` for
-workspaces, and `WT-` for new worktree identities. Schema-v1 `W-` values are
+workspaces, and `W-` for new worktree identities. Schema-v1 `W-` values are
 decoded by record type (`workspace` or `worktree`) and never compared across
-types. Schema v2 writes only `WS-`/`WT-` and records a tracked
+types. Schema v2 writes only `WS-`/`W-` and records a tracked
 `IdentityMigrationRecord(old_uid, old_record_type, new_uid, migrated_in_snapshot_uid)`.
-The new UID is derived, not randomly allocated: `WS-` or `WT-` plus the first
+The new UID is derived, not randomly allocated: `WS-` or `W-` plus the first
 26 Crockford characters under the encoding above of SHA-256 over UTF-8
 `spipe-identity-migration-v1\0`, the target record type, a NUL byte, and the
 legacy `W-` UID bytes. Mutable record content is excluded. Identical
@@ -1383,7 +1383,6 @@ renders targets returned by that view. MCP/CLI adapters consume both through
 
 ```text
 ResourceResolver
-  -> WorkspaceRegistry.resolveExact(workspaceUid)
   -> SnapshotAuthorityPortV1.openBoundSnapshot(binding)
   -> SnapshotAuthorityPortV1.resolveCanonicalAlias(...) -> resolveCanonicalTarget(...)
      (or resolveCanonicalTarget(...) directly for canonical URIs)
@@ -1443,8 +1442,10 @@ the seal and denies; the field is forbidden for project scope, which requires
 its non-null project UID. This bridges existing project-owned snapshots without
 letting a URI assert a null-project read.
 
-The precise call order is: parse; exact registry workspace/worktree lookup;
-open the receipt-named authority snapshot/revision as an *untrusted candidate*
+The precise resolver call order is: parse; call `openBoundSnapshot` with the
+receipt-named authority snapshot/revision as an *untrusted candidate*;
+SnapshotAuthority performs exact registry workspace/worktree lookup internally,
+opens the exact snapshot and published inventory, and revalidates both revisions;
 and verify its sealed inventory; a legacy alias yields only a canonical
 candidate, then `resolveCanonicalTarget` proves that candidate wholly inside
 the view (canonical URIs prove their target directly); derive the closed
@@ -1548,6 +1549,16 @@ immutable accepted request and committed policy version; a duplicate
 `rotationUid` with different bytes fails, while an identical replay returns the
 already recorded policy.
 
+The sole logical `CursorReceiptKeyPolicyV1` is persisted as one transactional,
+append-only record family: initial `policy`, then `key`, `issuer`, `rotation`,
+and `revocation` operations. Every operation carries its monotonic policy
+version and immutable operation UID and folds to exactly the canonical record
+above; this is not a second policy schema. Initial policy-directory creation
+and every operation write, rename, and required parent/file fsync complete
+before acknowledgement. Recovery accepts only the longest contiguous
+consistent chain; equal UID/bytes replay returns the prior result while altered
+bytes or stale version fail closed.
+
 `rotateCursorReceiptKeyV1` atomically appends one `pending` record after a
 compare-and-swap of `policyVersion`; its request is exactly `{rotationUid,
 expectedPolicyVersion, newAuthorityKeyId, newAlgorithm, newAuthorityKeyEpoch,
@@ -1581,3 +1592,28 @@ Every pre-projection failure has zero ProjectionPort calls and the bounded
 public `not_found_or_unauthorized` response. A post-list issue failure discards
 the page and uses that same response; telemetry may retain only a closed reason
 such as `stale_cursor`.
+
+### 21.3 Production authority/store admission correction
+
+Every authority binding uses `W-<opaque-base32>` worktree UIDs only. The
+composition root owns branded `WorkspaceRegistryV1`, `SnapshotStoreV1`, and
+`TargetInventoryStoreV1`, exposing exactly
+`resolveExactWorkspaceWorktreeV1`, `openExactSnapshotV1`,
+`publishAuthorityInventoryV1`, and `openPublishedAuthorityInventoryV1`.
+Their immutable records bind registry revision, snapshot revision, base
+snapshot UID, inventory root, authority snapshot UID, and manifest digest.
+`openBoundSnapshot` reads registry -> snapshot -> published inventory and then
+re-reads both exact revisions before returning a view; changed revisions deny.
+
+Only KnowledgeCompiler's production snapshot-commit transaction publishes
+inventories. It selects all and only complete project roots for the exact
+registry revision, atomically makes the project and aggregate inventories
+reader-visible, then publishes authority manifests. `listDirectoryTarget`
+permits request limits `1..100`, with <=100 entries, <=200 Markdown lines, and
+roughly <=6,000 tokens; continuation is authenticated and no unbounded
+directory projection exists. Authorization's child policy store fsyncs the
+initial directory, uses monotonic CAS policy versions and immutable operation
+UIDs for policy/key/issuer/rotation/revocation records, and recovers only contiguous durable
+state. Mock stores, old `WT-*` fixtures, or in-memory fault-free evidence are
+non-admitted; production clean/incremental parity, revision revalidation, and
+create/write/fsync/rename/CAS crash evidence are required.

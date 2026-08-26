@@ -667,8 +667,9 @@ manifest bytes commit that full ordered list; missing, extra, substituted, or
 reordered roots fail admission. The registry selects that aggregate only for
 the exact workspace/worktree/revision.
 
-The resolver does: parse; exact workspace/worktree lookup; open the receipt's
-snapshot/revision as an untrusted candidate and validate its sealed inventory;
+The resolver does: parse; delegate exact workspace/worktree lookup and opening
+of the receipt's snapshot/revision as an untrusted candidate to SnapshotAuthority,
+which validates its sealed inventory and revalidates exact revisions;
 for an alias, resolve only a canonical candidate then prove it with
 `resolveCanonicalTarget`; for a canonical URI, prove its target directly;
 derive `ExpectedReadBindingV1` from the proved view/target/request, including
@@ -697,3 +698,29 @@ closed if its current private KeyProvider handle is unavailable. The resolver
 may consume only opaque verified grants and never performs these transitions on
 its request path. The field order, expiry rule, and rotation request are those
 in architecture §21, so this document does not define a second ABI.
+
+### 12.3 Production port and evidence correction
+
+Only branded composition-root `WorkspaceRegistryV1`, `SnapshotStoreV1`, and
+`TargetInventoryStoreV1` may implement this design. Valid worktree UIDs are
+`W-<opaque-base32>` only. The exact operations are
+`WorkspaceRegistryV1.resolveExactWorkspaceWorktreeV1({workspaceUid,worktreeUid})`,
+`SnapshotStoreV1.openExactSnapshotV1({workspaceUid,projectUidOrNull,worktreeUid,snapshotUid,revisionId,registryRevisionId})`,
+`TargetInventoryStoreV1.publishAuthorityInventoryV1(build)`, and
+`TargetInventoryStoreV1.openPublishedAuthorityInventoryV1(exactBinding)`.
+`publishAuthorityInventoryV1` belongs only to the production commit flow.
+`openBoundSnapshot` calls only `resolveExactWorkspaceWorktreeV1`, then
+`openExactSnapshotV1`, then `openPublishedAuthorityInventoryV1`, and revalidates
+registry plus snapshot revision before returning a view. The production KnowledgeCompiler
+snapshot-commit path alone publishes complete project/aggregate roots and the
+matching authority manifests. Directory requests accept only `1..100` and
+produce <=100 entries, <=200 Markdown lines, and roughly <=6,000 tokens.
+
+`CursorReceiptKeyPolicyStoreV1` persists the single §21.2 logical policy as
+an append-only policy/key/issuer/rotation/revocation record family. It must fsync
+initial-directory creation and each monotonic-CAS record before acknowledgement;
+operation UID equality is replay-idempotent and altered/stale operations deny.
+Admission needs production clean/incremental parity for artifact, section,
+directory, and aggregate plus restart/fault injection at create/write/fsync/
+rename/CAS. Mocks, raw fixtures, and rejected sealed-read drafts are
+`NOT-EVIDENCE`.

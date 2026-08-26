@@ -435,7 +435,7 @@ or package smoke gates activated by the actual changed paths.
 
 - **Given** two schema-v1 snapshots with the same workspace/worktree `W-` identities but changed project membership and revision fields
 - **When** both independently migrate to schema v2
-- **Then** record type and legacy UID select identical `WS-`/`WT-` mappings, each migration records its own first v2 snapshot UID, and both v1 snapshots remain unchanged.
+- **Then** record type and legacy UID select identical `WS-`/`W-` mappings, each migration records its own first v2 snapshot UID, and both v1 snapshots remain unchanged.
 
 ### Scenario: Edge authority fails closed
 
@@ -483,7 +483,7 @@ or package smoke gates activated by the actual changed paths.
 
 - **Given** v1 edges and manifests containing workspace/worktree `W-` values
 - **When** typed identity migration precedes edge migration
-- **Then** unique mappings produce `WS-`/`WT-` v2 provenance/endpoints, while missing or ambiguous mappings remain historical with stable reasons.
+- **Then** unique mappings produce `WS-`/`W-` v2 provenance/endpoints, while missing or ambiguous mappings remain historical with stable reasons.
 
 ### Scenario: Delta replay distinguishes identity and conflict
 
@@ -1603,3 +1603,18 @@ The execution ledger records the durable policy fixture and independent review
 receipt. Private telemetry may retain a closed reason such as `stale_cursor`,
 but no test accepts a public distinction between absent, hidden, unauthorized,
 or stale targets.
+
+### 22.1 Production authority/store evidence required before W5A/W5C admission
+
+| ID | Setup/action | Required oracle |
+|---|---|---|
+| W5A-16 | Supply `WT-*`, path-derived, or malformed worktree UID | Reject before registry/store access; only `W-<opaque-base32>` is accepted |
+| W5A-17 | Change registry or snapshot revision between open and final revalidation | Bounded denial; no view, grant, or ProjectionPort call |
+| W5A-18 | Publish project and aggregate through production publisher | Reader sees either no manifest or fully recomputable roots; aggregate has all and only selected complete contributors |
+| W5A-19 | Clean rebuild versus equivalent incremental commit for artifact, section, directory, aggregate | Byte-identical roots, pages, and projection bytes |
+| W5A-20 | Request limits 0, 101, 1, and 100 | Invalid denies; valid page <=100 entries, <=200 lines/~6k tokens, authenticated continuation |
+| W5C-11 | Crash at initial policy-directory create and at write/fsync/rename/CAS of each policy, key, issuer, rotation, and revocation record | Restart sees prior complete state or one complete monotonic state, never partial/ambiguous; no acknowledgement precedes durable state |
+| W5C-12 | Replay same operation UID for every record class; alter bytes; use stale policy version | Equal replay idempotent; altered/stale denies without second durable transition |
+
+Fake registry/store, raw fixture manifest, mock projection, or a rejected
+sealed-read implementation is `NOT-EVIDENCE`.
