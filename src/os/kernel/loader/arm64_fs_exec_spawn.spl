@@ -20,7 +20,9 @@ use os.kernel.scheduler.scheduler.{
 }
 use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet, CapabilityToken}
 use os.kernel.scheduler.process_execution_observation.{
-    scheduler_execution_take_reaped_token_v1
+    SchedulerExecutionDeliveryStatusV2,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_discard_terminal_v2
 }
 
 extern fn serial_println(msg: text)
@@ -181,12 +183,14 @@ pub(package) fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
         wait_collect_result_status(collected) != exit_code.to_i32()):
         return FsExecAuthenticatedRunResultV1(
             exit_code: -10, evidence: nil, scheduler: owner)
-    val evidence = scheduler_execution_take_reaped_token_v1(child.id)
-    if not evidence.?:
+    val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+        child.id, path, argv)
+    if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
+        _ = scheduler_execution_discard_terminal_v2(child.id)
         return FsExecAuthenticatedRunResultV1(
             exit_code: -10, evidence: nil, scheduler: owner)
     FsExecAuthenticatedRunResultV1(
-        exit_code: exit_code, evidence: evidence, scheduler: owner)
+        exit_code: exit_code, evidence: delivered.token, scheduler: owner)
 
 pub fn arm64_fs_exec_load_and_launch_hello_world() -> i64:
     """Load `/sys/apps/hello_world.smf` and emit genuine load + launch proofs.

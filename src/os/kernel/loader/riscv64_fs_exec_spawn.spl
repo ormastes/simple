@@ -11,7 +11,9 @@ use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.scheduler.process_execution_observation.{
-    SchedulerExecutionEvidenceTokenV1, scheduler_execution_take_reaped_token_v1,
+    SchedulerExecutionEvidenceTokenV1, SchedulerExecutionDeliveryStatusV2,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_discard_terminal_v2,
     scheduler_execution_evidence_consume_once_v1
 }
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
@@ -21,9 +23,6 @@ use os.kernel.scheduler.scheduler.{
     wait_collect_result_error, wait_collect_result_pid, wait_collect_result_status
 }
 use os.kernel.types.capability_types.{CapabilitySet}
-use os.kernel.scheduler.process_execution_observation.{
-    scheduler_execution_take_reaped_token_v1
-}
 
 extern fn serial_println(msg: text)
 
@@ -106,12 +105,14 @@ pub(package) fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         wait_collect_result_status(collected) != exit_code.to_i32()):
         return Rv64AuthenticatedExecutionResultV1(
             exit_code: -10, evidence: nil, scheduler: owner)
-    val evidence = scheduler_execution_take_reaped_token_v1(child.id)
-    if not evidence.?:
+    val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+        child.id, path, argv)
+    if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
+        _ = scheduler_execution_discard_terminal_v2(child.id)
         return Rv64AuthenticatedExecutionResultV1(
             exit_code: -10, evidence: nil, scheduler: owner)
     Rv64AuthenticatedExecutionResultV1(
-        exit_code: captured.exit_code, evidence: evidence, scheduler: owner)
+        exit_code: captured.exit_code, evidence: delivered.token, scheduler: owner)
 
 pub fn riscv64_authenticated_execution_acceptance_fixture_v1(
     scheduler: Scheduler, table: MountTable,
