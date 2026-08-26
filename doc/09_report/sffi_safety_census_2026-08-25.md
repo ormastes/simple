@@ -518,6 +518,14 @@ needed, by `SIMPLE_LINKER_FLAVOR`; platform process probes are unchanged.  No
 new allocation, copy, cache, lock, hash, boxing, subprocess, or dispatch was
 introduced.
 
+### MIR optimizer environment-authority follow-up
+
+The MIR optimizer no longer declares or calls raw `rt_env_get`; its shared
+nullable helper delegates to canonical always-inlined `env_get_opt`.  Trace and
+bootstrap policy remain mutation-visible at their existing query sites, while
+verify-each retains its one-read process cache.  No environment read, pass-loop
+work, allocation, copy, lock, hash, boxing, or dispatch was added.
+
 ### SSA and AOP environment-authority follow-up
 
 Variable-reassignment SSA and driver AOP weaving no longer declare or call raw

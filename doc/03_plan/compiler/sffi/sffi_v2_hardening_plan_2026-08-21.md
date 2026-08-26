@@ -1205,3 +1205,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
   `env_get_opt`.
 - [x] Preserve two mutation-visible SSA debug checks and four AOP reads.
 - [x] Add no cache or hot-path work and add a static call-count ratchet.
+
+### Completed MIR optimizer environment-authority slice
+
+- [x] Remove the module-local raw environment declaration and call.
+- [x] Retain the shared nullable helper through canonical always-inline
+  `env_get_opt`.
+- [x] Preserve mutation-visible trace/bootstrap reads and the one-read
+  verify-each cache.
+- [x] Add a static authority, call-count, and cache-shape ratchet.
