@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 2
+cd "$ROOT"
+
+fail() { echo "check-github-policy-projection: FAIL — $*" >&2; exit 1; }
+
+sh -n scripts/release/github-policy.sh || fail "github policy tool does not parse"
+sh -n scripts/release/candidate-ref-create.sh || fail "candidate ref tool does not parse"
+
+for file in .github/rulesets/spipe-vcs-v3-*.json .github/release-environment.json; do
+    jq -e . "$file" >/dev/null || fail "invalid JSON: $file"
+done
+
+rendered=$(scripts/release/github-policy.sh render)
+[ "$(printf '%s' "$rendered" | jq 'length')" -eq 7 ] || fail "expected seven rulesets"
+
+for name in candidates version-tags; do
+    file=".github/rulesets/spipe-vcs-v3-$name.json"
+    jq -e '([.rules[].type] | sort) == (["deletion","non_fast_forward","update"] | sort)' "$file" >/dev/null ||
+        fail "$name must be immutable after creation"
+    jq -e '(.bypass_actors // []) | length == 0' "$file" >/dev/null ||
+        fail "$name must not have an immutability bypass"
+done
+
+for name in candidate-creation version-tag-creation; do
+    file=".github/rulesets/spipe-vcs-v3-$name.json"
+    jq -e '[.rules[].type] == ["creation"]' "$file" >/dev/null ||
+        fail "$name must restrict creation"
+    jq -e '.bypass_actors == [{"actor_id":2378857,"actor_type":"User","bypass_mode":"always"}]' "$file" >/dev/null ||
+        fail "$name must bind creation to the repository owner authority"
+done
+
+jq -e '[.rules[].type] | index("pull_request") != null' \
+    .github/rulesets/spipe-vcs-v3-main.json >/dev/null || fail "main is not PR-only"
+jq -e '[.rules[].type] | index("pull_request") != null' \
+    .github/rulesets/spipe-vcs-v3-release-lines.json >/dev/null || fail "release lines are not PR-only"
+
+for projection in \
+    spipe-vcs-v3-main.json \
+    spipe-vcs-v3-release-lines.json \
+    spipe-vcs-v3-candidates.json \
+    spipe-vcs-v3-review-recovery.json \
+    spipe-vcs-v3-version-tags.json; do
+    rg -q "$projection" .spipe/policy/vcs.sdn || fail "policy does not bind $projection"
+done
+
+for projection in spipe-vcs-v3-candidate-creation.json spipe-vcs-v3-version-tag-creation.json; do
+    rg -q "$projection" .spipe/policy/vcs.sdn || fail "policy does not bind $projection"
+done
+
+rg -q 'immutable_releases: required' .spipe/policy/vcs.sdn || fail "immutable release authority missing"
+echo "check-github-policy-projection: PASS — seven rulesets, split creation/immutability authority, environment, and immutable-release policy"
