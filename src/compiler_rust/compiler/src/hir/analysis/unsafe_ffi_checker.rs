@@ -26,10 +26,10 @@ pub fn check_unsafe_ffi(module: &HirModule) -> Vec<UnsafeFfiViolation> {
     out
 }
 
-/// The seed mirrors the pure compiler's settled profile policy: critical and
-/// verified deny unsafe FFI, lower profiles remain migration diagnostics.
-/// Cached once so module count cannot turn profile lookup into a build-time
-/// hot-path regression.
+/// Critical and verified profiles deny unscoped raw FFI. Lower profiles remain
+/// temporarily permissive while the repository-wide census identifies and
+/// migrates legacy callsites; they must not be described as verified.
+/// Cache the profile decision so module count cannot multiply environment work.
 pub fn unsafe_ffi_deny_enabled() -> bool {
     static DENY: OnceLock<bool> = OnceLock::new();
     *DENY.get_or_init(|| {

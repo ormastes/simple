@@ -1129,6 +1129,13 @@ slice was source-reviewed only and deliberately not executed. Raw-call identity
 now comes exclusively from HIR's extern set, which includes imported externs and
 aliases; `rt_`/`spl_` prefixes alone no longer misclassify pure local functions.
 The check remains one existing O(1) set lookup per analyzed global call.
+Strict-profile MIR admission skips the HIR walk in O(1) when the semantic extern
+set is empty; modules that actually contain or import externs receive one
+fail-fast linear pass. Lower profiles remain temporarily permissive during the
+large migration and therefore remain classified unsafe/unverified by the
+census. Enabling the gate globally before those callsites are tagged would
+break ordinary builds, so that sequencing shortcut was explicitly rejected.
+Source-reviewed, not executed.
 
 ## 2026-08-26 Base64/Base64url contract follow-up
 

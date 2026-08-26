@@ -1585,6 +1585,9 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Replaced `rt_`/`spl_` prefix inference with the HIR extern-identity set, which
   already includes imported externs and aliases; pure local prefixed functions
   no longer acquire foreign authority accidentally.
+- Added an O(1) empty-extern bypass to strict-profile MIR admission; actual SFFI
+  modules retain one fail-fast linear HIR pass. Global gating remains sequenced
+  after callsite migration so ordinary builds are not broken prematurely.
 - Kept MIR/runtime representation unchanged; capability collection is linear in
   the already-parsed header and stores one small vector per unsafe block only
   during compilation.
