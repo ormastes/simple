@@ -21,8 +21,26 @@ use std.spec.{describe, it, assert_equal, assert_true}
 use std.common.base_encoding.base64.{base64url_encode as simple_encode, base64url_decode as simple_decode}
 
 # C oracle (test-only; never production-linked from Simple product code here).
-extern fn rt_base64url_encode(input: text, len: i64) -> text
-extern fn rt_base64url_decode(encoded: text) -> text
+@unsafe(reason: "raw nullable C Base64url encode oracle", capabilities: [ffi])
+extern fn rt_base64url_encode(input: text, len: i64) -> text?
+@unsafe(reason: "raw nullable C Base64url decode oracle", capabilities: [ffi])
+extern fn rt_base64url_decode(encoded: text) -> text?
+
+fn c_base64url_encode(input: text, len: i64) -> text:
+    if len < 0 or len > input.bytes().len():
+        panic("E-SFFI-BASE64URL-ENCODE: length is outside input bounds")
+    val result = unsafe(capabilities: [ffi]):
+        rt_base64url_encode(input, len)
+    if result == nil:
+        panic("E-SFFI-BASE64URL-ENCODE: C oracle rejected input")
+    result.unwrap()
+
+fn c_base64url_decode(encoded: text) -> text:
+    val result = unsafe(capabilities: [ffi]):
+        rt_base64url_decode(encoded)
+    if result == nil:
+        panic("E-SFFI-BASE64URL-DECODE: C oracle rejected input")
+    result.unwrap()
 
 val ENC_LOWER = "abcdefghijklmnopqrstuvwxyz"
 val ENC_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -35,19 +53,19 @@ describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 
         # url-safe alphabet only differs from standard base64 in char 62/63
         # and padding, exercised separately below.
         assert_equal(simple_encode(""), "")
-        assert_equal(simple_encode(""), rt_base64url_encode("", 0))
+        assert_equal(simple_encode(""), c_base64url_encode("", 0))
         assert_equal(simple_encode("f"), "Zg")
-        assert_equal(simple_encode("f"), rt_base64url_encode("f", 1))
+        assert_equal(simple_encode("f"), c_base64url_encode("f", 1))
         assert_equal(simple_encode("fo"), "Zm8")
-        assert_equal(simple_encode("fo"), rt_base64url_encode("fo", 2))
+        assert_equal(simple_encode("fo"), c_base64url_encode("fo", 2))
         assert_equal(simple_encode("foo"), "Zm9v")
-        assert_equal(simple_encode("foo"), rt_base64url_encode("foo", 3))
+        assert_equal(simple_encode("foo"), c_base64url_encode("foo", 3))
         assert_equal(simple_encode("foob"), "Zm9vYg")
-        assert_equal(simple_encode("foob"), rt_base64url_encode("foob", 4))
+        assert_equal(simple_encode("foob"), c_base64url_encode("foob", 4))
         assert_equal(simple_encode("fooba"), "Zm9vYmE")
-        assert_equal(simple_encode("fooba"), rt_base64url_encode("fooba", 5))
+        assert_equal(simple_encode("fooba"), c_base64url_encode("fooba", 5))
         assert_equal(simple_encode("foobar"), "Zm9vYmFy")
-        assert_equal(simple_encode("foobar"), rt_base64url_encode("foobar", 6))
+        assert_equal(simple_encode("foobar"), c_base64url_encode("foobar", 6))
 
     it "round-trips through decode, matching the C oracle":
         val vectors = ["", "f", "fo", "foo", "foob", "fooba", "foobar", "hello world", "Simple!"]
@@ -55,10 +73,10 @@ describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 
         while i < vectors.len():
             val v = vectors[i]
             val simple_enc = simple_encode(v)
-            val c_enc = rt_base64url_encode(v, v.bytes().len())
+            val c_enc = c_base64url_encode(v, v.bytes().len())
             assert_equal(simple_enc, c_enc)
             val simple_dec = simple_decode(simple_enc)
-            val c_dec = rt_base64url_decode(c_enc)
+            val c_dec = c_base64url_decode(c_enc)
             assert_equal(simple_dec, v)
             assert_equal(simple_dec, c_dec)
             i = i + 1
@@ -73,7 +91,7 @@ describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 
         while i < vectors.len():
             val v = vectors[i]
             val enc = simple_encode(v)
-            val oracle_enc = rt_base64url_encode(v, v.bytes().len())
+            val oracle_enc = c_base64url_encode(v, v.bytes().len())
             assert_equal(enc, oracle_enc)
             assert_true(!enc.contains("+"))
             assert_true(!enc.contains("/"))
@@ -84,11 +102,11 @@ describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 
         val enc_a = simple_encode("abc")
         val enc_b = simple_encode("abd")
         assert_true(enc_a != enc_b)
-        assert_true(rt_base64url_encode("abc", 3) != rt_base64url_encode("abd", 3))
+        assert_true(c_base64url_encode("abc", 3) != c_base64url_encode("abd", 3))
 
     it "is deterministic on both sides":
         assert_equal(simple_encode("determinism"), simple_encode("determinism"))
-        assert_equal(rt_base64url_encode("determinism", 11), rt_base64url_encode("determinism", 11))
+        assert_equal(c_base64url_encode("determinism", 11), c_base64url_encode("determinism", 11))
 
     it "matches the C oracle on 100 shared branch-covering vectors, with perf evidence":
         # SHARED TEST LOGIC (plan: "C-migration test standard"): one
@@ -123,7 +141,7 @@ describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 
             val t0 = time_now_unix_micros()
             val s = simple_encode(body)
             val t1 = time_now_unix_micros()
-            val c = rt_base64url_encode(body, nbytes)
+            val c = c_base64url_encode(body, nbytes)
             val t2 = time_now_unix_micros()
             simple_us = simple_us + (t1 - t0)
             c_us = c_us + (t2 - t1)
@@ -144,11 +162,11 @@ describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 
         val abc = "ABC"      # exact 3-byte multiple -> no padding
         val abcabc = "ABCABC"  # two exact 3-byte groups
 
-        assert_equal(simple_encode(""), rt_base64url_encode("", 0))
-        assert_equal(simple_encode(a), rt_base64url_encode(a, 1))
-        assert_equal(simple_encode(ab), rt_base64url_encode(ab, 2))
-        assert_equal(simple_encode(abc), rt_base64url_encode(abc, 3))
-        assert_equal(simple_encode(abcabc), rt_base64url_encode(abcabc, 6))
+        assert_equal(simple_encode(""), c_base64url_encode("", 0))
+        assert_equal(simple_encode(a), c_base64url_encode(a, 1))
+        assert_equal(simple_encode(ab), c_base64url_encode(ab, 2))
+        assert_equal(simple_encode(abc), c_base64url_encode(abc, 3))
+        assert_equal(simple_encode(abcabc), c_base64url_encode(abcabc, 6))
 
         assert_equal(simple_decode(simple_encode(a)), a)
         assert_equal(simple_decode(simple_encode(ab)), ab)
@@ -163,18 +181,18 @@ describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 
             big = big + ENC_LOWER.char_at(k % 26)
             k = k + 1
         val big_simple_enc = simple_encode(big)
-        val big_c_enc = rt_base64url_encode(big, big.bytes().len())
+        val big_c_enc = c_base64url_encode(big, big.bytes().len())
         assert_equal(big_simple_enc, big_c_enc)
         assert_equal(simple_decode(big_simple_enc), big)
-        assert_equal(simple_decode(big_c_enc), rt_base64url_decode(big_c_enc))
+        assert_equal(simple_decode(big_c_enc), c_base64url_decode(big_c_enc))
 
     # ---- out-of-alphabet input (added 2026-08-18) -------------------------
     #
     # Gap this closes: every example above feeds the decoders WELL-FORMED
     # base64url. RFC 4648 section 3.3 requires a decoder to REJECT characters
-    # outside the alphabet unless the referring spec says otherwise. Measured
-    # here: neither provider rejects, and they are lenient in DIFFERENT ways,
-    # so the oracle cannot be trusted on this input class.
+    # outside the alphabet unless the referring spec says otherwise. The C
+    # oracle and interpreter bridge now reject this class; these rows retain
+    # characterization of the separate pure-Simple decoder defect.
     #
     # These are CHARACTERIZATION examples, not approval. They pin the current
     # pure-Simple behaviour so the fix is visible when it lands, and assert
@@ -200,10 +218,9 @@ describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 
         assert_equal(simple_decode("ab*d").len(), 2)
         assert_equal(simple_decode("a b c").len(), 2)
 
-    it "CHARACTERIZATION: '+' and '/' are tolerated, and the oracle disagrees":
-        # Standard-alphabet text is NOT valid base64url. Both sides accept it
-        # anyway and produce DIFFERENT results — so this is precisely where
-        # the differential oracle must not be treated as ground truth.
+    it "CHARACTERIZATION: the pure decoder still tolerates '+' and '/'":
+        # Standard-alphabet text is NOT valid base64url. The hardened foreign
+        # oracle rejects it, so this row characterizes only the remaining pure
+        # decoder defect rather than calling the oracle with malformed input.
         val std_alphabet = "a+b/c"
         assert_equal(simple_decode(std_alphabet).len(), 3)
-        assert_true(simple_decode(std_alphabet) != rt_base64url_decode(std_alphabet))

@@ -1552,6 +1552,17 @@ Torch SFFI nor all SFFI may be described as verified safe.
   removing the final raw declaration while retaining one provider call.
 - Status: source-reviewed, deliberately unverified; global signed provider
   admission remains pending.
+## 2026-08-26 Base64/Base64url contract follow-up
+
+- Enforced exact interpreter arity, bounded explicit encode length, strict
+  alphabet decoding, and strict UTF-8 lifting; removed nil/empty/lossy failure.
+- Hardened the C oracle for null arguments, malformed length/alphabet, size
+  overflow, and allocation failure, returning null rather than corrupt output.
+- Tagged the two test-only raw declarations `unsafe(ffi)` and confined them to
+  nullable fail-closed wrappers with input-length admission.
+- Kept provider encode/decode single-pass with one output allocation; invalid
+  decode frees that allocation and no valid path gains a second traversal.
+- Status: source-reviewed, deliberately unverified and unsigned.
 ## 2026-08-26 SHA-1 return-contract follow-up
 
 - Aligned `finish(handle) -> text?` and `finish_bytes(handle) -> [u8]?` across

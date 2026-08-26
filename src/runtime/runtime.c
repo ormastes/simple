@@ -2630,11 +2630,17 @@ int64_t rt_random_i64(void) {
 static const char b64url_enc_table[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+/* Returns NULL for malformed arguments, size overflow, or allocation failure. */
 const char* rt_base64url_encode(const char* input, int64_t len) {
-    if (!input || len <= 0) return SPL_STRDUP("", "str");
+    if (len < 0 || (!input && len != 0)) return NULL;
+    if (len == 0) return SPL_STRDUP("", "str");
     size_t in_len = (size_t)len;
-    size_t out_len = ((in_len + 2) / 3) * 4;
+    if (in_len > SIZE_MAX - 2) return NULL;
+    size_t groups = (in_len + 2) / 3;
+    if (groups > (SIZE_MAX - 1) / 4) return NULL;
+    size_t out_len = groups * 4;
     char* out = (char*)SPL_MALLOC(out_len + 1, "str");
+    if (!out) return NULL;
     size_t j = 0;
     for (size_t i = 0; i < in_len; ) {
         uint32_t a = (unsigned char)input[i++];
@@ -2663,22 +2669,31 @@ static int b64url_decode_char(char c) {
     return -1;
 }
 
+/* Returns NULL for invalid alphabet/length, overflow, or allocation failure. */
 const char* rt_base64url_decode(const char* input) {
-    if (!input || !*input) return SPL_STRDUP("", "str");
+    if (!input) return NULL;
+    if (!*input) return SPL_STRDUP("", "str");
     size_t in_len = strlen(input);
+    if (in_len % 4 == 1 || in_len > SIZE_MAX - 3) return NULL;
     /* Pad to multiple of 4 for decoding */
     size_t padded = in_len;
     if (padded % 4 != 0) padded += 4 - (padded % 4);
-    size_t out_max = (padded / 4) * 3;
+    size_t groups = padded / 4;
+    if (groups > (SIZE_MAX - 1) / 3) return NULL;
+    size_t out_max = groups * 3;
     char* out = (char*)SPL_MALLOC(out_max + 1, "str");
+    if (!out) return NULL;
     size_t j = 0;
     for (size_t i = 0; i < padded; i += 4) {
         int a = (i     < in_len) ? b64url_decode_char(input[i])     : 0;
         int b = (i + 1 < in_len) ? b64url_decode_char(input[i + 1]) : 0;
         int c = (i + 2 < in_len) ? b64url_decode_char(input[i + 2]) : -1;
         int d = (i + 3 < in_len) ? b64url_decode_char(input[i + 3]) : -1;
-        if (a < 0) a = 0;
-        if (b < 0) b = 0;
+        if (a < 0 || b < 0 || (i + 2 < in_len && c < 0) ||
+            (i + 3 < in_len && d < 0)) {
+            SPL_FREE(out);
+            return NULL;
+        }
         uint32_t triple = ((uint32_t)a << 18) | ((uint32_t)b << 12);
         if (c >= 0) triple |= ((uint32_t)c << 6);
         if (d >= 0) triple |= (uint32_t)d;

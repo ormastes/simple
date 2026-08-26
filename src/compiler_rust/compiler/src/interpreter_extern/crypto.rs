@@ -167,17 +167,21 @@ pub fn rt_sha1_finish_base64(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_base64_encode(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_base64_encode")?;
     let data = bytes_arg(args, 0, "rt_base64_encode")?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
     Ok(Value::text(encoded))
 }
 
 pub fn rt_base64_decode(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_base64_decode")?;
     let input = text_arg(args, 0, "rt_base64_decode")?;
-    match base64::engine::general_purpose::STANDARD.decode(input) {
-        Ok(bytes) => Ok(Value::text(String::from_utf8_lossy(&bytes).into_owned())),
-        Err(_) => Ok(Value::Nil),
-    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(input)
+        .map_err(|_| CompileError::runtime("rt_base64_decode: invalid base64 input".to_string()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| CompileError::runtime("rt_base64_decode: decoded bytes are not UTF-8".to_string()))?;
+    Ok(Value::text(text))
 }
 
 /// Constant-time text comparison for the interpreter.
@@ -232,6 +236,7 @@ pub fn rt_constant_time_compare(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_sha1(data: text) -> text`
 pub fn rt_sha1(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha1")?;
     let data = bytes_arg(args, 0, "rt_sha1")?;
     let mut hasher = Sha1::new();
     hasher.update(&data);
@@ -243,25 +248,30 @@ pub fn rt_sha1(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_base64url_decode(encoded: text) -> text`
 pub fn rt_base64url_decode(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_base64url_decode")?;
     let input = text_arg(args, 0, "rt_base64url_decode")?;
-    match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(input) {
-        Ok(bytes) => Ok(Value::text(String::from_utf8_lossy(&bytes).into_owned())),
-        Err(_) => Ok(Value::text(String::new())),
-    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(input)
+        .map_err(|_| CompileError::runtime("rt_base64url_decode: invalid base64url input".to_string()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| CompileError::runtime("rt_base64url_decode: decoded bytes are not UTF-8".to_string()))?;
+    Ok(Value::text(text))
 }
 
 /// Base64url encode (RFC 4648 section 5, no padding).
 ///
 /// Callable from Simple as: `rt_base64url_encode(input: text, len: i64) -> text`
 pub fn rt_base64url_encode(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 2, "rt_base64url_encode")?;
     let data = bytes_arg(args, 0, "rt_base64url_encode")?;
-    // Second argument (len) can limit how many bytes to encode
-    let requested = int_arg(args, 1, "rt_base64url_encode")?;
-    let limit = if requested > 0 && (requested as usize) < data.len() {
-        requested as usize
-    } else {
-        data.len()
-    };
+    let limit = usize::try_from(int_arg(args, 1, "rt_base64url_encode")?)
+        .map_err(|_| CompileError::runtime("rt_base64url_encode: len is outside usize range".to_string()))?;
+    if limit > data.len() {
+        return Err(CompileError::runtime(format!(
+            "rt_base64url_encode: len {limit} exceeds payload length {}",
+            data.len()
+        )));
+    }
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&data[..limit]);
     Ok(Value::text(encoded))
 }
@@ -293,10 +303,18 @@ mod tests {
         assert!(rt_sha1_reset(&[Value::Bool(false)]).is_err());
         assert!(rt_sha1_free(&[Value::Int(i64::MAX)]).is_err());
         assert!(rt_base64_encode(&[]).is_err());
+        assert!(rt_base64_encode(&[Value::text("a"), Value::Nil]).is_err());
         assert!(rt_base64_decode(&[Value::Int(0)]).is_err());
+        assert!(rt_base64_decode(&[Value::text("!!!!")]).is_err());
+        assert!(rt_base64url_decode(&[Value::text("a+b/c")]).is_err());
         assert!(rt_constant_time_compare(&[Value::text("a"), Value::Nil]).is_err());
         assert!(rt_sha1(&[]).is_err());
         assert!(rt_base64url_encode(&[Value::text("value"), Value::Nil]).is_err());
+        assert!(rt_base64url_encode(&[
+            Value::text("value"),
+            Value::Int(6),
+        ])
+        .is_err());
     }
 
     #[test]

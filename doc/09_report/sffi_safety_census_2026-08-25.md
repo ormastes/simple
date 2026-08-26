@@ -1078,3 +1078,14 @@ frame send/receive hot path. Wall-clock access now uses the canonical fail-close
 time facade, removing the final raw declaration from this module while retaining
 the same provider call and millisecond division. Source-reviewed but unverified;
 broader SFFI signing and admission remain absent.
+## 2026-08-26 Base64/Base64url contract follow-up
+
+Interpreter Base64/Base64url handlers now enforce exact arity, explicit bounded
+encode length, strict alphabet decoding, and strict UTF-8 lifting instead of
+nil/empty or lossy text. The C Base64url oracle returns null for malformed
+arguments, invalid alphabet/length, arithmetic overflow, or allocation failure;
+its test-only declarations are optional, tagged `unsafe(ffi)`, and lifted once
+through fail-closed wrappers. C decode validates while producing output and
+frees on rejection; encode/decode remain single-pass with one output allocation
+and no preflight alphabet traversal. Pure-Simple decoder leniency remains a
+separate characterized defect. Source-reviewed but unverified and unsigned.
