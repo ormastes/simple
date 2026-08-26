@@ -1496,3 +1496,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add no loop work, allocation, hash, lock, cache, or dispatch.
 - [x] Add a static authority and call-count ratchet.
 - [x] Record the canonical provider as raw, unsigned, and unverified.
+## 2026-08-26 module-resolution environment authority follow-up
+
+- Removed the duplicate module-resolver `rt_env_get` declaration and wrapper.
+- Kept path join/dirname as direct always-inline owners with unchanged probe
+  ordering and counts.
+- Deferred any `SIMPLE_LIB` value cache because it would change visibility of
+  environment mutation; canonical ownership alone adds no intended hot-path
+  allocation, lookup, or copy.
+- Status: source-reviewed, deliberately unverified for this sync.

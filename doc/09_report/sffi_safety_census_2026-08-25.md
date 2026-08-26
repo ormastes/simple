@@ -895,3 +895,9 @@ same default-profile input, while callers can still reapply an already resolved
 policy later. Initialization retains exactly one read and one policy application
 with no loop work, allocation, copy, cache, hash, signature check, lock, lookup,
 boxing, marshalling, or dynamic dispatch added.
+## 2026-08-26 module-resolution environment authority follow-up
+
+`module_loader_resolve.spl` no longer redeclares `rt_env_get`; `SIMPLE_LIB` is
+read through the canonical always-inline `env_get_opt` owner. The two raw path
+ABIs remain locally confined so candidate ordering and all path-operation call
+sites are unchanged. This slice is source-reviewed but unverified.
