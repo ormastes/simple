@@ -32,14 +32,10 @@
 //! `ring` is used because it is already a dependency of this crate (see
 //! `sha512.rs`); no new crate is introduced.
 //!
-//! **Deliberately NOT registered here:** `rt_sha256_finish_bytes` (the native
-//! form packs 32 raw, non-UTF-8 bytes into a runtime string; no interpreter
-//! `Value` reproduces that packing without either lossy corruption or a
-//! type divergence between lanes) and any one-shot `rt_sha256_hex` (it has no
-//! native counterpart, so a `.spl` caller would link on the interpreter and
-//! fail to link AOT). Only the five symbols whose observable behaviour is
-//! identical in both lanes are registered, so `.spl` code written against them
-//! behaves the same interpreted and compiled.
+//! `rt_sha256_finish_bytes` is registered here because the native provider now
+//! returns a typed byte array rather than packing arbitrary bytes into a runtime
+//! string. A one-shot `rt_sha256_hex` remains absent because it has no native
+//! counterpart. Every registered symbol therefore has a matching compiled ABI.
 
 use crate::error::CompileError;
 use crate::value::Value;
@@ -211,6 +207,20 @@ pub fn rt_sha256_finish(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_sha256_finish_bytes(hasher: i64) -> [u8]` — exact 32-byte digest.
+pub fn rt_sha256_finish_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha256_finish_bytes")?;
+    let handle = handle_of(args, "rt_sha256_finish_bytes")?;
+    let ctx = SHA256_STATE.lock().unwrap().remove(&handle);
+    match ctx {
+        Some(c) => Ok(Value::byte_array(c.finish().as_ref().to_vec())),
+        None => Err(CompileError::runtime(format!(
+            "rt_sha256_finish_bytes: unknown hasher handle {}",
+            handle
+        ))),
+    }
+}
+
 /// `rt_sha256_reset(hasher: i64)`
 pub fn rt_sha256_reset(args: &[Value]) -> Result<Value, CompileError> {
     require_arity(args, 1, "rt_sha256_reset")?;
@@ -361,8 +371,27 @@ mod tests {
         ])
         .is_err());
         assert!(rt_sha256_finish(&[Value::Int(handle), Value::Nil]).is_err());
+        assert!(rt_sha256_finish_bytes(&[Value::Int(handle), Value::Nil]).is_err());
         assert!(rt_sha256_reset(&[Value::Int(handle), Value::Nil]).is_err());
         assert!(rt_sha256_free(&[Value::Int(handle), Value::Nil]).is_err());
+    }
+
+    /// Byte-result lifting must preserve all 32 digest bytes without text loss.
+    #[test]
+    fn finish_bytes_matches_published_vector() {
+        let handle = new_handle();
+        rt_sha256_write(&[
+            Value::Int(handle),
+            Value::text("abc".to_string()),
+            Value::Int(3),
+        ])
+        .unwrap();
+        let result = rt_sha256_finish_bytes(&[Value::Int(handle)]).unwrap();
+        let bytes = result.try_array_bytes().unwrap();
+        assert_eq!(
+            hex_of(&bytes),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     /// An unknown handle must error, not return a digest of nothing. Guards

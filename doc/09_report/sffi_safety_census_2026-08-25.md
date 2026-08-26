@@ -1052,3 +1052,15 @@ Native digest publication uses the packed-array bulk-copy owner rather than
 twenty element-dispatch calls.
 This remains source-reviewed, unverified, unsigned, and SHA-1 remains unsuitable
 for security decisions.
+## 2026-08-26 SHA-256 cross-lane return follow-up
+
+SHA-256 `finish` and `finish_bytes` declarations now match provider text and
+optional byte-array results. The ignored out-pointer and packed-value-to-`u64`
+paths are removed; invalid allocation/finish handles fail closed. The
+interpreter now owns a strict registered byte-result handler instead of falling
+through generic dynamic dispatch, and native binary output is tagged as a byte
+array rather than text. Native write rejects non-platform-sized lengths and
+handle allocation rejects counter exhaustion. Scalar finish uses the first
+eight digest bytes and native publication uses one packed bulk copy, avoiding
+hex formatting and per-element dispatch. Source-reviewed but unverified and
+unsigned; signed artifact admission is still absent.

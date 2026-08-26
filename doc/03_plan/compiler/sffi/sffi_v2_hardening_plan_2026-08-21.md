@@ -1555,6 +1555,19 @@ Torch SFFI nor all SFFI may be described as verified safe.
   native digest publication uses one packed-array bulk copy.
 - Status: source-reviewed, deliberately unverified and unsigned; SHA-1 is not
   admitted for security use.
+## 2026-08-26 SHA-256 cross-lane return follow-up
+
+- Aligned raw finish declarations with typed text/optional byte-array provider
+  results and removed ignored out-pointer/packed-integer conversions.
+- Added the exact interpreter `finish_bytes` registration; no dynamic fallback.
+- Made invalid allocation/finish handles fail closed and checked native pointer
+  length plus atomic handle exhaustion.
+- Published native digest bytes through one packed bulk copy and derived scalar
+  finish directly from eight digest bytes, eliminating hex formatting and
+  per-element setter dispatch from that public path.
+- Preserved one registry removal and one digest finalization; no preflight
+  lookup, second lock, payload copy, or hash pass was added.
+- Status: source-reviewed, deliberately unverified and unsigned.
 ## 2026-08-26 XXH3 legacy-boundary follow-up
 
 - Tagged six raw XXH3 declarations `unsafe(ffi)` and confined their calls to

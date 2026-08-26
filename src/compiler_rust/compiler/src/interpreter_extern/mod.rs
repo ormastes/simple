@@ -1826,6 +1826,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // See `interpreter_extern/sha256.rs` and
     // doc/08_tracking/bug/vulkan_font_whole_atlas_sha256_per_upload_2026-08-04.md.
     insert_simple!("rt_sha256_finish", sha256::rt_sha256_finish);
+    insert_simple!("rt_sha256_finish_bytes", sha256::rt_sha256_finish_bytes);
     insert_simple!("rt_sha256_free", sha256::rt_sha256_free);
     insert_simple!("rt_sha256_new", sha256::rt_sha256_new);
     insert_simple!("rt_sha256_reset", sha256::rt_sha256_reset);
