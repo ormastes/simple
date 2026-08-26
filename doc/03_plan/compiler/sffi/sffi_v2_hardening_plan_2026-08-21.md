@@ -1799,3 +1799,16 @@ Torch SFFI nor all SFFI may be described as verified safe.
   keep signature and evidence verification at admission, never on the call
   path.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 span-handle export minimization
+
+- Confirmed the six interpreter span-handle symbols have no Simple consumers.
+- Removed both direct-module and aggregate exports while retaining private,
+  explicitly `unsafe(ffi)` declarations and the hardened interpreter provider.
+- Added a static authority contract that rejects raw re-export and new
+  interpreter callsites outside the owner.
+- Avoided manufacturing an ownership wrapper for an unused API, so there is no
+  new owner allocation, lookup, branch, copy, or provider dispatch.
+- A future consumer must first introduce a typed non-copying owner with explicit
+  close/drop semantics; raw i64 handles must not be re-exported.
+- Status: source-reviewed, deliberately unverified and unsigned.

@@ -1016,7 +1016,13 @@ because `i64` cannot prove ownership. The interpreter provider now enforces
 exact arity, checked `usize` conversion, ordered ranges, checked handle-ID
 growth, and unknown/double-free errors. Valid create/access/free paths retain
 one registry insertion/lookup/removal; no extra registry pass or allocation was
-added. Interpreter-only, source-reviewed, unverified, and unsigned.
+added. Follow-up reachability review found no repository consumers, so the six
+raw handle functions are no longer exported by either their owner module or the
+interpreter FFI aggregate. This reduces the public unsafe surface without
+inventing an allocated wrapper for an unused API or changing provider/runtime
+work. A static authority contract keeps the private declarations annotated and
+prevents raw re-export or new interpreter callsites. Interpreter-only,
+source-reviewed, unverified, and unsigned.
 ## 2026-08-26 SHA-256 handle-contract follow-up
 
 The five interpreter SHA-256 handlers now enforce exact arity. Write requires a
