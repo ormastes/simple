@@ -290,3 +290,11 @@ always-inlined lexical owners.  SDN reads are nullable; subprocess exit codes
 and generated-output presence remain mandatory checks.  Raw calls remain
 one-for-one, with no extra process, filesystem probe, allocation, copy, lookup,
 or generic dispatch.
+### Compiler public-VHDL authority follow-up
+
+The public VHDL compile facade now declares its source-map reader nullable,
+tags it `unsafe(ffi)`, and confines it to one always-inlined lexical owner.
+After a successful external compile, source or generated-output read failure
+now changes the result to a typed runtime error instead of writing an empty
+source map and returning success.  The successful branch retains exactly two
+reads and adds no probe, retry, copy, lookup, or generic dispatch.

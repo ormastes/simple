@@ -1864,3 +1864,10 @@ and unpromoted.
 - [x] Correct SDN source reads to nullable text.
 - [x] Preserve exit-code and output-presence checks.
 - [x] Preserve foreign-call counts and add a static ownership ratchet.
+### Completed compiler public-VHDL authority slice
+
+- [x] Correct source-map reads to nullable text.
+- [x] Tag and confine them to one always-inlined lexical owner.
+- [x] Fail a successful compile if source-map input/output cannot be read.
+- [x] Prevent fabricated empty source maps from returning success.
+- [x] Preserve two-read success behavior and add a static ratchet.
