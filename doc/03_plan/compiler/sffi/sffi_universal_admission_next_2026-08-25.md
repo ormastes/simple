@@ -550,3 +550,16 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   clobber bug; do not report lint as passing.
 - [ ] Continue with real provider families and exact-artifact admission; this
   dead-lane removal is not signed verification.
+
+### Providerless QUIC ABI removal
+
+- [x] Confirm `quic_provider_check()` is hard-disabled and no C/Rust quiche
+  provider exists.
+- [x] Remove the 14 production and 28 mirrored-test raw `rt_quic_*`
+  declarations.
+- [x] Preserve the public connection API as a pure-Simple terminal-state facade
+  with no native handle dispatch.
+- [x] Add an authority guard requiring the unadmitted ABI to stay absent.
+- [x] Run the guard, source check, compatibility spec, and optimizer once.
+- [ ] Introduce native QUIC only through a typed status/out ownership contract
+  after authenticated QUIC-TLS and exact-artifact admission are available.

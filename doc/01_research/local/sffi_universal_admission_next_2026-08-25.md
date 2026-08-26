@@ -6117,3 +6117,26 @@ The requested lint lane was also attempted once and failed in the compiler,
 before producing a file verdict, because `Linter.lint_source_for_parsed_append`
 is unresolved.  This is the already-recorded lint-subsystem clobber blocker in
 `stale_snapshot_clobber_4edef8fab8e_2026-08-26.md`, not a green lint result.
+
+## Providerless QUIC ABI removal checkpoint (2026-08-26)
+
+The native-quiche facade declared 14 `rt_quic_*` functions without any C or
+Rust provider.  Its provider authority is deliberately constant
+`Unavailable`, so all raw calls were unreachable, while two mirrored unit
+specs repeated the same 14 unresolved declarations.  The source tree therefore
+carried 42 raw QUIC declarations for a provider that cannot be admitted.
+
+The raw module and test-local extern shadows are removed.  The connection API
+is now an explicit pure-Simple terminal-state compatibility facade: constructors
+return closed connections, writes/timers return the existing failure sentinel,
+and no native lookup or call exists.  A future native provider must introduce a
+typed reviewed contract rather than changing the availability enum alone.
+
+The QUIC authority audit and source check pass; the pure compatibility spec
+passes 12/12.  Optimizer analysis reports no opportunity.  Every retained leaf
+remains O(1), and removing unreachable provider checks/calls reduces branches
+and code without adding allocation, copying, lookup, or dispatch.  The refreshed
+repository census is 12,929 total declarations and 11,305 `rt_` declarations,
+with zero signed admission; exactly 42 `rt_quic_*` declarations are removed by
+this tranche, while concurrent upstream census movement accounts for the other
+three-row difference from the preceding checkpoint.

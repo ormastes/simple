@@ -2029,3 +2029,19 @@ allocation, lookup, or copy to the retained native registry.  Total SFFI rows
 drop by another 14 to an expected 12,974, while the 11,350 `rt_` rows and zero
 signed-admitted rows are unchanged.  This remains unsafe-surface reduction,
 not universal verification.
+
+### Providerless QUIC ABI removed (2026-08-26)
+
+The native-quiche layer had no provider and was permanently gated unavailable,
+but retained 14 production and 28 mirrored-test `rt_quic_*` declarations.  All
+42 declarations are removed.  The public connection surface now executes only
+its existing pure-Simple terminal-state behavior, and the authority audit
+prevents raw QUIC declarations or the deleted `quic_sffi` owner from returning.
+
+The connection source check passes, the compatibility spec passes 12/12, and
+optimizer analysis reports no opportunity.  All leaves remain O(1); no
+allocation, copy, lookup, or dispatch was added.  The current repository census
+is 12,929 SFFI rows, 11,305 `rt_` rows, 3,018 distinct `rt_` symbols, 1,585
+symbols with incomplete unsafe tagging, 1,031 untouched symbols, and zero
+signed-admitted rows or symbols.  Native QUIC remains unavailable rather than
+being mislabeled safe or verified.
