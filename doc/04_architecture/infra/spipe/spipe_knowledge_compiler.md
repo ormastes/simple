@@ -1072,6 +1072,14 @@ wrong-policy, or wrong-generation replay fails closed. Persistence across
 restart is not claimed. Provider selection occurs before bridge construction,
 so a failed page cannot switch providers mid-collection.
 
+The public-error and storage capsules intentionally use different closed
+vocabularies. After reservation, an unclassified malfunction of trusted cursor
+authority `identity`, `sign`, or `verify` is stored as the existing legal
+`interrupted` tombstone before the bridge returns public `internal_error`.
+`internal_error` never enters the tombstone enum. A specific expiry,
+revocation, binding, authority-generation, policy, or record-corruption result
+established first retains precedence.
+
 Successful bridge and provider-executor paths both observe their trusted clock
 before work and immediately before return. The end observation rechecks expiry
 and current revocation; work that crosses expiry is tombstoned and cannot
@@ -1138,19 +1146,13 @@ The architecture dependency order is now provider-ABI repair, provider
 implementation/admission, then integrated pipeline admission. Wave 4 and AC-4
 remain open.
 
-### 17.8 Final-four provider ABI architecture handoff (2026-08-26)
+### 17.8 Cursor-authority failure mapping (2026-08-26)
 
-The fresh final-four repair narrowed the prior blockers but reached the third
-review/fix cycle with one unresolved representability conflict. After a
-reservation, a cursor-authority malfunction has the public result
-`internal_error`, while the closed tombstone enum cannot represent that value.
-The next fresh architecture pass must explicitly freeze either (a) a legal
-stored `interrupted` tombstone paired with public `internal_error`, or (b) an
-added `internal_error` tombstone member. No implicit coercion is admissible.
-
-The failed immutable snapshot
-`4c009a35f32be370cba5df6fcd142841165fcb57` is retained only at
-`/tmp/spkc-provider-abi-final4-b60RQD/repo`. The session landed no contract or
-product edits, ran no product tests, and pushed nothing. Its text remains
-non-authoritative. Wave 4, provider admission, AC-4, and pipeline admission
+The final-four representability conflict is resolved with no ABI expansion.
+For a trusted cursor-authority malfunction after reservation, storage records
+the existing legal `interrupted` tombstone and the public boundary returns
+`internal_error`, in that order. This is explicit capsule translation, not
+implicit coercion; `internal_error` remains absent from the tombstone enum.
+Specific already-established failure classifications retain precedence.
+Provider implementation and admission, Wave 4, AC-4, and pipeline admission
 remain open.

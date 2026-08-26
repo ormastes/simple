@@ -1731,6 +1731,13 @@ for `kind:"lexical_aggregate"` it is exactly the corresponding aggregate
 operation digest. These are the only two `kind` values. Tombstone `reason` is
 exactly one of `interrupted`, `expired`, `revoked`, `binding_mismatch`,
 `authority_generation_changed`, `policy_changed`, or `record_corrupt`.
+`internal_error` is deliberately not a tombstone reason. If trusted
+cursor-authority `identity`, `sign`, or `verify` malfunctions after reservation,
+the bridge first persists `interrupted` and then returns public
+`{code:"internal_error"}`. This is an explicit public/storage mapping, not an
+enum coercion. A specific expiry, revocation, binding, authority-generation,
+policy, or record-corruption classification established first retains
+precedence.
 
 #### 17.7.2 Existing lexical-source request records
 
@@ -2149,6 +2156,12 @@ decision is `revoked`; workspace/snapshot/scope/root/binding/session drift is
 `record_corrupt`. Otherwise incomplete provider/authority/store work is
 `interrupted`. The first applicable reason in that order is stored.
 
+After reservation, an otherwise unclassified trusted cursor-authority
+malfunction stores `interrupted` before returning public `internal_error`.
+The public code never becomes stored state and does not extend the tombstone
+enum; the specific classifications in the preceding order win over this
+catch-all mapping.
+
 Bridge-level public error precedence is:
 
 1. `invalid_request` for closed-shape/type/canonicality failure;
@@ -2264,19 +2277,14 @@ integrate exact identity, excluded lexical results, graph results,
 complete-pool RRF v2, admitted rerank evidence, pair reranking/explanations,
 and the final user limit. Wave 4 and AC-4 remain open.
 
-### 17.10 Final-four implementation-readiness stop (2026-08-26)
+### 17.10 Cursor-authority failure representation (2026-08-26)
 
-The fresh provider-ABI review narrowed the previous four blockers to one but
-finished `FAIL` after the mandatory third cycle. The unresolved state is
-representational: a cursor-authority malfunction occurring after reservation
-must return public `internal_error`, yet the exact tombstone enum has no
-`internal_error` member. Before product work resumes, a fresh design session
-must freeze either legal stored `interrupted` plus public `internal_error`, or
-an explicit new `internal_error` tombstone enum member, including its oracle
-expectations.
-
-No contract or product edit landed, no product test ran, and no push occurred.
-Snapshot `4c009a35f32be370cba5df6fcd142841165fcb57` in
-`/tmp/spkc-provider-abi-final4-b60RQD/repo` is failed forensic evidence only;
-do not copy its contract text. Provider implementation readiness, Wave 4,
-AC-4, and the integrated pipeline remain open.
+The representability blocker from the final-four review is resolved without
+broadening the ABI. After reservation, an unclassified malfunction of trusted
+cursor-authority `identity`, `sign`, or `verify` first persists tombstone reason
+`interrupted`, then returns public `internal_error`. `internal_error` is not and
+must not become a tombstone-enum member. Specific failures already classified
+as expiry, revocation, binding, authority-generation, policy, or record
+corruption retain precedence. Product implementation and admission, Wave 4,
+AC-4, and the integrated pipeline remain open; this contract correction is not
+product evidence.

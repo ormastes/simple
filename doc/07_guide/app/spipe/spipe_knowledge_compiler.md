@@ -1167,6 +1167,13 @@ are `expired`, `revoked`, `binding_mismatch`,
 catch-all `interrupted`. The `inputDigest` is exactly the corresponding page or
 aggregate operation digest; it is never caller-selected metadata.
 
+If trusted cursor-authority `identity`, `sign`, or `verify` malfunctions after
+reservation, persist the catch-all `interrupted` tombstone before returning
+public `internal_error`. Do not add `internal_error` to the tombstone enum or
+persist the public code as a reason. A specific expiry, revocation, binding,
+authority-generation, policy, or record-corruption classification established
+first retains precedence.
+
 Successful page and aggregate bridge calls observe the trusted clock at start
 and again immediately before return. The provider executor independently does
 the same around receipt verification and ranking. End observations must show
@@ -1241,19 +1248,12 @@ Resume with a fresh provider-ABI repair, obtain independent admission, then
 implement and admit the provider. The integrated pipeline remains waiting on
 that provider. Keep Wave 4 and AC-4 open.
 
-#### Final-four provider ABI operator handoff (2026-08-26)
+#### Cursor-authority failure operator handoff (2026-08-26)
 
-The fresh final-four session narrowed the earlier provider blockers but stopped
-at the mandatory third review/fix cycle with `FAIL`. One representation remains
-undefined: after reservation, cursor-authority malfunction returns public
-`internal_error`, but the exact tombstone enum has no `internal_error` member.
-In the next fresh session, explicitly choose and freeze either a stored legal
-`interrupted` tombstone with public `internal_error`, or a new
-`internal_error` tombstone enum member. Do not let an implementation invent the
-mapping.
-
-Do not use snapshot `4c009a35f32be370cba5df6fcd142841165fcb57`
-from `/tmp/spkc-provider-abi-final4-b60RQD/repo` as an operator contract. It is
-failed immutable forensic evidence. That session landed no contract/product
-edit, ran no product test, and pushed nothing. Keep provider admission, Wave 4,
-AC-4, and the integrated pipeline open.
+The final-four representation blocker is contractually resolved. After a
+reservation, an unclassified trusted cursor-authority malfunction must first
+persist legal tombstone reason `interrupted` and then return public
+`internal_error`. Never add `internal_error` to the tombstone enum. Preserve
+the earlier specific-failure precedence. Provider implementation, tests, and
+admission are still pending; keep Wave 4, AC-4, and the integrated pipeline
+open.

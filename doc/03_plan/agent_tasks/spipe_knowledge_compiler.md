@@ -965,22 +965,20 @@ normal/highest-capability model. AC-4 remains open.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
-### 10.17 Final-four provider ABI stop and next-session choice (2026-08-26)
+### 10.17 Cursor-authority mapping and provider handoff (2026-08-26)
 
-1. **Provider ABI — still stopped.** A fresh session narrowed the earlier four
-   blockers but exhausted all three review/fix cycles with one remaining
-   representability blocker: cursor-authority malfunction after reservation
-   returns public `internal_error`, while the exact tombstone enum lacks that
-   member.
-2. **Next fresh session — freeze one branch.** Either store legal
-   `interrupted` while returning public `internal_error`, or add and freeze an
-   `internal_error` tombstone member. Specify the chosen stored/public mapping
-   and independent oracle before implementation begins.
-3. **Evidence — forensic only.** Failed immutable snapshot
-   `4c009a35f32be370cba5df6fcd142841165fcb57` is retained in clean worktree
-   `/tmp/spkc-provider-abi-final4-b60RQD/repo`. No contract/product edit landed,
-   no product test ran, and nothing was pushed. Do not copy its contract text.
-4. **Downstream lanes — waiting.** Provider admission, Wave 4, AC-4, and the
+1. **Representation decision — frozen.** After reservation, an unclassified
+   trusted cursor-authority `identity`, `sign`, or `verify` malfunction first
+   stores legal tombstone reason `interrupted`, then returns public
+   `internal_error`. Do not add `internal_error` to the tombstone enum.
+   Specific already-established expiry, revocation, binding,
+   authority-generation, policy, or record-corruption classifications retain
+   precedence.
+2. **Next implementation session.** Implement the frozen mapping and oracle
+   cases without broadening either closed vocabulary. Prove tombstone-before-
+   return ordering, identical-retry fail-closed behavior, and the precedence
+   cases.
+3. **Downstream lanes — waiting.** Provider admission, Wave 4, AC-4, and the
    integrated pipeline remain open.
 
 Merge owner remains `/root`; independent normal/highest-capability review is
