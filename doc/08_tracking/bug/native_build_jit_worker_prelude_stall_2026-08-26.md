@@ -7,7 +7,7 @@ WM/GUI/Web/Engine2D Vulkan showcase.
 
 ## Reproduction
 
-At source revision `18c312d34d0`, rebuild the Rust seed, then run the
+At source revision `e35d34f9eed`, rebuild the Rust seed, then run the
 cache-backed parse shard directly:
 
 ```sh
@@ -18,7 +18,7 @@ src/compiler_rust/target/debug/simple run src/app/cli/parse_shard_main.spl \
   --entry-closure --threads 8 \
   --cache-dir /mnt/data/worktrees/lane-amb3/build/bootstrap/native_cache \
   --mode dynload --entry src/app/cli/_CliMain/main_and_help.spl \
-  -o build/native_probe/simple --parse-shard=0/8
+  -o build/native_probe/simple --parse-shard=0/2
 ```
 
 `run_parse_shards` previously launched `native_build_worker.spl`, contrary to
@@ -39,17 +39,21 @@ the corrected slim entry reaches a smaller, but still excessive, prelude:
 ```
 
 Both JIT markers occur before source closure or cache progress. Production
-children inherit `SIMPLE_EXECUTION_MODE=interpret` from the parent, so the
-relevant probe uses that mode: it emitted no JIT marker and no source-closure
-line after 74 seconds, reaching 1.63 GiB RSS before interruption. The remaining
-blocker is therefore eager transitive module loading before `main`, not merely
-JIT compilation. The preserved cache still contains 893 files.
+children inherit `SIMPLE_EXECUTION_MODE=interpret` from the parent. Revision
+`e35d34f9eed` caps that mode to two parse-shard processes by default (with the
+measured-host override `SIMPLE_PARSE_SHARD_MAX`), avoiding the prior eight-way
+11.6 GiB resident-heap burst. The capped production run reached the closure
+walker, completed 1,809 discovery files, then advanced source closure to
+704/1,047. It then made no further receipt for 83 seconds at about 1.79 GiB
+RSS per child. The remaining blocker is a source-closure tail stall after
+eager module loading, not merely JIT compilation or unsafe shard fan-out. The
+preserved cache still contains 893 files.
 
 ## Required follow-up
 
-Keep the stage markers and split the parse-shard runner's transitive imports so
-the source-closure planner can begin before the compiler's HIR/type/borrow
-diagnostic graph is loaded. Splitting only the full CLI removes 2,792 JIT
-functions but is insufficient. Add a bounded worker receipt for this
-pre-source-closure wait. No Vulkan showcase or guest-frame claim may be
-admitted from a seed-only run.
+Keep the two-process interpreter allocation cap. Then isolate and repair the
+source-closure tail immediately after
+`src/lib/nogc_sync_mut/tooling/easy_fix/accessor_core.spl` (the 704 receipt),
+with a bounded per-file receipt rather than another whole-worker retry.
+Splitting only the full CLI removes 2,792 JIT functions but is insufficient.
+No Vulkan showcase or guest-frame claim may be admitted from a seed-only run.
