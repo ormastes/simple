@@ -6090,3 +6090,30 @@ This removal adds no runtime instruction, branch, allocation, copy, lookup, or
 dispatch.  It reduces the total SFFI declaration inventory by 19 without
 changing the `rt_` inventory.  It is unsafe-surface reduction, not signed
 provider admission.
+
+## Generic interpreter FFI removal checkpoint (2026-08-26)
+
+The backing-aware census found 14 declarations in
+`src/app/interpreter/ffi/extern.spl`: five providerless `call_ffi_0..4`
+trampolines, duplicated platform dynload declarations, and Windows loader
+declarations.  Repository references prove the lane was reachable only from
+two private, unused helpers in `bridge.spl`; no caller used those helpers or
+the exported loader facade.
+
+The lane erased every signature into an integer call ABI, converted `nil` to
+zero, packed typed arguments into `u64`, returned pointers as integers, and
+allocated argument/byte arrays.  It is deleted rather than annotated.  The
+typed native registry remains, and an executable guard prevents the generic
+dispatcher or its loader facade from returning.
+
+The guard passes and the package initializer checks successfully.  Direct
+checking of the surviving bridge is blocked by pre-existing Rust-like syntax
+at the unchanged beginning of the file; the exact blocker is recorded under
+`doc/08_tracking/bug/`.  Optimizer analysis reports only low-confidence MIR
+opportunities.  Removing dead code adds no hot-path work and eliminates any
+possible generic marshalling allocation or dispatch.
+
+The requested lint lane was also attempted once and failed in the compiler,
+before producing a file verdict, because `Linter.lint_source_for_parsed_append`
+is unresolved.  This is the already-recorded lint-subsystem clobber blocker in
+`stale_snapshot_clobber_4edef8fab8e_2026-08-26.md`, not a green lint result.

@@ -2006,3 +2006,26 @@ basics interpreter spec passes 25/25.  The change removes runtime fallback
 surface and adds no hot-path work or allocation.  The total SFFI declaration
 count therefore drops by 19; `rt_` counts and signed-admitted counts are
 unchanged, including zero signed-admitted providers.
+
+### Generic interpreter all-integer dispatcher removed (2026-08-26)
+
+The current backing-aware census classified all five `call_ffi_0..4`
+trampolines as genuinely missing.  The containing module contributed 14 SFFI
+declaration rows and was referenced only by private, unused bridge helpers.
+That module, those helpers, and the unused package exports are now removed.
+
+The authority guard passes and preserves the typed native registry.  The
+initializer source check passes.  The surviving bridge cannot yet be directly
+checked because its unchanged Rust-like import/struct syntax produces 24 parser
+errors; a focused bug records that blocker.  Optimizer analysis found 19
+low-confidence MIR opportunities and no general allocation/copy pattern.
+Lint was attempted once but produced no verdict because the deployed compiler
+cannot resolve `Linter.lint_source_for_parsed_append`; the existing stale-
+snapshot lint-subsystem bug remains the authoritative blocker.
+
+The change removes O(arguments) array construction, signature erasure, and
+generic indirect dispatch from the only possible path; it adds no instruction,
+allocation, lookup, or copy to the retained native registry.  Total SFFI rows
+drop by another 14 to an expected 12,974, while the 11,350 `rt_` rows and zero
+signed-admitted rows are unchanged.  This remains unsafe-surface reduction,
+not universal verification.

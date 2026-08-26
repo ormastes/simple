@@ -532,3 +532,21 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   once (25/25 pass).
 - [ ] Continue census-led unsafe minimization; this removal does not supply a
   signed provider admission job.
+
+### Generic interpreter FFI removal
+
+- [x] Prove the all-`u64` dispatcher and compiled-module loader helpers have no
+  repository consumers.
+- [x] Delete the 14-declaration generic extern module and its two private bridge
+  helpers instead of widening unsafe scope.
+- [x] Remove the unused loader facade from the interpreter FFI package exports.
+- [x] Add an executable guard that retains the typed native registry and rejects
+  restoration of `call_ffi_N`, nil-to-zero marshalling, or the removed facade.
+- [x] Run the guard, package initializer check, and optimizer once.
+- [x] Record the pre-existing legacy-syntax blocker preventing a clean direct
+  check of the surviving bridge.
+- [x] Attempt lint once and bind its unresolved
+  `Linter.lint_source_for_parsed_append` failure to the existing lint-subsystem
+  clobber bug; do not report lint as passing.
+- [ ] Continue with real provider families and exact-artifact admission; this
+  dead-lane removal is not signed verification.
