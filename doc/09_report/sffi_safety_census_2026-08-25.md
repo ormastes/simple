@@ -2109,3 +2109,29 @@ The expanded ephemeral fixture passes in 1.5 seconds. This is one-time
 admission/census work and adds zero per-call instructions or memory. The test
 key is intentionally not a production trust root, so declaration statistics
 remain 12,910 total, 11,286 `rt_`, and zero production signed-admitted rows.
+
+### Providerless debug command-output removal (2026-08-26)
+
+Four production modules declared `rt_command_output(cmd) -> text`, but the
+backing census found no provider. The text-only shape also erased command exit
+status and stderr. All four declarations are removed and their ten scoped call
+sites now share one bounded pure-Simple owner over the existing typed
+`process_run_bounded` facade. Nonzero exit is `Err`; successful empty stdout
+remains distinguishable as `Ok("")`. External values cross as argv or as
+positional parameters to a fixed shell script, preventing shell interpolation.
+
+The helper uses one subprocess, O(output) capture, a 120-second timeout, and a
+1 MiB cap. It adds no lookup, retry, second process, per-byte loop, generic
+dispatch, or unbounded allocation. The compatibility spec passes 3/3 in 6.84
+seconds with 176,820 KiB peak RSS under the available Rust bootstrap runner,
+including a literal shell-substitution sabotage argument;
+five source checks, the authority guard, direct-runtime guard, and optimizer
+analysis pass. Lint remains blocked before file analysis by the existing
+`Linter.lint_source_for_parsed_append` dispatch defect, so this row is not
+reported lint-verified or Stage-4 verified.
+
+The post-change source census is 12,888 total SFFI declarations, 11,264 `rt_`
+declarations, 2,986 distinct `rt_` symbols, 1,553 incompletely unsafe-tagged
+symbols, 1,002 untouched `rt_` symbols, and zero signed-admitted rows or
+symbols. The tranche removes four rows and one distinct providerless symbol;
+the retained process provider and wider estate remain unsigned and unverified.

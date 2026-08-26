@@ -6238,3 +6238,41 @@ expanded fixture completes in 1.5 seconds. It deliberately generates ephemeral
 test trust material and does not count as production signed admission. A real
 external trust policy and exact production build inputs are still required, so
 the repository-wide signed-admitted count remains zero.
+
+## Providerless debug command-output removal (2026-08-26)
+
+The backing-aware census found four production declarations of
+`rt_command_output`, ten scoped call sites, and no C, Rust, interpreter, or
+native provider. The raw function returned only `text`, so command-not-found,
+nonzero exit, stderr-only failure, and legitimate empty stdout could not be
+distinguished.
+
+All four declarations are removed. A single pure-Simple compatibility module
+now calls the existing typed `process_run_bounded` facade with a 120-second
+timeout and 1 MiB output bound. Its argv path and fixed-script/positional-arg
+shell path both return `Result<text, text>`, preserve stdout only on exit zero,
+and map nonzero exit plus bounded stderr to `Err`. Untrusted device paths,
+serials, filenames, commands, and ports are argv/positional data rather than
+interpolated shell syntax. Callers either propagate the error or deliberately
+reduce probe failure to their existing `unknown` adapter result.
+
+The helper retains one child process and O(output) capture. It adds no foreign
+lookup, generic dispatch, retry, second child, or per-byte loop. The new spec
+passes 3/3 under the available Rust bootstrap runner in 6.84 seconds with
+176,820 KiB peak RSS, including a literal shell-substitution sabotage value,
+so this is compatibility evidence, not a pure-Simple
+Stage-4 claim. All five touched sources pass `check`; the authority and
+direct-runtime guards pass; optimizer analysis reports only low-confidence
+bounds/dead-code opportunities for the helper and no allocation/copy/loop/
+dispatch finding. Lint was attempted once but all five invocations stop at the
+pre-existing `Linter.lint_source_for_parsed_append` code-generation gap (exit
+70), tracked in
+`doc/08_tracking/bug/stale_snapshot_clobber_4edef8fab8e_2026-08-26.md`; no lint
+PASS is claimed.
+
+The post-change source census is 12,888 total declarations, 11,264 `rt_`
+declarations, 2,986 distinct `rt_` symbols, 1,553 symbols with incomplete
+unsafe tagging, 1,002 untouched `rt_` symbols, and zero signed-admitted rows or
+symbols. This removes exactly four declaration rows and one providerless
+symbol. It does not verify or sign the canonical process provider or wider
+SFFI estate.

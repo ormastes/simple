@@ -609,3 +609,26 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   sabotage controls.
 - [ ] Provision an external production trust policy and exact runtime evidence
   inputs; fixture-generated keys must never promote production census rows.
+
+### Providerless debug command output
+
+- [x] Confirm all four `rt_command_output` declarations are genuinely missing
+  across C, Rust, interpreter, and native backing.
+- [x] Replace the raw text-only boundary with one canonical bounded
+  `process_run_bounded` owner returning `Result<text, text>`.
+- [x] Propagate nonzero exit and stderr through typed errors instead of empty
+  successful output.
+- [x] Cap each command at 120 seconds and 1 MiB without adding a second child,
+  retry, per-byte loop, registry lookup, or generic dispatch.
+- [x] Pass external values as argv or fixed-script positional parameters so
+  shell metacharacters remain data rather than executable syntax.
+- [x] Add real success/failure coverage and an authority audit preventing the
+  providerless symbol from returning.
+- [x] Pass source checks, the 3/3 compatibility spec, authority guard,
+  direct-runtime guard, and optimizer analysis once.
+- [x] Attempt lint once and retain the existing
+  `Linter.lint_source_for_parsed_append` blocker rather than claiming PASS.
+- [ ] Verify the same spec with an admitted current-source pure-Simple Stage-4
+  runtime; bootstrap-seed execution is compatibility evidence only.
+- [ ] Bind the canonical process provider to exact signed admission evidence;
+  repository-wide signed admission remains zero.

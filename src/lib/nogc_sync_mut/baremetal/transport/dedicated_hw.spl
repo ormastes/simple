@@ -3,6 +3,8 @@
 # UART via hardware adapter (FTDI/CP2102/CH340).
 # Uses serial FFI for direct UART access through USB-UART adapter.
 
+use std.nogc_sync_mut.debug.remote.protocol.process_command.{debug_process_output}
+
 extern fn rt_serial_open(path: text, baud: i32) -> i64
 extern fn rt_serial_close(fd: i64) -> bool
 extern fn rt_serial_read(fd: i64, max_bytes: i32) -> text
@@ -10,7 +12,6 @@ extern fn rt_serial_write(fd: i64, data: text) -> i64
 extern fn rt_serial_flush(fd: i64) -> bool
 extern fn rt_serial_available(fd: i64) -> i32
 extern fn rt_serial_set_timeout(fd: i64, timeout_ms: i64) -> bool
-extern fn rt_command_output(cmd: text) -> text
 
 # Dedicated UART hardware adapter transport (FTDI, CP2102, CH340)
 class DedicatedHwTransport:
@@ -95,7 +96,13 @@ impl DedicatedHwTransport:
 # Detect adapter type from device path
 fn detect_adapter(device: text) -> text:
     # Check USB device info
-    val info = rt_command_output("udevadm info --query=all --name={device} 2>/dev/null")
+    val info_result = debug_process_output(
+        "udevadm",
+        ["info", "--query=all", "--name={device}"]
+    )
+    val info = match info_result:
+        Ok(value): value
+        Err(_): ""
     if info.contains("FTDI"):
         return "FTDI"
     if info.contains("CP210"):
@@ -105,7 +112,8 @@ fn detect_adapter(device: text) -> text:
     if info.contains("PL2303"):
         return "PL2303"
     # If device exists but type unknown, still allow connection
-    val check = rt_command_output("test -c {device} && echo yes")
-    if check.trim() == "yes":
-        return "generic"
+    val check_result = debug_process_output("test", ["-c", device])
+    match check_result:
+        Ok(_): return "generic"
+        Err(_): pass
     "unknown"
