@@ -2192,6 +2192,123 @@ static spl_u8 g_boot_tcp_rx_buf[4096];
 static spl_u64 g_boot_tcp_rx_len = 0;
 static spl_u64 g_boot_tcp_rx_off = 0;
 
+/*
+ * Additive boot-TCP registry.
+ *
+ * The wire backend below remains deliberately singleton: it owns one listener
+ * (legacy fd 100) and one accepted peer (legacy fd 200).  The registry gives
+ * C/Simple callers opaque, generation-tagged handles without changing those
+ * legacy entry points or allowing a stale handle to reach the singleton.
+ * Registry storage is static and bounded; returned byte arrays are part of
+ * the pre-existing Simple ABI and are not registry storage.
+ */
+#define RT_BOOT_TCP_REGISTRY_CAPACITY 4U
+#define RT_BOOT_TCP_REGISTRY_FD_BASE 1073741824LL
+#define RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS 3U
+#define RT_BOOT_TCP_REGISTRY_LISTENER 1U
+#define RT_BOOT_TCP_REGISTRY_CLIENT 2U
+
+typedef struct RtBootTcpRegistryEntry {
+    spl_u64 generation;
+    spl_u64 parent_generation;
+    spl_u8 active;
+    spl_u8 kind;
+    spl_u8 parent_slot;
+} RtBootTcpRegistryEntry;
+
+static RtBootTcpRegistryEntry g_boot_tcp_registry[RT_BOOT_TCP_REGISTRY_CAPACITY];
+static spl_u64 g_boot_tcp_registry_next_generation = 1ULL;
+
+static spl_i64 rt_boot_tcp_registry_encode_fd(spl_u64 slot, spl_u64 generation) {
+    if (slot >= RT_BOOT_TCP_REGISTRY_CAPACITY || generation == 0ULL ||
+        generation > ((0x7fffffffffffffffULL - (spl_u64)RT_BOOT_TCP_REGISTRY_FD_BASE) >> RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS)) {
+        return -1;
+    }
+    return RT_BOOT_TCP_REGISTRY_FD_BASE + (spl_i64)((generation << RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS) | slot);
+}
+
+static RtBootTcpRegistryEntry *rt_boot_tcp_registry_lookup(spl_i64 fd, spl_u64 *slot_out) {
+    spl_u64 encoded;
+    spl_u64 slot;
+    spl_u64 generation;
+    RtBootTcpRegistryEntry *entry;
+    if (fd < RT_BOOT_TCP_REGISTRY_FD_BASE) {
+        return 0;
+    }
+    encoded = (spl_u64)(fd - RT_BOOT_TCP_REGISTRY_FD_BASE);
+    slot = encoded & ((1ULL << RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS) - 1ULL);
+    generation = encoded >> RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS;
+    if (slot >= RT_BOOT_TCP_REGISTRY_CAPACITY || generation == 0ULL) {
+        return 0;
+    }
+    entry = &g_boot_tcp_registry[slot];
+    if (!entry->active || entry->generation != generation) {
+        return 0;
+    }
+    if (slot_out) {
+        *slot_out = slot;
+    }
+    return entry;
+}
+
+static spl_i64 rt_boot_tcp_registry_has_active(void) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        if (g_boot_tcp_registry[slot].active) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static spl_i64 rt_boot_tcp_registry_can_allocate(void) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        if (!g_boot_tcp_registry[slot].active) {
+            return rt_boot_tcp_registry_encode_fd(slot, g_boot_tcp_registry_next_generation) >= 0;
+        }
+    }
+    return 0;
+}
+
+static spl_i64 rt_boot_tcp_registry_has_child(spl_u64 parent_slot, spl_u64 parent_generation) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        RtBootTcpRegistryEntry *entry = &g_boot_tcp_registry[slot];
+        if (entry->active && entry->kind == RT_BOOT_TCP_REGISTRY_CLIENT &&
+            entry->parent_slot == parent_slot && entry->parent_generation == parent_generation) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static spl_i64 rt_boot_tcp_registry_allocate(spl_u8 kind, spl_u64 parent_slot, spl_u64 parent_generation) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        RtBootTcpRegistryEntry *entry = &g_boot_tcp_registry[slot];
+        spl_u64 generation;
+        if (entry->active) {
+            continue;
+        }
+        generation = g_boot_tcp_registry_next_generation;
+        if (generation == 0ULL || rt_boot_tcp_registry_encode_fd(slot, generation) < 0) {
+            return -1;
+        }
+        g_boot_tcp_registry_next_generation = generation + 1ULL;
+        entry->generation = generation;
+        entry->parent_generation = parent_generation;
+        entry->active = 1U;
+        entry->kind = kind;
+        entry->parent_slot = (spl_u8)parent_slot;
+        return rt_boot_tcp_registry_encode_fd(slot, generation);
+    }
+    return -1;
+}
+
+static void rt_boot_tcp_registry_release(RtBootTcpRegistryEntry *entry) {
+    entry->active = 0U;
+    entry->kind = 0U;
+    entry->parent_slot = 0U;
+    entry->parent_generation = 0ULL;
+}
+
 spl_i64 rt_boot_tcp_bind_port(spl_i64 port);
 
 static void rt_boot_tcp_compact_rx_buf(void) {
@@ -3958,6 +4075,117 @@ spl_i64 rt_boot_tcp_read_bytes_for_fd(spl_i64 fd, spl_i64 max_len) {
         return rt_array_new(0);
     }
     return rt_boot_tcp_read_bytes(max_len);
+}
+
+/* Opaque-registry API.  These entry points intentionally do not delegate to
+ * the legacy accept/read helpers: those helpers poll in a tight loop, whereas
+ * a registry call performs at most one receive poll and reports timeout as -1
+ * (accept) or an empty byte array (read). */
+spl_i64 rt_boot_tcp_registry_bind(spl_i64 addr) {
+    spl_i64 legacy_fd;
+    if (!rt_boot_tcp_registry_can_allocate() || rt_boot_tcp_registry_has_active() ||
+        g_boot_tcp_bound || g_boot_tcp_client_open) {
+        return -1;
+    }
+    legacy_fd = rt_boot_tcp_bind(addr);
+    if (legacy_fd != 100) {
+        return -1;
+    }
+    return rt_boot_tcp_registry_allocate(RT_BOOT_TCP_REGISTRY_LISTENER, 0ULL, 0ULL);
+}
+
+spl_i64 rt_boot_tcp_registry_bind_port(spl_i64 port) {
+    spl_i64 legacy_fd;
+    if (port < 1 || port > 65535 || !rt_boot_tcp_registry_can_allocate() || rt_boot_tcp_registry_has_active() ||
+        g_boot_tcp_bound || g_boot_tcp_client_open) {
+        return -1;
+    }
+    legacy_fd = rt_boot_tcp_bind_port(port);
+    if (legacy_fd != 100) {
+        return -1;
+    }
+    return rt_boot_tcp_registry_allocate(RT_BOOT_TCP_REGISTRY_LISTENER, 0ULL, 0ULL);
+}
+
+spl_i64 rt_boot_tcp_registry_accept_timeout(spl_i64 listener_fd, spl_i64 ms) {
+    spl_u64 listener_slot;
+    RtBootTcpRegistryEntry *listener = rt_boot_tcp_registry_lookup(listener_fd, &listener_slot);
+    spl_i64 client_fd;
+    if (ms < 0 || !rt_boot_tcp_registry_can_allocate() || !listener || listener->kind != RT_BOOT_TCP_REGISTRY_LISTENER ||
+        rt_boot_tcp_registry_has_child(listener_slot, listener->generation) || !g_boot_tcp_bound) {
+        return -1;
+    }
+    /* A single poll makes timeout cooperative: callers choose when to retry,
+       and no timeout value can trigger an unbounded busy wait at boot. */
+    rt_poll_rx_once();
+    if (!g_boot_tcp_client_open) {
+        return -1;
+    }
+    client_fd = rt_boot_tcp_registry_allocate(RT_BOOT_TCP_REGISTRY_CLIENT, listener_slot, listener->generation);
+    if (client_fd < 0) {
+        return -1;
+    }
+    g_boot_tcp_client_ready = 0;
+    g_boot_tcp_client_announced = 1;
+    g_boot_tcp_response_kind = 0;
+    return client_fd;
+}
+
+spl_i64 rt_boot_tcp_registry_write_bytes(spl_i64 client_fd, spl_i64 data_value) {
+    RtBootTcpRegistryEntry *client = rt_boot_tcp_registry_lookup(client_fd, 0);
+    if (!client || client->kind != RT_BOOT_TCP_REGISTRY_CLIENT || !g_boot_tcp_client_open) {
+        return -1;
+    }
+    return rt_boot_tcp_write_bytes(200, data_value);
+}
+
+spl_i64 rt_boot_tcp_registry_read_bytes(spl_i64 client_fd, spl_i64 max_len) {
+    RtBootTcpRegistryEntry *client = rt_boot_tcp_registry_lookup(client_fd, 0);
+    spl_u64 want = max_len <= 0 ? 0ULL : (spl_u64)max_len;
+    spl_u64 available;
+    spl_i64 out;
+    if (!client || client->kind != RT_BOOT_TCP_REGISTRY_CLIENT || !g_boot_tcp_client_open || want == 0ULL) {
+        return rt_array_new(0);
+    }
+    if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        rt_poll_rx_once();
+    }
+    if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        return rt_array_new(0);
+    }
+    available = g_boot_tcp_rx_len - g_boot_tcp_rx_off;
+    if (want > available) {
+        want = available;
+    }
+    out = rt_array_new((spl_i64)want);
+    for (spl_u64 i = 0ULL; i < want; i = i + 1ULL) {
+        rt_array_push(out, rt_int((spl_i64)g_boot_tcp_rx_buf[g_boot_tcp_rx_off + i]));
+    }
+    g_boot_tcp_rx_off = g_boot_tcp_rx_off + want;
+    if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        g_boot_tcp_rx_len = 0ULL;
+        g_boot_tcp_rx_off = 0ULL;
+    }
+    return out;
+}
+
+spl_i64 rt_boot_tcp_registry_close(spl_i64 fd) {
+    spl_u64 slot;
+    RtBootTcpRegistryEntry *entry = rt_boot_tcp_registry_lookup(fd, &slot);
+    spl_i64 legacy_fd;
+    if (!entry) {
+        return -1;
+    }
+    if (entry->kind == RT_BOOT_TCP_REGISTRY_LISTENER &&
+        rt_boot_tcp_registry_has_child(slot, entry->generation)) {
+        return -1;
+    }
+    legacy_fd = entry->kind == RT_BOOT_TCP_REGISTRY_CLIENT ? 200 : 100;
+    if (rt_boot_tcp_close(legacy_fd) != 0) {
+        return -1;
+    }
+    rt_boot_tcp_registry_release(entry);
+    return 0;
 }
 
 __attribute__((weak)) spl_i64 rt_io_tcp_bind(spl_i64 addr) {
