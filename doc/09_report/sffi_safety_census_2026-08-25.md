@@ -362,3 +362,14 @@ through one always-inlined lexical owner.  Its nullable result contract already
 matches provider absence.  All configuration consumers keep the same one-call
 lookup behavior, with no added allocation, copy, cache, lock, hash, or dispatch
 table.
+
+### Native-build cache environment authority follow-up
+
+The native-build cache entrypoint no longer declares or calls `rt_env_get`
+directly.  Cache-root selection now uses the canonical nullable
+`std.io_runtime.env_get_opt` facade, while cache probes use the canonical
+always-inlined `file_exists` facade.  The unused local clock declaration was
+also removed, leaving this module with no raw SFFI authority.
+Each build invocation retains exactly one environment lookup and the same
+default-directory branch, with no extra filesystem probe, allocation, copy,
+cache, lock, hash, or dispatch table.

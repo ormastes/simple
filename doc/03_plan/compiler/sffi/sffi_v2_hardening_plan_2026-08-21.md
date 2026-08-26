@@ -1920,6 +1920,16 @@ and unpromoted.
 - [x] Keep raw symbol references limited to declaration plus owner.
 - [x] Add a static authority/count ratchet.
 
+### Completed native-build cache environment authority slice
+
+- [x] Remove the module-local raw `rt_env_get` declaration and call.
+- [x] Route cache-root absence through canonical nullable `env_get_opt`.
+- [x] Route cache probes through the canonical always-inline `file_exists`.
+- [x] Remove the unused raw clock declaration.
+- [x] Eliminate all module-local `unsafe(ffi)` authority.
+- [x] Preserve one lookup and the existing default-directory behavior.
+- [x] Add a static ratchet preventing the raw declaration from returning.
+
 ### Completed compiler DI authority slice
 
 - [x] Remove the module-local raw `rt_env_get` declaration and calls.
