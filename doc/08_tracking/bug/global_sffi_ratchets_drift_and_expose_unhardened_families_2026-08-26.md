@@ -13,10 +13,10 @@ comparison fails with 540 new and 3,435 stale entries. Regenerating the baseline
 would silently grandfather new unsafe declarations and is not an acceptable
 fix.
 
-`scripts/audit/sffi-null-signature-guard.shs` independently fails. Findings
-include interpreter dynload and symbol lookup fabricating zero on failure,
-boolean values entering the integer bridge, missing checked dynload/symbol
-contracts, stale TCP/UDP ABI expectations, and missing checked crypto bindings.
+`scripts/audit/sffi-null-signature-guard.shs` independently fails. Checked
+dynload/symbol providers and typed boolean thunks have since removed those WFFI
+findings, but stale TCP/UDP ABI expectations, runtime null contracts, and missing
+checked crypto bindings remain.
 
 ## Unblock condition
 

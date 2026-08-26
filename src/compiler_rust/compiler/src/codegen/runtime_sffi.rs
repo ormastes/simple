@@ -2123,10 +2123,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Dynamic Loading (WFFI)
     // =========================================================================
     RuntimeFuncSpec::new("spl_dlopen", &[I64], &[I64]),
+    RuntimeFuncSpec::new("spl_dlopen_checked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlsym", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_dlsym_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_dlsym_process_checked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlclose", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_i64", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_i64_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_wffi_call_bool0_checked", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_wffi_call_bool1_checked", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new(
         "spl_wffi_call_i64_with_bytes",
         &[I64, I64, I64, I64, I64, I64],

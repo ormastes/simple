@@ -6,6 +6,8 @@ static int failed = 0;
 
 static int64_t zero_value(void) { return 0; }
 static int64_t add_values(int64_t a, int64_t b) { return a + b; }
+static bool true_value(void) { return true; }
+static bool is_positive(int64_t value) { return value > 0; }
 
 static void report(const char* name, int ok) {
     checked++;
@@ -56,6 +58,17 @@ int main(void) {
         (int64_t)(intptr_t)zero_value, (int64_t)(uintptr_t)invalid, 1);
     report("non-integer argument is status 1", result_at(result, 0) == 1);
     release_result(result);
+
+    int8_t boolean = 0;
+    report("typed bool0 preserves true",
+           spl_wffi_call_bool0_checked((int64_t)(intptr_t)true_value, &boolean) == 0 && boolean == 1);
+    report("typed bool1 preserves false",
+           spl_wffi_call_bool1_checked((int64_t)(intptr_t)is_positive, -1, &boolean) == 0 && boolean == 0);
+    boolean = 1;
+    report("typed bool null function is status 2 and false output",
+           spl_wffi_call_bool0_checked(0, &boolean) == 2 && boolean == 0);
+    report("typed bool null output is status 1",
+           spl_wffi_call_bool0_checked((int64_t)(intptr_t)true_value, NULL) == 1);
 
     rt_array_free(empty);
     rt_array_free(two);

@@ -5981,3 +5981,31 @@ and no allocation/general pattern. A focused static ratchet passes. The Rust
 unit test remains blocked by the already-recorded runtime export drift, and
 whole-file `rustfmt --check` is blocked by unrelated existing formatting drift;
 neither provider family is promoted to verified or signed-admitted.
+
+## Checked dynload and typed boolean checkpoint
+
+Current Pure Simple wrappers already declared status/out load and symbol APIs,
+but the C, Rust-runtime, interpreter, and codegen providers were absent after
+tree drift. Raw interpreter load/symbol failure also returned integer zero, and
+the generic integer bridge accepted `bool` by coercing it to 0/1. That combined
+missing provider and fabricated-value state is now removed.
+
+`spl_dlopen_checked`, `spl_dlsym_checked`, and
+`spl_dlsym_process_checked` now initialize output to zero and return distinct
+invalid-contract/load-failure/missing-symbol statuses across both C owners,
+the Rust runtime, and the interpreter. Interior-NUL paths/names and null handles
+fail before platform lookup. Legacy native scalar entry points remain unsafe
+compatibility shims, while the safe loader routes through status/out.
+
+Boolean calls no longer cross the integer ABI. Allocation-free typed
+`bool()` and `bool(i64)` status/out thunks exist in C, Rust runtime, interpreter,
+dispatch, and codegen lanes. They initialize false before validation, preserve
+real false/true, and distinguish null function/output failures. The C harness
+passes ten cases, including legitimate integer zero and all boolean outcomes.
+
+Exact Linux admission also restores the sealed memfd snapshot provider. Its
+sabotage check proves the snapshot is write-sealed and loads the originally
+hashed bytes after pathname replacement. Load/path copies happen once during
+admission; boolean hot thunks allocate nothing and call the cached function
+pointer directly. The older checked integer bridge still allocates a two-value
+result array per call and remains a separately tracked performance migration.

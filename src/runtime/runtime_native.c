@@ -54,6 +54,7 @@
 #if defined(__linux__)
 #include <sys/random.h>
 #include <sys/syscall.h>
+#include <linux/memfd.h>
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #endif
@@ -6933,24 +6934,139 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
  * missing library. Because the bundle links runtime_native.o BEFORE
  * runtime_dynload.o under -z muldefs, THIS weaker copy was the one that won.
  * rt_interp_cstr accepts both encodings and is a strict superset. */
-int64_t spl_dlopen(int64_t path_value) {
-    const char* path = rt_interp_cstr(path_value);
-    if (!path) return 0;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)LoadLibraryA(path);
+static HMODULE runtime_dynload_open_utf8(const char *path) {
+    int wide_len;
+    wchar_t *wide_path;
+    HMODULE handle;
+    if (!path || !path[0]) return NULL;
+    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            path, -1, wide_path, wide_len) != wide_len) {
+        free(wide_path);
+        return NULL;
+    }
+    handle = LoadLibraryW(wide_path);
+    free(wide_path);
+    return handle;
+}
+#endif
+
+int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
+#if defined(__linux__)
+    const char* path = rt_interp_cstr(path_value);
+    if (!path) return -1;
+    int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (source < 0) return -1;
+    struct stat source_stat;
+    if (fstat(source, &source_stat) != 0 || !S_ISREG(source_stat.st_mode) ||
+        source_stat.st_size < 0 || (uint64_t)source_stat.st_size > UINT64_C(1073741824)) {
+        close(source);
+        return -1;
+    }
+    int snapshot = (int)syscall(SYS_memfd_create, "simple-sffi-provider",
+                                MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (snapshot < 0) { close(source); return -1; }
+    uint8_t buffer[65536];
+    uint64_t total = 0;
+    for (;;) {
+        ssize_t got = read(source, buffer, sizeof(buffer));
+        if (got == 0) break;
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            close(source); close(snapshot); return -1;
+        }
+        if ((uint64_t)got > UINT64_C(1073741824) - total) {
+            close(source); close(snapshot); return -1;
+        }
+        total += (uint64_t)got;
+        ssize_t offset = 0;
+        while (offset < got) {
+            ssize_t put = write(snapshot, buffer + offset, (size_t)(got - offset));
+            if (put < 0 && errno == EINTR) continue;
+            if (put <= 0) { close(source); close(snapshot); return -1; }
+            offset += put;
+        }
+    }
+    if (total != (uint64_t)source_stat.st_size || close(source) != 0 ||
+        lseek(snapshot, 0, SEEK_SET) < 0 ||
+        fcntl(snapshot, F_ADD_SEALS,
+              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+        close(snapshot);
+        return -1;
+    }
+    return (int64_t)snapshot;
 #else
-    return (int64_t)(intptr_t)dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    (void)path_value;
+    return -1;
 #endif
 }
 
-int64_t spl_dlsym(int64_t handle, int64_t name_value) {
-    const char* name = rt_interp_cstr(name_value);
-    if (!handle || !name) return 0;
+int64_t spl_dlopen(int64_t path_value) {
+    int64_t handle = 0;
+    return spl_dlopen_checked(path_value, &handle) == 0 ? handle : 0;
+}
+
+int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle) {
+    if (!out_handle) return 1;
+    *out_handle = 0;
+    const char* path = rt_interp_cstr(path_value);
+    if (!path || !path[0]) return 1;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)GetProcAddress((HMODULE)(intptr_t)handle, name);
+    HMODULE handle = runtime_dynload_open_utf8(path);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #else
-    return (int64_t)(intptr_t)dlsym((void*)(intptr_t)handle, name);
+    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #endif
+    return 0;
+}
+
+int64_t spl_dlsym(int64_t handle, int64_t name_value) {
+    int64_t symbol = 0;
+    return spl_dlsym_checked(handle, name_value, &symbol) == 0 ? symbol : 0;
+}
+
+int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbol) {
+    if (!out_symbol) return 1;
+    *out_symbol = 0;
+    const char* name = rt_interp_cstr(name_value);
+    if (!handle || !name || !name[0]) return 1;
+#ifdef _WIN32
+    FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#else
+    void* symbol = dlsym((void*)(intptr_t)handle, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#endif
+    return 0;
+}
+
+int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol) {
+    if (!out_symbol) return 1;
+    *out_symbol = 0;
+    const char* name = rt_interp_cstr(name_value);
+    if (!name || !name[0]) return 1;
+#ifdef _WIN32
+    HMODULE process = GetModuleHandleA(NULL);
+    if (!process) return 3;
+    FARPROC symbol = GetProcAddress(process, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#else
+    void* symbol = dlsym(NULL, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#endif
+    return 0;
 }
 
 int64_t spl_dlclose(int64_t handle) {
@@ -6990,6 +7106,63 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
         case 8: return ((Fn8)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
         default: return 0;
     }
+}
+
+/* Checked integer-only WFFI transport: [status, value]. */
+#define SPL_WFFI_OK 0
+#define SPL_WFFI_INVALID_ARGUMENT 1
+#define SPL_WFFI_NULL_FUNCTION 2
+#define SPL_WFFI_UNSUPPORTED_SIGNATURE 3
+
+int64_t spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value) {
+    typedef bool (*Fn)(void);
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
+    *out_value = ((Fn)(uintptr_t)fptr)() ? 1 : 0;
+    return SPL_WFFI_OK;
+}
+
+int64_t spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0, int8_t* out_value) {
+    typedef bool (*Fn)(int64_t);
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
+    *out_value = ((Fn)(uintptr_t)fptr)(arg0) ? 1 : 0;
+    return SPL_WFFI_OK;
+}
+
+static int64_t spl_wffi_i64_checked_result(int64_t status, int64_t value) {
+    SplArray* result = rt_array_new(2);
+    if (!result) return rt_core_nil();
+    if (!rt_array_push(result, rt_value_int(status)) ||
+        !rt_array_push(result, rt_value_int(value))) {
+        rt_array_free(result);
+        return rt_core_nil();
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
+int64_t spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value, int64_t nargs) {
+    if (fptr == 0) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_NULL_FUNCTION, 0);
+    }
+    if (nargs < 0) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    if (nargs > 8) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_UNSUPPORTED_SIGNATURE, 0);
+    }
+    RtCoreArray* args = rt_core_as_array(args_value);
+    if (!args || (args->flags & RT_CORE_ARRAY_FLAG_BYTES) || !args->data || nargs > args->len) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    for (int64_t i = 0; i < nargs; i++) {
+        if (!rt_core_is_int(((int64_t*)args->data)[i])) {
+            return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+        }
+    }
+    return spl_wffi_i64_checked_result(SPL_WFFI_OK, spl_wffi_call_i64(fptr, args_value, nargs));
 }
 
 int64_t rt_array_header_ptr(SplArray* a) {

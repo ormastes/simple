@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "runtime.h"
 
 typedef long (*probe_fn)(void);
 
@@ -15,6 +16,21 @@ int64_t spl_dlclose(int64_t handle);
 const char *rt_interp_cstr(int64_t value) {
     return (const char *)(intptr_t)value;
 }
+
+/* The dynload owner also contains optional GPU adapters. This harness does not
+ * exercise them; provide inert link-only stubs so the exact-loader test remains
+ * focused on snapshot/hash/load identity. */
+int64_t rt_array_len(SplArray *array) { (void)array; return 0; }
+int64_t rt_array_get(SplArray *array, int64_t index) {
+    (void)array; (void)index; return 0;
+}
+int8_t rt_array_set(SplArray *array, int64_t index, int64_t value) {
+    (void)array; (void)index; (void)value; return 0;
+}
+int64_t rt_value_as_int(int64_t value) { return value; }
+int64_t rt_value_int(int64_t value) { return value; }
+int64_t rt_string_len(int64_t value) { (void)value; return -1; }
+const uint8_t *rt_string_data(int64_t value) { (void)value; return NULL; }
 
 int main(int argc, char **argv) {
     if (argc != 4) {

@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+owners='src/runtime/runtime_dynload.c src/runtime/runtime_native.c src/compiler_rust/runtime/src/value/wsffi_native.rs src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs src/compiler_rust/compiler/src/interpreter_extern/mod.rs src/compiler_rust/compiler/src/codegen/runtime_sffi.rs'
+
+for symbol in spl_dlopen_checked spl_dlsym_checked spl_dlsym_process_checked; do
+    for owner in $owners; do
+        grep -Fq "$symbol" "$owner" || {
+            echo "FAIL: $owner lacks $symbol" >&2
+            exit 1
+        }
+    done
+done
+
+for symbol in spl_wffi_call_bool0_checked spl_wffi_call_bool1_checked; do
+    for owner in src/runtime/runtime_native.c \
+        src/compiler_rust/runtime/src/value/wsffi_native.rs \
+        src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs \
+        src/compiler_rust/compiler/src/interpreter_extern/mod.rs \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs; do
+        grep -Fq "$symbol" "$owner" || {
+            echo "FAIL: $owner lacks typed boolean provider $symbol" >&2
+            exit 1
+        }
+    done
+done
+
+grep -Fq 'dynload_rejects_interior_nul_instead_of_returning_zero' \
+    src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs
+grep -Fq 'symbol_lookup_rejects_null_handle_instead_of_returning_zero' \
+    src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs
+grep -Fq 'integer_bridge_rejects_boolean_coercion' \
+    src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs
+grep -Fq 'checked_boolean_transport_preserves_bool_and_failure_identity' \
+    src/compiler_rust/runtime/src/value/wsffi_native.rs
+
+bool_c=$(sed -n '/^int64_t spl_wffi_call_bool0_checked(/,/^}/p' src/runtime/runtime_native.c)
+bool_rust=$(sed -n '/^pub extern "C" fn spl_wffi_call_bool0_checked(/,/^}/p' \
+    src/compiler_rust/runtime/src/value/wsffi_native.rs)
+if printf '%s\n%s\n' "$bool_c" "$bool_rust" | grep -Eiq \
+    '(malloc|calloc|realloc|Vec|HashMap|Mutex|dlsym|dlopen)'; then
+    echo 'FAIL: typed boolean hot thunk gained allocation, lookup, or locking' >&2
+    exit 1
+fi
+
+echo 'PASS: checked dynload/symbol admission and allocation-free boolean thunks are complete'

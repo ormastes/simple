@@ -2439,10 +2439,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_bits_to_f64", wsffi::spl_bits_to_f64);
     insert_simple!("spl_dlclose", wsffi::spl_dlclose);
     insert_simple!("spl_dlopen", wsffi::spl_dlopen);
+    insert_simple!("spl_dlopen_checked", wsffi::spl_dlopen_checked);
     insert_simple!("spl_dlsym", wsffi::spl_dlsym);
+    insert_simple!("spl_dlsym_checked", wsffi::spl_dlsym_checked);
+    insert_simple!("spl_dlsym_process_checked", wsffi::spl_dlsym_process_checked);
     insert_simple!("spl_f64_to_bits", wsffi::spl_f64_to_bits);
     insert_simple!("spl_i64_is_zero", memory::spl_i64_is_zero);
     insert_simple!("spl_str_ptr", wsffi::spl_str_ptr);
+    insert_simple!("spl_wffi_call_bool0_checked", wsffi::spl_wffi_call_bool0_checked);
+    insert_simple!("spl_wffi_call_bool1_checked", wsffi::spl_wffi_call_bool1_checked);
     insert_simple!("spl_wffi_call_f64", wsffi::spl_wffi_call_f64);
     insert_simple!("spl_wffi_call_f64_checked", wsffi::spl_wffi_call_f64_checked);
     insert_simple!("spl_wffi_call_i64", wsffi::spl_wffi_call_i64);

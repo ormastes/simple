@@ -1912,3 +1912,23 @@ The independent null/signature guard also fails on multiple existing families,
 including fabricated-zero dynload/symbol lookup, boolean/integer ABI coercion,
 TCP/UDP contracts, and missing checked crypto declarations. These failures are
 authoritative evidence that whole-SFFI safety and verification are incomplete.
+
+### Checked dynload, symbol lookup, and boolean transport
+
+The fabricated-zero dynload/symbol findings and boolean-to-integer coercion are
+now removed from the global guard. Status/out providers are present across both
+C owners, the Rust runtime, interpreter, dispatch table, and codegen registry;
+outputs are initialized before failure. The exact Linux snapshot sabotage
+passes after proving write seals and pathname-replacement resistance.
+
+Typed `bool()` and `bool(i64)` calls now use direct status/out thunks, not the
+integer dispatcher. Their hot path has no allocation, copy, lookup, lock, or
+generic array dispatch. The C cross-lane harness passes 10/10 cases. The Rust
+tests did not execute because the existing spin-loop/TLS/UDP export drift still
+stops `simple-runtime` compilation before the target.
+
+The global null/signature guard remains red for independent TCP/UDP, crypto,
+and other runtime contract drift. Signed admission is still zero. The checked
+integer call API also retains an existing per-call two-element array allocation;
+that performance debt is not introduced by the typed boolean thunks and remains
+open for a scalar status/out migration.

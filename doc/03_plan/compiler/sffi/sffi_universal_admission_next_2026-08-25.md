@@ -465,3 +465,21 @@ does not label inline assembly safe or verified.
   execute the focused volatile sabotage unit test and formatting gate.
 - [ ] Establish target-owned MMIO ranges, exact ABI parity, signed provider
   admission, cross-target code shape, latency, and peak RSS evidence.
+
+## Checked dynload and typed boolean tranche
+
+- [x] Restore checked status/out load, library-symbol, and current-process
+  symbol providers across C, Rust runtime, interpreter, dispatch, and codegen.
+- [x] Reject interpreter interior-NUL names, null handles, missing symbols, and
+  unsupported platforms as errors rather than integer zero.
+- [x] Stop coercing `Value::Bool` into the untyped integer call ABI.
+- [x] Add typed allocation-free `bool()` and `bool(i64)` status/out thunks and
+  preserve false separately from bridge failure.
+- [x] Restore and sabotage-test the sealed Linux exact-artifact snapshot loader.
+- [x] Extend the C harness to cover legitimate integer zero and typed boolean
+  true/false/null-function/null-output outcomes.
+- [ ] Replace the checked integer bridge's per-call `[status, value]` allocation
+  with a scalar status/out ABI while retaining the public `Result<i64, text>`.
+- [ ] Unblock Rust workspace exports and execute Rust/interpreter unit tests.
+- [ ] Bind admitted exact artifact and ABI registry to verified signatures;
+  current signed-admitted count remains zero.
