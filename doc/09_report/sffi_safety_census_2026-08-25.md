@@ -219,3 +219,10 @@ creation and source/library/header copy is checked, and the installer cannot
 print success after a partial copy.  Hash helpers still read each selected file
 once; no retry, read-back beyond the existing post-copy integrity check,
 registry lookup, or generic dispatch was added.
+### Package-manifest authority follow-up
+
+Package manifest parsing and add/remove mutation paths no longer use a local
+raw text reader or existence-then-read pairs.  Each path performs one typed
+read, distinguishes provider failure from a valid empty file, and returns
+before parsing or mutation on failure.  This removes filesystem probes rather
+than adding retries, copies, registry lookups, or generic dispatch.

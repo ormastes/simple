@@ -1801,3 +1801,10 @@ and unpromoted.
 - [x] Check every directory and source/library/header copy operation.
 - [x] Prevent a partial installation from reporting success.
 - [x] Add a static ownership and one-read hash ratchet.
+### Completed package-manifest authority slice
+
+- [x] Remove the package installer's local raw file-read declaration.
+- [x] Make shared manifest parsing use one typed read.
+- [x] Distinguish provider read failure from a valid empty manifest.
+- [x] Fail before add/remove parsing or mutation on read errors.
+- [x] Remove existence/read double syscalls and add a static ratchet.
