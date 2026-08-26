@@ -9,25 +9,52 @@ authority-safe atomic publication contract required after P2. P3 must not use a
 publicly constructible lexical/state object as an authority substitute, nor
 expose a partially staged publication through a convenience recovery path.
 
+Two admission blockers remain after the earlier sealed-record, old-to-new head,
+pointer revalidation, and open-reader findings were repaired in the candidate:
+
+1. The authority bridge is duck-typed/forgeable. A caller can currently choose
+   a journal root, replay scope, or canonical input instead of presenting one
+   closure-branded authority bridge minted by the P2 publisher. That makes
+   `stageAndPublishV1` an arbitrary-root/scope/input writer rather than the
+   P2-to-P3 continuation. The bridge must be lexical-private and closure
+   branded; all public arguments that purport to select those values must be
+   rejected. P3 derives the root, replay scope, expected publication identity,
+   and canonical input only from the sealed bridge after exact brand validation.
+2. The current-pointer CAS lock is not yet a durable ownership protocol. It
+   needs an fsynced owner receipt, a compare-and-remove/reclaim operation tied
+   to the exact observed lock and receipt identity, stale recovery that cannot
+   delete a replacement owner, and restart proof after the owning process is
+   killed. Time-based path unlinking, a PID check alone, or a mutable caller
+   supplied lock record is insufficient.
+
 The only public ABI names for this slice are exactly:
 
 - `stageAndPublishV1`
 - `openPublishedAuthorityInventoryV1`
 - `recoverAuthorityPublicationV1`
 
-All authority constructors, record parsers, sealing helpers, journal paths, and
-mutable current-pointer machinery remain lexical-private to the journal owner.
-No additional public construction, reopen, or mutation API is permitted.
+All authority constructors, bridge brands, record parsers, sealing helpers,
+journal paths, lock-owner receipts, and mutable current-pointer machinery
+remain lexical-private to the journal owner. No additional public construction,
+reopen, or mutation API is permitted.
 
 ## Required P3 contract
 
-`stageAndPublishV1` takes a P2-validated canonical input and stages its derived
-objects privately. It writes immutable content-addressed objects, writes and
-fsyncs a closed publication record, then advances the current pointer with a
-durable compare-and-swap. A reader may expose a head only after the pointer,
-record, and every referenced immutable object verify as one complete
-publication. Recovery may finalize or discard interrupted private staging, but
-may not invent a head or publish an incomplete record.
+`stageAndPublishV1` accepts only a closure-branded P2 authority bridge and
+stages its derived objects privately. It writes immutable content-addressed
+objects, writes and fsyncs a closed publication record, then advances the
+current pointer with a durable compare-and-swap protected by an owner-receipt
+lock. A reader may expose a head only after the pointer, record, and every
+referenced immutable object verify as one complete publication. Recovery may
+finalize or discard interrupted private staging, but may not invent a head or
+publish an incomplete record.
+
+The owner receipt is created durably before its lock becomes visible and binds
+at least a fresh owner nonce, process identity, lock generation, and the
+expected old/current-pointer identity. A reclaimer must re-read and compare the
+same receipt and lock identity immediately before it removes either path; if
+either changed, it loses the race and retries without deletion. The current
+pointer update is authorized only while that exact owner receipt remains live.
 
 The closed record must rebind, from canonical bytes rather than defaults or
 sanitization, at least its exact schema/version and field set, replay scope,
@@ -36,6 +63,19 @@ An equal replay is not a cache hit until it also validates the persisted current
 pointer and its referenced complete record/objects. A changed scope, revision,
 expected publication identity, or canonical input must deny before pointer
 advance.
+
+## Retained non-admission context
+
+The repaired findings remain release-blocking context rather than being erased:
+
+- prepared input must not be forgeable;
+- persisted pointer and record bytes must validate the old-to-new head relation
+  before an idempotent replay or recovery result is returned;
+- pointer compare-and-swap must have a no-TOCTOU durability argument; and
+- restart and concurrent-reader claims require independent-process evidence.
+
+The bridge and lock requirements above strengthen these gates; they do not
+relax the closed-record, object-completeness, or old-or-new-only contract.
 
 ## Fresh-session scope and evidence
 
@@ -54,23 +94,30 @@ must preserve that exact ownership boundary.
 The test matrix is mandatory and must use real independent processes where it
 claims restart or concurrent-reader behavior:
 
-1. first publish creates only immutable objects, a closed record, and one
+1. a caller cannot construct, clone, serialize/reopen, or duck-type an
+   authority bridge, and cannot select another root, replay scope, expected
+   publication identity, or canonical input through the public P3 ABI;
+2. first publish creates only immutable objects, a closed record, and one
    durable current pointer; fault injection at every stage leaves readers on
    the old complete head or no head, never a partial head;
-2. restart after each interrupted stage recovers only the prior complete head
+3. restart after each interrupted stage recovers only the prior complete head
    or the one complete new head;
-3. concurrent readers during pointer advance each observe either the old
+4. concurrent readers during pointer advance each observe either the old
    complete publication or the new complete publication, never a mixed record,
    missing object, private staging path, or partially parsed input;
-4. an equal replay validates the current pointer and referenced record/objects
+5. an equal replay validates the current pointer and referenced record/objects
    before returning idempotence; corrupt, absent, redirected, or mismatched
    pointer state is denied/recovered according to the closed journal contract;
-5. altered record scope, `publicationUid`, schema/version, extra field, or
+6. altered record scope, `publicationUid`, schema/version, extra field, or
    canonical input bytes is rejected before projection or pointer advance.
+7. two independent publisher processes contend for a current-pointer CAS:
+   only the exact owner receipt holder may advance it; a stale reclaimer cannot
+   delete a replacement receipt/lock; and a SIGKILL owner is reclaimed only
+   after a fresh process verifies stale receipt identity and restart safety.
 
 Run the focused Node test once after the repair, then obtain an independent
 highest-capability review of the exact three-file diff. Package/full-suite
 results do not replace the restart and independent-process proofs. No source is
-admitted or pushed until all five cases pass together and the review is PASS.
+admitted or pushed until all seven cases pass together and the review is PASS.
 
 Cross-links: [W5A publisher gates](../../03_plan/sys_test/spipe_knowledge_compiler.md#224-ordered-remediation-gates-blocking-test-execution) and [remediation order](../../03_plan/agent_tasks/spipe_knowledge_compiler.md#wave-5-admission-remediation-execution-order-2026-08-26).
