@@ -433,6 +433,11 @@ impl SshSession:
             return
 
         val command = r_command.unwrap().value
+        if self.pending_ring3_exec:
+            if want_reply:
+                self.send_packet(_build_channel_failure_stable(remote_id))
+            self._finish_exec_request(local_id, remote_id, 1u32, [])
+            return
         serial_println("[sshd-session] exec command={command}")
         self._mark_channel_shell(local_id)
         if want_reply:
@@ -466,10 +471,7 @@ impl SshSession:
             # PATH-resolution generalization — argv[0] already starts with '/' here,
             # so fs_exec_resolve returns it unchanged).
             # Store channel info so the accept loop can send the real exit status after spawn.
-            self.pending_ring3_exec_remote_id = remote_id
-            self.pending_ring3_exec_local_id = local_id
-            self.pending_ring3_exec = true
-            self.pending_ring3_exec_command = command
+            self._defer_ring3_exec(local_id, remote_id, command)
             self.transition_closed()
             return
 
@@ -487,10 +489,7 @@ impl SshSession:
         # parsing happens in this deep frame (Phase 2e Inc 2).
         if ssh_session_u8_at(payload, off + 4) == 0x63u8:
             serial_println("[sshd-session] exec ring3 DEFER command={command}")
-            self.pending_ring3_exec_remote_id = remote_id
-            self.pending_ring3_exec_local_id = local_id
-            self.pending_ring3_exec = true
-            self.pending_ring3_exec_command = command
+            self._defer_ring3_exec(local_id, remote_id, command)
             self.transition_closed()
             return
 
@@ -560,10 +559,7 @@ impl SshSession:
         # it or return exit 127 "command not found" — never spawns from this
         # deep frame, and never falls into the interactive toy shell for a
         # one-shot `ssh host cmd` exec request.
-        self.pending_ring3_exec_remote_id = remote_id
-        self.pending_ring3_exec_local_id = local_id
-        self.pending_ring3_exec = true
-        self.pending_ring3_exec_command = command
+        self._defer_ring3_exec(local_id, remote_id, command)
         self.transition_closed()
 
     me _handle_channel_data(payload: [u8]):
@@ -719,32 +715,41 @@ impl SshSession:
         if self.channels.channels.len() == 0:
             self.transition_closed()
 
-    me _send_deferred_ring3_exec_response():
+    me _defer_ring3_exec(local_id: u32, remote_id: u32, command: text):
+        """Publish one command for the shallow launcher after this deep frame exits."""
+        self.pending_ring3_exec_remote_id = remote_id
+        self.pending_ring3_exec_local_id = local_id
+        self.pending_ring3_exec_command = command
+        # Publish validity last so no re-entrant observer can claim a partial
+        # request record.
+        self.pending_ring3_exec = true
+
+    me _send_deferred_ring3_exec_response(
+        local_id: u32, remote_id: u32, stdout: [u8], exit_status: u32,
+        stdout_truncated: bool
+    ):
         """Send the real exit status for a deferred ring-3 execution after the spawn completes.
 
         Called from the accept loop after _sshd_run_pending_exec() returns the exit code.
         """
-        if self.pending_ring3_exec:
-            val remote_id = self.pending_ring3_exec_remote_id
-            val local_id = self.pending_ring3_exec_local_id
-            var exit_code = self.pending_ring3_exec_exit_code.to_u32()
-            if self.pending_ring3_exec_stdout.len() > 0:
-                if self.channels.consume_remote_window(local_id, self.pending_ring3_exec_stdout.len().to_u32()):
-                    self.send_packet(_build_channel_data_stable(remote_id, self.pending_ring3_exec_stdout))
-                else:
-                    # Do not silently drop a real child result and then report
-                    # success. This bounded one-shot response has no retained
-                    # window-adjust buffer, so fail closed before EOF/CLOSE.
-                    exit_code = SSH_EXIT_REMOTE_WINDOW_EXHAUSTED
-                    serial_println("[sshd] deferred exec stdout blocked by remote window; reporting rc={exit_code} bytes={self.pending_ring3_exec_stdout.len()}")
-            if self.pending_ring3_exec_stdout_truncated:
-                serial_println("[sshd] deferred exec stdout truncated bytes={self.pending_ring3_exec_stdout.len()}")
-            serial_println("[sshd] sending deferred exit-status rc={exit_code} remote_id={remote_id}")
-            self.send_packet(_build_channel_exit_status_stable(remote_id, exit_code))
-            self.send_packet(_build_channel_eof_stable(remote_id))
-            self.send_packet(_build_channel_close_stable(remote_id))
-            self.channels.close(local_id)
-            self.channels.remove_closed()
+        var exit_code = exit_status
+        if stdout.len() > 0:
+            if self.channels.consume_remote_window(local_id, stdout.len().to_u32()):
+                self.send_packet(_build_channel_data_stable(remote_id, stdout))
+            else:
+                # Do not silently drop a real child result and then report
+                # success. This bounded one-shot response has no retained
+                # window-adjust buffer, so fail closed before EOF/CLOSE.
+                exit_code = SSH_EXIT_REMOTE_WINDOW_EXHAUSTED
+                serial_println("[sshd] deferred exec stdout blocked by remote window; reporting rc={exit_code} bytes={stdout.len()}")
+        if stdout_truncated:
+            serial_println("[sshd] deferred exec stdout truncated bytes={stdout.len()}")
+        serial_println("[sshd] sending deferred exit-status rc={exit_code} remote_id={remote_id}")
+        self.send_packet(_build_channel_exit_status_stable(remote_id, exit_code))
+        self.send_packet(_build_channel_eof_stable(remote_id))
+        self.send_packet(_build_channel_close_stable(remote_id))
+        self.channels.close(local_id)
+        self.channels.remove_closed()
 
     me _forward_shell_output():
         if self.shell == nil:

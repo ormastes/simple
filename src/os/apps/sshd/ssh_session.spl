@@ -135,6 +135,12 @@ pub struct SshShellLaunchReport:
     smf_backed: bool
     shell_exec_path: bool
 
+pub struct SshDeferredRing3ExecClaimV1:
+    """One claimed deferred command, detached before shallow execution."""
+    local_id: u32
+    remote_id: u32
+    command: text
+
 class SshSession:
     """Per-client SSH session.
 
@@ -195,6 +201,27 @@ class SshSession:
     scp_file_name: text    # basename sent in the C0644 control line
 
 impl SshSession:
+
+    pub me claim_pending_ring3_exec() -> SshDeferredRing3ExecClaimV1?:
+        """Consume the one deferred command before the shallow launcher runs.
+
+        A claimed command has no retry path: a launcher or response failure may
+        lose its reply, but it must never execute the command a second time.
+        """
+        if not self.pending_ring3_exec:
+            return nil
+        val claim = SshDeferredRing3ExecClaimV1(
+            local_id: self.pending_ring3_exec_local_id,
+            remote_id: self.pending_ring3_exec_remote_id,
+            command: self.pending_ring3_exec_command)
+        self.pending_ring3_exec = false
+        self.pending_ring3_exec_exit_code = 0u32
+        self.pending_ring3_exec_stdout = []
+        self.pending_ring3_exec_stdout_truncated = false
+        self.pending_ring3_exec_remote_id = 0u32
+        self.pending_ring3_exec_local_id = 0u32
+        self.pending_ring3_exec_command = ""
+        Some(claim)
 
     static fn new(socket_fd: i64, user_db: SshUserDb, host_private: [u8], host_public: [u8]) -> SshSession:
         """Create a new SSH session for an accepted TCP connection.
