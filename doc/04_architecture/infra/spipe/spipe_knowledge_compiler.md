@@ -365,7 +365,7 @@ The table is the full-system edge vocabulary. Wave 3 enables every row except
 `produces` and `promoted_from`; those fail closed until later waves publish the
 canonical run/result and promotion node schemas.
 
-### 4.4 Trace authority
+### 4.6 Trace authority
 
 Authority and acceptance are independent fields.
 

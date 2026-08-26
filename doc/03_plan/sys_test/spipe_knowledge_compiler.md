@@ -1471,3 +1471,21 @@ The next run is permitted only after those static defects are repaired, and it
 must execute full parity once on a capable pure-Simple runtime. No code is
 accepted; the analyzer prerequisite remains missing and Wave 4 remains
 `IN PROGRESS`.
+
+## 14. Current evidence status (2026-08-26)
+
+The five system specifications and their Markdown manuals are executable-design
+scaffolds, not passing evidence. Four fail closed with `DESIGN-SCAFFOLD`; the
+provider-parity spec fails closed with `NOT-EVIDENCE`. Requirements `REQ-SPKC-001` through
+`REQ-SPKC-030` and NFRs `NFR-SPKC-001` through `NFR-SPKC-025` remain active;
+header ranges and family allocation rows are planning aids and do not replace a
+named scenario plus oracle and retained receipt for each ID. Do not mark AC-13,
+NFR-SPKC-020, or final verification complete until the real oracles replace the
+scaffolds and the manuals are regenerated from the executed specs.
+
+Accepted implementation evidence currently covers Waves 1–3 and the checked
+common BM25 scorer only. DBFS parity, RRF, the JavaScript fallback/provider,
+Unicode analyzer parity, canonical JSON, and the native identity candidate are
+`FAIL`, `BLOCKED`, or `NOT-EVIDENCE`. Later wave tests must not use those
+candidates as prerequisites until an accepted commit and focused receipt are
+recorded in the execution ledger.

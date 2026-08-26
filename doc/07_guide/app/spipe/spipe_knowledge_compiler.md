@@ -1,7 +1,29 @@
 # SPipe Knowledge Compiler Operator Guide
 
-**Status:** Wave 2 core accepted; later commands remain planned until their dependency wave lands
-**Date:** 2026-08-25
+**Status:** Waves 1–3 accepted; Wave 4 partial; Waves 5–11 planned
+**Date:** 2026-08-26
+
+## 0. Current capability and evidence matrix
+
+This table is authoritative for deciding whether a workflow below is runnable.
+Commands described for an unlanded wave are contract previews, not executable
+operator instructions.
+
+| Capability | State | Evidence / operator consequence |
+|---|---|---|
+| Legacy CLI/MCP modularization | Accepted (Wave 1) | Commit `185f3303282`; existing host, fine-tune, doctor, and legacy MCP surfaces remain the only released command surface. |
+| Identity, parsing, registry, snapshots, overlays | Accepted (Wave 2) | Commit `deccbce964e`; callable through the dependency-free JavaScript library and tests, not through the planned Knowledge Compiler CLI. |
+| Typed graph and diagnostics foundation | Accepted (Wave 3) | Commit `5e2a049eb89`; graph publication and diagnostic APIs are library surfaces. Later lifecycle/run/result trace nodes remain Wave 7. |
+| Checked common BM25 scorer | Accepted foundation | Commit `2b9f25f8604`; this does not prove SPipe search, RRF, provider, JavaScript fallback, or DBFS parity. |
+| Wave 4 provider/search integration | In progress | JSON, Unicode/analyzer, provider, DBFS, and parity candidates are rejected, blocked, or unverified unless a later accepted commit says otherwise. |
+| Virtual views/MCP 2026/refactor/rebalance/promotion/skill compiler/DB adapters | Planned | Waves 5–11; the corresponding commands in this guide are unavailable. |
+| Five system SSpecs and manuals | RED design scaffolds | Their fail-fast helpers are intentional. They are not runtime or release evidence. |
+
+To inspect the released surface, use the installed package's `spipe --help`
+and MCP `tools/list`; never infer command availability from a planned syntax
+block. A missing admitted self-hosted Simple runtime does not block standalone
+JavaScript work, but it does block native Simple admission. Rust bootstrap-seed
+or raw-source execution is not substitute evidence.
 
 ## 1. What the knowledge compiler does
 

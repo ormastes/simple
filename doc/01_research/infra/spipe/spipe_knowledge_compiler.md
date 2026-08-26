@@ -1,6 +1,11 @@
 <!-- codex-research -->
 # SPipe Knowledge Compiler
+
 ## Virtual Documentation Views, Hybrid Search, Traceability, Tree Rebalancing, and Common-Knowledge Promotion
+
+**Research layout note:** This requested infrastructure research artifact
+combines repository-local findings and domain research; no duplicate same-slug
+`local/` or `domain/` companion files currently exist.
 
 **Date:** 2026-08-25  
 **Status:** Final research, architecture, design, and implementation plan  
@@ -2331,7 +2336,7 @@ Normative follow-on artifacts:
 - `doc/05_design/infra/spipe/spipe_knowledge_compiler_mcp_views.md`
 - `doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md`
 
-## 31. 2026-08-26 Native Identity-Model Follow-up
+## 32. 2026-08-26 Native Identity-Model Follow-up
 
 Wave 2's dependency-free JavaScript identity and schema implementation is
 already present on `main` (rewritten upstream commit `deccbce964e`). A review

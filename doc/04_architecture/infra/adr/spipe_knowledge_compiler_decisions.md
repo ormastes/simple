@@ -505,6 +505,10 @@ provider response poisoning, and untrusted prompt content.
 
 ## ADR-SPKC-016 — Graph identity, delta, and publication contract
 
+### Status
+
+Accepted
+
 **Decision:** The graph is a snapshot projection of canonical typed records.
 Wave 3 uses `RQ-`, `NFR-`, `SS-`, `SY-`, `WS-`, and `WT-`; `R-` remains a
 project relation. Existing schema-v1 `W-` workspace/worktree identities are

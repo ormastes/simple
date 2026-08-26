@@ -1,6 +1,11 @@
 <!-- codex-design -->
 # SPipe Knowledge Compiler — Integrating Detail Design
 
+**UI design:** N/A. This feature exposes CLI, MCP, library, and generated
+read-only filesystem surfaces; it has no independent TUI or GUI in scope.
+Protocol interaction and virtual-directory presentation are specified in the
+MCP-view detail design rather than separate `_tui`/`_gui` artifacts.
+
 **Status:** Implementation-ready integrating design  
 **Date:** 2026-08-25  
 **Requirements:** `doc/02_requirements/feature/spipe_knowledge_compiler.md`  
