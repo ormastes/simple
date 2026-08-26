@@ -1588,6 +1588,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Added an O(1) empty-extern bypass to strict-profile MIR admission; actual SFFI
   modules retain one fail-fast linear HIR pass. Global gating remains sequenced
   after callsite migration so ordinary builds are not broken prematurely.
+- Tagged and confined the five dedicated-host POSIX mmap/file calls to private
+  always-inline owners; validated byte narrowing in the existing single pass
+  and made exact size mismatch fail typed lifting.
+- Added a static authority contract. This family remains unverified/unsigned
+  because interpreter failure can return `Nil` and no owned native rich-array
+  provider was found.
 - Kept MIR/runtime representation unchanged; capability collection is linear in
   the already-parsed header and stores one small vector per unsafe block only
   during compilation.

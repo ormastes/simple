@@ -1137,6 +1137,19 @@ census. Enabling the gate globally before those callsites are tagged would
 break ordinary builds, so that sequencing shortcut was explicitly rejected.
 Source-reviewed, not executed.
 
+## 2026-08-26 dedicated-host POSIX mmap follow-up
+
+The five raw mmap/file declarations in `dedicated_host_posix.spl` are now
+explicitly `unsafe(ffi)` and confined to five always-inline private owners.
+Mapped byte lifting validates `0..255` during the existing conversion loop and
+returns a typed error instead of narrowing arbitrary integers; preload size is
+checked exactly, including empty files. Valid execution retains one foreign
+call, one conversion pass, and the pre-existing output allocation/copy. A static
+authority contract pins declaration/call confinement and lifting checks.
+Interpreter read failure can still originate as `Nil`, and no owned native
+provider for the rich array symbol was found, so this family remains explicitly
+unverified and unsigned. Source-reviewed only; checks were not executed.
+
 ## 2026-08-26 Base64/Base64url contract follow-up
 
 Interpreter Base64/Base64url handlers now enforce exact arity, explicit bounded
