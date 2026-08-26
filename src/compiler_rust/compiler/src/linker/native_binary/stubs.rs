@@ -265,7 +265,6 @@ const RT_KEEP: &[&str] = &[
     "rt_epoll_create",
     "rt_epoll_ctl",
     "rt_epoll_wait",
-    "rt_socket_set_nonblocking",
     "rt_stdin_read",
     "rt_stdin_read_all",
     "rt_stdin_read_line",

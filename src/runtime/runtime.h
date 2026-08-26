@@ -1273,6 +1273,9 @@ int64_t     rt_epoll_create(void);
 int64_t     rt_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t events);
 SplArray*   rt_epoll_wait(int64_t epfd, int64_t max_events, int64_t timeout_ms);
 bool        rt_socket_set_nonblocking(int64_t fd, bool enabled);
+int64_t     rt_socket_nonblock_prepare(int64_t fd, int64_t mode);
+int64_t     rt_socket_nonblock_commit(int64_t fd, int64_t flags);
+int64_t     rt_socket_nonblock_mask(void);
 
 /* ===== Raw 32-bit framebuffer operations ===== */
 

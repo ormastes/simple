@@ -2908,8 +2908,7 @@ pub(crate) fn call_extern_function_with_values(
         return audio::dispatch(name, &evaluated);
     }
 
-    // rt_fb_*/rt_image_*/rt_simpleos_log_*+rt_log_target_*/
-    // rt_socket_set_nonblocking are 14 of the 20 bucket (a)
+    // rt_fb_*/rt_image_*/rt_simpleos_log_*+rt_log_target_* were bucket (a)
     // "source-list-absent" names left after the rt_audio_* lane above; see
     // doc/08_tracking/bug/interpreter_extern_unreachable_names.md bucket (a).
     // The other 6, rt_mmio_read_u8/u16/u32 + rt_mmio_write_u8/u16/u32,
@@ -2926,8 +2925,13 @@ pub(crate) fn call_extern_function_with_values(
     if name.starts_with("rt_simpleos_log_") || name.starts_with("rt_log_target_") {
         return simpleos_log::dispatch(name, &evaluated);
     }
-    if name == "rt_socket_set_nonblocking" {
-        return socket_nonblock::dispatch(&evaluated);
+    // Pure Simple owns rt_socket_set_nonblocking; only its scalar syscall
+    // shims are interpreter externs.
+    if name == "rt_socket_nonblock_prepare"
+        || name == "rt_socket_nonblock_commit"
+        || name == "rt_socket_nonblock_mask"
+    {
+        return socket_nonblock::dispatch(name, &evaluated);
     }
 
     // The rt_opengl_* / rt_oneapi_* families are implemented once, in C, at
