@@ -1,5 +1,16 @@
 #!/bin/sh
 
+# Keep helper subcommands on the canonical bootstrap entrypoint.  Dispatch
+# before the strategy/session wrappers: progress-watch observes another process
+# and must not acquire bootstrap ownership or create its own process group.
+bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+case "${1:-}" in
+  progress-watch)
+    shift
+    exec sh "${bootstrap_entry_dir}/bootstrap-progress-watch.shs" "$@"
+    ;;
+esac
+
 # The coordinated strategy supervisor is the default entry for an ordinary
 # multi-stage bootstrap. Single-stage recovery, receipt validation, help, and
 # diagnostic sweeps keep their direct fail-closed paths. The supervisor sets
@@ -37,7 +48,6 @@ fi
 
 # Keep bootstrap and every non-detached descendant in one dedicated kernel
 # process group. Lock recovery remains fail-closed while any group member lives.
-bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
 bootstrap_session_helper=\
 "${bootstrap_entry_dir}/../check/lib/portable-session-exec.pl"
 if [ "${SIMPLE_BOOTSTRAP_SESSION_READY:-0}" = 1 ]; then
@@ -93,6 +103,10 @@ SimpleOS / --target=simpleos-x86_64:
   for the underlying x86_64-simpleos lane.
 
 Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
+
+Subcommands:
+  progress-watch --pid=N --progress-log=PATH [options]
+                     Standalone bootstrap progress/liveness watcher
 
 Options:
   --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm; cranelift also supported)
@@ -689,7 +703,7 @@ if [ -n "${progress_log}" ]; then
   : >"${progress_log}"
   : >"${build_progress_events}"
   bootstrap_progress_mark starting ""
-  sh "${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs" \
+  sh "${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh" progress-watch \
     --pid="$$" --state-file="${bootstrap_progress_state}" \
     --event-file="${build_progress_events}" \
     --progress-log="${progress_log}" --interval="${progress_interval}" &
