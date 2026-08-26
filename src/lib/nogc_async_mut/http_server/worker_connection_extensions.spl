@@ -56,7 +56,7 @@ impl Worker:
         val is_h2 = self.h2_connections.contains_key(fd)
 
         if result < 0:
-            self.transport_send_bytes.remove(op_id)
+            self.transport_send_progress.remove(op_id)
             if typ == OP_OPEN_SENDFILE:
                 self.sendfile_pending.remove(fd)
             if typ == OP_SENDFILE:
@@ -82,7 +82,7 @@ impl Worker:
                 self.handle_recv(fd, data, raw_bytes, now)
 
         elif typ == OP_SEND:
-            if not self.transport_send_bytes.contains_key(op_id):
+            if not self.transport_send_progress.contains_key(op_id):
                 # Every Worker socket send is owner-backed. A completion that
                 # lacks its payload cannot be progressed safely.
                 if is_h2:
@@ -90,9 +90,9 @@ impl Worker:
                 else:
                     self.close_connection(fd)
                 return
-            val sent = self.transport_send_bytes[op_id]
-            self.transport_send_bytes.remove(op_id)
-            if result <= 0 or result > sent.len():
+            var progress = self.transport_send_progress[op_id]
+            self.transport_send_progress.remove(op_id)
+            if result <= 0 or result > progress.submitted_len():
                 # A zero-byte completion has made no transport progress; do
                 # not turn it into a completed HTTP response or spin forever.
                 if is_h2:
@@ -100,8 +100,9 @@ impl Worker:
                 else:
                     self.close_connection(fd)
                 return
-            if result < sent.len():
-                self.submit_transport_send(fd, sent.slice(result, sent.len()))
+            progress.advance_after_write(result)
+            if not progress.complete():
+                self.submit_transport_send_retry(fd, progress)
                 return
             # Check if there's a pending sendfile for this fd
             val file_path = worker_sendfile_open_path_for_pending(self.sendfile_pending, fd)
@@ -452,7 +453,7 @@ impl Worker:
             if self.op_to_fd[oid] == fd:
                 self.op_to_fd.remove(oid)
                 self.op_type.remove(oid)
-                self.transport_send_bytes.remove(oid)
+                self.transport_send_progress.remove(oid)
         if self.sendfile_open_files.contains_key(fd):
             val open_file = self.sendfile_open_files[fd]
             self.driver.submit_close(open_file)
@@ -527,7 +528,7 @@ impl Worker:
         self.h2_connections = {}
         self.op_to_fd = {}
         self.op_type = {}
-        self.transport_send_bytes = {}
+        self.transport_send_progress = {}
         self.sendfile_pending = {}
         self.sendfile_progress = {}
         self.sendfile_open_files = {}

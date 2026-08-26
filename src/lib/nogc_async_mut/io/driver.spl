@@ -436,6 +436,7 @@ class IoDriver:
         var new_length: [i64] = []
         var new_path: [text] = []
         var new_time: [i64] = []
+        var canceled_ids: [i64] = []
         var i = 0
         while i < self._p_id.len():
             if self._p_fd[i] != fd:
@@ -449,6 +450,8 @@ class IoDriver:
                 new_length.push(self._p_length[i])
                 new_path.push(self._p_path[i])
                 new_time.push(self._p_time[i])
+            else:
+                canceled_ids.push(self._p_id[i])
             i = i + 1
         self._p_id = new_id
         self._p_type = new_type
@@ -460,6 +463,27 @@ class IoDriver:
         self._p_length = new_length
         self._p_path = new_path
         self._p_time = new_time
+
+        # Byte sends retain their data outside the pending-op arrays.  Remove
+        # rows for canceled operations too, otherwise a closed descriptor can
+        # leave a retained payload behind until a later driver teardown.
+        var kept_byte_ids: [i64] = []
+        var kept_byte_data: [[u8]] = []
+        i = 0
+        while i < self._bytes_pending_ids.len() and i < self._bytes_pending_data.len():
+            var canceled = false
+            var j = 0
+            while j < canceled_ids.len():
+                if self._bytes_pending_ids[i] == canceled_ids[j]:
+                    canceled = true
+                    break
+                j = j + 1
+            if not canceled:
+                kept_byte_ids.push(self._bytes_pending_ids[i])
+                kept_byte_data.push(self._bytes_pending_data[i])
+            i = i + 1
+        self._bytes_pending_ids = kept_byte_ids
+        self._bytes_pending_data = kept_byte_data
 
     # ---- Batch Control ----
 

@@ -94,6 +94,41 @@ pub(package) val OP_SEND = 2
 pub(package) val OP_SENDFILE = 3
 pub(package) val OP_OPEN_SENDFILE = 4
 pub(package) val OP_CLOSE_SENDFILE = 5
+pub(package) val TRANSPORT_RETRY_CHUNK_BYTES: i64 = 65536
+
+pub class WorkerTransportSendProgress:
+    """Worker-owned byte-send progress with bounded retry material.
+
+    The initial socket submission deliberately sends `payload` as one fast
+    path.  Only after a short completion do retries materialize a bounded
+    `current_chunk`; the full immutable payload and cursor remain the source
+    of truth for every subsequent retry.
+    """
+    payload: [u8]
+    cursor: i64
+    current_chunk: [u8]
+
+    static fn initial(payload: [u8]) -> WorkerTransportSendProgress:
+        WorkerTransportSendProgress(payload: payload, cursor: 0, current_chunk: [])
+
+    fn submitted_len(self) -> i64:
+        if self.current_chunk.len() > 0:
+            return self.current_chunk.len()
+        self.payload.len()
+
+    me advance_after_write(written: i64):
+        self.cursor = self.cursor + written
+        if self.cursor >= self.payload.len():
+            self.current_chunk = []
+            return
+        val end = if self.cursor + TRANSPORT_RETRY_CHUNK_BYTES > self.payload.len():
+            self.payload.len()
+        else:
+            self.cursor + TRANSPORT_RETRY_CHUNK_BYTES
+        self.current_chunk = self.payload.slice(self.cursor, end)
+
+    fn complete(self) -> bool:
+        self.cursor >= self.payload.len()
 
 # ============================================================================
 # Worker
@@ -126,7 +161,7 @@ pub class Worker:
     h2_connections: Dict<i64, H2Connection>
     op_to_fd: Dict<i64, i64>
     op_type: Dict<i64, i64>
-    transport_send_bytes: Dict<i64, [u8]>
+    transport_send_progress: Dict<i64, WorkerTransportSendProgress>
     sendfile_pending: Dict<i64, (text, i64, i64)>
     sendfile_progress: Dict<i64, (i64, i64)>
     sendfile_open_files: Dict<i64, i64>
@@ -210,7 +245,7 @@ pub class Worker:
             h2_connections: {},
             op_to_fd: {},
             op_type: {},
-            transport_send_bytes: {},
+            transport_send_progress: {},
             sendfile_pending: {},
             sendfile_progress: {},
             sendfile_open_files: {},
@@ -610,15 +645,21 @@ pub class Worker:
     pub(package) me submit_transport_send(fd: i64, bytes: [u8]):
         """Submit one owner-tracked transport write.
 
-        The I/O driver may complete a socket send after a short write. Keeping
-        the immutable payload under the Worker owner lets completion processing
-        submit only the remaining suffix, and lets close cancellation discard
-        that suffix before the descriptor can be reused.
+        The first submission keeps the existing full-payload fast path.  A
+        short completion transfers progress to a bounded retry chunk, avoiding
+        a full remaining-payload copy on every retry.
         """
         if bytes.len() == 0:
             return
         val op = self.driver.submit_send_bytes(fd, bytes)
-        self.transport_send_bytes[op] = bytes
+        self.transport_send_progress[op] = WorkerTransportSendProgress.initial(bytes)
+        self.op_to_fd[op] = fd
+        self.op_type[op] = OP_SEND
+
+    pub(package) me submit_transport_send_retry(fd: i64, progress: WorkerTransportSendProgress):
+        """Submit the current bounded retry chunk for an owner-tracked send."""
+        val op = self.driver.submit_send_bytes(fd, progress.current_chunk)
+        self.transport_send_progress[op] = progress
         self.op_to_fd[op] = fd
         self.op_type[op] = OP_SEND
 
