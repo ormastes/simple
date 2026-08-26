@@ -249,3 +249,11 @@ passing placeholder.
     handle/message fallbacks. Static owner audit, source check, and optimizer
     review pass; unsigned, interpreter-owned handle lifetime remains an explicit
     unsafe limitation until multi-lane provider/evidence admission exists.
+45. Harden the counterpart dynamic-provider ABI owner: tag and lexically scope
+    its nine raw shim calls, remove missing-foreign-value-to-empty-text
+    coercions, and retain its existing status/manifest fail-closed behavior.
+    Preserve direct calls with no call-time admission work. Static authority
+    and source checks pass; runtime proof is blocked by a stale bootstrap
+    artifact missing registered `rt_counterpart_*` handlers. Do not claim the
+    provider signed or globally verified until deployed-artifact parity and
+    artifact-bound evidence are repaired.

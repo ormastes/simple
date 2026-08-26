@@ -75,3 +75,14 @@ a claim that SFFI v2 is complete.
   wrapper; optimizer reports 18 MIR-only opportunities and zero general ones.
 - FAIL (global admission): error handles remain interpreter-owned opaque values
   without artifact-bound signature/evidence admission or cross-lane proof.
+
+## Follow-up: counterpart ABI boundary (2026-08-26)
+
+- PASS (source/static): nine raw dlopen/opaque-handle calls are lexical
+  `unsafe(ffi)`; the guard rejects nil-to-empty coercion and call-time admission.
+- PASS (performance review): no new lookup/hash/dispatch/allocation path;
+  optimizer reports one pre-existing general capacity suggestion.
+- FAIL (runtime): the deployed bootstrap artifact reports unknown
+  `rt_counterpart_open`/`rt_counterpart_probe_abi`; 7 of 8 focused examples
+  fail before provider invocation. This is artifact parity, not a pass.
+- FAIL (global admission): no signed provider/evidence admission is established.

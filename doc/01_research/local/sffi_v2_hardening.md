@@ -1569,3 +1569,17 @@ The owner audit and source check pass, and optimizer review reports no general
 pattern. These remain opaque interpreter-owned handles with no artifact-bound
 signature/evidence admission, so the public wrappers are contained but not
 verified safe across all execution lanes.
+
+### Counterpart ABI boundary audit (2026-08-26)
+
+The canonical counterpart provider shim performs dlopen/dlsym, ABI negotiation,
+opaque-handle lifecycle, and caller-owned text buffering in C. Its Simple owner
+now marks all nine raw calls `unsafe(ffi)` and scopes each call lexically. The
+wrapper no longer coerces a missing foreign manifest/response/trace/loader
+detail to empty text; an empty manifest remains a documented fail-closed
+rejection. The static guard prevents unscoped calls, nil-to-empty coercion, and
+per-call admission work. Source check passes, while the executable counterpart
+spec is blocked because the deployed bootstrap artifact lacks source-registered
+`rt_counterpart_*` handlers (7/8 examples fail before provider invocation).
+Optimizer review reports one pre-existing collection-capacity suggestion. This
+is not signed-provider admission or cross-lane verification.
