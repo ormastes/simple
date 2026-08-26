@@ -563,3 +563,16 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
 - [x] Run the guard, source check, compatibility spec, and optimizer once.
 - [ ] Introduce native QUIC only through a typed status/out ownership contract
   after authenticated QUIC-TLS and exact-artifact admission are available.
+
+### Dead executable-memory generator spec
+
+- [x] Prove all 16 proposed symbols have no provider, generated target,
+  consumer, or live test.
+- [x] Delete the unimplemented RWX/raw-function-pointer spec instead of tagging
+  it as if an ABI existed.
+- [x] Preserve the canonical loader W^X and Rust `ExecutableMemory` owners.
+- [x] Add and run an authority audit for dead-symbol absence and RW→RX ownership.
+- [x] Remove all 16 stale rows from the seed, interpreter-gap, unbacked, and
+  raw-unsafe ledgers; focused interpreter-gap scan passes.
+- [ ] Continue auditing the live `rt_mmap*` loader boundary separately; deleting
+  this dead parallel design does not verify or sign that provider.

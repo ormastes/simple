@@ -2045,3 +2045,23 @@ is 12,929 SFFI rows, 11,305 `rt_` rows, 3,018 distinct `rt_` symbols, 1,585
 symbols with incomplete unsafe tagging, 1,031 untouched symbols, and zero
 signed-admitted rows or symbols.  Native QUIC remains unavailable rather than
 being mislabeled safe or verified.
+
+### Dead executable-memory generator ABI removed (2026-08-26)
+
+Sixteen proposed `rt_*exec_memory*`, protection, and generic function-pointer
+declarations had no implementation or consumer outside their specification.
+The spec is deleted rather than marked unsafe or allowed to generate an RWX
+parallel loader path.  The authority audit passes and retains the real
+`smf_mmap_native` W^X owner (`PROT_READ | PROT_EXEC`).
+
+No executable code changed, so runtime time and memory behavior are identical.
+The current census is 12,910 total SFFI rows, 11,286 `rt_` rows, 3,000 distinct
+`rt_` symbols, 1,567 with incomplete unsafe tagging, 1,013 untouched, and zero
+signed-admitted.  This tranche removes exactly 16 declaration rows; three other
+rows moved in concurrent upstream changes incorporated by the rebase.
+
+The mandatory push gate caught stale interpreter-gap rows for the removed ABI.
+All four relevant ledgers were narrowed by exactly those 16 entries.  The
+focused interpreter-gap scan now passes (238 checked, zero new/stale).  The
+repository's broader seed, unbacked, and raw-unsafe ratchets still report
+unrelated concurrent drift and are not claimed green by this checkpoint.

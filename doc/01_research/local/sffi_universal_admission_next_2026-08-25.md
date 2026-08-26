@@ -6140,3 +6140,30 @@ repository census is 12,929 total declarations and 11,305 `rt_` declarations,
 with zero signed admission; exactly 42 `rt_quic_*` declarations are removed by
 this tranche, while concurrent upstream census movement accounts for the other
 three-row difference from the preceding checkpoint.
+
+## Dead executable-memory generator spec removal (2026-08-26)
+
+The SFFI generator's `exec_memory.spl` declared 16 raw allocation, protection,
+function-pointer call, and statistics functions.  Every symbol occurred only in
+that file: there is no generated Rust target, provider, consumer, or referenced
+test.  Its own text also proposed development-time RWX pages despite documenting
+W^X as the production requirement.
+
+The dead spec is deleted.  Real loader execution remains owned by
+`compiler/99.loader/smf_mmap_native.spl`, which allocates through the existing
+mapping primitive and changes pages to `PROT_READ | PROT_EXEC`; Rust loader
+memory remains owned by `ExecutableMemory`.  The new authority audit verifies
+both the absence of the dead ABI and the presence of the canonical W^X owner.
+
+This is a source-only deletion: it changes no runtime instruction, allocation,
+copy, lookup, or dispatch, and it cannot regress a hot path.  The audit passes.
+After rebasing concurrent upstream changes, the current source census is 12,910
+total declarations, 11,286 `rt_` declarations, and zero signed admission; this
+tranche itself removes exactly 16 rows.
+
+The first push gate correctly rejected stale interpreter-gap ledger entries for
+all 16 removed symbols.  Their seed, interpreter-gap, unbacked, and raw-unsafe
+baseline rows are now deleted, and the focused interpreter-gap scan passes with
+238 compiler symbols, zero new, and zero stale.  Broader seed/unbacked/raw
+ratchets remain red from large unrelated concurrent baseline drift; those
+findings were not rewritten or absorbed into this tranche.
