@@ -1271,3 +1271,21 @@ still has done/failure and nullable-text ambiguity, zero typed-native registry
 coverage, interpreter-only registrations, unsigned providers, and no admitted
 artifact evidence. PureDatabase remains the preferred native Simple database.
 Source-reviewed only; checks were not executed.
+
+## 2026-08-26 legacy regex duplicate-boundary removal
+
+The app legacy regex module is now an export-only facade over the API-compatible
+no-GC async owner, removing eight duplicate raw declarations and roughly 370
+lines of repeated helper code. The retained owner uses `push` for flattened
+find-all results; the removed app copy repeatedly concatenated arrays, so this
+also eliminates a potential O(n²) accumulation path. All eight retained raw
+declarations are tagged `unsafe(ffi)` and their nine calls are lexically
+confined. Both native and interpreter registries contain every symbol. Export
+resolution adds no regex call, allocation, lookup, copy, hash, or dispatch.
+
+The separate no-GC sync `simple_regex_*` API remains distinct because its names
+and named-group scanning implementation differ; it was not folded through a
+wrapper hop. Regex false/empty results can still conflate no-match with provider
+failure, and a feature-gated Rust stub provider exists, so the retained family
+remains unsafe, unsigned, and unverified. Source-reviewed only; checks were not
+executed.

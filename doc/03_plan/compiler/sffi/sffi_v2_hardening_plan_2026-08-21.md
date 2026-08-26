@@ -1890,3 +1890,18 @@ Torch SFFI nor all SFFI may be described as verified safe.
   to typed status/out and require signed exact-artifact admission before any
   safe promotion.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 legacy regex boundary deduplication
+
+- Replaced the app legacy regex implementation with an export-only facade over
+  the API-compatible no-GC async owner.
+- Removed eight duplicate raw declarations and the app copy's repeated-array
+  concatenation; the retained find-all path uses amortized-linear `push`.
+- Tagged all eight retained declarations and confined all nine raw calls.
+- Added a ratchet for provider registry presence, raw-free facade shape, and
+  linear find-all accumulation; no wrapper call or runtime dispatch added.
+- Kept the distinct no-GC sync `simple_regex_*` API separate to avoid wrapper
+  overhead and semantic drift.
+- Next replace no-match/provider-failure ambiguity and feature-gated stub
+  outputs with typed results and signed exact-artifact admission.
+- Status: source-reviewed, deliberately unverified and unsigned.
