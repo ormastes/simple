@@ -373,3 +373,15 @@ also removed, leaving this module with no raw SFFI authority.
 Each build invocation retains exactly one environment lookup and the same
 default-directory branch, with no extra filesystem probe, allocation, copy,
 cache, lock, hash, or dispatch table.
+
+### MSVC linker authority follow-up
+
+The MSVC linker no longer declares or calls raw process, filesystem, or
+environment SFFI.  It uses the canonical `process_run`, always-inlined
+`file_exists`, and nullable `env_get_opt` facades.  A missing
+`ProgramFiles(x86)` value now omits that derived `vswhere.exe` candidate instead
+of fabricating a path.  Discovery performs at most one environment lookup and
+retains the same process invocations.  It probes the fixed path first, avoiding
+a temporary candidate array and skipping the environment lookup and derived
+probe when the fixed path exists; no cache, lock, hash, or dispatch table was
+added.

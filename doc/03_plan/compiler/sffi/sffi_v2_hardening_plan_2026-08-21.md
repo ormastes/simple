@@ -1930,6 +1930,16 @@ and unpromoted.
 - [x] Preserve one lookup and the existing default-directory behavior.
 - [x] Add a static ratchet preventing the raw declaration from returning.
 
+### Completed MSVC linker authority slice
+
+- [x] Remove raw process, file-existence, and environment declarations/calls.
+- [x] Route all three operations through canonical runtime facades.
+- [x] Preserve direct file-probe cost through the always-inline facade.
+- [x] Omit the derived `vswhere.exe` path when its environment root is absent.
+- [x] Remove the temporary candidate array and short-circuit fixed-path hits.
+- [x] Preserve process-call counts and reduce discovery work.
+- [x] Add a static ratchet preventing raw SFFI from returning.
+
 ### Completed compiler DI authority slice
 
 - [x] Remove the module-local raw `rt_env_get` declaration and calls.
