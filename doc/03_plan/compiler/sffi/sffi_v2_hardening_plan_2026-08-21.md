@@ -1966,6 +1966,15 @@ and unpromoted.
 - [x] Preserve one lookup and one append with no retry or extra I/O.
 - [x] Add a static authority, status-check, and performance-shape ratchet.
 
+### Completed public driver API-types authority slice
+
+- [x] Remove seven unused raw declarations from the tier-0 module.
+- [x] Correct the runtime-path environment result to nullable text.
+- [x] Retain only environment and file-existence raw dependencies.
+- [x] Confine both to always-inline lexical unsafe owners.
+- [x] Preserve one lookup and the existing ordered candidate probes.
+- [x] Add a static authority and call-count ratchet.
+
 ### Completed MIR target-context authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.

@@ -441,3 +441,13 @@ now raises `E-SFFI-014` instead of silently returning a receipt line that was
 not persisted.  The path retains one lookup and one append, adding only the
 mandatory status branch with no retry, extra I/O, allocation, copy, cache,
 lock, hash, boxing, or dispatch table.
+
+### Public driver API-types authority follow-up
+
+The tier-0 driver API-types module removed seven unused raw declarations that
+downstream modules do not consume from it.  Its two real dependencies—nullable
+runtime-path environment lookup and runtime-library candidate existence—remain
+behind two always-inlined lexical `unsafe(ffi)` owners because the layer cannot
+import the higher I/O facade.  Runtime discovery retains one environment lookup
+and the same ordered candidate probes, with no additional allocation, copy,
+filesystem call, cache, lock, hash, boxing, or dispatch table.
