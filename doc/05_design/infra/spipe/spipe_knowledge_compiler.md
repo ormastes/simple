@@ -2240,3 +2240,26 @@ and review exactly these two files.
 No earlier green result changes the dependency order: provider implementation
 and admission first, rerank-evidence admission second, integrated pipeline
 third. AC-4 remains open.
+
+### 17.9 Superseding implementation-readiness ledger (2026-08-26)
+
+Commit `4455b760da` admits the standalone rerank-evidence source and oracle.
+Its evidence is syntax `PASS`, focused `18/18`, unit `192/192`, Wave 2 `9/9`,
+Wave 3 `25/25`, Wave 4 `9/9`, and legacy, security, workflow, and performance
+`PASS`, with final independent xhigh review `PASS` in cycle 2 of 3. The
+integrated pipeline may depend on this admitted pair without reopening it.
+
+Provider implementation readiness remains `FAIL`. The provider-authority ABI
+repair stopped at the mandatory three-cycle cap with unresolved
+collision-result signaling, executor error classification, cursor error
+precedence, and canonical-byte accounting versus heap/RSS limits. It made no
+product edit, executed no product test, and created no repository-history
+commit. Retained object `3827a1099e` at
+`/tmp/spkc-provider-abi-repair2-clean` is a failed immutable draft only. Its
+contract text is excluded from this detail design.
+
+Resume with a fresh, bounded provider-ABI repair that resolves those four
+items, then implement and admit the provider. Only afterward may the pipeline
+integrate exact identity, excluded lexical results, graph results,
+complete-pool RRF v2, admitted rerank evidence, pair reranking/explanations,
+and the final user limit. Wave 4 and AC-4 remain open.

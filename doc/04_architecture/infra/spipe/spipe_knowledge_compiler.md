@@ -1115,3 +1115,25 @@ contract. A fresh session owns the exact source/oracle pair and its review.
 Dependency order is provider implementation/admission, rerank-evidence
 repair/admission, then integrated exact/lexical/graph/RRF/evidence/rerank
 orchestration. AC-4 remains open.
+
+### 17.7 Superseding capsule admission status (2026-08-26)
+
+The rerank-evidence capsule is now admitted by commit `4455b760da`. Syntax,
+focused `18/18`, unit `192/192`, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4 `9/9`,
+legacy, security, workflow, and performance gates passed, followed by an
+independent xhigh `PASS` in verify/fix cycle 2 of 3. This admits the standalone
+authority-evidence boundary only; it does not admit the provider or integrated
+pipeline.
+
+The provider-authority ABI repair did not land. After the mandatory third
+cycle its status is `FAIL` because collision-result signaling, executor error
+classification, cursor error precedence, and canonical-byte accounting versus
+heap/RSS limits remain under-specified. No product edit or product test was
+performed and no draft entered repository history. Failed object
+`3827a1099e`, retained under `/tmp/spkc-provider-abi-repair2-clean`, is
+non-authoritative forensic material and must not be used to extend this
+architecture contract.
+
+The architecture dependency order is now provider-ABI repair, provider
+implementation/admission, then integrated pipeline admission. Wave 4 and AC-4
+remain open.

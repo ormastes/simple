@@ -2714,3 +2714,26 @@ two-file pair.
 The authoritative next order is: implement and admit the complete provider
 authority bridge; repair and admit the rerank-evidence pair; then build the
 integrated search pipeline. AC-4 remains open.
+
+### 39.5 Rerank-evidence admission and provider-ABI repair stop (2026-08-26)
+
+Commit `4455b760da` supersedes the rerank-evidence status in Section 39.4. The
+exact source/oracle pair passed syntax validation, focused `18/18`, full unit
+`192/192`, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4 `9/9`, and the legacy,
+security, workflow, and performance gates. Final independent xhigh review
+passed during verify/fix cycle 2 of the allowed 3. The authority-bound
+rerank-evidence prerequisite is therefore admitted.
+
+The subsequent provider-authority ABI repair is **not landed** and its review
+status is **FAIL**. It reached the mandatory three-cycle cap with four
+unresolved specification blockers: collision-result signaling, executor error
+classification, cursor error precedence, and the distinction between
+canonical-byte accounting and heap/RSS limits. No product file was edited, no
+product test was run, and no draft was committed to repository history. The
+failed immutable draft is retained only for forensic comparison as object
+`3827a1099e` under `/tmp/spkc-provider-abi-repair2-clean`; none of its contract
+text is authoritative.
+
+Wave 4 and AC-4 remain open. The integrated pipeline may consume the admitted
+rerank-evidence capsule only after a fresh provider-authority ABI repair and
+provider implementation pass independent admission.

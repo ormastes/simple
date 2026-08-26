@@ -1219,3 +1219,24 @@ that exact pair in a fresh session; do not rerun unchanged green gates first.
 Resume in this order: provider implementation/admission, rerank-evidence
 repair/admission, then integrated pipeline. Keep AC-4 open until the final
 pipeline oracle passes.
+
+#### Superseding operator handoff (2026-08-26)
+
+Use commit `4455b760da` as the admitted rerank-evidence implementation. Its
+single admission run passed syntax, focused `18/18`, unit `192/192`, Wave 2
+`9/9`, Wave 3 `25/25`, Wave 4 `9/9`, legacy, security, workflow, and performance
+checks; independent xhigh review passed in cycle 2 of 3. Do not resume from the
+older `/tmp/spkc-rerank-evidence4-aIcFIZ/repo` candidate and do not rerun those
+unchanged green checks.
+
+Do not use the latest provider-authority ABI draft. That lane stopped with
+`FAIL` after the mandatory third cycle, without product edits, product tests,
+or a repository-history commit. Its four unresolved blockers are
+collision-result signaling, executor error classification, cursor error
+precedence, and canonical-byte accounting versus heap/RSS limits. Object
+`3827a1099e` under `/tmp/spkc-provider-abi-repair2-clean` is retained only for
+forensic comparison; its contract text is not an operator contract.
+
+Resume with a fresh provider-ABI repair, obtain independent admission, then
+implement and admit the provider. The integrated pipeline remains waiting on
+that provider. Keep Wave 4 and AC-4 open.

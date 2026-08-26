@@ -939,3 +939,28 @@ file ownership above; no sidecar may change schemas/domains. Merge owner is
 
 Merge owner remains `/root`; the final reviewer remains the best available
 normal/highest-capability model. AC-4 remains open.
+
+### 10.16 Superseding admission ledger and provider blocker handoff (2026-08-26)
+
+1. **Rerank evidence — admitted.** Commit `4455b760da` admits the exact
+   `src/search/rerank_evidence.js` and
+   `test/unit/search_rerank_evidence_test.js` pair. Syntax passed; focused
+   `18/18`, unit `192/192`, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4 `9/9`, and
+   legacy, security, workflow, and performance gates passed. Final independent
+   xhigh review passed in cycle 2 of 3. Do not repeat these unchanged green
+   gates.
+2. **Provider authority ABI — stopped, not landed.** The repair lane exhausted
+   the mandatory three review/fix cycles and remains `FAIL` on exactly four
+   blockers: collision-result signaling, executor error classification,
+   cursor error precedence, and canonical-byte accounting versus heap/RSS
+   limits. It made no product edit, ran no product test, and produced no
+   repository-history commit. Object `3827a1099e` in
+   `/tmp/spkc-provider-abi-repair2-clean` is a failed immutable draft for
+   forensic comparison only; do not copy its contract text into implementation
+   or authoritative documentation.
+3. **Pipeline — waiting on provider.** Keep its frozen integration order, but
+   do not start it until a fresh provider ABI repair and provider implementation
+   are independently admitted. Wave 4 and AC-4 remain open.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.
