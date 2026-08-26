@@ -112,6 +112,17 @@ struct NvfsOpenHandle:
 
 val NVFS_DRIVER_MAX_OPEN_HANDLES: i64 = 65536
 val NVFS_DRIVER_MAX_HANDLE_ID: u64 = 0xFFFFFFFFFFFFFFFFu64
+# The table is mount-local, while the opaque handle namespace is process-wide.
+# Without a single allocator, `FileHandle(1)` from mount A can alias the first
+# live slot in mount B when a caller crosses FsDriver instances.
+var _next_handle_id: u64 = 1
+
+fn _take_handle_id() -> u64:
+    if _next_handle_id == NVFS_DRIVER_MAX_HANDLE_ID:
+        return 0u64
+    val id = _next_handle_id
+    _next_handle_id = _next_handle_id + 1u64
+    id
 
 # ---------------------------------------------------------------------------
 # NvfsDriver struct
@@ -131,7 +142,6 @@ struct NvfsDriver:
     read_only: bool
     ns: Namespace
     open_handles: [NvfsOpenHandle]
-    next_handle_id: u64
 
 impl NvfsDriver:
 
@@ -141,8 +151,7 @@ impl NvfsDriver:
             mounted:   false,
             read_only: false,
             ns: Namespace.new(),
-            open_handles: [],
-            next_handle_id: 1
+            open_handles: []
         )
 
     fn _find_handle(id: u64) -> i64:
@@ -154,11 +163,11 @@ impl NvfsDriver:
         -1
 
     fn _alloc_handle(arena_id: i64, read_only: bool) -> Result<FileHandle, FsError>:
-        if self.open_handles.len() >= NVFS_DRIVER_MAX_OPEN_HANDLES or
-            self.next_handle_id == NVFS_DRIVER_MAX_HANDLE_ID:
+        if self.open_handles.len() >= NVFS_DRIVER_MAX_OPEN_HANDLES:
             return Err(FsError.TooLarge)
-        val id = self.next_handle_id
-        self.next_handle_id = self.next_handle_id + 1
+        val id = _take_handle_id()
+        if id == 0u64:
+            return Err(FsError.TooLarge)
         self.open_handles.push(NvfsOpenHandle(
             handle_id: id, arena_id: arena_id, read_only: read_only))
         Ok(FileHandle(id: id))
