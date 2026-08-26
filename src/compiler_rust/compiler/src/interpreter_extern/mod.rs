@@ -1690,6 +1690,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_mmap_raw", memory::rt_mmap_raw);
     insert_simple!("rt_munmap_raw", memory::rt_munmap_raw);
     insert_simple!("rt_mprotect", memory::rt_mprotect);
+    insert_simple!("rt_madvise_raw", memory::rt_madvise_raw);
+    insert_simple!("rt_msync_flags", memory::rt_msync_flags);
+    insert_simple!("rt_mlock", memory::rt_mlock);
+    insert_simple!("rt_munlock", memory::rt_munlock);
+    insert_simple!("rt_open_fd", file_io::rt_open_fd);
+    insert_simple!("rt_close_fd", file_io::rt_close_fd);
     insert_simple!("rt_ptr_write_i32", memory::rt_ptr_write_i32);
     insert_simple!("rt_ptr_write_i16", memory::rt_ptr_write_i16);
     insert_simple!("rt_ptr_write_i64", memory::rt_ptr_write_i64);
