@@ -1815,3 +1815,10 @@ and unpromoted.
 - [x] Propagate present-manifest read and parse failures.
 - [x] Keep one probe plus one read and linear dependency traversal.
 - [x] Add a static authority and I/O-shape ratchet.
+### Completed package-lock authority slice
+
+- [x] Remove the lock loader's raw file-read declaration.
+- [x] Type absence separately from read/empty/parse failure.
+- [x] Fail frozen and ordinary installs closed on corrupt lock state.
+- [x] Preserve one probe plus one read for the optional file.
+- [x] Add a static contract and I/O-shape ratchet.

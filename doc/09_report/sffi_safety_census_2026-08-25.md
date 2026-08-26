@@ -234,3 +234,11 @@ manifest now uses one typed read and propagates empty, unreadable, or malformed
 metadata as a resolution error instead of silently installing with fabricated
 version data.  Dependency traversal remains linear and adds no retry, second
 read, registry lookup, or generic dispatch.
+### Package-lock authority follow-up
+
+Package lock loading no longer declares a raw text reader or collapses every
+failure to “no lock.”  Its type is now `Result<LockFile?, text>`: absence is
+`Ok(nil)`, while present-but-unreadable, empty, or malformed files are errors.
+Frozen and ordinary installs both stop on those errors.  Optional-file loading
+remains one existence probe plus one read, with no retry, second read, lookup,
+or generic dispatch.
