@@ -1087,6 +1087,7 @@ pub use hpcollections::btreeset::clear_btreeset_registry;
 pub use sffi::clear_regex_cache;
 pub use sffi::sync::clear_sync_registries;
 pub use sffi::atomic::clear_atomic_registries;
+pub use sffi::atomic::{rt_atomic_bool_fetch_and, rt_atomic_bool_fetch_not, rt_atomic_bool_fetch_or};
 pub use sffi::hash::clear_hash_registries;
 pub use sffi::concurrent::clear_concurrent_registries;
 pub use net::clear_socket_registry;

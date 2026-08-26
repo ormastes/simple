@@ -785,18 +785,6 @@ impl Lowerer {
             else {
                 continue;
             };
-            // Per-importer binding tables for duplicate-function resolution.
-            if local_name == "*" {
-                self.importer_glob_sources
-                    .entry(importer.to_string())
-                    .or_default()
-                    .push(source_owner.to_string());
-            } else {
-                self.importer_fn_bindings.insert(
-                    (importer.to_string(), local_name.to_string()),
-                    (source_owner.to_string(), source_name.to_string()),
-                );
-            }
             if local_name == "*" || source_name == "*" || local_name == source_name {
                 continue;
             }

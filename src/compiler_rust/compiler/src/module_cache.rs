@@ -98,6 +98,26 @@ thread_local! {
     static FILTERED_DICT_CACHE: RefCell<HashMap<usize, (Arc<HashMap<String, Value>>, Arc<HashMap<String, Value>>)>> =
         RefCell::new(HashMap::new());
     static LOADER_STATS: RefCell<LoaderStats> = RefCell::new(LoaderStats::default());
+    static PROBE_SOURCE_CACHE: RefCell<HashMap<PathBuf, Option<Arc<String>>>> =
+        RefCell::new(HashMap::new());
+}
+
+pub fn probe_source_cached(path: &Path, max_check_bytes: u64) -> Option<Arc<String>> {
+    if let Some(hit) = PROBE_SOURCE_CACHE.with(|cache| cache.borrow().get(path).cloned()) {
+        crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_HITS, 1);
+        return hit;
+    }
+    crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_READS, 1);
+    let value = match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > max_check_bytes => None,
+        _ => crate::read_trace::rts(file!(), line!(), path).ok().map(Arc::new),
+    };
+    PROBE_SOURCE_CACHE.with(|cache| cache.borrow_mut().insert(path.to_path_buf(), value.clone()));
+    value
+}
+
+pub fn clear_probe_source_cache() {
+    PROBE_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 /// Maximum depth for recursive module loading to prevent infinite loops
@@ -145,6 +165,7 @@ pub fn clear_module_cache() {
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
+    clear_probe_source_cache();
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
     crate::mem_trace::report("clear_module_cache");

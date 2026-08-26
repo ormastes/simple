@@ -39,6 +39,10 @@ counters!(
     // filter_functions_from_value: imported-module dict rebuilt vs memo hit
     FILTERED_DICT_BUILDS,
     FILTERED_DICT_HITS,
+    IMPORT_AST_PARSES,
+    IMPORT_AST_HITS,
+    PROBE_SOURCE_READS,
+    PROBE_SOURCE_HITS,
 );
 
 #[inline(always)]

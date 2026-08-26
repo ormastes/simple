@@ -555,12 +555,12 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             };
             Ok(items)
         }
-        _ => {
+        other => {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("iteration requires array, tuple, dict, string, or range types");
             Err(CompileError::semantic_with_context(
-                "cannot iterate over this type".to_string(),
+                format!("cannot iterate over this type: {other:?}"),
                 ctx,
             ))
         }

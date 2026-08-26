@@ -39,6 +39,7 @@ pub mod hydration_manifest;
 pub mod i18n;
 pub mod import_loader;
 pub mod incremental;
+pub mod read_trace;
 pub mod interpreter;
 pub mod interpreter_contract;
 pub mod interpreter_sffi;
