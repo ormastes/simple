@@ -1589,3 +1589,14 @@ records both remaining declaration owners, and reports the exact providerless
 set so consolidation cannot be misreported as safety. Production declarations
 fall from 7,220 to 7,138; unsafe-tag gaps fall from 4,356 to 4,274 and contract
 gaps from 6,110 to 6,076. Source-reviewed only; checks were not executed.
+
+### Pure-Simple network URL codec follow-up
+
+Both remaining network declaration owners now export their matching
+Pure-Simple RFC 3986 percent encoder/decoder instead of declaring four
+providerless foreign functions. This preserves the public `url_encode` and
+`url_decode` names and removes the silent-nil path without adding a forwarding
+wrapper, allocation, lookup, hash, lock, or dispatch. The production inventory
+falls to 7,134 declarations, 4,270 unsafe-tag gaps, 6,072 contract gaps, and
+zero signed-admitted declarations. Sixteen distinct providerless network
+identities remain. Source-reviewed only; checks were not executed.

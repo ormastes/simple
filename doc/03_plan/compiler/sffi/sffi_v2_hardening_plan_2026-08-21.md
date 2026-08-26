@@ -2146,3 +2146,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Remaining production debt after this pass: 4,274 unsafe-tag gaps, 6,076
   contract gaps, and zero signed-admitted declarations.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+### Pure-Simple URL codec follow-up
+
+- Replace both owners' `url_encode`/`url_decode` foreign declarations with
+  direct exports from their existing Pure-Simple RFC 3986 modules.
+- Preserve the public names with no forwarding wrapper and no per-call
+  allocation, lookup, copy, branch, hash, lock, or dispatch beyond the codec's
+  existing algorithm.
+- Remaining network providerless identities: 16 (14 UDP, HTTP request, and URL
+  parse). Remaining production debt: 4,270 unsafe-tag gaps, 6,072 contract
+  gaps, and zero signed-admitted declarations.
+- Status: source-reviewed, deliberately unverified and unsigned.
