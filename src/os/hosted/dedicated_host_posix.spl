@@ -21,8 +21,8 @@ use common.platform.dedicated_host.{
 
 use std.io_runtime.{ file_exists, platform_name }
 
-@unsafe(reason: "raw mapped-file byte transport; every element requires bounded lifting", capabilities: [ffi])
-extern fn rt_file_mmap_read_bytes(path: text) -> [i64]
+@unsafe(reason: "raw nullable mapped-file byte transport; nil means provider failure", capabilities: [ffi])
+extern fn rt_file_mmap_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw file-size status ABI; negative values are failures", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
 @unsafe(reason: "raw mapped-address ABI; -1 is MAP_FAILED", capabilities: [ffi, raw_ptr])
@@ -33,7 +33,7 @@ extern fn rt_mprotect(address: i64, length: i64, protection: i64) -> i64
 extern fn rt_munmap_raw(address: i64, length: i64) -> i64
 
 @always_inline
-fn _sffi_file_mmap_read_bytes(path: text) -> [i64]:
+fn _sffi_file_mmap_read_bytes(path: text) -> [u8]?:
     unsafe(capabilities: [ffi]):
         rt_file_mmap_read_bytes(path)
 
@@ -79,12 +79,9 @@ pub class PosixDedicatedHost:
 
 fn _posix_mmap_bytes(path: text) -> Result<[u8], text>:
     val raw = _sffi_file_mmap_read_bytes(path)
-    var bytes: [u8] = []
-    for value in raw:
-        if value < 0 or value > 255:
-            return Err("mmap-read-invalid-byte")
-        bytes.push(value as u8)
-    Ok(bytes)
+    if raw == nil:
+        return Err("mmap-read-failed")
+    Ok(raw ?? [])
 
 impl DedicatedHost for PosixDedicatedHost:
     fn host_name() -> text:

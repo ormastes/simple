@@ -1786,14 +1786,16 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Corrected the stale claim that no owned native provider exists: Rust exports
   `rt_file_mmap_read_bytes`, and pure-Simple/C-bootstrap provide the sibling
   byte-reader implementation.
-- Kept the family unsafe because the Rust provider collapses path, read, and
-  allocation/lift failures into `RuntimeValue::NIL`, while the caller declares
-  a bare array and cannot preserve that failure state.
-- Require the replacement ABI to return status plus an owned array output (or
-  an equivalent typed `Result`) in one provider call, with success/non-null and
-  failure/no-output invariants generated from the registry.
+- Changed the dedicated-host raw declaration to `[u8]?`, preserving provider
+  `NIL` as explicit absence and lifting it to `Result.Err`; a valid empty array
+  remains a successful value.
+- Matched the provider byte-array element type and removed the former O(n)
+  i64-to-u8 conversion, second allocation, and payload copy.
+- Keep status-plus-owned-output as the eventual versioned registry contract;
+  the nullable bridge is an exact existing ABI but not signed admission.
 - Reject extra stat/existence probes, duplicate reads, per-byte foreign calls,
   and sentinel payloads: they add races, I/O, dispatch, or ambiguity.
-- Preserve the current one-read/O(n)-copy performance envelope; keep signature
-  and evidence verification at provider admission, never on the call path.
+- Improve the current envelope to one read and the provider-owned output only;
+  keep signature and evidence verification at admission, never on the call
+  path.
 - Status: source-reviewed, deliberately unverified and unsigned.

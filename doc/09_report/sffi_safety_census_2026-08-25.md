@@ -1156,13 +1156,15 @@ pure-Simple/C-bootstrap byte readers. This corrects the earlier missing-provider
 classification, but does not promote the boundary: the Rust exports return
 `RuntimeValue::NIL` for invalid paths, read failures, and allocation/lift
 failures, while the safe-looking Simple declaration returns only `[i64]`.
-Consequently a provider failure can still be confused with the array bridge's
-absence/empty representation, with the zero-length-file case defeating an
-external length check. The required fix is a generated status-plus-owned-output
-contract (or an equivalently typed `Result`) lifted in one call. A preliminary
-existence/stat call, a second read, a per-element foreign loop, and a sentinel
-byte were rejected because they are racy, slower, or ambiguous. This family
-therefore remains explicitly unsafe, unverified, and unsigned. Source-reviewed
+The dedicated-host declaration now preserves that provider state as `[u8]?`
+and lifts `nil` to `Result.Err` before accepting the owned byte array. A valid
+empty file remains `Some([])`, so zero length no longer defeats failure
+detection. Matching the provider's byte-array element type also removes the
+former O(n) i64-to-u8 conversion, second array allocation, and full payload
+copy. A preliminary existence/stat call, a second read, a per-element foreign
+loop, and a sentinel byte were rejected because they are racy, slower, or
+ambiguous. The raw provider remains explicitly unsafe, unverified, and
+unsigned pending signed admission and cross-lane evidence. Source-reviewed
 only; checks were not executed.
 
 ## 2026-08-26 Base64/Base64url contract follow-up
