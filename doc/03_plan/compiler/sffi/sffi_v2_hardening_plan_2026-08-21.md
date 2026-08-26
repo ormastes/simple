@@ -1903,3 +1903,11 @@ and unpromoted.
 - [x] Confine raw calls to four always-inlined lexical owners.
 - [x] Reject failed size, mtime, and digest results before stamp creation.
 - [x] Preserve successful-path I/O complexity and add a static ratchet.
+
+### Completed compiler cache-limits authority slice
+
+- [x] Remove the module-local raw `rt_env_get` declaration and call.
+- [x] Route absence-aware lookup through canonical `env_get_opt`.
+- [x] Eliminate local `unsafe(ffi)` authority instead of duplicating it.
+- [x] Preserve one-lookup startup complexity and parse/default behavior.
+- [x] Add a static ratchet preventing raw SFFI from returning to the module.

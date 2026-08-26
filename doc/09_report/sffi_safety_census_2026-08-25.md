@@ -335,3 +335,12 @@ the runtime's actual zero mtime failure sentinel before constructing a stamp.
 The successful fast path retains the same existence/size/mtime probes, and the
 torn-read path retains the same metadata/hash call counts; no allocation,
 copy, lookup, lock, extra I/O, or generic dispatch was added.
+
+### Compiler cache-limits authority follow-up
+
+Cache-limit loading no longer declares or calls `rt_env_get` directly.  It now
+uses the canonical nullable `std.io_runtime.env_get_opt` facade, removing this
+module's unsafe authority rather than duplicating it behind another wrapper.
+The startup path retains one environment lookup and the same parse/default
+logic, with no additional scan, allocation, copy, lock, retry, or dispatch
+table.
