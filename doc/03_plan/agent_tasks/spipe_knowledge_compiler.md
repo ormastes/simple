@@ -948,6 +948,18 @@ file ownership above; no sidecar may change schemas/domains. Merge owner is
 Merge owner remains `/root`; the final reviewer remains the best available
 normal/highest-capability model. AC-4 remains open.
 
+### 11.1 Wave 5a seal and alias repair (2026-08-26)
+
+W5A-A owns a non-cyclic seal: `TargetInventoryManifestV1` binds the existing
+base snapshot UID, and a separate content-addressed `AuthorityManifestV1`
+authority snapshot UID commits the base UID plus inventory root. Receipts bind
+the authority snapshot. The sealed inventory owns normalized legacy alias
+mappings, so the frozen authority API includes
+`resolveCanonicalAlias(view, alias) -> CanonicalTargetCandidateV1`, followed
+by `resolveCanonicalTarget` proof before receipt verification; external
+registry/path alias lookup is not admissible. W5A evidence must inject cyclic,
+tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
+
 ### 10.16 Superseding admission ledger and provider blocker handoff (2026-08-26)
 
 1. **Rerank evidence — admitted.** Commit `4455b760da` admits the exact
@@ -973,17 +985,58 @@ normal/highest-capability model. AC-4 remains open.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+## 11. Wave 5a snapshot-authority prerequisite and ownership (2026-08-26)
+
+The current URI lane is **non-admitted**. `ImmutableSnapshotStore` lacks a
+target inventory and workspace/worktree-bound authority view, so a direct URI
+resolver cannot prove that a receipt's target kind/UID belongs to its pinned
+snapshot. Do not start/reuse a URI implementation candidate until this port
+slice is accepted.
+
+| Lane | Exclusive ownership | Published boundary | Gate before downstream work |
+|---|---|---|---|
+| W5A-A Snapshot authority | `src/core`, `src/storage`, `src/workspace` integration owner | branded `SnapshotAuthorityPortV1`, opaque `SnapshotAuthorityViewV1`, inventory manifest | workspace/project/worktree/snapshot/revision and digest checks plus target membership |
+| W5A-B Projection | `src/view` | branded `ProjectionPortV1` consuming only authority views and canonical targets | no raw store, path inference, scan, or refresh request path |
+| W5A-C Evidence | focused unit/integration fixtures and system-plan mapping | W5A-01 through W5A-14 oracle evidence | independent highest-capability PASS |
+| W5-D URI/MCP/materializer | `src/view`, `mcp` | resolver/resources/tools adapters | waits for all W5A gates; a sealed alias yields only a candidate, authority proves its canonical target, then receipt authorization occurs |
+
+The integration owner freezes these exact methods before sidecars work:
+`openBoundSnapshot(binding)`, `resolveCanonicalTarget(view, target)`,
+`resolveCanonicalAlias(view, alias)`, `listDirectoryTarget(view, selector)`,
+`ProjectionPortV1.list(...)`, and
+`ProjectionPortV1.render(...)`. The binding is exactly `{workspaceUid,
+projectUidOrNull, worktreeUid, snapshotUid, revisionId}`. The final reviewer
+must reject structural substitutes, project-only snapshot reads, missing
+manifest target inventory, and any URI rendering before target proof. This is
+a read-only prerequisite and does not authorize an HTTP or write feature.
+
+W5A-A additionally owns sealed `TargetInventoryManifestV1` roots. It must
+define project versus `workspace_aggregate` scope. The aggregate's required,
+canonical `contributingProjectRoots` field is the full ordered manifest of
+`{projectUid, baseSnapshotUid, authoritySnapshotUid, targetInventoryRoot}`;
+it is committed by both inventory and authority manifests, forbidden for a
+project scope, and permits an explicit empty aggregate only. Resolver adapters
+first open and verify the receipt-named snapshot only as an untrusted
+candidate; a legacy alias yields only a canonical candidate, which must pass
+sealed `resolveCanonicalTarget` membership proof; only then verify the receipt
+against a binding derived from that proof. `worktreeUid` stays out
+of the frozen receipt ABI and is proved through the authority view's verified
+workspace/worktree/snapshot/revision tuple. Evidence must include tampered
+root, project mismatch, aggregate positives, and cross-instance genuine-brand
+mixing before W5-D begins.
+
 ### 10.23 Wave 5 URI-foundation non-admission and fresh lane (2026-08-26)
 
 1. **Attempt closed.** The Wave 5 URI-foundation candidate exhausted three
    independent review/fix cycles. It is uncommitted and not admitted; do not
    reuse its code. Wave 5 URI execution remains pending.
 2. **Canonical alias gate.** The fresh owner resolves every legacy alias,
-   including `spipe://skill`, then issues a receipt using the one exact v2 ABI
-   frozen below. Verify the signed `D-` receipt through `AuthorizationPort`
+   including `spipe://skill`, only to a canonical candidate and proves its
+   sealed target membership before issuing or accepting a receipt using the one
+   exact v2 ABI frozen below. Verify the signed `D-` receipt through `AuthorizationPort`
    (supported version/key, canonical `spipe-uri-read-v1\0` payload, allow
    decision, live window, revocation epoch) before every call compares all
-   fields against its direct resolved target or reauthorizes/fails closed.
+   fields against its direct proven target or reauthorizes/fails closed.
    Freeze exactly `CanonicalReadReceiptV1{receiptVersion, authorityKeyId,
    authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
    projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
