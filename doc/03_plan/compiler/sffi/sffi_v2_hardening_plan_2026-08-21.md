@@ -1669,3 +1669,15 @@ name lookup, dictionary lookup, mutex, generic dispatcher, or new allocation.
 Admission is one-time; the hot path is a cached typed call and its mandatory
 contract checks. Any change that cannot demonstrate this shape remains unsafe
 and unpromoted.
+
+#### Completed production slice: app.io compatibility hub (2026-08-26)
+
+- [x] Remove its dead `rt_env_get` declaration.
+- [x] Replace two non-optional environment reads followed by dead nil checks
+  with the existing nullable `env_get_opt` owner.
+- [x] Tag and lexically confine all 11 remaining random, logging, and volatile
+  raw declarations/calls.
+- [x] Add a static authority ratchet that pins exactly one declaration and one
+  direct wrapper call per raw symbol, with no new lookup or allocation layer.
+- [ ] Re-run the global census and executable checks when verification is
+  authorized; do not infer new repository-wide totals from this local delta.

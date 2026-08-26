@@ -40,7 +40,7 @@ use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default, shell_ou
 use std.nogc_sync_mut.io.process_ops.{eprint}
 # shell_output (1-arg) has no equivalent in the new split io.process_ops module —
 # it is only defined (pub) in the pre-migration io_runtime.spl monolith.
-use std.nogc_sync_mut.io_runtime.{shell_output, read_file_text_result}
+use std.nogc_sync_mut.io_runtime.{shell_output, read_file_text_result, env_get_opt}
 use app.io.process_env_ops.{process_spawn_async_env, process_is_alive}
 use app.io.rt_hal_isolated_host.{
     RtHalIsolatedExactHostConfig, rt_hal_linux_isolated_host_port,
@@ -117,55 +117,70 @@ use app.io.cli_ops.{fault_set_timeout, fault_set_execution_limit}
 # Hub-local functions (kept here for backward compatibility)
 # ============================================================================
 
-# Platform detection
-extern fn rt_env_get(key: text) -> text
-
 fn is_windows_platform() -> bool:
-    val os_env = env_get("OS")
+    val os_env = env_get_opt("OS")
     if os_env == nil:
         false
     else:
         os_env.lower().contains("windows")
 
 # Random number generation
+@unsafe(reason: "raw host random-uniform ABI; provider range semantics are not compiler-verified", capabilities: [ffi])
 extern fn rt_random_uniform(min: f64, max: f64) -> f64
+@unsafe(reason: "raw host random-integer ABI; provider range semantics are not compiler-verified", capabilities: [ffi])
 extern fn rt_random_randint(min: i64, max: i64) -> i64
 
 fn random_uniform(min: f64, max: f64) -> f64:
-    rt_random_uniform(min, max)
+    unsafe(capabilities: [ffi]):
+        rt_random_uniform(min, max)
 
 fn random_randint(min: i64, max: i64) -> i64:
-    rt_random_randint(min, max)
+    unsafe(capabilities: [ffi]):
+        rt_random_randint(min, max)
 
 # Logging
+@unsafe(reason: "raw logging ABI consumes caller-provided pointer/length pairs", capabilities: [ffi, raw_ptr])
 extern fn rt_log_emit(level: i64, scope_ptr: i64, scope_len: i64, msg_ptr: i64, msg_len: i64)
+@unsafe(reason: "raw process-global logging-level ABI", capabilities: [ffi])
 extern fn rt_log_get_global_level() -> i64
+@unsafe(reason: "raw process-global logging-level mutation ABI", capabilities: [ffi])
 extern fn rt_log_set_global_level(level: i64)
+@unsafe(reason: "raw logging scope pointer/length lookup ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_log_get_scope_level(scope_ptr: i64, scope_len: i64) -> i64
+@unsafe(reason: "raw logging scope pointer/length mutation ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_log_set_scope_level(scope_ptr: i64, scope_len: i64, level: i64)
+@unsafe(reason: "raw logging scope pointer/length predicate ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_log_is_enabled(level: i64, scope_ptr: i64, scope_len: i64) -> i64
+@unsafe(reason: "raw process-global logging-scope reset ABI", capabilities: [ffi])
 extern fn rt_log_clear_scope_levels()
 
 fn log_emit(level: i64, scope_ptr: i64, scope_len: i64, msg_ptr: i64, msg_len: i64):
-    rt_log_emit(level, scope_ptr, scope_len, msg_ptr, msg_len)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_log_emit(level, scope_ptr, scope_len, msg_ptr, msg_len)
 
 fn log_get_global_level() -> i64:
-    rt_log_get_global_level()
+    unsafe(capabilities: [ffi]):
+        rt_log_get_global_level()
 
 fn log_set_global_level(level: i64):
-    rt_log_set_global_level(level)
+    unsafe(capabilities: [ffi]):
+        rt_log_set_global_level(level)
 
 fn log_get_scope_level(scope_ptr: i64, scope_len: i64) -> i64:
-    rt_log_get_scope_level(scope_ptr, scope_len)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_log_get_scope_level(scope_ptr, scope_len)
 
 fn log_set_scope_level(scope_ptr: i64, scope_len: i64, level: i64):
-    rt_log_set_scope_level(scope_ptr, scope_len, level)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_log_set_scope_level(scope_ptr, scope_len, level)
 
 fn log_is_enabled(level: i64, scope_ptr: i64, scope_len: i64) -> i64:
-    rt_log_is_enabled(level, scope_ptr, scope_len)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_log_is_enabled(level, scope_ptr, scope_len)
 
 fn log_clear_scope_levels():
-    rt_log_clear_scope_levels()
+    unsafe(capabilities: [ffi]):
+        rt_log_clear_scope_levels()
 
 # Thread sleep alias
 fn thread_sleep(millis: i64):
@@ -175,7 +190,7 @@ fn thread_sleep(millis: i64):
 # Keep `shell(...)` object-returning; use `shell_tuple(...)` when the legacy
 # `(stdout, stderr, exit_code)` shape is required.
 fn shell_tuple(command: text) -> (text, text, i64):
-    val os_env = env_get("OS")
+    val os_env = env_get_opt("OS")
     val is_windows = if os_env == nil:
         false
     else:
@@ -226,14 +241,18 @@ fn math_random() -> f64:
         0.5
 
 # Volatile memory access
+@unsafe(reason: "raw volatile read requires a valid aligned readable address", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_read_u64(addr: i64) -> i64
+@unsafe(reason: "raw volatile write requires a valid aligned writable address", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_write_u64(addr: i64, value: i64)
 
 fn read_volatile(addr: i64) -> i64:
-    rt_volatile_read_u64(addr)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_read_u64(addr)
 
 fn write_volatile(addr: i64, value: i64):
-    rt_volatile_write_u64(addr, value)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_write_u64(addr, value)
 
 # ============================================================================
 # All re-exports (backward compatibility)

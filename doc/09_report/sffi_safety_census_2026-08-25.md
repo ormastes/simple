@@ -86,3 +86,15 @@ verified-and-signed symbols, 1,825 untouched distinct symbols, and 263 symbols
 whose declarations have multiple source-signature hashes requiring resolved-
 type triage. The remaining declarations must stay unsafe until exact provider
 evidence and executable contracts prove a narrow safe wrapper.
+
+## Post-census migration note — 2026-08-26
+
+The backward-compatible `src/app/io/mod.spl` hub was narrowed without changing
+its direct-call shape: one unused `rt_env_get` redeclaration was removed, two
+dead nil checks now call the existing nullable `env_get_opt` owner, and all 11
+remaining random/logging/volatile raw declarations and calls are explicitly
+tagged and lexically confined. The new
+`scripts/audit/app-io-hub-sffi-authority.shs` ratchets the declaration count,
+owner calls, and no-extra-dispatch shape. This delta has not been used to
+rewrite the baseline table above; a future full census must measure the new
+global totals.
