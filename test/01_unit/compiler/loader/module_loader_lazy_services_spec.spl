@@ -19,6 +19,9 @@ use compiler.loader.loader.module_loader.{
     moduleloader_semantic_dependents_of
 }
 use compiler.loader.loader.module_loader_semantic.{_semantic_dependents_from_paths}
+use std.io_runtime.{read_file_text}
+
+val MODULE_LOADER_SEMANTIC_SOURCE = "src/compiler/99.loader/loader/module_loader_semantic.spl"
 
 fn lazy_default_config() -> LazyModuleLoaderConfig:
     lazymoduleloaderconfig_default()
@@ -110,6 +113,43 @@ describe "Module Loader Lazy Services":
         val affected = moduleloader_semantic_dependents_of(loader, "absent.smf")
 
         expect(affected).to_equal([])
+
+    it "keeps fixed-point scan order when fan-in makes an earlier module ready":
+        var loader = lazymoduleloader_new(lazy_default_config())
+        moduleloader_record_dependency_semantic_fingerprint(loader, "A.smf", "B.smf", "B:v1")
+        moduleloader_record_dependency_semantic_fingerprint(loader, "B.smf", "seed.smf", "seed:v1")
+        moduleloader_record_dependency_semantic_fingerprint(loader, "C.smf", "seed.smf", "seed:v1")
+
+        val affected = moduleloader_semantic_dependents_of(loader, "seed.smf")
+
+        expect(affected).to_equal(["B.smf", "C.smf", "A.smf"])
+
+    it "finds wide and deep dependents in established pass order":
+        var loader = lazymoduleloader_new(lazy_default_config())
+        moduleloader_record_dependency_semantic_fingerprint(loader, "deep3.smf", "deep2.smf", "deep2:v1")
+        moduleloader_record_dependency_semantic_fingerprint(loader, "deep2.smf", "deep1.smf", "deep1:v1")
+        moduleloader_record_dependency_semantic_fingerprint(loader, "deep1.smf", "seed.smf", "seed:v1")
+        moduleloader_record_dependency_semantic_fingerprint(loader, "wide_a.smf", "seed.smf", "seed:v1")
+        moduleloader_record_dependency_semantic_fingerprint(loader, "wide_b.smf", "seed.smf", "seed:v1")
+
+        val affected = moduleloader_semantic_dependents_of(loader, "seed.smf")
+
+        expect(affected).to_equal([
+            "deep1.smf", "wide_a.smf", "wide_b.smf",
+            "deep2.smf", "deep3.smf"
+        ])
+
+    it "keeps high-fanout and dense reverse edges in append-only scalar-index storage":
+        val source = read_file_text(MODULE_LOADER_SEMANTIC_SOURCE)
+
+        expect(source).to_contain("var reverse_heads: Dict<text, i64> = {}")
+        expect(source).to_contain("var reverse_dependents: [text] = []")
+        expect(source).to_contain("var reverse_next: [i64] = []")
+        expect(source).to_contain("reverse_dependents.push(module_path)")
+        expect(source).to_contain("reverse_next.push(previous_head)")
+        expect(source).to_contain("reverse_heads[dependency_path] = edge_index")
+        expect(source).to_contain("edge_index = reverse_next[edge_index]")
+        expect(source.contains("var reverse_dependents: Dict<text, [text]>")).to_equal(false)
 
     it "keeps export and dependency closure order across backward edges and a cycle":
         val paths = ["late.smf", "exporter.smf", "direct.smf", "unrelated.smf", "seed"]
