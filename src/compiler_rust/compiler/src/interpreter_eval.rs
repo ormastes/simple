@@ -1774,7 +1774,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // doing `use compiler.tools.lint.main.{Linter, ...}`). A Single or
                         // Aliased import is explicit user intent and is left untouched.
                         if bind_module_namespace_after_import(
-                            env,
+                            &mut env,
                             &binding_name,
                             &use_stmt.target,
                             &value,
