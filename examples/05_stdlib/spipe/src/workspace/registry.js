@@ -9,6 +9,13 @@ import { opaqueUid } from "../core/identity.js";
 import { createProjectRecord } from "../model/project.js";
 import { assertCanonicalUid } from "../model/identity.js";
 
+const WORKSPACE_REGISTRY_V1_BRAND = new WeakSet();
+
+/** Internal construction brand; prototype/instanceof lookalikes are not owners. */
+export function isWorkspaceRegistryV1(value) {
+  return WORKSPACE_REGISTRY_V1_BRAND.has(value);
+}
+
 function clone(value) {
   return JSON.parse(canonicalJson(value));
 }
@@ -61,6 +68,7 @@ export class WorkspaceRegistry {
     this._projects = new Map();
     this._relations = new Map();
     this._worktrees = new Map();
+    WORKSPACE_REGISTRY_V1_BRAND.add(this);
   }
 
   registerProject(input) {

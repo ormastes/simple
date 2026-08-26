@@ -9,6 +9,13 @@ import { canonicalRoot } from "../workspace/paths.js";
 export const SNAPSHOT_SCHEMA_VERSION = 1;
 export const SNAPSHOT_ID_PREFIX = "spks1-";
 
+const IMMUTABLE_SNAPSHOT_STORE_V1_BRAND = new WeakSet();
+
+/** Internal construction brand; prototype/instanceof lookalikes are not owners. */
+export function isImmutableSnapshotStoreV1(value) {
+  return IMMUTABLE_SNAPSHOT_STORE_V1_BRAND.has(value);
+}
+
 const SNAPSHOT_FIELDS = Object.freeze([
   "project_uid", "worktree_uid", "revision_id", "base_generation_hash",
   "overlay_generation_hash", "schema_version", "parser_version",
@@ -140,6 +147,7 @@ export class ImmutableSnapshotStore {
     this.repository_id = safeNamespace(String(repositoryId), "repository id");
     this.root = join(this.cacheRoot, "shared", this.repository_id, "snapshots");
     mkdirSync(this.root, { recursive: true });
+    IMMUTABLE_SNAPSHOT_STORE_V1_BRAND.add(this);
   }
 
   pathFor(snapshotUid) {
