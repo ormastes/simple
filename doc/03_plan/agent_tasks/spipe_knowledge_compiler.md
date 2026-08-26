@@ -593,15 +593,16 @@ Next session fixes all static defects first and then runs one bounded full
 parity check on a capable pure-Simple runtime. No code is accepted, the
 analyzer prerequisite is still missing, and Wave 4 remains `IN PROGRESS`.
 
-### 10.7 Raw JavaScript RRF attempt closure
+### 10.7 Raw JavaScript RRF admission
 
-No RRF source or test is accepted. The isolated two-file candidate reached the
-three-cycle cap with syntax `PASS`, focused `10/11`, and highest-capability
-`FAIL`. Resume only in a fresh scoped session from `/tmp/spkc-js-rrf-wt` or a
-clean reimplementation. The owner must first normalize caller input by reading
-each own data property once, reject accessors/proxies/hidden or symbol fields,
-retain exact validation-phase error precedence, and complete default, numeric,
-source-identity, and hostile-object oracles. Run the unchanged focused test at
-most once after those static gates pass. Raw RRF admission advances only part of
-REQ-SPKC-012/013 and cannot close AC-4 without identity dominance, graph
-candidate production, bounded adjustments, and integrated explanations.
+The initial rejected candidate remains historical `NOT-EVIDENCE`. A fresh
+scoped implementation repaired once-only input normalization, closed descriptor
+validation, phase-specific errors, and adversarial/default/boundary coverage.
+Static and final highest-capability reviews passed; syntax passed; the focused
+suite passed 16/16 in cycle 2. The exact two-file raw kernel is accepted and
+pushed as `595ba6e449`.
+
+Do not expand its claim: it advances only the raw-fusion portion of
+REQ-SPKC-012/013. AC-4 still requires exact identity dominance, accepted graph
+candidate production/proximity, bounded adjustments, and integrated
+stale/deprecated explanations.

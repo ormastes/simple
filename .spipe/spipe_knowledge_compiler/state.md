@@ -26,6 +26,13 @@ is retained as an append-only audit log and must not be read as current truth.
   incomplete closed-object validation, missing adversarial numeric/default
   coverage, and one incorrect reordered-source oracle. No commit/push; retained
   candidate `/tmp/spkc-js-rrf-wt` is `NOT-EVIDENCE`.
+- implementation-wave4-raw-rrf-accepted: A fresh scoped session replaced the
+  rejected candidate's TOCTOU/error/schema defects with once-only descriptor
+  snapshots and complete hostile/default/boundary coverage. Evidence: static
+  xhigh PASS; syntax PASS; focused 16/16 in cycle 2; independent final xhigh
+  PASS. Exact two-file commit pushed as `595ba6e449`. This admits raw fusion
+  only; identity dominance, graph candidates/proximity, bounded adjustments,
+  integrated explanations, and AC-4 remain open.
 
 ## Raw Request
 `$sp_dev imlldoc/01_research/infra/spipe/spipe_knowledge_compiler.md with pherallel agents with detail guide and higher model review. make design plan details. sync push often gh main`

@@ -2359,20 +2359,22 @@ Before admission it still needs focused self-hosted check/test evidence, success
 coverage for every `KnowledgeUid` variant, and an early non-ASCII provisional-ID
 rejection case. No runtime PASS or implementation-complete claim is made.
 
-## 33. 2026-08-26 Raw JavaScript RRF Attempt
+## 33. 2026-08-26 Raw JavaScript RRF Admission
 
-The dependency-free raw-RRF boundary was frozen separately from exact-identity
-dominance, graph traversal, semantic retrieval, and post-fusion adjustments.
-Its two-file candidate correctly implemented ordinary fixed-point contribution
-math and deterministic ordering, but it is not admitted. The final permitted
-cycle produced syntax `PASS`, focused `10/11`, and highest-capability `FAIL`.
+The dependency-free raw-RRF boundary is separate from exact-identity dominance,
+graph traversal, semantic retrieval, and post-fusion adjustments. An initial
+two-file candidate stopped at syntax `PASS`, focused `10/11`, and high-review
+`FAIL`; it remains historical `NOT-EVIDENCE`.
 
-The next fresh session must snapshot every caller property exactly once before
-validation and use only that immutable normalized input, preserve phase-specific
-errors instead of collapsing nested failures through an outer catch, reject
-symbol/non-enumerable/accessor properties under the closed request schema, and
-add hostile getter/proxy plus complete numeric/default/source-identity coverage.
-The remaining failed oracle also needs to identify `lexical` as the offending
-entry for reordered `[graph, lexical]`. Candidate files remain outside the
-shared worktree at `/tmp/spkc-js-rrf-wt`; they are `NOT-EVIDENCE`, and AC-4
-remains open.
+A fresh session repaired the validation TOCTOU by snapshotting caller-owned
+data descriptors exactly once, rejected accessor/hidden/symbol/unknown shapes,
+preserved phase-specific errors, completed numeric/default/source-identity and
+hostile-object coverage, and corrected the reordered-source oracle. Evidence:
+pre-runtime highest-capability static `PASS`; cycle 1 syntax `PASS` and focused
+`15/16` with one malformed test fixture; cycle 2 syntax `PASS` and focused
+`16/16`; independent final highest-capability `PASS`. The exact two-file kernel
+was pushed as `595ba6e449`.
+
+This admits raw deterministic RRF only. Exact identity dominance, accepted graph
+candidate construction/proximity, bounded post-fusion adjustments, integrated
+stale/deprecated explanations, and full AC-4 remain open.
