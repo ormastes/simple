@@ -3,7 +3,7 @@
 **Date:** 2026-08-26
 **Area:** `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`,
 `src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl`
-**Status:** OPEN — fix written, A/B measurement in flight
+**Status:** FIX LANDED LOCALLY — A/B blocked before HIR by source-closure stall
 **ID:** REXVISIT
 
 ## NOT a duplicate of REXMEMO (`reexport_root_memo_deleted_glob_superlinear_2026-08-21.md`)
@@ -117,6 +117,14 @@ patch, under the same harness. **The 26 normally-completing modules are the
 contention control** — the previous theory's raw 0.57x read as a 1.75x
 regression until the untouched modules exposed the 0.65 load factor. No speedup
 may be claimed without that normalisation.
+
+The narrow two-file REXVISIT implementation was transplanted into the current
+render/bootstrap lane on 2026-08-26. Both touched files complete the repository
+optimizer source analysis. A no-stub shard cannot yet reach HIR: it stalls in
+the earlier `source_closure` phase at 704/1047 and hits the bounded 900-second
+watchdog. Therefore this record remains open and makes no measured speedup
+claim; `native_build_parse_shard_post_closure_stall_2026-08-26.md` owns the
+earlier blocker.
 
 ## Prevention
 

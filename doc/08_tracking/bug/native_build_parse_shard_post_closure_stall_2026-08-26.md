@@ -20,6 +20,13 @@ progress for more than 26 minutes while remaining at approximately 100% CPU and
 direct shard runner has no worker watchdog, so the exact process was terminated
 with SIGTERM and the cache/log were preserved.
 
+A second bounded reproduction after the independent REXVISIT dictionary fix
+reaches 704/1047 in 56.975 seconds, names the same
+`src/lib/nogc_sync_mut/tooling/easy_fix/accessor_core.spl` item, then emits no
+new progress before `timeout --kill-after=10s 900s` exits 124. This proves the
+stall is in source-closure expansion before the HIR re-export walk and is not
+caused by REXVISIT's former quadratic visited set.
+
 ## Required fix
 
 Instrument the transition after source-closure enumeration with phase and
