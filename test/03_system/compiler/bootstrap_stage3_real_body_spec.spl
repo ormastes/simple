@@ -9,6 +9,7 @@ cannot satisfy the runtime marker assertion.
 use std.spec.*
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -36,6 +37,14 @@ fn probe_source() -> text:
         "    0\n"
     ].join("")
 
+fn canonical_bootstrap_version() -> text:
+    val authority = rt_file_read_text("release/version.sdn") ?? ""
+    for raw_line in authority.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with("semver:"):
+            return line.substring("semver:".len(), line.len()).trim()
+    ""
+
 describe "pure-Simple Stage3 real entry body":
     it "builds and executes a nontrivial bare positional entry":
         val stage3 = rt_env_get("SIMPLE_STAGE3_BIN") ?? ""
@@ -46,10 +55,12 @@ describe "pure-Simple Stage3 real entry body":
         expect(stage3.contains("src/compiler_rust")).to_equal(false)
 
         step("Verify the selected compiler identifies as the bootstrap compiler")
+        val expected_version = canonical_bootstrap_version()
+        expect(expected_version.len()).to_be_greater_than(0)
         val (version_out, version_err, version_code) = rt_process_run(stage3, ["--version"])
         expect(version_code).to_equal(0)
         expect(version_err).to_equal("")
-        expect(version_out).to_contain("simple-bootstrap 1.0.0-RC")
+        expect(version_out.trim()).to_equal("simple-bootstrap " + expected_version)
 
         step("Write a helper-calling entry whose observable marker requires real body execution")
         val (mkdir_out, mkdir_code) = shell("rm -rf '" + BUILD_DIR + "' && mkdir -p '" + BUILD_DIR + "'")
