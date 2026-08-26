@@ -15,7 +15,6 @@
 # against a real build's longest single action; revisit if a legitimate lease
 # is ever reclaimed while its process is still alive but slow.
 
-extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
@@ -26,6 +25,7 @@ extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_process_exists(pid: i64) -> bool
 
 use std.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 
 val LEASE_HEADER: text = "simple-cache-lease-v1"
 val LEASE_STALE_TIMEOUT_SECS: i64 = 21600   # 6h conservative ceiling
@@ -110,7 +110,7 @@ fn lease_heartbeat(root: text, lease_id: text) -> bool:
     val path = lease_path(root, lease_id)
     if not rt_file_exists(path):
         return false
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_nullable(path) ?? ""
     match lease_parse(content):
         case Some(lease):
             val bumped = CacheLease(
@@ -129,7 +129,7 @@ fn lease_read(root: text, lease_id: text) -> CacheLease?:
     val path = lease_path(root, lease_id)
     if not rt_file_exists(path):
         return nil
-    lease_parse(rt_file_read_text(path) ?? "")
+    lease_parse(file_read_nullable(path) ?? "")
 
 # A lease is reclaimable (safe to delete without violating gc_reachability_safe)
 # only if the owning process is provably dead, or the heartbeat generation has
@@ -148,7 +148,7 @@ fn lease_list_active(root: text) -> [CacheLease]:
     var out: [CacheLease] = []
     val now = rt_time_now_unix_micros()
     for name in rt_dir_list(dir):
-        val content = rt_file_read_text("{dir}/{name}") ?? ""
+        val content = file_read_nullable("{dir}/{name}") ?? ""
         match lease_parse(content):
             case Some(lease):
                 if not lease_is_reclaimable(lease, now):
@@ -166,7 +166,7 @@ fn lease_reclaim_stale(root: text) -> i64:
     val now = rt_time_now_unix_micros()
     for name in rt_dir_list(dir):
         val path = "{dir}/{name}"
-        val content = rt_file_read_text(path) ?? ""
+        val content = file_read_nullable(path) ?? ""
         match lease_parse(content):
             case Some(lease):
                 if lease_is_reclaimable(lease, now):

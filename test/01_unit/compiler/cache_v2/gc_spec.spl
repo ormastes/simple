@@ -12,6 +12,7 @@ use compiler.driver.cache.lease.lease.{lease_acquire, lease_release, lease_list_
 use compiler.driver.cache.gc.fast_gc.{gc_fast_sweep, gc_expire_tmp, gc_delete_trash}
 use compiler.driver.cache.gc.mark_sweep.{gc_mark_and_sweep, gc_select_roots}
 use compiler.driver.cache.gc.admission.{admission_check, pinned_overflow_check, PinnedOverflowReport}
+use std.io_runtime.{read_file_text}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -33,6 +34,29 @@ fn small_limits() -> CacheLimits:
         tmp_hours: 24,
         quarantine_days: 7,
     )
+
+fn lease_id_of(lease: CacheLease?) -> text:
+    match lease:
+        case Some(active): active.lease_id
+        case nil: ""
+
+describe "Lease lifecycle":
+    it "acquires, lists, and releases a real lease":
+        val root = scratch_root("lease_lifecycle")
+        cas_open(root)
+        val acquired = lease_acquire(root, ["manifest-live"], ["artifact-live"])
+        val lease_id = lease_id_of(acquired)
+        assert_true(lease_id != "")
+
+        val active = lease_list_active(root)
+        expect(active.len()).to_equal(1)
+        expect(active[0].lease_id).to_equal(lease_id)
+        assert_true(active[0].referenced_manifests.contains("manifest-live"))
+        assert_true(active[0].referenced_artifacts.contains("artifact-live"))
+
+        assert_true(lease_release(root, lease_id))
+        expect(lease_list_active(root).len()).to_equal(0)
+        rt_dir_remove_all(root)
 
 describe "GC roots and mark-sweep":
     it "preserves a manifest reachable from a lease root":
@@ -214,3 +238,46 @@ describe "PinnedOverflow report":
         # store is nominally "over quota" per the report above.
         gc_mark_and_sweep(root)
         rt_dir_remove_all(root)
+
+describe "Lease nullable-read facade ownership":
+    it "uses the exact owner four times and preserves every guard-read-parse order":
+        val source = read_file_text("src/compiler/80.driver/cache/lease/lease.spl")
+
+        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{file_read_nullable}")
+        expect(source.split("file_read_nullable(").len() - 1).to_equal(4)
+        expect(source).to_not_contain("extern fn rt_file_read_text")
+        expect(source).to_not_contain("rt_file_read_text(")
+
+        val heartbeat_pos = source.index_of("fn lease_heartbeat(root: text, lease_id: text) -> bool:")
+        val heartbeat_guard_pos = source.index_of("if not rt_file_exists(path):", heartbeat_pos)
+        val heartbeat_read_pos = source.index_of("val content = file_read_nullable(path) ?? \"\"", heartbeat_pos)
+        val heartbeat_parse_pos = source.index_of("match lease_parse(content):", heartbeat_pos)
+        expect(heartbeat_guard_pos).to_be_greater_than(heartbeat_pos)
+        expect(heartbeat_read_pos).to_be_greater_than(heartbeat_guard_pos)
+        expect(heartbeat_parse_pos).to_be_greater_than(heartbeat_read_pos)
+
+        val read_fn_pos = source.index_of("fn lease_read(root: text, lease_id: text) -> CacheLease?:")
+        val read_guard_pos = source.index_of("if not rt_file_exists(path):", read_fn_pos)
+        val read_call_pos = source.index_of("lease_parse(file_read_nullable(path) ?? \"\")", read_fn_pos)
+        expect(read_guard_pos).to_be_greater_than(read_fn_pos)
+        expect(read_call_pos).to_be_greater_than(read_guard_pos)
+
+        val list_pos = source.index_of("fn lease_list_active(root: text) -> [CacheLease]:")
+        val list_guard_pos = source.index_of("if not rt_file_exists(dir):", list_pos)
+        val list_walk_pos = source.index_of("for name in rt_dir_list(dir):", list_pos)
+        val list_read_pos = source.index_of("val content = file_read_nullable(\"{dir}/{name}\") ?? \"\"", list_pos)
+        val list_parse_pos = source.index_of("match lease_parse(content):", list_pos)
+        expect(list_guard_pos).to_be_greater_than(list_pos)
+        expect(list_walk_pos).to_be_greater_than(list_guard_pos)
+        expect(list_read_pos).to_be_greater_than(list_walk_pos)
+        expect(list_parse_pos).to_be_greater_than(list_read_pos)
+
+        val reclaim_pos = source.index_of("fn lease_reclaim_stale(root: text) -> i64:")
+        val reclaim_guard_pos = source.index_of("if not rt_file_exists(dir):", reclaim_pos)
+        val reclaim_walk_pos = source.index_of("for name in rt_dir_list(dir):", reclaim_pos)
+        val reclaim_read_pos = source.index_of("val content = file_read_nullable(path) ?? \"\"", reclaim_pos)
+        val reclaim_parse_pos = source.index_of("match lease_parse(content):", reclaim_pos)
+        expect(reclaim_guard_pos).to_be_greater_than(reclaim_pos)
+        expect(reclaim_walk_pos).to_be_greater_than(reclaim_guard_pos)
+        expect(reclaim_read_pos).to_be_greater_than(reclaim_walk_pos)
+        expect(reclaim_parse_pos).to_be_greater_than(reclaim_read_pos)
