@@ -64,3 +64,14 @@ a claim that SFFI v2 is complete.
 - WARN: checks ran through the bootstrap seed, not a self-hosted production
   binary. No signature or artifact-bound evidence was created, so global SFFI
   admission remains FAIL.
+
+## Follow-up: interpreter error-handle owner (2026-08-26)
+
+- PASS (static): nine canonical raw calls are explicitly and lexically
+  `unsafe(ffi)`; the compatibility facade has no raw declarations.
+- PASS (source): both canonical and compatibility modules check successfully;
+  the owner audit verifies interpreter-provider symbols and no lexical bypass.
+- PASS (performance review): compatibility now re-exports with no runtime
+  wrapper; optimizer reports 18 MIR-only opportunities and zero general ones.
+- FAIL (global admission): error handles remain interpreter-owned opaque values
+  without artifact-bound signature/evidence admission or cross-lane proof.

@@ -1555,3 +1555,17 @@ exports, and absence of per-call admission/lookup/hash/dispatch. The existing
 math specification passes 13/13; the optimizer reports no general pattern.
 This preserves values and performance shape but is not an artifact signature or
 semantic verification claim.
+
+### Interpreter error-handle boundary audit (2026-08-26)
+
+The legacy `std.ffi.error` module duplicated all nine raw error-handle
+declarations from `std.sffi.error`. It is now a compile-time re-export of the
+canonical owner. The canonical declarations are explicitly `unsafe(ffi)` and
+their wrappers use minimal lexical scopes; the compatibility-named
+`error_index_out_of_bounds` now routes through the checked wrapper instead of
+bypassing that scope. The interpreter provider rejects invalid handles by
+raising `CompileError`, rather than returning a fabricated message or handle.
+The owner audit and source check pass, and optimizer review reports no general
+pattern. These remain opaque interpreter-owned handles with no artifact-bound
+signature/evidence admission, so the public wrappers are contained but not
+verified safe across all execution lanes.

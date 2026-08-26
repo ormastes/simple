@@ -242,3 +242,10 @@ passing placeholder.
     check, 13-case math spec, and optimizer review pass under the bootstrap
     seed. Signed admission remains zero; continue with a provider that has a
     complete ABI/evidence path rather than labeling scalar containment verified.
+44. Keep raw interpreter error handles in one canonical SFFI owner. Remove
+    duplicate compatibility declarations, annotate all remaining handle
+    operations `unsafe(ffi)`, and make aliases call the scoped wrapper rather
+    than the raw symbol. Preserve the direct one-call path and reject fabricated
+    handle/message fallbacks. Static owner audit, source check, and optimizer
+    review pass; unsigned, interpreter-owned handle lifetime remains an explicit
+    unsafe limitation until multi-lane provider/evidence admission exists.
