@@ -378,6 +378,35 @@ fn _apk_read_text(data: [u8], offset: i64, length: i64) -> text:
 fn _apk_crc(data: [u8]) -> i64:
     (gzip_crc32(data) as i64) & 4294967295
 
+fn _apk_push_identity_text_v1(out: [u8], value: text):
+    val bytes = text_to_bytes(value)
+    _apk_push_u64(out, bytes.len())
+    _apk_push_bytes(out, bytes)
+
+fn _apk_module_identity_v1(module_id: text, aspect_id: text,
+        module_abi_hash: text, required_core_public_abi_hash: text,
+        required_core_layout_hash: text, variant_fingerprint: text) -> text:
+    """Canonical identity of one §11.2 ModuleEntry.
+
+    The semantic tuple is, in directory order:
+    (module_id, aspect_id, module_abi_hash, required_core_public_abi_hash,
+     required_core_layout_hash, variant_fingerprint).
+
+    The version tag and every field use an unsigned 64-bit length-prefixed byte
+    encoding. This keeps boundaries unambiguous even when an adversarial field
+    contains separators or NUL bytes. Hashing happens once when a binding is
+    published; indexed lookups reuse the stored digest.
+    """
+    var encoded: [u8] = []
+    _apk_push_identity_text_v1(encoded, "apk-module-identity-v1")
+    _apk_push_identity_text_v1(encoded, module_id)
+    _apk_push_identity_text_v1(encoded, aspect_id)
+    _apk_push_identity_text_v1(encoded, module_abi_hash)
+    _apk_push_identity_text_v1(encoded, required_core_public_abi_hash)
+    _apk_push_identity_text_v1(encoded, required_core_layout_hash)
+    _apk_push_identity_text_v1(encoded, variant_fingerprint)
+    sha256_u8_hex(encoded)
+
 # ---------------------------------------------------------------- pack build
 
 fn apk_build_pack_v1(modules: [ApkModuleSourceV1]) -> ApkBuildResultV1:
@@ -1493,6 +1522,10 @@ var _fc_pack: [text] = []
 # rebuilding it byte-by-byte, and unload compaction moves one reference per
 # surviving binding rather than copying every surviving payload byte.
 var _fc_payload: [[u8]] = []
+# Canonical ModuleEntry identity, computed once on publication. It is retained
+# beside the reference-backed payload so lookup and compaction never rebuild or
+# rehash module metadata.
+var _fc_module_identity: [text] = []
 var _fc_generation: [i64] = []
 # design §14.7 unload: per-binding lifecycle state and pin count. A binding is
 # freed only when nothing still holds it.
@@ -1501,6 +1534,12 @@ var _fc_refs: [i64] = []
 # Compact history ledger: preserves the public UNLOADED observation without
 # retaining payloads or full tombstone rows. One row per loader/key.
 var _fc_unloaded: Dict<text, bool> = {}
+
+# Exact facet-key -> global SoA row, partitioned by loader. The old hot path
+# scanned every binding from every loader. Dict lookup is average O(1); each
+# compaction rebuilds every loader's map because removing a middle global row
+# shifts survivor rows belonging to this loader and to other loaders.
+var _ld_binding_index: [Dict<text, i64>] = []
 
 # One path-indexed registry per loader. Keeping the registry with its loader
 # makes duplicate detection and routed lookup independent of the number of
@@ -1550,6 +1589,7 @@ fn apk_loader_new() -> i64:
     _ld_catalog_invalidations = _ld_catalog_invalidations.push(0)
     _ld_operational_sealed = _ld_operational_sealed.push(false)
     _ld_packs = _ld_packs.push({})
+    _ld_binding_index = _ld_binding_index.push({})
     id
 
 fn apk_loader_seal_operational_state(ld: i64):
@@ -1743,17 +1783,14 @@ fn apk_try_facet(ld: i64, facet_key: text) -> ApkFacetLoadV1:
     """Design §6.7 `try_facet`: NEVER performs I/O. Returns an already-bound
     facet or a clean miss — it never consults the catalog, never opens a pack
     and never decompresses, so none of the loader counters can move."""
-    var i = 0
-    val n = _fc_ld.len()
-    while i < n:
-        if _fc_ld[i] == ld and _fc_key[i] == facet_key and _fc_state[i] == APK_FC_BOUND:
-            _ld_cache_hits[ld] = _ld_cache_hits[ld] + 1
-            _ld_last_error[ld] = ""
-            return ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
-                facet_key: facet_key, pack_path: _fc_pack[i], module_id: _fc_module[i],
-                aspect_id: _fc_aspect[i], activation: _fc_activation[i],
-                from_cache: true, payload: _fc_payload[i], generation: _fc_generation[i])
-        i = i + 1
+    val i = _apk_fc_index(ld, facet_key)
+    if i >= 0 and _fc_state[i] == APK_FC_BOUND:
+        _ld_cache_hits[ld] = _ld_cache_hits[ld] + 1
+        _ld_last_error[ld] = ""
+        return ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
+            facet_key: facet_key, pack_path: _fc_pack[i], module_id: _fc_module[i],
+            aspect_id: _fc_aspect[i], activation: _fc_activation[i],
+            from_cache: true, payload: _fc_payload[i], generation: _fc_generation[i])
     _apk_facet_miss(facet_key)
 
 fn apk_load_facet(ld: i64, catalog: [u8], facet_key: text) -> ApkFacetLoadV1:
@@ -1830,12 +1867,10 @@ fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bo
     # design §14.7 step 2: while a binding is quiescing, NEW acquisitions are
     # refused. Existing pinned references stay valid; this is what makes an
     # unload ordered rather than a race.
-    var q = 0
-    while q < _fc_ld.len():
-        if _fc_ld[q] == ld and _fc_key[q] == facet_key and _fc_state[q] == APK_FC_QUIESCING:
-            _ld_last_error[ld] = "aspect is quiescing and cannot be re-acquired: {facet_key}"
-            return _apk_facet_error("APK_ASPECT_QUIESCING", "aspect is quiescing and cannot be re-acquired: {facet_key}")
-        q = q + 1
+    val resident_index = _apk_fc_index(ld, facet_key)
+    if resident_index >= 0 and _fc_state[resident_index] == APK_FC_QUIESCING:
+        _ld_last_error[ld] = "aspect is quiescing and cannot be re-acquired: {facet_key}"
+        return _apk_facet_error("APK_ASPECT_QUIESCING", "aspect is quiescing and cannot be re-acquired: {facet_key}")
     var route = apk_catalog_route_v1(catalog, cat, facet_key)
     if _ld_profile[ld] != "":
         route = apk_catalog_route_in_profile_v1(catalog, cat, _ld_profile[ld], facet_key)
@@ -1898,13 +1933,26 @@ fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bo
     _ld_bytes_decompressed[ld] = _ld_bytes_decompressed[ld] + load.bytes_decompressed
     _ld_last_error[ld] = ""
 
-    # design §5.7 atomic activation: the epoch advances exactly once, here,
-    # only on the success path that is about to publish. Every prior return
-    # in this function is a failure and left the generation untouched.
-    val gen = _ld_generation[ld] + 1
-    _ld_generation[ld] = gen
+    # Compute the canonical ModuleEntry identity once. The binding row retains
+    # this digest through hits and compaction; no hot lookup re-encodes fields.
+    val module_identity = _apk_module_identity_v1(load.module_id, load.aspect_id,
+        load.module_abi_hash, load.required_core_public_abi_hash,
+        load.required_core_layout_hash, load.variant_fingerprint)
 
-    # publish into the already-bound registry so the next acquisition is I/O-free
+    # Under this module's current single-owner loader contract, prepare the
+    # next §5.7 activation epoch, publish the row plus index entry, and advance
+    # only after publication succeeds. Cross-thread first-use serialization is
+    # outside this container; within one owner, a duplicate loader/key entry is
+    # an integrity failure, never a silent overwrite.
+    if module_identity == "":
+        _ld_last_error[ld] = "module identity is missing for facet: {facet_key}"
+        return _apk_facet_error("APK_BINDING_IDENTITY_MISSING", _ld_last_error[ld])
+    var binding_index = _ld_binding_index[ld]
+    if binding_index.contains_key(facet_key):
+        _ld_last_error[ld] = "facet binding already published: {facet_key}"
+        return _apk_facet_error("APK_BINDING_DUPLICATE", _ld_last_error[ld])
+    val gen = _ld_generation[ld] + 1
+    val row = _fc_ld.len()
     _fc_ld = _fc_ld.push(ld)
     _fc_key = _fc_key.push(facet_key)
     _fc_module = _fc_module.push(load.module_id)
@@ -1912,9 +1960,13 @@ fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bo
     _fc_activation = _fc_activation.push(route.activation)
     _fc_pack = _fc_pack.push(route.pack_path)
     _fc_payload = _fc_payload.push(load.payload)
+    _fc_module_identity = _fc_module_identity.push(module_identity)
     _fc_generation = _fc_generation.push(gen)
     _fc_state = _fc_state.push(APK_FC_BOUND)
     _fc_refs = _fc_refs.push(0)
+    binding_index[facet_key] = row
+    _ld_binding_index[ld] = binding_index
+    _ld_generation[ld] = gen
     ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
         facet_key: facet_key, pack_path: route.pack_path, module_id: load.module_id,
         aspect_id: load.aspect_id, activation: route.activation, from_cache: false,
@@ -1938,12 +1990,20 @@ fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bo
 
 fn _apk_fc_index(ld: i64, facet_key: text) -> i64:
     """Index of the LIVE (bound or quiescing) registry row for a key, or -1."""
-    var i = 0
-    while i < _fc_ld.len():
-        if _fc_ld[i] == ld and _fc_key[i] == facet_key and _fc_state[i] != APK_FC_UNLOADED:
-            return i
-        i = i + 1
-    -1
+    if ld < 0 or ld >= _ld_binding_index.len():
+        return -1
+    val binding_index = _ld_binding_index[ld]
+    if not binding_index.contains_key(facet_key):
+        return -1
+    val i = binding_index[facet_key]
+    # Fail closed if any indexed identity or row coordinate is inconsistent.
+    # This makes a stale middle-compaction index observable as a miss instead
+    # of returning another loader's payload.
+    if (i < 0 or i >= _fc_ld.len() or i >= _fc_module_identity.len() or
+            _fc_module_identity[i] == "" or _fc_ld[i] != ld or
+            _fc_key[i] != facet_key or _fc_state[i] == APK_FC_UNLOADED):
+        return -1
+    i
 
 fn apk_facet_state_v1(ld: i64, facet_key: text) -> i64:
     """design §14.7: APK_FC_BOUND / APK_FC_QUIESCING for a live binding,
@@ -2014,11 +2074,18 @@ fn _apk_record_unloaded(ld: i64, key: text):
 
 fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, all_loader: bool):
     """design §14.7 step 5: free the binding. Only ever reached with a zero
-    refcount, so a resident, still-referenced module can never be freed."""
-    # Compact the SoA and reference-backed payload values in one pass. Leaving
-    # tombstone rows here makes reload grow RSS and every future lookup without
-    # bound; copying payload bytes would make unload proportional to all live
-    # payload bytes rather than the number of live bindings.
+    refcount, so a resident, still-referenced module can never be freed.
+
+    With B global live bindings and L loaders this is O(B + L). It allocates
+    one replacement array per SoA column and one empty Dict per loader, then
+    inserts one row reference per survivor. Payload arrays and identity texts
+    remain reference-backed values: payload bytes are not copied and module
+    identities are not rehashed.
+    """
+    # Compact all parallel columns and rebuild every loader index in one pass.
+    # Leaving tombstone rows makes reload grow RSS and every lookup without
+    # bound; rebuilding is required because a middle removal shifts later rows
+    # owned by this loader and by other loaders.
     var next_ld: [i64] = []
     var next_key: [text] = []
     var next_module: [text] = []
@@ -2026,9 +2093,15 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
     var next_activation: [i64] = []
     var next_pack: [text] = []
     var next_payload: [[u8]] = []
+    var next_module_identity: [text] = []
     var next_generation: [i64] = []
     var next_state: [i64] = []
     var next_refs: [i64] = []
+    var next_binding_index: [Dict<text, i64>] = []
+    var loader_index = 0
+    while loader_index < _ld_binding_index.len():
+        next_binding_index.push({})
+        loader_index = loader_index + 1
     var released = 0
     var row = 0
     while row < _fc_ld.len():
@@ -2043,6 +2116,7 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
             _apk_record_unloaded(_fc_ld[row], _fc_key[row])
             released = released + 1
         else:
+            val next_row = next_ld.len()
             next_ld.push(_fc_ld[row])
             next_key.push(_fc_key[row])
             next_module.push(_fc_module[row])
@@ -2050,9 +2124,13 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
             next_activation.push(_fc_activation[row])
             next_pack.push(_fc_pack[row])
             next_payload.push(_fc_payload[row])
+            next_module_identity.push(_fc_module_identity[row])
             next_generation.push(_fc_generation[row])
             next_state.push(_fc_state[row])
             next_refs.push(_fc_refs[row])
+            var survivor_index = next_binding_index[_fc_ld[row]]
+            survivor_index[_fc_key[row]] = next_row
+            next_binding_index[_fc_ld[row]] = survivor_index
         row = row + 1
     _fc_ld = next_ld
     _fc_key = next_key
@@ -2061,9 +2139,11 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
     _fc_activation = next_activation
     _fc_pack = next_pack
     _fc_payload = next_payload
+    _fc_module_identity = next_module_identity
     _fc_generation = next_generation
     _fc_state = next_state
     _fc_refs = next_refs
+    _ld_binding_index = next_binding_index
     _ld_unloads[ld] = _ld_unloads[ld] + released
 
 fn _apk_release_binding(ld: i64, i: i64):
@@ -2071,13 +2151,14 @@ fn _apk_release_binding(ld: i64, i: i64):
     _apk_compact_bindings(ld, i, "", false, false)
 
 fn _apk_release_pack_bindings(ld: i64, path: text):
-    """Free all unpinned bindings for a pack with one O(active-bindings) pass."""
+    """Free all unpinned bindings for a pack with one O(B + L) compaction."""
     _apk_compact_bindings(ld, -1, path, true, false)
 
 fn apk_loader_invalidate_catalog_v1(ld: i64) -> bool:
     """Release every unpinned binding before a visible-catalog replacement.
 
-    This is a two-phase, O(active bindings + activation depth) transition:
+    This is a two-phase, O(active bindings + loaders + activation depth)
+    transition:
     first prove that no activation or pin can observe a partial replacement,
     then compact all loader rows once. Pack registrations and payload arrays
     are not scanned or copied. On refusal absolutely no state changes.
