@@ -42,6 +42,30 @@ fn _pipeline_source_read_raw(path: text) -> text?:
 fn driver_source_owner_text_copy(value: text) -> text:
     rt_bytes_to_text(value.bytes())
 
+fn _driver_source_has_rt_annotation(content: text) -> bool:
+    # `@rt` is common in attribute documentation. Parse only a genuine
+    # annotation, not a docstring or comment mention, so source-cache warming
+    # cannot spend minutes parsing an unrelated attribute-definition module.
+    if not content.contains("@rt"):
+        return false
+    var in_doc = false
+    for raw_line in content.split("\n"):
+        var scan_line = raw_line
+        if not in_doc and scan_line.contains("#"):
+            scan_line = scan_line.split("#")[0]
+        var quote_count = 0
+        if scan_line.contains("\"\"\""):
+            quote_count = scan_line.split("\"\"\"").len() - 1
+        val was_in_doc = in_doc
+        if quote_count % 2 == 1:
+            in_doc = not in_doc
+        if was_in_doc or quote_count > 0:
+            continue
+        val line = scan_line.trim()
+        if line.starts_with("@rt(") or line == "@rt":
+            return true
+    false
+
 impl CompilerDriver:
     # --------------------------------------------------------------------------
     # Phase 1: Load sources (with optional cache-aware skipping)
@@ -258,7 +282,7 @@ impl CompilerDriver:
                 # Hidden compiler ABI dependencies are admitted from a typed
                 # parser result. The substring is only an allocation-saving
                 # prefilter; it never decides whether a declaration is HAL.
-                if closure_src.content.contains("@rt"):
+                if _driver_source_has_rt_annotation(closure_src.content):
                     val rt_probe = parse_full_frontend(
                         closure_src.content, closure_src.path,
                         closure_src.module_name, self.ctx.logger)
