@@ -648,3 +648,34 @@ The integrated search owner must consume this resolver without re-resolving or
 weakening its bindings: a resolved identity is pinned ahead of retrieval and
 removed from every ranked source; ambiguity is reported without a pin; not-found
 continues normally. Graph/provider/RRF orchestration and AC-4 remain open.
+
+### 10.11 Accepted graph candidate contract and evidence prerequisite
+
+The graph candidate boundary is frozen but not implemented. It consumes one
+authorization-filtered digest-bound graph snapshot, performs a fixed-count
+node-authorization recheck, admits only receipt-verified accepted
+explicit/generated schema-v2 edges, and runs deterministic bounded
+both-direction depth-three BFS. Partial work returns only a single-use
+factory-local opaque cursor; only exhaustive completion may emit an RRF-v2 graph
+source and evidence digest.
+
+The exact implementation gate enforces depth 3, sourceK 1..1000 default 1000,
+page work 1..50,000 default 50,000, configurable total work 1..500,000,
+20,000 nodes, 50,000 edges, 1001 roots, and
+512-byte IDs. Paths repeat no node/edge; improved same-distance tuples re-expand;
+the full tuple and final Artifact UID order are tested before top-K truncation.
+Default and minimum/maximum boundary oracles cover sourceK/page/total work;
+root-precedence oracles bind exact to `(tier=0,rank=0)` and lexical to
+`(tier=1,rank=sourceRank)`.
+Node authorization runs exactly once per declared node without early exit or
+metadata disclosure. Cursor tests cover null-prototype/no-enumerable state,
+atomic consumption, cross-factory/copy/replay rejection, partial-data absence,
+hard-cap destruction, bounded state, and GC eligibility.
+
+Implementation is gated by lossless edge authority representation. Current
+reranker evidence uses independently unique edge and receipt arrays with equal
+length, but one authority receipt may cover multiple edges. First add an
+additive pair-based reranker evidence contract accepting ordered
+`{edgeUid,authorityReceiptUid}` records. Do not fabricate per-edge receipts,
+drop edges, duplicate receipts to satisfy uniqueness, or claim graph boost
+integration before that prerequisite and the standalone graph oracle pass.

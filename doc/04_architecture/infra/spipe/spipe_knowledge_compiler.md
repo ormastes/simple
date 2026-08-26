@@ -575,6 +575,74 @@ owns the byte-stream, diagnostic, deadline, and commit-admission mechanics;
 durable provider transactions remain the semantic mutation linearization
 authority.
 
+### 8.2 Accepted graph-candidate authority and continuation
+
+Graph search consumes an already authorization-filtered, digest-bound graph
+snapshot. A fixed-count metadata-free node-authorization pass rechecks every
+declared node under the current receipt before traversal; it is a TOCTOU guard,
+not a filter, and any denial invalidates the snapshot without identifying the
+node. Only schema-v2 accepted explicit/generated edges with matching provenance,
+policy, authority kind, decision receipt, and verified receipt may contribute.
+Proposed, inferred, structural, stale, rejected, superseded, legacy, malformed,
+or unverifiable edges never become search evidence.
+
+The standalone traversal is deterministic both-direction BFS with these exact
+v1 limits: depth `3`; `sourceK` `1..1000` (default `1000`); page work
+`1..50,000` (default `50,000`); configurable total work `1..500,000`;
+authorized nodes `20,000`; authorized edges `50,000`; roots `1001`
+(one exact plus 1,000 lexical); and document IDs at most 512 UTF-8 bytes. No
+path repeats a node or edge. Cycles are legal. The generator keeps the best path
+per `(nodeUid, distance)` and replaces/re-expands a same-distance state when its
+tuple improves. The exact ascending comparison tuple is:
+
+```text
+distance,
+seedTier,                 # exact=0, lexical=1
+seedRank,                 # exact=0, lexical=sourceRank
+generatedEdgeCount,
+-bottleneckConfidenceMilli,
+edgeUidSequence unsigned-UTF-8 lexicographic,
+directionSequence,       # out < in
+nodeUidSequence unsigned-UTF-8 lexicographic
+```
+
+Final candidates sort by that tuple and then artifact UID by unsigned UTF-8.
+Only authorized Artifact nodes are emitted, roots are excluded, and `sourceK`
+is applied only after exhaustive bounded traversal. Hitting a hard bound fails
+closed rather than returning a partial source.
+
+Budget continuation uses a single-use, factory-branded, deeply frozen,
+null-prototype in-process object with no enumerable state. A factory-local
+`WeakMap` binds the normalized request (excluding budget/cursor), exact immutable
+snapshot and digest, frontier, best-path tables, counters, and consumed bit.
+Continuation atomically consumes the old state before work and emits a new
+handle only if still partial. It never reopens the snapshot or repeats authority
+calls. A copied, reconstructed, cross-factory, serialized, or replayed cursor is
+invalid. Partial success is exactly `{status:'partial', contractVersion, cursor,
+counters}` with no candidates/source/evidence/digests. Total-cap failure destroys
+the state. Only frontier exhaustion yields a complete digest-bound graph source.
+All retained collections are bounded by the limits above; abandoned cursor keys
+and their WeakMap state are garbage-collection eligible. The handle has no clock,
+randomness, MAC, expiry, cross-process portability, or restart guarantee.
+
+The authorized snapshot is already filtered before it crosses the port, so
+hidden nodes/edges cannot affect counts, caps, work, ordering, errors, cursor
+state, or digests. The current-operation recheck calls `authorizeNode` exactly
+once for every declared canonical node, in canonical UID order, with only
+`{pin,nodeUid,nodeKind}`. It records all failures and completes the fixed call
+count rather than exiting early; any denial, malformed decision, or exception
+collapses to generic `snapshot_unavailable`. Edge receipt verification binds
+edge UID/type/endpoints/origin, receipt/authority kind, graph snapshot/root,
+scope, search receipt, and exact policy hash/version. No port error exposes a
+UID, count, position, or hidden existence.
+
+Accepted-edge evidence is losslessly represented as ordered
+`{edgeUid, authorityReceiptUid}` pairs. Independently unique edge and receipt
+arrays are derived views, because one decision receipt may authorize multiple
+edges. A reranker contract that assumes an injective edge-to-receipt mapping
+cannot consume the general graph source; pair-based reranker evidence is a
+prerequisite for integrated graph boosting.
+
 ## 9. Rebalancing and Promotion Boundaries
 
 Rebalancing consumes a snapshot and returns a deterministic proposal. Fixed
