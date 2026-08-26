@@ -1826,3 +1826,18 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Keep the family unsafe until bitmap handles become typed non-copying owners
   with generation/liveness validation and provider admission is signed.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 gamepad boundary deduplication
+
+- Replaced the app-local 20-declaration/roughly-400-line gamepad copy with an
+  export-only facade over the canonical Pure-Simple no-GC sync owner.
+- Preserved the complete public type/function surface and runtime-family facade
+  direction; no C/Rust implementation replaces Pure Simple.
+- Extended the existing authority ratchet to reject raw declarations, raw
+  calls, and duplicate wrapper functions in the app facade.
+- Preserved canonical provider-call counts and all polling, event, rumble, and
+  deadzone behavior; export resolution adds no runtime allocation, lookup,
+  branch, copy, or dispatch.
+- Keep all 20 symbols unsafe/unavailable until real typed providers are
+  registered, then require signed exact-artifact admission before promotion.
+- Status: source-reviewed, deliberately unverified and unsigned.

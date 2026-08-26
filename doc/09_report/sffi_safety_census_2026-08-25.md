@@ -1199,3 +1199,19 @@ shape. Bitmap handles remain copyable integers without generation validation,
 so this family is unsafe-minimized rather than promoted: it remains unsigned
 and unverified pending a typed non-copying bitmap owner and signed provider
 admission. Source-reviewed only; checks were not executed.
+
+## 2026-08-26 gamepad duplicate-boundary removal
+
+`app.io.gamepad_sffi` no longer owns a second 20-declaration copy of the
+gamepad boundary and its roughly four hundred lines of duplicated wrapper
+logic. It is now an export-only facade over the canonical Pure-Simple no-GC
+owner, matching the existing runtime-family facade direction. The canonical
+owner retains its 20 annotated raw declarations, 20 provider calls, state
+checks, event decoding, rumble behavior, and safe deadzone math. Module export
+resolution is compile-time, so polling and input hot paths gain no call,
+allocation, lookup, branch, copy, or dispatch. The authority audit now rejects
+raw declarations, provider calls, and duplicate wrapper bodies in the app
+facade. All 20 provider symbols remain unregistered in both seed registry lanes,
+so the family is explicitly unsafe, unavailable, unsigned, and unverified—not
+silently safe because duplication was removed. Source-reviewed only; checks
+were not executed.
