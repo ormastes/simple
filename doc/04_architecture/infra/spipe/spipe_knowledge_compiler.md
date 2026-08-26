@@ -1670,3 +1670,51 @@ Policy persistence is atomic replacement plus file and parent-directory fsync
 under cross-process monotonic CAS. Loading validates schemas and only a
 contiguous durable operation sequence; equal operation UID/payload replays,
 altered payloads and stale CAS fail.
+
+### 21.5 KnowledgeCompiler commit publisher: prerequisite ownership
+
+The reader ports above do not create the production publication they trust.
+Current immutable metadata and graph snapshot stores lack one transaction that
+materializes complete artifact/section/directory/project/aggregate inventories.
+`SnapshotAuthorityPortV1` is therefore non-admitted until parent-owned
+`KnowledgeCompilerCommitPublisherV1` exists.
+
+Construct it only at the composition root from branded `WorkspaceRegistryV1`,
+`SnapshotStoreV1`, `TargetInventoryStoreV1`, and
+`AuthorityPublicationJournalV1`. Its only input is closed
+`CommitInputV1 {commitId, workspaceUid, projectUidOrNull, worktreeUid,
+revisionId, expectedRegistryRevisionId, expectedBaseSnapshotUidOrNull,
+expectedPublicationUidOrNull, inputDeltas}`. Expected IDs are null only for an
+initial publication; otherwise the publisher opens that exact prior tuple. The one
+transaction normalizes deltas; materializes an immutable base snapshot; fixes
+the exact registry revision; materializes sealed project target/section/
+directory inventories; derives the registry-complete aggregate; seals the
+paired manifests; mints a closure `AuthorityInventoryPublishPermitV1`; then
+publishes both scopes through durable revision CAS.
+
+```text
+KnowledgeCompilerCommitPublisherV1.commit(CommitInputV1) -> PublishedAuthorityCommitV1
+TargetInventoryMaterializerV1.materialize(baseSnapshot, registryRevision, deltas)
+  -> ProductionInventoryBuildV1
+PublisherPermitIssuerV1.mintForCommit(transaction) -> AuthorityInventoryPublishPermitV1
+TargetInventoryStoreV1.publishAuthorityInventoryV1({permit, build})
+  -> PublishedAuthorityInventoryV1
+AuthorityPublicationJournalV1.recoverAuthorityPublicationV1() -> RecoveryResultV1
+```
+
+`ProductionInventoryBuildV1` is private until publication. Its contributor list is
+ordered, schema-complete, and all-and-only registry-selected; all content and
+directory data precedes sealing. The closure permit cannot be serialized or
+provided by adapters. The journal stages immutable objects and the complete
+`AuthorityPublicationRecordV1`, fsyncs every staged file and parent directory,
+then invokes the sole atomic durable current-pointer revision-CAS. That CAS
+does not expose the new head until its pointer write/fsync boundary completes;
+`openPublishedAuthorityInventoryV1` observes old or new complete records only.
+The pointer contains its publication UID, exact registry/base tuple, ordered
+project roots, aggregate root, paired authority snapshot UIDs, and both manifest
+digests. Journal-owned recovery validates this state before acknowledgement.
+Equal canonical commit replay
+is idempotent; changed replay/stale revision fail; recovery exposes old complete
+or new complete state only. W5A-18/19/21/22 require real all-kind parity,
+forged-permit/contributor/substitution negatives and crash/restart/CAS proof;
+authority/projection/cursor claims remain non-admitted before that evidence.

@@ -778,3 +778,40 @@ continuation only for the same bound domain, position, and limit. The policy
 ledger uses cross-process CAS, atomic write/rename, file/parent fsync, schema
 validation, and contiguous-log recovery. These foundations require
 production-oracle PASS before cursor or URI/MCP/projection admission.
+
+### 12.5 Commit-path publisher slice (required before authority admission)
+
+Current `ImmutableSnapshotStore` and graph snapshot publication do not implement
+the KnowledgeCompiler transaction assumed above: they do not materialize the
+complete sealed artifact/section/directory/project/aggregate inventory. A
+standalone authority implementation is therefore **not evidence** for W5A-18/19.
+
+Implement `src/core/knowledge_compiler_commit_publisher.js` with private
+`target_inventory_materializer.js` and
+`src/storage/authority_publication_journal.js`. The composition-root-only entry
+`commit({commitId,workspaceUid,projectUidOrNull,worktreeUid,revisionId,
+expectedRegistryRevisionId,expectedBaseSnapshotUidOrNull,
+expectedPublicationUidOrNull,inputDeltas})` opens the exact prior tuple (both
+expected IDs null only initially), then normalizes deltas;
+creates the immutable base snapshot; selects the exact registry revision;
+materializes target/section/bounded-directory entries; selects all-and-only
+complete contributors; derives project/aggregate inventories; seals both
+manifest layers; mints the closure permit; and calls
+`publishAuthorityInventoryV1({permit,build})`.
+
+`build` is not caller data: it carries the exact base/registry tuple, ordered
+complete roots, target/section digests, sealed pages, and authority manifest.
+`AuthorityPublicationJournalV1` stages and fsyncs objects, records, and their parent directories,
+then executes one atomic durable current-pointer CAS for a closed
+`AuthorityPublicationRecordV1` with registry/base tuple, ordered project roots,
+aggregate root, paired authority snapshot UIDs, and manifest digests. The CAS
+exposes the head only at its durable pointer boundary, so reads see old-or-new
+complete heads only; `AuthorityPublicationJournalV1` supports
+deterministic replay/recovery. Equal commit-ID/input replays; altered/stale
+input denies. URI/MCP/projection/materializer adapters remain readers only.
+
+Focused production tests must prove all-kind clean/incremental byte parity,
+all-and-only aggregate selection, permit/root rejection, substitution/revision
+denial, and stage/write/fsync/CAS/rename/parent-fsync/restart recovery. Until
+independent review passes, authority and dependent cursor/URI/MCP paths remain
+`NON-ADMITTED`.

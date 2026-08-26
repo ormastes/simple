@@ -3196,3 +3196,54 @@ clean/incremental parity, revision windows, aggregate substitution, directory
 bounds, cross-process races, and fault injection at
 create/write/fsync/rename/CAS/recovery. Mock or in-memory passing tests are not
 admission evidence.
+
+### 43.3 Evidenced commit-path prerequisite (2026-08-26)
+
+**Status: `SnapshotAuthorityPortV1` and the sealed-read primitive remain
+`NON-ADMITTED`.** Current `ImmutableSnapshotStore` persists metadata and
+`GraphSnapshotStore` can stage/publish a graph snapshot, but no production
+`KnowledgeCompiler` transaction turns input deltas into the complete artifact,
+section, directory, project, and workspace-aggregate inventories required by
+W5A-18/W5A-19. A manual manifest, test map, or standalone authority primitive
+cannot claim those gates.
+
+The prerequisite is composition-root `KnowledgeCompilerCommitPublisherV1` with
+closed `CommitInputV1 {commitId, workspaceUid, projectUidOrNull, worktreeUid,
+revisionId, expectedRegistryRevisionId, expectedBaseSnapshotUidOrNull,
+expectedPublicationUidOrNull, inputDeltas}`. Deltas apply only to the opened
+expected base/publication tuple; both expected UIDs are null only initially.
+Thus deterministic delta application, CAS, and replay never infer prior state.
+
+```text
+normalize deltas -> immutable base snapshot -> exact registry revision
+-> materialize target/section/directory inventories -> all-and-only complete
+   project contributors -> project + aggregate roots -> seal manifests
+-> closure-mint PublisherPermit -> atomic CAS publication/journal/fsync
+-> idempotent recovery result
+```
+
+Its sole interfaces are `TargetInventoryMaterializerV1.materialize(baseSnapshot,
+registryRevision,deltas) -> ProductionInventoryBuildV1`,
+`PublisherPermitIssuerV1.mintForCommit(transaction) ->
+AuthorityInventoryPublishPermitV1`,
+`TargetInventoryStoreV1.publishAuthorityInventoryV1({permit,build})`, and
+`AuthorityPublicationJournalV1.recoverAuthorityPublicationV1()`. The private build
+binds the exact base/registry tuple, ordered schema-valid complete contributors,
+content-digest targets/sections, and bounded deterministic directories before
+manifest sealing. The closure permit is minted only after that build is frozen;
+URI/MCP/materializer adapters provide neither permit, roots, nor aggregate.
+
+Stage immutable objects, `AuthorityPublicationJournalV1`, and complete `AuthorityPublicationRecordV1`,
+file-fsync every record/object and parent-fsync every containing directory;
+only then executes the one atomic durable current-pointer revision-CAS. The
+pointer contains publication UID, exact registry/base tuple, ordered project
+roots, aggregate root, paired authority snapshot UIDs, and both manifest
+digests. The CAS primitive makes the pointer visible only after its own durable
+write/fsync boundary completes, so readers see old or new complete records only.
+Equal `commitId` plus canonical input replays; changed input or stale revision
+denies. Recovery exposes only the preceding complete record or one complete new
+record. Production-oracle evidence must prove all-kind
+clean/incremental byte parity, permit/root and contributor negatives, manifest
+substitution/revision windows, and stage/write/fsync/CAS/rename/parent-fsync/
+restart faults. Only then may W5A-18..24 or dependent cursor/URI/MCP work claim
+admission.

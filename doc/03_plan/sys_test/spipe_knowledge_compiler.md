@@ -1632,3 +1632,23 @@ sealed-read implementation is `NOT-EVIDENCE`.
 | W5C-14 | Crash at temp creation, write, file fsync, rename, parent fsync, or recovery with malformed record | Restart observes old complete state or one schema-valid contiguous prefix; acknowledgement never precedes durability |
 
 These are prerequisites for W5C-01..10 and all URI/MCP/materializer tests.
+
+### 22.3 Commit-path publication prerequisite
+
+The current stores do not supply the production KnowledgeCompiler transaction
+needed for W5A-18/W5A-19. The following production-oracle cases target
+`KnowledgeCompilerCommitPublisherV1`; fixture maps, raw manifests, and a
+standalone authority primitive are `NOT-EVIDENCE`.
+
+| ID | Setup/action | Required oracle |
+|---|---|---|
+| W5A-25 | Commit from exact prior base/publication tuple, then supply caller permit/root/aggregate | Only closure permit publishes; adapters cannot choose contributors or infer prior state |
+| W5A-26 | Commit artifacts, sections, directories; compare clean and incremental | Base/authority snapshots, roots, pages, and projections are byte-identical |
+| W5A-27 | Missing/extra/reordered/substituted/incomplete aggregate contributor | Denial before publication; no partial project/aggregate visibility |
+| W5A-28 | Fault stage/write/**AuthorityPublicationJournalV1 publication-journal atomic rename**/file-fsync/parent-fsync/current-pointer-CAS/ack/restart; concurrently read at every boundary | AuthorityPublicationJournalV1 validates one AuthorityPublicationRecordV1; recovery and concurrent reader see only old complete or new complete dual-scope state, never staged/partial state |
+| W5A-29 | Equal commit-ID/exact tuple/input then altered input, stale revision, or changed expected base/publication UID | Equal replay idempotent; altered/stale denies without publication |
+| W5A-30 | Substitute manifest/inventory/snapshot/revision/section/target/directory root | Revalidation denies before lookup or ProjectionPort |
+
+W5A-25..30 run against real composition-root registry, snapshot, inventory,
+journal, and filesystem owners. They gate W5A-18..24, W5C, URI, MCP, and
+materializer re-attempts.

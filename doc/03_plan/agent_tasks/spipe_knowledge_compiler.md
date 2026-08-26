@@ -988,6 +988,30 @@ tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### 10.24 Wave 5a commit-publisher prerequisite (2026-08-26)
+
+**Status: W5A authority primitive is `NON-ADMITTED`.** Existing stores persist
+metadata/graph snapshots but lack the KnowledgeCompiler transaction required to
+materialize and publish complete artifact/section/directory/project/aggregate
+authority inventories. Synthetic manifests/maps cannot satisfy W5A-18/19.
+
+| Lane | Exclusive ownership | Required output | Gate |
+|---|---|---|---|
+| W5A-P commit publisher | `src/core/knowledge_compiler_commit_publisher.js`, materializer, composition-root wiring | exact base/publication input, immutable base snapshot, sealed inventories/manifests, closure permit | W5A-25..27 parity/all-and-only contributor proof |
+| W5A-S authority ports | `src/workspace/registry_authority_v1.js`, `src/storage/snapshot_authority_v1.js`, `src/storage/target_inventory_store.js` | branded revisioned registry/snapshot/inventory construction and store wiring | real owner construction before W5A-P/E |
+| W5A-J publication journal | `src/storage/authority_publication_journal.js` | `AuthorityPublicationRecordV1`, fsynced staged objects/records/parents, atomic durable current-pointer CAS, sole recovery owner | W5A-28..29 fault/restart/concurrent-read/replay proof |
+| W5A-E independent oracle | focused production fixtures | real roots/pages/projections and substitution evidence | W5A-30 + highest-capability PASS |
+
+Frozen names: `KnowledgeCompilerCommitPublisherV1`, `CommitInputV1`,
+`TargetInventoryMaterializerV1`, `ProductionInventoryBuildV1`,
+`AuthorityPublicationJournalV1`, `PublishedAuthorityCommitV1`. Commit order:
+open exact expected base/publication -> normalize deltas -> base snapshot -> exact registry -> complete project
+inventories -> all-and-only aggregate -> seal -> closure permit -> fsynced CAS
+publish -> recovery-safe acknowledgement. URI/MCP/materializer stays read-only.
+
+Merge owner: `/root`; final reviewer: independent highest-capability reviewer.
+No authority/cursor/URI/projection admission before W5A-P/J/E passes.
+
 ### 11.2 Wave 5a sealed-publication repair gate (2026-08-26)
 
 1. **Status/ownership.** The rejected pre-cursor authority candidate is
