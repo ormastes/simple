@@ -56,6 +56,7 @@ impl Worker:
         val is_h2 = self.h2_connections.contains_key(fd)
 
         if result < 0:
+            self.transport_send_bytes.remove(op_id)
             if typ == OP_OPEN_SENDFILE:
                 self.sendfile_pending.remove(fd)
             if typ == OP_SENDFILE:
@@ -81,6 +82,27 @@ impl Worker:
                 self.handle_recv(fd, data, raw_bytes, now)
 
         elif typ == OP_SEND:
+            if not self.transport_send_bytes.contains_key(op_id):
+                # Every Worker socket send is owner-backed. A completion that
+                # lacks its payload cannot be progressed safely.
+                if is_h2:
+                    self.close_h2_connection(fd)
+                else:
+                    self.close_connection(fd)
+                return
+            val sent = self.transport_send_bytes[op_id]
+            self.transport_send_bytes.remove(op_id)
+            if result <= 0 or result > sent.len():
+                # A zero-byte completion has made no transport progress; do
+                # not turn it into a completed HTTP response or spin forever.
+                if is_h2:
+                    self.close_h2_connection(fd)
+                else:
+                    self.close_connection(fd)
+                return
+            if result < sent.len():
+                self.submit_transport_send(fd, sent.slice(result, sent.len()))
+                return
             # Check if there's a pending sendfile for this fd
             val file_path = worker_sendfile_open_path_for_pending(self.sendfile_pending, fd)
             if file_path.len() > 0:
@@ -108,11 +130,47 @@ impl Worker:
             val length = pending.2
             self.sendfile_pending.remove(fd)
             self.sendfile_open_files[fd] = result
+            if length == 0:
+                self.sendfile_open_files.remove(fd)
+                val close_op = self.driver.submit_close(result)
+                self.op_to_fd[close_op] = fd
+                self.op_type[close_op] = OP_CLOSE_SENDFILE
+                return
+            self.sendfile_progress[fd] = (offset, length)
             val sf_op = self.driver.submit_sendfile(fd, result, offset, length)
             self.op_to_fd[sf_op] = fd
             self.op_type[sf_op] = OP_SENDFILE
 
         elif typ == OP_SENDFILE:
+            if not self.sendfile_progress.contains_key(fd):
+                if is_h2:
+                    self.close_h2_connection(fd)
+                else:
+                    self.close_connection(fd)
+                return
+            val progress = self.sendfile_progress[fd]
+            val offset = progress.0
+            val remaining = progress.1
+            if result <= 0 or result > remaining:
+                if is_h2:
+                    self.close_h2_connection(fd)
+                else:
+                    self.close_connection(fd)
+                return
+            if result < remaining:
+                val open_file = self.sendfile_open_files.get(fd)
+                if not open_file.?:
+                    if is_h2:
+                        self.close_h2_connection(fd)
+                    else:
+                        self.close_connection(fd)
+                    return
+                self.sendfile_progress[fd] = (offset + result, remaining - result)
+                val sf_op = self.driver.submit_sendfile(fd, open_file, offset + result, remaining - result)
+                self.op_to_fd[sf_op] = fd
+                self.op_type[sf_op] = OP_SENDFILE
+                return
+            self.sendfile_progress.remove(fd)
             val open_file = self.sendfile_open_files.get(fd)
             if open_file.?:
                 self.sendfile_open_files.remove(fd)
@@ -153,9 +211,7 @@ impl Worker:
             var h2conn = H2Connection.new(fd, peer, now)
             # Send server SETTINGS (empty = use defaults)
             var server_settings: [u8] = [0, 0, 0, 4, 0, 0, 0, 0, 0]
-            val ss_op = self.driver.submit_send_bytes(fd, server_settings)
-            self.op_to_fd[ss_op] = fd
-            self.op_type[ss_op] = OP_SEND
+            self.submit_transport_send(fd, server_settings)
             h2conn.settings_sent = true
             # Process initial bytes (preface + client SETTINGS)
             h2conn.h2_on_data_received(raw_bytes, now)
@@ -163,9 +219,7 @@ impl Worker:
             # Flush pending writes (SETTINGS ACK from consume_frames)
             val out = h2conn.take_pending_writes()
             if out.len() > 0:
-                val out_op = self.driver.submit_send_bytes(fd, out)
-                self.op_to_fd[out_op] = fd
-                self.op_type[out_op] = OP_SEND
+                self.submit_transport_send(fd, out)
             self.h2_connections[fd] = h2conn
             val recv_op = self.driver.submit_recv(fd, 8192)
             self.op_to_fd[recv_op] = fd
@@ -376,9 +430,7 @@ impl Worker:
             session.server_seq = session.server_seq + 1
             offset = offset + chunk_len
         self.tls_sessions[fd] = session
-        val op = self.driver.submit_send_bytes(fd, encrypted)
-        self.op_to_fd[op] = fd
-        self.op_type[op] = OP_SEND
+        self.submit_transport_send(fd, encrypted)
         true
 
     # ========================================================================
@@ -400,10 +452,12 @@ impl Worker:
             if self.op_to_fd[oid] == fd:
                 self.op_to_fd.remove(oid)
                 self.op_type.remove(oid)
+                self.transport_send_bytes.remove(oid)
         if self.sendfile_open_files.contains_key(fd):
             val open_file = self.sendfile_open_files[fd]
             self.driver.submit_close(open_file)
         self.sendfile_pending.remove(fd)
+        self.sendfile_progress.remove(fd)
         self.sendfile_open_files.remove(fd)
         self.tls_sessions.remove(fd)
         self.tls_rx_streams.remove(fd)
@@ -473,7 +527,9 @@ impl Worker:
         self.h2_connections = {}
         self.op_to_fd = {}
         self.op_type = {}
+        self.transport_send_bytes = {}
         self.sendfile_pending = {}
+        self.sendfile_progress = {}
         self.sendfile_open_files = {}
         self.tls_sessions = {}
         self.tls_rx_streams = {}
@@ -510,9 +566,7 @@ impl Worker:
                 if not self.submit_tls_send_bytes(fd, initial_bytes):
                     return
             else:
-                val send_op = self.driver.submit_send_bytes(fd, initial_bytes)
-                self.op_to_fd[send_op] = fd
-                self.op_type[send_op] = OP_SEND
+                self.submit_transport_send(fd, initial_bytes)
 
         # Start reading client preface + frames
         val recv_op = self.driver.submit_recv(fd, 8192)
@@ -560,9 +614,7 @@ impl Worker:
                 if not self.submit_tls_send_bytes(fd, out_bytes):
                     return
             else:
-                val send_op = self.driver.submit_send_bytes(fd, out_bytes)
-                self.op_to_fd[send_op] = fd
-                self.op_type[send_op] = OP_SEND
+                self.submit_transport_send(fd, out_bytes)
 
         if keep_going and not conn.is_goaway_sent():
             # Continue reading
