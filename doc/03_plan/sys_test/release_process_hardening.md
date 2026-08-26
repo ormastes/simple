@@ -20,6 +20,7 @@
 | REQ-011 | redeploy/withdraw accepted; delete/move/reuse rejected |
 | REQ-012..014 | process-level CLI JSON isolation and adversarial routing, plugin schema/capability, and model projection parity |
 | REQ-015 | focused suite and final release-bound whole test evidence |
+| REQ-016 | bounded read-only convergence planning in both directions; explicit reviewed selection; no mutation; release-first forward-port to `main`; reject making `main` track the release line |
 
 ## Execution order
 
@@ -27,4 +28,9 @@ Run each unchanged passing gate once: focused unit/spec checks, the process-leve
 
 ## Unsupported external rows
 
-Live GitHub ruleset mutation, real signing, protected tag push, immutable GitHub publication, and registry publication require explicit external authority and are not executed by this implementation lane. Their policy/plan rejection behavior remains testable; they cannot be counted as live PASS.
+The live GitHub policy baseline is now verified: seven repository rulesets, the
+declared environments, and immutable releases pass
+`scripts/release/github-policy.sh verify-live ormastes/simple`. This proves
+configuration only. Real signed beta tag creation, protected publication, and
+registry publication remain external release gates and cannot be counted as
+PASS until exact candidate receipts exist.

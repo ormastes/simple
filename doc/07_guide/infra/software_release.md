@@ -56,6 +56,17 @@ For each operator-selected exact commit:
 
 If either protected head changes, discard stale admission and retry from a fresh snapshot. `main` always remains the development trunk: never reset or repoint it to `release/X.Y`, make the release branch its upstream, merge an entire maintenance line merely to carry one fix, or push either protected ref directly. Release-only compatibility changes may remain on the release line when the divergence receipt explains why; shared bug fixes must be forward-ported unless explicitly rejected by review.
 
+Prepare one selected fix with `scripts/release/converge-reviewed-fix.sh`. The
+command requires a create-once `spipe-review-receipt/1` file bound to the exact
+approved commit, change ID, and `kind=fix`; the command snapshots and hashes
+those bytes before fetching. It first fetches bounded source and target refs from the configured
+remote, then creates one unique `work/backport/*` or `work/forwardport/*`
+branch and linked worktree at the fetched target SHA. A conflict removes the
+new private worktree/branch and fails closed. Success emits a
+`spipe-reviewed-fix-preparation/1` receipt under the session-private build
+tree and leaves the branch for renewed tests, PR review, and protected CAS
+integration. It never pushes or moves `main` or `release/*`.
+
 Required platform rows are declared in `release/support.sdn`. The candidate
 workflow `.github/workflows/candidate.yml` builds the exact create-once
 candidate ref, runs full bootstrap and whole tests, and emits immutable product,
@@ -124,12 +135,14 @@ Use `simple release withdraw-check`. Redeployment may select a prior valid relea
 
 ## Current verification boundary
 
-The repository now contains candidate-build, promote-only release, and
-admitted-tarball publication workflows, but their presence is not evidence that
-GitHub rulesets, signing, immutable-release settings, environments, or registry
-publication are configured and working live. The available local `simple`
-runtime identifies itself as bootstrap seed-derived, so it cannot supply the
-required release-grade whole-suite evidence. The trusted-session integration
-spec also exceeded its bounded test timeout in the final verification pass.
-Both facts remain release blockers until fresh admitted-runtime and bounded
-session evidence pass; neither may be converted to a warning or inferred PASS.
+The live GitHub configuration baseline passes
+`scripts/release/github-policy.sh verify-live ormastes/simple`: all seven
+declared rulesets match their projections, the protected-integration, release,
+and npm-release environments exist with the declared policy, and immutable
+releases are enabled. This is configuration evidence, not release admission.
+
+The exact release lineage still lacks admitted Stage 3 and Stage 4 receipts and
+one clean release-grade `bin/simple test test --whole --mode=interpreter` PASS.
+No signed beta tag, immutable candidate publication, or byte-identical npm
+publication receipt exists. Those rows remain FAIL and must not be inferred
+from the live policy PASS or from workflow source.

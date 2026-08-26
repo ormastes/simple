@@ -14,6 +14,7 @@ Apply this skill to any software repository, adapting provider commands while pr
 - Use SemVer; prereleases are lowercase and numbered.
 - Maintenance/beta fixes are explicit reviewed backports of exact bug-fix commits, with provenance and renewed evidence after application.
 - During an active beta/bootstrap lane, occasionally perform one bounded read-only comparison of exact `main` and `release/X.Y` snapshots. Discovery proposes reviewed fixes but never selects, applies, or pushes them.
+- Prepare an operator-selected fix with `scripts/release/converge-reviewed-fix.sh`: it fetches exact remote heads first, verifies the commit-bound approved review receipt, creates a unique target-based work branch/worktree, cherry-picks only that commit, and emits a preparation receipt. It never pushes a protected ref.
 - Backport selected `main` fixes through an isolated release-targeted work branch. Forward-port fixes developed on `release/X.Y` through an isolated `main`-targeted work branch. Both directions require exact commits, review, renewed evidence, a divergence receipt, and protected CAS integration.
 - `main` always remains the development trunk. Never reset/repoint it to a release line, configure it to track a release branch, or merge an entire maintenance line merely to carry one fix.
 - Integrate by exact-revision CAS or a merge queue.

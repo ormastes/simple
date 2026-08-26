@@ -9,9 +9,12 @@ fail() { echo "check-github-policy-projection: FAIL — $*" >&2; exit 1; }
 sh -n scripts/release/github-policy.sh || fail "github policy tool does not parse"
 sh -n scripts/release/candidate-ref-create.sh || fail "candidate ref tool does not parse"
 
-for file in .github/rulesets/spipe-vcs-v3-*.json .github/release-environment.json; do
+for file in .github/rulesets/spipe-vcs-v3-*.json .github/*-environment.json; do
     jq -e . "$file" >/dev/null || fail "invalid JSON: $file"
 done
+
+[ "$(find .github -maxdepth 1 -name '*-environment.json' | wc -l)" -eq 3 ] ||
+    fail "expected protected-integration, release, and npm-release environments"
 
 rendered=$(scripts/release/github-policy.sh render)
 [ "$(printf '%s' "$rendered" | jq 'length')" -eq 7 ] || fail "expected seven rulesets"
@@ -51,4 +54,8 @@ for projection in spipe-vcs-v3-candidate-creation.json spipe-vcs-v3-version-tag-
 done
 
 rg -q 'immutable_releases: required' .spipe/policy/vcs.sdn || fail "immutable release authority missing"
+for environment in protected-integration release npm-release; do
+    rg -q "$environment-environment.json" .spipe/policy/vcs.sdn ||
+        fail "policy does not bind $environment environment"
+done
 echo "check-github-policy-projection: PASS — seven rulesets, split creation/immutability authority, environment, and immutable-release policy"

@@ -105,7 +105,7 @@ SPipe, scan it with `sspec-maintain`, and then run the release-bound whole suite
 once. Required external rows stay blocked until their own receipts exist.
 """
 # @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008
-# @req: REQ-009 REQ-010 REQ-011 REQ-012 REQ-013 REQ-014 REQ-015
+# @req: REQ-009 REQ-010 REQ-011 REQ-012 REQ-013 REQ-014 REQ-015 REQ-016
 # research: doc/01_research/infra/release/simple_spipe_release_branch_tag_test_repair_bootstrap_scheduling_hardening_2026-08-26.md
 # architecture: doc/04_architecture/release_process_hardening.md
 # design: doc/05_design/release_process_hardening.md
@@ -118,6 +118,9 @@ use app.release.policy.{
     validate_release_session, check_beta_preparation, check_backport_admission,
     check_candidate_manifest, candidate_identity, check_candidate_create_once, check_qualification_receipt,
     check_promotion_plan, check_withdrawal_plan
+}
+use app.release.convergence.{
+    ReviewedBugFix, ConvergenceRequest, plan_release_main_convergence
 }
 
 fn sha_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -307,6 +310,60 @@ describe "Hardened Simple and Spipe software release":
             forward_port_receipt_sha256: ""
         )
         expect(check_backport_admission(missing_forward_port).reason).to_equal("release-first emergency fix requires an exact forward-port receipt to main")
+
+    it "plans reviewed bidirectional convergence without mutating or repointing main":
+        step("Reconcile reviewed fixes with main")
+        val main_fix = ReviewedBugFix(
+            commit_sha: sha_a(), review_receipt_sha256: digest_a(),
+            source_ref: "main", change_kind: "fix"
+        )
+        val backport = ConvergenceRequest(
+            last_scanned_main_sha: sha_b(), current_main_sha: sha_c(),
+            release_ref: "release/1.4", release_head_sha: sha_b(),
+            last_scan_epoch_seconds: 100, current_epoch_seconds: 200,
+            scan_interval_seconds: 60, eligible_reviewed_bug_fixes: [main_fix],
+            selected_bug_fix_shas: [sha_a()], caller_selection_confirmed: true,
+            direction: "main_to_release", forward_port_required: false,
+            forward_port_target_ref: "", main_tracks_release: false
+        )
+        val backport_plan = plan_release_main_convergence(backport)
+        expect(backport_plan.valid).to_be(true)
+        expect(backport_plan.ready).to_be(true)
+        expect(backport_plan.mutation).to_equal("none")
+        expect(backport_plan.main_remains_independent).to_be(true)
+
+        val release_fix = ReviewedBugFix(
+            commit_sha: sha_a(), review_receipt_sha256: digest_b(),
+            source_ref: "release/1.4", change_kind: "fix"
+        )
+        val forward_port = ConvergenceRequest(
+            last_scanned_main_sha: sha_b(), current_main_sha: sha_c(),
+            release_ref: "release/1.4", release_head_sha: sha_b(),
+            last_scan_epoch_seconds: 100, current_epoch_seconds: 200,
+            scan_interval_seconds: 60, eligible_reviewed_bug_fixes: [release_fix],
+            selected_bug_fix_shas: [sha_a()], caller_selection_confirmed: true,
+            direction: "release_to_main", forward_port_required: true,
+            forward_port_target_ref: "main", main_tracks_release: false
+        )
+        val forward_plan = plan_release_main_convergence(forward_port)
+        expect(forward_plan.valid).to_be(true)
+        expect(forward_plan.forward_port_required).to_be(true)
+        expect(forward_plan.forward_port_target_ref).to_equal("main")
+
+        val unsafe_tracking = ConvergenceRequest(
+            last_scanned_main_sha: backport.last_scanned_main_sha,
+            current_main_sha: backport.current_main_sha,
+            release_ref: backport.release_ref,
+            release_head_sha: backport.release_head_sha,
+            last_scan_epoch_seconds: backport.last_scan_epoch_seconds,
+            current_epoch_seconds: backport.current_epoch_seconds,
+            scan_interval_seconds: backport.scan_interval_seconds,
+            eligible_reviewed_bug_fixes: [], selected_bug_fix_shas: [],
+            caller_selection_confirmed: false, direction: backport.direction,
+            forward_port_required: false, forward_port_target_ref: "",
+            main_tracks_release: true
+        )
+        expect(plan_release_main_convergence(unsafe_tracking).reason).to_equal("main must remain an independent trunk and never track a release branch")
 
     it "freezes one complete candidate and rejects mutation":
         step("Freeze and qualify the release candidate")

@@ -67,6 +67,11 @@ reviewed result, and every selected patch represented. `main` must remain a
 separate development trunk and must never track, reset to, or be replaced by the
 release line.
 
+The executable scenario covers both reviewed directions. A `main` fix produces
+a mutation-free backport plan; a release-first fix requires an explicit
+forward-port target of `main`; and any plan claiming that `main` tracks the
+release line is rejected.
+
 ### 5. Freeze and qualify the candidate
 
 The first beta candidate is `candidate/v1.4.0-beta.2/a001`. The canonical
@@ -114,9 +119,10 @@ The runnable SSpec currently contains six active scenarios and no placeholders:
 1. canonical policy/version parsing and stale projection rejection;
 2. isolated beta preparation and main-worktree rejection;
 3. reviewed backport/forward-port admission and feature/stale-review rejection;
-4. complete candidate and qualification receipt plus create-once rejection;
-5. exact admission/promotion plus rebuild and version/tag mismatch rejection;
-6. non-destructive withdrawal.
+4. mutation-free bidirectional convergence planning and independent-trunk rejection;
+5. complete candidate and qualification receipt plus create-once rejection;
+6. exact admission/promotion plus rebuild and version/tag mismatch rejection;
+7. non-destructive withdrawal.
 
 Trusted session registration and Git convergence require real repository
 fixtures and are covered by their focused integration specs rather than being
@@ -124,9 +130,9 @@ faked in this pure system scenario.
 
 ## Current evidence boundary
 
-This manual does not claim a live beta release. The available local runtime is
-bootstrap seed-derived and therefore cannot prove the release-grade whole-suite
-gate. The final trusted-session integration spec also timed out. GitHub
-rulesets, signing, immutable release settings, protected environments, and npm
-publication still require live receipts. Missing evidence is a release-blocking
-FAIL, never a degraded PASS.
+This manual does not claim a live beta release. Live GitHub policy verification
+now passes for seven rulesets, the declared environments, and immutable release
+configuration. Stage 3/4 qualification, one clean release-grade whole-suite
+confirmation, an exact signed beta promotion, immutable publication of that
+candidate, and byte-identical npm publication still require receipts. Missing
+release evidence is a release-blocking FAIL, never a degraded PASS.

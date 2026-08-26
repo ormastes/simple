@@ -26,7 +26,9 @@
   and accepts a retry only when registry bytes and tag already match.
 - Spipe 0.2.0 guarded release planners, CLI/MCP descriptions, general release
   skills, and projection parity checks describe the same trust boundaries.
-- The executable release SSpec contains six real scenarios. Its standalone
+- The executable release SSpec contains seven real scenarios, including
+  mutation-free bidirectional `main`/release convergence and independent-trunk
+  rejection. Its standalone
   manual was manually synchronized with the final source because the docgen
   lane had reached the mandatory three-cycle retry cap.
 
@@ -51,6 +53,9 @@
 - Direct environment/runtime facade guards: PASS for working and staged scans.
 - Source/workflow safety checks reject direct protected-ref mutation, broad tag
   pushes, rebuild/fallback promotion, and destructive tag rollback.
+- Live GitHub policy baseline: PASS. Seven projected rulesets, the declared
+  protected-integration/release/npm-release environments, and immutable
+  releases pass `scripts/release/github-policy.sh verify-live ormastes/simple`.
 
 ## Release-blocking evidence gaps
 
@@ -78,10 +83,10 @@
    pre-push chain and is submitted to protected `main` as PR #26. The stack
    must be restacked and submitted only after #25/#26 integration; no direct
    protected-ref update or hook bypass is permitted.
-2. Repository workflow source is not live-provider evidence. GitHub rulesets,
-   protected environments, signing identity, immutable-release configuration,
-   artifact attestations, and npm registry publication require successful live
-   receipts before a beta can be declared released.
+2. The GitHub policy configuration row is now PASS, but configuration is not a
+   beta release receipt. Exact signed beta promotion, immutable publication of
+   its admitted assets, artifact attestations, and byte-identical npm registry
+   publication remain unexecuted and FAIL.
 
 ## Acceptance disposition
 
@@ -97,6 +102,6 @@
 
 1. Produce an admitted pure-Simple runtime and run the required lint plus one
    clean `bin/simple test test --whole --mode=interpreter` confirmation.
-2. Apply/verify live rulesets and protected environments, then exercise one
-   create-once beta candidate and promote its exact assets through signing,
-   immutable GitHub publication, and byte-identical npm publication receipts.
+2. Using the verified live policy baseline, exercise one create-once beta
+   candidate and promote its exact assets through signing, immutable GitHub
+   publication, and byte-identical npm publication receipts.

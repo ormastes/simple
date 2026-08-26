@@ -21,6 +21,13 @@ manifest_files() {
     find "$RULESET_DIR" -maxdepth 1 -type f -name 'spipe-vcs-v3-*.json' -print | LC_ALL=C sort
 }
 
+environment_files() {
+    printf '%s\n' \
+        "$ROOT/.github/protected-integration-environment.json" \
+        "$ROOT/.github/release-environment.json" \
+        "$ROOT/.github/npm-release-environment.json"
+}
+
 normalize_ruleset() {
     jq -S '
       {name,target,enforcement,conditions,rules,bypass_actors:(.bypass_actors // [])}
@@ -97,20 +104,23 @@ verify_live() {
         _fail=1
     fi
     rm -f "$_expected_names" "$_live_names"
-    _expected_env=$(mktemp) || exit 2
-    _actual_env=$(mktemp) || exit 2
-    jq -S '{wait_timer,prevent_self_review,reviewers,deployment_branch_policy}' \
-        "$ENVIRONMENT_FILE" >"$_expected_env"
-    if ! gh api "repos/$_repo/environments/release" >"$_actual_env" 2>/dev/null; then
-        echo "github-policy: MISSING environment release" >&2
-        _fail=1
-    elif ! normalize_environment "$_actual_env" | cmp -s "$_expected_env" -; then
-        echo "github-policy: DRIFT environment release" >&2
-        _fail=1
-    else
-        echo "github-policy: PASS environment release"
-    fi
-    rm -f "$_expected_env" "$_actual_env"
+    for _environment_file in $(environment_files); do
+        _environment=$(basename "$_environment_file" -environment.json)
+        _expected_env=$(mktemp) || exit 2
+        _actual_env=$(mktemp) || exit 2
+        jq -S '{wait_timer,prevent_self_review,reviewers,deployment_branch_policy}' \
+            "$_environment_file" >"$_expected_env"
+        if ! gh api "repos/$_repo/environments/$_environment" >"$_actual_env" 2>/dev/null; then
+            echo "github-policy: MISSING environment $_environment" >&2
+            _fail=1
+        elif ! normalize_environment "$_actual_env" | cmp -s "$_expected_env" -; then
+            echo "github-policy: DRIFT environment $_environment" >&2
+            _fail=1
+        else
+            echo "github-policy: PASS environment $_environment"
+        fi
+        rm -f "$_expected_env" "$_actual_env"
+    done
     _immutable=$(gh api "repos/$_repo/immutable-releases" --jq '.enabled')
     if [ "$_immutable" != true ]; then
         echo "github-policy: DRIFT immutable releases disabled" >&2
@@ -140,8 +150,11 @@ apply_live() {
             echo "github-policy: created ruleset $_name"
         fi
     done
-    gh api --method PUT "repos/$_repo/environments/release" --input "$ENVIRONMENT_FILE" >/dev/null
-    echo "github-policy: configured environment release"
+    for _environment_file in $(environment_files); do
+        _environment=$(basename "$_environment_file" -environment.json)
+        gh api --method PUT "repos/$_repo/environments/$_environment" --input "$_environment_file" >/dev/null
+        echo "github-policy: configured environment $_environment"
+    done
     gh api --method PUT "repos/$_repo/immutable-releases" >/dev/null
     echo "github-policy: enabled immutable releases"
     verify_live "$_repo"

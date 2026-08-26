@@ -1,0 +1,90 @@
+#!/bin/sh
+# Focused, network-free contract tests for the GitHub policy/ref authorities.
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+mkdir -p "$tmp/bin"
+
+fail() { echo "test-github-policy-contracts: FAIL — $*" >&2; exit 1; }
+expect_fail() {
+    _needle=$1
+    shift
+    if "$@" >"$tmp/out" 2>"$tmp/err"; then
+        fail "command unexpectedly passed: $*"
+    fi
+    grep -F "$_needle" "$tmp/err" >/dev/null || {
+        sed -n '1,12p' "$tmp/err" >&2
+        fail "missing failure text: $_needle"
+    }
+}
+
+cat >"$tmp/bin/gh" <<'EOF'
+#!/bin/sh
+set -eu
+root=${MOCK_ROOT:?}
+actor=${MOCK_ACTOR:-2378857}
+mode=${MOCK_MODE:-valid}
+args="$*"
+
+if [ "$args" = "api user --jq .id" ]; then printf '%s\n' "$actor"; exit 0; fi
+
+case $args in
+  "api --paginate repos/"*"/rulesets")
+    if [ "$mode" = missing ]; then echo '[]'; exit 0; fi
+    jq -s 'to_entries | map(.value + {id:(.key + 1)})' "$root"/.github/rulesets/spipe-vcs-v3-*.json
+    ;;
+  "api repos/"*"/rulesets/"*)
+    id=${args##*/}
+    file=$(find "$root/.github/rulesets" -name 'spipe-vcs-v3-*.json' -print | LC_ALL=C sort | sed -n "${id}p")
+    [ -n "$file" ] || exit 1
+    if [ "$mode" = drift ] && [ "$id" = 1 ]; then jq '.enforcement="disabled"' "$file"; else cat "$file"; fi
+    ;;
+  "api repos/"*"/environments/"*)
+    environment=${args##*/}
+    jq '{protection_rules:((if .wait_timer > 0 then [{type:"wait_timer",wait_timer:.wait_timer}] else [] end) + (if (.reviewers|length)>0 then [{type:"required_reviewers",prevent_self_review:.prevent_self_review,reviewers:[.reviewers[]|{type,reviewer:{id}}]}] else [] end)),deployment_branch_policy}' "$root/.github/$environment-environment.json"
+    ;;
+  "api repos/"*"/immutable-releases --jq .enabled") echo true ;;
+  "api repos/"*"/git/ref/heads/candidate/"*) [ "${MOCK_CANDIDATE_EXISTS:-0}" = 1 ] ;;
+  "api repos/"*"/git/commits/"*" --jq .sha") printf '%s\n' "${MOCK_COMMIT_SHA:-}" ;;
+  "api repos/"*"/git/ref/heads/release/"*" --jq .object.sha") printf '%s\n' "${MOCK_TARGET_SHA:-}" ;;
+  "api --method POST repos/"*"/git/refs --input -") cat >"${MOCK_POST_CAPTURE:?}" ;;
+  "api --method "*) exit 0 ;;
+  *) echo "mock gh: unsupported: $args" >&2; exit 90 ;;
+esac
+EOF
+chmod +x "$tmp/bin/gh"
+
+export PATH="$tmp/bin:$PATH" MOCK_ROOT="$root"
+policy="$root/scripts/release/github-policy.sh"
+candidate="$root/scripts/release/candidate-ref-create.sh"
+repo=example/project
+commit=0123456789abcdef0123456789abcdef01234567
+
+# Rendering is deterministic and contains every managed ruleset exactly once.
+[ "$("$policy" render | jq 'length')" -eq 7 ] || fail "render did not contain seven rulesets"
+
+MOCK_MODE=missing; export MOCK_MODE
+expect_fail "MISSING ruleset" "$policy" verify-live "$repo"
+MOCK_MODE=drift; export MOCK_MODE
+expect_fail "DRIFT ruleset" "$policy" verify-live "$repo"
+MOCK_MODE=valid MOCK_ACTOR=99; export MOCK_MODE MOCK_ACTOR
+expect_fail "is not creation authority" "$policy" apply-live --yes "$repo"
+
+MOCK_ACTOR=2378857 MOCK_COMMIT_SHA=$commit MOCK_TARGET_SHA=$commit MOCK_POST_CAPTURE="$tmp/post.json"
+export MOCK_ACTOR MOCK_COMMIT_SHA MOCK_TARGET_SHA MOCK_POST_CAPTURE
+
+expect_fail "candidate version does not match target line" "$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.3
+expect_fail "invalid candidate name" "$candidate" --yes "$repo" candidate/v1.4.0-BETA.2/a001 "$commit" release/1.4
+MOCK_TARGET_SHA=abcdef0123456789abcdef0123456789abcdef01; export MOCK_TARGET_SHA
+expect_fail "not the exact protected target tip" "$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.4
+
+MOCK_TARGET_SHA=$commit; export MOCK_TARGET_SHA
+"$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.4 >"$tmp/create.out"
+jq -e --arg ref refs/heads/candidate/v1.4.0-beta.2/a001 --arg sha "$commit" '.ref==$ref and .sha==$sha' "$tmp/post.json" >/dev/null || fail "created ref payload was not exact"
+
+MOCK_CANDIDATE_EXISTS=1; export MOCK_CANDIDATE_EXISTS
+expect_fail "candidate already exists; refusing update" "$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.4
+
+echo "test-github-policy-contracts: PASS — render, live drift, actor, binding, target tip, and create-once"

@@ -32,6 +32,13 @@ Retain immutable bootstrap authority generations, snapshots, stage receipts, rej
 
 The typed VCS policy models protected integration and release refs, signed immutable tags, isolated workspaces, and denied direct mutations. The audited GitHub state reported `main` unprotected and no repository rulesets for either repository. Server rulesets and drift verification must therefore be release blockers; local hooks are insufficient, particularly for JJ paths.
 
+**2026-08-26 implementation update:** the original observation above is
+historical. The Simple repository now passes the generated live-policy verifier
+with seven rulesets, the declared protected-integration/release/npm-release
+environments, and immutable releases enabled. This closes the configuration
+drift row only. It does not supply Stage 3/4, whole-suite, signed beta,
+immutable-candidate publication, or npm publication receipts.
+
 ### P0-B — Human and LLM rules still require direct `main`
 
 Current VCS instructions include “no branches; work directly on main,” and `scripts/check/land.shs` moves and pushes `main`. This conflicts with typed policy and concurrent-session isolation. Remove direct-main authoring; only an integration authority may update a protected target by compare-and-swap after exact-revision gates pass.

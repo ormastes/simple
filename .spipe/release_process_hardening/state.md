@@ -58,7 +58,7 @@ verify-evidence-required
 
 ## Log
 
-- dev: Created state file with 15 acceptance criteria (type: feature).
+- dev: Created state file with 16 acceptance criteria (type: feature).
 - research/design: Saved the audit, selected requirements/NFRs, architecture,
   detailed design, system-test plan, and parallel-agent ownership plan.
 - implementation: Added typed release policy/CLI checks, beta backport admission,
@@ -116,5 +116,7 @@ verify-evidence-required
   Stack publication was fail-closed by `main`'s multiline lint parse defect;
   the separate grammar fix passed the complete pre-push chain and is PR #26.
   Restack/publish waits for protected integration of #25/#26. No release-line
-  backport is yet eligible. Live GitHub
-  policy/signing/immutable-publication/npm receipts are also still required.
+  backport is yet eligible. The live GitHub policy baseline now passes with
+  seven rulesets, the declared environments, and immutable releases enabled.
+  Stage 3/4, the clean whole suite, exact signed beta promotion, candidate
+  publication, and byte-identical npm receipts are still required.
