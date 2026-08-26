@@ -190,9 +190,6 @@ const RT_KEEP: &[&str] = &[
     "rt_load_barrier",
     "rt_store_barrier",
     "panic",
-    "future_alloc_ready",
-    "future_map",
-    "future_then",
     // TODO(rt_io_file): drop these 12 entries once the deployed runtime carries
     // the symbols. They are NOT bootstrap placeholders — they are the public
     // `FileHandle`/`File` API of `src/lib/nogc_sync_mut/io/file.spl`, and while

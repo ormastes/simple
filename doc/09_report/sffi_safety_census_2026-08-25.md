@@ -1992,3 +1992,17 @@ proves that 1,599 `rt_` symbols still have incomplete declaration tagging and
 that no exact provider artifact has passed cryptographic admission.  The next
 work must continue census-led unsafe minimization and produce real admission
 jobs rather than treating the green source guard as a signature.
+
+### Providerless async ABI removal (2026-08-26)
+
+The unused `nogc_async_mut.async.sffi` module contributed 19 generic foreign
+declarations despite having no provider and no imports.  The native linker also
+permitted three corresponding zero-return stubs.  Both the module and those
+permissions are removed; the canonical Future, Promise, and AsyncIO owners stay
+pure Simple.
+
+The new authority audit passes, all three owner checks pass, and the async
+basics interpreter spec passes 25/25.  The change removes runtime fallback
+surface and adds no hot-path work or allocation.  The total SFFI declaration
+count therefore drops by 19; `rt_` counts and signed-admitted counts are
+unchanged, including zero signed-admitted providers.

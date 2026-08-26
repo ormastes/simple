@@ -518,3 +518,17 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
 - [x] Make the global null/signature guard pass without widening unsafe scope.
 - [ ] Supply real `SFFI_ADMISSION_JOBS` inputs for exact crypto provider
   artifacts; passing source guards are not signed admission.
+
+### Providerless async ABI removal
+
+- [x] Remove the unused 19-declaration generic async SFFI module after proving
+  it has no provider and no consumers.
+- [x] Remove native zero-return stub permissions for `future_alloc_ready`,
+  `future_map`, and `future_then`.
+- [x] Retain Future, Promise, and AsyncIO in their canonical pure-Simple owners.
+- [x] Add an executable authority audit preventing the providerless ABI and
+  fabricated stubs from returning.
+- [x] Check the three canonical owners and run the existing async basics spec
+  once (25/25 pass).
+- [ ] Continue census-led unsafe minimization; this removal does not supply a
+  signed provider admission job.

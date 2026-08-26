@@ -6070,3 +6070,23 @@ caused by the deleted declaration; its broader suggestions concern pre-existing
 MIR/loop/length opportunities in the large session module.  This change adds no
 instruction, branch, allocation, copy, lookup, lock, or dispatch to a crypto
 hot path because it removes an unused declaration only.
+
+## Providerless async ABI removal checkpoint (2026-08-26)
+
+`src/lib/nogc_async_mut/async/sffi.spl` declared 19 generic Future, Promise,
+task, combinator, and async-I/O externs, but repository searches found no
+provider and no imports of that module.  Three names were nevertheless allowed
+by the native linker as zero-return stubs, so an absent provider could become a
+fabricated result.
+
+The unused declaration module and those three stub permissions are removed.
+The canonical Future, Promise, and AsyncIO implementations remain pure Simple.
+An executable authority audit prevents the providerless module/imports and
+zero stubs from returning while confirming that the canonical owners contain
+no raw replacement externs.  Their source checks pass, and the existing async
+basics spec passes 25/25.
+
+This removal adds no runtime instruction, branch, allocation, copy, lookup, or
+dispatch.  It reduces the total SFFI declaration inventory by 19 without
+changing the `rt_` inventory.  It is unsafe-surface reduction, not signed
+provider admission.
