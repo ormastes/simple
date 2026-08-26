@@ -53,6 +53,7 @@ struct ReleaseAdmission:
     admitted: bool
 
 struct PromotionPlan:
+    candidate_identity: text
     tag: text
     target_commit_sha: text
     candidate_commit_sha: text
@@ -85,9 +86,10 @@ fn _decimal_identifier_valid(value: text, allow_zero: bool) -> bool:
     number >= 0 and (allow_zero or number > 0)
 
 fn parse_release_version(value: text) -> ReleaseVersion:
-    var canonical = value.trim()
+    val canonical = value.trim()
+    # Product/version manifests use bare SemVer.  Only release tag refs add `v`.
     if canonical.starts_with("v"):
-        canonical = canonical[1:]
+        return ReleaseVersion(canonical: "", line: "", channel: "invalid", sequence: -1)
     val dash_parts = canonical.split("-")
     if dash_parts.len() > 2:
         return ReleaseVersion(canonical: "", line: "", channel: "invalid", sequence: -1)
@@ -198,10 +200,18 @@ fn check_candidate_manifest(candidate: CandidateManifest) -> ReleaseCheck:
     release_pass()
 
 fn candidate_identity(candidate: CandidateManifest) -> text:
-    candidate.version + "|" + candidate.attempt.to_text() + "|" + candidate.candidate_ref + "|" +
-        candidate.commit_sha + "|" + candidate.source_tree_sha256 + "|" + candidate.policy_sha256 + "|" +
-        candidate.version_manifest_sha256 + "|" + candidate.toolchain_manifest_sha256 + "|" +
-        candidate.support_manifest_sha256 + "|" + candidate.evidence_manifest_sha256
+    # Length prefixes keep distinct manifests distinct even when a field contains
+    # the separator.  The outer release facade hashes this canonical text.
+    val fields = [
+        candidate.version, candidate.attempt.to_text(), candidate.candidate_ref,
+        candidate.commit_sha, candidate.source_tree_sha256, candidate.policy_sha256,
+        candidate.version_manifest_sha256, candidate.toolchain_manifest_sha256,
+        candidate.support_manifest_sha256, candidate.evidence_manifest_sha256
+    ]
+    var identity = ""
+    for field in fields:
+        identity = identity + field.len().to_text() + ":" + field
+    identity
 
 fn check_candidate_create_once(existing_identity: text, candidate: CandidateManifest) -> ReleaseCheck:
     val candidate_check = check_candidate_manifest(candidate)
@@ -216,13 +226,19 @@ fn check_promotion_plan(admission: ReleaseAdmission, plan: PromotionPlan) -> Rel
         return release_fail("release candidate has not been admitted")
     if admission.candidate_commit_sha == "" or admission.candidate_identity == "":
         return release_fail("release admission identity is incomplete")
+    if admission.evidence_manifest_sha256 == "":
+        return release_fail("release admission evidence identity is incomplete")
+    if plan.candidate_identity != admission.candidate_identity:
+        return release_fail("promotion candidate identity does not match release admission")
     if plan.target_commit_sha != admission.candidate_commit_sha or plan.candidate_commit_sha != admission.candidate_commit_sha:
         return release_fail("promotion target does not match the admitted candidate commit")
     if plan.artifact_manifest_sha256 == "" or plan.artifact_manifest_sha256 != admission.artifact_manifest_sha256:
         return release_fail("promotion artifacts do not match the admitted manifest")
     if plan.admitted_artifact_manifest_sha256 != admission.artifact_manifest_sha256:
         return release_fail("promotion admission binding is stale")
-    val tag_version = parse_release_version(plan.tag)
+    if not plan.tag.starts_with("v"):
+        return release_fail("promotion requires one canonical SemVer release tag")
+    val tag_version = parse_release_version(plan.tag[1:])
     if tag_version.channel == "invalid" or plan.tag != "v" + tag_version.canonical:
         return release_fail("promotion requires one canonical SemVer release tag")
     if not plan.signed_tag or not plan.annotated_tag:

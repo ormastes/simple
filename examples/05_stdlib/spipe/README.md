@@ -35,6 +35,11 @@ such as `.spipe/doc`, `.spipe/spipe_project`, `.spipe/spipe`, and
 When installed as an npm-style package, the binaries are `spipe` and
 `spipe-mcp`.
 
+Protected release policy is available through `release-guide` and
+`release-capabilities`. These are inspection commands, not release mutation
+commands: signing, protected-ref updates, and publication remain external,
+explicitly authorized operations.
+
 The CLI also owns the reusable LLM fine-tune process. It can initialize host
 attempt registries, record data downloads, model research, base-model choice,
 tuning method, training script, eval results, retry decisions, and app/server

@@ -169,6 +169,7 @@ describe "Hardened Simple and Spipe software release":
         expect(check_version_channel(beta, "beta").valid).to_be(true)
         expect(check_version_projection(beta.canonical, "VERSION", "1.4.0-beta.1").reason).to_equal("version projection is stale: VERSION")
         expect(parse_release_version("1.4.0-BETA").channel).to_equal("invalid")
+        expect(parse_release_version("v1.4.0-beta.2").channel).to_equal("invalid")
 
     it "prepares an isolated beta release and rejects the main worktree":
         step("Prepare an isolated beta release")
@@ -212,6 +213,19 @@ describe "Hardened Simple and Spipe software release":
         val identity = candidate_identity(candidate)
         expect(check_candidate_create_once(identity, candidate).valid).to_be(true)
         expect(check_candidate_create_once("different-existing-identity", candidate).reason).to_equal("candidate identity is create-once and cannot be mutated")
+        val separator_candidate = CandidateManifest(
+            version: candidate.version,
+            attempt: candidate.attempt,
+            candidate_ref: candidate.candidate_ref,
+            commit_sha: "candidate|commit",
+            source_tree_sha256: "source-digest",
+            policy_sha256: candidate.policy_sha256,
+            version_manifest_sha256: candidate.version_manifest_sha256,
+            toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
+            support_manifest_sha256: candidate.support_manifest_sha256,
+            evidence_manifest_sha256: candidate.evidence_manifest_sha256
+        )
+        expect(candidate_identity(separator_candidate) == identity).to_be(false)
 
     it "promotes exact admitted artifacts without rebuilding or fallback":
         step("Promote exact admitted artifacts")
@@ -224,6 +238,7 @@ describe "Hardened Simple and Spipe software release":
             admitted: true
         )
         val plan = PromotionPlan(
+            candidate_identity: admission.candidate_identity,
             tag: "v1.4.0-beta.2",
             target_commit_sha: candidate.commit_sha,
             candidate_commit_sha: candidate.commit_sha,
@@ -237,6 +252,7 @@ describe "Hardened Simple and Spipe software release":
         )
         expect(check_promotion_plan(admission, plan).valid).to_be(true)
         val rebuild = PromotionPlan(
+            candidate_identity: plan.candidate_identity,
             tag: plan.tag,
             target_commit_sha: plan.target_commit_sha,
             candidate_commit_sha: plan.candidate_commit_sha,
@@ -249,6 +265,20 @@ describe "Hardened Simple and Spipe software release":
             fallback_artifact: false
         )
         expect(check_promotion_plan(admission, rebuild).reason).to_equal("promotion must not rebuild admitted artifacts")
+        val stale_candidate = PromotionPlan(
+            candidate_identity: "stale-candidate-identity",
+            tag: plan.tag,
+            target_commit_sha: plan.target_commit_sha,
+            candidate_commit_sha: plan.candidate_commit_sha,
+            artifact_manifest_sha256: plan.artifact_manifest_sha256,
+            admitted_artifact_manifest_sha256: plan.admitted_artifact_manifest_sha256,
+            signed_tag: plan.signed_tag,
+            annotated_tag: plan.annotated_tag,
+            exact_tag_push: plan.exact_tag_push,
+            rebuild: false,
+            fallback_artifact: false
+        )
+        expect(check_promotion_plan(admission, stale_candidate).reason).to_equal("promotion candidate identity does not match release admission")
 
     it "withdraws without rewriting published release identity":
         step("Withdraw without rewriting release identity")

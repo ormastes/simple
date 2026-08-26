@@ -5,16 +5,19 @@ alwaysApply: false
 ---
 # Version Control
 
-- Use **jj** (Jujutsu) as primary VCS, colocated with git
-- **NEVER create branches** - work directly on `main`
-- Commit: `jj commit -m "message"` (auto-tracks all changes, no staging needed)
-- Push: `sh scripts/check/land.shs` — gates the rules.sdl quick-group and integrity
-  checks against COMMITTED content, THEN runs `sj bookmark set main -r @- && sj
-  git push --bookmark main`. **Do not push via raw `sj`/`jj git push` directly** —
-  `jj git push` never invokes `.git/hooks/pre-push`, so the rules.sdl gates are
-  silently skipped on that path. See
+- Use **jj** (Jujutsu) as primary VCS, colocated with git.
+- Every mutating session requires one unique work branch and one unique linked
+  worktree/workspace. The registered main worktree is read-only for authoring.
+- Commit only session-owned paths: `jj commit -m "message" <owned-paths...>`.
+- Fetch GitHub before creating the session, and fetch again before integrating.
+  Rebase only the private work branch onto the exact protected target.
+- Push only the owned work branch, then submit it to the integration authority.
+  `main`, `release/*`, `candidate/*`, and `v*` are protected and may not be
+  updated directly by an authoring session.
+- The integration authority runs the committed-content rules.sdl and integrity
+  gates and updates the target with compare-and-swap semantics. Raw `jj git
+  push` bypasses Git hooks, so it is not an integration mechanism. See
   `doc/08_tracking/bug/jj_push_bypasses_rules_sdl_gates_2026-08-11.md`.
-- Fetch: `sj raw jj git fetch && sj raw jj rebase -d main@origin`
 
 ## When `jj git push` fails ("External git program failed")
 

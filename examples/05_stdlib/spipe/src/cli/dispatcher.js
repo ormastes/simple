@@ -25,6 +25,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     console.log("schema.candidate=spipe-candidate/1");
     console.log("capability.isolated_sessions=true");
     console.log("capability.reviewed_beta_backports=true");
+    console.log("capability.immutable_release_candidates=true");
     console.log("capability.promote_without_rebuild=true");
     return;
   }

@@ -2,12 +2,8 @@
 
 use std.cli.cli_util.{get_cli_args}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
-use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.log.{error}
 
-use app.release.github.{
-    create_github_release, default_repo, default_token, read_body_file
-}
 use app.release.policy.{
     ReleaseCheck, ReleaseSession, BackportRequest, CandidateManifest,
     ReleaseAdmission, PromotionPlan, parse_release_version,
@@ -28,18 +24,8 @@ fn print_help():
     print "  candidate-check      Validate one immutable candidate manifest"
     print "  promote-check        Validate promote-without-rebuild inputs"
     print "  withdraw-check       Validate non-destructive rollback/withdrawal"
-    print "  github               Create a GitHub release and upload assets"
     print ""
-    print "GitHub release options:"
-    print "  --repo=OWNER/REPO    GitHub repository (default: GITHUB_REPOSITORY)"
-    print "  --token=TOKEN        GitHub token (default: GITHUB_TOKEN)"
-    print "  --tag=vX.Y.Z         Release tag (required)"
-    print "  --name=NAME          Release title (default: tag)"
-    print "  --body-file=PATH     Release notes file"
-    print "  --target=SHA         Target commitish"
-    print "  --files-dir=DIR      Directory of assets to upload"
-    print "  --draft              Create draft release"
-    print "  --prerelease         Mark as prerelease"
+    print "Publication is unavailable until a provider is bound to an admitted candidate."
     print "  --json               Output as JSON"
     for line in log_options_help():
         print "  {line}"
@@ -181,6 +167,7 @@ fn run_promote_check(args: [text], as_json: bool) -> i64:
         admitted: has_flag(args, "admitted")
     )
     val plan = PromotionPlan(
+        candidate_identity: arg_value(args, "candidate-identity"),
         tag: arg_value(args, "tag"),
         target_commit_sha: arg_value(args, "target-sha"),
         candidate_commit_sha: arg_value(args, "candidate-commit-sha"),
@@ -200,65 +187,6 @@ fn run_withdraw_check(args: [text], as_json: bool) -> i64:
         has_flag(args, "reuse-version"), arg_value(args, "redeploy")
     )
     _print_release_check("withdraw-check", check, as_json)
-
-fn run_github(args: [text], as_json: bool) -> i64:
-    var repo = arg_value(args, "repo")
-    if repo == "":
-        repo = default_repo()
-
-    var token = arg_value(args, "token")
-    if token == "":
-        token = default_token()
-
-    val tag = arg_value(args, "tag")
-    var name = arg_value(args, "name")
-    val body_file = arg_value(args, "body-file")
-    val target = arg_value(args, "target")
-    val files_dir = arg_value(args, "files-dir")
-    val draft = has_flag(args, "draft")
-    val prerelease = has_flag(args, "prerelease")
-
-    if repo == "":
-        error("release", "missing --repo and GITHUB_REPOSITORY is not set")
-        return 1
-    if token == "":
-        error("release", "missing --token and GITHUB_TOKEN is not set")
-        return 1
-    if tag == "":
-        error("release", "missing required --tag")
-        return 1
-    if name == "":
-        name = tag
-    if body_file != "" and not file_exists(body_file):
-        error("release", "body file not found: {body_file}")
-        return 1
-
-    val body_result = read_body_file(body_file)
-    match body_result:
-        Err(err_msg):
-            error("release", err_msg)
-            return 1
-        Ok(body):
-            print "Creating GitHub release for {repo} ({tag})"
-            if files_dir != "":
-                print "Uploading assets from {files_dir}"
-
-            val release_result = create_github_release(
-                repo, token, tag, name, body, target, draft, prerelease, files_dir
-            )
-            match release_result:
-                Ok(url):
-                    if as_json:
-                        val repo_json = _json_escape(repo)
-                        val tag_json = _json_escape(tag)
-                        val url_json = _json_escape(url)
-                        print "{\"command\":\"release github\",\"status\":\"ok\",\"repo\":\"{repo_json}\",\"tag\":\"{tag_json}\",\"url\":\"{url_json}\"}"
-                    else:
-                        print "Release published: {url}"
-                    return 0
-                Err(err_msg):
-                    error("release", err_msg)
-                    return 1
 
 fn main() -> i64:
     val args = get_cli_args()
@@ -308,8 +236,6 @@ fn main() -> i64:
             return run_promote_check(sub_args, as_json)
         case "withdraw-check":
             return run_withdraw_check(sub_args, as_json)
-        case "github":
-            return run_github(sub_args, as_json)
         case "-h" | "--help" | "help":
             print_help()
             return 0

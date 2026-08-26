@@ -84,6 +84,7 @@ export function callTool(moduleRoot, name, args = {}) {
     "candidate=spipe-candidate/1",
     "isolated_sessions=true",
     "reviewed_beta_backports=true",
+    "immutable_release_candidates=true",
     "promote_without_rebuild=true"
   ].join("\n"));
   throw new Error(`unknown tool: ${name}`);
