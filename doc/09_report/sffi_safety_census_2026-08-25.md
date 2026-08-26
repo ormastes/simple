@@ -765,3 +765,15 @@ canonical environment owner while continuing to pin all 16 discriminant
 projections and five environment queries. No call, branch, allocation, copy,
 cache, hash, signature check, lock, lookup, boxing, marshalling, or dispatch was
 added. The remaining tagged-value provider is unsafe, unsigned, and unverified.
+
+### MIR expression-dispatch environment-authority follow-up
+
+MIR expression dispatch removed its duplicate raw nullable environment
+declaration and collapsed its two-wrapper environment chain into one
+always-inlined `mir_expr_env_get` owner over canonical `env_get_opt`. Its six
+garbage, strict-array, field, bounds, and bootstrap query sites remain unchanged,
+as does the existing garbage-trace cache. The cross-lane audit now rejects raw
+environment authority while continuing to pin 95 discriminant, six payload,
+and fourteen tuple projections. This removes one potential call layer and adds
+no call, branch, allocation, copy, cache, hash, signature check, lock, lookup,
+boxing, marshalling, or dispatch. Tagged providers remain unsafe and unverified.

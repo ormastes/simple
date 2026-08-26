@@ -23,22 +23,16 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use std.io_runtime.{env_get_opt}
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
-@unsafe(reason: "raw process environment lookup ABI; nil means unset or provider failure", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text?
 @unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
 @unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
 extern fn rt_enum_payload(value: Any) -> i64
 @unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
-
-@always_inline
-fn _sffi_env_get(key: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_env_get(key)
 
 @always_inline
 fn _sffi_enum_discriminant(value: Any) -> i64:
@@ -55,12 +49,11 @@ fn _sffi_tuple_get(tuple: i64, index: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_tuple_get(tuple, index)
 
-# `rt_env_get` yields nil for an UNSET variable, so both the extern and this
-# wrapper are OPTIONAL — every call site below already uses the optional-safe
-# `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
-# Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
+# Unset and explicitly-empty environment values are both disabled through the
+# canonical nullable owner.
+@always_inline
 fn mir_expr_env_get(key: text) -> text?:
-    _sffi_env_get(key)
+    env_get_opt(key)
 
 fn mir_exception_type_tag(type_: HirType?) -> i64:
     """Stable, allocation-free tags for catchable runtime types.

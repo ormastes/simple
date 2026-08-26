@@ -1369,6 +1369,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add no call, branch, allocation, cache, hash, lock, or dispatch.
 - [x] Record the remaining discriminant provider as unsafe and unverified.
 
+### Completed MIR expression-dispatch environment-authority slice
+
+- [x] Remove the duplicate raw nullable environment declaration.
+- [x] Collapse two environment wrappers into one always-inline canonical owner.
+- [x] Preserve all six environment and 115 tagged projection query sites.
+- [x] Update the existing cross-lane audit and exact call-count ratchets.
+- [x] Remove one potential call layer and add no branch/allocation/dispatch.
+- [x] Record tagged projection providers as unsafe and unverified.
+
 ### Completed MIR literal-lowering dead-authority slice
 
 - [x] Remove unused raw dictionary, environment, and discriminant declarations.
