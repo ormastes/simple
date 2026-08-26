@@ -6047,3 +6047,26 @@ dispatch was introduced.
 This checkpoint is unsafe-minimization and cross-lane source verification, not
 signed admission.  The global guard now clears network failures and remains
 red only for checked ECDSA facade ownership and raw SSH verification imports.
+
+## Canonical checked-crypto ownership checkpoint (2026-08-26)
+
+The last ECDSA findings were checker drift: the common P-256 module already
+imports safe `Result` wrappers from the canonical `signature_sffi` owner and
+correctly contains no raw runtime declaration.  The guard now requires that
+safe import, requires raw checked declarations only in the canonical owner,
+and rejects checked or legacy raw ECDSA externs in the common layer.  The SSH
+session also carried an unused raw RSA verifier declaration; it was removed
+rather than annotated.
+
+The improved guard passes.  The post-change census reports 13,007 SFFI rows,
+11,350 `rt_` rows, and 3,032 distinct `rt_` symbols.  There are 2,825 tagged
+`rt_` rows, 8,276 untouched rows, 1,599 symbols with incomplete unsafe tagging,
+1,045 untouched symbols, and zero signed-admitted declarations or symbols.
+The lower tagged count reflects deletion of a duplicate tagged declaration,
+not reduced confinement.
+
+The SSH module check passes.  Optimizer analysis reports no change requirement
+caused by the deleted declaration; its broader suggestions concern pre-existing
+MIR/loop/length opportunities in the large session module.  This change adds no
+instruction, branch, allocation, copy, lookup, lock, or dispatch to a crypto
+hot path because it removes an unused declaration only.

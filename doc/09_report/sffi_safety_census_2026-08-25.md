@@ -1970,3 +1970,25 @@ feature-macro drift and an unrelated `runtime_process.c` call-arity defect.
 Rust focused tests remain blocked earlier by the recorded runtime export drift.
 This tranche is source/syntax/contract checked and unsafe-minimized, but not a
 verified signed provider admission.
+
+### Checked ECDSA and SSH facade ownership closure (2026-08-26)
+
+The common ECDSA P-256 module already used canonical typed checked wrappers;
+the global checker incorrectly demanded duplicate raw extern declarations.
+The checker now enforces the correct architecture: raw checked declarations in
+`signature_sffi`, exact safe-wrapper imports in common crypto, and no raw
+checked or legacy ECDSA extern in the common facade.  An unused raw RSA verifier
+declaration was removed from the SSH session.  No runtime operation was added.
+
+The global null/signature guard now passes.  The SSH module source check passes,
+and optimizer analysis reports only pre-existing opportunities in the large
+session body.  The post-change census is 13,007 total SFFI declarations and
+11,350 `rt_` declarations, with 2,825 unsafe-tagged, 8,276 untouched, and zero
+signed-admitted `rt_` rows.  There are 3,032 distinct `rt_` symbols: 1,433 fully
+tagged, 1,599 incompletely tagged, 1,045 untouched, and zero admitted.
+
+This is a static contract/tooling PASS, not universal safety.  The inventory
+proves that 1,599 `rt_` symbols still have incomplete declaration tagging and
+that no exact provider artifact has passed cryptographic admission.  The next
+work must continue census-led unsafe minimization and produce real admission
+jobs rather than treating the green source guard as a signature.

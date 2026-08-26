@@ -496,8 +496,10 @@ does not label inline assembly safe or verified.
   release; retain direct O(1) status leaves without lookup or dispatch.
 - [x] Deduplicate the production `rt_env_cwd` raw declaration through the
   canonical `io_runtime` owner.
-- [ ] Repair checked ECDSA ownership in `src/lib/common/crypto/ecdsa_p256.spl`.
-- [ ] Remove raw RSA/Ed25519 verify declarations from the SSH session facade.
+- [x] Enforce checked ECDSA ownership in `src/lib/common/crypto/ecdsa_p256.spl`
+  through the canonical safe facade without duplicating raw externs.
+- [x] Remove the unused raw RSA verifier declaration from the SSH session
+  facade; no raw Ed25519 verifier declaration was present there.
 - [ ] Admit exact provider artifacts through verified signature jobs; current
   repository-wide signed-admitted count remains zero.
 
@@ -506,3 +508,13 @@ network authority audits PASS; Simple owner check PASS; optimizer reports only
 generic low-confidence MIR opportunities.  The full C compilation guard is
 still blocked by the existing Linux seal-macro bug and a separate process
 runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
+
+### Checked-crypto owner follow-up
+
+- [x] Keep raw checked ECDSA declarations solely in
+  `std.nogc_sync_mut.io.signature_sffi`.
+- [x] Require the common P-256 module to import typed `Result` wrappers and
+  reject any raw checked or legacy ECDSA redeclaration there.
+- [x] Make the global null/signature guard pass without widening unsafe scope.
+- [ ] Supply real `SFFI_ADMISSION_JOBS` inputs for exact crypto provider
+  artifacts; passing source guards are not signed admission.
