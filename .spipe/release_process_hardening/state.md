@@ -53,8 +53,25 @@ Implement and verify one policy-driven Simple/Spipe software-release system in w
 
 ## Phase
 
-dev-done
+verify-blocked
 
 ## Log
 
 - dev: Created state file with 15 acceptance criteria (type: feature).
+- research/design: Saved the audit, selected requirements/NFRs, architecture,
+  detailed design, system-test plan, and parallel-agent ownership plan.
+- implementation: Added typed release policy/CLI checks, beta backport admission,
+  immutable candidate/promotion checks, normalized `1.0.0-rc.1` projections,
+  software-release guides/skills, and Spipe 0.2.0 release capabilities.
+- isolation: Fetched GitHub before creating
+  `work/release/local-20260826-001-release-process-hardening` in
+  `/mnt/data/worktrees/simple-release-process-hardening`; rebased the private
+  branch onto current `origin/main` after implementation.
+- focused verification: release SSpec 6/6 PASS; version-manifest spec 5/5 PASS;
+  Spipe build/parity PASS; direct-env runtime guards working/staged PASS.
+- review: lower-model inventory lanes and implementation/docs plugin reviews
+  completed; highest-capability release review requested after reconciliation.
+- blocked: release-grade whole-suite/lint evidence cannot be claimed with the
+  available runtime because it identifies itself as bootstrap seed-derived.
+  Live GitHub ruleset verification and promote-only workflow conversion remain
+  outside the authorized live-mutation scope and are tracked separately.
