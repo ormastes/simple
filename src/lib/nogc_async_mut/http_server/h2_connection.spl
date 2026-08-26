@@ -224,6 +224,18 @@ class H2Connection:
 
     pub(package) me queue_h2_response(stream_id: i64, request_method: text,
                                      resp: HttpResponseData):
+        # The worker can finish routing after the peer has sent RST_STREAM.
+        # Never resurrect that peer-cancelled request (or emit a response on an
+        # arbitrary stream id): only a request whose remote side is closed is
+        # eligible for its one local terminal response.
+        if self.goaway_sent or not self.streams.contains_key(stream_id):
+            return
+        val response_stream = self.streams[stream_id]
+        match response_stream.state:
+            H2StreamState.HalfClosedRemote:
+                pass_dn
+            _:
+                return
         # Build HPACK-encoded header block inline
         var hpack: [u8] = []
         val st = resp.status
@@ -328,6 +340,11 @@ class H2Connection:
                 self.pending_writes.push(body_bytes[di])
                 di = di + 1
 
+        # The queued bytes own the response from here.  Release the terminal
+        # stream so a completed/cancelled request cannot retain peer input or
+        # be rearmed by a racing RST_STREAM.
+        self.streams.remove(stream_id)
+
     # ========================================================================
     # Frame consumption loop
     # ========================================================================
@@ -428,8 +445,7 @@ class H2Connection:
                 return false
 
             H2Frame.Headers(hf):
-                self.handle_headers(hf)
-                return true
+                return self.handle_headers(hf)
 
             H2Frame.Data(df):
                 self.handle_data(df)
@@ -572,7 +588,7 @@ class H2Connection:
     # HEADERS handling
     # ========================================================================
 
-    me handle_headers(hf: H2HeadersFrame):
+    me handle_headers(hf: H2HeadersFrame) -> bool:
         """Process a HEADERS frame — create or update a stream.
 
         Accumulates header blocks, then when END_HEADERS + END_STREAM are
@@ -580,7 +596,21 @@ class H2Connection:
         pending_requests for worker to drain and route.
         """
         val sid = hf.stream_id
-        if sid > self.last_stream_id:
+        # Servers only receive newly-created, client-initiated odd stream
+        # identifiers, in strict ascending order.  Keeping a terminal stream
+        # out of the registry must not let a peer reuse its id after RESET or
+        # after the server has completed its response.
+        if sid <= 0 or sid % 2 == 0:
+            self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+            return false
+        val is_new_stream = not self.streams.contains_key(sid)
+        if is_new_stream and sid <= self.last_stream_id:
+            self.queue_goaway(self.last_stream_id, H2_ERR_PROTOCOL_ERROR)
+            return false
+        if is_new_stream and self.streams.len() >= self.local_max_concurrent_streams:
+            self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
+            return true
+        if is_new_stream:
             self.last_stream_id = sid
 
         # Create stream if new
@@ -588,7 +618,7 @@ class H2Connection:
         if not self.streams.contains_key(sid):
             if hf.header_block.len() > H2_MAX_HEADER_BLOCK_BYTES:
                 self.queue_rst_stream(sid, H2_ERR_PROTOCOL_ERROR)
-                return
+                return true
             stream.on_headers(hf.header_block, hf.flags)
         else:
             stream = self.streams[sid]
@@ -598,7 +628,7 @@ class H2Connection:
                 stream.close()
                 stream.request_dispatched = true
                 self.streams[sid] = stream
-                return
+                return true
             stream.on_headers(hf.header_block, hf.flags)
 
         # Check if request is complete (END_HEADERS + END_STREAM received)
@@ -608,6 +638,7 @@ class H2Connection:
         self.streams[sid] = stream
         if (hf.flags & H2_FLAG_END_HEADERS) == 0:
             self.pending_continuation_stream_id = sid
+        return true
 
     me _decode_and_buffer_request(sid: i64, stream: H2Stream) -> bool:
         """Decode HPACK header blocks and build an HttpRequestData.
@@ -734,12 +765,9 @@ class H2Connection:
     # ========================================================================
 
     me handle_rst_stream(rf: H2RstStreamFrame):
-        """Process a RST_STREAM — close the stream."""
+        """Process a RST_STREAM and release the peer-cancelled stream."""
         if self.streams.contains_key(rf.stream_id):
-            var s = self.streams[rf.stream_id]
             self.streams.remove(rf.stream_id)
-            s.close()
-            self.streams[rf.stream_id] = s
 
     # ========================================================================
     # Outbound frame helpers
