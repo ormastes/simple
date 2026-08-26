@@ -660,3 +660,16 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   entries without regenerating its baseline blindly.
 - [ ] Bind each source-backed provider to exact ABI, artifact, and signature
   evidence before treating it as safe or critical-admissible.
+
+### HDA PCI boundary
+
+- [x] Classify all four HDA PCI scalar externs as `unsafe(ffi)` and contain
+  every call in a tiny `@always_inline` lexical owner.
+- [x] Add source authority coverage proving four declarations/four owners and
+  no direct raw HDA PCI call outside those owners.
+- [x] Preserve boot-path complexity and memory behavior; do not substitute the
+  allocating full-bus `PciBus` owner for this scalar target ABI.
+- [ ] Define one versioned target PCI contract (especially BAR/IRQ field
+  numbering), add real x86_64 provider code, and bind it to an artifact.
+- [ ] Run the existing native-stub spec under a current admitted runtime; the
+  bootstrap runner lacks its test-only provider.

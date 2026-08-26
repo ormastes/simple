@@ -6310,3 +6310,20 @@ signature admission are still absent. The one-shot shell audit has no compiled
 runtime hot path, allocations, or dispatch change. The global unbacked ratchet
 is currently blocked by concurrent baseline drift (46 new and 370 stale rows),
 which is recorded rather than silently regenerated.
+
+### HDA PCI raw boundary confinement (2026-08-26)
+
+The HDA PCI binding declared four raw scalar functions. Two are present only in
+the native test stub, and the field-number convention differs from the
+RISC-V-only PCI source provider, so neither source presence nor the test stub
+is a portable ABI proof. Replacing it with the general Pure-Simple `PciBus`
+would add a full-bus scan and dynamic device-array allocation to audio boot;
+that is rejected as a performance/memory regression.
+
+All four declarations now carry explicit `unsafe(ffi)` authority and all raw
+calls pass through four `@always_inline` lexical owners. This preserves the
+existing scalar call shape—no new loop, allocation, copy, lookup, or dynamic
+dispatch—and makes target/provider uncertainty visible. Source check and the
+authority audit pass. The native-stub spec cannot execute under the available
+bootstrap runner because `rt_hda_pci_probe_set_mode` is unregistered; this is a
+runtime-evidence blocker, not a pass. No provider is signed or verified.

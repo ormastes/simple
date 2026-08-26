@@ -2157,3 +2157,13 @@ source provenance only—not deployed-binary evidence, ABI/null/ownership
 verification, or signature admission. It changes no compiled or hot runtime
 path. The current global unbacked ratchet remains intentionally red because it
 reports 46 new and 370 stale entries outside this focused correction.
+
+### HDA PCI raw-boundary classification (2026-08-26)
+
+The HDA binding now has four explicitly unsafe raw declarations and four
+`@always_inline` lexical owners; the authority audit passes. The change adds no
+loop, allocation, copy, lookup, or dynamic dispatch to the audio boot path.
+It is not a provider or ABI verification: two symbols have only test-stub
+definitions, and existing target providers disagree on field interpretation.
+The native-stub spec is blocked before examples by the bootstrap runner's
+unregistered `rt_hda_pci_probe_set_mode`, so no runtime PASS is claimed.
