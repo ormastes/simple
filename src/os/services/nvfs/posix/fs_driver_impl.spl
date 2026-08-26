@@ -115,9 +115,14 @@ impl FsDriver for NvfsPosixDriver:
         """Open/create a path; allocate fd slot; return FileHandle."""
         if (not self.mounted):
             return Err(FsError.InvalidArg)
-        if flags.is_writable() and self.read_only:
-            return Err(FsError.ReadOnly)
         val existing = self._find_name(path)
+        # A missing path is hydrated by allocating an arena and publishing a
+        # name entry.  Treat that as a write even when the caller requested a
+        # read-only descriptor, so a read-only mount cannot create namespace
+        # state while probing an absent path.
+        val mutates = flags.is_writable() or (flags.bits & (64 | 512)) != 0 or existing < 0
+        if self.read_only and mutates:
+            return Err(FsError.ReadOnly)
         var arena_id: i64 = -1
         if existing < 0:
             arena_id = arena_create_impl(0, 4096)
@@ -305,6 +310,8 @@ impl FsDriver for NvfsPosixDriver:
 
     fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
         """mkdir — create a directory via namespace."""
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val pair = self.ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
@@ -313,6 +320,8 @@ impl FsDriver for NvfsPosixDriver:
 
     fn rmdir(path: Path) -> Result<(), FsError>:
         """rmdir — remove an empty directory via namespace."""
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val pair = self.ns.resolve_parent(path.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
@@ -324,6 +333,8 @@ impl FsDriver for NvfsPosixDriver:
         Decrements the ReflinkTable refcount; discards the arena only when
         count drops to zero and no fds remain open.
         """
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val idx = self._find_name(path)
         if idx < 0:
             return Err(FsError.NotFound)
@@ -367,6 +378,8 @@ impl FsDriver for NvfsPosixDriver:
 
     fn symlink(target: Path, link: Path) -> Result<(), FsError>:
         """symlink — create a symlink at `link` pointing at `target`."""
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val pair = self.ns.resolve_parent(link.raw)?
         val parent_ino = pair.0
         val leaf = pair.1
@@ -384,6 +397,8 @@ impl FsDriver for NvfsPosixDriver:
 
         Bumps the ReflinkTable refcount so unlink() knows when to discard.
         """
+        if self.read_only:
+            return Err(FsError.ReadOnly)
         val idx = self._find_name(target)
         if idx < 0:
             return Err(FsError.NotFound)
