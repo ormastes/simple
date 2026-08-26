@@ -14,7 +14,8 @@ resolution-witness probe order sensitivity, and golden digest stability.
 """
 
 use std.spec.*
-use compiler.driver.cache.action_key.{ActionKey, ActionDep, ResolutionProbe, action_key_encode, action_key_digest, interface_digest_of, resolution_witness_digest}
+use std.io_runtime.{file_read}
+use compiler.driver.cache.action_key.{ActionKey, ActionDep, ResolutionProbe, action_key_encode, action_key_digest, action_key_sort_texts, action_key_sort_deps, interface_digest_of, resolution_witness_digest}
 
 fn dep(m: text, i: text) -> ActionDep:
     ActionDep(module_id: m, iface_digest: i)
@@ -46,6 +47,56 @@ fn sample_key() -> ActionKey:
         aop_selection: "aop-digest-1",
         ct_env_inputs: ["SIMPLE_CFG=1", "SIMPLE_TARGET=host"]
     )
+
+describe "ActionKey canonical sort behavior":
+    it "orders empty, singleton, sorted, and reverse text inputs":
+        val empty: [text] = []
+        expect(action_key_sort_texts(empty)).to_equal(empty)
+        expect(action_key_sort_texts(["only"])).to_equal(["only"])
+        expect(action_key_sort_texts(["a", "b", "c", "d"])).to_equal(["a", "b", "c", "d"])
+        expect(action_key_sort_texts(["d", "c", "b", "a"])).to_equal(["a", "b", "c", "d"])
+
+    it "preserves duplicate text values in canonical order":
+        expect(action_key_sort_texts(["b", "a", "b", "a"])).to_equal(["a", "a", "b", "b"])
+
+    it "uses UTF-8 byte order rather than locale order":
+        expect(action_key_sort_texts(["é", "z", "ß"])).to_equal(["z", "ß", "é"])
+
+    it "orders dependencies by module then interface digest including duplicates":
+        val sorted = action_key_sort_deps([
+            dep("mod.b", "iface-a"),
+            dep("mod.a", "iface-z"),
+            dep("mod.a", "iface-a"),
+            dep("mod.a", "iface-a")
+        ])
+        expect(sorted).to_equal([
+            dep("mod.a", "iface-a"),
+            dep("mod.a", "iface-a"),
+            dep("mod.a", "iface-z"),
+            dep("mod.b", "iface-a")
+        ])
+
+    it "keeps caller-owned text and dependency arrays unchanged after result mutation":
+        var text_input = ["c", "a", "b"]
+        var text_result = action_key_sort_texts(text_input)
+        text_result[0] = "changed"
+        expect(text_input).to_equal(["c", "a", "b"])
+
+        var dep_input = [dep("mod.c", "iface-c"), dep("mod.a", "iface-a")]
+        var dep_result = action_key_sort_deps(dep_input)
+        dep_result[0] = dep("changed", "changed")
+        expect(dep_input).to_equal([dep("mod.c", "iface-c"), dep("mod.a", "iface-a")])
+
+    it "pins in-place heap ordering without growing-prefix rebuilds":
+        val source = file_read("src/compiler/80.driver/cache/action_key.spl")
+        val begin = source.index_of("fn action_key_sort_texts(")
+        val finish = source.index_of("# Canonical encoding primitives", begin)
+        expect(begin >= 0 and finish > begin).to_equal(true)
+        val sort_bodies = source.substring(begin, finish)
+        expect(sort_bodies.count("var out = items")).to_equal(2)
+        expect(sort_bodies.count("_sift_down(out,")).to_equal(4)
+        expect(sort_bodies.count("var next: [")).to_equal(0)
+        expect(sort_bodies.count("out = next")).to_equal(0)
 
 describe "ActionKey set-field reorder invariance":
     it "deps_reorder_hits: same deps in different order give identical digest":
