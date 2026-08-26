@@ -34,7 +34,8 @@
 use std.common.structural.component.descriptor.{
     ComponentDescriptorV1,
     ComponentChoice,
-    resolve_component
+    resolve_component,
+    resolve_component_with_static_presence
 }
 
 # Classified startup request as the planner needs it. Parallel arrays for
@@ -46,6 +47,11 @@ struct PlannerRequest:
     digest_ids: [text]
     embedded_hashes: [text]
     configured_hashes: [text]
+    # The original pure planner accepted only digest pairs. Production
+    # startup also knows whether a generated static-table row exists, which
+    # prevents an absent row from being represented by a fabricated digest.
+    static_table_known: bool
+    static_ids: [text]
 
 struct PlanStep:
     id: text
@@ -65,7 +71,10 @@ fn planner_request_default(command: text) -> PlannerRequest:
     val b: [text] = []
     val c: [text] = []
     val d: [text] = []
-    PlannerRequest(command: command, requested: a, digest_ids: b, embedded_hashes: c, configured_hashes: d)
+    val e: [text] = []
+    PlannerRequest(command: command, requested: a, digest_ids: b,
+        embedded_hashes: c, configured_hashes: d,
+        static_table_known: false, static_ids: e)
 
 fn plan_error(command: text, reason: text) -> StartupLoadPlan:
     val steps: [PlanStep] = []
@@ -96,6 +105,33 @@ fn planner_catalog_find(catalog: [ComponentDescriptorV1], id: text) -> i64:
             return idx
         idx = idx + 1
     -1
+
+fn planner_request_error(req: PlannerRequest,
+        catalog: [ComponentDescriptorV1]) -> text:
+    if req.digest_ids.len() != req.embedded_hashes.len() or
+            req.digest_ids.len() != req.configured_hashes.len():
+        return "malformed_digest_table"
+    var seen_digests: Dict<text, bool> = {}
+    var idx = 0
+    while idx < req.digest_ids.len():
+        val id = req.digest_ids[idx]
+        if seen_digests.has(id):
+            return "duplicate_digest:" + id
+        if planner_catalog_find(catalog, id) < 0:
+            return "unknown_digest_component:" + id
+        seen_digests[id] = true
+        idx = idx + 1
+    var seen_static: Dict<text, bool> = {}
+    idx = 0
+    while idx < req.static_ids.len():
+        val id = req.static_ids[idx]
+        if seen_static.has(id):
+            return "duplicate_static_component:" + id
+        if planner_catalog_find(catalog, id) < 0:
+            return "unknown_static_component:" + id
+        seen_static[id] = true
+        idx = idx + 1
+    ""
 
 # Selected set: requested + activation=startup components + transitive deps.
 # Deterministic: worklist seeded in catalog order then request order.
@@ -133,16 +169,23 @@ fn planner_select(req: PlannerRequest, catalog: [ComponentDescriptorV1]) -> [tex
 # Returns empty on cycle; caller reports the explicit error.
 fn planner_toposort(selected: [text], catalog: [ComponentDescriptorV1]) -> [text]:
     var ordered: [text] = []
-    var remaining: [text] = []
+    var placed_rows: [bool] = []
+    var selected_ids: Dict<text, bool> = {}
+    var ordered_ids: Dict<text, bool> = {}
     var idx = 0
     while idx < selected.len():
-        remaining.push(selected[idx])
+        placed_rows.push(false)
+        selected_ids[selected[idx]] = true
         idx = idx + 1
-    while remaining.len() > 0:
+    var remaining = selected.len()
+    while remaining > 0:
         var placed = false
         var ridx = 0
-        while ridx < remaining.len():
-            val id = remaining[ridx]
+        while ridx < selected.len():
+            if placed_rows[ridx]:
+                ridx = ridx + 1
+                continue
+            val id = selected[ridx]
             val cat_idx = planner_catalog_find(catalog, id)
             var ready = true
             if cat_idx >= 0:
@@ -150,18 +193,14 @@ fn planner_toposort(selected: [text], catalog: [ComponentDescriptorV1]) -> [text
                 var didx = 0
                 while didx < deps.len():
                     val dep = deps[didx]
-                    if planner_list_contains(selected, dep) and not planner_list_contains(ordered, dep):
+                    if selected_ids.has(dep) and not ordered_ids.has(dep):
                         ready = false
                     didx = didx + 1
             if ready:
                 ordered.push(id)
-                var rest: [text] = []
-                var kidx = 0
-                while kidx < remaining.len():
-                    if kidx != ridx:
-                        rest.push(remaining[kidx])
-                    kidx = kidx + 1
-                remaining = rest
+                ordered_ids[id] = true
+                placed_rows[ridx] = true
+                remaining = remaining - 1
                 placed = true
                 break
             ridx = ridx + 1
@@ -173,6 +212,9 @@ fn planner_toposort(selected: [text], catalog: [ComponentDescriptorV1]) -> [text
 # The planner. Pure: (request, catalog) -> plan. Fail-closed on unknown
 # components, resolve errors, and dependency cycles.
 fn plan_startup(req: PlannerRequest, catalog: [ComponentDescriptorV1]) -> StartupLoadPlan:
+    val request_error = planner_request_error(req, catalog)
+    if request_error != "":
+        return plan_error(req.command, request_error)
     val selected = planner_select(req, catalog)
     var idx = 0
     while idx < selected.len():
@@ -188,7 +230,11 @@ fn plan_startup(req: PlannerRequest, catalog: [ComponentDescriptorV1]) -> Startu
         val id = ordered[idx]
         val emb = planner_digest_for(req, id, true)
         val cfg = planner_digest_for(req, id, false)
-        val resolved = resolve_component(catalog, id, emb, cfg)
+        val resolved = if req.static_table_known:
+            resolve_component_with_static_presence(
+                catalog, id, planner_list_contains(req.static_ids, id), emb, cfg)
+        else:
+            resolve_component(catalog, id, emb, cfg)
         match resolved:
             Ok(choice):
                 steps.push(PlanStep(id: choice.id, version: choice.version, mode: choice.mode, activation: choice.activation, dynload_setting: choice.dynload_setting))
