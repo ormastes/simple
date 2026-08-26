@@ -4,10 +4,18 @@
 # Exercises snapshot, query, and ensure-style state loops on a multi-surface
 # in-memory session so perf regressions show up without any filesystem or
 # subprocess dependence.
+#
+# Purpose and audience: UI access protocol hot-path latency evidence for
+# tooling/UI engineers; scope is the /api/test/ui snapshot, query, and state
+# routes on an in-memory multi-surface session.
+#
+# @req REQ-PERF-UI-ACCESS-HOTPATHS
+# research: doc/01_research/ui/protocol/ui_access_protocol.md ; plan: doc/03_plan/agent_tasks/office_cli_tui_ui_access.md
 
 extern fn rt_time_now_unix_micros() -> i64
 
 use std.spec.{describe, it, expect}
+use std.spec.step
 use common.ui.builder.{column, text_widget, button, text_field, textarea, build_tree}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.widget.{UIEvent, UITree, WidgetNode}
@@ -65,7 +73,10 @@ fn _check_budget(label: text, elapsed_us: i64, soft_ms: i64, hard_ms: i64):
     expect elapsed_ms < hard_ms
 
 describe "ui_access hot paths perf smoke":
+    # @manual UI access hot-path evidence
     slow_it "snapshot route stays interactive on a multi-surface in-memory session":
+        # @req REQ-PERF-UI-ACCESS-HOTPATHS
+        step("drive 100 snapshot requests against a 3-surface session and time them")
         var session = _session_fixture()
         val inject_event = \event:
             session.dispatch(event)
@@ -80,6 +91,7 @@ describe "ui_access hot paths perf smoke":
                 session
             )
         val preflight = snapshot_request()
+        # oracle: 200 = successful route response before timing begins.
         expect(preflight.0).to_equal(200)
         expect(preflight.2).to_contain("\"popup\"")
 
@@ -87,6 +99,8 @@ describe "ui_access hot paths perf smoke":
         _check_budget("ui_access snapshot route", elapsed, 100, 2000)
 
     slow_it "query route stays interactive across kind/text filters":
+        # @req REQ-PERF-UI-ACCESS-HOTPATHS
+        step("run filtered button queries on the popup surface and time them")
         var session = _session_fixture()
         val inject_event = \event:
             session.dispatch(event)
@@ -101,14 +115,18 @@ describe "ui_access hot paths perf smoke":
                 session
             )
         val preflight = query_request()
+        # oracle: 200 = successful route response before timing begins.
         expect(preflight.0).to_equal(200)
         expect(preflight.2).to_contain("\"match_count\"")
+        # oracle: popup#popup_button_0 is the first Go button of the popup fixture.
         expect(preflight.2).to_contain("popup#popup_button_0")
 
         val elapsed = _bench_request("ui_access query route", 5, 100, query_request)
         _check_budget("ui_access query route", elapsed, 100, 2000)
 
     slow_it "ensure-style state loop stays interactive on a canonical button":
+        # @req REQ-PERF-UI-ACCESS-HOTPATHS
+        step("drive state-ensure POSTs on main#main_button_0 and time them")
         var session = _session_fixture()
         val inject_event = \event:
             session.dispatch(event)
@@ -125,6 +143,7 @@ describe "ui_access hot paths perf smoke":
             )
 
         val seed = ensure_request()
+        # oracle: 200 = successful route response before timing begins.
         expect(seed.0).to_equal(200)
         expect(seed.2).to_contain("\"state_key\":\"selected\"")
 
