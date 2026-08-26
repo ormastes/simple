@@ -178,6 +178,16 @@ use os.kernel.fs.fat32.*
         # and the byte offset within that cluster.
         var cluster_idx: u64 = offset / cluster_bytes
         var byte_in_cluster: u64 = offset % cluster_bytes
+        # Derive the number of clusters touched without adding the request
+        # length to an in-cluster offset: that expression can wrap on a wide
+        # caller buffer even though the eventual read is bounded by file size.
+        var window_clusters = 1u64
+        val first_cluster_available = cluster_bytes - byte_in_cluster
+        if to_read > first_cluster_available:
+            val after_first = to_read - first_cluster_available
+            window_clusters = 1u64 + after_first / cluster_bytes
+            if after_first % cluster_bytes != 0u64:
+                window_clusters = window_clusters + 1u64
 
         # Validate the complete FAT chain before exposing any file bytes, just
         # as read_cluster_chain did here before.  Retain only the cluster
@@ -187,8 +197,7 @@ use os.kernel.fs.fat32.*
         # lease; it deliberately preserves this method's existing single-call
         # device traversal and fail-closed chain validation semantics.
         val window_result = self._read_cluster_window(
-            dev, h.start_cluster, cluster_idx,
-            (byte_in_cluster + to_read + cluster_bytes - 1u64) / cluster_bytes)
+            dev, h.start_cluster, cluster_idx, window_clusters)
         if window_result.is_err():
             return Err(EIO)
         val chain = window_result.unwrap()
