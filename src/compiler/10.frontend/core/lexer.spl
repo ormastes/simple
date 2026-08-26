@@ -34,8 +34,6 @@ use compiler.core.ast.{lexer_cur_line2_get, lexer_cur_line2_set, lexer_cur_col2_
 use compiler.core.ast.{lexer_cur_suffix2_get, lexer_cur_suffix2_set}
 @unsafe(reason: "raw file-to-text read ABI; nil means read/provider failure", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
-@unsafe(reason: "raw process environment lookup ABI; nil means unset or provider failure", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text?
 @unsafe(reason: "raw process environment update status ABI", capabilities: [ffi])
 extern fn rt_env_set(key: text, value: text) -> bool
 @unsafe(reason: "raw owned tagged-array release ABI", capabilities: [ffi])
@@ -45,11 +43,6 @@ extern fn rt_array_free(array: i64)
 fn _sffi_file_read_text(path: text) -> text?:
     unsafe(capabilities: [ffi]):
         rt_file_read_text(path)
-
-@always_inline
-fn _sffi_env_get(key: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_env_get(key)
 
 @always_inline
 fn _sffi_env_set(key: text, value: text) -> bool:
@@ -62,6 +55,7 @@ fn _sffi_array_free(array: i64):
         rt_array_free(array)
 
 export use compiler.frontend.lexer_types.{TokenKind}
+use std.io_runtime.{env_get_nullable}
 
 # Light wrapper struct to satisfy callers expecting a Lexer value.
 struct Lexer:
@@ -155,7 +149,7 @@ fn lex_init_with_path(source: text, source_path: text):
         lex_token_start_direct = [0]
     if lex_token_end_direct.len() == 0:
         lex_token_end_direct = [0]
-    lex_env_save_enabled[0] = (_sffi_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
+    lex_env_save_enabled[0] = (env_get_nullable("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
     lex_generic_close_pending[0] = false
     core_token_env_save_set(lex_env_save_enabled[0])
     # Keep the active lexer on the exact caller source. Rereading a non-empty
@@ -226,7 +220,7 @@ fn env_value_nul_free(value: text) -> bool:
     true
 
 fn lex_state_get(key: text, fallback: text) -> text:
-    _sffi_env_get("SIMPLE_BOOTSTRAP_STATE_{key}") ?? fallback
+    env_get_nullable("SIMPLE_BOOTSTRAP_STATE_{key}") ?? fallback
 
 fn lex_state_set(key: text, value: text):
     if env_value_nul_free(value):
@@ -368,7 +362,7 @@ fn lex_cur_no_interp_get() -> bool:
     false
 
 fn lex_env_i64(key: text, fallback: i64) -> i64:
-    val raw = _sffi_env_get(key) ?? ""
+    val raw = env_get_nullable(key) ?? ""
     if raw == "":
         return fallback
     raw.to_int()
@@ -436,10 +430,10 @@ fn current_core_source_get() -> text:
     # Guest-first: the module-global slot persists where the env var does not.
     if lex_inline_source_slot.len() > 0 and lex_inline_source_slot[0] != "":
         return lex_inline_source_slot[0]
-    val inline_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val inline_source = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     if inline_source != "":
         return inline_source
-    val source_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? module_get_path()
+    val source_path = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_PATH") ?? module_get_path()
     if source_path != "":
         val content = _sffi_file_read_text(source_path) ?? ""
         return content
@@ -476,13 +470,13 @@ fn current_core_lexer_load() -> CoreLexer:
     var at_line_start = true
     var paren_depth = 0
     var indent_stack_raw = "0"
-    val raw_pos = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_POS") ?? ""
-    val raw_line = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_LINE") ?? ""
-    val raw_col = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_COL") ?? ""
-    val raw_pending = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PENDING") ?? ""
-    val raw_line_start = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_LINE_START") ?? ""
-    val raw_paren = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PAREN") ?? ""
-    val raw_indent = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_INDENT") ?? ""
+    val raw_pos = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_POS") ?? ""
+    val raw_line = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_LINE") ?? ""
+    val raw_col = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_COL") ?? ""
+    val raw_pending = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_PENDING") ?? ""
+    val raw_line_start = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_LINE_START") ?? ""
+    val raw_paren = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_PAREN") ?? ""
+    val raw_indent = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_INDENT") ?? ""
     if raw_pos != "":
         pos = raw_pos.to_int()
     if raw_line != "":
@@ -592,7 +586,7 @@ fn lex_next() -> i64:
             lex_dead_reported = [false]
         if not lex_dead_reported[0]:
             lex_dead_reported[0] = true
-            val dead_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+            val dead_path = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
             val dead_line = core_lexer_last_line_get()
             val dead_col = core_lexer_last_col_get()
             val dead_len = current_core_source_get().len()

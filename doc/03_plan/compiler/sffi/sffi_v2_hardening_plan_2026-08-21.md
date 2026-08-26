@@ -1505,3 +1505,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
   environment mutation; canonical ownership alone adds no intended hot-path
   allocation, lookup, or copy.
 - Status: source-reviewed, deliberately unverified for this sync.
+## 2026-08-26 lexer nullable-environment authority follow-up
+
+- Added canonical `env_get_nullable` for exact optional transport semantics.
+- Removed the lexer's duplicate raw environment declaration and unsafe wrapper.
+- Preserved thirteen read call sites, empty-versus-nil behavior, and the
+  one-direct-call hot-path shape; added no allocation, copy, lookup, or retry.
+- Kept the remaining three lexer ABIs locally unsafe pending their own typed
+  ownership migrations.
+- Status: source-reviewed, deliberately unverified for this sync.

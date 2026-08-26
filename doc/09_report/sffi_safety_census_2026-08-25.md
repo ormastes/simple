@@ -901,3 +901,10 @@ boxing, marshalling, or dynamic dispatch added.
 read through the canonical always-inline `env_get_opt` owner. The two raw path
 ABIs remain locally confined so candidate ordering and all path-operation call
 sites are unchanged. This slice is source-reviewed but unverified.
+## 2026-08-26 lexer nullable-environment authority follow-up
+
+The compiler lexer no longer redeclares `rt_env_get`. Its thirteen read call
+sites use the canonical always-inline `env_get_nullable` transport, which keeps
+explicitly empty values distinct from nil and remains one direct ABI call.
+Write, file-read, and array-release ownership is unchanged. This slice is
+source-reviewed but unverified.
