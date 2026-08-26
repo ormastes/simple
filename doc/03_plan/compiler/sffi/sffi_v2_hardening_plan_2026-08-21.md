@@ -1787,3 +1787,10 @@ and unpromoted.
 - [x] Fail closed on static-content provider read failure.
 - [x] Reject playground audit-storage creation failure.
 - [x] Add a static ratchet for raw authority and database read complexity.
+### Completed census-schema clarity slice
+
+- [x] Emit the inventory mode (`source_only`, supplied, or live backing).
+- [x] Emit distinct-symbol counts for unsafe tags, minimized owners,
+      untouched declarations, and verified-and-signed admission.
+- [x] Refresh source-only row and implementation-language statistics.
+- [x] Keep cryptographic admission fail closed at zero without evidence.

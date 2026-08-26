@@ -1,7 +1,7 @@
 # SFFI Safety Census — 2026-08-25
 
-**Revision:** `d813ea19dd9` plus the current linear `origin/main` rebase  
-**Command:** `sh scripts/audit/rt-safety-census.shs ...`  
+**Revision:** `5e0af505385` plus the current dedicated-worktree change
+**Command:** `SFFI_SOURCE_ONLY=1 sh scripts/audit/rt-safety-census.shs ...`
 **Evidence bundle:** none supplied
 
 This is a static source and provider inventory, not a safety certificate. The
@@ -15,16 +15,16 @@ count is correctly zero.
 
 | Metric | Declaration rows | Distinct `rt_*` symbols |
 |---|---:|---:|
-| Total | 11,590 | 3,137 |
-| Explicitly `@unsafe(... ffi ...)` | 2,826 | 1,779 |
-| Contract documented | 1,032 | 391 |
+| Total | 11,572 | 3,137 |
+| Explicitly `@unsafe(... ffi ...)` | 2,857 | 1,793 |
+| Contract documented | 1,044 | 398 |
 | Cryptographically verified and signed | 0 | 0 |
-| Untouched: no unsafe tag, contract, or evidence | 8,515 | 1,825 |
-| Unsafe but minimized to a narrow owner | 783 | not yet aggregated |
-| Unsafe and not minimized | 10,807 | not yet aggregated |
-| Symbols with multiple source-signature hashes | — | 263 |
+| Untouched: no unsafe tag, contract, or evidence | 8,468 | 1,817 |
+| Unsafe but minimized to a narrow owner | 797 | 380 |
+| Unsafe and not minimized | 10,775 | measured by updated tool |
+| Symbols with multiple source-signature hashes | — | 264 |
 
-All 11,590 declaration rows remain fail-closed unsafe in the census. An unsafe
+All 11,572 declaration rows remain fail-closed unsafe in the census. An unsafe
 annotation is necessary migration metadata; it does not verify the ABI or the
 provider implementation.
 
@@ -45,7 +45,7 @@ The implementation-definition scan independently found:
 |---|---:|---:|---:|
 | C | 2,405 | 1,901 | 90 |
 | Rust | 2,146 | 2,124 | 173 |
-| Simple | 687 | 646 | 65 |
+| Simple | 671 | 646 | 64 |
 | C++ | 219 | 219 | 1 |
 
 These tables answer different questions. Provider provenance is conservative
@@ -54,13 +54,13 @@ therefore includes mirrors and alternative providers.
 
 ## Highest remaining debt
 
-Production contains 5,415 declaration rows, of which 2,871 are untouched. The
+Production contains 5,397 declaration rows, of which 2,824 are untouched. The
 largest untouched families are `rt_file` (2,529 rows), `rt_process` (966),
 `rt_env` (388), `rt_time` (335), and `rt_dir` (217). Test declarations account
 for another 5,154 untouched rows and must not be allowed to inflate production
 confidence.
 
-The 263 multi-signature-hash symbols are the first ABI-integrity triage set.
+The 264 multi-signature-hash symbols are the first ABI-integrity triage set.
 This scanner hashes normalized source declarations, so parameter spelling,
 nullable surface syntax, and other source-shape differences can create variants
 without proving distinct machine ABIs. Conversely, a matching source hash does
@@ -81,11 +81,15 @@ and ownership checks required by that signature.
 
 ## Honest status
 
-All SFFI is **not** safe and verified. Current exact status is zero
-verified-and-signed symbols, 1,825 untouched distinct symbols, and 263 symbols
+All SFFI is **not** safe and verified. Current source-only status is zero
+verified-and-signed symbols, 8,468 untouched declaration rows, and 264 symbols
 whose declarations have multiple source-signature hashes requiring resolved-
 type triage. The remaining declarations must stay unsafe until exact provider
 evidence and executable contracts prove a narrow safe wrapper.
+
+The refreshed run was deliberately source-only because this sync lane was
+instructed not to run builds or verification. Provider-class rows below retain
+the prior full-backing scan and are not silently presented as refreshed.
 
 ## Post-census migration note — 2026-08-26
 

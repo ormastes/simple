@@ -16,6 +16,14 @@ scopes_out=${5:-${TMPDIR:-/tmp}/rt-safety-scopes.tsv}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
+if [ "${SFFI_SOURCE_ONLY:-0}" = 1 ]; then
+    inventory_mode=source_only
+elif [ -n "${SFFI_CENSUS_INPUT:-}" ]; then
+    inventory_mode=supplied_backing
+else
+    inventory_mode=live_backing
+fi
+
 sh "$root/scripts/audit/sffi-contract-inventory.shs" \
     "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>&1
 
@@ -64,7 +72,7 @@ else
     printf '__admission_header__\tfalse\tfalse\n' >"$work/admitted.tsv"
 fi
 
-awk -F '\t' 'BEGIN { OFS="\t" }
+awk -F '\t' -v inventory_mode="$inventory_mode" 'BEGIN { OFS="\t" }
     NR == FNR { admitted[$1 SUBSEP $2]=1; next }
     FNR == 1 {
         print $0, "evidence_verified", "signature_verified", "safety_class"
@@ -135,23 +143,26 @@ xargs -0 -r -n 200 perl -0ne '
     ' "$work/definitions.tsv" | sort
 } >"$languages_out"
 
-awk -F '\t' 'BEGIN { OFS="\t" }
+awk -F '\t' -v inventory_mode="$inventory_mode" 'BEGIN { OFS="\t" }
     NR == 1 { next }
     {
         rows++
         symbol[$1]=1
-        if ($7 == "tagged") tagged++
-        if ($8 != "missing") contracted++
+        if ($7 == "tagged") { tagged++; tagged_symbol[$1]=1 }
+        if ($8 != "missing") { contracted++; contracted_symbol[$1]=1 }
         if ($10 == "claim_present_unverified") claims++
         if ($12 == "true") verified++
         if ($13 == "true") signed++
-        if ($14 == "verified_and_signed") admitted++
+        if ($14 == "verified_and_signed") { admitted++; admitted_symbol[$1]=1 }
         else {
             unsafe++
-            if ($7 == "tagged" && $8 != "missing") minimized++
+            if ($7 == "tagged" && $8 != "missing") { minimized++; minimized_symbol[$1]=1 }
             else unminimized++
         }
-        if ($7 == "missing" && $8 == "missing" && $10 == "missing") untouched++
+        if ($7 == "missing" && $8 == "missing" && $10 == "missing") {
+            untouched++
+            untouched_symbol[$1]=1
+        }
         signature[$1 SUBSEP $4]=1
     }
     END {
@@ -161,19 +172,30 @@ awk -F '\t' 'BEGIN { OFS="\t" }
             signature_count[p[1]]++
         }
         for (s in signature_count) if (signature_count[s] > 1) variants++
+        for (s in tagged_symbol) tagged_symbols++
+        for (s in contracted_symbol) contracted_symbols++
+        for (s in admitted_symbol) admitted_symbols++
+        for (s in minimized_symbol) minimized_symbols++
+        for (s in untouched_symbol) untouched_symbols++
         print "metric", "value"
+        print "inventory_mode", inventory_mode
         print "declaration_rows", rows + 0
         print "distinct_declared_symbols", symbols + 0
         print "unsafe_tagged_rows", tagged + 0
+        print "unsafe_tagged_distinct_symbols", tagged_symbols + 0
         print "contract_documented_rows", contracted + 0
+        print "contract_documented_distinct_symbols", contracted_symbols + 0
         print "evidence_claim_unverified_rows", claims + 0
         print "evidence_verified_rows", verified + 0
         print "signature_verified_rows", signed + 0
         print "verified_and_signed_rows", admitted + 0
+        print "verified_and_signed_distinct_symbols", admitted_symbols + 0
         print "fail_closed_unsafe_rows", unsafe + 0
         print "unsafe_minimized_rows", minimized + 0
+        print "unsafe_minimized_distinct_symbols", minimized_symbols + 0
         print "unsafe_unminimized_rows", unminimized + 0
         print "untouched_rows", untouched + 0
+        print "untouched_distinct_symbols", untouched_symbols + 0
         print "source_signature_variant_symbols", variants + 0
     }
 ' "$declarations_out" >"$summary_out"
