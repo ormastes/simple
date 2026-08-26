@@ -41,3 +41,27 @@ Full list: `git show 4edef8fab8e --stat=200 -- src`.
 Per-file audit of `git show 4edef8fab8e -- <path>`: restore from
 `4edef8fab8e~1` every path where HEAD references a symbol the clobbered file no
 longer defines and no forward commit touched the path since.
+
+## Update 2026-08-26 (second pass)
+
+Additional restores landed: `00.common/assurance/warning_phase.spl` (+ spec,
+guide, review report — all four deleted by the clobber) and
+`80.driver/driver_safety_severity.spl`; `assurance_warning_phase_spec` is 18/18
+green again.
+
+**Lint engine is entangled — do NOT restore it file-by-file.** Restoring
+`90.tools/lint/_LintMain/{config_and_model,lint_checks,nonexistent_type_lints}.spl`
+and `35.semantics/lint/cow_alias_hotpath.spl` fixes the 4 red examples in
+`test/01_unit/compiler/lint/raw_rt_access_spec.spl` (missing
+`lint_source_for_parsed_append` / `last_resolved_path` /
+`check_cow_alias_hotpath_snapshot` / `raw_rt_wrapper_binding_is_unshadowed`)
+but regresses `riscv_rtl_debuggability_spec` 11/14 -> 1/14 with
+`method sort_by not found on type array` from the pre-clobber lint pipeline.
+The lint subsystem needs an all-or-nothing restore audited together.
+
+Separate finding (may predate the clobber):
+`src/compiler_rust/lib/std/src/bare/hal/uart.spl:79-80` calls
+`Option.some/none` but `core/option.spl` declares `Some/None`;
+`hal_traits_spec` fails on it, and editing that file (either worktree) does not
+change the outcome, so the interpreter resolves `std.bare.hal.uart` from a
+third location — see memory note "binary reads stdlib from build worktree".
