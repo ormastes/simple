@@ -1767,3 +1767,18 @@ them; ARM32 uses one coherent MRRC counter read. No per-switch/per-tick
 allocation, copy, lookup, hashing, lock, signature check, or generic dispatch
 is added. The bounded context family remains unsafe and unsigned; timer
 assembly is source-reviewed but hardware/compiler-unverified.
+
+### User-entry and VirtIO input authority
+
+Six ARM32/ARM64 privilege-transfer declarations, four dependent wrappers, and
+all raw calls now carry explicit FFI authority. Existing scalar validation and
+authenticated reap equality remain unchanged; no safe or signed promotion is
+claimed.
+
+Fourteen ARM64/RV64 VirtIO input declarations and four wrappers are explicitly
+unsafe because one event is reconstructed from a provider-global snapshot over
+six calls and queue corruption aliases ordinary no-event. Non-`1` poll results
+no longer produce an event. There is no new per-poll allocation, copy, lookup,
+hash, lock, signature check, retry, or provider call. A one-call status/out ABI
+remains required for safe typed admission; current artifacts are unsigned and
+unverified.

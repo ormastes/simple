@@ -381,3 +381,15 @@ does not label inline assembly safe or verified.
   contexts and an exact non-returning, artifact-admitted assembly ABI.
 - [ ] Execute cross-target assembly, QEMU context-resume, and timer monotonicity
   evidence on an admitted current-source compiler.
+
+## User-entry and VirtIO input tranche
+
+- [x] Tag six ARM32/ARM64 privilege-transfer declarations and all dependent
+  wrappers; confine raw calls without changing status or call counts.
+- [x] Tag fourteen ARM64/RV64 VirtIO input declarations and four wrappers.
+- [x] Reject non-`1` poll status before projecting a fabricated event.
+- [x] Record the split global snapshot and missing error-channel blocker.
+- [ ] Replace six-call event reconstruction with one fixed-layout stack
+  status/out contract and typed `Result<Option<Event>, SffiError>` lift.
+- [ ] Bind target providers and non-returning privilege-transfer assembly to
+  exact ABI/artifact hashes and signed admission evidence.

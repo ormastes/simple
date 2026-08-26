@@ -5838,3 +5838,27 @@ op example definitions are removed. Timer reads/writes remain O(1), allocation-
 free, lookup-free, and direct; memory clobbers add compiler ordering but no
 runtime instruction. Cross-target assembly and hardware behavior remain
 unverified and unsigned.
+
+## User-entry and VirtIO input authority checkpoint
+
+ARM32 and ARM64 privilege-transfer owners expose six target-specific scalar
+declarations. Their token, recorded-handoff, address-space, assembly-control,
+and non-returning assumptions are not represented by ordinary scalar types or
+bound to admitted artifacts. All declarations and the four dependent wrapper
+surfaces now carry `unsafe(ffi)` authority, and each raw call is lexically
+confined. Existing preflight, token/reap equality, and failure statuses remain
+unchanged; annotations add no transfer-path work.
+
+ARM64 and RV64 VirtIO input each expose seven calls: initialization, polling,
+and five projections from provider-global event state. Polling followed by
+independent projections is not an atomic snapshot and cannot distinguish queue
+corruption from no event. All fourteen declarations and four dependent wrappers
+are now explicitly unsafe. Poll accepts only the provider's exact ready value
+`1`; other values do not fabricate an event. The call topology remains one poll
+plus five projections with no new allocation, copy, lookup, hash, lock,
+signature operation, retry, or dispatch.
+
+The required follow-up is a single stack status/out descriptor returning
+`Result<Option<Event>, SffiError>`, reducing six calls to one. Until that ABI
+and exact artifacts are admitted, these surfaces remain unsafe, unsigned, and
+unverified. The focused ratchet was source-reviewed only and not executed.
