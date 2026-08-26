@@ -52,6 +52,12 @@ is retained as an append-only audit log and must not be read as current truth.
   Evidence: syntax PASS, focused 8/8, full SPipe suite/perf PASS, final xhigh
   PASS. Exact two-file commit pushed as `d1b601697f`. Graph/provider/fusion
   orchestration and AC-4 remain open.
+- implementation-wave4-rerank-pair-v3-accepted: Added ordered edge/receipt pair
+  evidence with shared-receipt support, derived display sets, evidence digest,
+  and verifier implementation binding while preserving v1/v2. Evidence: static
+  xhigh PASS, syntax PASS, focused 26/26, full package 142/142 plus Wave/legacy/
+  perf PASS, final xhigh PASS. Exact two-file commit pushed as `f89b120be7`.
+  Graph candidate generation and integrated AC-4 remain open.
 
 ## Raw Request
 `$sp_dev imlldoc/01_research/infra/spipe/spipe_knowledge_compiler.md with pherallel agents with detail guide and higher model review. make design plan details. sync push often gh main`

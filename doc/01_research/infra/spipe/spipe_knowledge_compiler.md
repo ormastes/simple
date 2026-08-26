@@ -2436,3 +2436,22 @@ two-file slice was pushed as `d1b601697f`.
 This admits exact resolution and the future pin decision only. It does not yet
 invoke lexical/semantic providers, accepted-edge traversal, fusion, reranking,
 or expose a search command; integrated AC-4 remains open.
+
+## 37. 2026-08-26 Pair-Based Reranker Evidence Admission
+
+Reranker v3 now represents accepted trace authority as ordered
+`{edgeUid, authorityReceiptUid}` pairs. Edge UIDs remain unique along a path,
+while one receipt may authorize multiple edges. Sorted-unique edge and receipt
+arrays are derived display views only; they cannot replace the lossless ordered
+pairs. The evidence digest and captured verifier implementation digest bind the
+complete page before the single authority call. V1/v2 behavior and fixed-policy
+arithmetic remain unchanged.
+
+Evidence: pre-runtime static review `PASS`; syntax `PASS`; focused existing plus
+new `26/26`; full SPipe suite `PASS` (`142/142` unit plus Wave, legacy, and
+performance gates); independent final review `PASS`. The exact two-file slice
+was pushed as `f89b120be7`.
+
+This removes the graph-evidence representation blocker. Accepted-edge graph
+candidate generation and integrated search orchestration remain unimplemented,
+and AC-4 remains open.

@@ -672,10 +672,11 @@ metadata disclosure. Cursor tests cover null-prototype/no-enumerable state,
 atomic consumption, cross-factory/copy/replay rejection, partial-data absence,
 hard-cap destruction, bounded state, and GC eligibility.
 
-Implementation is gated by lossless edge authority representation. Current
-reranker evidence uses independently unique edge and receipt arrays with equal
-length, but one authority receipt may cover multiple edges. First add an
-additive pair-based reranker evidence contract accepting ordered
-`{edgeUid,authorityReceiptUid}` records. Do not fabricate per-edge receipts,
-drop edges, duplicate receipts to satisfy uniqueness, or claim graph boost
-integration before that prerequisite and the standalone graph oracle pass.
+The lossless authority prerequisite is accepted as reranker v3 commit
+`f89b120be7`: ordered `{edgeUid,authorityReceiptUid}` pairs permit one receipt to
+cover multiple edges, while display arrays are derived only. Static, syntax,
+focused 26/26, full package, and final highest-capability gates passed.
+
+The graph generator is now unblocked. Do not fabricate per-edge receipts, drop
+edges, or replace ordered pairs with the derived unique arrays. Graph boost and
+AC-4 remain open until the standalone graph oracle and integrated search pass.
