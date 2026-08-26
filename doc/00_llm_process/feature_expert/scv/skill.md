@@ -82,3 +82,23 @@ rows done. Known gaps: Rust notify bridge (src/runtime/fswatch/) TODO;
 SCV-IMPL-B-01 blocked on sj repair; pre-existing reds unchanged
 (parser_wasm 7/12, structural_match 5/9, merge 1/5, gates 4/10, storage,
 parser_incremental, parser_cache, wasm_executor).
+
+## Post-Wave-2 (2026-08-26)
+Wave 2 (SCV-IMPL E-04, E-05, P-04, P-05, G-02, G-03, B-03, B-04, I-03) is
+landed and green (closeout sweep 2026-08-26; regressions all held, incl.
+mvp 11/11, file-identity 8/8, incremental-parse 9/9, wasm-shim 8/8). New
+capabilities: event coalescer/settle layer (`src/lib/scv/event_coalesce.spl`);
+persistent binary worktree index (`worktree_index.spl` — own store; B-04 DB
+migration is the documented adoption seam); parser trust/lock v2 registry
+(`parser_lock.spl` — pins sha256/ABI/protocol/signature, no implicit
+downloads; signature is pinned, NOT cryptographically verified yet); generic
+CST IR (`cst_ir.spl`); forced-unparsed audit path (`--force-unparsed
+--reason`, never public_ready by default); enforced v2 state model with
+legacy-v1 name mapping (`state_model.spl`); dual-byte content model
+(`dual_byte.spl`); metadata DB on textual SdnDatabase+WAL — deliberately NOT
+rt_sqlite emulation; WAL replay needs a prior schema snapshot, so
+crash-before-first-save loses pre-snapshot rows (`metadata_db.spl`); symbol
+entities via interim .spl structural scanner (`symbol_entity.spl`, P-06
+query-pack hookup TODO). Ledger 42/42 done (week-6 rows due 2026-10-13,
+signed step scripts SCV-IMPL-{E-04,E-05,P-04,P-05,G-02,G-03,B-03,B-04,I-03}).
+B-01 remains blocked on sj repair.

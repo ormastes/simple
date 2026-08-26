@@ -1,0 +1,148 @@
+# SCV symbol-entity identity (plan row SCV-IMPL-I-03).
+#
+# SymbolEntityId: repo-unique "sym_<n>" per logical declaration, stable
+# across commits, keyed on (file_id, kind, name) and persisted in the
+# metadata db's symbol_entity table (SCV-IMPL-B-04 SdnDatabase backend);
+# each ingest at a commit appends a symbol_entity_version row.
+#
+# Declaration extraction is HONESTLY scoped: a structural line scanner for
+# Simple (.spl) sources only, extracting module-level and member
+# declarations (fn/me, class/struct/enum/trait/type, field, variant,
+# top-level const). It does NOT parse other languages and does not claim
+# to.
+# TODO(SCV-IMPL-P-06): route extraction through the query-pack parser
+# artifacts once Wave-3 query packs land; this scanner is the interim
+# extractor the plan row's I-01-only dependency allows.
+
+use std.scv.metadata_db.{ScvMetaDb}
+
+val SCV_SYMBOL_EXTRACTOR_VERSION = "sym-spl-1"
+
+fn scv_symbol_indent(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line[n:n + 1] == " ":
+        n = n + 1
+    n
+
+fn scv_symbol_ident_prefix(s: text) -> text:
+    # Leading identifier characters of s.
+    var i = 0
+    while i < s.len():
+        val c = s[i:i + 1]
+        val ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+        if not ok:
+            break
+        i = i + 1
+    s[0:i]
+
+fn scv_symbol_is_ident(s: text) -> bool:
+    s != "" and scv_symbol_ident_prefix(s) == s
+
+# Extract declarations from Simple source text.
+# Returns rows "kind|name|line_no|container" (1-based line numbers;
+# container = enclosing type name or "" at module level).
+fn scv_symbol_extract_decls(source: text) -> [text]:
+    var out: [text] = []
+    var container = ""
+    var container_kind = ""
+    var container_indent = -1
+    var line_no = 0
+    for raw in source.split("\n"):
+        line_no = line_no + 1
+        val t = raw.trim()
+        if t == "" or t.starts_with("#"):
+            continue
+        val indent = scv_symbol_indent(raw)
+        if container_indent >= 0 and indent <= container_indent:
+            container = ""
+            container_kind = ""
+            container_indent = -1
+        var rest = ""
+        var kind = ""
+        if t.starts_with("static fn "):
+            kind = "fn"
+            rest = t[10:]
+        elif t.starts_with("fn "):
+            kind = "fn"
+            rest = t[3:]
+        elif t.starts_with("me "):
+            kind = "fn"
+            rest = t[3:]
+        elif t.starts_with("class "):
+            kind = "type"
+            rest = t[6:]
+        elif t.starts_with("struct "):
+            kind = "type"
+            rest = t[7:]
+        elif t.starts_with("enum "):
+            kind = "enum"
+            rest = t[5:]
+        elif t.starts_with("trait "):
+            kind = "trait"
+            rest = t[6:]
+        elif t.starts_with("type "):
+            kind = "type"
+            rest = t[5:]
+        elif indent == 0 and (t.starts_with("val ") or t.starts_with("var ")):
+            kind = "const"
+            rest = t[4:]
+        if kind != "":
+            val name = scv_symbol_ident_prefix(rest)
+            if name == "":
+                continue
+            out.push("{kind}|{name}|{line_no}|{container}")
+            if kind == "type" or kind == "enum" or kind == "trait":
+                container = name
+                container_kind = kind
+                container_indent = indent
+            continue
+        # Members of an open container.
+        if container != "" and indent > container_indent:
+            if container_kind == "enum" and scv_symbol_is_ident(t):
+                out.push("variant|{t}|{line_no}|{container}")
+            elif container_kind == "type" and t.contains(":") and not t.contains("("):
+                val fname = scv_symbol_ident_prefix(t)
+                if fname != "" and t[fname.len():fname.len() + 1] == ":":
+                    out.push("field|{fname}|{line_no}|{container}")
+    out
+
+# Ingest one file's declarations at `commit`: allocate stable sym ids for
+# new (file_id, kind, name, container) keys, reuse existing ids, and append
+# one symbol_entity_version row per declaration. Saves the metadata db
+# before returning. Returns "symbols=<total>,new=<n>,versions=<v>".
+fn scv_symbol_ingest(meta: ScvMetaDb, file_id: text, source: text, commit: text) -> text:
+    var m = meta
+    # Existing id per composite key, read once (not per declaration).
+    var by_key: Dict<text, text> = {}
+    for r in m.rows("symbol_entity"):
+        val rfid = r.get("file_id") ?? ""
+        val rname = r.get("name") ?? ""
+        val rkind = r.get("kind") ?? ""
+        val k = "{rfid}/{rname}/{rkind}"
+        by_key[k] = r.get("sym_id") ?? ""
+    val decls = scv_symbol_extract_decls(source)
+    var new_count = 0
+    var versions = 0
+    for d in decls:
+        val p = d.split("|")
+        if p.len() < 4:
+            continue
+        val kind = p[0]
+        val name = if p[3] != "": "{p[3]}.{p[1]}" else: p[1]
+        val key = "{file_id}/{name}/{kind}"
+        var sym = ""
+        if by_key.contains_key(key):
+            sym = by_key[key]
+        else:
+            sym = m.next_key("symbol_entity", "sym")
+            m.insert("symbol_entity", [sym, file_id, kind, name, "live"])
+            by_key[key] = sym
+            new_count = new_count + 1
+        val vk = m.next_key("symbol_entity_version", "sv")
+        m.insert("symbol_entity_version", [vk, sym, commit, p[2], "{kind} {name}"])
+        versions = versions + 1
+    m.save()
+    "symbols={decls.len()},new={new_count},versions={versions}"
+
+export SCV_SYMBOL_EXTRACTOR_VERSION
+export scv_symbol_extract_decls, scv_symbol_ingest

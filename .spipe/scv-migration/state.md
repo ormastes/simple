@@ -193,3 +193,44 @@ run is FAIL. Step scripts are committed unsigned and signed by a human with
   (E-01 pure-Simple half only); SCV-IMPL-B-01 blocked on sj repair;
   pre-existing reds unchanged (storage, structural_match 5/9, merge 1/5,
   parser_incremental 0/1, parser_cache 0/1, wasm_executor, gates 4/10).
+
+## Wave 2 — COMPLETE 2026-08-26 (closeout lane)
+- SCV-IMPL E-04, E-05, P-04, P-05, G-02, G-03, B-03, B-04, I-03 landed by four
+  lanes; all nine acceptance specs green at expected counts (closeout sweep
+  2026-08-26, binary bin/release/x86_64-unknown-linux-gnu/simple 60744944B
+  2026-08-26 01:16): event-coalesce 8/8, worktree-index 5/5, parser-lock 5/5,
+  generic-cst 4/4, forced-unparsed 6/6, state-model 8/8, dual-byte 8/8,
+  metadata-db 5/5, symbol-entity 3/3.
+- Per-item notes (verified against module content):
+  - E-04 coalescer/settle: editor micro-batch, fs settle window, save
+    immediate, VCS/bulk deferred; atomic-save tmp-write-rename coalesces to
+    modify-target (src/lib/scv/event_coalesce.spl).
+  - E-05 worktree index landed as its OWN binary store; the B-04 DB migration
+    is the explicit adoption seam — load/save/upsert/get/remove is the surface
+    the B-04 path_state table replaces (header note in
+    src/lib/scv/worktree_index.spl).
+  - P-04 parser lock: registry pins grammar id/source/artifact sha256/TS
+    ABI/protocol/runtime kind/signature; NO implicit downloads. Honest limit:
+    signature presence+stability is pinned, cryptographic VERIFICATION is not
+    yet performed (src/lib/scv/parser_lock.spl header).
+  - P-05 generic CST IR: File/Named/List(ordered|commutative)/Atom/Trivia/
+    Error, versioned (src/lib/scv/cst_ir.spl).
+  - G-02 forced_unparsed: --force-unparsed --reason audited, never
+    public_ready by default; G-03 state model enforces journal_only →
+    private_* → compile_ok → test_ok → verified_ok → public_ready, with a
+    legacy(v1)→v2 state-name mapping as the wiring seam for pre-existing
+    states (src/lib/scv/state_model.spl).
+  - B-03 dual-byte model: WorktreeContentId vs RepositoryContentId +
+    TransformId; native default identity transform.
+  - B-04 metadata DB backend choice: textual SdnDatabase + WAL from
+    std.database.core, deliberately NOT the rt_sqlite emulation (non-ACID,
+    unenforced constraints). Durability = CRC32 atomic snapshot + per-insert
+    WAL append replayed on load. Known limitation: WAL replay needs a schema
+    snapshot on disk first — crash-before-first-save loses pre-snapshot rows;
+    repeated crash cycles are bounded by save() checkpoints
+    (src/lib/scv/metadata_db.spl header).
+  - I-03 symbol entities: interim .spl structural line scanner; P-06
+    query-pack hookup is an explicit TODO — no multi-language claim.
+- B-01 stays OUT of the ledger (blocked on sj repair, per plan Wave order).
+- Ledger: 9 rows appended (week 6, due 2026-10-13); flipped by the signed
+  checker at --now 2026-10-13T12:00:00Z → 42/42 done.
