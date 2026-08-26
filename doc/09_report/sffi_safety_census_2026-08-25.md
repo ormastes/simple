@@ -742,3 +742,14 @@ boolean behavior are preserved without numeric API substitution. No allocation,
 copy, hash, signature check, lock, lookup, boxing, generic marshalling, or extra
 dynamic dispatch was added. The discriminant/environment providers remain
 unsafe, unsigned, and unverified.
+
+### MIR data environment-authority follow-up
+
+MIR data and builder infrastructure removed its duplicate raw non-null
+environment declaration and all five local unsafe blocks. Its three outer-scope
+trace reads, three fallback trace reads, bootstrap gate, and builder-finalize
+gate now use canonical always-inlined nullable `env_get_opt`; the existing
+outer-scope cache and all eight call sites are unchanged. Unset and empty values
+remain disabled. No read moved into a loop and no allocation, copy, cache, hash,
+signature check, lock, lookup, boxing, generic marshalling, or dispatch was
+added. The canonical runtime provider remains raw, unsigned, and unverified.

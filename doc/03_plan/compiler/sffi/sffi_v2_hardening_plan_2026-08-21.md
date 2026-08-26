@@ -1376,3 +1376,13 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Reduce provider calls and add no allocation, hash, lock, or dispatch.
 - [x] Add a static authority, call-count, and cache-shape ratchet.
 - [x] Record both providers as unsafe, unsigned, and unverified.
+
+### Completed MIR data environment-authority slice
+
+- [x] Remove the duplicate raw non-null environment declaration.
+- [x] Remove five module-local unsafe blocks through canonical `env_get_opt`.
+- [x] Preserve all eight reads and the existing outer-scope trace cache.
+- [x] Preserve disabled behavior for unset and explicitly empty values.
+- [x] Add no loop work, allocation, hash, lock, cache, or dispatch.
+- [x] Add a static authority and call-count ratchet.
+- [x] Record the canonical provider as raw, unsigned, and unverified.
