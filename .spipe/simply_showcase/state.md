@@ -32,7 +32,7 @@ recursion guard between simply and simple.
 | Seed shadowing fix | done | redeployed seed built from origin/main; strace 0 foreign opens |
 | Completion criteria + test lists | done | simply `doc/plan/completion_criteria.md`, `data/tests.sdn` (`80ffc46`) |
 | Full `test/01_unit` sweep → dashboard | in progress | 8,807 files; results go to simply `data/test_results.json` |
-| Sweep-fix campaign | wave 2 landed | wave 1: `b1ded64c8e4` `8d8d11097a0` `88fe280bb0f` `05b134ac502`; wave 2 (5 parallel agents, 48 specs, ~15 lib bugs): `dddd834f996` `c433e5d091d` `6e7b2eb616a` `9c5595b146d` `4907ce1da97` `e5a10e3ee78` `f65ae4a5f9c` `d9ca9d78b1d` `2f3f215003b`; residue: `doc/08_tracking/bug/unit_sweep_language_and_interpreter_gaps_2026-08-26.md` |
+| Sweep-fix campaign | wave 2 landed | wave 1: `b1ded64c8e4` `8d8d11097a0` `88fe280bb0f` `05b134ac502`; wave 2 (5 parallel agents, 48 specs, ~15 lib bugs): `dddd834f996` `c433e5d091d` `6e7b2eb616a` `9c5595b146d` `4907ce1da97` `e5a10e3ee78` `f65ae4a5f9c` `d9ca9d78b1d` `2f3f215003b`; wave 3: `676241b1db3` `9db7dbb836d` (16 specs); residue: `doc/08_tracking/bug/unit_sweep_language_and_interpreter_gaps_2026-08-26.md` |
 
 ## Open
 

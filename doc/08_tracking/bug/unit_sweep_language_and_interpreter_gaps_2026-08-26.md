@@ -59,3 +59,17 @@ Mechanical failures were fixed and landed (`dddd834f996`, `c433e5d091d`,
 `gc_async_mut/**_facade_spec` (facades never existed; real specs live under
 `nogc_async_mut/`), engine 3D/ids API drift, `text/*` Phase-5 modules,
 `JsonValue` removal, hardware VHDL/SV content oracles.
+
+## Wave 3 additions (`676241b1db3`, `9db7dbb836d`)
+
+13. `skia/entity/canvas.spl`: `if val rec = self.recorder: rec.record(...)`
+    mutates a COW copy — canvas recording never captures ops (`op_count` 0).
+14. Seed mock SQL engine (`interpreter_extern/sffi_db.rs`) rejects column-less
+    `INSERT INTO t VALUES (...)` and bound params — 6 `database/sql/*` specs.
+15. Text slicing `value[1..n-1]` is byte-based in the seed while
+    `strip_quotes` assumes char semantics (`sdn_reader_utf8`, em-dash).
+16. CUDA reported unavailable (`env_skip`) on a host with two working NVIDIA
+    GPUs — detection gap in the cuda specs' env probe.
+17. ROCm/HIP out-pointer results were read from the DynLib return status
+    (fixed in `ffi_rocm`/`sffi_rocm`); missing externs `rt_font_load`,
+    `rt_engine2d_pack_args_4`.
