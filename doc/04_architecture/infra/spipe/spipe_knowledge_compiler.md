@@ -986,3 +986,108 @@ only accepted integration sequence is exact identity, provider-owned lexical
 exclusion, complete lexical collection, graph generation, complete-pool RRF
 v2, rerank-evidence verification, pair-based reranking, explanation assembly,
 and user limit last. AC-4 remains open until that complete path is admitted.
+
+### 17.5 Authority bridge correction and capsule ownership
+
+The full synchronous JavaScript authority bridge is now the only accepted
+first slice. The earlier reading of `lexical_page.js` as a wire-independent
+translator that manufactures a nine-field `D-*` projection is a rejected
+pre-authority alternative. The projection is compatibility data consumed by
+`lexical_source.js`; authority comes only from a verified transport receipt
+plus a signed, stored, and re-resolvable evidence record.
+
+```text
+createAuthorizedLexicalSourceV1
+  ├─ verifySearchReceipt                    existing trusted search binding
+  ├─ authorizeArtifactCandidate             existing per-artifact decision
+  └─ createAuthorizedLexicalProviderPageBridgeV1
+       ├─ providerSession                    frozen wire/root/scope/policy pin
+       ├─ issueTransportQueryReceiptV1       qr-* issuer
+       ├─ verifyTransportQueryReceiptV1      qr-* verifier
+       ├─ executeLexicalPageV11              synchronous in-process provider
+       ├─ lexicalEvidenceAuthority           identity/sign/verify for D-*
+       ├─ lexicalEvidenceStore               reserve/commit/resolve/tombstone
+       └─ clockNowMs                         trusted expiry observation
+```
+
+The factory exposes exactly the frozen
+`{readLexicalProviderPage,verifyLexicalEvidence}` pair. It is a parent-owned
+adapter capsule: the provider owns ranking and pre-ranking exclusion; the
+authority owns signatures and current key/policy/revocation identity; the store
+owns immutable receipt objects and replay keys; the lexical source owns page
+collection and digest construction. No child may reach into a sibling's
+private state or mint another child's identity.
+
+The transport remains wire `{major:1,minor:1}`, capability
+`authorized_lexical_page:true`, and operation `lexical_page`, while provider,
+analyzer, and score identities remain `spipe-search-provider/1.0`,
+`spipe-unicode-lex-v1`, and `bm25-fixed-v1`. A successful wire response echoes
+the full verified `spipe-query-receipt-v1` (`qr-*`). The bridge signs a full
+`spipe-lexical-page-evidence-receipt-v1`, stores it atomically, resolves it
+again, and only then derives the nine-field `D-*` projection. Aggregate
+verification resolves every page `D-*` in order, re-verifies its signature,
+embedded `qr-*`, root, scope, policy, authority/revocation generation, expiry,
+cursor/rank chain, and page content, then signs/stores/re-resolves a
+`spipe-lexical-aggregate-evidence-receipt-v1`.
+
+Initialization supports exact minors 1.0 and 1.1 without silent negotiation:
+the legacy closed 1.0 capability record stays byte-compatible, while the closed
+1.1 record adds final `authorized_lexical_page:true`. The semantic identity
+arrays, limits, and empty optional-field list do not change. The bridge can be
+composed only from a validated 1.1 result.
+
+The provider-side executor is frozen separately as
+`createInProcessLexicalPageExecutorV11({provider,providerSession,
+verifyTransportQueryReceiptV1,lexicalCursorAuthority,clockNowMs})`. It verifies
+the `qr-*` before reaching the raw index. Non-null cursors are signed
+`spipe-authorized-lexical-cursor-v1` records bound to provider implementation/
+generation/session, root, scope, policy, query, exclusion, and next rank; they
+omit requested page size and page-local `qr-*` by design.
+The frozen provider session also carries the expected transport key,
+authority-generation, and revocation-generation tuple. Verifier-current
+decisions must echo it on both sides; a revocation-generation change invalidates
+the session.
+`lexicalCursorAuthority` uses the exact closed authority
+`identity/sign/verify` capability and must match that transport tuple and
+policy; the evidence signer may be distinct but cannot change policy.
+
+Authority signatures and receipt/store identities use restricted canonical
+JSON with the framed form
+`UTF8(domain + "\0") || U64BE(length) || canonicalBytes`. Existing admitted
+lexical hashes keep their unframed lowercase-domain convention. Exact domains,
+preimages, record fields, error precedence, and caps are frozen in detail
+design Section 17.7 and are not reinterpreted by adapters.
+
+The store is a bounded synchronous process-local capsule for this slice: all
+reserved, active/replay, and tombstoned operations share a 4,096-entry and
+64-MiB accounted-byte cap; page/aggregate records are limited to 1/2 MiB.
+Each reservation pre-charges exactly 2,048 bytes of worst-case tombstone
+headroom, which is retained if commit cannot fit. Entries remain until
+generation destruction. Exact live replay resolves/re-verifies and returns the
+same receipt without transport issuance, provider execution, signing, or
+commit. Operations reserve atomically before `qr-*` issuance; every
+post-reservation failure tombstones the key, so an identical retry cannot make
+a second transport/evidence chain. Conflicting, expired, revoked, wrong-root,
+wrong-policy, or wrong-generation replay fails closed. Persistence across
+restart is not claimed. Provider selection occurs before bridge construction,
+so a failed page cannot switch providers mid-collection.
+
+Successful bridge and provider-executor paths both observe their trusted clock
+before work and immediately before return. The end observation rechecks expiry
+and current revocation; work that crosses expiry is tombstoned and cannot
+produce evidence.
+
+Implementation ownership adds
+`examples/05_stdlib/spipe/src/provider/lexical_evidence_store.js`; the complete
+bridge stays in `provider/lexical_page.js`, protocol validation in
+`provider/protocol.js`, translation/session state in `provider/adapter.js`, and
+provider-side receipt checking plus page execution in `provider/js_fixed_point.js`.
+`index/contracts.js`, `index/logical_index.js`, and `provider/index.js` retain
+the roles stated above. `provider/durable_lifecycle.js` is not reused: it owns
+asynchronous mutation-candidate persistence, not synchronous query evidence.
+
+This architecture deliberately makes no subprocess, async stream, native, or
+cross-restart durability claim. A later provider may implement the same
+semantics only through a separately reviewed asynchronous boundary. Until the
+full JS oracle proves both signatures and store resolution, the bridge is
+design-frozen but not conforming, and AC-4 remains open.

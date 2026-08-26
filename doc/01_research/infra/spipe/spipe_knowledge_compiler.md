@@ -2607,3 +2607,82 @@ The standalone rerank-evidence implementation lane is active, after which the
 pipeline must consume exact identity, excluded lexical source, admitted graph
 source, complete-pool RRF v2, authority-bound rerank evidence, pair-based
 reranking, and only then the user limit. AC-4 remains open.
+
+### 39.3 Authority-ABI contradiction resolved
+
+Review of the proposed adapter found that its claims were stronger than its
+frozen ABI. A producer of only
+`{receiptUid,kind,bindingDigest,excludedDocumentUid,exclusionApplied,
+providerCursorDigest,requestedLimit,nextCursorDigest,pageDigest}` could invent
+a canonical-looking `D-*` value without proving the wire `qr-*` signature,
+retaining a signed record, observing revocation, or supporting the later
+aggregate resolution already required by `lexical_source.js`. That minimal
+translator is therefore recorded as a rejected pre-authority alternative.
+
+The selected first slice remains synchronous and in-process, but is complete:
+`createAuthorizedLexicalProviderPageBridgeV1` captures a frozen 1.1 provider
+session; transport receipt issue/verify ports; one synchronous
+`executeLexicalPageV11` port; the established authority
+`identity/sign/verify` capability; an atomic synchronous evidence store; and a
+trusted clock. It exports only the current
+`readLexicalProviderPage/verifyLexicalEvidence` pair, so the admitted lexical
+source contract does not change.
+
+The provider-side composition is
+`createInProcessLexicalPageExecutorV11`; it receives the trusted transport
+verifier and cursor authority and returns the direct wire-envelope executor.
+Its authenticated cursor binds provider implementation/generation/session,
+root, scope, policy, query, exclusion, and next rank while deliberately omitting
+the variable page limit and page-local `qr-*`.
+
+Protocol initialization is exact rather than best-effort: legacy 1.0 keeps its
+closed capability shape, while a 1.1 request must return 1.1 plus
+`authorized_lexical_page:true` with unchanged semantic identities, limits, and
+empty optional fields. No silent minor upgrade/downgrade is permitted. Query
+receipt IDs remain exactly `qr-` plus 64 lowercase hexadecimal characters.
+
+Every fresh page now has two non-substitutable receipts. The existing full
+`spipe-query-receipt-v1` (`qr-*`) is issued for the exact `lexical_page`
+payload, checked by the provider, echoed, and independently verified by the
+bridge. The bridge then signs and stores the full page, binding, provider
+session, transport receipt, root, scope, policy, authority generation,
+revocation generation, expiry, cursors, candidates, and page digest as a
+`spipe-lexical-page-evidence-receipt-v1` (`D-*`). It re-resolves that record
+before exposing the nine-field projection.
+
+At completion, the aggregate verifier resolves every page `D-*` in order,
+re-verifies both the stored evidence signature and embedded `qr-*`, rebuilds
+cursor and rank continuity, and recomputes page-set, rank-evidence, and output
+document digests. It then signs, atomically stores, and immediately re-resolves
+one `spipe-lexical-aggregate-evidence-receipt-v1`; its UID is the aggregate
+`authorityReceiptUid` returned to the lexical source.
+
+The authority domains use restricted canonical JSON framed by domain, NUL, and
+unsigned 64-bit byte length. Existing lexical query/binding/page digests retain
+their already-tested unframed convention. Exact domains, complete record
+schemas, replay rules, call order, public error precedence, and bounds are
+frozen in detail design Section 17.7. Semantic identity remains provider
+`spipe-search-provider/1.0`; only wire negotiation is 1.1.
+
+The evidence store is deliberately bounded and process-local for this slice.
+It reserves an operation before `qr-*` issuance, atomically commits the signed
+record, provides exact replay and UID resolution, and tombstones every
+post-reservation failure so retries cannot fork evidence. It fails on collision,
+counts reservations, active/replay records, and tombstones inside one 4,096-
+entry/64-MiB generation envelope. Every reservation pre-charges 2,048 bytes of
+worst-case tombstone headroom, so capacity failure cannot prevent mandatory
+cleanup. It expires evidence within 30 seconds, observes
+time and current policy/revocation both before work and before success return,
+and makes no restart-durability claim. Exact live replay returns
+the same signed receipt and skips transport issuance, provider execution,
+signing, and commit; stale or revoked replay fails rather than refreshing under
+the same key. Provider fallback is chosen before bridge creation and cannot
+change between pages.
+
+This resolution requires the new
+`examples/05_stdlib/spipe/src/provider/lexical_evidence_store.js` owner beside
+the planned `lexical_page.js`, plus the already named contracts, logical index,
+protocol, adapter, fixed-point provider, export, unit-oracle, and vector-fixture
+changes. It does not authorize async/process/native work. Provider conformance
+still requires the independent literal digest/signature/replay/revocation
+oracle, and AC-4 remains open.

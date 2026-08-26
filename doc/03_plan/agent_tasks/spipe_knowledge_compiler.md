@@ -774,10 +774,11 @@ provider/query/snapshot/exclusion/rank identity but not per-page `qr-*` or
 `requestedLimit`.
 
 The conformance oracle must distinguish transport `qr-*` receipts from signed
-authority `D-*` lexical-page receipts. The adapter returns only the admitted
-nine-field `D-*` projection, and the aggregate verifier resolves all authority
-receipts and binds page/rank/exclusion/policy/root evidence. Protocol 1.0 is
-legacy-only for this path.
+authority `D-*` lexical-page receipts. The adapter returns a page containing
+the admitted nine-field projection only after the full signed `D-*` record is
+stored and re-resolved; the projection is not authority. The aggregate verifier
+resolves all full authority receipts and binds page/rank/exclusion/policy/root
+evidence. Protocol 1.0 is legacy-only for this path.
 
 Execution order and ownership:
 
@@ -798,3 +799,116 @@ ms, and qualified maximum-RSS evidence with a configured cap. Numeric RSS is
 blocked pending Wave 0 measurement. There is no current provider conformance or
 pipeline-integration claim. Merge owner remains `/root`; final acceptance owner
 is the best available normal/highest-capability reviewer. AC-4 remains open.
+
+### 10.14 Corrected provider-authority implementation lane
+
+The nine-field-only adapter described in the preceding freeze is rejected as a
+pre-authority alternative. The provider lane must implement the full
+synchronous in-process ABI in detail design Section 17.7 without narrowing its
+claims. The interface names are frozen before implementation fan-out:
+
+```text
+createAuthorizedLexicalProviderPageBridgeV1
+  config: {providerSession,issueTransportQueryReceiptV1,
+           verifyTransportQueryReceiptV1,executeLexicalPageV11,
+           lexicalEvidenceAuthority,lexicalEvidenceStore,clockNowMs}
+  output: {readLexicalProviderPage,verifyLexicalEvidence}
+
+createBoundedLexicalEvidenceStoreV1
+  output: {reserveOperationV1,commitReceiptV1,resolveReceiptV1,
+           tombstoneOperationV1}
+
+createInProcessLexicalPageExecutorV11
+  config: {provider,providerSession,verifyTransportQueryReceiptV1,
+           lexicalCursorAuthority,clockNowMs}
+  output: frozen executeLexicalPageV11(envelope) -> response
+```
+
+All calls are direct synchronous calls; Promises/thenables, filesystem work,
+process spawning, polling, and retry sleeps are out of scope. Semantic provider
+identity stays `spipe-search-provider/1.0`; wire 1.1 adds only
+`authorized_lexical_page:true` and `lexical_page`.
+Initialization must preserve the exact legacy 1.0 closed capability result and
+add only the final capability for an exact 1.1 request; no silent minor
+selection is allowed. Canonical UIDs retain both admitted 32-hex and
+26-Crockford payload spellings, and `qr-*` remains `qr-<64 lowercase hex>`.
+
+#### Product ownership
+
+| Lane | Exact files | Deliverable |
+|---|---|---|
+| Contract/index | `src/index/contracts.js`, `src/index/logical_index.js` | 1.1 capability and exact pre-ranking exclusion without corpus-stat mutation |
+| Wire/session | `src/provider/protocol.js`, `src/provider/adapter.js` | closed 1.1 envelopes, full `qr-*` records, validated frozen session |
+| Provider | `src/provider/js_fixed_point.js` | synchronous page execution and provider-side `qr-*` verification |
+| Authority bridge | new `src/provider/lexical_page.js` | full page/aggregate records, signatures, resolution, projections |
+| Evidence store | new `src/provider/lexical_evidence_store.js` | bounded atomic receipt/replay store |
+| Export | `src/provider/index.js` | public factory/constants only |
+| Oracle | new `test/unit/search_lexical_provider_page_test.js` | independent authority/wire/store/lifecycle tests |
+| Vectors | new `test/fixture/wave4_search/authorized_lexical_provider_page_vectors.json` | literal domain/preimage/UID/signature/store goldens |
+
+All `src/` and `test/` paths in this table are relative to
+`examples/05_stdlib/spipe/`. Do not edit `provider/durable_lifecycle.js`: its
+async mutation lifecycle is a different owner. Do not edit Simple-native files
+or introduce a Node process adapter in this lane.
+
+#### Required implementation sequence
+
+1. Freeze constants, closed record validators, restricted canonical encoder,
+   exact digest preimages, authenticated cursor schema, deterministic
+   `lpo-/lao-/req-lp-` mappings, and independent literal vectors.
+2. Add protocol 1.1 negotiation and provider/session validation while retaining
+   all 1.0 semantic identities and legacy behavior.
+3. Implement provider-owned exclusion before scoring/top-k/pagination; keep
+   snapshot `N`, `df`, and average document length unchanged.
+4. Implement and test full `spipe-query-receipt-v1` issue, provider-side check,
+   exact echo, and independent bridge verification for `lexical_page`.
+5. Implement the bounded store and its atomic reserve/commit/exact-replay/
+   conflict/tombstone
+   behavior; operation keys are exact `lpo-<64 lowercase hex>` or
+   `lao-<64 lowercase hex>` values, `inputDigest` is the corresponding full
+   operation digest, kinds are `lexical_page|lexical_aggregate`, and tombstone
+   reasons use the seven-value enum frozen in design Section 17.7. Pre-charge
+   2,048 bytes of tombstone headroom per reservation so commit-capacity failure
+   cannot block cleanup.
+6. Implement page operation hashing, full page `D-*` sign/self-verify/commit/
+   re-resolve, then derive the existing nine-field page projection.
+7. Implement aggregate resolution of every page `D-*`, re-verify every embedded
+   `qr-*`, rebuild cursor/rank continuity and all digests, then sign/commit/
+   re-resolve the aggregate `D-*`.
+8. Prove start/end bridge and start/end provider-executor clock observations,
+   canonical-byte equality of the
+   complete echoed `qr-*`, expiry, authority/key/policy/revocation/root/scope/provider-generation
+   drift fail closed and never trigger per-page fallback.
+9. Run the focused oracle once, the full SPipe package once after focus passes,
+   and the existing Wave 4/legacy/performance gates once. Stop after at most
+   three verify/fix cycles.
+10. Require pre-runtime and final highest-capability review before merge.
+
+#### Admission evidence
+
+The oracle must cover every exact input/output record and domain from design
+Section 17.7, including two-sided `qr-*` verification, `qr-*`/`D-*`
+non-substitutability, full stored record resolution, write/read witnesses,
+aggregate reconstruction, replay/conflict/expiry/revocation, proof that replay
+does not issue, execute, sign, or commit, hostile
+canonicality and cap inputs, provider identity stability, no mid-stream
+fallback, and literal signature/UID/digest goldens. It must also prove direct
+non-thenable operation and the fixed 4,096-record/64-MiB store envelope.
+
+Candidate performance receipts are bridge construction P95 under 5 ms,
+authority/store overhead P95 under 10 ms per 1,000-hit page excluding scoring,
+warm lexical P95 under 100 ms for 50,000 artifacts, startup P95 under 250 ms,
+and no process/file-scan/retry activity on the hot path. No provider conformance
+or AC-4 completion is claimed until product, oracle, package checks, performance
+receipts, and highest-capability review all pass.
+
+The store bound counts every reservation, active/replay row, tombstone,
+operation key, and signed record inside one 4,096-entry/64-MiB generation
+envelope, including each reservation's fixed 2,048-byte worst-case tombstone
+headroom. Active replay tombstoning uses a null token plus the exact stored
+UID/digest; reserved tombstoning uses the single-use token. Tests must cover
+work crossing receipt expiry and post-commit resolve corruption.
+
+Sidecar lanes: lower-model implementation assistance is limited to the fixed
+file ownership above; no sidecar may change schemas/domains. Merge owner is
+`/root`; final reviewer is the best available normal/highest-capability model.

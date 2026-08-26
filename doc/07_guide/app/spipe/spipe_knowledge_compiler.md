@@ -1033,3 +1033,165 @@ exact resolution; excluded complete lexical collection; graph generation;
 complete-pool RRF v2; authority-bound rerank evidence; pair-based reranking and
 explanations; user limit last. Until the end-to-end pipeline passes, keep AC-4
 open.
+
+#### Full authority bridge: authoritative operator contract
+
+The preceding nine-field receipt description is only the projection consumed
+by `lexical_source.js`. A bridge that creates that projection without a full
+signed record is the rejected pre-authority design. The admitted implementation
+target is the synchronous in-process
+`createAuthorizedLexicalProviderPageBridgeV1` factory. It captures exactly:
+
+```text
+{providerSession,issueTransportQueryReceiptV1,
+ verifyTransportQueryReceiptV1,executeLexicalPageV11,
+ lexicalEvidenceAuthority,lexicalEvidenceStore,clockNowMs}
+```
+
+and exposes only the frozen
+`{readLexicalProviderPage,verifyLexicalEvidence}` pair. Every call is direct;
+a Promise/thenable, process spawn, poll, retry sleep, or per-page file read is a
+contract failure. `executeLexicalPageV11` receives the complete wire 1.1
+request envelope and returns the complete wire response—not an invented page
+projection.
+
+The provider-side companion is
+`createInProcessLexicalPageExecutorV11({provider,providerSession,
+verifyTransportQueryReceiptV1,lexicalCursorAuthority,clockNowMs})`; it returns
+the frozen `executeLexicalPageV11(envelope)` function. Provider-side `qr-*`
+checking lives there, while the bridge checks the echoed receipt independently.
+
+Check identity in two layers:
+
+| Layer | Required identity |
+|---|---|
+| Search semantics | provider `spipe-search-provider/1.0`, analyzer `spipe-unicode-lex-v1`, scorer `bm25-fixed-v1` |
+| Transport | `{major:1,minor:1}`, `authorized_lexical_page:true`, `lexical_page` |
+| Adapter/page | `spipe-authorized-lexical-provider-adapter-v1`, `spipe-authorized-lexical-provider-page-v1` |
+| Evidence | `spipe-lexical-page-evidence-receipt-v1`, `spipe-lexical-aggregate-evidence-receipt-v1` |
+
+Do not diagnose protocol 1.1 as provider semantic version 1.1. Protocol 1.0 is
+legacy-compatible but cannot supply authority-bound pages.
+
+Initialization never silently changes minors. A 1.0 request returns the current
+closed 1.0 capability record unchanged. A 1.1 request must return 1.1 and the
+same closed record plus final `authorized_lexical_page:true`; absent/false is
+not conforming. All semantic identity arrays, limits, and `optional_fields:[]`
+remain unchanged. Unknown versions or extra fields fail closed.
+
+For each fresh page the observable order is: a bridge start-clock observation;
+derive deterministic session/input/operation/request identity; atomically
+reserve; issue `qr-*`; provider
+verification and execution; exact canonical-byte receipt echo; independent
+bridge verification; provider page validation; full page `D-*` signature;
+atomic store; immediate resolve/re-verification; then projection. The page
+operation key is `lpo-<64 lowercase hex>` and its request ID is
+`req-lp-<the same 64 hex>`. An aggregate operation uses
+`lao-<64 lowercase hex>`.
+Immediately before success return, the bridge observes the clock again and
+rejects/tombstones work that crossed receipt expiry.
+
+A non-null page cursor is strict unpadded Base64Url of the closed signed
+`spipe-authorized-lexical-cursor-v1` record. It binds authority/revocation,
+adapter and provider implementation/generation/session, workspace/snapshot/
+scope/root, lexical binding/query/exclusion, next rank, policy, and expiry. It
+intentionally omits `requested_limit` and page-local `qr-*`. A noncanonical
+encoding, wrong signature, wrong session, or stale time is `stale_cursor`.
+Its cursor authority has the exact `identity/sign/verify` Ed25519 capability
+shape and must match the provider session's transport key, authority,
+authority/revocation generations, and policy. Evidence receipts may use a
+separate signer, but not a different policy.
+
+The full `qr-*` is the existing closed `spipe-query-receipt-v1`, binding
+request, operation, provider generation, workspace, snapshot, scope, lexical
+root, query hash, policy, authority/revocation generation, issue/expiry time,
+key, and signature. The provider checks it before ranking; the bridge checks
+the complete echoed canonical bytes after ranking. A partial field echo does
+not pass.
+Its ID spelling is exactly `qr-` plus 64 lowercase hexadecimal characters.
+
+The stored page `D-*` contains the full provider session and lexical binding,
+the complete verified `qr-*`, raw inbound/next cursors, provider identity,
+ordered candidates, page digest, authority/key/policy/revocation generations,
+issue/expiry, UID, and signature. The returned nine fields are derived from
+that record. The aggregate verifier resolves every page `D-*`, verifies the
+store digest, UID, signature, embedded `qr-*`, expiry/revocation, root/scope/
+policy, page projection, cursor chain, and rank sequence, then recomputes page
+set, rank evidence, and output document digests. Only then may it sign/store/
+re-resolve the aggregate `D-*` returned as `authorityReceiptUid`.
+
+Authority receipt preimages use restricted canonical JSON framed as
+`domain + NUL + U64BE(byte length) + canonical bytes`. Relevant domains are:
+
+```text
+SPKC-LEXICAL-PAGE-OPERATION-V1
+SPKC-LEXICAL-PROVIDER-SESSION-V1
+SPKC-QUERY-PAYLOAD-V1
+SPKC-QUERY-RECEIPT-V1
+SPKC-AUTHORIZED-LEXICAL-CURSOR-V1
+SPKC-LEXICAL-TRANSPORT-RECEIPT-DIGEST-V1
+SPKC-LEXICAL-PAGE-EVIDENCE-RECEIPT-V1
+SPKC-LEXICAL-OUTPUT-DOCUMENTS-V1
+SPKC-LEXICAL-AGGREGATE-OPERATION-V1
+SPKC-LEXICAL-AGGREGATE-EVIDENCE-RECEIPT-V1
+SPKC-LEXICAL-EVIDENCE-STORE-RECORD-V1
+```
+
+The admitted lowercase lexical page/page-set/rank digests keep their existing
+unframed convention; a changed golden there is a bug, not a migration.
+
+Replay is exact and bounded. A live operation key resolves and fully
+re-verifies the same stored receipt and returns it without calling the
+transport issuer, provider executor, evidence signer, or store commit. A
+different record under the same key is `operation_conflict`. Expired, revoked, wrong-root, wrong-policy,
+or wrong-generation evidence is tombstoned through `tombstoneOperationV1` and
+cannot be refreshed in that bridge generation. The first store is process-local
+only: all reserved, active/replay, and tombstoned operations share one 4,096
+entry cap and 64-MiB accounted canonical-byte cap, including a fixed token
+charge and exactly 2,048 bytes of worst-case tombstone headroom pre-charged for
+each reservation. Commit replaces that headroom only if the active record fits,
+so mandatory cleanup remains possible after a capacity failure. Page records
+are capped at 1 MiB and aggregate records at 2 MiB.
+Entries are not evicted or overwritten until the bridge generation is
+destroyed. Restart persistence is not claimed.
+
+The store surface is exactly
+`{reserveOperationV1,commitReceiptV1,resolveReceiptV1,tombstoneOperationV1}`.
+After reservation, every failure before commit tombstones the key—including a
+failure after `qr-*` issuance—so an identical retry cannot issue a second
+receipt. A process crash discards the process-local bridge/provider generation;
+recovery requires a new generation and verified search binding.
+Store kinds are only `lexical_page` and `lexical_aggregate`. Tombstone reasons
+are `expired`, `revoked`, `binding_mismatch`,
+`authority_generation_changed`, `policy_changed`, `record_corrupt`, or the
+catch-all `interrupted`. The `inputDigest` is exactly the corresponding page or
+aggregate operation digest; it is never caller-selected metadata.
+
+Successful page and aggregate bridge calls observe the trusted clock at start
+and again immediately before return. The provider executor independently does
+the same around receipt verification and ranking. End observations must show
+every receipt, cursor, and evidence record still live and authority-current; a
+call that finishes after expiry is tombstoned and rejected.
+
+Failure triage should follow the fixed order: invalid shape; exceeded bound;
+protocol/contract mismatch; binding/cursor drift; replay conflict; invalid
+`qr-*`; provider unavailable; corrupt page; unverified evidence; internal
+error. Public errors remain generic. In particular, `unauthorized` points to
+transport receipt verification, while `evidence_unverified` points to `D-*`
+authority/store/aggregate verification.
+
+Provider caches own immutable snapshot ranking only. The adapter caches one
+validated session. The evidence store owns receipts/replay only. Provider
+fallback is chosen before the bridge is created and may not change between
+pages; a mid-collection provider failure invalidates the collection.
+
+The complete JavaScript ownership is
+`src/index/{contracts,logical_index}.js` and
+`src/provider/{protocol,adapter,js_fixed_point,lexical_page,
+lexical_evidence_store,index}.js` under `examples/05_stdlib/spipe/`, plus the
+independent page unit oracle and Wave 4 authority vectors. Do not route this
+through `durable_lifecycle.js`, attach a Simple subprocess, or claim native or
+cross-restart durability. Exact schemas/preimages and test requirements are in
+detail design Section 17.7. Until those tests and highest-capability review
+pass, report the bridge as **contract frozen, not conforming** and keep AC-4
+open.
