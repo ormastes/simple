@@ -1378,6 +1378,16 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Avoid duplicate digest validation, extra retry, scan, lock, or dispatch.
 - [x] Add a static authority and exact operation-count ratchet.
 
+### Completed driver action-index authority slice
+
+- [x] Remove all eight action-index-local raw SFFI declarations.
+- [x] Preserve one existence probe and one typed read per lookup.
+- [x] Preserve two directory creates and one exact atomic publication attempt.
+- [x] Preserve failed-move cleanup and the existing lost-race re-read.
+- [x] Fail closed on invalid PID/clock without fabricated temp-file identity.
+- [x] Add no retry, scan, allocation, hash, lock, or dynamic dispatch.
+- [x] Add a static authority and exact operation-count ratchet.
+
 ### Completed MIR switch/operator environment-authority slice
 
 - [x] Remove the duplicate raw nullable environment declaration.

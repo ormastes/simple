@@ -803,3 +803,16 @@ publication. The canonical hash owner performs the sole 64-byte validation, so
 no second digest check or shell fallback was added. Disk I/O counts, cache
 complexity, and stored data layout are unchanged, with no new scan, retry,
 allocation, copy, lock, lookup, generic dispatch, or per-hit admission work.
+
+### Driver action-index authority follow-up
+
+The driver action index removed eight raw file, directory, process-id, and
+clock declarations. It now uses canonical owners while preserving one
+existence probe and typed read per lookup, two directory creates, one validated
+PID and timestamp, one exact write, one move, and one failed-move cleanup per
+publication attempt. Read failure and malformed data remain misses; write or
+move failure remains a conflict and retains the existing lost-race re-read.
+There is no extra retry, file scan, serialization, allocation, copy, cache,
+hash, signature check, lock, lookup, boxing, marshalling, or dynamic dispatch.
+PID/clock provider failures now fail closed rather than naming a fabricated
+temporary file.
