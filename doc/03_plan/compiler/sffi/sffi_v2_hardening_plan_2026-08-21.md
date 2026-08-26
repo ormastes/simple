@@ -1378,6 +1378,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Avoid duplicate digest validation, extra retry, scan, lock, or dispatch.
 - [x] Add a static authority and exact operation-count ratchet.
 
+### Completed frontend trace environment-authority slice
+
+- [x] Remove the frontend runner's duplicate raw environment declaration.
+- [x] Use one always-inline process-lifetime tri-state trace gate.
+- [x] Reduce two provider reads per module to at most one per process.
+- [x] Preserve boolean/default-off trace behavior and both receipts.
+- [x] Add no parse-loop scan, allocation, hash, lock, or dynamic dispatch.
+- [x] Add a static authority, call-count, and cache-shape ratchet.
+
 ### Completed driver action-index authority slice
 
 - [x] Remove all eight action-index-local raw SFFI declarations.

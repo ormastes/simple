@@ -816,3 +816,14 @@ There is no extra retry, file scan, serialization, allocation, copy, cache,
 hash, signature check, lock, lookup, boxing, marshalling, or dynamic dispatch.
 PID/clock provider failures now fail closed rather than naming a fabricated
 temporary file.
+
+### Frontend trace environment-authority follow-up
+
+The frontend runner removed its duplicate raw environment declaration and now
+uses one always-inlined process-lifetime tri-state gate for
+`SIMPLE_COMPILER_TRACE`. The two former provider reads per parsed module become
+at most one nullable provider read per process followed by integer branches.
+Both existing trace receipts remain boolean and default-off. No parsing loop,
+source scan, allocation, copy, cache lookup, hash, signature check, lock,
+boxing, marshalling, or dynamic dispatch was added; repeated module parsing
+strictly loses environment-provider work.
