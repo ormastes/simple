@@ -1514,3 +1514,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Kept the remaining three lexer ABIs locally unsafe pending their own typed
   ownership migrations.
 - Status: source-reviewed, deliberately unverified for this sync.
+## 2026-08-26 lexer nullable-file authority follow-up
+
+- Added canonical `file_read_nullable` for exact one-call optional transport.
+- Removed the lexer's duplicate raw file-read declaration and unsafe wrapper.
+- Preserved two read call sites, nil/empty behavior, and direct-call hot-path
+  shape with no Result allocation, conversion, lookup, normalization, or retry.
+- Retained and documented the layer-0 driver source raw owner as unsafe because
+  facade import would violate compiler layering.
+- Status: source-reviewed, deliberately unverified for this sync.

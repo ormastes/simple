@@ -32,17 +32,10 @@ use compiler.core.ast.{lexer_core_indent_stack_get, lexer_core_indent_stack_set}
 use compiler.core.ast.{lexer_cur_kind2_get, lexer_cur_kind2_set, lexer_cur_text2_get, lexer_cur_text2_set}
 use compiler.core.ast.{lexer_cur_line2_get, lexer_cur_line2_set, lexer_cur_col2_get, lexer_cur_col2_set}
 use compiler.core.ast.{lexer_cur_suffix2_get, lexer_cur_suffix2_set}
-@unsafe(reason: "raw file-to-text read ABI; nil means read/provider failure", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text?
 @unsafe(reason: "raw process environment update status ABI", capabilities: [ffi])
 extern fn rt_env_set(key: text, value: text) -> bool
 @unsafe(reason: "raw owned tagged-array release ABI", capabilities: [ffi])
 extern fn rt_array_free(array: i64)
-
-@always_inline
-fn _sffi_file_read_text(path: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_file_read_text(path)
 
 @always_inline
 fn _sffi_env_set(key: text, value: text) -> bool:
@@ -55,7 +48,7 @@ fn _sffi_array_free(array: i64):
         rt_array_free(array)
 
 export use compiler.frontend.lexer_types.{TokenKind}
-use std.io_runtime.{env_get_nullable}
+use std.io_runtime.{env_get_nullable, file_read_nullable}
 
 # Light wrapper struct to satisfy callers expecting a Lexer value.
 struct Lexer:
@@ -156,7 +149,7 @@ fn lex_init_with_path(source: text, source_path: text):
     # source from disk can differ from preprocessed or generated text.
     var core_source = source
     if core_source == "" and source_path != "":
-        core_source = _sffi_file_read_text(source_path) ?? ""
+        core_source = file_read_nullable(source_path) ?? ""
         # Fail-closed: a NAMED source file that reaches the lexer as empty text
         # is the "reads every source as empty" failure. Silently lexing "" then
         # yields an immediate EOF (or, with the pre-2026-08-09 kind-0 read-back
@@ -435,7 +428,7 @@ fn current_core_source_get() -> text:
         return inline_source
     val source_path = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_PATH") ?? module_get_path()
     if source_path != "":
-        val content = _sffi_file_read_text(source_path) ?? ""
+        val content = file_read_nullable(source_path) ?? ""
         return content
     ""
 

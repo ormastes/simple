@@ -908,3 +908,10 @@ sites use the canonical always-inline `env_get_nullable` transport, which keeps
 explicitly empty values distinct from nil and remains one direct ABI call.
 Write, file-read, and array-release ownership is unchanged. This slice is
 source-reviewed but unverified.
+## 2026-08-26 lexer nullable-file authority follow-up
+
+The compiler lexer no longer redeclares `rt_file_read_text`; both read sites
+use canonical always-inline `file_read_nullable`, retaining one ABI call and
+the same nil/empty lifting. The layer-0 driver source owner remains explicitly
+unsafe because importing the runtime facade there would violate layering.
+This slice is source-reviewed but unverified.
