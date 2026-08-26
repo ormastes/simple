@@ -3,7 +3,7 @@
 **Date:** 2026-08-26
 **Area:** `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`,
 `src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl`
-**Status:** FIX LANDED LOCALLY — A/B blocked before HIR by source-closure stall
+**Status:** RESOLVED 2026-08-26 — fix landed as `808f5cc2dd6`, measured ~9.5x here with a decision-identical proof
 **ID:** REXVISIT
 
 ## NOT a duplicate of REXMEMO (`reexport_root_memo_deleted_glob_superlinear_2026-08-21.md`)
@@ -133,3 +133,72 @@ built from parallel arrays grown by COW alias assignment, and no gate saw it.
 `check-cow-alias-hotpath.shs` ratchets the alias form; it did not fire here
 because the pushes are on a local `state` carrier, not on `self`. Widening that
 gate to carrier-typed locals in HIR lowering is the durable fix.
+
+## RESOLVED 2026-08-26 — measured A/B, ~9.5x, behaviour proven unchanged
+
+The status line above ("A/B blocked before HIR by source-closure stall") is
+superseded: the A/B was completed in an isolated replica (`lane-perf6`, all
+writable paths rebased into the lane; no other lane touched). The source fix
+itself landed independently as `808f5cc2dd6` "perf(hir): make reexport visited
+lookup constant time" — identical in substance to the patch measured here
+(`visited_depth: {text: i64}`, `hir_reexport_parallel_find` deleted). What was
+missing was the evidence, which is recorded below.
+
+### Method
+
+Two Stage-2 binaries built from the SAME tree by the same script, differing only
+in this patch — legA unpatched (sha256 `4c024630…`), legB patched (sha256
+`3356e79f…`) — each driving the same `native-build` of
+`src/app/cli/bootstrap_main.spl` under the same env. Both ran CONCURRENTLY on
+the same loaded host, so shared contention biases the comparison AGAINST the
+patch, not for it.
+
+### Speed — matched module indices, not wall clock
+
+The first 85 modules are processed in a verified-identical order in both legs,
+so `[build] hir N/713 … +Nms` is directly comparable at equal N:
+
+| hir index | legA (unpatched) | legB (patched) | ratio |
+|---|---|---|---|
+| 20 | 4,504,027 ms | 482,263 ms | 9.34x |
+| 40 | 7,247,950 ms | 765,390 ms | 9.47x |
+| 60 | 9,511,920 ms | 992,332 ms | 9.58x |
+| 80 | 10,163,694 ms | 1,063,268 ms | 9.56x |
+
+**The stability of the ratio is the contention control.** The previous theory's
+0.57x reading was a load artifact; a load effect drifts, and this holds to
++/-0.12x across a 4x span of work. That is what distinguishes a real speedup
+here from the two refuted ones.
+
+### Correctness — decision-identical, proven not asserted
+
+At hir index 85 both logs sit at the SAME line number (3270), with **57**
+`ambiguous explicit callable dependency` errors and **59** `[hir-poisoned]`
+markers each. Extracting every semantic diagnostic (ambiguity / poisoned /
+unresolved-type) and diffing the sorted sets: **959 lines on each side,
+byte-identical.**
+
+Two things that look like regressions and are not, recorded so the next reader
+does not re-raise them:
+
+- legB exited `RC=1` with 7,924 ambiguity errors against legA's 57. That is
+  progress, not divergence: legB reached module 261 while legA was still at 85.
+  At equal index the counts match exactly.
+- The `[hir-prof-reg]` `completed`/`skips` counters differ between legs. Those
+  are the visited set's OWN bookkeeping, which necessarily changes shape when
+  three parallel arrays become one dict. No semantic line differs.
+
+### Scope — what this does NOT fix
+
+legB still hit the ambiguity wall and exited at 261/713. **The quadratic chase
+was the COST of poisoning, not its CAUSE.** Stage 3 now walks ~9.5x faster into
+the same wall; the residual wildcard-import ambiguity (overlapping globs in
+`mir_instruction_graph.spl`, a different mechanism from the item-degenerate
+case) remains the actual Stage-3 blocker. Do not read this row as "Stage 3
+unblocked".
+
+### Prevention landed
+
+`scripts/check/check-cow-alias-hotpath.shs` was widened (`acce8d3fd1`) — it had
+been anchored on the literal `self.` AND required the field as a call ARGUMENT,
+so this defect fell through both holes at once. Baseline 191 -> 943.
