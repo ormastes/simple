@@ -64,8 +64,14 @@
    recovery then failed deterministically in
    `driver_hir_pipeline_lowering.spl`: the seed could not resolve
    `compiler.semantics.const_fold` (E1034). A bounded fetch/check of
-   `origin/main` at `e35d34f9eeda1b899abd439c56aa8ecec674a1cf` found no fix; the
-   file is identical there. No Stage 2 compiler was admitted.
+   `origin/main` at `e35d34f9eeda1b899abd439c56aa8ecec674a1cf` found no fix. The
+   defect was repaired on isolated branch
+   `work/fix/local-20260826-002-stage2-const-fold-import`, reviewed independently
+   twice, verified by the focused quarantine spec (2/2), and submitted to
+   protected `main` as PR #25. A single post-fix Stage 2 retry passed E1034 but
+   later failed at link on independent unresolved compiler symbols. No Stage 2
+   compiler was admitted, and the fix is not yet eligible for release-line
+   backport because protected-main integration remains pending.
 2. Repository workflow source is not live-provider evidence. GitHub rulesets,
    protected environments, signing identity, immutable-release configuration,
    artifact attestations, and npm registry publication require successful live

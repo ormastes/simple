@@ -105,7 +105,11 @@ verify-evidence-required
   receipt-free Stage 2 recovery then failed E1034 because the seed resolved
   `compiler.semantics.const_fold` relative to `src/compiler/80.driver`; no
   compiler was admitted. A bounded fetch/check of `origin/main` at
-  `e35d34f9eeda1b899abd439c56aa8ecec674a1cf` found no corresponding fix, so the
-  defect must be repaired through the normal isolated `main` fix lane and
-  separately backported if required. Live GitHub
+  `e35d34f9eeda1b899abd439c56aa8ecec674a1cf` found no corresponding fix. The
+  normal isolated `main` fix lane then removed the accidentally resurrected HIR
+  fold references; focused evidence passes 2/2, two independent reviews agree,
+  and exact branch commit `36f0aeb00c9` is submitted to protected `main` as PR
+  #25. A single Stage 2 retry cleared E1034 but later failed on independent
+  unresolved link symbols, so no compiler was admitted and no release-line
+  backport is yet eligible. Live GitHub
   policy/signing/immutable-publication/npm receipts are also still required.
