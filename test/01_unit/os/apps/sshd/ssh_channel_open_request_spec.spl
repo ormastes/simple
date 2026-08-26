@@ -1,6 +1,8 @@
 use os.apps.sshd.ssh_channel_open_request.*
 use os.apps.sshd.ssh_channel.{SSH_MSG_CHANNEL_OPEN_FAILURE, SSH_OPEN_UNKNOWN_CHANNEL_TYPE, SSH_OPEN_RESOURCE_SHORTAGE}
 
+extern fn rt_file_read_text(path: text) -> text
+
 fn _push_u32_be(out: [u8], value: u32) -> [u8]:
     var bytes = out
     bytes.push(((value >> 24) & 255u32).to_u8())
@@ -22,6 +24,15 @@ fn _open_packet(kind: [u8], sender: u32, tail: [u8]) -> [u8]:
     packet
 
 describe "bounded SSH channel-open classification":
+    it "routes live admission through bounded classification before allocation":
+        val source = rt_file_read_text("src/os/apps/sshd/ssh_session_channel.spl")
+        expect(source).to_contain("val request = ssh_channel_open_request_classify_v1(payload)")
+        expect(source).to_contain("if ssh_channel_open_transport_must_close_v1(request):")
+        expect(source).to_contain("if request.kind != SshChannelOpenRequestKindV1.Session:")
+        expect(source).to_contain("val rejected = ssh_channel_open_rejection_payload_v1(request)")
+        expect(source).to_contain("self.channels.session_channel_open_response(\n            request.sender_channel, request.initial_window, request.maximum_packet)")
+        expect(source.contains("_is_live_channel_open_session")).to_be(false)
+
     it "admits an exact session request without retaining its type":
         val request = ssh_channel_open_request_classify_v1(
             _open_packet([0x73u8, 0x65u8, 0x73u8, 0x73u8, 0x69u8, 0x6Fu8, 0x6Eu8], 17u32, [])
