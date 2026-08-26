@@ -594,6 +594,17 @@ the provider's valid success result.
 The provider remains unsigned and unverified, so this is unsafe minimization,
 not safe promotion.
 
+### MIR interpreter async-runtime authority follow-up
+
+The MIR interpreter now tags actor spawn/send/receive and scheduler yield
+`unsafe(ffi)` and confines all four primitives to always-inlined lexical
+owners.  Runtime-name dispatch, argument checks, receive timeout behavior, and
+provider-call counts are unchanged; no scheduler lookup, allocation, copy,
+cache, lock, hash, boxing, generic marshalling, or extra dispatch was added.
+The dispatcher still returns legacy integer zero for malformed spawn/send
+argument lists, so it remains explicitly unsafe pending a `Result` migration
+through MIR instruction execution and is not verified or signed.
+
 The feature-vector builder no longer imports or calls the raw square-root
 symbol from `math_utils`; it consumes the confined always-inline owner.  Its
 shape remains one root after one O(n) frequency-weight accumulation, with no

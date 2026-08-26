@@ -1250,6 +1250,14 @@ Torch SFFI nor all SFFI may be described as verified safe.
   `E-SFFI-017` on the cold promotion path.
 - [x] Keep provider admission off hot paths and add a static call-count ratchet.
 
+### Completed MIR interpreter async-runtime authority slice
+
+- [x] Tag actor spawn/send/receive and scheduler yield `unsafe(ffi)`.
+- [x] Confine each primitive to one always-inline lexical owner.
+- [x] Preserve runtime-name dispatch, timeout behavior, and provider calls.
+- [x] Record the legacy malformed-argument zero as an open `Result` migration.
+- [x] Add no scheduler hot-path work and add a static call-count ratchet.
+
 ### Completed compiler performance CLI authority slice
 
 - [x] Remove both duplicate raw `rt_get_args` declarations and calls.
