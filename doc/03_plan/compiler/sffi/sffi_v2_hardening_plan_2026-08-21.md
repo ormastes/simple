@@ -1911,3 +1911,11 @@ and unpromoted.
 - [x] Eliminate local `unsafe(ffi)` authority instead of duplicating it.
 - [x] Preserve one-lookup startup complexity and parse/default behavior.
 - [x] Add a static ratchet preventing raw SFFI from returning to the module.
+
+### Completed compiler DI authority slice
+
+- [x] Remove the module-local raw `rt_env_get` declaration and calls.
+- [x] Route both absence-aware lock checks through canonical `env_get_opt`.
+- [x] Eliminate local `unsafe(ffi)` authority.
+- [x] Preserve the existing short-circuit lookup count and behavior.
+- [x] Add a static ratchet preventing raw SFFI from returning to the module.

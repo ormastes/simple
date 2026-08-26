@@ -344,3 +344,12 @@ module's unsafe authority rather than duplicating it behind another wrapper.
 The startup path retains one environment lookup and the same parse/default
 logic, with no additional scan, allocation, copy, lock, retry, or dispatch
 table.
+
+### Compiler DI authority follow-up
+
+The compiler dependency-injection container no longer owns a raw `rt_env_get`
+declaration or call.  Both system-test lock checks now use the canonical
+nullable `std.io_runtime.env_get_opt` facade, eliminating local unsafe
+authority.  Short-circuit behavior is unchanged: the DI bypass variable is
+queried only when system-test mode is enabled, so there is no added environment
+lookup, allocation, copy, cache, lock, or dispatch table.
