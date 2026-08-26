@@ -55,17 +55,20 @@ struct SbiResult:
     error: i64
     value: i64
 
+@unsafe(reason: "executes a privileged SBI ecall through an unsigned target C provider", capabilities: [ffi])
 extern fn rt_riscv64_sbi_call(ext: u64, fid: u64, arg0: u64, arg1: u64,
                               arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> SbiResult
+@unsafe(reason: "writes privileged CLINT MMIO through an unsigned target provider", capabilities: [ffi])
 extern fn rt_mmio_write_u32(addr: u64, value: u32)
 
 fn sbi_ecall(ext: u64, fid: u64, arg0: u64, arg1: u64, arg2: u64,
              arg3: u64, arg4: u64, arg5: u64) -> SbiResult:
-    rt_riscv64_sbi_call(ext, fid, arg0, arg1, arg2, arg3, arg4, arg5)
+    unsafe(capabilities: [ffi]):
+        rt_riscv64_sbi_call(ext, fid, arg0, arg1, arg2, arg3, arg4, arg5)
 
 fn sbi_probe_extension(ext_id: u64) -> bool:
     val ret = sbi_ecall(SBI_EXT_BASE, 3, ext_id, 0, 0, 0, 0, 0)
-    ret.value != 0
+    ret.error == SBI_IPI_SUCCESS and ret.value != 0
 
 # ============================================================================
 # IPI path initialisation (call once at boot)
@@ -103,7 +106,8 @@ fn sbi_send_ipi_legacy(hart_mask_ptr: u64) -> SbiResult:
 fn clint_send_ipi_to_hart(hartid: u32):
     """Write MSIP bit for hartid via CLINT MMIO (0x02000000 + 4*hartid)."""
     val addr = CLINT_MSIP_BASE + 4u64 * hartid as u64
-    rt_mmio_write_u32(addr, 1u32)
+    unsafe(capabilities: [ffi]):
+        rt_mmio_write_u32(addr, 1u32)
 
 # ============================================================================
 # Unified IPI send — chooses path by cached IPI_PATH
@@ -115,15 +119,23 @@ fn sbi_probe_then_send_ipi(hart_mask: u64, hart_mask_base: u64):
         init_ipi_path()
     if IPI_PATH == IpiPath.Sbi_v3:
         sbi_send_ipi_v3(hart_mask, hart_mask_base)
-    else if IPI_PATH == IpiPath.Sbi_legacy:
-        # Legacy takes a pointer to the hart_mask; pass mask on stack via register
-        sbi_send_ipi_legacy(hart_mask)
+    else if IPI_PATH == IpiPath.Sbi_legacy and hart_mask_base == 0u64:
+        # Legacy takes a pointer to one synchronous supervisor-memory mask word.
+        var legacy_mask = hart_mask
+        val legacy_mask_ptr = unsafe(capabilities: [raw_ptr]):
+            (&legacy_mask) as u64
+        sbi_send_ipi_legacy(legacy_mask_ptr)
     else:
-        # ClintMmio: iterate set bits in hart_mask
+        # CLINT has absolute hart IDs; reject values its 32-bit owner cannot name.
+        if hart_mask_base > 0xFFFFFFFFu64:
+            return
         var bit: u32 = 0
         var mask = hart_mask
-        while bit < 64u32:
+        while mask != 0u64:
             if mask & 1u64 != 0u64:
-                clint_send_ipi_to_hart(bit)
+                val hartid = hart_mask_base + bit as u64
+                if hartid > 0xFFFFFFFFu64:
+                    return
+                clint_send_ipi_to_hart(hartid as u32)
             mask = mask >> 1u64
             bit = bit + 1u32

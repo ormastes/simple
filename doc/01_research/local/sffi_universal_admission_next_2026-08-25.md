@@ -5862,3 +5862,36 @@ The required follow-up is a single stack status/out descriptor returning
 `Result<Option<Event>, SffiError>`, reducing six calls to one. Until that ABI
 and exact artifacts are admitted, these surfaces remain unsafe, unsigned, and
 unverified. The focused ratchet was source-reviewed only and not executed.
+
+## SBI and ARM32 boot-topology checkpoint
+
+The RV32 SBI tuple declaration has no production provider. RV64 has a direct,
+libc-free C ecall leaf, but neither the leaf nor its by-value return layout is
+bound to an exact signed provider artifact. ARM32 boot topology is backed only
+by a target example provider that exposes one immutable boot-global address as
+two 16-bit reads. These six raw declarations are now explicitly `unsafe(ffi)`
+and each call is confined to the smallest lexical capability region.
+
+Both RV64 extension probes previously returned `true` from a nonzero value even
+when the SBI error field reported failure. They now require success and a
+nonzero value, preserving `bool` as the public result rather than converting it
+to a numeric workaround. The legacy IPI path now passes the address of a live
+stack mask word instead of treating the mask value as an address. Its CLINT
+fallback honors `hart_mask_base`, rejects unrepresentable hart IDs, and stops
+when the remaining mask becomes zero.
+
+The changed call paths remain O(1) for probes and topology reads. IPI fallback
+is O(highest-set-bit), improved from an unconditional 64 iterations. No heap
+allocation, payload copy, name lookup, generic dispatch, lock, hash, or
+signature operation was added. Source tags and a static ratchet are not proof
+of ABI, firmware, compiler, hardware, or signed-artifact admission; RV32 stays
+provider-blocked and verified-and-signed remains zero.
+
+The full provider-aware inventory measured 11,370 `rt_*` declarations across
+3,035 symbols: 2,798 declarations are unsafe-tagged, 8,323 are untouched, and
+zero are signed-admitted. Its provider-language output is a disjoint set of
+language combinations because one declaration can have C, Rust-export, and
+Rust-interpreter providers simultaneously; the leading combination contains
+5,622 declarations. This is the correct representation for parity analysis and
+must not be collapsed into overlapping per-language totals without an explicit
+multi-provider accounting rule.

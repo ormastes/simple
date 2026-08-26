@@ -393,3 +393,23 @@ does not label inline assembly safe or verified.
   status/out contract and typed `Result<Option<Event>, SffiError>` lift.
 - [ ] Bind target providers and non-returning privilege-transfer assembly to
   exact ABI/artifact hashes and signed admission evidence.
+
+## SBI and ARM32 boot-topology tranche
+
+- [x] Tag the providerless RV32 tuple call, both RV64 ecall declarations, the
+  RV64 CLINT write, and both ARM32 split-DTB reads as raw FFI authority.
+- [x] Confine each raw call lexically without adding wrapper allocation,
+  registry lookup, hashing, signing, locks, retries, or generic dispatch.
+- [x] Require SBI success before converting extension-probe payloads to bool.
+- [x] Pass a live stack-word address to legacy SBI IPI and honor the absolute
+  hart-mask base in the CLINT fallback.
+- [x] Stop CLINT scanning when the remaining mask is zero and reject hart IDs
+  that cannot fit the canonical 32-bit MMIO owner.
+- [ ] Replace or implement the providerless RV32 tuple boundary with an exact
+  target ABI, then bind it to the loaded artifact and registry identity.
+- [ ] Bind RV64 SBI return layout, compiler, firmware, and provider bytes to
+  signed evidence before verified or critical promotion.
+- [ ] Replace the ARM32 split address calls with one coherent typed boot
+  descriptor when its freestanding ABI is available.
+- [ ] Run cross-target compiler, OpenSBI/QEMU, firmware-error sabotage, and
+  timing/RSS evidence once the admitted current-source toolchain is available.

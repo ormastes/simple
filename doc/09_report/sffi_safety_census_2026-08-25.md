@@ -1782,3 +1782,51 @@ no longer produce an event. There is no new per-poll allocation, copy, lookup,
 hash, lock, signature check, retry, or provider call. A one-call status/out ABI
 remains required for safe typed admission; current artifacts are unsigned and
 unverified.
+
+### SBI and ARM32 topology authority
+
+Six raw architecture declarations are newly explicit unsafe boundaries: RV32
+SBI remains genuinely providerless; RV64 SBI/CLINT has a direct target C leaf
+but no signed artifact admission; and ARM32 topology reads a split boot-global
+address from an example-only provider. No declaration in this tranche is
+verified-and-signed.
+
+Two RV64 extension probes now preserve their boolean API while requiring both
+`error == success` and a nonzero value. The legacy IPI path supplies an actual
+stack-word pointer, while CLINT fallback applies `hart_mask_base`, rejects
+unrepresentable IDs, and terminates after the highest set bit. The stack word
+does not allocate or escape the synchronous ecall. There is no per-call hash,
+signature verification, lookup, lock, retry, generic dispatch, or payload copy.
+
+This is source hardening, not whole-module verification. Exact ABI layout,
+provider/firmware identity, cross-target compiler behavior, and hardware/QEMU
+execution remain missing evidence, so the repository-wide SFFI verdict remains
+unsafe/incomplete rather than safe and verified.
+
+#### Provider-aware inventory snapshot (2026-08-26)
+
+The full inventory reported 11,370 `rt_*` declaration rows and 3,035 distinct
+`rt_*` symbols. Of the declarations, 2,798 are unsafe-tagged, 8,323 are
+untouched, and zero are exact-artifact signed-admitted. Production scope alone
+contains 5,667 rows: 2,620 unsafe-tagged, 2,970 untouched, and zero admitted.
+
+Provider provenance is many-to-many. The largest exact combination rows are:
+
+| Observed provider languages | `rt_*` declarations | Unsafe-tagged | Untouched | Signed-admitted |
+|---|---:|---:|---:|---:|
+| C + Rust export + Rust interpreter | 5,622 | 708 | 4,706 | 0 |
+| Rust export + Rust interpreter | 1,385 | 585 | 786 | 0 |
+| C + Rust interpreter | 1,226 | 342 | 867 | 0 |
+| None observed | 1,165 | 400 | 757 | 0 |
+| Rust interpreter only | 702 | 346 | 355 | 0 |
+| C + C/C++ header + Rust interpreter | 302 | 29 | 273 | 0 |
+| C only | 262 | 58 | 204 | 0 |
+| C + C/C++ header + Rust export + Rust interpreter | 250 | 33 | 217 | 0 |
+| Rust export only | 187 | 77 | 110 | 0 |
+| C++ only | 126 | 126 | 0 | 0 |
+
+These are disjoint combination rows, not independent language totals. A
+declaration with both C and Rust providers appears in one combined row. Provider
+detection does not prove matching ABI, null safety, ownership, or artifact
+identity; only the currently empty signed-admission column represents that
+stronger state.

@@ -1,6 +1,6 @@
 # RISC-V legacy SBI `send_ipi` passes a hart-mask value where the ABI requires a pointer
 
-- **Status:** OPEN
+- **Status:** SOURCE-FIXED, EXECUTION UNVERIFIED
 - **Filed:** 2026-08-25
 - **Area:** RV64 bare-metal SBI IPI dispatch
 - **Severity:** critical — the selected legacy IPI path can give firmware an invalid
@@ -163,3 +163,15 @@ Close this bug only after the value-versus-pointer mismatch is repaired without
 moving IPI policy out of Pure Simple, the production-boundary tests cover the
 listed conditions, and retained firmware-backed evidence demonstrates correct
 legacy IPI delivery. Updating only the local mocks does not satisfy closure.
+
+## Source fix (2026-08-26)
+
+The production dispatcher now creates one local `u64` mask word, takes its
+address inside a minimal `raw_ptr` capability region, and passes that address
+to the synchronous legacy ecall. A nonzero hart-mask base uses CLINT instead;
+that fallback now adds the base, rejects values outside `u32`, and stops once
+the remaining mask is zero. No heap allocation or extra foreign call is added.
+
+The focused static ratchet records this source shape, but the production ecall
+interception, OpenSBI/QEMU behavior, and exact signed artifact remain unproven.
+Accordingly this issue is not labeled verified or closed.
