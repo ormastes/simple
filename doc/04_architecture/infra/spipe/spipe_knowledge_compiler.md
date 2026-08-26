@@ -1091,3 +1091,27 @@ cross-restart durability claim. A later provider may implement the same
 semantics only through a separately reviewed asynchronous boundary. Until the
 full JS oracle proves both signatures and store resolution, the bridge is
 design-frozen but not conforming, and AC-4 remains open.
+
+### 17.6 Admission status and next dependency order (2026-08-26)
+
+Commit `47a922eec6` admits this provider-authority **architecture contract**
+after highest-capability review; it does not admit an implementation. The
+attempt in `/tmp/spkc-lexical-provider-z15Uhp/repo` reached its pre-runtime
+review cap without producing an in-scope product or oracle edit. The next
+provider implementation must start from the complete capsule, authority,
+store, replay, cursor, clock, and error ABI in Section 17.5/detail design
+Section 17.7. The previously rejected minimal projection adapter remains
+architecturally invalid.
+
+The candidate rerank-evidence capsule in
+`/tmp/spkc-rerank-evidence4-aIcFIZ/repo` is uncommitted and unadmitted. Its
+focused `16/16`, full unit `190/190`, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4
+`9/9`, legacy, security, workflow, and performance gates are retained, but
+final highest-capability review after cycle three found two blockers:
+`limit_exceeded` must retain precedence for oversized derived evidence arrays,
+and the semantic contract string must be bound to the admitted consumer
+contract. A fresh session owns the exact source/oracle pair and its review.
+
+Dependency order is provider implementation/admission, rerank-evidence
+repair/admission, then integrated exact/lexical/graph/RRF/evidence/rerank
+orchestration. AC-4 remains open.

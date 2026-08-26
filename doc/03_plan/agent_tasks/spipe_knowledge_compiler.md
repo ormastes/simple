@@ -912,3 +912,30 @@ work crossing receipt expiry and post-commit resolve corruption.
 Sidecar lanes: lower-model implementation assistance is limited to the fixed
 file ownership above; no sidecar may change schemas/domains. Merge owner is
 `/root`; final reviewer is the best available normal/highest-capability model.
+
+### 10.15 Corrected handoff ledger and resume order (2026-08-26)
+
+1. **Provider authority — contract only.** Commit `47a922eec6` passed the
+   highest-capability contract review for the complete ABI in Section 10.14 and
+   detail design Section 17.7. The implementation attempt in
+   `/tmp/spkc-lexical-provider-z15Uhp/repo` stopped at the pre-runtime review
+   cap and made no in-scope product/oracle edit. Resume in a fresh session from
+   the full final ABI; do not implement the rejected minimal projection
+   adapter.
+2. **Rerank evidence — candidate only.** The exact untracked pair in
+   `/tmp/spkc-rerank-evidence4-aIcFIZ/repo` is
+   `examples/05_stdlib/spipe/src/search/rerank_evidence.js` and
+   `examples/05_stdlib/spipe/test/unit/search_rerank_evidence_test.js`. It has
+   no commit and is not admitted. Focused `16/16`, full unit `190/190`, Wave 2
+   `9/9`, Wave 3 `25/25`, Wave 4 `9/9`, legacy, security, workflow, and
+   performance gates passed, but final highest-capability review after cycle
+   three found unresolved `limit_exceeded` precedence for oversized derived
+   evidence arrays and an unresolved semantic-contract-string binding. Start a
+   fresh exact two-file fix/review lane; do not rerun unchanged green commands.
+3. **Pipeline — waiting.** Begin only after provider implementation admission
+   and rerank-evidence admission. Preserve the frozen order: exact resolution,
+   excluded complete lexical collection, graph generation, complete-pool RRF
+   v2, authority-bound evidence, pair rerank/explanation, then user limit.
+
+Merge owner remains `/root`; the final reviewer remains the best available
+normal/highest-capability model. AC-4 remains open.

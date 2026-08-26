@@ -2686,3 +2686,31 @@ protocol, adapter, fixed-point provider, export, unit-oracle, and vector-fixture
 changes. It does not authorize async/process/native work. Provider conformance
 still requires the independent literal digest/signature/replay/revocation
 oracle, and AC-4 remains open.
+
+### 39.4 Implementation-status correction (2026-08-26)
+
+Commit `47a922eec6` records the full provider-authority ABI above and passed its
+highest-capability contract review. It does **not** admit a provider
+implementation. The attempted provider lane in
+`/tmp/spkc-lexical-provider-z15Uhp/repo` stopped at its pre-runtime review cap
+and produced no in-scope product or oracle edits. A fresh implementation must
+therefore begin from the complete final ABI in Sections 39.1-39.3 and detail
+design Section 17.7; the rejected minimal nine-field adapter is not an
+acceptable starting contract.
+
+The standalone rerank-evidence candidate in
+`/tmp/spkc-rerank-evidence4-aIcFIZ/repo` is likewise **not admitted** and has no
+commit. Its two untracked files are
+`examples/05_stdlib/spipe/src/search/rerank_evidence.js` and
+`examples/05_stdlib/spipe/test/unit/search_rerank_evidence_test.js`. Focused
+`16/16`, full unit `190/190`, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4 `9/9`, and
+legacy, security, workflow, and performance checks passed. After the third
+verify/fix cycle, however, final highest-capability review found unresolved
+`limit_exceeded` precedence for oversized derived evidence arrays and an
+unresolved semantic-contract-string binding. Those green commands are retained
+evidence, not admission. A fresh session must repair and review exactly that
+two-file pair.
+
+The authoritative next order is: implement and admit the complete provider
+authority bridge; repair and admit the rerank-evidence pair; then build the
+integrated search pipeline. AC-4 remains open.

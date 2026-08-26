@@ -1195,3 +1195,27 @@ cross-restart durability. Exact schemas/preimages and test requirements are in
 detail design Section 17.7. Until those tests and highest-capability review
 pass, report the bridge as **contract frozen, not conforming** and keep AC-4
 open.
+
+#### Current operator handoff (2026-08-26)
+
+Treat commit `47a922eec6` as a reviewed provider-authority **contract**, not a
+provider implementation. The attempt at
+`/tmp/spkc-lexical-provider-z15Uhp/repo` ended at the pre-runtime review cap
+without an in-scope product or oracle edit. A fresh implementation must follow
+the complete ABI above and detail design Section 17.7. Do not resume from the
+rejected minimal adapter that only manufactures the visible nine-field
+projection.
+
+Do not consume `/tmp/spkc-rerank-evidence4-aIcFIZ/repo` as admitted code. Its
+`src/search/rerank_evidence.js` and
+`test/unit/search_rerank_evidence_test.js` are untracked, uncommitted candidate
+files. Focused `16/16`, full unit `190/190`, Wave 2 `9/9`, Wave 3 `25/25`, Wave
+4 `9/9`, legacy, security, workflow, and performance checks are green, but the
+third-cycle final highest-capability review still found two blockers: preserve
+`limit_exceeded` precedence for oversized derived evidence arrays, and bind the
+semantic contract string to the admitted consumer contract. Repair and review
+that exact pair in a fresh session; do not rerun unchanged green gates first.
+
+Resume in this order: provider implementation/admission, rerank-evidence
+repair/admission, then integrated pipeline. Keep AC-4 open until the final
+pipeline oracle passes.

@@ -2213,3 +2213,30 @@ lexical P95 below 100 ms on 50,000 artifacts, zero process spawn/file scan/
 retry sleep on the hot path, bounded 64 MiB evidence-store memory, and no
 unbounded cache. Startup remains below 250 ms. These stay candidate targets
 until the implementation oracle and measured receipts pass; AC-4 remains open.
+
+### 17.8 Current admission ledger (2026-08-26)
+
+The ABI in Section 17.7 is frozen and review-passed in commit `47a922eec6`, but
+the provider product is not implemented or conforming. The implementation
+attempt at `/tmp/spkc-lexical-provider-z15Uhp/repo` ended at the pre-runtime
+review cap with no in-scope edit. Resume in a fresh session from the complete
+Section 17.7 ABI, including authority, bounded store, replay/tombstone,
+authenticated cursor, two-clock checks, and exact error precedence. Do not
+revive the rejected minimal adapter that merely fabricates the nine-field
+projection.
+
+The rerank-evidence candidate at
+`/tmp/spkc-rerank-evidence4-aIcFIZ/repo` contains only the untracked product
+`examples/05_stdlib/spipe/src/search/rerank_evidence.js` and oracle
+`examples/05_stdlib/spipe/test/unit/search_rerank_evidence_test.js`; it has no
+admission commit. Focused `16/16`, full unit `190/190`, Wave 2 `9/9`, Wave 3
+`25/25`, Wave 4 `9/9`, plus legacy, security, workflow, and performance gates
+passed. Final highest-capability review after the third cycle still rejected
+the pair because oversized derived evidence arrays do not preserve the
+contracted `limit_exceeded` precedence and the semantic contract string is not
+correctly bound to the admitted consumer contract. A fresh session must fix
+and review exactly these two files.
+
+No earlier green result changes the dependency order: provider implementation
+and admission first, rerank-evidence admission second, integrated pipeline
+third. AC-4 remains open.
