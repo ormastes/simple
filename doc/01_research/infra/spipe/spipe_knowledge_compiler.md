@@ -2913,8 +2913,10 @@ projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
 normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
 pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
 issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1` has the identical
-binding plus `lastSortKey`; both are verified solely by the branded signed
-`AuthorizationPort` contract.
+binding only as a historical shorthand. The sole cursor ABI is architecture
+§21.1: it signs the trusted worktree claim and bounded `pagePosition`, has its
+own domain-separated identity/signing preimages, and is verified only by the
+required same-port extension.
 
 The resolver directly validates that the selected immutable snapshot exists,
 belongs to the requested workspace/project, carries the stated revision, and
@@ -2969,6 +2971,8 @@ resolveCanonicalAlias(view, { normalizedAliasUri })
   -> Result<CanonicalTargetCandidateV1, SnapshotAuthorityError>
 listDirectoryTarget(view, { viewKind, normalizedLogicalPath, selectorDigest })
   -> Result<CanonicalDirectoryTargetV1, SnapshotAuthorityError>
+createExpectedReadBindingV1(view, canonicalTargetOrDirectory, normalizedRequest)
+  -> Result<ExpectedReadBindingV1, SnapshotAuthorityError>
 ```
 
 `CanonicalTargetCandidateV1` contains only normalized canonical
@@ -2976,9 +2980,11 @@ listDirectoryTarget(view, { viewKind, normalizedLogicalPath, selectorDigest })
 cannot be accepted as a `CanonicalTargetV1`. `CanonicalTargetV1` contains the canonical kind/UID, immutable content or
 section locator, and source-manifest digest; it cannot be constructed by URI,
 MCP, or materializer adapters. `ProjectionPortV1` is separately branded and
-accepts only a `SnapshotAuthorityViewV1` plus a resolved canonical target. It
-may list/render deterministic read-only projections, but cannot open a raw
-snapshot, infer a target from a path, or refresh the index. The manifest must
+accepts only same-authority opaque inputs: `render(authorityView,
+canonicalTarget,verifiedReadGrant)` or `list(authorityView,directoryTarget,
+verifiedReadGrant,verifiedCursorGrantOrNull)`. It may list/render deterministic
+read-only projections, but cannot open a raw snapshot, infer a target from a
+path, or refresh the index. The manifest must
 include a deterministic inventory of artifact, section, trace, diagnostics,
 and directory projection entries sufficient to answer these operations without
 repository scanning.
@@ -2988,7 +2994,8 @@ workspace (including its worktree) in `WorkspaceRegistry`; open and validate
 the receipt-named snapshot as an untrusted candidate through
 `SnapshotAuthorityPortV1`; resolve a legacy alias through the sealed authority
 view, if present; prove the canonical target/directory in that view; derive
-the expected binding; obtain and verify a fresh read receipt; then call
+`ExpectedReadBindingV1`, including `authorityInstanceUid` and
+`authorityManifestDigest`; obtain and verify a fresh read receipt; then call
 `ProjectionPortV1`. Any unavailable workspace/worktree, manifest, revision,
 inventory item, or binding mismatch is the same bounded public denial class
 and reaches neither rendering nor a filesystem path. This inserts a Wave 5a
@@ -3037,12 +3044,44 @@ snapshot/revision only as an untrusted candidate and validate it against the
 registry and sealed manifest; for a legacy URI, resolve its sealed alias only
 to obtain a canonical candidate and then call `resolveCanonicalTarget` to
 prove that candidate's membership; for a canonical URI, prove its target
-directly inside that authority view; derive `expectedBinding` solely from the
-proven view, target, and normalized request; verify the receipt against that
-binding; then invoke ProjectionPort. Alias resolution is neither authorization
-nor target proof, and authorization cannot precede that proof. Receipt text
-never supplies an accepted target. A
-receipt has no `worktreeUid`; this ABI remains frozen, and worktree binding is
-proved transitively by the verified snapshot/aggregate manifest tuple selected
-by the exact registry workspace/worktree record. Every failure coalesces to
-the existing bounded public denial.
+directly inside that authority view; derive `ExpectedReadBindingV1` solely from
+the proven view, target, and normalized request, including its
+`authorityInstanceUid` and `authorityManifestDigest`; verify the canonical-read receipt
+against that binding; then either render with the returned read grant or, for a
+directory, verify an inbound cursor against that grant, list, and issue an
+outbound cursor from the deterministic next position. Alias resolution is
+neither authorization nor target proof, and authorization cannot precede that
+proof. Receipt text never supplies an accepted target. A
+legacy read receipt has no `worktreeUid`; its verified opaque grant receives
+that trusted value together with `authorityInstanceUid` and
+`authorityManifestDigest` from the sealed `ExpectedReadBindingV1`, while the
+cursor receipt signs the worktree. Those authority claims are never derived by
+a cursor, URI, or projection adapter. Every failure coalesces to the existing
+bounded public denial.
+
+## 43. Cursor authorization prerequisite found during Wave 5a (2026-08-26)
+
+Source inspection shows a material implementation gap: the concrete
+`examples/05_stdlib/spipe/src/core/authorization.js` has Trust and Edge receipt
+operations, but no admitted fully-bound cursor issuer/verifier. The selected
+remedy is a backward-compatible required extension of the existing branded
+composition-root port, not a generic signer or a second authority root.
+
+Canonical-read verification produces an opaque `VerifiedReadGrantV1`. Although
+the compatibility read receipt itself lacks `worktreeUid`, the grant contains
+that claim together with `authorityInstanceUid` and `authorityManifestDigest`
+only because `AuthorizationPortV1` copies all three from the sealed
+`ExpectedReadBindingV1` supplied after SnapshotAuthority target proof. Cursor
+issue derives its complete binding from this grant and signs the worktree. This
+removes the unsafe alternative of a later adapter deriving worktree identity.
+
+Key rotation is durable policy, not a cache replacement. The one policy record
+and its uniquely replay-safe rotation records transition `pending`, `current`,
+verification-only `grace`, and permanently `revoked` keys; only the due-
+transition operation advances the current cursor revocation epoch. Pending keys
+cannot verify, current keys sign and verify, grace keys verify only, and
+revoked keys cannot be used. Restart reloads this durable state and fails
+closed without the current private signing handle. The exact ABI, fields,
+canonical bytes, and transition rules are architecture §21 and MCP detail
+design §5/§12; they are acceptance prerequisites rather than proof that Wave 5
+resources exist.

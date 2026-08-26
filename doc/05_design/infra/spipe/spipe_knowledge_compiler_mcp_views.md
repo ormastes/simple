@@ -66,8 +66,10 @@ ports; they do not parse or scan repositories directly:
 ```text
 WorkspaceRegistry.open(workspace_id) -> KnowledgeSnapshot
 ResourceResolver.resolve(snapshot, uri) -> ResourceTarget
-ProjectionPort.list(snapshot, target, cursor, limit) -> ResourcePage
-ProjectionPort.read(snapshot, target, range) -> ResourceContent
+ProjectionPortV1.render(authorityView, canonicalTarget, verifiedReadGrant)
+  -> Result<ProjectionDocumentV1, ProjectionError>
+ProjectionPortV1.list(authorityView, directoryTarget, verifiedReadGrant, verifiedCursorGrantOrNull)
+  -> Result<ProjectionPageV1, ProjectionError>
 Materializer.sync(snapshot, view, output_root) -> MaterializeReceipt
 ```
 
@@ -179,16 +181,15 @@ lifecycle grouping, and trace gaps. Limits are:
 - cursor pagination before either bound would be exceeded.
 
 A cursor is an opaque, versioned `CursorReceiptV1`, signed by the same admitted
-receipt authority as reads. Its canonical signed payload binds **authority
-key/epoch**, workspace UID, project UID or null, snapshot ID, revision ID, view
-kind, normalized logical path, normalized filters, effective authorization
-scope digest, ordering version, last sort key, and the issued page limit. The
-next request independently resolves and authorizes the URI, then compares every
-binding before consulting the cursor position. A valid receipt with a different
-authority, workspace, snapshot, view, scope, selector, or limit is
-`stale_cursor`; it never silently skips, duplicates, remaps, or discloses
-results. Cursor verification never substitutes a current default workspace or
-current snapshot.
+receipt authority as reads. Its sole canonical schema is architecture §21.1:
+it additionally signs the trusted worktree binding and a bounded canonical
+`pagePosition`, rather than an informal last-sort-key field. The next request
+independently proves and authorizes the URI, then verifies the cursor against
+the resulting opaque read grant before consulting that position. A mismatched
+receipt is internally `stale_cursor` and externally the bounded
+`not_found_or_unauthorized` class; it never silently skips, duplicates,
+remaps, or discloses results. Cursor verification never substitutes a current
+default workspace or snapshot.
 
 `AuthorizationPort` is a branded, real signed-verifier boundary, not a
 structural JavaScript object or duck-typed callback. `createAuthorizationPort`
@@ -196,9 +197,20 @@ returns an unforgeable branded instance after it loads an issuer/algorithm/key
 allowlist and verified key epoch. `verifyCanonicalReadReceiptV1(receipt,
 expectedBinding, clockNowMs)` verifies the brand, protocol version, canonical
 payload bytes, signature, issuer/key/epoch allowlist, revocation epoch,
-`issuedAtMs <= clockNowMs < expiresAtMs`, and exact expected binding. It returns
-only an opaque verified-read grant; parser, projection, and cursor modules
+`issuedAtMs <= clockNowMs < expiresAtMs`, and exact `ExpectedReadBindingV1`,
+including `authorityInstanceUid` and `authorityManifestDigest`. It returns only
+an opaque verified-read grant; parser, projection, and cursor modules
 cannot construct a grant or accept `{ verify() {} }` substitutes.
+
+The required same-port extension is `issueCursorReceiptV1(readGrant,
+{pagePosition, requestedExpiresAtMs}, clockNowMs)`,
+`verifyCursorReceiptV1(receipt, readGrant, clockNowMs)`,
+`rotateCursorReceiptKeyV1(request, clockNowMs)`, and
+`applyDueCursorReceiptKeyTransitionsV1(clockNowMs)`. It is not currently
+admitted merely because canonical-read verification exists. The read grant is
+opaque and carries the sealed `ExpectedReadBindingV1`'s trusted `worktreeUid`,
+`authorityInstanceUid`, and `authorityManifestDigest`; cursor issuance derives
+all other binding fields from it, not from an adapter request.
 
 MIME types are `inode/directory` for directory resources, `text/markdown` for
 rendered documents, and `application/vnd.spipe.sdn` for structured graph data.
@@ -580,8 +592,13 @@ SnapshotAuthorityPortV1.resolveCanonicalAlias(
 SnapshotAuthorityPortV1.listDirectoryTarget(
   view, {viewKind, normalizedLogicalPath, selectorDigest}
 ) -> Result<CanonicalDirectoryTargetV1, SnapshotAuthorityError>
-ProjectionPortV1.list(view, directoryTarget, pageRequest) -> Result<ProjectionPageV1, ProjectionError>
-ProjectionPortV1.render(view, canonicalTarget) -> Result<ProjectionDocumentV1, ProjectionError>
+SnapshotAuthorityPortV1.createExpectedReadBindingV1(
+  view, canonicalTargetOrDirectory, normalizedRequest
+) -> Result<ExpectedReadBindingV1, SnapshotAuthorityError>
+ProjectionPortV1.render(authorityView, canonicalTarget, verifiedReadGrant)
+  -> Result<ProjectionDocumentV1, ProjectionError>
+ProjectionPortV1.list(authorityView, directoryTarget, verifiedReadGrant, verifiedCursorGrantOrNull)
+  -> Result<ProjectionPageV1, ProjectionError>
 ```
 
 `CanonicalTargetCandidateV1` contains only normalized canonical kind/UID and
@@ -601,11 +618,15 @@ resolve the named workspace and worktree exactly; (3) open the receipt-named
 authority snapshot only as an untrusted candidate; (4) a legacy alias resolves
 through that view's sealed alias index only to a canonical candidate, which is
 then passed to `resolveCanonicalTarget`, while a canonical URI proves its
-target/directory directly; (5) derive expected receipt binding from that
-proved target and verify the receipt through `AuthorizationPortV1`; (6) ask
-ProjectionPort to list/render. Every error before step 6 has the bounded public
-denial class and cannot disclose a canonical path. An alias never contributes
-authority or bypasses target proof; authorization never precedes that proof.
+target/directory directly; (5) create the trusted `ExpectedReadBindingV1` from
+that sealed proof, including `authorityInstanceUid` and
+`authorityManifestDigest`, and verify the canonical-read receipt through
+`AuthorizationPortV1`; (6) a direct read calls `render` with that grant, while
+a directory list verifies its inbound cursor against the same grant, calls
+`list`, then issues the outbound cursor from the page's next position. Every
+error before a ProjectionPort call has the bounded public denial class and
+cannot disclose a canonical path. An alias never contributes authority or
+bypasses target proof; authorization never precedes that proof.
 
 Wave 5a acceptance uses this matrix before any URI implementation is admitted:
 
@@ -650,8 +671,29 @@ The resolver does: parse; exact workspace/worktree lookup; open the receipt's
 snapshot/revision as an untrusted candidate and validate its sealed inventory;
 for an alias, resolve only a canonical candidate then prove it with
 `resolveCanonicalTarget`; for a canonical URI, prove its target directly;
-derive the expected receipt binding from the proved view/target/request; verify
-the receipt; then call ProjectionPort. `CanonicalReadReceiptV1` deliberately has no worktree
-field: the port proves it transitively through the verified manifest tuple, so
-the frozen receipt ABI does not change. All pre-render failures coalesce to the
+derive `ExpectedReadBindingV1` from the proved view/target/request, including
+its `authorityInstanceUid` and `authorityManifestDigest`; verify the
+canonical-read receipt; for a directory, verify any inbound cursor against
+the opaque read grant, list, and issue an outbound cursor only from the returned
+next position; for a direct target, render with the read grant.
+`CanonicalReadReceiptV1` deliberately has no serialized worktree field, but
+`VerifiedReadGrantV1` receives the sealed `ExpectedReadBindingV1`'s trusted
+worktree, authority-instance, and authority-manifest claims; cursor code never
+derives them. Architecture §21 is the sole cursor
+schema and durable-rotation contract. All pre-render failures coalesce to the
 bounded public denial class.
+
+### 12.2 Cursor policy integration gate
+
+The detail implementation persists exactly one `CursorReceiptKeyPolicyV1` with
+ordered key and unique rotation records. `rotateCursorReceiptKeyV1` writes a
+future `pending` key through a policy-version CAS; the root-only
+`applyDueCursorReceiptKeyTransitionsV1` durably changes it to `current`, moves
+the prior current key to verification-only `grace`, then to `revoked` at the
+recorded deadline and advances the cursor revocation epoch exactly once. A
+pending key neither signs nor verifies; a current key signs and verifies; grace
+verifies only; revoked does neither. A restart reuses durable state and fails
+closed if its current private KeyProvider handle is unavailable. The resolver
+may consume only opaque verified grants and never performs these transitions on
+its request path. The field order, expiry rule, and rotation request are those
+in architecture §21, so this document does not define a second ABI.

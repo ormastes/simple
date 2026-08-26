@@ -94,22 +94,38 @@ ports or parent-applied deltas.
 `AuthorizationPort` is an authenticating composition-root service, not a
 shape-compatible object accepted from a handler. The composition root creates a
 branded `AuthorizationPortV1` only after loading its signature verifier,
-issuer/algorithm/key allowlist, and key/revocation epoch. It alone exposes:
+issuer/algorithm/key allowlist, and durable key/revocation policy. The following
+is the **required** cursor/read extension of that same port (not a description
+of the currently admitted Trust/Edge-only implementation):
 
 ```text
 verifyCanonicalReadReceiptV1(receipt, expected_binding, clock_now_ms)
   -> Result<VerifiedReadGrantV1, AdmissionFailure>
-signCursorReceiptV1(binding, page_position, expiry) -> CursorReceiptV1
-verifyCursorReceiptV1(receipt, expected_binding, clock_now_ms)
+issueCursorReceiptV1(verified_read_grant, {pagePosition, requestedExpiresAtMs}, clock_now_ms)
+  -> Result<CursorReceiptV1, AdmissionFailure>
+verifyCursorReceiptV1(receipt, verified_read_grant, clock_now_ms)
   -> Result<VerifiedCursorGrantV1, AdmissionFailure>
+rotateCursorReceiptKeyV1(rotation_request, clock_now_ms)
+  -> Result<CursorReceiptKeyPolicyV1, AdmissionFailure>
+applyDueCursorReceiptKeyTransitionsV1(clock_now_ms)
+  -> Result<CursorReceiptKeyPolicyV1, AdmissionFailure>
 ```
 
-`expected_binding` is a closed tuple of authority key/epoch, workspace UID,
-project UID-or-null, snapshot ID, revision ID, view kind, normalized logical
-path, normalized selector/filter digest, effective scope digest, ordering
-version, and page limit. A parser/projection module receives only verified
-grants; it cannot create a receipt, widen a selector, or choose a replacement
-workspace/snapshot. The root URI grammar is likewise closed: only
+`ExpectedReadBindingV1` (`expected_binding`) is an authority-created closed
+tuple of authority key/epoch, **authority instance UID**, **authority manifest
+digest**, normalized alias URI-or-null, canonical URI, workspace UID, project
+UID-or-null, **worktree UID**, target kind/UID, snapshot ID, revision ID, view kind,
+normalized logical path, normalized selector/filter digest, effective scope
+digest, ordering version, page limit, and policy version. The signed legacy
+`CanonicalReadReceiptV1` deliberately lacks a worktree field for compatibility;
+on successful verification the port copies the sealed expected binding into the
+opaque `VerifiedReadGrantV1`. That grant's trusted worktree, authority-instance,
+and authority-manifest claims are therefore not derived by cursor, URI, or
+projection code. The complete receipt, grant,
+cursor, and durable-rotation schemas are frozen in §21. A parser/projection
+module receives only verified grants; it cannot create a receipt, widen a
+selector, or choose a replacement workspace/snapshot. The root URI grammar is
+likewise closed: only
 `spipe://workspace/{workspace}/` denotes a workspace directory; the un-slashed
 form is malformed rather than normalized.
 
@@ -1302,23 +1318,28 @@ is uncommitted and not admitted. Wave 5 URI execution remains pending. A new
 implementation starts from this architecture, not from the rejected code.
 
 `ResourceResolver` canonicalizes a legacy alias only to a candidate, proves
-that candidate's target membership, and only then authorizes. It calls
-only `AuthorizationPort.verifyCanonicalReadReceiptV1`, which allowlists the
+that candidate's target membership, and only then authorizes. It first calls
+`AuthorizationPort.verifyCanonicalReadReceiptV1`, which allowlists the
 version/key, verifies the signed `D-` payload (`spipe-uri-read-v1\0` plus
 canonical JSON), requires `decision=allow`, a live clock window, and the
-current revocation epoch, then compares every field with the direct resolved
-target and pinned `KnowledgeSnapshot`; any difference causes fresh
-authorization or a closed failure. Thus `spipe://skill` cannot be read under
-an alias-only grant.
+current revocation epoch, then returns the trusted read grant. A non-paginated
+read calls `ProjectionPortV1.render` with that grant. A directory list verifies
+an inbound cursor against that same grant before `ProjectionPortV1.list`, then
+issues an outbound cursor from the returned next position. Any difference
+causes fresh authorization or a closed failure. Thus `spipe://skill` cannot be
+read under an alias-only grant.
 
 `CanonicalReadReceiptV1` has exactly `{receiptVersion, authorityKeyId,
 authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
 projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
 normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
 pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
-issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1` has that same
-binding plus `lastSortKey`; both use the sole verifier method names frozen in
-§3.1 and no `verifyCanonicalTargetReceiptV1` alias exists.
+issuerKeyId, revocationEpoch, signature}`. Earlier prose that described a
+cursor as "the same binding plus" a sort key is superseded; the sole complete
+cursor ABI, including trusted worktree binding and `pagePosition`, is §21.1.
+Both use only the sole
+verifier method names frozen in §3.1 and no
+`verifyCanonicalTargetReceiptV1` alias exists.
 
 Before authorization and rendering, the resolver directly verifies that the
 snapshot exists, is immutable, belongs to the selected workspace/project, has
@@ -1366,8 +1387,18 @@ ResourceResolver
   -> SnapshotAuthorityPortV1.openBoundSnapshot(binding)
   -> SnapshotAuthorityPortV1.resolveCanonicalAlias(...) -> resolveCanonicalTarget(...)
      (or resolveCanonicalTarget(...) directly for canonical URIs)
-  -> AuthorizationPortV1.verifyCanonicalReadReceiptV1(...)
-  -> ProjectionPortV1.render/list(authorityView, canonicalTarget)
+  -> SnapshotAuthorityPortV1.createExpectedReadBindingV1(authorityView,
+       canonicalTargetOrDirectory, normalizedRequest)
+       -> ExpectedReadBindingV1
+  -> AuthorizationPortV1.verifyCanonicalReadReceiptV1(..., ExpectedReadBindingV1, ...)
+       -> verifiedReadGrant
+  -> direct: ProjectionPortV1.render(authorityView, canonicalTarget, verifiedReadGrant)
+     list: AuthorizationPortV1.verifyCursorReceiptV1(..., verifiedReadGrant, ...)
+           -> verifiedCursorGrant
+           -> ProjectionPortV1.list(authorityView, directoryTarget, verifiedReadGrant,
+                                    verifiedCursorGrantOrNull)
+           -> AuthorizationPortV1.issueCursorReceiptV1(verifiedReadGrant,
+                                                       {pagePosition: nextPosition, requestedExpiresAtMs}, ...)
 ```
 
 The binding is exactly `{workspaceUid, projectUidOrNull, worktreeUid,
@@ -1416,10 +1447,137 @@ The precise call order is: parse; exact registry workspace/worktree lookup;
 open the receipt-named authority snapshot/revision as an *untrusted candidate*
 and verify its sealed inventory; a legacy alias yields only a canonical
 candidate, then `resolveCanonicalTarget` proves that candidate wholly inside
-the view (canonical URIs prove their target directly); derive expected receipt
-binding from the proved view/target/request; verify the receipt; render through
-ProjectionPort. Thus alias lookup is neither proof nor authorization, and
-receipt verification cannot precede target proof. `worktreeUid` is intentionally not a
-receipt field: it is transitively proved by the verified snapshot/aggregate
-tuple selected by the registry. No receipt, alias, URI, or projection adapter
-can fabricate a target before that proof.
+the view (canonical URIs prove their target directly); derive the closed
+`ExpectedReadBindingV1` from the proved view/target/request, including
+`authorityInstanceUid` and `authorityManifestDigest`; verify the canonical-read
+receipt;
+for a list, verify the inbound cursor against the resulting read grant, list,
+and issue the next cursor; for a direct read, render with the read grant. Thus
+alias lookup is neither proof nor authorization, and
+receipt verification cannot precede target proof. `worktreeUid` is intentionally
+absent from the legacy read receipt but is a trusted claim in the verified read
+grant and a signed field of the cursor receipt, as §21.1 defines. No receipt,
+alias, URI, or projection adapter can fabricate a target before that proof.
+
+## 21. Cursor-receipt authorization prerequisite (2026-08-26)
+
+<!-- codex-architecture -->
+
+The concrete port currently admits Trust and Edge receipt verification only.
+Wave 5 URI, MCP pagination, and materialization are consequently
+**non-admitted** until the required §3.1 extension is implemented and reviewed.
+It extends the same branded composition-root `AuthorizationPortV1`; a local
+cursor signer, generic signature helper, receipt map, or Trust/Edge adapter is
+not an implementation.
+
+### 21.1 Sole read, grant, cursor, and ProjectionPort ABIs
+
+`CanonicalReadReceiptV1` remains exactly `{receiptVersion, authorityKeyId,
+authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
+projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
+pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
+issuerKeyId, revocationEpoch, signature}`. Its only verification result is the
+opaque, branded `VerifiedReadGrantV1`. Its canonical claims are exactly the
+verified receipt binding **plus** `{worktreeUid, authorityInstanceUid,
+authorityManifestDigest}` copied from the sealed `ExpectedReadBindingV1` passed
+to verification. Its complete closed tuple is the §3.1 authority key/epoch,
+authority instance UID, authority manifest digest, normalized alias URI-or-null,
+canonical URI, workspace/project/worktree UIDs, target kind/UID, snapshot/revision,
+view kind, normalized logical path, selector/effective-scope digests, ordering,
+page limit, and policy version. `ExpectedReadBindingV1` is created only from the proven
+`SnapshotAuthorityViewV1`, canonical target/directory, and normalized request;
+it is not an adapter-owned object. Thus the grant's `worktreeUid` is trusted
+authority input even though it is intentionally not serialized in the legacy
+read receipt.
+
+`CursorReceiptV1` is exactly `{receiptVersion, receiptKind, authorityKeyId,
+authorityKeyEpoch, authorityInstanceUid, authorityManifestDigest,
+normalizedAliasUriOrNull, canonicalUri, workspaceUid, projectUidOrNull,
+worktreeUid, targetKind, targetUid, snapshotUid, revisionId,
+viewKind, normalizedLogicalPath, selectorDigest, effectiveScopeDigest,
+orderingVersion, pageLimit, pagePosition, policyVersion, issuedAtMs,
+expiresAtMs, receiptUid, issuerKeyId, algorithm, revocationEpoch, signature}`;
+`receiptVersion="v1"` and `receiptKind="cursor"` are fixed. `pagePosition` is
+a canonical JSON array of one to eight scalar sort-key values (NFC text or
+bounded safe integers); objects, paths, controls, NaN, and ambiguous numeric
+forms are rejected. `issueCursorReceiptV1` derives every non-position binding
+field from `VerifiedReadGrantV1`; callers cannot supply a cursor binding. It
+sets `issuedAtMs=clockNowMs` and accepts an integer expiry only when
+`issuedAtMs < requestedExpiresAtMs <= min(readGrant.expiresAtMs,
+issuedAtMs + policy.maxTtlMs)` without overflow.
+
+The identity preimage is every cursor field except `receiptUid` and
+`signature`; `receiptUid` is lowercase SHA-256 of UTF-8
+`spipe-cursor-receipt-id-v1\0` followed by its canonical JSON. The signing
+payload is every field except `signature`, including that derived receipt UID;
+signing bytes are UTF-8 `spipe-cursor-receipt-v1\0` followed by canonical JSON
+and `signature` is unpadded base64url. Canonical JSON uses lexicographic field
+ordering, NFC strings, base-10 integers, and no omitted/null-equivalent fields.
+This domain separation prevents Trust, Edge, and canonical-read signatures from
+being accepted as cursors.
+
+The sole `ProjectionPortV1` ABI is:
+
+```text
+ProjectionPortV1.render(authorityView, canonicalTarget, verifiedReadGrant)
+  -> Result<ProjectionDocumentV1, ProjectionError>
+ProjectionPortV1.list(authorityView, directoryTarget, verifiedReadGrant, verifiedCursorGrantOrNull)
+  -> Result<ProjectionPageV1, ProjectionError>
+```
+
+It accepts only mutually matched opaque branded values from the same authority
+instance and repeats binding/manifest equality checks. The resolver verifies an
+inbound cursor before `list`; after a deterministic page returns its next
+position, the authorization port issues the outbound cursor. End-of-list emits
+none. On outbound issue failure the page is discarded. No URI, projection, or
+materializer adapter may reconstruct a grant, infer a target, refresh a
+snapshot, or call a raw store.
+
+### 21.2 Durable cursor key policy and rotation
+
+`CursorReceiptKeyPolicyV1` is the one durable canonical record:
+`{policyVersion, currentReceiptRevocationEpoch, currentAuthorityKeyId,
+keyRecords, rotationRecords}`. `keyRecords` are canonically ordered by
+`authorityKeyEpoch` then key ID and contain exactly `{authorityKeyId, algorithm,
+authorityKeyEpoch, issuerKeyId, publicVerificationKey, status, activateAtMs,
+graceUntilMsOrNull, revokedAtMsOrNull, revocationEpochAtRevocationOrNull}`.
+`status` is one of `pending`, `current`, `grace`, or `revoked`.
+`rotationRecords` are canonically ordered by `rotationUid` and contain the
+immutable accepted request and committed policy version; a duplicate
+`rotationUid` with different bytes fails, while an identical replay returns the
+already recorded policy.
+
+`rotateCursorReceiptKeyV1` atomically appends one `pending` record after a
+compare-and-swap of `policyVersion`; its request is exactly `{rotationUid,
+expectedPolicyVersion, newAuthorityKeyId, newAlgorithm, newAuthorityKeyEpoch,
+newIssuerKeyId, newPublicVerificationKey, activateAtMs, priorGraceUntilMs,
+revocationEpochAtPriorRevocation}`. Epochs and the revocation epoch are
+strictly monotonic, one key ID maps to one algorithm, and
+`clockNowMs <= activateAtMs < priorGraceUntilMs` is required. Only the
+composition-root administrator invokes rotation or due transitions.
+
+`applyDueCursorReceiptKeyTransitionsV1` is the only state-transition writer.
+At `activateAtMs`, it atomically changes the pending record to `current` and
+the former current record to verification-only `grace`; at `priorGraceUntilMs`,
+it changes that grace record to `revoked`, records its revocation time and
+epoch, and advances `currentReceiptRevocationEpoch` to the recorded monotonic
+value. It durably commits each transition before use, is restart-idempotent,
+and fails closed if time and durable state disagree. A pending key signs or
+verifies nothing; current signs and verifies; grace verifies only; revoked
+neither signs nor verifies. Verification requires a permitted record and the
+receipt's exact current revocation epoch, so the durable revocation transition
+invalidates pre-revocation receipts without changing their bindings. Private
+signing handles are non-exportable, purpose/environment-scoped `KeyProvider`
+material; only public verification policy is portable. Restart reloads the
+policy and provider, and issuance fails closed without the current private
+handle.
+
+The required call order is sealed authority view and target proof; creation of
+the closed `ExpectedReadBindingV1`, including `authorityInstanceUid` and
+`authorityManifestDigest`; canonical-read verification; inbound cursor
+verification against that read grant; ProjectionPort call; then outbound issue.
+Every pre-projection failure has zero ProjectionPort calls and the bounded
+public `not_found_or_unauthorized` response. A post-list issue failure discards
+the page and uses that same response; telemetry may retain only a closed reason
+such as `stale_cursor`.

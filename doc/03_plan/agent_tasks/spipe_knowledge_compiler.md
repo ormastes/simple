@@ -985,6 +985,40 @@ tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+## 12. Cursor authorization prerequisite (2026-08-26)
+
+**Status: design frozen; implementation non-admitted.** The existing concrete
+`AuthorizationPortV1` is Trust/Edge-only. Wave 5 URI/MCP/materializer work must
+wait for the required §3.1 extension of that same branded port; no lane may
+create a parallel signer or alter Trust/Edge receipt semantics.
+
+| Lane | Exclusive ownership | Published boundary | Gate |
+|---|---|---|---|
+| W5C-A authorization | `src/core/authorization.js` owner | read/cursor grants, durable cursor key policy | exact domain/brand/binding/expiry/revocation evidence |
+| W5C-B authority/projection | SnapshotAuthority + `src/view` integration owner | trusted expected read binding and sole ProjectionPort ABI | no raw authority claim or Projection call before proof |
+| W5C-C URI/MCP | view/MCP owner | inbound/outbound cursor adapter | blocked on W5C-A/B PASS |
+| W5C-D evidence | independent reviewer | real-port restart/rotation/fault matrix | W5C-01…W5C-10 PASS |
+
+The only projection operations are
+`render(authorityView,canonicalTarget,verifiedReadGrant)` and
+`list(authorityView,directoryTarget,verifiedReadGrant,verifiedCursorGrantOrNull)`.
+The inbound cursor is verified against the same opaque read grant before list;
+the returned deterministic next position is sent to `issueCursorReceiptV1`
+only after list. `VerifiedReadGrantV1` carries a sealed `ExpectedReadBindingV1`'s
+trusted worktree UID, authority-instance UID, and authority-manifest digest,
+despite its legacy read receipt not serializing the worktree field. The
+canonical schemas and the only durable key-policy state machine are
+architecture §21; no `lastSortKey`, `pageRequest`, or adapter-created grant is
+an ABI.
+
+W5C-A owns one durable `CursorReceiptKeyPolicyV1`, including unique rotation
+records and `pending -> current -> grace -> revoked` transitions. It must make
+the durable revocation-epoch advance restart-idempotent, preserve old
+verification only during grace, and fail closed for a missing current private
+KeyProvider handle. The final reviewer rejects any configuration that has a
+second rotation record shape, non-durable transition, or a cursor binding
+derived after read-grant verification.
+
 ## 11. Wave 5a snapshot-authority prerequisite and ownership (2026-08-26)
 
 The current URI lane is **non-admitted**. `ImmutableSnapshotStore` lacks a
@@ -996,15 +1030,17 @@ slice is accepted.
 | Lane | Exclusive ownership | Published boundary | Gate before downstream work |
 |---|---|---|---|
 | W5A-A Snapshot authority | `src/core`, `src/storage`, `src/workspace` integration owner | branded `SnapshotAuthorityPortV1`, opaque `SnapshotAuthorityViewV1`, inventory manifest | workspace/project/worktree/snapshot/revision and digest checks plus target membership |
-| W5A-B Projection | `src/view` | branded `ProjectionPortV1` consuming only authority views and canonical targets | no raw store, path inference, scan, or refresh request path |
-| W5A-C Evidence | focused unit/integration fixtures and system-plan mapping | W5A-01 through W5A-14 oracle evidence | independent highest-capability PASS |
+| W5A-B Projection | `src/view` | branded `ProjectionPortV1` consuming authority views, proven targets, and opaque verified grants | no raw store, path inference, scan, refresh, or adapter-created grant |
+| W5A-C Evidence | focused unit/integration fixtures and system-plan mapping | W5A-01 through W5A-15 oracle evidence | independent highest-capability PASS |
 | W5-D URI/MCP/materializer | `src/view`, `mcp` | resolver/resources/tools adapters | waits for all W5A gates; a sealed alias yields only a candidate, authority proves its canonical target, then receipt authorization occurs |
 
 The integration owner freezes these exact methods before sidecars work:
 `openBoundSnapshot(binding)`, `resolveCanonicalTarget(view, target)`,
 `resolveCanonicalAlias(view, alias)`, `listDirectoryTarget(view, selector)`,
-`ProjectionPortV1.list(...)`, and
-`ProjectionPortV1.render(...)`. The binding is exactly `{workspaceUid,
+`createExpectedReadBindingV1(view, canonicalTargetOrDirectory, normalizedRequest)`,
+`ProjectionPortV1.render(authorityView,canonicalTarget,verifiedReadGrant)`, and
+`ProjectionPortV1.list(authorityView,directoryTarget,verifiedReadGrant,verifiedCursorGrantOrNull)`.
+The authority binding is exactly `{workspaceUid,
 projectUidOrNull, worktreeUid, snapshotUid, revisionId}`. The final reviewer
 must reject structural substitutes, project-only snapshot reads, missing
 manifest target inventory, and any URI rendering before target proof. This is
@@ -1019,11 +1055,13 @@ project scope, and permits an explicit empty aggregate only. Resolver adapters
 first open and verify the receipt-named snapshot only as an untrusted
 candidate; a legacy alias yields only a canonical candidate, which must pass
 sealed `resolveCanonicalTarget` membership proof; only then verify the receipt
-against a binding derived from that proof. `worktreeUid` stays out
-of the frozen receipt ABI and is proved through the authority view's verified
-workspace/worktree/snapshot/revision tuple. Evidence must include tampered
-root, project mismatch, aggregate positives, and cross-instance genuine-brand
-mixing before W5-D begins.
+against an `ExpectedReadBindingV1` created from that proof, including its
+`authorityInstanceUid` and `authorityManifestDigest`. `worktreeUid` stays out
+of the legacy serialized read receipt but is a trusted `VerifiedReadGrantV1`
+claim, together with the two authority claims, copied from the sealed authority
+binding and a signed cursor field. Evidence
+must include tampered root, project mismatch, aggregate positives, and
+cross-instance genuine-brand mixing before W5-D begins.
 
 ### 10.23 Wave 5 URI-foundation non-admission and fresh lane (2026-08-26)
 
@@ -1042,8 +1080,11 @@ mixing before W5-D begins.
    projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
    normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
    pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
-   issuerKeyId, revocationEpoch, signature}` and `CursorReceiptV1` with the
-   same binding plus `lastSortKey`.
+   issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1`, verified
+   grants, and cursor-key rotation use only architecture §21's complete
+   contract: signed trusted worktree, `pagePosition`, domain-separated identity
+   and signing preimages, and one durable policy state machine. `lastSortKey`
+   is not an ABI field.
 3. **Snapshot gate.** Directly validate immutable snapshot existence,
    workspace/project ownership, revision, and target membership; URI/query text
    is never authority.
@@ -1063,8 +1104,10 @@ mixing before W5-D begins.
 6. **Fresh-v2 correction.** Before the new implementation starts, extend the
    frozen receipt tuple to include authority key/epoch, view, normalized
    selector/filter digest, ordering version, and page limit. Cursor receipts
-   use the same tuple plus page position and cannot be replayed against any
-   selector, including a foreign workspace. The composition root must reject
+   use only architecture §21.1's complete schema, including `receiptKind`,
+   trusted signed worktree, algorithm, and bounded page position; they cannot
+   be replayed against any selector, including a foreign workspace. The
+   composition root must reject
    structural/duck-typed “verifiers”; only an opaque branded real signed
    `AuthorizationPortV1` creates verified grants. The workspace-root success
    case is exactly `spipe://workspace/{workspace}/`; its un-slashed form is a

@@ -129,7 +129,8 @@ scenarios include:
   invalid algorithm/issuer/key/epoch, malformed signature, expired/revoked
   receipt, and receipt payloads whose authority/workspace/project/snapshot/
   revision/view/normalized-path/selector/scope/ordering/page-limit binding
-  differs from the request;
+  differs from the request; prove that the verified-read grant carries a
+  sealed, trusted worktree binding and that cursor issue cannot derive it;
 - accept one fully authorized canonical read and one next-page cursor in the
   same complete authority/workspace/project/snapshot/revision/view/path/
   selector/scope/ordering/page-limit tuple, then reject cursor reuse across
@@ -1533,10 +1534,11 @@ raw `ImmutableSnapshotStore` or a duck-typed substitute cannot satisfy it.
 | W5A-12 | Remove one otherwise valid aggregate contributor | Denial before target lookup or ProjectionPort call |
 | W5A-13 | Add an otherwise valid extra contributor or substitute one contributor root | Denial before target lookup or ProjectionPort call |
 | W5A-14 | Present the same contributor records in non-canonical order | Denial before target lookup or ProjectionPort call |
+| W5A-15 | Create `ExpectedReadBindingV1` only from a proven authority view, canonical target/directory, and normalized request; independently mismatch authority instance or manifest digest | Construction/verification denies structural or mismatched input before `AuthorizationPortV1` or ProjectionPort call; the closed tuple preserves both authority claims |
 
 The eventual MCP system spec uses `step("Browse virtual knowledge views")` and
 `check_spipe_virtual_view_safety`; its fail-fast helper remains fail-fast until
-these fourteen cases observe real ports. A Wave 5 URI candidate that proves only
+these fifteen cases observe real ports. A Wave 5 URI candidate that proves only
 syntax, receipt signatures, or mocked membership is `NOT-EVIDENCE`.
 
 ### 21.1 Seal and alias additions (repair cycle 2)
@@ -1557,10 +1559,13 @@ workspace-root, trace, diagnostics, and directory aggregate cases use the
 defined null-project `workspace_aggregate` scope; (d) project scope rejects
 null project while aggregate scope rejects a supplied project; (e) two genuine
 branded authority instances/views/targets cannot be cross-mixed; and (f) each
-receipt binding field is mutated independently. The worktree negative uses a
-valid receipt whose snapshot tuple belongs to another worktree, proving the
-receipt's intentionally absent worktree field is enforced transitively rather
-than silently ignored.
+`ExpectedReadBindingV1` field, including `authorityInstanceUid` and
+`authorityManifestDigest`, is mutated independently. The worktree negative
+uses a valid receipt whose snapshot tuple belongs to another worktree, proving
+the receipt's intentionally absent worktree field is enforced transitively
+rather than silently ignored; genuine branded cross-instance and
+manifest-digest mismatch negatives prove the two authority claims are equally
+closed rather than adapter-supplied.
 
 ### 21.3 Aggregate-manifest exactness
 
@@ -1573,3 +1578,28 @@ and a reordered equivalent list. Every variation must deny before target
 lookup or ProjectionPort calls; only byte-identical canonical manifest and
 authority tuple can be admitted. The same fixture verifies that a project
 scope containing this field, and an aggregate scope omitting it, reject.
+
+## 22. CursorReceiptV1 authorization admission matrix (2026-08-26)
+
+Wave 5 URI/MCP pagination is **NOT-EVIDENCE** until a real extension of the
+existing branded `AuthorizationPortV1` passes every case below. Trust/Edge-only
+behavior, a local signer, mock verifier, in-memory receipt table, or
+duck-typed grant cannot PASS.
+
+| ID | Setup/action | Required oracle |
+|---|---|---|
+| W5C-01 | Verify an authorized read after sealed authority proof, then issue a cursor | `ExpectedReadBindingV1` and opaque read grant contain exactly the sealed `worktreeUid`, `authorityInstanceUid`, and `authorityManifestDigest` claims; cursor signs all three and every other closed field |
+| W5C-02 | Mutate `authorityKeyId`, `authorityKeyEpoch`, `authorityInstanceUid`, `authorityManifestDigest`, workspace, project, worktree, snapshot, revision, target, view, path, selector, scope, order, limit, position, policy, issuer, epoch, or time field independently | Denial before ProjectionPort; same public bounded class |
+| W5C-03 | Substitute Trust, Edge, canonical-read, wrong algorithm, unknown issuer/key, forged receipt, or structural verifier/grant | Domain/brand/allowlist/signature denial; no fallback or disclosure |
+| W5C-04 | Use exact-before, exact-at, and exact-after expiry/revocation; request expiry beyond read grant or TTL | Only `issued <= now < expires` and current durable epoch pass; issue rejects overshoot |
+| W5C-05 | Restart with durable policy and KeyProvider, then verify/issue valid, expired, revoked, and foreign-policy cursors | Pre/post restart parity; no in-memory state; missing active private handle fails closed |
+| W5C-06 | Submit a rotation then apply due transitions before activation, at activation, during grace, and at prior-key revocation | Unique pending/current/grace/revoked transitions and only one durable revocation-epoch advance; old verification only in grace |
+| W5C-07 | Replay same rotation UID with identical bytes, then with changed bytes or stale policy version | Idempotent same-result replay; changed/stale input fails without duplicate durable record |
+| W5C-08 | Continue a positive multipage directory through restart and key grace | Stable ordering with no gap/duplicate; inbound cursor verifies against the same read grant and outbound receipt follows list |
+| W5C-09 | Recompute cursor identity preimage, UID, signing payload, and signature bytes from production fixture | UID excludes UID/signature; signing includes derived UID and excludes signature; canonical bytes are exact |
+| W5C-10 | Force outbound cursor issuance failure after a successful list | Page is discarded, no content leaks, and public response remains `not_found_or_unauthorized` |
+
+The execution ledger records the durable policy fixture and independent review
+receipt. Private telemetry may retain a closed reason such as `stale_cursor`,
+but no test accepts a public distinction between absent, hidden, unauthorized,
+or stale targets.
