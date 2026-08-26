@@ -40,6 +40,8 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::os::raw::{c_int, c_uint, c_void};
 use std::ptr;
+#[cfg(feature = "cuda")]
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use crate::value::{byte_array_bytes, RuntimeValue};
@@ -1529,19 +1531,43 @@ pub extern "C" fn rt_cuda_device_get(_device_id: i64) -> i64 {
     -3
 }
 
+#[cfg(feature = "cuda")]
+static CUDA_DEVICE_NAMES: OnceLock<Mutex<HashMap<i64, CString>>> = OnceLock::new();
+
+#[cfg(feature = "cuda")]
+fn cuda_device_names() -> &'static Mutex<HashMap<i64, CString>> {
+    CUDA_DEVICE_NAMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Get CUDA device name
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_device_name(device: i64) -> *const c_char {
+    if let Ok(names) = cuda_device_names().lock() {
+        if let Some(name) = names.get(&device) {
+            return name.as_ptr();
+        }
+    } else {
+        return c"Unknown".as_ptr();
+    }
+
     unsafe {
         let mut name_buf = [0i8; 256];
         let err = cuDeviceGetName(name_buf.as_mut_ptr(), 256, device as CUdevice);
         if err != 0 {
-            return b"Unknown\0".as_ptr() as *const c_char;
+            return c"Unknown".as_ptr();
         }
         let name = CStr::from_ptr(name_buf.as_ptr()).to_string_lossy().into_owned();
-        let cstr = CString::new(name).unwrap_or_default();
-        cstr.into_raw() // Leaked - caller should not free
+        let Ok(name) = CString::new(name) else {
+            return c"Unknown".as_ptr();
+        };
+        // Entries are never removed. HashMap growth may move the CString
+        // value, but its owned byte allocation (and therefore `as_ptr()`) is
+        // stable for the process lifetime.
+        let Ok(mut names) = cuda_device_names().lock() else {
+            return c"Unknown".as_ptr();
+        };
+        names.entry(device).or_insert(name).as_ptr()
     }
 }
 

@@ -1551,6 +1551,9 @@ Torch SFFI nor all SFFI may be described as verified safe.
   adding a duplicate dispatch path.
 - Remove redundant feature-path name allocation and the per-call CUDA error
   text allocation/leak; retain direct typed calls and existing validation.
+- Cache successful device names once per actual device handle; use static text
+  for invalid devices, preserve process-lifetime pointer validity, and bound
+  retained allocations by discovered devices rather than call count.
 - Add a source-only owner ratchet that checks exact writes, both-lane identity,
   and static error text without claiming signature admission.
 - Remaining production debt: 4,470 unsafe-tag gaps, 6,224 contract gaps, and

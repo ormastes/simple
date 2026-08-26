@@ -1287,6 +1287,15 @@ text now comes from static C strings rather than allocating and permanently
 leaking one `CString` per call. These changes remove allocation/memory costs;
 they add no per-call hashing, lookup, dispatch, or synchronization.
 
+The device-name provider is also changed from leaking one allocation on every
+query to a process-lifetime cache keyed by the actual CUDA device handle.
+Cache lookup is average O(1), successful names allocate once per device, and
+invalid handles return static text without entering the cache. The cache uses
+a mutex because device-name queries are control-plane operations; it replaces
+the substantially more expensive driver query, UTF-8 conversion, allocation,
+and leak on every repeated call. Returned byte allocations remain stable even
+if the map relocates its `CString` values, and entries are never removed.
+
 The production-source census moves to 2,789 unsafe-tagged declarations, 4,470
 unsafe-tag gaps, and 6,224 contract gaps. The `rt_*` subset has 3,307 unsafe-tag
 gaps and 5,035 contract gaps. Signed-admitted declarations remain zero without
