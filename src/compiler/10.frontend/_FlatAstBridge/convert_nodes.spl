@@ -46,6 +46,7 @@ use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
 use compiler.blocks.blocks.value.{BlockValue}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 
 # Iteration 17 probe plumbing (UNGATED, Trap D): trace ExprKind discs at
 # construction time to find where the stage4 flat-bridge Expr goes bad.
@@ -53,18 +54,10 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-# `rt_env_get` returns nil for an UNSET variable, so its return type must be
-# declared optional. Declaring it `-> text` made the wrapper below propagate
-# that nil out of a non-optional return, which the SFFI return-contract
-# validator (wired 2026-08-21) correctly rejects with
-# `nil is forbidden by the non-optional return contract of 'flat_bridge_env_get'`
-# — every parse that consulted an unset env var then died. The wrapper stays
-# total by collapsing an unset variable to the empty string, which is exactly
-# what all of its `?? ""` call sites already assumed.
-extern fn rt_env_get(key: text) -> text?
-
+# Keep the bridge's historical total, empty-for-unset contract while routing
+# the nullable runtime transport through its canonical one-call facade.
 fn flat_bridge_env_get(key: text) -> text:
-    rt_env_get(key) ?? ""
+    env_get_nullable(key) ?? ""
 
 fn flat_bridge_trace_enabled() -> bool:
     frontend_compiler_trace_enabled()
@@ -1990,7 +1983,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
     if flat_bridge_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
         eprint("[simpleos-flat-ret] name={name} tag={ret}")
     val body = decl_get_body(idx)
-    val trace_reset = (rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1"
+    val trace_reset = (env_get_nullable("SIMPLE_TRACE_AST_RESET") ?? "") == "1"
     if trace_reset and body.len() > 0 and body[body.len() - 1] >= stmt_count():
         print "[convert_decl_fn] STALE-BODY-SUSPECT name={name} body_len={body.len()} body_first={body[0]} body_last={body[body.len() - 1]} live_stmt_count={stmt_count()} reset_seq={ast_reset_seq_get()}"
     var stmts: [Stmt] = []
