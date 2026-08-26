@@ -6434,3 +6434,17 @@ spec exercises fail-closed invalid-handle and name-only-kernel behavior.
 This is metadata and audit work only: it adds no render-path branch, lookup,
 allocation, copy, or dispatch. Optimizer analysis reports no general-pattern
 finding. The provider remains unsigned and unverified.
+
+### ROCm Engine2D raw-boundary classification (2026-08-26)
+
+ROCm has an already-explicit no-GC I/O SFFI owner, but two older public
+Engine2D dispatch façades retain 12 and 13 raw declarations respectively.
+They are still active compatibility surfaces, so removing them would change
+backend behavior. All 25 raw declarations now carry `unsafe(ffi)` (and
+`raw_ptr` where their handle/array ABI requires it); the authority audit keeps
+that classification from regressing.
+
+The existing 13-case ROCm spec passes, including the fail-closed legacy
+kernel-path cases. This metadata-only change adds no draw-path branch,
+allocation, copy, lookup, or dispatch. It does not establish typed span/handle
+contracts, target hardware behavior, artifact identity, or signed admission.

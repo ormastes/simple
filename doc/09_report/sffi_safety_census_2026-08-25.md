@@ -2261,3 +2261,18 @@ The source-only census remains 12,773 SFFI rows / 11,149 `rt_*` rows, now with
 3,261 / 2,940 explicitly unsafe-tagged declarations and zero signed admission.
 Owned C source is not treated as an admitted artifact, so OpenCL remains unsafe
 and unverified.
+
+### ROCm Engine2D raw-boundary classification (2026-08-26)
+
+The two active legacy ROCm Engine2D dispatch owners retain their public
+behavior, but all 25 raw declarations are now explicit `unsafe(ffi)`; pointer/
+array crossings also declare `raw_ptr`. The authority audit verifies the 12/13
+owner split. The existing ROCm spec passes 13/13, including fail-closed legacy
+kernel calls; source checks and optimizer analysis report no general-pattern
+finding. No GPU call-path instruction, allocation, copy, lookup, or dispatch
+is added.
+
+The source-only census remains 12,773 SFFI rows / 11,149 `rt_*` rows, with
+3,286 / 2,965 explicitly unsafe-tagged declarations and zero signed admission.
+ROCm's C source is not equivalent to ABI/null/ownership verification or an
+admitted artifact.

@@ -753,3 +753,14 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   optimizer analysis without altering the dispatch path.
 - [ ] Define typed span/handle/status contracts, bind the C provider to an
   exact artifact, and require signature/evidence admission before safe use.
+
+### ROCm Engine2D raw-boundary classification
+
+- [x] Inventory the canonical ROCm I/O owner and the two legacy Engine2D raw
+  owners; retain active compatibility behavior rather than deleting it blindly.
+- [x] Mark all 25 legacy Engine2D raw declarations `unsafe(ffi)` and add a
+  regression audit for their two declaration counts.
+- [x] Run source checks, the existing 13-case ROCm spec, and optimizer analysis
+  without changing any GPU call path.
+- [ ] Replace legacy dispatch façades with one typed ROCm ABI, validate array/
+  handle ownership and status semantics, and admit an exact signed provider.
