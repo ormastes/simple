@@ -490,6 +490,15 @@ pub fn rt_atomic_flag_test_and_set(args: &[Value]) -> Result<Value, CompileError
     }
 }
 
+/// Read an atomic flag without changing it.
+pub fn rt_atomic_flag_load(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args
+        .first()
+        .ok_or_else(|| CompileError::semantic("rt_atomic_flag_load expects 1 argument"))?
+        .as_int()?;
+    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_flag_load(handle))) }
+}
+
 /// Clear atomic flag
 pub fn rt_atomic_flag_clear(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
@@ -522,6 +531,15 @@ pub fn rt_atomic_flag_free(args: &[Value]) -> Result<Value, CompileError> {
         simple_runtime::value::rt_atomic_flag_free(handle);
         Ok(Value::Nil)
     }
+}
+
+/// Yield an architecture-specific hint while retaining the current thread.
+pub fn rt_spin_loop_hint(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::semantic("rt_spin_loop_hint expects 0 arguments"));
+    }
+    simple_runtime::value::rt_spin_loop_hint();
+    Ok(Value::Nil)
 }
 
 // ============================================================================

@@ -93,6 +93,16 @@ the prior full-backing scan and are not silently presented as refreshed.
 
 ## Post-census migration note — 2026-08-26
 
+The bootstrap atomic family repaired 23 source/provider contracts instead of
+mass-tagging the prior mismatched ABI. Ordering is no longer passed to SeqCst
+providers, integer/boolean CAS now preserves real booleans in one call, and
+flag inspection uses one non-mutating load. C, Rust, interpreter, and native
+registries now close the new identities. Construction adds one non-positive
+handle check; hot operations add no call, allocation, lookup, retry, hash, or
+signature work. All raw declarations remain unsafe, the Rust provider remains
+mutex/map-backed, and no artifact evidence was supplied, so signed/admitted
+coverage remains zero.
+
 The bootstrap sandbox builder removed seven unused raw declarations and tagged
 and lexically confined its fifteen live reset/configure/apply calls. The
 source-only delta is seven fewer rows, fifteen fewer untouched rows, and fifteen

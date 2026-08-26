@@ -166,6 +166,15 @@ the provider is mutex/map-backed rather than lock-free. Fix the ABI and boolean
 semantics first under the single-call hot-path gate documented in
 `doc/08_tracking/bug/bootstrap_atomic_sffi_abi_and_semantics_2026-08-26.md`.
 
+Source-resolution checkpoint: bootstrap atomics now use exact provider-owned
+SeqCst signatures, boolean compare-exchange, non-mutating flag load, and closed
+C/Rust/interpreter/native identities. Each ordinary operation remains one
+provider call; no contention-path reload, wrapper allocation, lookup, retry,
+hash, or signature work was added. Manual release and unproven `AtomicRef`
+casts remain unsafe. Dynamic performance/correctness evidence, replacement of
+the Rust mutex/map compatibility provider, artifact signatures, and admission
+receipts remain open.
+
 Checkpoint: the bootstrap sandbox builder removed seven unused raw declarations
 and confines all fifteen live reset/configure/apply operations to individual
 lexical `unsafe(ffi)` expressions. The Rust provider and interpreter cover the

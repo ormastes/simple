@@ -44,8 +44,18 @@ boolean ABI mismatches, fabricated compare-exchange decoding, mutating flag
 inspection, a missing spin-loop closure, and a mutex/map implementation exposed
 as “lock-free.” The exact evidence and semantics-preserving repair order are in
 `doc/08_tracking/bug/bootstrap_atomic_sffi_abi_and_semantics_2026-08-26.md`.
-This boundary remains unsafe and untouched until the ABI is fixed; annotations
-must not hide a hot-path mis-call.
+At that checkpoint the boundary remained unsafe and untouched pending an ABI
+fix; annotations were not allowed to hide a hot-path mis-call.
+
+Follow-up: the source ABI repair is now implemented. All 23 bootstrap atomic
+declarations are explicitly unsafe, advisory ordering no longer crosses the
+SeqCst provider ABI, compare-exchange is a real one-call boolean operation, and
+flag observation is a real one-call non-mutating load. C, Rust, interpreter,
+and native registry closure now includes boolean CAS, flag load, and spin hint.
+Construction adds only a failure-path handle comparison; ordinary operations
+retain exactly one provider call and remove ordering conversion work. The Rust
+compatibility provider remains mutex/map-backed and all artifacts remain
+unsigned/unadmitted, so this is source repair rather than verification.
 
 ## SimpleOS tools-test authority checkpoint
 

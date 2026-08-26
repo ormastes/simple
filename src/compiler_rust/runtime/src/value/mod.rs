@@ -281,6 +281,7 @@ pub use sync::{
     rt_atomic_new,
     rt_atomic_store,
     rt_atomic_swap,
+    rt_spin_loop_hint,
     // Barrier
     rt_barrier_free,
     rt_barrier_new,
@@ -492,8 +493,9 @@ pub use sffi::{
 
 // Re-export atomic operations SFFI functions
 pub use sffi::{
-    rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new, rt_atomic_bool_store, rt_atomic_bool_swap,
-    rt_atomic_flag_clear, rt_atomic_flag_free, rt_atomic_flag_new, rt_atomic_flag_test_and_set,
+    rt_atomic_bool_compare_exchange, rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new,
+    rt_atomic_bool_store, rt_atomic_bool_swap, rt_atomic_flag_clear, rt_atomic_flag_free,
+    rt_atomic_flag_load, rt_atomic_flag_new, rt_atomic_flag_test_and_set,
     rt_atomic_int_compare_exchange, rt_atomic_int_fetch_add, rt_atomic_int_fetch_and, rt_atomic_int_fetch_or,
     rt_atomic_int_fetch_sub, rt_atomic_int_fetch_xor, rt_atomic_int_free, rt_atomic_int_load, rt_atomic_int_new,
     rt_atomic_int_store, rt_atomic_int_swap,

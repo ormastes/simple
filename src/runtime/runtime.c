@@ -1467,10 +1467,63 @@ bool rt_atomic_bool_swap(int64_t handle, bool value) {
     return atomic_exchange_explicit(&atomic->value, value, memory_order_seq_cst);
 }
 
+bool rt_atomic_bool_compare_exchange(int64_t handle, bool current, bool new_value) {
+    SplAtomicBool* atomic = spl_atomic_bool_from_handle(handle);
+    if (!atomic) return false;
+    return atomic_compare_exchange_strong_explicit(
+        &atomic->value,
+        &current,
+        new_value,
+        memory_order_seq_cst,
+        memory_order_seq_cst
+    );
+}
+
 void rt_atomic_bool_free(int64_t handle) {
     SplAtomicBool* atomic = spl_atomic_bool_from_handle(handle);
     if (!atomic) return;
     SPL_FREE(atomic);
+}
+
+int64_t rt_atomic_flag_new(void) {
+    SplAtomicBool* flag = (SplAtomicBool*)SPL_MALLOC(sizeof(SplAtomicBool), "atomic");
+    if (!flag) return 0;
+    atomic_init(&flag->value, false);
+    return (int64_t)(intptr_t)flag;
+}
+
+bool rt_atomic_flag_test_and_set(int64_t handle) {
+    SplAtomicBool* flag = spl_atomic_bool_from_handle(handle);
+    if (!flag) return false;
+    return atomic_exchange_explicit(&flag->value, true, memory_order_seq_cst);
+}
+
+bool rt_atomic_flag_load(int64_t handle) {
+    SplAtomicBool* flag = spl_atomic_bool_from_handle(handle);
+    if (!flag) return false;
+    return atomic_load_explicit(&flag->value, memory_order_seq_cst);
+}
+
+void rt_atomic_flag_clear(int64_t handle) {
+    SplAtomicBool* flag = spl_atomic_bool_from_handle(handle);
+    if (!flag) return;
+    atomic_store_explicit(&flag->value, false, memory_order_seq_cst);
+}
+
+void rt_atomic_flag_free(int64_t handle) {
+    SplAtomicBool* flag = spl_atomic_bool_from_handle(handle);
+    if (!flag) return;
+    SPL_FREE(flag);
+}
+
+void rt_spin_loop_hint(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#else
+    atomic_signal_fence(memory_order_seq_cst);
+#endif
 }
 
 /* ================================================================

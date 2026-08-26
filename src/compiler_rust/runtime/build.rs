@@ -168,6 +168,8 @@ fn runtime_symbol_declaration(
         "rt_atomic_bool_fetch_not" => "(handle: i64) -> bool",
         "rt_atomic_int_compare_exchange" => "(handle: i64, current: i64, new_value: i64) -> bool",
         "rt_atomic_flag_test_and_set" => "(handle: i64) -> bool",
+        "rt_atomic_flag_load" => "(handle: i64) -> bool",
+        "rt_spin_loop_hint" => "()",
         "rt_file_mmap" => "(addr: *mut u8, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *mut u8",
         "rt_file_munmap" => "(addr: *mut u8, length: u64) -> i32",
         "rt_file_madvise" => "(addr: *mut u8, length: u64, advice: i32) -> i32",

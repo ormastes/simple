@@ -249,6 +249,16 @@ pub extern "C" fn rt_atomic_flag_test_and_set(handle: i64) -> bool {
         .unwrap_or(false)
 }
 
+/// Read an atomic flag without changing it.
+#[no_mangle]
+pub extern "C" fn rt_atomic_flag_load(handle: i64) -> bool {
+    ATOMIC_FLAG_MAP
+        .lock()
+        .get(&handle)
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
 /// Clear atomic flag
 #[no_mangle]
 pub extern "C" fn rt_atomic_flag_clear(handle: i64) {
@@ -479,14 +489,22 @@ mod tests {
     fn test_atomic_flag() {
         let handle = rt_atomic_flag_new();
 
+        // Observation must not mutate the flag.
+        assert!(!rt_atomic_flag_load(handle));
+        assert!(!rt_atomic_flag_load(handle));
+
         // First test_and_set should return false (was clear)
         assert!(!rt_atomic_flag_test_and_set(handle));
+
+        assert!(rt_atomic_flag_load(handle));
+        assert!(rt_atomic_flag_load(handle));
 
         // Second test_and_set should return true (was set)
         assert!(rt_atomic_flag_test_and_set(handle));
 
         // Clear the flag
         rt_atomic_flag_clear(handle);
+        assert!(!rt_atomic_flag_load(handle));
 
         // After clear, test_and_set should return false again
         assert!(!rt_atomic_flag_test_and_set(handle));

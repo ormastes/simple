@@ -655,6 +655,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_async_ws_read_raw", network::rt_async_ws_read_raw);
     insert_simple!("rt_async_ws_write_raw", network::rt_async_ws_write_raw);
     insert_simple!("rt_atomic_bool_free", atomic::rt_atomic_bool_free);
+    insert_simple!("rt_atomic_bool_compare_exchange", atomic::rt_atomic_bool_compare_exchange);
     insert_simple!("rt_atomic_bool_load", atomic::rt_atomic_bool_load);
     insert_simple!("rt_atomic_bool_new", atomic::rt_atomic_bool_new);
     insert_simple!("rt_atomic_bool_store", atomic::rt_atomic_bool_store);
@@ -667,6 +668,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_atomic_fetch_sub", atomic::rt_atomic_fetch_sub_fn);
     insert_simple!("rt_atomic_flag_clear", atomic::rt_atomic_flag_clear);
     insert_simple!("rt_atomic_flag_free", atomic::rt_atomic_flag_free);
+    insert_simple!("rt_atomic_flag_load", atomic::rt_atomic_flag_load);
     insert_simple!("rt_atomic_flag_new", atomic::rt_atomic_flag_new);
     insert_simple!("rt_atomic_flag_test_and_set", atomic::rt_atomic_flag_test_and_set);
     insert_simple!("rt_atomic_int_compare_exchange", atomic::rt_atomic_int_compare_exchange);
@@ -689,6 +691,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_atomic_store_u64", atomic::rt_atomic_store_u64);
     insert_simple!("rt_atomic_store_u8", atomic::rt_atomic_store_u8);
     insert_simple!("rt_atomic_swap", atomic::rt_atomic_swap_fn);
+    insert_simple!("rt_spin_loop_hint", atomic::rt_spin_loop_hint);
     insert_simple!("rt_base64_decode", crypto::rt_base64_decode);
     insert_simple!("rt_base64_encode", crypto::rt_base64_encode);
     insert_simple!("rt_base64url_decode", crypto::rt_base64url_decode);

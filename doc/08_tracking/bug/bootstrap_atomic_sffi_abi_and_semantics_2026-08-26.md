@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-26
 
-**Status:** Open; source-reviewed, not dynamically verified
+**Status:** Source fix implemented; not dynamically or cryptographically verified
 
 **Owner:** bootstrap standard library / atomic runtime boundary
 
@@ -60,6 +60,30 @@ interpreter registration in the inspected tree.
    measurement and implementation evidence.
 7. Add the spin-loop identity to exact native/interpreter registries before the
    spinlock facade can be admitted.
+
+## Implemented source resolution
+
+- The bootstrap raw declarations now exactly match the provider-owned SeqCst
+  ABI; ordering remains a source compatibility parameter and is no longer
+  transported to providers that do not accept it.
+- Integer and boolean compare-exchange return real booleans. The impossible
+  packed-current decoder and unconditional boolean swap workaround are gone.
+- Semaphore consumers use the boolean directly, so contention still performs
+  one compare-exchange and no reconstructing load.
+- Flag observation uses a new `rt_atomic_flag_load` identity across C, Rust,
+  interpreter, and native registry and no longer changes the flag.
+- `rt_spin_loop_hint` now has exact interpreter/native registry closure and a C
+  provider in addition to the Rust provider.
+- C and Rust allocation handles are rejected once at construction when
+  non-positive. Manual release and raw-object `AtomicRef` operations are
+  explicitly unsafe.
+- Module documentation now distinguishes direct C11 atomics from the Rust
+  compatibility provider's mutex-protected handle maps.
+
+The runtime provider remains unsigned and unadmitted, Rust handle operations
+remain mutex/map-backed, and invalid raw handles still collapse to zero/false.
+Those limitations prevent a verified-safe claim even though the source ABI and
+boolean semantics are repaired.
 
 ## Performance and memory gate
 

@@ -260,6 +260,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_atomic_bool_load", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_atomic_bool_store", &[I64, I8], &[]),
     RuntimeFuncSpec::new("rt_atomic_bool_swap", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_atomic_bool_compare_exchange", &[I64, I8, I8], &[I8]),
     RuntimeFuncSpec::new("rt_atomic_bool_free", &[I64], &[]),
     RuntimeFuncSpec::new("rt_atomic_int_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_atomic_int_load", &[I64], &[I64]),
@@ -274,8 +275,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_atomic_int_free", &[I64], &[]),
     RuntimeFuncSpec::new("rt_atomic_flag_new", &[], &[I64]),
     RuntimeFuncSpec::new("rt_atomic_flag_test_and_set", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_atomic_flag_load", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_atomic_flag_clear", &[I64], &[]),
     RuntimeFuncSpec::new("rt_atomic_flag_free", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_spin_loop_hint", &[], &[]),
     // =========================================================================
     // Signature verification and generation
     // =========================================================================
