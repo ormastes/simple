@@ -19,7 +19,7 @@ use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, 
 use std.nogc_sync_mut.http_server.response.{with_default_security_headers, serialize_response, serialize_response_for_method_connection}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.common.net.http_core.{response_body_framing_decision}
-use std.nogc_sync_mut.http_server.tls_server.{tls_server_config_new, tls_server_config_error, tls_server_accept, tls_conn_is_h2, tls_conn_is_http1}
+use std.nogc_sync_mut.http_server.tls_server.{TlsServerConn, tls_server_config_new, tls_server_config_error, tls_server_accept, tls_conn_is_h2, tls_conn_is_http1}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 
 fn secure_web_server_fixture() -> SecureServerPolicy:
@@ -147,6 +147,29 @@ describe "Secure Pure-Simple production web routing":
         expect(tls_conn_is_http1(conn)).to_equal(false)
         expect(tls_conn_is_h2(conn)).to_equal(false)
         expect(conn.tcp.is_open()).to_equal(false)
+
+    it "AC-3 binds HTTP dispatch to a successful exact ALPN selection":
+        step("Verify: AC-3 accepts only clean h2 or HTTP/1 ALPN dispatch")
+        # @req: REQ-WEB-SecuPureSimpWebServ-001
+        val h2 = TlsServerConn(tcp: TcpStream.from_accepted_fd(-1),
+            negotiated_protocol: "h2", tls_active: true, error: "")
+        expect(tls_conn_is_h2(h2)).to_equal(true)
+        expect(tls_conn_is_http1(h2)).to_equal(false)
+
+        val http1 = TlsServerConn(tcp: TcpStream.from_accepted_fd(-1),
+            negotiated_protocol: "http/1.1", tls_active: true, error: "")
+        expect(tls_conn_is_http1(http1)).to_equal(true)
+        expect(tls_conn_is_h2(http1)).to_equal(false)
+
+        val failed_h2 = TlsServerConn(tcp: TcpStream.from_accepted_fd(-1),
+            negotiated_protocol: "h2", tls_active: false, error: "handshake failed")
+        expect(tls_conn_is_h2(failed_h2)).to_equal(false)
+        expect(tls_conn_is_http1(failed_h2)).to_equal(false)
+
+        val unsupported = TlsServerConn(tcp: TcpStream.from_accepted_fd(-1),
+            negotiated_protocol: "h3", tls_active: true, error: "")
+        expect(tls_conn_is_h2(unsupported)).to_equal(false)
+        expect(tls_conn_is_http1(unsupported)).to_equal(false)
 
     it "AC-3 returns a production startup failure instead of opening plaintext":
         step("Verify: AC-3 returns a production startup failure instead of opening plaintext")
