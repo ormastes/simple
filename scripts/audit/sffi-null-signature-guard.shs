@@ -71,12 +71,61 @@ if rg -q --glob '*.spl' --glob '!**/vendor/**' \
     failed=1
 fi
 
-# Keep the blocking sleep boundary in io_runtime's already-scoped
-# rt_thread_sleep owner. Compatibility code may export a Simple wrapper named
-# rt_sleep_ms, but must not redeclare the raw foreign symbol.
+# Keep the semantic blocking-sleep boundary in io_runtime's already-scoped
+# rt_thread_sleep owner. Simple callers use thread_sleep/sleep_ms; rt_sleep_ms
+# remains only a foreign runtime ABI provider and compiler declaration.
 if rg -q --glob '*.spl' --glob '!**/vendor/**' \
-    '^\s*extern fn rt_sleep_ms\(' "$root/src" "$root/test"; then
+    '^\s*extern fn rt_sleep_ms\(' \
+    "$root/src" "$root/test" "$root/examples" "$root/scripts"; then
     echo 'SFFI lint: direct Simple rt_sleep_ms declaration bypasses canonical thread_sleep' >&2
+    failed=1
+fi
+for facade in \
+    src/lib/nogc_sync_mut/io/time_ops.spl \
+    src/lib/nogc_async_mut/io/time_ops.spl \
+    src/lib/gc_async_mut/io.spl \
+    src/app/io/time_ops.spl \
+    src/app/io/__init__.spl
+do
+    reject_text '\brt_sleep_ms\b' "$facade"
+done
+sleep_call_refs=$(rg -n --glob '*.spl' --glob '!**/vendor/**' \
+    '\brt_sleep_ms\(' \
+    "$root/src" "$root/test" "$root/examples" "$root/scripts" || true)
+if [ -n "$sleep_call_refs" ]; then
+    while IFS=: read -r file line_number source_line; do
+        if [ "$file" = "$root/src/runtime/simple_core/core_process.spl" ] && \
+            [ "$source_line" = 'pub fn rt_sleep_ms(ms: i64):' ]; then
+            continue
+        fi
+        if [ "$file" = "$root/src/compiler/70.backend/backend/llvm_backend.spl" ] && \
+            [ "$source_line" = '    decls = decls + "declare void @rt_sleep_ms(i64)\n"' ]; then
+            continue
+        fi
+        echo "SFFI lint: semantic rt_sleep_ms use bypasses canonical thread_sleep/sleep_ms at $file:$line_number" >&2
+        failed=1
+    done <<EOF
+$sleep_call_refs
+EOF
+fi
+require_text '^pub fn rt_sleep_ms\(ms: i64\):$' \
+    src/runtime/simple_core/core_process.spl
+if ! awk '
+    /^pub fn rt_sleep_ms\(ms: i64\):$/ {
+        found = found + 1
+        if (found != 1) exit 1
+        getline
+        if ($0 != "    if ms > 0:") exit 1
+        getline
+        if ($0 != "        _sffi_usleep(ms * 1000)") exit 1
+        getline
+        if ($0 != "") exit 1
+        getline
+        if ($0 !~ /^pub fn rt_thread_sleep\(ms: i64\):$/) exit 1
+    }
+    END { if (found != 1) exit 1 }
+' "$root/src/runtime/simple_core/core_process.spl"; then
+    echo 'SFFI lint: simple_core rt_sleep_ms must be a guarded unit-returning ABI provider' >&2
     failed=1
 fi
 
