@@ -1334,3 +1334,22 @@ branch, conversion, allocation, copy, lookup, hash, or generic dispatch was
 added. The functions remain unsafe and unsigned because registration is not
 artifact admission or semantic verification. Source-reviewed only; checks were
 not executed.
+
+## 2026-08-26 file-delete ABI reconciliation
+
+The unused `file_delete_ptr` declaration/export was removed from the compiler
+minimal facade, reducing it to 41 explicitly unsafe declarations and wrappers.
+The live self-hosted interpreter call remains, but its C provider now accepts
+the same `(pointer, length)` ABI already exported by Rust and expected by text
+lowering. Native codegen now records the exact `[I64, I64] -> [I8]` signature,
+and the call is tagged and lexically confined. The minimal facade has no
+interpreter-only symbols after this removal: coverage is 20 both, 3
+native-only, and 18 neither.
+
+Both C runtime implementations use the existing bounded stack path conversion.
+`rt_file_remove` now delegates to that owner instead of allocating and freeing
+a path buffer on every call, so the correction removes one heap allocation and
+copy from its common path rather than adding overhead. Long or malformed paths
+fail closed. Registration and source parity do not constitute signed admission
+or semantic verification; the boundary remains unsafe and unsigned.
+Source-reviewed only; checks were not executed.

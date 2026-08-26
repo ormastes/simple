@@ -8677,20 +8677,14 @@ int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
-int rt_file_delete(const char* path) {
-    if (!path) return 0;
+int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return remove(path) == 0 ? 1 : 0;
 }
 
 int rt_file_remove(const uint8_t* path_ptr, uint64_t path_len) {
-    if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
-    char* path = (char*)malloc((size_t)path_len + 1);
-    if (!path) return 0;
-    memcpy(path, path_ptr, (size_t)path_len);
-    path[(size_t)path_len] = '\0';
-    int ok = remove(path) == 0 ? 1 : 0;
-    free(path);
-    return ok;
+    return rt_file_delete(path_ptr, path_len);
 }
 
 /* Non-accelerator native bridges. Text parameters use the ABI selected by

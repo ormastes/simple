@@ -1821,7 +1821,11 @@ int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     fclose(out);
     return 1;
 }
-int         rt_file_delete(const char* path)    { return spl_file_delete(path); }
+int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return spl_file_delete(path);
+}
 int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;

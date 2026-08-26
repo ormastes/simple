@@ -1541,6 +1541,23 @@ Torch SFFI nor all SFFI may be described as verified safe.
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
 
+## 2026-08-26 file-delete ABI reconciliation
+
+- Remove the unused raw `file_delete_ptr` compiler-minimal declaration and
+  re-export instead of retaining a second conflicting signature.
+- Standardize live C and Rust `rt_file_delete` providers on `(pointer, length)`
+  and publish the exact `[I64, I64] -> [I8]` native contract.
+- Tag and lexically confine the self-hosted interpreter's live raw call.
+- Reuse the bounded stack path converter in both C providers; make
+  `rt_file_remove` delegate directly, eliminating its per-call heap allocation
+  and redundant copy.
+- Minimal-facade closure is now 20 both lanes, 3 native-only, 0
+  interpreter-only, and 18 neither. Next classify/remove the 18 providerless
+  declarations before implementing any new provider.
+- Keep deletion unsafe and unsigned until exact-artifact admission and
+  cross-lane sabotage evidence exist.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
 ## 2026-08-26 provider-language census correction
 
 - Report every observed implementation language per extern symbol instead of

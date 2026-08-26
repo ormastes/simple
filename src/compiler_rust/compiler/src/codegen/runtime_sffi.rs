@@ -1967,6 +1967,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_write_text_at_cached", &[I64, I64], &[I64]), // offset, data RuntimeValue -> bytes written on prepared cache
     RuntimeFuncSpec::new("rt_file_write_text_at_cached_repeat", &[I64, I64], &[I64]), // iterations, data RuntimeValue -> bytes written on prepared cache
     RuntimeFuncSpec::new("rt_file_copy", &[I64, I64, I64, I64], &[I8]),               // src, dest -> bool
+    RuntimeFuncSpec::new("rt_file_delete", &[I64, I64], &[I8]),                       // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_remove", &[I64, I64], &[I8]),                       // path -> bool
     RuntimeFuncSpec::new("rt_file_size", &[I64, I64], &[I64]),                        // path -> i64
     RuntimeFuncSpec::new("rt_file_hash_sha256", &[I64, I64], &[I64]),                 // path -> RuntimeValue
