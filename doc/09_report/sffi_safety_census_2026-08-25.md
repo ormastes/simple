@@ -98,3 +98,12 @@ tagged and lexically confined. The new
 owner calls, and no-extra-dispatch shape. This delta has not been used to
 rewrite the baseline table above; a future full census must measure the new
 global totals.
+
+The canonical `std.nogc_sync_mut.io.env_ops` compatibility layer was then
+narrowed: its duplicate `rt_env_get` declaration/calls now use
+`io_runtime.env_get_opt`, and its `rt_env_vars` declaration was corrected from
+an incompatible `Dict<text,text>` result to the provider's nullable tuple-array
+representation. The snapshot remains explicitly unsafe because ownership and
+allocation failure are not proven. No dictionary conversion was added, so the
+fix removes a representation hazard without adding an allocation or copy.
+`scripts/audit/env-ops-sffi-authority.shs` pins this shape.

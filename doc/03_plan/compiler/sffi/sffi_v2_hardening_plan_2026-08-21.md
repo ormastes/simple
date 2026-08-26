@@ -1681,3 +1681,14 @@ and unpromoted.
   direct wrapper call per raw symbol, with no new lookup or allocation layer.
 - [ ] Re-run the global census and executable checks when verification is
   authorized; do not infer new repository-wide totals from this local delta.
+
+#### Completed production slice: environment compatibility owner (2026-08-26)
+
+- [x] Remove the duplicate `rt_env_get` declaration and route three reads
+  through the existing nullable `io_runtime.env_get_opt` owner.
+- [x] Correct `rt_env_vars` from an incompatible dictionary declaration to the
+  provider's nullable tuple-array representation.
+- [x] Keep snapshot ownership/allocation failure explicit and unsafe; do not
+  fabricate an empty dictionary or allocate a per-call conversion.
+- [x] Add a static ratchet for the single direct snapshot owner and the absence
+  of duplicate raw lookup authority.
