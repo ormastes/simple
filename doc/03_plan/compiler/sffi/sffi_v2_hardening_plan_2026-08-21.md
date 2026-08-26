@@ -1643,3 +1643,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Preserved one registry operation per valid create/access/free and added no
   lookup, allocation, copy, hash, retry, or traversal.
 - Typed native registry coverage remains absent; status is unverified/unsigned.
+## 2026-08-26 SHA-256 handle-contract follow-up
+
+- Enforced exact arity for new/write/finish/reset/free interpreter handlers.
+- Removed malformed-length fallback-to-full-payload hashing.
+- Rejected non-`i64` handles and atomic handle-counter overflow.
+- Tagged six raw seed declarations `unsafe(ffi)`; free stays explicitly
+  idempotent because both providers define that semantic.
+- Confined raw calls to the six existing `Sha256Hasher` method boundaries;
+  seed integer carrier versus interpreter array transport remains unresolved.
+- Preserved one payload pass and one registry operation per valid call; no
+  extra payload copy, traversal, lookup, hash pass, lock, or dispatch was added.
+- Status: source-reviewed, deliberately unverified and unsigned.

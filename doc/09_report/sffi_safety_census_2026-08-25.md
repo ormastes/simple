@@ -1017,3 +1017,13 @@ exact arity, checked `usize` conversion, ordered ranges, checked handle-ID
 growth, and unknown/double-free errors. Valid create/access/free paths retain
 one registry insertion/lookup/removal; no extra registry pass or allocation was
 added. Interpreter-only, source-reviewed, unverified, and unsigned.
+## 2026-08-26 SHA-256 handle-contract follow-up
+
+The five interpreter SHA-256 handlers now enforce exact arity. Write requires a
+checked explicit length rather than hashing the full payload on malformed input;
+handles require `i64`, and allocation rejects counter overflow. All six seed
+raw declarations are tagged `unsafe(ffi)` and confined to the six existing
+`Sha256Hasher` method boundaries. Free remains explicitly idempotent, matching
+existing interpreter/native semantics. Valid hashing complexity and registry
+operations are unchanged. The seed integer data carrier versus interpreter
+array transport remains unverified and unsigned.
