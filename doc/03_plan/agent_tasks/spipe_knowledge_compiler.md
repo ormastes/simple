@@ -983,3 +983,24 @@ normal/highest-capability reviewer.
 
 Merge owner remains `/root`; independent normal/highest-capability review is
 still required for the next frozen contract and implementation.
+
+### 10.18 Full ABI consolidation stop and next owner (2026-08-26)
+
+1. **Consolidation attempt — `FAIL`.** The eleven-item ABI consolidation
+   exhausted the mandatory three review/fix cycles. It made no product edit,
+   ran no product test, admitted no contract, and pushed nothing. Retain
+   `e5c556de59d` at `/tmp/spkc-provider-abi-full-uWb9kD/repo` as immutable
+   forensic evidence only; do not copy its rejected contract text.
+2. **Review split.** Implementation-readiness review passed. Independent
+   highest-capability review failed because Section 17.11 excludes Section
+   17.7.1 but depends on its exact `providerSession`, authority, and executor
+   schemas, and excludes Section 17.7.9 without restating the complete public
+   error record/field shapes and exhaustive precedence.
+3. **Fresh-session task.** Restate both definition families completely inside
+   Section 17.11. Do not inherit excluded control prose or claim readiness
+   until a new independent highest-capability review passes.
+4. **Downstream lanes — waiting.** Provider readiness and admission, Wave 4,
+   AC-4, and the integrated pipeline remain open.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.

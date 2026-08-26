@@ -2288,3 +2288,21 @@ as expiry, revocation, binding, authority-generation, policy, or record
 corruption retain precedence. Product implementation and admission, Wave 4,
 AC-4, and the integrated pipeline remain open; this contract correction is not
 product evidence.
+
+### 17.12 Full ABI consolidation review stop (2026-08-26)
+
+The attempted eleven-item consolidation stopped `FAIL` after the mandatory
+third review/fix cycle. No product file was edited, no product test ran, no
+contract was admitted, and nothing was pushed. Preserve failed immutable
+snapshot `e5c556de59d` at `/tmp/spkc-provider-abi-full-uWb9kD/repo` only for
+forensic comparison; do not copy its contract text.
+
+Implementation-readiness review passed, but independent highest-capability
+review identified two self-containment failures. Section 17.11 excludes Section
+17.7.1 while relying on its exact `providerSession`, authority, and executor
+schemas. It also excludes Section 17.7.9 while omitting the complete public
+error record and field shapes and exhaustive error precedence. The next fresh
+design session must restate all of those definitions directly in Section 17.11
+instead of inheriting excluded control prose. This is a failed handoff, not a
+readiness claim: provider readiness/implementation/admission, Wave 4, AC-4, and
+the integrated pipeline remain open.

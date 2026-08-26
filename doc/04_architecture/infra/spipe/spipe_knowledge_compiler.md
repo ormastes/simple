@@ -1156,3 +1156,21 @@ implicit coercion; `internal_error` remains absent from the tombstone enum.
 Specific already-established failure classifications retain precedence.
 Provider implementation and admission, Wave 4, AC-4, and pipeline admission
 remain open.
+
+### 17.9 Full ABI consolidation status (2026-08-26)
+
+The eleven-item consolidation attempt stopped `FAIL` at the mandatory
+three-cycle cap. It produced no product edit, product test, admitted contract,
+or push. Snapshot `e5c556de59d` at
+`/tmp/spkc-provider-abi-full-uWb9kD/repo` is immutable forensic evidence, not
+architecture authority.
+
+Although implementation-readiness review passed, independent
+highest-capability review found the proposed capsule non-self-contained:
+Section 17.11 excludes Section 17.7.1 while relying on its exact
+`providerSession`, authority, and executor schemas, and excludes Section 17.7.9
+without defining the complete public error record/field shapes and exhaustive
+precedence. The next fresh architecture session must restate those definitions
+inside Section 17.11 and must not inherit excluded control prose. Provider
+readiness/implementation/admission, Wave 4, AC-4, and pipeline admission remain
+open.

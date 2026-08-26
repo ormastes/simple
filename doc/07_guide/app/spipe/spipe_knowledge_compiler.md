@@ -1257,3 +1257,20 @@ persist legal tombstone reason `interrupted` and then return public
 the earlier specific-failure precedence. Provider implementation, tests, and
 admission are still pending; keep Wave 4, AC-4, and the integrated pipeline
 open.
+
+#### Full ABI consolidation operator handoff (2026-08-26)
+
+Do not use the eleven-item consolidation draft. It stopped `FAIL` after the
+mandatory third review/fix cycle, with no product edit, product test, admitted
+contract, or push. Snapshot `e5c556de59d` at
+`/tmp/spkc-provider-abi-full-uWb9kD/repo` is immutable forensic material only;
+never copy its rejected contract text into an implementation prompt.
+
+Implementation-readiness review passed, but independent highest-capability
+review found two self-containment blockers. Section 17.11 excludes Section
+17.7.1 while depending on its exact `providerSession`, authority, and executor
+schemas. Section 17.11 also excludes Section 17.7.9 while lacking the complete
+public error record/field shapes and exhaustive precedence. Start a fresh
+bounded session and restate those definitions inside Section 17.11; do not
+inherit excluded control prose. Keep provider readiness/implementation/
+admission, Wave 4, AC-4, and the integrated pipeline open.

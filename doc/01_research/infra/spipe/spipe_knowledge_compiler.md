@@ -2756,3 +2756,21 @@ revocation, binding, authority-generation, policy, or record-corruption
 classifications established first retain precedence. This freezes the
 public/storage translation while leaving provider implementation, tests,
 admission, Wave 4, AC-4, and the integrated pipeline open.
+
+### 39.7 Full ABI consolidation stop (2026-08-26)
+
+The follow-up eleven-item provider-ABI consolidation stopped `FAIL` after the
+mandatory third review/fix cycle. It made no product edit, ran no product test,
+admitted no contract, and pushed nothing. Failed immutable forensic snapshot
+`e5c556de59d` remains at `/tmp/spkc-provider-abi-full-uWb9kD/repo`; its text is
+not authoritative and must not be copied into the canonical contract.
+
+Implementation-readiness review passed, but the independent
+highest-capability review found two remaining self-containment blockers:
+Section 17.11 excludes Section 17.7.1 while relying on its exact
+`providerSession`, authority, and executor schemas; and Section 17.11 excludes
+Section 17.7.9 while lacking the complete public error record and field shapes
+and exhaustive error precedence. A fresh session must restate those definitions
+inside Section 17.11 rather than inherit excluded control prose. Provider
+readiness, implementation/admission, Wave 4, AC-4, and the integrated pipeline
+remain open.
