@@ -472,17 +472,48 @@ Implemented substrate:
 - Component descriptor parsing and catalog validation under
   `src/lib/common/structural/component/descriptor.spl`.
 
-Partial/not wired:
+### 3.5.1 Static correction (2026-08-26; not acceptance evidence)
 
-- `src/app/main.spl` still calls `dynsmf_startup_session(...)`, not the config
-  entrypoint.
-- The loader-side `load_policy` consumer remains unfinished.
-- No app-root stage-0 option-router cutover exists.
-- `resolve_component` static/dynamic selection is not implemented.
+The preceding snapshot predates several landed source slices.  The following is
+a **static, source-only correction at audited revision
+`2b35049f8d70d7c5af93adf3de2c6e3be36a419b`**.  It does not assert that an
+app-root path is executed, that a public typed-facet grammar/ABI is selected,
+or that any of the acceptance gates in section 6 pass.
 
-True aspect/facet dynload remains not started: no implemented `AspectCatalog`,
-`AspectPackDirectory`, `SMF_FLAG_ASPECT_PACK`, `facet interface`, `facet impl`,
-`bind facet`, `FacetRef`, or `try_facet` surface exists in source and tests.
+- `resolve_component` static/dynamic selection is implemented in
+  `src/lib/common/structural/component/descriptor.spl`; the production-planner
+  consumer is `src/app/startup/startup_planner.spl`, and
+  `src/app/startup/dynsmf_component_bridge.spl` feeds that planner from the
+  checked dynSMF manifest/config overlay.  The old "not implemented" statement
+  is stale.  App-root stage-0 cutover remains an acceptance item until an
+  executable entrypoint proves it.
+- Aspect-pack SMF producer and reader substrate exists: the compiler writer
+  declares `SectionType.AspectPackDirectory` and
+  `SMF_FLAG_ASPECT_PACK` in
+  `src/compiler/70.backend/linker/smf_writer.spl` and
+  `src/compiler/backend/linker/smf_header.spl`; the canonical writer exposes
+  `generate_aspect_pack_smf`; and
+  `src/compiler/99.loader/aspect_pack_section.spl` validates and registers the
+  matching section.  This corrects the older claim that those source symbols
+  did not exist; it does not prove an end-to-end emitted artifact is loaded by
+  every product path.
+- Loader-owned catalog and lifecycle source now exists in
+  `src/compiler/99.loader/module_loader_compat.spl`, including explicit catalog
+  installation, visible-facet acquisition, and unload entrypoints.  Its
+  catalogue digest, generation, and single-flight work remain subject to the
+  existing receipt/final-unpin design and review gates; this correction neither
+  approves nor alters those unsafe proposals.
+- `src/lib/common/facet_registry.spl` supplies an in-memory catalog,
+  binding lookup, optional `try_facet`, and generation witness primitives;
+  `src/lib/common/facet_syntax.spl` supplies text-level declarations for
+  `facet interface`, `facet impl`, `bind facet`, and `require facet`.
+  Corresponding source specs exist under `test/01_unit/lib/`, but are not
+  claimed executed here.
+
+The public typed `FacetRef<T>` acquisition ABI, selected frontend grammar
+contract, end-to-end typed lowering/dispatch, and accepted unload lifetime
+semantics are still **not complete**.  They require the outstanding feature and
+NFR selection and must not be inferred from the internal/static substrate above.
 
 ### 3.6 Startup/interpreter/compiler/loader performance
 
