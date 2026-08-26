@@ -1,54 +1,287 @@
-# SPipe Knowledge Compiler Provider Parity — Authored Design Scaffold
+# SPipe knowledge-compiler provider parity
 
-> **Not generated and not PASS evidence.** The acceptance harness requires
-> exactly one closed `SPIPE_WAVE4_CONFORMANCE=` JSON record from each executed
-> Simple/DBFS producer. Focused spec verdicts remain insufficient; neither
-> producer yet emits all canonical roots, scores, order, statistics,
-> explanations, and deltas. The executable spec therefore fails closed.
+> This executable manual owns the Wave 4 provider-parity acceptance surface.
 
-**Source:** `test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl`  
-**Generation command:** `bin/simple spipe-docgen test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl --output doc/06_spec --no-index`
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 8 | 8 | 0 | 0 |
 
-## REQ/NFR map
+<details>
+<summary>Full Scenario Manual</summary>
 
-- Exact/BM25/RRF: REQ-SPKC-011..014; NFR-SPKC-001..003, 012..013.
-- DB/symbol/trace: REQ-SPKC-015..018; NFR-SPKC-006, 020..022.
-- Privacy/bounds/performance: NFR-SPKC-007, 011, 014..016.
+# SPipe knowledge-compiler provider parity
 
-## Operator flow
+This executable manual owns the Wave 4 provider-parity acceptance surface.
 
-Search and trace artifacts against one locked corpus/snapshot, comparing exact
-scores, document ordering, explanations, incremental parity, exhaustive/WAND
-top-k, and strict trace authority. A malicious/crashed provider must be
-contained and reported as `provider_unavailable` or `incompatible_contract`;
-lexical fallback must not be mislabeled semantic or Simple-native evidence.
+## At a Glance
 
-## Fixed query limits
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-Frame 1 MiB; normalized query 4,096 bytes; tokens 128; Boolean clauses 64;
-depth 8; phrase terms 32/phrase and 64 total; expansions 256; filters 32;
-values/filter 64; hits 1,000; explanation terms 128/hit, fields 32/hit, bytes
-64 KiB/hit and 512 KiB/page; delta documents 1,000; fields/document 64; field
-value 1 MiB; duplicate candidates 1,000 total/100 per document; symbols 1,000;
-deadline 50 ms minimum and 30 s maximum. Regex and leading unbounded wildcards
-are unsupported. One-over returns `frame_too_large`, `limit_exceeded`,
-`deadline_exceeded`, or `invalid_request` without truncating semantics.
+This executable manual owns the Wave 4 provider-parity acceptance surface.
+Every scenario invokes the same locked `check_spipe_provider_parity` gate.
+The JavaScript provider and focused Simple/DBFS production fixtures execute.
+The Node acceptance runner rejects a successful spec verdict unless the fixture
+also emits exactly one `SPIPE_WAVE4_CONFORMANCE=` JSON record conforming to
+`conformance_evidence_schema.json`. Simple and DBFS do not yet emit canonical five-field roots,
+scores, statistics, explanations, and deltas for every applicable matrix row.
+Until they do, the gate fails with `NOT-EVIDENCE`; source presence and a
+narrower green fixture are never provider-parity evidence.
 
-## Evidence limitation
+Fixture oracle:
+`examples/05_stdlib/spipe/test/fixture/wave4_search/fixture_manifest.json`.
 
-Retain compact text/protocol receipts without prompts, document content, or
-credentials. The exact envelope and delta keys are locked by
-`examples/05_stdlib/spipe/test/fixture/wave4_search/conformance_evidence_schema.json`.
-The current helper raises `NOT-EVIDENCE`; no parity or performance PASS is
-claimed.
+## Scenarios
 
-## Producer closure still required
+### SPipe knowledge compiler provider parity
 
-The Simple producer must compute (rather than accept) the canonical five-field
-logical root, return non-empty per-field statistics, emit the locked query hit
-and explanation records, and expose mixed-delta plus clean-rebuild roots.
+#### should return identical golden ordering and scores across fallback and Simple providers
 
-The DBFS compatibility producer needs an explicit five-field adapter with field
-weights/statistics/explanations and deterministic logical-root/delta reporting.
-Its process lifecycle rows remain not applicable; the adapter must not invent
-receipts, cancellation, or candidate publication support.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- Search and trace artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SPKC-011, REQ-SPKC-012, REQ-SPKC-013
+step("Search and trace artifacts")
+check_spipe_provider_parity()
+```
+
+</details>
+
+#### should keep exact identity dominant and break lexical ties by public document ID
+
+- Search and trace artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SPKC-011, REQ-SPKC-012
+step("Search and trace artifacts")
+check_spipe_provider_parity()
+```
+
+</details>
+
+#### should reject phrase queries and apply metadata equality filters identically in version 1
+
+- Search and trace artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SPKC-011, REQ-SPKC-012
+step("Search and trace artifacts")
+check_spipe_provider_parity()
+```
+
+</details>
+
+#### should return bounded canonical explanations for every ranked hit
+
+- Search and trace artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SPKC-013
+step("Search and trace artifacts")
+check_spipe_provider_parity()
+```
+
+</details>
+
+#### should make mixed incremental deltas equal a clean rebuilt snapshot
+
+- Search and trace artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SPKC-012, REQ-SPKC-014
+step("Search and trace artifacts")
+check_spipe_provider_parity()
+```
+
+</details>
+
+#### should degrade process and semantic provider failures without a false semantic pass
+
+- Search and trace artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SPKC-013, REQ-SPKC-015, REQ-SPKC-016, REQ-SPKC-017, REQ-SPKC-018
+step("Search and trace artifacts")
+check_spipe_provider_parity()
+```
+
+</details>
+
+#### should reject every query and response resource boundary at limit plus one
+
+- Search and trace artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SPKC-011, REQ-SPKC-012, REQ-SPKC-013
+step("Search and trace artifacts")
+check_spipe_provider_parity()
+```
+
+</details>
+
+#### should meet qualified warm-query and incremental-update latency gates
+
+- Search and trace artifacts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SPKC-011, REQ-SPKC-012, REQ-SPKC-014
+step("Search and trace artifacts")
+check_spipe_provider_parity()
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 8 |
+| Active scenarios | 8 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SPKC-011`
+- `REQ-SPKC-012`
+- `REQ-SPKC-013`
+- `REQ-SPKC-014`
+- `REQ-SPKC-015`
+- `REQ-SPKC-016`
+- `REQ-SPKC-017`
+- `REQ-SPKC-018`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `75f64a5ca937bda5c25a33f0f620668f91e89a50a7a115e20c7825ac817fbede`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `75f64a5ca937bda5c25a33f0f620668f91e89a50a7a115e20c7825ac817fbede`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `75f64a5ca937bda5c25a33f0f620668f91e89a50a7a115e20c7825ac817fbede`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **78/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl
+mirror: doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.md (current)
+findings: 12 blockers: 1
+  narrative=100 structure=70 oracle=50
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=78; blocker cap makes effective=49
+doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:33:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should return identical golden ordering and scores across fallback and Simple providers' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should return identical golden ordering and scores across fallback and Simple providers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:38:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep exact identity dominant and break lexical ties by public document ID' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep exact identity dominant and break lexical ties by public document ID' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:43:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject phrase queries and apply metadata equality filters identically in version 1' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject phrase queries and apply metadata equality filters identically in version 1' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:48:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should return bounded canonical explanations for every ranked hit' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:53:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should make mixed incremental deltas equal a clean rebuilt snapshot' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_provider_parity_spec.spl:58:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should degrade process and semantic provider failures without a false semantic pass' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

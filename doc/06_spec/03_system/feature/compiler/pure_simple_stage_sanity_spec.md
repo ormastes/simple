@@ -24,7 +24,7 @@ Prove that each retained pure-Simple bootstrap stage starts, rejects unsupported
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/feature/compiler/pure_simple_stage_sanity_spec.spl` |
-| Updated | 2026-07-15 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -45,46 +45,24 @@ must exit successfully and print exactly `5`.
 ### REQ-BOOT-STAGE-001: every retained pure-Simple stage is executable
 
 #### should prove Stage 2 can compile and run a native fixture
-
-- Start Stage 2 and require its bootstrap version
-- Reject unsupported run without native-build misrouting
-- Strictly compile the canonical tiny fixture
-- Run the Stage 2-produced fixture and require output 5
-- expect stage sane
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Start Stage 2 and require its bootstrap version")
-step("Reject unsupported run without native-build misrouting")
-step("Strictly compile the canonical tiny fixture")
-step("Run the Stage 2-produced fixture and require output 5")
-expect_stage_sane("stage2")
-```
-
-</details>
-
 #### should prove Stage 3 can compile and run a native fixture
 
+- should prove Stage 3 can compile and run a native fixture
 - Start Stage 3 and require its bootstrap version
 - Reject unsupported run without native-build misrouting
 - Strictly compile the canonical tiny fixture
 - Run the Stage 3-produced fixture and require output 5
-- expect stage sane
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should prove Stage 3 can compile and run a native fixture")
 step("Start Stage 3 and require its bootstrap version")
 step("Reject unsupported run without native-build misrouting")
 step("Strictly compile the canonical tiny fixture")
@@ -112,3 +90,59 @@ expect_stage_sane("stage3")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-BOOT-STAGE-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b933e1d4242ae7f88694561aa2b77032236a4e33180cb494072489b9d2f60ffe`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b933e1d4242ae7f88694561aa2b77032236a4e33180cb494072489b9d2f60ffe`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b933e1d4242ae7f88694561aa2b77032236a4e33180cb494072489b9d2f60ffe`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/compiler/pure_simple_stage_sanity_spec.spl
+mirror: doc/06_spec/03_system/feature/compiler/pure_simple_stage_sanity_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=80 oracle=100
+  traceability=60 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=86; blocker cap makes effective=49
+doc/06_spec/03_system/feature/compiler/pure_simple_stage_sanity_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/compiler/pure_simple_stage_sanity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/compiler/pure_simple_stage_sanity_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/feature/compiler/pure_simple_stage_sanity_spec.spl:108:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should prove Stage 2 can compile and run a native fixture' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/compiler/pure_simple_stage_sanity_spec.spl:108:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should prove Stage 2 can compile and run a native fixture' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/compiler/pure_simple_stage_sanity_spec.spl:119:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should prove Stage 3 can compile and run a native fixture' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/compiler/pure_simple_stage_sanity_spec.spl:119:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should prove Stage 3 can compile and run a native fixture' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

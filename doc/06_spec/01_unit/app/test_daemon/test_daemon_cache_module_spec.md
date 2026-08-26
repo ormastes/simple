@@ -1,30 +1,6 @@
 # Test Daemon Cache Module Specification
 
-> 1. dir create all
-
-<!-- sdn-diagram:id=test_daemon_cache_module_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=test_daemon_cache_module_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-test_daemon_cache_module_spec -> std
-test_daemon_cache_module_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=test_daemon_cache_module_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering TestDaemon cache module.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,10 +17,7 @@ test_daemon_cache_module_spec -> app
 
 #### persists cached output across save and load
 
-1. dir create all
-2. file write
-3. cache record result
-4. cache save
+- persists cached output across save and load
    - Expected: entry.result_status equals `2`
    - Expected: entry.result_output equals `line one\nline two`
 
@@ -52,10 +25,12 @@ test_daemon_cache_module_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("persists cached output across save and load")
 dir_create_all(daemon_cache_spec_root)
 val cache_path = daemon_cache_test_path("daemon_cache.sdn")
 val test_path = daemon_cache_test_path("sample_spec.spl")
@@ -84,12 +59,12 @@ expect(entry.result_output).to_equal("line one\nline two")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/test_daemon/test_daemon_cache_module_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering TestDaemon cache module.
 - TestDaemon cache module
 
 ## Scenario Summary
@@ -104,3 +79,52 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `15ea1c904f3272c2812a7c739a43a5711fd6f7099ff5d6b2a29e7dbfbbc3245b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `15ea1c904f3272c2812a7c739a43a5711fd6f7099ff5d6b2a29e7dbfbbc3245b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `15ea1c904f3272c2812a7c739a43a5711fd6f7099ff5d6b2a29e7dbfbbc3245b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **83/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/app/test_daemon/test_daemon_cache_module_spec.spl
+mirror: doc/06_spec/01_unit/app/test_daemon/test_daemon_cache_module_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=100 oracle=40
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=83; blocker cap makes effective=49
+doc/06_spec/01_unit/app/test_daemon/test_daemon_cache_module_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/test_daemon/test_daemon_cache_module_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/test_daemon/test_daemon_cache_module_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario compares only locally constructed arithmetic or literals
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/01_unit/app/test_daemon/test_daemon_cache_module_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/test_daemon/test_daemon_cache_module_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'persists cached output across save and load' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

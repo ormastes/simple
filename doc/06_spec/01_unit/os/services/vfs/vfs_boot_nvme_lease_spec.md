@@ -1,30 +1,6 @@
 # Vfs Boot Nvme Lease Specification
 
-> <details>
-
-<!-- sdn-diagram:id=vfs_boot_nvme_lease_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=vfs_boot_nvme_lease_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-vfs_boot_nvme_lease_spec -> std
-vfs_boot_nvme_lease_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=vfs_boot_nvme_lease_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering VFS boot NVMe lease contract.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,28 @@ vfs_boot_nvme_lease_spec -> os
 
 #### builds a filesystem-ready system FAT32 lease for pure Simple boot
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- builds a filesystem-ready system FAT32 lease for pure Simple boot
+   - Expected: lease.provider equals `simple-driver`
+   - Expected: lease.shared_block_interface is true
+   - Expected: lease.namespace_identity.nsid equals `1u32`
+   - Expected: lease.lba_count equals `65536u64`
+   - Expected: lease.grant_kind.to_start_with("resource-grant-set:tok=") is true
+   - Expected: nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32) equals `ready`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("builds a filesystem-ready system FAT32 lease for pure Simple boot")
 val lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
 expect(lease.provider).to_equal("simple-driver")
 expect(lease.shared_block_interface).to_equal(true)
@@ -61,13 +52,19 @@ expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equ
 
 #### keeps invalid namespace geometry rejected before FAT32 can mount
 
+- keeps invalid namespace geometry rejected before FAT32 can mount
+   - Expected: nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32) equals `nvme-fs-namespace-invalid-lba-size`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps invalid namespace geometry rejected before FAT32 can mount")
 val lease = vfs_boot_nvme_system_fat32_lease(0u32, 65536u64, _tokenized_boot_grant())
 expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equal("nvme-fs-namespace-invalid-lba-size")
 ```
@@ -76,13 +73,21 @@ expect(nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)).to_equ
 
 #### builds production boot FAT32 leases only from ready transfer evidence
 
+- builds production boot FAT32 leases only from ready transfer evidence
+   - Expected: lease.provider equals `simple-driver`
+   - Expected: nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32) equals `ready`
+   - Expected: rejected.unwrap_err() equals `nvme-fs-transfer-not-ready:missing-nvme-sector-write`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("builds production boot FAT32 leases only from ready transfer evidence")
 val ready = nvme_transfer_evidence(
     "simple-driver",
     true,
@@ -129,14 +134,28 @@ expect(rejected.unwrap_err()).to_equal("nvme-fs-transfer-not-ready:missing-nvme-
 
 #### uses hardware transfer evidence before mounting the pure Simple boot FAT32 lease
 
+- uses hardware transfer evidence before mounting the pure Simple boot FAT32 lease
+   - Expected: source contains `val transfer_evidence_result = g_nvme.transfer_evidence_from_reversible_probe(`
+   - Expected: source contains `"system-driver"`
+   - Expected: source contains `"kernel-owned-resource"`
+   - Expected: source contains `"system-kernel-namespace"`
+   - Expected: source contains `vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(`
+   - Expected: source contains `g_vfs_nvme_active_leases = [lease]`
+   - Expected: source contains `g_vfs_nvme_direct_adapter_leases = [lease]`
+   - Expected: source contains `pure-Simple NVMe evidence lease policy degraded`
+   - Expected: source contains `NvmeBlockAdapter.for_identified_namespace_unchecked(`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+# @req REQ-SSPEC-OS
+step("uses hardware transfer evidence before mounting the pure Simple boot FAT32 lease")
+val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 expect(source.contains("val transfer_evidence_result = g_nvme.transfer_evidence_from_reversible_probe(")).to_equal(true)
 expect(source.contains("\"system-driver\"")).to_equal(true)
 expect(source.contains("\"kernel-owned-resource\"")).to_equal(true)
@@ -152,21 +171,22 @@ expect(source.contains("NvmeBlockAdapter.for_identified_namespace_unchecked(")).
 
 #### records boot NVMe leases and rejects later user assignment of the same namespace
 
-1. vfs boot nvme reset active leases for test
+- records boot NVMe leases and rejects later user assignment of the same namespace
    - Expected: vfs_boot_nvme_record_active_lease_for_test(system_lease) equals `ready`
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `1u64`
    - Expected: vfs_boot_nvme_active_lease_acceptance_reason(conflicting_user) equals `nvme-fs-namespace-mode-conflict:system:user-assigned`
    - Expected: vfs_boot_nvme_active_lease_acceptance_reason(other_user) equals `ready`
-2. vfs boot nvme reset active leases for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("records boot NVMe leases and rejects later user assignment of the same namespace")
 vfs_boot_nvme_reset_active_leases_for_test()
 val system_lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
 val conflicting_user = _user_lease_for_boot_nsid(1u32)
@@ -183,21 +203,22 @@ vfs_boot_nvme_reset_active_leases_for_test()
 
 #### assigns user namespaces through the active VFS lease registry
 
-1. vfs boot nvme reset active leases for test
+- assigns user namespaces through the active VFS lease registry
    - Expected: vfs_boot_nvme_record_active_lease_for_test(boot_lease) equals `ready`
    - Expected: conflict.unwrap_err() equals `nvme-fs-namespace-mode-conflict:system:user-assigned`
    - Expected: assigned.is_ok() is true
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `2u64`
-2. vfs boot nvme reset active leases for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("assigns user namespaces through the active VFS lease registry")
 vfs_boot_nvme_reset_active_leases_for_test()
 val boot_lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
 val grant = _tokenized_grant_for_owner(42u64)
@@ -217,22 +238,23 @@ vfs_boot_nvme_reset_active_leases_for_test()
 
 #### creates user namespace driver instances only after active-lease admission
 
-1. vfs boot nvme reset active leases for test
+- creates user namespace driver instances only after active-lease admission
    - Expected: vfs_boot_nvme_record_active_lease_for_test(boot_lease) equals `ready`
    - Expected: conflict.unwrap_err() equals `nvme-fs-namespace-mode-conflict:system:user-assigned`
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `1u64`
    - Expected: mounted.is_ok() is true
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `2u64`
-2. vfs boot nvme reset active leases for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("creates user namespace driver instances only after active-lease admission")
 vfs_boot_nvme_reset_active_leases_for_test()
 val boot_lease = vfs_boot_nvme_system_fat32_lease(512u32, 65536u64, _tokenized_boot_grant())
 val grant = _tokenized_grant_for_owner(42u64)
@@ -253,14 +275,22 @@ vfs_boot_nvme_reset_active_leases_for_test()
 
 #### keeps generic user namespace driver instances off the NVMe DirectIo adapter registry
 
+- keeps generic user namespace driver instances off the NVMe DirectIo adapter registry
+   - Expected: generic_body contains `vfs_nvme_buffered_driver_instance_for_lease(name, dev, lease, consumer)`
+   - Expected: generic_body does not contain `vfs_nvme_driver_instance_for_lease(name, dev, lease, consumer)`
+   - Expected: generic_body does not contain `g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_adapters.push`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+# @req REQ-SSPEC-OS
+step("keeps generic user namespace driver instances off the NVMe DirectIo adapter registry")
+val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 val generic_pos = source.index_of("fn vfs_boot_nvme_assign_user_namespace_driver_instance(")
 val hardware_pos = source.index_of("fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(")
 val generic_body = source.substring(generic_pos, hardware_pos)
@@ -274,20 +304,21 @@ expect(generic_body.contains("g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_ada
 
 #### rejects a second user driver instance for the same namespace with a different grant
 
-1. vfs boot nvme reset active leases for test
+- rejects a second user driver instance for the same namespace with a different grant
    - Expected: mounted.is_ok() is true
    - Expected: conflict.unwrap_err() equals `nvme-fs-user-namespace-grant-conflict`
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `1u64`
-2. vfs boot nvme reset active leases for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects a second user driver instance for the same namespace with a different grant")
 vfs_boot_nvme_reset_active_leases_for_test()
 val grant = _tokenized_grant_for_owner(42u64)
 val other_grant = _tokenized_grant_for_owner(43u64)
@@ -307,14 +338,57 @@ vfs_boot_nvme_reset_active_leases_for_test()
 
 #### routes production user namespace mounts through the pure Simple NVMe block adapter
 
+- routes production user namespace mounts through the pure Simple NVMe block adapter
+   - Expected: source contains `fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(`
+   - Expected: source contains `fn vfs_boot_nvme_assign_discovered_user_namespace_hardware_driver_instance(`
+   - Expected: source contains `fn vfs_boot_nvme_system_namespace_nsid_for_user_assignment() -> u32:`
+   - Expected: source contains `if lease.mode == NvmeNamespaceMode.System:`
+   - Expected: source contains `val system_nsid = vfs_boot_nvme_system_namespace_nsid_for_user_assignment()`
+   - Expected: source contains `val user_namespace = g_nvme.identify_first_assignable_user_namespace(system_n... (full value in folded executable source)`
+   - Expected: source contains `"nvme-user-assign-namespace-discovery-failed:"`
+   - Expected: source contains `facts.formatted_lba_size`
+   - Expected: source contains `facts.lba_count`
+   - Expected: source contains `val interface_probe = vfs_boot_nvme_assign_user_namespace_lease(`
+   - Expected: source contains `val shared_interface = vfs_boot_nvme_shared_consumer_interface_reason(probe_l... (full value in folded executable source)`
+   - Expected: source contains `val release_probe = vfs_boot_nvme_release_active_lease(probe_lease)`
+   - Expected: source contains `"nvme-user-assign-shared-interface-not-ready:"`
+   - Expected: source contains `"nvme-user-assign-probe-release-failed"`
+   - Expected: source contains `val driver_ready = vfs_boot_nvme_shared_driver_ready_for_user_assignment()`
+   - Expected: source contains `return Err(driver_ready)`
+   - Expected: source contains `val previous_nsid = g_nvme.get_namespace_id()`
+   - Expected: source contains `val identify = g_nvme.identify_namespace_id(lease.namespace_identity.nsid)`
+   - Expected: source contains `"nvme-user-assign-namespace-identify-failed:"`
+   - Expected: source contains `val queue_ready = g_nvme.ensure_user_data_queue_for_assignment(`
+   - Expected: source contains `lease.namespace_identity.controller_id`
+   - Expected: source contains `lease.namespace_identity.nsid`
+   - Expected: source contains `lease.queue.owner_task`
+   - Expected: source contains `"nvme-user-assign-queue-create-failed:"`
+   - Expected: source contains `val restore_identify = g_nvme.identify_namespace_id(previous_nsid)`
+   - Expected: source contains `val restore_after_queue = g_nvme.identify_namespace_id(previous_nsid)`
+   - Expected: source contains `val restore_after_adapter = g_nvme.identify_namespace_id(previous_nsid)`
+   - Expected: source contains `"nvme-user-assign-namespace-restore-failed:"`
+   - Expected: source contains `NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, consumer)`
+   - Expected: source contains `val bounce = adapter.init_bounce_buffer()`
+   - Expected: source contains `vfs_nvme_driver_instance_for_lease(name, adapter, lease, consumer)`
+   - Expected: source contains `g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)`
+   - Expected: source contains `g_vfs_nvme_direct_adapter_leases = g_vfs_nvme_direct_adapter_leases.push(lease)`
+   - Expected: source contains `g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_adapters.push(adapter)`
+   - Expected: lease_check_pos >= 0 is true
+   - Expected: identify_pos > lease_check_pos is true
+   - Expected: queue_pos > lease_check_pos is true
+   - Expected: adapter_pos > lease_check_pos is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+# @req REQ-SSPEC-OS
+step("routes production user namespace mounts through the pure Simple NVMe block adapter")
+val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 val lease_check_pos = source.index_of("val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(")
 val identify_pos = source.index_of("val identify = g_nvme.identify_namespace_id(lease.namespace_identity.nsid)")
 val queue_pos = source.index_of("val queue_ready = g_nvme.ensure_user_data_queue_for_assignment(")
@@ -363,7 +437,7 @@ expect(adapter_pos > lease_check_pos).to_equal(true)
 
 #### keeps direct IO adapter ownership mapped by lease instead of active lease index
 
-1. vfs boot nvme reset active leases for test
+- keeps direct IO adapter ownership mapped by lease instead of active lease index
    - Expected: lease_only.is_ok() is true
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `1u64`
    - Expected: vfs_boot_nvme_direct_adapter_count_for_test() equals `0u64`
@@ -381,20 +455,21 @@ expect(adapter_pos > lease_check_pos).to_equal(true)
    - Expected: source contains `lease.queue.queue_id`
    - Expected: source contains `lease.queue.owner_task`
    - Expected: source does not contain `for active in g_vfs_nvme_active_leases:\n        if nvme_filesystem_lease_sam... (full value in folded executable source)`
-2. vfs boot nvme reset active leases for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps direct IO adapter ownership mapped by lease instead of active lease index")
 vfs_boot_nvme_reset_active_leases_for_test()
 val grant = _tokenized_grant_for_owner(42u64)
 val evidence = _user_evidence(grant)
-val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 
 val lease_only = vfs_boot_nvme_assign_user_namespace_lease(evidence, grant, 0u32, 16u32, 512u32, 65536u64, 0u64, 1024u64, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID, 42u64, 64u16, NvmeFilesystemConsumer.Nvfs)
 expect(lease_only.is_ok()).to_equal(true)
@@ -422,21 +497,21 @@ vfs_boot_nvme_reset_active_leases_for_test()
 
 #### requires filesystem DirectIo probe before submitting through lease adapters
 
-1. vfs boot nvme reset active leases for test
-2. owner: DmaOwner
+- requires filesystem DirectIo probe before submitting through lease adapters
    - Expected: vfs_boot_nvme_submit_filesystem_direct_4k(unsupported, lease, req).unwrap_err() equals `FsError.Unsupported`
    - Expected: vfs_boot_nvme_submit_filesystem_direct_4k(mounted, lease, unaligned).unwrap_err() equals `FsError.InvalidArg`
    - Expected: vfs_boot_nvme_submit_filesystem_direct_4k_batch(mounted_batch, lease, batch).unwrap_err() equals `FsError.NotFound`
-3. vfs boot nvme reset active leases for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires filesystem DirectIo probe before submitting through lease adapters")
 vfs_boot_nvme_reset_active_leases_for_test()
 val lease = _user_lease_for_boot_nsid(18u32)
 val unsupported = DriverInstance.DbFs(DbFsDriver.new_hosted())
@@ -464,14 +539,29 @@ vfs_boot_nvme_reset_active_leases_for_test()
 
 #### resolves filesystem DirectIo through file extents before lease adapter submission
 
+- resolves filesystem DirectIo through file extents before lease adapter submission
+   - Expected: source contains `fn vfs_boot_nvme_map_filesystem_direct_4k_request(driver: DriverInstance, req... (full value in folded executable source)`
+   - Expected: source contains `fn vfs_boot_nvme_map_filesystem_direct_4k_batch(driver: DriverInstance, req: ... (full value in folded executable source)`
+   - Expected: source contains `driver.direct_io_extent_for_handle(FileHandle(id: req.handle_id), req.file_of... (full value in folded executable source)`
+   - Expected: source contains `val storage_offset = (mapped.storage_lba * mapped.sector_size.to_u64()) as i64`
+   - Expected: source contains `file_offset: storage_offset`
+   - Expected: source contains `for offset in req.file_offsets:\n        val extent = driver.direct_io_extent... (full value in folded executable source)`
+   - Expected: source contains `storage_offsets.push((mapped.storage_lba * mapped.sector_size.to_u64()) as i64)`
+   - Expected: source contains `file_offsets: storage_offsets`
+   - Expected: source contains `vfs_boot_nvme_direct_io_extent_matches_request(direct, mapped, req.file_offse... (full value in folded executable source)`
+   - Expected: source contains `vfs_boot_nvme_direct_io_extent_matches_request(direct, mapped, offset, 4096u64)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+# @req REQ-SSPEC-OS
+step("resolves filesystem DirectIo through file extents before lease adapter submission")
+val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 
 expect(source.contains("fn vfs_boot_nvme_map_filesystem_direct_4k_request(driver: DriverInstance, req: DirectIoRequest) -> Result<DirectIoRequest, FsError>:")).to_equal(true)
 expect(source.contains("fn vfs_boot_nvme_map_filesystem_direct_4k_batch(driver: DriverInstance, req: DirectIoBatchRequest) -> Result<DirectIoBatchRequest, FsError>:")).to_equal(true)
@@ -489,13 +579,23 @@ expect(source.contains("vfs_boot_nvme_direct_io_extent_matches_request(direct, m
 
 #### rejects DirectIo extents that do not match the probed request
 
+- rejects DirectIo extents that do not match the probed request
+   - Expected: vfs_boot_nvme_direct_io_extent_matches_request(dbfs, matching, 0i64, 4096u64) is true
+   - Expected: vfs_boot_nvme_direct_io_extent_matches_request(dbfs, wrong_consumer, 0i64, 4096u64) is false
+   - Expected: vfs_boot_nvme_direct_io_extent_matches_request(dbfs, missing_consumer, 0i64, 4096u64) is false
+   - Expected: vfs_boot_nvme_direct_io_extent_matches_request(dbfs, wrong_offset, 0i64, 4096u64) is false
+   - Expected: vfs_boot_nvme_direct_io_extent_matches_request(dbfs, wrong_len, 0i64, 4096u64) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects DirectIo extents that do not match the probed request")
 val dbfs = direct_io_nvme_filesystem_extension("dbfs", 512u32)
 val matching = DirectIoExtent(
     consumer: "dbfs",
@@ -544,13 +644,22 @@ expect(vfs_boot_nvme_direct_io_extent_matches_request(dbfs, wrong_len, 0i64, 409
 
 #### exposes boot FAT DirectIo extents on the pure SimpleOS shared FAT driver
 
+- exposes boot FAT DirectIo extents on the pure SimpleOS shared FAT driver
+   - Expected: source contains `use std.fs_driver.direct_io.{DirectIoExtent}`
+   - Expected: source contains `me fn direct_io_extent_for_handle(handle: u64, file_offset: i64, byte_len: u6... (full value in folded executable source)`
+   - Expected: source contains `return Result.Err("invalid file handle")`
+   - Expected: source contains `self.inner.direct_io_extent_for_handle(shared_opt.unwrap(), file_offset, byte... (full value in folded executable source)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("exposes boot FAT DirectIo extents on the pure SimpleOS shared FAT driver")
 val source = read_file("src/os/services/fat32/shared_fat32_driver.spl")
 
 expect(source.contains("use std.fs_driver.direct_io.{DirectIoExtent}")).to_equal(true)
@@ -563,17 +672,20 @@ expect(source.contains("self.inner.direct_io_extent_for_handle(shared_opt.unwrap
 
 #### rejects uncommitted DBFS filesystem DirectIo batches before adapter lookup
 
-1. owner: DmaOwner
+- rejects uncommitted DBFS filesystem DirectIo batches before adapter lookup
+   - Expected: handle.is_ok() is true
    - Expected: mapped.unwrap_err() equals `FsError.Unsupported`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects uncommitted DBFS filesystem DirectIo batches before adapter lookup")
 val lease = _user_lease_for_boot_nsid(19u32)
 val mounted = vfs_nvme_driver_instance_for_lease("user-dbfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Dbfs).unwrap()
 val handle = mounted.open_path(Path(raw: "/hot.db"), OpenFlags.read_write().with_create())
@@ -595,13 +707,20 @@ expect(mapped.unwrap_err()).to_equal(FsError.Unsupported)
 
 #### rejects uncommitted NVFS filesystem DirectIo before adapter lookup
 
+- rejects uncommitted NVFS filesystem DirectIo before adapter lookup
+   - Expected: handle.is_ok() is true
+   - Expected: mapped.unwrap_err() equals `FsError.Unsupported`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects uncommitted NVFS filesystem DirectIo before adapter lookup")
 val lease = _user_lease_for_boot_nsid(20u32)
 val mounted = vfs_nvme_driver_instance_for_lease("user-nvfs", MemBlockDevice.new(1024u64, 512u32), lease, NvmeFilesystemConsumer.Nvfs).unwrap()
 val handle = mounted.open_path(Path(raw: "/hot.nvfs"), OpenFlags.read_write().with_create())
@@ -615,14 +734,40 @@ expect(mapped.unwrap_err()).to_equal(FsError.Unsupported)
 
 #### wires q35 pure Simple perf evidence to real shared-DMA direct I/O
 
+- wires q35 pure Simple perf evidence to real shared-DMA direct I/O
+   - Expected: source contains `fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:`
+   - Expected: source contains `val batch_4k_ops: u32 = 32u32`
+   - Expected: source contains `dma_alloc(batch_bytes as i64, DmaDir.Bidirectional)`
+   - Expected: source contains `vfs_boot_nvme_submit_active_lease_direct_4k_batch(`
+   - Expected: source contains `direct_io_read_batch_request(1u64, offsets, shared, 100000u32)`
+   - Expected: source contains `direct_io_write_batch_request(1u64, offsets, shared, 100000u32)`
+   - Expected: source contains `vfs_boot_nvme_submit_active_lease_direct_4k_batch_write_through(`
+   - Expected: source contains `fn _vfs_boot_q35_ready_fs_consumers(lease: NvmeFilesystemLease) -> Result<tex... (full value in folded executable source)`
+   - Expected: source contains `vfs_boot_nvme_shared_consumer_interface_reason(lease)`
+   - Expected: source contains `nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)`
+   - Expected: source contains `nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Nvfs)`
+   - Expected: source contains `nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Dbfs)`
+   - Expected: source contains `fs-consumer-lease-not-ready`
+   - Expected: source contains `/SYS/PERF/CFAT4K.TXT`
+   - Expected: source contains `real_device_q35_pure_simple_perf_marker_from_measurements(`
+   - Expected: source contains `reason=c-baseline-missing-iops`
+   - Expected: entry contains `q35_pure_nvme_perf_serial_lines`
+   - Expected: entry contains `serial_println(line)`
+   - Expected: pcimgr contains `fn pcimgr_enable_mmio_bus_master`
+   - Expected: pcimgr contains `command | 0x00000006u32`
+   - Expected: pcimgr contains `pcimgr_enable_mmio_bus_master(bus_u8, dev_u8, func_u8)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+# @req REQ-SSPEC-OS
+step("wires q35 pure Simple perf evidence to real shared-DMA direct I/O")
+val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 val entry = read_file("examples/09_embedded/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl")
 
 expect(source.contains("fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:")).to_equal(true)
@@ -653,13 +798,33 @@ expect(pcimgr.contains("pcimgr_enable_mmio_bus_master(bus_u8, dev_u8, func_u8)")
 
 #### measures the standalone q35 C baseline inside the guest on the same device
 
+- measures the standalone q35 C baseline inside the guest on the same device
+   - Expected: source contains `extern fn simpleos_nvme_init() -> i64`
+   - Expected: source contains `extern fn simpleos_nvme_read_sector(device_idx: u64, lba: u64, buf_addr: u64)... (full value in folded executable source)`
+   - Expected: source contains `extern fn simpleos_nvme_write_sector(device_idx: u64, lba: u64, buf_addr: u64... (full value in folded executable source)`
+   - Expected: source contains `fn _measure_c_bridge_4k_baseline(lbas: [u64], sector_size: u32, buf_addr: u64... (full value in folded executable source)`
+   - Expected: source contains `val init = simpleos_nvme_init()`
+   - Expected: source contains `simpleos_nvme_read_sector(0u64, lba + sector.to_u64(), buf_addr`
+   - Expected: source contains `simpleos_nvme_write_sector(0u64, lba + sector.to_u64(), buf_addr`
+   - Expected: source contains `all_lbas.push(lba)`
+   - Expected: source contains `val c_baseline = _measure_c_bridge_4k_baseline(all_lbas, sector_size, shared.... (full value in folded executable source)`
+   - Expected: source contains `c_read_iops = c.read_iops`
+   - Expected: source contains `c_write_iops = c.write_iops`
+   - Expected: source contains `if read_p99_us >= c_read_p99_us:`
+   - Expected: source contains `simple-read-p99-not-faster-than-c`
+   - Expected: source contains `if write_p99_us >= c_write_p99_us:`
+   - Expected: source contains `simple-write-p99-not-faster-than-c`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("measures the standalone q35 C baseline inside the guest on the same device")
 val source = read_file("src/os/services/vfs/q35_pure_nvme_perf_boot.spl")
 
 expect(source.contains("extern fn simpleos_nvme_init() -> i64")).to_equal(true)
@@ -683,13 +848,72 @@ expect(source.contains("simple-write-p99-not-faster-than-c")).to_equal(true)
 
 #### measures standalone q35 Simple I/O through the lease-backed adapter DirectIo surface
 
+- measures standalone q35 Simple I/O through the lease-backed adapter DirectIo surface
+   - Expected: source contains `use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}`
+   - Expected: source contains `nvme_transfer_readiness_reason(evidence)`
+   - Expected: source contains `NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease_window(nvme, 1u3... (full value in folded executable source)`
+   - Expected: source contains `NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_write_through_for_lease_wi... (full value in folded executable source)`
+   - Expected: source does not contain `NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_identified_namespace`
+   - Expected: adapter contains `static fn submit_direct_4k_shared_dma_batch_for_lease(`
+   - Expected: adapter contains `static fn submit_direct_4k_shared_dma_batch_for_lease_window(`
+   - Expected: adapter contains `static fn submit_direct_4k_shared_dma_batch_write_through_for_lease(`
+   - Expected: adapter contains `static fn submit_direct_4k_shared_dma_batch_write_through_for_lease_window(`
+   - Expected: adapter contains `nvme.flush_in_namespace_on_queue(lease.namespace_identity.nsid, lease.queue.q... (full value in folded executable source)`
+   - Expected: adapter contains `nvme.flush_in_namespace_on_queue(nsid, queue_id)`
+   - Expected: adapter contains `durable: true`
+   - Expected: adapter contains `durable: false`
+   - Expected: adapter contains `lease: NvmeFilesystemLease`
+   - Expected: adapter contains `val reason = nvme_filesystem_lease_reason(lease, consumer)`
+   - Expected: adapter contains `nvme_filesystem_lease_absolute_lba(lease, relative_lba)`
+   - Expected: adapter contains `if relative_lba >= lba_count:`
+   - Expected: adapter contains `direct_io_validate_batch(ext, req, 4096u64)`
+   - Expected: source contains `fn _fat32_fixture_direct_offsets(nvme: NvmeDriver, sector_size: u32, buf: Sha... (full value in folded executable source)`
+   - Expected: source contains `"FAT4K   BIN"`
+   - Expected: source contains `fat32_extent_source=freestanding-fat32-extents`
+   - Expected: source contains `fn _dbfs_arena_direct_offsets(sector_size: u32, sector_count: u64, arena_base... (full value in folded executable source)`
+   - Expected: source contains `nvfs_extent_source=freestanding-dbfs-arena`
+   - Expected: source contains `dbfs_extent_source=freestanding-dbfs-arena`
+   - Expected: source contains `fat32_direct_io=read-write-through`
+   - Expected: source contains `nvfs_direct_io=read-write-through`
+   - Expected: source contains `dbfs_direct_io=read-write-through`
+   - Expected: source contains `fn _consumer_for_measurement(run: u32, op: u32) -> NvmeFilesystemConsumer:`
+   - Expected: source contains `saw_fat32 = true`
+   - Expected: source contains `saw_nvfs = true`
+   - Expected: source contains `saw_dbfs = true`
+   - Expected: source contains `fs-consumer-direct-io-incomplete`
+   - Expected: source contains `fs_consumers=" + fs_consumers`
+   - Expected: source contains `direct_io_read_batch_request(1u64, offsets, shared, 200000u32)`
+   - Expected: source contains `direct_io_write_batch_request(1u64, offsets, shared, 200000u32)`
+   - Expected: source contains `fn _q35_user_namespace_assignment_marker(`
+   - Expected: source contains `active_leases: [NvmeFilesystemLease]`
+   - Expected: source contains `val active_system_lease = _q35_system_namespace_lease(sector_size, sector_count)`
+   - Expected: source contains `val system_nsid = 1u32`
+   - Expected: source contains `val user_namespace = nvme.identify_first_assignable_user_namespace(system_nsid)`
+   - Expected: source contains `val user_nsid = user_facts.nsid`
+   - Expected: source does not contain `nvme_user_assigned_filesystem_lease_from_grant_checked(\n        evidence,\n ... (full value in folded executable source)`
+   - Expected: source contains `nvme_user_assigned_filesystem_lease_from_grant_checked(\n        evidence,\n ... (full value in folded executable source)`
+   - Expected: source contains `_q35_user_namespace_assignment_marker(nvme, grant, shared, [active_system_lea... (full value in folded executable source)`
+   - Expected: source does not contain `NvmeFilesystemConsumer.Fat32,\n        []`
+   - Expected: source contains `user_namespace_assignment=hardware-data-queue`
+   - Expected: source contains `user_namespace_nsid=" + lease.namespace_identity.nsid.to_u64().to_text()`
+   - Expected: source contains `user_namespace_active_lease_count=" + active_leases.len().to_u64().to_text()`
+   - Expected: source contains `user_namespace_direct_io=read-write-through`
+   - Expected: source contains `nvme_shared_filesystem_interface(lease)`
+   - Expected: source contains `user_namespace_shared_interface=" + nvme_shared_filesystem_interface_consumers()`
+   - Expected: source contains `NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_write_through_for_lease(`
+   - Expected: source does not contain `nvme.read_4k_shared_dma_batch_in_namespace_on_queue(`
+   - Expected: source does not contain `nvme.write_4k_shared_dma_batch_in_namespace_on_queue(`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("measures standalone q35 Simple I/O through the lease-backed adapter DirectIo surface")
 val source = read_file("src/os/services/vfs/q35_pure_nvme_perf_boot.spl")
 
 expect(source.contains("use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}")).to_equal(true)
@@ -753,28 +977,45 @@ expect(source.contains("nvme.write_4k_shared_dma_batch_in_namespace_on_queue("))
 
 #### packages the C FAT baseline artifact into the q35 FAT image contract
 
+- packages the C FAT baseline artifact into the q35 FAT image contract
+   - Expected: script contains `make_os_disk.c`
+   - Expected: c_source contains `SIMPLEOS_CFAT4K_BASELINE`
+   - Expected: c_source contains `build/os/perf/CFAT4K.TXT`
+   - Expected: c_source contains `put_dir_entry(sys, &sys_n, "PERF       "`
+   - Expected: c_source contains `put_dir_entry(perf, &perf_n, "CFAT4K  TXT"`
+   - Expected: c_source contains `SIMPLEOS_FAT32_DIRECT_IO_4K_FIXTURE`
+   - Expected: c_source contains `put_dir_entry(perf, &perf_n, "FAT4K   BIN"`
+   - Expected: c_source contains `FAT32_MIN_DATA_CLUSTERS = 65525`
+   - Expected: c_source contains `geometry_for_cluster_size`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("packages the C FAT baseline artifact into the q35 FAT image contract")
 val script = read_file("scripts/os/make_os_disk.shs")
-expect(script.contains("SIMPLEOS_CFAT4K_BASELINE")).to_equal(true)
-expect(script.contains("build\", \"os\", \"perf\", \"CFAT4K.TXT")).to_equal(true)
-expect(script.contains("sys_entries.append(dir_entry(\"PERF       \"")).to_equal(true)
-expect(script.contains("perf_entries.append(dir_entry(\"CFAT4K  TXT\"")).to_equal(true)
-expect(script.contains("SIMPLEOS_FAT32_DIRECT_IO_4K_FIXTURE")).to_equal(true)
-expect(script.contains("perf_entries.append(dir_entry(\"FAT4K   BIN\"")).to_equal(true)
-expect(script.contains("spc = 8")).to_equal(true)
+val c_source = read_file("scripts/os/make_os_disk.c")
+expect(script.contains("make_os_disk.c")).to_equal(true)
+expect(c_source.contains("SIMPLEOS_CFAT4K_BASELINE")).to_equal(true)
+expect(c_source.contains("build/os/perf/CFAT4K.TXT")).to_equal(true)
+expect(c_source.contains("put_dir_entry(sys, &sys_n, \"PERF       \"")).to_equal(true)
+expect(c_source.contains("put_dir_entry(perf, &perf_n, \"CFAT4K  TXT\"")).to_equal(true)
+expect(c_source.contains("SIMPLEOS_FAT32_DIRECT_IO_4K_FIXTURE")).to_equal(true)
+expect(c_source.contains("put_dir_entry(perf, &perf_n, \"FAT4K   BIN\"")).to_equal(true)
+expect(c_source.contains("FAT32_MIN_DATA_CLUSTERS = 65525")).to_equal(true)
+expect(c_source.contains("geometry_for_cluster_size")).to_equal(true)
 ```
 
 </details>
 
 #### checks shared driver readiness before constructing hardware user namespace adapters
 
-1. vfs boot nvme reset active leases for test
+- checks shared driver readiness before constructing hardware user namespace adapters
    - Expected: vfs_boot_nvme_shared_driver_ready_for_user_assignment() equals `nvme-user-assign-boot-storage-not-ready:not-mounted`
    - Expected: guard_pos >= 0 is true
    - Expected: adapter_pos > guard_pos is true
@@ -784,12 +1025,14 @@ expect(script.contains("spc = 8")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("checks shared driver readiness before constructing hardware user namespace adapters")
 vfs_boot_nvme_reset_active_leases_for_test()
-val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 val guard_pos = source.index_of("val driver_ready = vfs_boot_nvme_shared_driver_ready_for_user_assignment()")
 val adapter_pos = source.index_of("NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, consumer)")
 
@@ -803,14 +1046,33 @@ expect(vfs_boot_nvme_active_lease_count_for_test()).to_equal(0u64)
 
 #### releases user data queue owners on post-queue hardware assignment failures
 
+- releases user data queue owners on post-queue hardware assignment failures
+   - Expected: helper_pos >= 0 is true
+   - Expected: fn_start >= 0 is true
+   - Expected: fn_end > fn_start is true
+   - Expected: source contains `g_nvme.release_user_data_queue_owner(\n        lease.queue.queue_id,\n       ... (full value in folded executable source)`
+   - Expected: adapter_fail_pos > queue_pos is true
+   - Expected: bounce_fail_pos > queue_pos is true
+   - Expected: driver_fail_pos > queue_pos is true
+   - Expected: adapter_fail_pos < record_pos is true
+   - Expected: bounce_fail_pos < record_pos is true
+   - Expected: driver_fail_pos < record_pos is true
+   - Expected: adapter_fail_body.index_of("val restore_after_adapter = g_nvme.identify_namespace_id(previous_nsid)") < adapter_fail_body.index_of("val queue_release = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)") is true
+   - Expected: adapter_fail_body contains `vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)`
+   - Expected: bounce_fail_body contains `vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)`
+   - Expected: driver_fail_body contains `vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+# @req REQ-SSPEC-OS
+step("releases user data queue owners on post-queue hardware assignment failures")
+val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 val helper_pos = source.index_of("fn vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease: NvmeFilesystemLease) -> text:")
 val fn_start = source.index_of("fn vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(")
 val fn_end = source.index_of("fn vfs_boot_nvme_assign_discovered_user_namespace_hardware_driver_instance(")
@@ -844,7 +1106,7 @@ expect(driver_fail_body.contains("vfs_boot_nvme_release_user_queue_owner_for_fai
 
 #### releases active user namespace leases so reassignment can proceed
 
-1. vfs boot nvme reset active leases for test
+- releases active user namespace leases so reassignment can proceed
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `1u64`
    - Expected: vfs_boot_nvme_release_active_lease(missing) equals `nvme-fs-active-lease-not-found`
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `1u64`
@@ -852,16 +1114,17 @@ expect(driver_fail_body.contains("vfs_boot_nvme_release_user_queue_owner_for_fai
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `0u64`
    - Expected: reassigned.is_ok() is true
    - Expected: vfs_boot_nvme_active_lease_count_for_test() equals `1u64`
-2. vfs boot nvme reset active leases for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("releases active user namespace leases so reassignment can proceed")
 vfs_boot_nvme_reset_active_leases_for_test()
 val grant = _tokenized_grant_for_owner(42u64)
 val evidence = _user_evidence(grant)
@@ -883,13 +1146,25 @@ vfs_boot_nvme_reset_active_leases_for_test()
 
 #### accepts only pure Simple NVMe boot storage as production-ready
 
+- accepts only pure Simple NVMe boot storage as production-ready
+   - Expected: vfs_boot_storage_acceptance_reason(false, "not-mounted", false) equals `not-mounted`
+   - Expected: vfs_boot_storage_acceptance_reason(true, "c-boot-bridge", false) equals `vfs-boot-storage-not-pure-simple:c-boot-bridge`
+   - Expected: vfs_boot_storage_acceptance_reason(true, "virtio-blk", true) equals `vfs-boot-storage-not-nvme-simple-driver:virtio-blk`
+   - Expected: vfs_boot_storage_acceptance_reason(true, "simple-driver", true) equals `ready`
+   - Expected: vfs_boot_storage_production_ready(true, "c-boot-bridge", false) is false
+   - Expected: vfs_boot_storage_production_ready(true, "virtio-blk", true) is false
+   - Expected: vfs_boot_storage_production_ready(true, "simple-driver", true) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("accepts only pure Simple NVMe boot storage as production-ready")
 expect(vfs_boot_storage_acceptance_reason(false, "not-mounted", false)).to_equal("not-mounted")
 expect(vfs_boot_storage_acceptance_reason(true, "c-boot-bridge", false)).to_equal("vfs-boot-storage-not-pure-simple:c-boot-bridge")
 expect(vfs_boot_storage_acceptance_reason(true, "virtio-blk", true)).to_equal("vfs-boot-storage-not-nvme-simple-driver:virtio-blk")
@@ -903,14 +1178,26 @@ expect(vfs_boot_storage_production_ready(true, "simple-driver", true)).to_equal(
 
 #### keeps production VFS boot out of C bridge and virtio fallback branches
 
+- keeps production VFS boot out of C bridge and virtio fallback branches
+   - Expected: boot_body does not contain `init_c_bridge()`
+   - Expected: boot_body does not contain `_vfs_boot_init_virtio_fat32()`
+   - Expected: boot_body contains `pure-Simple NVMe + FAT32 unavailable; VFS unavailable`
+   - Expected: production_body does not contain `vfs_boot_init()`
+   - Expected: production_body does not contain `init_c_bridge()`
+   - Expected: production_body does not contain `_vfs_boot_init_virtio_fat32()`
+   - Expected: production_body contains `_vfs_boot_init_pure_nvme_fat32(nvme_idx.to_u64())`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = read_file("src/os/services/vfs/vfs_boot_init.spl")
+# @req REQ-SSPEC-OS
+step("keeps production VFS boot out of C bridge and virtio fallback branches")
+val source = (read_file("src/os/services/vfs/vfs_boot_init.spl") + read_file("src/os/services/vfs/vfs_boot_core.spl") + read_file("src/os/services/vfs/vfs_boot_state.spl") + read_file("src/os/services/vfs/vfs_ambient_context.spl") + read_file("src/os/services/vfs/nvme_boot_runtime_owner.spl") + read_file("src/os/services/vfs/nvme_filesystem_direct_io.spl") + read_file("src/os/services/vfs/nvme_q35_lease_perf.spl") + read_file("src/os/services/vfs/direct_fat32_boot_reader.spl"))
 val boot_pos = source.index_of("pub fn vfs_boot_init() -> bool:")
 val production_pos = source.index_of("pub fn vfs_boot_init_production() -> bool:")
 val pure_pos = source.index_of("fn _vfs_boot_init_pure_nvme_fat32")
@@ -930,13 +1217,19 @@ expect(production_body.contains("_vfs_boot_init_pure_nvme_fat32(nvme_idx.to_u64(
 
 #### exports fail-closed production readiness through the VFS public surface
 
+- exports fail-closed production readiness through the VFS public surface
+   - Expected: vfs_boot_storage_acceptance_ready() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("exports fail-closed production readiness through the VFS public surface")
 expect(vfs_boot_storage_acceptance_ready()).to_equal(false)
 ```
 
@@ -949,12 +1242,12 @@ expect(vfs_boot_storage_acceptance_ready()).to_equal(false)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering VFS boot NVMe lease contract.
 - VFS boot NVMe lease contract
 
 ## Scenario Summary
@@ -969,3 +1262,55 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ef0c504f8321b32a67d9c829f2f0d173d96336aa06059524b4c91f6d0ac52bb8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ef0c504f8321b32a67d9c829f2f0d173d96336aa06059524b4c91f6d0ac52bb8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ef0c504f8321b32a67d9c829f2f0d173d96336aa06059524b4c91f6d0ac52bb8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl
+mirror: doc/06_spec/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl:118:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds a filesystem-ready system FAT32 lease for pure Simple boot' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl:129:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps invalid namespace geometry rejected before FAT32 can mount' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl:193:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records boot NVMe leases and rejects later user assignment of the same namespace' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

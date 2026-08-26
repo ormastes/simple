@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,16 +17,23 @@
 
 #### gates the production registry on exact theme readiness
 
-- Inspect the hosted theme-before-init production route.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- gates the production registry on exact theme readiness
+- Inspect the hosted theme-before-init production route
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("gates the production registry on exact theme readiness")
 step("Inspect the hosted theme-before-init production route")
 val entry = executable_source_lines(
     rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -45,14 +52,22 @@ val create_pos = entry.find(
     "HostedBrowserRendererRegistry.create_with_theme("
 )
 val accept_start = registry.find("me _accept_polled_result(")
-val accept_end = registry.find("me advance_window(", accept_start)
+val accept_end = registry.find(
+    "me advance_window(", accept_start
+)
 val accept = registry.slice(accept_start, accept_end)
-val theme_pos = accept.find("entry.renderer.begin_theme_init(2000)")
-val init_pos = accept.find("entry.renderer.begin_init(")
+val theme_pos = accept.find(
+    "entry.renderer.begin_theme_init(2000)"
+)
+val init_pos = accept.find(
+    "entry.renderer.begin_init("
+)
 val resume_pos = accept.find(
     "if entry.renderer.site_swap_pending:", init_pos
 )
-val frame_pos = accept.find("self._store_frame(", resume_pos)
+val frame_pos = accept.find(
+    "self._store_frame(", resume_pos
+)
 expect(create_pos).to_be_greater_than(-1)
 expect(registry).to_contain(
     "simple_web_content_full_html_with_install_wire("
@@ -66,7 +81,9 @@ expect(resume_pos).to_be_greater_than(init_pos)
 expect(frame_pos).to_be_greater_than(resume_pos)
 expect(process).to_contain("\"await-theme-ready\"")
 expect(process).to_contain("\"theme-ready-mismatch\"")
-expect(registry).to_contain("\"theme-parent-projection-mismatch\"")
+expect(registry).to_contain(
+    "\"theme-parent-projection-mismatch\""
+)
 val swap_start = registry.find("me _begin_site_swap(")
 val swap_end = registry.find("me _store_frame(", swap_start)
 val swap = registry.slice(swap_start, swap_end)
@@ -76,23 +93,28 @@ expect(swap).to_contain(
 expect(swap).to_contain(
     "simple_web_content_full_html_with_install_wire("
 )
-expect(swap).to_contain("entry.startup_html = restart_html")
+expect(swap).to_contain(
+    "entry.startup_html = restart_html"
+)
 ```
 
 </details>
 
 #### keeps secondary hosted navigation public and response-bounded
 
+- keeps secondary hosted navigation public and response-bounded
 - Inspect the secondary navigation source limits
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps secondary hosted navigation public and response-bounded")
 step("Inspect the secondary navigation source limits")
 val source = rt_file_read_text(
     "src/os/hosted/hosted_web_content_session.spl"
@@ -108,19 +130,19 @@ expect(source.contains("rt_browser_http_job_start(")).to_be(false)
 
 #### dispatches the hidden worker before host UI initialization
 
+- dispatches the hidden worker before host UI initialization
 - Inspect the worker startup ordering
-- rt file read text
-- "args len
-- "args contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("dispatches the hidden worker before host UI initialization")
 step("Inspect the worker startup ordering")
 val entry = executable_source_lines(
     rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -135,7 +157,10 @@ expect(main_start).to_be_greater_than(-1)
 expect(args_pos).to_be_greater_than(main_start)
 expect(worker_pos).to_be_greater_than(args_pos)
 expect(entry).to_contain(
-    "args.len() == 5 and args[1] == BROWSER_RENDERER_WORKER_ARG"
+    "(args.len() == 5 or args.len() == 6)"
+)
+expect(entry).to_contain(
+    "args[1] == BROWSER_RENDERER_WORKER_ARG"
 )
 expect(entry.contains(
     "args.contains(BROWSER_RENDERER_WORKER_ARG)"
@@ -149,25 +174,19 @@ expect(winit_pos).to_be_greater_than(worker_pos)
 
 #### keeps one ready-gated renderer with bounded writes and validated frames
 
+- keeps one ready-gated renderer with bounded writes and validated frames
 - Inspect renderer readiness and frame bounds
-- broker find
-- broker find
-- "if not process is piped alive
-- "if chunk == \"\" and not process is piped alive
-- "return Some
-- "rt browser http job cancel
-- "me fail
-- "process close piped
-- "self decoder = browser renderer decoder new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 135 lines folded for reproduction.
+Runnable source: 137 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps one ready-gated renderer with bounded writes and validated frames")
 step("Inspect renderer readiness and frame bounds")
 val broker = rt_file_read_text(
     "src/os/hosted/hosted_browser_renderer_process.spl"
@@ -309,16 +328,19 @@ expect(broker.contains("fn _renderer_fetch_mode")).to_be(false)
 
 #### builds bounded diagnostics without joining retained warnings
 
+- builds bounded diagnostics without joining retained warnings
 - Inspect bounded renderer diagnostics
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("builds bounded diagnostics without joining retained warnings")
 step("Inspect bounded renderer diagnostics")
 val worker = rt_file_read_text(
     "src/os/hosted/hosted_browser_renderer_worker.spl"
@@ -340,22 +362,19 @@ expect(body).to_contain("warning.slice(0, remaining)")
 
 #### routes the production browser through the external worker frame gate
 
+- routes the production browser through the external worker frame gate
 - Inspect external worker frame routing
-- rt file read text
-- "browser renderer start
-- "var web sessions = HostedWebContentRegistry create
-- "HostedWebContentRegistry create with default bookmark store
-- "val now micros = rt time now micros
-- "val wall clock ms = rt time now unix micros
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 104 lines folded for reproduction.
+Runnable source: 106 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("routes the production browser through the external worker frame gate")
 step("Inspect external worker frame routing")
 val entry = executable_source_lines(
     rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -466,18 +485,19 @@ expect(entry.contains(
 
 #### converges parent-owned bookmarks across idle and busy renderers
 
+- converges parent-owned bookmarks across idle and busy renderers
 - Inspect bookmark convergence across renderer states
-- rt file read text
-- "me set bookmark snapshot
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("converges parent-owned bookmarks across idle and busy renderers")
 step("Inspect bookmark convergence across renderer states")
 val entry = executable_source_lines(
     rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -526,16 +546,19 @@ expect(hidden).to_be_greater_than(applied)
 
 #### keeps startup HTML out of the address draft and Escape fallback
 
+- keeps startup HTML out of the address draft and Escape fallback
 - Inspect startup address draft and Escape behavior
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps startup HTML out of the address draft and Escape fallback")
 step("Inspect startup address draft and Escape behavior")
 val registry = executable_source_lines(
     rt_file_read_text(
@@ -571,17 +594,19 @@ expect(init_payload).to_be_greater_than(init)
 
 #### keeps primary startup HTML as payload but exposes about blank
 
+- keeps primary startup HTML as payload but exposes about blank
 - Inspect primary startup payload and public address
-- rt file read text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps primary startup HTML as payload but exposes about blank")
 step("Inspect primary startup payload and public address")
 val entry = executable_source_lines(
     rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -610,21 +635,19 @@ expect(fallback).to_be_greater_than(escape)
 
 #### keeps title commands and page input on their production owner routes
 
+- keeps title commands and page input on their production owner routes
 - Inspect title and page-input owner routing
-- rt file read text
-- "if val Some
-- "                        if comp requires external web frame
-- key targets start, browser key len
-- text targets start, browser text len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 219 lines folded for reproduction.
+Runnable source: 235 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps title commands and page input on their production owner routes")
 step("Inspect title and page-input owner routing")
 val entry = executable_source_lines(
     rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -856,40 +879,27 @@ val advance_failure = animation_body.find(
 expect(active_animation).to_be_greater_than(-1)
 expect(advance_call).to_be_greater_than(active_animation)
 expect(advance_failure).to_be_greater_than(advance_call)
+
+# @req REQ-SSPEC-OS REQ-SSPEC-OS
 ```
 
 </details>
 
 #### routes each secondary browser window through its own sandbox renderer
 
+- routes each secondary browser window through its own sandbox renderer
 - Inspect per-window sandbox renderer isolation
-- rt file read text
-- entry find
-- entry find
-- "comp requires external web frame
-- entry find
-- entry find
-- entry find
-- entry find
-- entry find
-- entry find
-- "comp requires external web frame
-- "comp requires external web frame
-- "                if comp requires external web frame
-- "if comp requires external web frame
-- "if comp requires external web frame
-- "Err
-- "Ok
-- "if comp requires external web frame
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 184 lines folded for reproduction.
+Runnable source: 186 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("routes each secondary browser window through its own sandbox renderer")
 step("Inspect per-window sandbox renderer isolation")
 val entry = executable_source_lines(
     rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -971,7 +981,7 @@ expect(render_route).to_contain(
     "browser_renderers.take_frame(\n                                web_window.id"
 )
 expect(render_route).to_contain(
-    "comp.set_external_web_frame(\n                                web_window.id"
+    "comp.set_external_web_frame_owned(\n                                web_window.id"
 )
 expect(render_route.contains("web_sessions.")).to_be(false)
 
@@ -1080,8 +1090,8 @@ expect(browser_text_route.contains("web_sessions.")).to_be(false)
 
 #### fails closed and reaps hidden or destroyed browser renderers
 
+- fails closed and reaps hidden or destroyed browser renderers
 - Inspect renderer reap and fail-closed paths
-- "content frames push
 
 
 <details>
@@ -1091,6 +1101,8 @@ Runnable source: 122 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("fails closed and reaps hidden or destroyed browser renderers")
 step("Inspect renderer reap and fail-closed paths")
 val compositor = rt_file_read_text(
     "src/os/compositor/host_compositor_core.spl"
@@ -1215,22 +1227,77 @@ expect(registry.contains(
 
 </details>
 
-#### persists learned HSTS before processing the completed frame
+#### keeps transient close failures recoverable
 
-- Inspect HSTS persistence ordering
-- rt file read text
-- "val browser poll = browser renderer poll
-- "if val Some
-- "browser renderer = saved renderer unwrap
+- keeps transient close failures recoverable
+- Check close retry clears only close-failed markers on success
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 61 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps transient close failures recoverable")
+step("Check close retry clears only close-failed markers on success")
+val registry = rt_file_read_text(
+    "src/os/hosted/hosted_browser_renderer_registry.spl"
+) ?? ""
+val drop_start = registry.find(
+    "fn _drop_renderer_close_failure(reason: text) -> text:"
+)
+expect(drop_start).to_be_greater_than(-1)
+val drop_end = registry.find("fn _active_or_default_wm_theme_id()", drop_start)
+expect(drop_end).to_be_greater_than(drop_start)
+val drop_body = registry.slice(drop_start, drop_end)
+expect(drop_body).to_contain("renderer-close-failed")
+expect(drop_body).to_contain("reason.replace(\";\" + marker + \";\", \";\")")
+val teardown = registry.find("me _teardown(index: i32, reason: text) -> bool:")
+val begin_site_swap = registry.find("me _begin_site_swap(", teardown)
+expect(teardown).to_be_greater_than(-1)
+expect(begin_site_swap).to_be_greater_than(teardown)
+val teardown_body = registry.slice(teardown, begin_site_swap)
+val close_success = teardown_body.find("if entry.renderer.close():")
+val clear_close_failure = (
+    teardown_body.find("_drop_renderer_close_failure", close_success)
+)
+expect(close_success).to_be_greater_than(-1)
+expect(clear_close_failure).to_be_greater_than(close_success)
+val advance_start = registry.find("me advance_window(")
+val advance_end = registry.find("me take_frame(", advance_start)
+val advance = registry.slice(advance_start, advance_end)
+val advance_success = advance.find(
+    "if entry.renderer.close():", advance.find("if entry.close_pending:")
+)
+val advance_clear = advance.find(
+    "_drop_renderer_close_failure(", advance_success
+)
+expect(advance_success).to_be_greater_than(-1)
+expect(advance_clear).to_be_greater_than(advance_success)
+
+# @req REQ-SSPEC-OS REQ-SSPEC-OS
+```
+
+</details>
+
+#### persists learned HSTS before processing the completed frame
+
+- persists learned HSTS before processing the completed frame
+- Inspect HSTS persistence ordering
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 65 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("persists learned HSTS before processing the completed frame")
 step("Inspect HSTS persistence ordering")
 val entry = executable_source_lines(
     rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -1292,40 +1359,27 @@ expect(profile_guard).to_be_greater_than(close_save)
 expect(close_profile).to_be_greater_than(profile_guard)
 expect(close_body).to_contain("renderer: renderer_close.renderer")
 expect(close_body).to_contain("raster: renderer_close.raster")
+
+# @req REQ-SSPEC-OS REQ-SSPEC-OS REQ-SSPEC-OS
 ```
 
 </details>
 
 #### reconciles titlebar keyboard and evidence browser closes
 
+- reconciles titlebar keyboard and evidence browser closes
 - Inspect browser close reconciliation
-- rt file read text
-- entry find
-- entry find
-- "comp handle mouse button
-- "browser renderer = saved renderer unwrap
-- entry find
-- entry find
-- "comp destroy window
-- "comp release external web frame
-- entry find
-- entry find
-- "comp destroy window
-- "comp release external web frame
-- entry find
-- entry find
-- "comp handle mouse button
-- "if browser renderer close
-- entry find
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 161 lines folded for reproduction.
+Runnable source: 163 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("reconciles titlebar keyboard and evidence browser closes")
 step("Inspect browser close reconciliation")
 val entry = executable_source_lines(
     rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
@@ -1498,7 +1552,7 @@ expect(shutdown).to_contain(
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -1510,11 +1564,63 @@ Tests covering hosted browser renderer entry isolation.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e8743e9bc182dd6c1a844f0fc6d59ea2a57876bbde563d7fffdf51062bc12e3d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e8743e9bc182dd6c1a844f0fc6d59ea2a57876bbde563d7fffdf51062bc12e3d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e8743e9bc182dd6c1a844f0fc6d59ea2a57876bbde563d7fffdf51062bc12e3d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.spl
+mirror: doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'gates the production registry on exact theme readiness' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps secondary hosted navigation public and response-bounded' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dispatches the hidden worker before host UI initialization' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

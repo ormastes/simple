@@ -1,6 +1,6 @@
 # Macos Vulkan Gui Widget Live Evidence Contract Specification
 
-> <details>
+> Tests covering macOS Vulkan GUI widget live evidence wrapper contract.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,16 +17,23 @@
 
 #### should require Vulkan device readback with positive render evidence
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should require Vulkan device readback with positive render evidence
 - Inspect Vulkan selection, readback provenance, handle, and checksum gates
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require Vulkan device readback with positive render evidence")
 step("Inspect Vulkan selection, readback provenance, handle, and checksum gates")
 val source = file_read(WRAPPER)
 expect(source).to_contain("SIMPLE_GUI_BACKEND=vulkan")
@@ -47,6 +54,7 @@ expect(source).to_contain("[ \"$renderer_handle\" = \"$handle\" ] || fail \"even
 
 #### should route focus keyboard pointer and click input through the launched window
 
+- should route focus keyboard pointer and click input through the launched window
 - Inspect PID-scoped focus, input injection, and application receipt checks
    - Expected: source does not contain `tell application "SimpleGui" to activate`
    - Expected: source does not contain `processes whose name is "SimpleGui"`
@@ -57,10 +65,12 @@ expect(source).to_contain("[ \"$renderer_handle\" = \"$handle\" ] || fail \"even
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should route focus keyboard pointer and click input through the launched window")
 step("Inspect PID-scoped focus, input injection, and application receipt checks")
 val source = file_read(WRAPPER)
 val launcher = file_read(LAUNCHER)
@@ -91,16 +101,19 @@ expect(source).to_contain("[ \"" + SHELL_OPEN + "revision:-0}\" -gt 0 ] || fail 
 
 #### should prove interaction changes device readback and visible captures
 
+- should prove interaction changes device readback and visible captures
 - Inspect before/after framebuffer and screen-capture difference checks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should prove interaction changes device readback and visible captures")
 step("Inspect before/after framebuffer and screen-capture difference checks")
 val source = file_read(WRAPPER)
 expect(source).to_contain("[ \"$initial_checksum\" != \"$interaction_checksum\" ]")
@@ -116,16 +129,19 @@ expect(source).to_contain("macos_vulkan_gui_widget_live_after_png=$AFTER_PNG")
 
 #### should enable Retina composition and record logical versus backing pixels
 
+- should enable Retina composition and record logical versus backing pixels
 - Inspect 300 DPI renderer flow and the independent macOS backing-scale proof
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should enable Retina composition and record logical versus backing pixels")
 step("Inspect 300 DPI renderer flow and the independent macOS backing-scale proof")
 val source = file_read(WRAPPER)
 val launcher = file_read(LAUNCHER)
@@ -140,9 +156,9 @@ expect(source).to_contain("fail \"high-dpi-backing-mismatch\"")
 expect(source).to_contain("macos_vulkan_gui_widget_live_logical_dimensions=" + SHELL_OPEN + "window_w}x" + SHELL_OPEN + "window_h}")
 expect(source).to_contain("macos_vulkan_gui_widget_live_backing_dimensions=" + SHELL_OPEN + "before_pixel_width}x" + SHELL_OPEN + "before_pixel_height}")
 expect(source).to_contain("macos_vulkan_gui_widget_live_backing_scale=$backing_scale")
-val configure_at = source.index_of("REQUESTED_DPI=\"" + SHELL_OPEN + "SHOWCASE_DPI:-300}\"") ?? -1
-val launch_at = source.index_of("SHOWCASE_DPI=\"$REQUESTED_DPI\"") ?? -1
-val validate_at = source.index_of("[ \"$renderer_dpi\" = \"$REQUESTED_DPI\" ]") ?? -1
+val configure_at = source.index_of("REQUESTED_DPI=\"" + SHELL_OPEN + "SHOWCASE_DPI:-300}\"")
+val launch_at = source.index_of("SHOWCASE_DPI=\"$REQUESTED_DPI\"")
+val validate_at = source.index_of("[ \"$renderer_dpi\" = \"$REQUESTED_DPI\" ]")
 expect(configure_at).to_be_greater_than(-1)
 expect(launch_at).to_be_greater_than(configure_at)
 expect(validate_at).to_be_greater_than(launch_at)
@@ -152,16 +168,19 @@ expect(validate_at).to_be_greater_than(launch_at)
 
 #### should require the selected vector face and cold-to-warm cache transition
 
+- should require the selected vector face and cold-to-warm cache transition
 - Inspect vector-font identity and cache admission checks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require the selected vector face and cold-to-warm cache transition")
 step("Inspect vector-font identity and cache admission checks")
 val source = file_read(WRAPPER)
 expect(source).to_contain("[ \"$font_loaded\" = \"true\" ] || fail \"vector-font-not-loaded\"")
@@ -177,16 +196,19 @@ expect(source).to_contain("[ \"" + SHELL_OPEN + "font_hits:-0}\" -gt 0 ] || fail
 
 #### should require Vulkan vector-font execution without CPU fallback
 
+- should require Vulkan vector-font execution without CPU fallback
 - Inspect the font execution target, attempt, and fallback checks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require Vulkan vector-font execution without CPU fallback")
 step("Inspect the font execution target, attempt, and fallback checks")
 val source = file_read(WRAPPER)
 expect(source).to_contain("[ -z \"$fallback_reason\" ] || fail \"renderer-cpu-fallback\"")
@@ -200,16 +222,19 @@ expect(source).to_contain("macos_vulkan_gui_widget_live_font_execution_target=$f
 
 #### should bound startup by timeout and resident memory
 
+- should bound startup by timeout and resident memory
 - Inspect the live-process deadline and RSS fail-closed gates
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should bound startup by timeout and resident memory")
 step("Inspect the live-process deadline and RSS fail-closed gates")
 val source = file_read(WRAPPER)
 expect(source).to_contain("TIMEOUT_SECS=\"" + SHELL_OPEN + "MACOS_VULKAN_GUI_WIDGET_TIMEOUT_SECS:-180}\"")
@@ -227,16 +252,19 @@ expect(source).to_contain("fail \"window-not-found\"")
 
 #### should fail closed when the child exits before opening a window
 
+- should fail closed when the child exits before opening a window
 - Inspect exact launch identity, early-exit detection, and bounded diagnostics
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed when the child exits before opening a window")
 step("Inspect exact launch identity, early-exit detection, and bounded diagnostics")
 val source = file_read(WRAPPER)
 expect(source).to_contain("app_pid=\"\"")
@@ -253,16 +281,19 @@ expect(source).to_contain("macos_vulkan_gui_widget_live_child_exit_cause=$child_
 
 #### should clean up only the exact launched child on every exit path
 
+- should clean up only the exact launched child on every exit path
 - Inspect PID-scoped window ownership, signal cleanup, and success cleanup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should clean up only the exact launched child on every exit path")
 step("Inspect PID-scoped window ownership, signal cleanup, and success cleanup")
 val source = file_read(WRAPPER)
 expect(source).to_contain("cleanup()")
@@ -278,23 +309,23 @@ expect(source).to_contain("cleanup\napp_pid=\"\"")
 
 #### should behaviorally reject malformed or mismatched renderer checksum proof
 
+- should behaviorally reject malformed or mismatched renderer checksum proof
 - Run the wrapper checksum contract probe with invalid evidence
-- process run
    - Expected: malformed_code equals `1`
-- process run
    - Expected: mismatch_code equals `1`
 - Accept only equal positive integer renderer and initial-event checksums
-- process run
    - Expected: matching_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should behaviorally reject malformed or mismatched renderer checksum proof")
 step("Run the wrapper checksum contract probe with invalid evidence")
 val malformed = "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=checksum " +
     "MACOS_VULKAN_GUI_WIDGET_RENDERER_CHECKSUM=abc " +
@@ -323,21 +354,22 @@ expect(matching_code).to_equal(0)
 
 #### should behaviorally reject a process command outside the launched bundle
 
+- should behaviorally reject a process command outside the launched bundle
 - Reject a same-name executable from a different temporary bundle
-- process run
    - Expected: wrong_code equals `1`
 - Accept the exact unique executable path with its program arguments
-- process run
    - Expected: exact_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should behaviorally reject a process command outside the launched bundle")
 step("Reject a same-name executable from a different temporary bundle")
 val wrong_process = "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=pid " +
     "MACOS_VULKAN_GUI_WIDGET_PROCESS_COMMAND='/tmp/other/SimpleGui.app/Contents/MacOS/SimpleGui run sample.spl' " +
@@ -361,23 +393,23 @@ expect(exact_code).to_equal(0)
 
 #### should behaviorally reject 1x or inconsistent backing-scale proof
 
+- should behaviorally reject 1x or inconsistent backing-scale proof
 - Reject a logical-size screenshot that has no Retina backing scale
-- process run
    - Expected: one_x_code equals `1`
 - Reject inconsistent axis scales and accept exact 2x backing pixels
-- process run
    - Expected: inconsistent_code equals `1`
-- process run
    - Expected: retina_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should behaviorally reject 1x or inconsistent backing-scale proof")
 step("Reject a logical-size screenshot that has no Retina backing scale")
 val one_x = "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=hidpi " +
     "MACOS_VULKAN_GUI_WIDGET_LOGICAL_WIDTH=1200 " +
@@ -412,16 +444,19 @@ expect(retina_code).to_equal(0)
 
 #### should admit only the trusted widget source and strict bundled runtime
 
+- should admit only the trusted widget source and strict bundled runtime
 - Inspect trusted-manifest admission and strict launcher environment
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should admit only the trusted widget source and strict bundled runtime")
 step("Inspect trusted-manifest admission and strict launcher environment")
 val source = file_read(WRAPPER)
 expect(source).to_contain(". scripts/check/lib/macos-gpu-trusted-build-admission.shs")
@@ -452,7 +487,9 @@ expect(source).to_contain("SIMPLE_GUI_LAUNCHED_PID_PATH=")
 
 #### should reject Vulkan and dynamic-provider overrides
 
+- should reject Vulkan and dynamic-provider overrides
 - Inspect canonical MoltenVK and launch-environment pinning
+   - Expected: probe_code equals `1`
    - Expected: source does not contain `\n{omitted_assignment}= \\`
    - Expected: source does not contain `ICD_PATH="" + SHELL_OPEN + "VK_ICD_FILENAMES:-`
    - Expected: source does not contain `DYLD_LIBRARY_PATH="" + SHELL_OPEN + "DYLD_LIBRARY_PATH:-`
@@ -461,10 +498,12 @@ expect(source).to_contain("SIMPLE_GUI_LAUNCHED_PID_PATH=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject Vulkan and dynamic-provider overrides")
 step("Inspect canonical MoltenVK and launch-environment pinning")
 val source = file_read(WRAPPER)
 expect(source).to_contain(
@@ -502,8 +541,8 @@ expect(source.contains("DYLD_LIBRARY_PATH=\"" + SHELL_OPEN + "DYLD_LIBRARY_PATH:
 
 #### should fail closed on a missing or non-strict runtime receipt before macOS checks
 
+- should fail closed on a missing or non-strict runtime receipt before macOS checks
 - Run the POSIX strict-record contract probe without a receipt
-- process run
    - Expected: missing_code equals `1`
 - Inspect the schema, canonical identity, digest, and PID equality gates
 
@@ -511,10 +550,12 @@ expect(source.contains("DYLD_LIBRARY_PATH=\"" + SHELL_OPEN + "DYLD_LIBRARY_PATH:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed on a missing or non-strict runtime receipt before macOS checks")
 step("Run the POSIX strict-record contract probe without a receipt")
 val missing_receipt = "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=strict-record " +
     "MACOS_VULKAN_GUI_WIDGET_STRICT_RECEIPT_PATH=/definitely/missing/receipt.env " +
@@ -554,16 +595,18 @@ expect(source).to_contain(
 
 #### should target input and captures to the same exact AX window number
 
-- "
+- should target input and captures to the same exact AX window number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should target input and captures to the same exact AX window number")
 val source = file_read(WRAPPER)
 expect(source).to_contain("focus_exact_ax_window")
 expect(source).to_contain(
@@ -580,25 +623,24 @@ expect(source).to_contain("exact-window-keyboard-focus-failed")
 
 #### should recursively detect simple_seed descendants in the pure POSIX seed-tree probe
 
+- should recursively detect simple_seed descendants in the pure POSIX seed-tree probe
 - Supply a descendant tree containing simple_seed and require positive detection
-- process run
    - Expected: seed_code equals `0`
 - Reject a tree without a seed descendant and inspect each live-operation gate
-- process run
    - Expected: clean_code equals `1`
-- process run
    - Expected: reject_clean_code equals `0`
-- process run
    - Expected: reject_seed_code equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should recursively detect simple_seed descendants in the pure POSIX seed-tree probe")
 step("Supply a descendant tree containing simple_seed and require positive detection")
 val seed_tree = "tree=$(mktemp); printf '40 1 /tmp/SimpleGui.app/Contents/MacOS/SimpleGui\\n41 40 /tmp/simple_seed child\\n' >\"$tree\"; " +
     "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=seed-tree " +
@@ -648,12 +690,12 @@ expect(source).to_contain("refusing cleanup with simple_seed descendant")
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering macOS Vulkan GUI widget live evidence wrapper contract.
 - macOS Vulkan GUI widget live evidence wrapper contract
 
 ## Scenario Summary
@@ -668,3 +710,76 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0fc1c211c5e009f095ca3b88898ca9bad736aa94f5317f68986acae86113a0b8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0fc1c211c5e009f095ca3b88898ca9bad736aa94f5317f68986acae86113a0b8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0fc1c211c5e009f095ca3b88898ca9bad736aa94f5317f68986acae86113a0b8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **72/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl
+mirror: doc/06_spec/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.md (current)
+findings: 13 blockers: 1
+  narrative=100 structure=70 oracle=20
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=72; blocker cap makes effective=49
+doc/06_spec/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 14 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:16:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require Vulkan device readback with positive render evidence' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:16:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should require Vulkan device readback with positive render evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:34:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should route focus keyboard pointer and click input through the launched window' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should route focus keyboard pointer and click input through the launched window' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:62:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should prove interaction changes device readback and visible captures' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should prove interaction changes device readback and visible captures' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:75:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should enable Retina composition and record logical versus backing pixels' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:99:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require the selected vector face and cold-to-warm cache transition' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl:112:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require Vulkan vector-font execution without CPU fallback' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

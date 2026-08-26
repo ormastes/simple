@@ -20,7 +20,7 @@ Release-blocking regression matrix for operators maintaining Simple MCP and
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl` |
-| Updated | 2026-08-10 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -55,59 +55,23 @@ make correlated tool calls.
 ### REQ-MCP-CMD-001: bounded pure-Simple startup ownership
 
 #### should keep interpreted entries lazy and register the MCP file probe for JIT
-
-- Verify interpreter source loading stays bounded
-- Verify the JIT provider owns every MCP startup file probe
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 23 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify interpreter source loading stays bounded")
-val loading = file_read(
-    "src/compiler/80.driver/driver_source_pipeline_loading.spl")
-val resolver = file_read(
-    "src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl")
-expect(loading).to_contain(
-    "compile_mode != CompileMode.Interpret")
-expect(loading).to_contain(
-    "if has_project_source and needs_bulk_project_sources and not nb_entry_closure:")
-expect(resolver).to_contain(
-    "val simple_lib = rt_env_get(\"SIMPLE_LIB\")")
-
-step("Verify the JIT provider owns every MCP startup file probe")
-val symbols = file_read(
-    "src/compiler_rust/common/src/runtime_symbols.rs")
-val metadata = file_read(
-    "src/compiler_rust/runtime/src/value/sffi/file_io/metadata.rs")
-val exports = file_read(
-    "src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs")
-expect(symbols).to_contain("\"rt_file_is_char_device\"")
-expect(metadata).to_contain(
-    "extern \"C\" fn rt_file_is_char_device")
-expect(exports).to_contain("rt_file_is_char_device")
-```
-
-</details>
-
 ### REQ-MCP-CMD-002: admitted production wrappers
 
 #### should reject source fallback and require native wrapper contracts
 
+- should reject source fallback and require native wrapper contracts
 - Verify wrappers admit only hash-bound native artifacts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject source fallback and require native wrapper contracts")
 step("Verify wrappers admit only hash-bound native artifacts")
 val result = run_mcp_gate(
     "sh", ["scripts/check/check-mcp-wrapper-contract.shs"], 30000)
@@ -123,16 +87,19 @@ check_marker(result, "mcp_wrapper_native_contract=pass")
 
 #### should exercise MCP and LSP protocol functions through production wrappers _(slow)_
 
+- should exercise MCP and LSP protocol functions through production wrappers
 - Exercise MCP and LSP protocol functions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should exercise MCP and LSP protocol functions through production wrappers")
 step("Exercise MCP and LSP protocol functions")
 val result = run_mcp_gate(
     "sh", ["scripts/check/check-mcp-native-smoke.shs"], 180000)
@@ -167,16 +134,19 @@ check_marker(result, "lsp_main_feature_call_valid=true")
 
 #### should keep warm MCP and LSP startup latency request p95 and RSS bounded _(slow)_
 
+- should keep warm MCP and LSP startup latency request p95 and RSS bounded
 - Measure warm startup, request latency, and RSS
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should keep warm MCP and LSP startup latency request p95 and RSS bounded")
 step("Measure warm startup, request latency, and RSS")
 val result = run_mcp_gate("env", [
     "MCP_LSP_NFR_SAMPLES=20",
@@ -203,6 +173,7 @@ check_marker(result, "mcp_lsp_nfr_status=pass")
 
 #### should fail closed when the NFR sample count is invalid
 
+- should fail closed when the NFR sample count is invalid
 - Reject an invalid performance evidence configuration
    - Expected: result.exit_code equals `2`
 
@@ -210,10 +181,12 @@ check_marker(result, "mcp_lsp_nfr_status=pass")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed when the NFR sample count is invalid")
 step("Reject an invalid performance evidence configuration")
 val result = run_mcp_gate("env", [
     "MCP_LSP_NFR_SAMPLES=0",
@@ -237,3 +210,81 @@ expect(result.stdout).to_contain("error=invalid_sample_count:0")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-MCP-CMD-001`
+- `REQ-MCP-CMD-002`
+- `REQ-MCP-003`
+- `REQ-MCP-005`
+- `REQ-MCP-005:`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9dad582f53bea8423f3917aa6365e315454287a4471682defcf658931e66f90c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9dad582f53bea8423f3917aa6365e315454287a4471682defcf658931e66f90c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9dad582f53bea8423f3917aa6365e315454287a4471682defcf658931e66f90c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **79/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl
+mirror: doc/06_spec/03_system/app/mcp/feature/mcp_failure_prevention_spec.md (current)
+findings: 13 blockers: 1
+  narrative=100 structure=65 oracle=90
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=79; blocker cap makes effective=49
+doc/06_spec/03_system/app/mcp/feature/mcp_failure_prevention_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/mcp/feature/mcp_failure_prevention_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 4 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:63:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should keep interpreted entries lazy and register the MCP file probe for JIT' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:63:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep interpreted entries lazy and register the MCP file probe for JIT' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:96:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject source fallback and require native wrapper contracts' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:96:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject source fallback and require native wrapper contracts' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:106:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should exercise MCP and LSP protocol functions through production wrappers' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should exercise MCP and LSP protocol functions through production wrappers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:131:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep warm MCP and LSP startup latency request p95 and RSS bounded' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:131:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep warm MCP and LSP startup latency request p95 and RSS bounded' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl:152:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed when the NFR sample count is invalid' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

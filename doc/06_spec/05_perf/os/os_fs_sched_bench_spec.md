@@ -1,29 +1,6 @@
 # Os Fs Sched Bench Specification
 
-> <details>
-
-<!-- sdn-diagram:id=os_fs_sched_bench_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=os_fs_sched_bench_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-os_fs_sched_bench_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=os_fs_sched_bench_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering os fs + scheduler bench (AC-3, x86_64 host-proxy).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,22 +17,11 @@ os_fs_sched_bench_spec
 
 #### bench dir created
 
-<details>
-<summary>Executable SSpec</summary>
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
-```simple
-val ok = rt_dir_create_all(FS_BENCH_DIR)
-expect(ok).to_equal(true)
-```
-
-</details>
-
-#### fs write succeeds
-
-- rt dir create all
+- bench dir created
    - Expected: ok is true
 
 
@@ -66,6 +32,29 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("bench dir created")
+val ok = rt_dir_create_all(FS_BENCH_DIR)
+expect(ok).to_equal(true)
+```
+
+</details>
+
+#### fs write succeeds
+
+- fs write succeeds
+   - Expected: ok is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-PERF
+step("fs write succeeds")
 rt_dir_create_all(FS_BENCH_DIR)
 val content = _make_fs_content()
 val ok = rt_file_write_text(FS_WRITE_PATH, content)
@@ -76,7 +65,7 @@ expect(ok).to_equal(true)
 
 #### fs round-trip: bytes written == bytes read (content oracle)
 
-- rt dir create all
+- fs round-trip: bytes written == bytes read (content oracle)
    - Expected: write_ok is true
    - Expected: read_len equals `written_len`
    - Expected: matches is true
@@ -85,10 +74,12 @@ expect(ok).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("fs round-trip: bytes written == bytes read (content oracle)")
 # ABSOLUTE ORACLE: content read back must exactly match what was written.
 rt_dir_create_all(FS_BENCH_DIR)
 val written = _make_fs_content()
@@ -108,18 +99,19 @@ expect(matches).to_equal(true)
 
 #### fs round-trip: file exists after write
 
-- rt dir create all
-- rt file write text
+- fs round-trip: file exists after write
    - Expected: exists is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("fs round-trip: file exists after write")
 rt_dir_create_all(FS_BENCH_DIR)
 val content = _make_fs_content()
 rt_file_write_text(FS_WRITE_PATH, content)
@@ -131,18 +123,19 @@ expect(exists).to_equal(true)
 
 #### fs write+read timing was recorded (warm plane, x86_64)
 
-- rt dir create all
-- rt file write text
+- fs write+read timing was recorded (warm plane, x86_64)
    - Expected: timing_recorded is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("fs write+read timing was recorded (warm plane, x86_64)")
 # Inline timing — does NOT use BenchResult struct (interp_cross_module_struct_return_unit bug).
 # Records elapsed micros as a primitive i64; asserts > 0 to confirm timing ran.
 rt_dir_create_all(FS_BENCH_DIR)
@@ -161,13 +154,19 @@ expect(timing_recorded).to_equal(true)
 
 #### arch tag is x86_64 (AC-3 extensibility row)
 
+- arch tag is x86_64 (AC-3 extensibility row)
+   - Expected: ARCH_TAG equals `x86_64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("arch tag is x86_64 (AC-3 extensibility row)")
 # Asserts the arch label for this spec. arm64/riscv64 rows extend this
 # spec later by adding skip_if(arch != "arm64", "not arm64") guards.
 # This test documents the current arch scope explicitly.
@@ -178,13 +177,22 @@ expect(ARCH_TAG).to_equal("x86_64")
 
 #### plane labels are distinct — fs != sched (AC-3 never-collapsed)
 
+- plane labels are distinct — fs != sched (AC-3 never-collapsed)
+   - Expected: fs_ne_sched is true
+   - Expected: MODE_FS equals `fs`
+   - Expected: MODE_SCHED equals `sched`
+   - Expected: PLANE_WARM equals `warm`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("plane labels are distinct — fs != sched (AC-3 never-collapsed)")
 # Each workload category must be a distinct row, never merged.
 val fs_ne_sched = MODE_FS != MODE_SCHED
 expect(fs_ne_sched).to_equal(true)
@@ -197,13 +205,20 @@ expect(PLANE_WARM).to_equal("warm")
 
 #### process spawn produces output (sched plane, x86_64)
 
+- process spawn produces output (sched plane, x86_64)
+   - Expected: out_trimmed equals `hello_bench`
+   - Expected: code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("process spawn produces output (sched plane, x86_64)")
 # Spawn one trivial echo process to confirm spawn works.
 # rt_process_run returns (stdout, stderr, exit_code).
 val (stdout, _stderr, code) = rt_process_run("/bin/echo", ["hello_bench"])
@@ -216,13 +231,19 @@ expect(code).to_equal(0)
 
 #### spawn timing was recorded (sched plane, x86_64)
 
+- spawn timing was recorded (sched plane, x86_64)
+   - Expected: timing_recorded is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("spawn timing was recorded (sched plane, x86_64)")
 # Time a single process spawn inline into i64; assert >= 0.
 val t0 = rt_time_now_unix_micros()
 val (_out, _err, _code) = rt_process_run("/bin/echo", ["bench"])
@@ -235,16 +256,18 @@ expect(timing_recorded).to_equal(true)
 
 #### qemu systest variant — x86_64 QEMU boot
 
-- pending
+- qemu systest variant — x86_64 QEMU boot
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("qemu systest variant — x86_64 QEMU boot")
 # This row documents the QEMU systest extension path (AC-3).
 # A full QEMU boot is too heavy for a standard test run.
 # Enable in the systest lane by removing the pending() and wiring
@@ -262,12 +285,12 @@ pending("qemu boot bound — runs in systest lane")
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/05_perf/os/os_fs_sched_bench_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering os fs + scheduler bench (AC-3, x86_64 host-proxy).
 - os fs + scheduler bench (AC-3, x86_64 host-proxy)
 
 ## Scenario Summary
@@ -282,3 +305,58 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-PERF`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9b404397235cd92cbdff45c2bf7083cc490a584fdbca77b22803e1ab5e195474`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9b404397235cd92cbdff45c2bf7083cc490a584fdbca77b22803e1ab5e195474`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9b404397235cd92cbdff45c2bf7083cc490a584fdbca77b22803e1ab5e195474`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/05_perf/os/os_fs_sched_bench_spec.spl
+mirror: doc/06_spec/05_perf/os/os_fs_sched_bench_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=40
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/05_perf/os/os_fs_sched_bench_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/05_perf/os/os_fs_sched_bench_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/05_perf/os/os_fs_sched_bench_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): unconditional pending or fail-fast scaffold remains
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/05_perf/os/os_fs_sched_bench_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/05_perf/os/os_fs_sched_bench_spec.spl:107:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'bench dir created' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/05_perf/os/os_fs_sched_bench_spec.spl:117:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fs write succeeds' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/05_perf/os/os_fs_sched_bench_spec.spl:125:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fs round-trip: bytes written == bytes read (content oracle)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

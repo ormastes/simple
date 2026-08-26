@@ -2,29 +2,6 @@
 
 > Comment-Only Specification Test
 
-<!-- sdn-diagram:id=comment_only_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=comment_only_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-comment_only_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=comment_only_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
@@ -43,7 +20,7 @@ Comment-Only Specification Test
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rust/meta/comment_only_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Comment-Only Specification Test
@@ -59,13 +36,18 @@ Test whether Simple compiler supports pure-docstring .spl files without executab
 
 #### placeholder
 
+- placeholder
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("placeholder")
 skip
 ```
 
@@ -83,3 +65,49 @@ skip
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `938606208ad597949494862e992bf1c448fe8f2147aa5f3762ab4111bc39404e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `938606208ad597949494862e992bf1c448fe8f2147aa5f3762ab4111bc39404e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `938606208ad597949494862e992bf1c448fe8f2147aa5f3762ab4111bc39404e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/02_integration/rust/meta/comment_only_spec.spl
+mirror: doc/06_spec/02_integration/rust/meta/comment_only_spec.md (current)
+findings: 4 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=85; blocker cap makes effective=49
+doc/06_spec/02_integration/rust/meta/comment_only_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/rust/meta/comment_only_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/rust/meta/comment_only_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/02_integration/rust/meta/comment_only_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'placeholder' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

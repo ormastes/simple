@@ -20,7 +20,7 @@ Purpose: Prove LIVE round trips of the LLM Caret infrastructure tools against
 | Category | Application |
 | Status | In Progress |
 | Source | `test/03_system/app/llm_caret/infra_servers_system_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -54,6 +54,12 @@ never silently passes.
 
 #### sends a mail, sees it in mail_list and reads its body back
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- sends a mail, sees it in mail_list and reads its body back
+   - Expected: cfg_err equals ``
 - mail_send goes through the gate with an explicit allow
    - Expected: sent.is_error is false
 - mail_list shows the nonce subject with a uid
@@ -65,10 +71,12 @@ never silently passes.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sends a mail, sees it in mail_list and reads its body back")
 if not _live("LLM_CARET_MAIL_LIVE"):
     pending("BLOCKED: no local SMTP/IMAP server on this host — set LLM_CARET_MAIL_LIVE=1 with credentials (LLM_CARET_CONFIG + secret_env) to run")
     return
@@ -112,6 +120,8 @@ reset_config()
 
 #### puts an object, lists it and gets identical bytes back
 
+- puts an object, lists it and gets identical bytes back
+   - Expected: cfg_err equals ``
 - storage_put goes through the gate with an explicit allow
    - Expected: put.is_error is false
 - storage_ls under the prefix shows the key with its byte size
@@ -124,10 +134,12 @@ reset_config()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("puts an object, lists it and gets identical bytes back")
 if not _live("LLM_CARET_STORAGE_LIVE"):
     pending("BLOCKED: no local S3-compatible (minio) server on this host — set LLM_CARET_STORAGE_LIVE=1 with credentials (LLM_CARET_CONFIG + access_key_env/secret_key_env) to run")
     return
@@ -162,13 +174,18 @@ reset_config()
 
 #### is blocked until the runtime backs the ftp facade _(pending)_
 
+- is blocked until the runtime backs the ftp facade
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("is blocked until the runtime backs the ftp facade")
 pending("BLOCKED: no local FTP server on this host and rt_ftp_* (src/lib/nogc_sync_mut/io/ftp_sffi.spl:17) is an unbacked runtime extern — set LLM_CARET_FTP_LIVE=1 with credentials to run once the facade is backed")
 return
 ```
@@ -179,6 +196,8 @@ return
 
 #### creates a page, finds it by title and reads the body back
 
+- creates a page, finds it by title and reads the body back
+   - Expected: cfg_err equals ``
 - wiki_write creates the page through the gate with an explicit allow
    - Expected: wrote.is_error is false
 - wiki_search by title returns the new page id
@@ -190,10 +209,12 @@ return
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates a page, finds it by title and reads the body back")
 if not _live("LLM_CARET_WIKI_LIVE"):
     pending("BLOCKED: no local Confluence on this host — set LLM_CARET_WIKI_LIVE=1 with credentials (LLM_CARET_CONFIG with [wiki] backend: confluence + base_url/space/user, and the env var named by token_env exported) to run")
     return
@@ -239,3 +260,55 @@ reset_config()
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9d05ecbde9efbb59eaf8a3ff21e50ada28b83f3e87563070f64477e59859b13f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9d05ecbde9efbb59eaf8a3ff21e50ada28b83f3e87563070f64477e59859b13f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9d05ecbde9efbb59eaf8a3ff21e50ada28b83f3e87563070f64477e59859b13f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/llm_caret/infra_servers_system_spec.spl
+mirror: doc/06_spec/03_system/app/llm_caret/infra_servers_system_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/03_system/app/llm_caret/infra_servers_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/llm_caret/infra_servers_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/llm_caret/infra_servers_system_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): unconditional pending or fail-fast scaffold remains
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/llm_caret/infra_servers_system_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sends a mail, sees it in mail_list and reads its body back' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/infra_servers_system_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'puts an object, lists it and gets identical bytes back' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/infra_servers_system_spec.spl:135:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is blocked until the runtime backs the ftp facade' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

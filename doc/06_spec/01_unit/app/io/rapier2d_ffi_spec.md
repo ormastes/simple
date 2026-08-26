@@ -1,33 +1,10 @@
 # Rapier2d Ffi Specification
 
-> <details>
-
-<!-- sdn-diagram:id=rapier2d_ffi_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=rapier2d_ffi_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-rapier2d_ffi_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=rapier2d_ffi_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Rapier2D FFI compatibility facade.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -36,19 +13,78 @@ rapier2d_ffi_spec
 
 ## Scenarios
 
-### Rapier2D Ffi
+### Rapier2D FFI compatibility facade
 
-#### skipped
+#### contains no duplicate foreign declarations
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- contains no duplicate foreign declarations
+   - Expected: source does not contain `extern fn `
+   - Expected: source does not contain `@extern(`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val pending_reason = "pre-existing test failures - functions/imports not available"
-expect(pending_reason.len()).to_be_greater_than(0)
+# @req REQ-SSPEC-APP
+step("contains no duplicate foreign declarations")
+val source = file_read("src/app/io/rapier2d_ffi.spl")
+expect(source.contains("extern fn ")).to_equal(false)
+expect(source.contains("@extern(")).to_equal(false)
+```
+
+</details>
+
+#### exports the canonical safe physics surface explicitly
+
+- exports the canonical safe physics surface explicitly
+   - Expected: source contains `physics_create_world`
+   - Expected: source contains `physics_joint_set_motor`
+   - Expected: source does not contain `rapier2d_sffi.*`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("exports the canonical safe physics surface explicitly")
+val source = file_read("src/app/io/rapier2d_ffi.spl")
+expect(source).to_contain("export use app.io.rapier2d_sffi.{{")
+expect(source.contains("physics_create_world")).to_equal(true)
+expect(source.contains("physics_joint_set_motor")).to_equal(true)
+expect(source.contains("rapier2d_sffi.*")).to_equal(false)
+```
+
+</details>
+
+#### does not re-export raw runtime symbols
+
+- does not re-export raw runtime symbols
+   - Expected: source does not contain `rt_rapier2d_`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("does not re-export raw runtime symbols")
+val source = file_read("src/app/io/rapier2d_ffi.spl")
+expect(source.contains("rt_rapier2d_")).to_equal(false)
 ```
 
 </details>
@@ -60,23 +96,75 @@ expect(pending_reason.len()).to_be_greater_than(0)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/io/rapier2d_ffi_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
-- Rapier2D Ffi
+Tests covering Rapier2D FFI compatibility facade.
+- Rapier2D FFI compatibility facade
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `fb889200f274fbdc937fed3ea6bd2795531ffa08dd1385b660ca537b22be83ea`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `fb889200f274fbdc937fed3ea6bd2795531ffa08dd1385b660ca537b22be83ea`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `fb889200f274fbdc937fed3ea6bd2795531ffa08dd1385b660ca537b22be83ea`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/app/io/rapier2d_ffi_spec.spl
+mirror: doc/06_spec/01_unit/app/io/rapier2d_ffi_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/01_unit/app/io/rapier2d_ffi_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/io/rapier2d_ffi_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/io/rapier2d_ffi_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/01_unit/app/io/rapier2d_ffi_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'contains no duplicate foreign declarations' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/io/rapier2d_ffi_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exports the canonical safe physics surface explicitly' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/io/rapier2d_ffi_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not re-export raw runtime symbols' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

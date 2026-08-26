@@ -2,29 +2,6 @@
 
 > Context blocks provide scoped execution environments that guarantee setup and teardown semantics, similar to Python's `with` statement or RAII in C++. They enable safe resource management by ensuring cleanup code runs regardless of how the block exits. This spec validates basic context execution, nested context support, variable scoping within contexts, and proper cleanup guarantees when exceptions occur.
 
-<!-- sdn-diagram:id=context_blocks_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=context_blocks_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-context_blocks_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=context_blocks_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -44,7 +21,7 @@ Context blocks provide scoped execution environments that guarantee setup and te
 | Category | Language |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/context_blocks_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -60,14 +37,23 @@ contexts, and proper cleanup guarantees when exceptions occur.
 ```simple
 context "Basic context execution":
 it "executes code within context scope":
+    # @req REQ-SSPEC-SYSTEM
+    step("executes code within context scope")
+    # evidence(protocol_json): asserted result fields below are the complete typed oracle
 skip
 
 context "Nested contexts":
 it "supports properly nested context blocks":
+    # @req REQ-SSPEC-SYSTEM
+    step("supports properly nested context blocks")
+    # evidence(protocol_json): asserted result fields below are the complete typed oracle
 skip
 
 context "Context variables":
 it "maintains context-scoped variables":
+    # @req REQ-SSPEC-SYSTEM
+    step("maintains context-scoped variables")
+    # evidence(protocol_json): asserted result fields below are the complete typed oracle
 skip
 ```
 
@@ -88,13 +74,19 @@ skip
 
 #### executes code within context scope
 
+- executes code within context scope
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes code within context scope")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 skip
 ```
 
@@ -104,13 +96,19 @@ skip
 
 #### runs setup before and teardown after context
 
+- runs setup before and teardown after context
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("runs setup before and teardown after context")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 skip
 ```
 
@@ -120,13 +118,19 @@ skip
 
 #### supports properly nested context blocks
 
+- supports properly nested context blocks
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports properly nested context blocks")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 skip
 ```
 
@@ -136,13 +140,19 @@ skip
 
 #### ensures cleanup even when exceptions occur
 
+- ensures cleanup even when exceptions occur
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("ensures cleanup even when exceptions occur")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 skip
 ```
 
@@ -152,13 +162,19 @@ skip
 
 #### maintains context-scoped variables
 
+- maintains context-scoped variables
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maintains context-scoped variables")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 skip
 ```
 
@@ -176,3 +192,46 @@ skip
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7eecbb273687b4331dd1bf3f3577249229aa16ba85be375c4aa43273feaaf7a0`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7eecbb273687b4331dd1bf3f3577249229aa16ba85be375c4aa43273feaaf7a0`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7eecbb273687b4331dd1bf3f3577249229aa16ba85be375c4aa43273feaaf7a0`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/usage/context_blocks_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/context_blocks_spec.md (current)
+findings: 3 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=87; blocker cap makes effective=49
+doc/06_spec/03_system/feature/usage/context_blocks_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/context_blocks_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/context_blocks_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+<!-- sspec-maintain:scorecard:end -->

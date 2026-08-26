@@ -2,32 +2,9 @@
 
 > FAT32 Hosted Seam Specification
 
-<!-- sdn-diagram:id=fat32_no_regression_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=fat32_no_regression_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-fat32_no_regression_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=fat32_no_regression_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,7 +20,7 @@ FAT32 Hosted Seam Specification
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/storage/dbfs/fat32_no_regression_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 FAT32 Hosted Seam Specification
@@ -59,13 +36,23 @@ Verifies the currently implemented FAT32 mount-table surface:
 
 #### shared FAT32 driver registers without error
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- shared FAT32 driver registers without error
+   - Expected: boot_driver.driver_name() equals `Fat32Driver`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("shared FAT32 driver registers without error")
 val mt = make_fat32_mounted()
 val boot_driver = mt.resolve_driver("/boot").unwrap()
 expect(boot_driver.driver_name()).to_equal("Fat32Driver")
@@ -75,13 +62,23 @@ expect(boot_driver.driver_name()).to_equal("Fat32Driver")
 
 #### stays on the shared FsFat32Driver surface
 
+- stays on the shared FsFat32Driver surface
+   - Expected: source does not contain `use os.services.fat32.fat32`
+   - Expected: source does not contain ` " + legacy_type + ".new(`
+   - Expected: source does not contain `=" + legacy_type + ".new(`
+   - Expected: source does not contain `(" + legacy_type + ".new(`
+   - Expected: source contains `FsFat32Driver.new(`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stays on the shared FsFat32Driver surface")
 val source = read_file("test/integration/storage/dbfs/fat32_no_regression_spec.spl")
 val legacy_type = "Fat32" + "Driver"
 expect(source.contains("use os.services.fat32.fat32")).to_equal(false)
@@ -93,12 +90,44 @@ expect(source.contains("FsFat32Driver.new(")).to_equal(true)
 
 </details>
 
+#### routes atomic replace lifecycle operations through the shared mount table
+
+- routes atomic replace lifecycle operations through the shared mount table
+   - Expected: table.stat("/boot/OLD.BIN").is_err() is true
+   - Expected: table.stat("/boot/NEW.BIN").is_ok() is true
+   - Expected: table.stat("/boot/NEW.BIN").is_err() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("routes atomic replace lifecycle operations through the shared mount table")
+var driver = FsFat32Driver.new_ram_backed_with_file("OLD.BIN", "hello")
+driver.mount(MountOptions.default()).unwrap()
+var table = MountTable.new()
+table.mount("/boot", DriverInstance.Fat32(driver), MountOptions.default()).unwrap()
+table.rename("/boot/OLD.BIN", "/boot/NEW.BIN").unwrap()
+expect(table.stat("/boot/OLD.BIN").is_err()).to_equal(true)
+expect(table.stat("/boot/NEW.BIN").is_ok()).to_equal(true)
+val opened = table.open("/boot/NEW.BIN", OpenFlags.read_only()).unwrap()
+table.ftruncate(opened, 3).unwrap()
+table.close(opened).unwrap()
+table.unlink("/boot/NEW.BIN").unwrap()
+expect(table.stat("/boot/NEW.BIN").is_err()).to_equal(true)
+```
+
+</details>
+
 ### FAT32 hosted seam — DBFS co-existence
 
 #### FAT32 and DBFS can both be mounted simultaneously
 
-1. mt mount
-2. mt mount
+- FAT32 and DBFS can both be mounted simultaneously
    - Expected: boot_driver.driver_name() equals `Fat32Driver`
    - Expected: data_driver.driver_name() equals `DbFsDriver`
 
@@ -106,10 +135,12 @@ expect(source.contains("FsFat32Driver.new(")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("FAT32 and DBFS can both be mounted simultaneously")
 val mt = MountTable.new()
 val fat32 = make_fat32_driver()
 mt.mount("/boot", DriverInstance.Fat32(fat32), MountOptions.read_only()).unwrap()
@@ -127,11 +158,63 @@ expect(data_driver.driver_name()).to_equal("DbFsDriver")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8244b0c99a2198ba7c85465ffcaa03fcb50771d7f84984ed0c287f47dec475b8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8244b0c99a2198ba7c85465ffcaa03fcb50771d7f84984ed0c287f47dec475b8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8244b0c99a2198ba7c85465ffcaa03fcb50771d7f84984ed0c287f47dec475b8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/02_integration/storage/dbfs/fat32_no_regression_spec.spl
+mirror: doc/06_spec/02_integration/storage/dbfs/fat32_no_regression_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/02_integration/storage/dbfs/fat32_no_regression_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/storage/dbfs/fat32_no_regression_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/storage/dbfs/fat32_no_regression_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/02_integration/storage/dbfs/fat32_no_regression_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'shared FAT32 driver registers without error' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/storage/dbfs/fat32_no_regression_spec.spl:95:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'stays on the shared FsFat32Driver surface' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/storage/dbfs/fat32_no_regression_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes atomic replace lifecycle operations through the shared mount table' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Integration Specification
 
-> <details>
-
-<!-- sdn-diagram:id=integration_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=integration_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-integration_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=integration_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering ExpectedResult, TestSource, TestAssertion, IntegrationTestResult, IntegrationTest, IntegrationTestSuite, IntegrationSuiteResult, Convenience Functions.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,22 @@ integration_spec
 
 #### creates success expectation
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates success expectation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates success expectation")
 # ExpectedResult.Success.to_text() == "success"
 pass
 ```
@@ -55,13 +41,18 @@ pass
 
 #### creates compile error expectation
 
+- creates compile error expectation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates compile error expectation")
 # ExpectedResult.CompileError("msg").to_text() contains "compile_error"
 pass
 ```
@@ -70,13 +61,18 @@ pass
 
 #### creates runtime error expectation
 
+- creates runtime error expectation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates runtime error expectation")
 # ExpectedResult.RuntimeError("msg").to_text() contains "runtime_error"
 pass
 ```
@@ -85,13 +81,18 @@ pass
 
 #### creates any error expectation
 
+- creates any error expectation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates any error expectation")
 # ExpectedResult.AnyError.to_text() == "any_error"
 pass
 ```
@@ -102,13 +103,18 @@ pass
 
 #### creates source with name
 
+- creates source with name
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates source with name")
 # TestSource.create("foo.spl", "code").name == "foo.spl"
 pass
 ```
@@ -117,13 +123,18 @@ pass
 
 #### identifies main file
 
+- identifies main file
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("identifies main file")
 # TestSource.main_file("code").is_main == true
 pass
 ```
@@ -132,13 +143,18 @@ pass
 
 #### non-main file not marked as main
 
+- non-main file not marked as main
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("non-main file not marked as main")
 # TestSource.create("helper.spl", "code").is_main == false
 pass
 ```
@@ -149,13 +165,18 @@ pass
 
 #### creates output contains assertion
 
+- creates output contains assertion
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates output contains assertion")
 # TestAssertion.OutputContains("hello").to_text() contains "hello"
 pass
 ```
@@ -164,13 +185,18 @@ pass
 
 #### creates output equals assertion
 
+- creates output equals assertion
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates output equals assertion")
 # TestAssertion.OutputEquals("hello").to_text() contains "output_equals"
 pass
 ```
@@ -179,13 +205,18 @@ pass
 
 #### creates exit code assertion
 
+- creates exit code assertion
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates exit code assertion")
 # TestAssertion.ExitCode(0).to_text() == "exit_code(0)"
 pass
 ```
@@ -194,13 +225,18 @@ pass
 
 #### creates compile time assertion
 
+- creates compile time assertion
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates compile time assertion")
 # TestAssertion.CompileTime(1000).to_text() contains "1000"
 pass
 ```
@@ -209,13 +245,18 @@ pass
 
 #### creates no warnings assertion
 
+- creates no warnings assertion
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates no warnings assertion")
 # TestAssertion.NoWarnings.to_text() == "no_warnings"
 pass
 ```
@@ -226,13 +267,18 @@ pass
 
 #### creates success result
 
+- creates success result
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates success result")
 # IntegrationTestResult.success("test", 100, 50, "output")
 # result.passed == true
 pass
@@ -242,13 +288,18 @@ pass
 
 #### creates compile failure result
 
+- creates compile failure result
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates compile failure result")
 # IntegrationTestResult.compile_failure("test", 100, "error")
 # result.passed == false
 # result.compile_success == false
@@ -259,13 +310,18 @@ pass
 
 #### formats result with status
 
+- formats result with status
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("formats result with status")
 # result.format_result() contains "PASS" or "FAIL"
 pass
 ```
@@ -274,13 +330,18 @@ pass
 
 #### formats failed assertions
 
+- formats failed assertions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("formats failed assertions")
 # result with failed_assertions
 # format_result() contains assertion messages
 pass
@@ -292,13 +353,18 @@ pass
 
 #### creates test with name
 
+- creates test with name
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates test with name")
 # IntegrationTest.create("my_test").name == "my_test"
 pass
 ```
@@ -307,13 +373,18 @@ pass
 
 #### adds source files
 
+- adds source files
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("adds source files")
 # test.add_source("foo.spl", "code")
 # test.sources.len() == 1
 pass
@@ -323,13 +394,18 @@ pass
 
 #### sets main source
 
+- sets main source
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("sets main source")
 # test.main_source("code")
 # test.sources[0].is_main == true
 pass
@@ -339,13 +415,18 @@ pass
 
 #### sets expectations
 
+- sets expectations
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("sets expectations")
 # test.expect_success()
 # test.expected == ExpectedResult.Success
 pass
@@ -355,13 +436,18 @@ pass
 
 #### adds output assertion
 
+- adds output assertion
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("adds output assertion")
 # test.expect_output("hello")
 # test.assertions contains OutputEquals
 pass
@@ -371,13 +457,18 @@ pass
 
 #### adds environment variable
 
+- adds environment variable
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("adds environment variable")
 # test.with_env("KEY", "VALUE")
 # test.env_vars["KEY"] == "VALUE"
 pass
@@ -387,13 +478,18 @@ pass
 
 #### sets timeout
 
+- sets timeout
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("sets timeout")
 # test.with_timeout(5000)
 # test.timeout_ms == 5000
 pass
@@ -405,13 +501,18 @@ pass
 
 #### creates suite with name
 
+- creates suite with name
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates suite with name")
 # IntegrationTestSuite.create("my_suite").name == "my_suite"
 pass
 ```
@@ -420,13 +521,18 @@ pass
 
 #### adds tests
 
+- adds tests
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("adds tests")
 # suite.add_test(test)
 # suite.tests.len() == 1
 pass
@@ -436,13 +542,18 @@ pass
 
 #### runs all tests
 
+- runs all tests
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("runs all tests")
 # suite.run_all() returns IntegrationSuiteResult
 pass
 ```
@@ -453,13 +564,18 @@ pass
 
 #### counts passed tests
 
+- counts passed tests
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("counts passed tests")
 # result.total_passed reflects actual passed count
 pass
 ```
@@ -468,13 +584,18 @@ pass
 
 #### counts failed tests
 
+- counts failed tests
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("counts failed tests")
 # result.total_failed reflects actual failed count
 pass
 ```
@@ -483,13 +604,18 @@ pass
 
 #### formats summary
 
+- formats summary
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("formats summary")
 # result.format_summary() contains suite name and counts
 pass
 ```
@@ -500,13 +626,18 @@ pass
 
 #### creates quick test
 
+- creates quick test
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates quick test")
 # quick_test("name", "code")
 # test.expected == ExpectedResult.Success
 pass
@@ -516,13 +647,18 @@ pass
 
 #### creates error test
 
+- creates error test
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates error test")
 # error_test("name", "code", "error")
 # test.expected is CompileError
 pass
@@ -532,13 +668,18 @@ pass
 
 #### creates output test
 
+- creates output test
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates output test")
 # output_test("name", "code", "output")
 # test has OutputEquals assertion
 pass
@@ -553,12 +694,12 @@ pass
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/test_runner/integration_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering ExpectedResult, TestSource, TestAssertion, IntegrationTestResult, IntegrationTest, IntegrationTestSuite, IntegrationSuiteResult, Convenience Functions.
 - ExpectedResult
 - TestSource
 - TestAssertion
@@ -580,3 +721,55 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `96e37462c26caf60b5442b1a40ff8ee17e6d1ed1bab5de3ef23e5ee3fe0da6fa`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `96e37462c26caf60b5442b1a40ff8ee17e6d1ed1bab5de3ef23e5ee3fe0da6fa`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `96e37462c26caf60b5442b1a40ff8ee17e6d1ed1bab5de3ef23e5ee3fe0da6fa`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/app/test_runner/integration_spec.spl
+mirror: doc/06_spec/01_unit/app/test_runner/integration_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/01_unit/app/test_runner/integration_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/test_runner/integration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/test_runner/integration_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/01_unit/app/test_runner/integration_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates success expectation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/test_runner/integration_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates compile error expectation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/test_runner/integration_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates runtime error expectation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->
