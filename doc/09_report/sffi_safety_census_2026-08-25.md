@@ -827,3 +827,14 @@ Both existing trace receipts remain boolean and default-off. No parsing loop,
 source scan, allocation, copy, cache lookup, hash, signature check, lock,
 boxing, marshalling, or dynamic dispatch was added; repeated module parsing
 strictly loses environment-provider work.
+
+### C-import header-read authority follow-up
+
+C-import processing removed its raw non-null file-read declaration and changed
+the private header reader to `Result<text,text>` through canonical
+`file_read_result`. Provider failure now follows the existing explicit
+`failed to read header` error path instead of first fabricating empty text;
+successful empty content retains the existing empty-header rejection. Each
+import still performs exactly one read and one bounded result lift before C
+parsing, with no retry, extra scan, allocation, copy, cache, hash, lock, lookup,
+boxing, marshalling, or dynamic dispatch.

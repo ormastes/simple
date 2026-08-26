@@ -1290,6 +1290,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
   verify-each cache.
 - [x] Add a static authority, call-count, and cache-shape ratchet.
 
+### Completed C-import header-read authority slice
+
+- [x] Remove the raw non-null C-header file-read declaration.
+- [x] Make the private header reader return typed `Result<text,text>`.
+- [x] Route provider failure to the existing explicit import error.
+- [x] Preserve exactly one read and existing empty-header behavior.
+- [x] Add no retry, scan, allocation, cache, hash, lock, or dispatch.
+- [x] Add a static typed-contract and call-count ratchet.
+
 ### Completed MIR bulk-ops flag spec authority slice
 
 - [x] Remove the spec-local raw environment setter declaration and calls.
