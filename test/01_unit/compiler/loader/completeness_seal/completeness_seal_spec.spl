@@ -80,6 +80,16 @@ fn config_for(name: text, critical: bool, verified: [text]) -> SealConfig:
         capacity: default_capacity()
     )
 
+fn sort_probe_module(id: text, provides: [text]) -> ModuleManifest:
+    ModuleManifest(
+        id: id,
+        linkage: "static",
+        closure: "static",
+        activation: "startup",
+        extends_list: [],
+        provides: provides
+    )
+
 describe "completeness seal — manifest loading":
     it "reads the §13.2 extension shape and the §16.4 module shape from one file":
         step("Verify: reads the §13.2 extension shape and the §16.4 module shape from one file")
@@ -270,3 +280,76 @@ describe "completeness seal — determinism":
                         assert_equal(seal_error_text(errs[0]), "<expected reverse order to seal>")
             case Err(errs):
                 assert_equal(seal_error_text(errs[0]), "<expected forward order to seal>")
+
+    it "sorts reverse and mixed module data while retaining duplicates":
+        step("Verify: canonical seal ordering is ascending and duplicate preserving")
+        val original_ids = ["zeta", "alpha", "middle", "alpha"]
+        val original_provides = ["zeta", "alpha", "middle", "alpha"]
+        val config = SealConfig(
+            critical: false,
+            core_abi_hash: CORE_ABI,
+            extensions: [],
+            modules: [
+                sort_probe_module(original_ids[0], original_provides),
+                sort_probe_module(original_ids[1], []),
+                sort_probe_module(original_ids[2], ["single"]),
+                sort_probe_module(original_ids[3], [])
+            ],
+            verified_sealed_modules: [],
+            capacity: default_capacity()
+        )
+        match seal(config):
+            case Ok(sealed):
+                expect(original_provides.join(",")).to_equal("zeta,alpha,middle,alpha")
+                expect(config.modules[0].provides.join(",")).to_equal("zeta,alpha,middle,alpha")
+                expect(sealed.module_ids.join(",")).to_equal("alpha,alpha,middle,zeta")
+                expect(sealed.canonical_lines.join("\n")).to_equal(
+                    "module|alpha|static|static|startup||\n" +
+                    "module|alpha|static|static|startup||\n" +
+                    "module|middle|static|static|startup||single\n" +
+                    "module|zeta|static|static|startup||alpha,alpha,middle,zeta"
+                )
+            case Err(errs):
+                assert_equal(seal_error_text(errs[0]), "<expected mixed ordering to seal>")
+
+    it "keeps empty and singleton canonical inputs unchanged":
+        step("Verify: empty and singleton seal ordering stays exact")
+        val empty_config = SealConfig(
+            critical: false,
+            core_abi_hash: CORE_ABI,
+            extensions: [],
+            modules: [],
+            verified_sealed_modules: [],
+            capacity: default_capacity()
+        )
+        match seal(empty_config):
+            case Ok(sealed):
+                expect(sealed.module_ids.len()).to_equal(0)
+                expect(sealed.canonical_lines.len()).to_equal(0)
+            case Err(errs):
+                assert_equal(seal_error_text(errs[0]), "<expected empty ordering to seal>")
+
+        val singleton_config = SealConfig(
+            critical: false,
+            core_abi_hash: CORE_ABI,
+            extensions: [],
+            modules: [sort_probe_module("only", ["only-interface"])],
+            verified_sealed_modules: [],
+            capacity: default_capacity()
+        )
+        match seal(singleton_config):
+            case Ok(sealed):
+                expect(sealed.module_ids.join(",")).to_equal("only")
+                expect(sealed.canonical_lines.join("\n")).to_equal(
+                    "module|only|static|static|startup||only-interface")
+            case Err(errs):
+                assert_equal(seal_error_text(errs[0]), "<expected singleton ordering to seal>")
+
+    it "does not rebuild immutable prefixes in the seal sorter":
+        step("Verify: the scoped seal sorter uses bounded in-place heap work")
+        val source = read_file("src/compiler/99.loader/completeness_seal/seal.spl")
+        val sorter_parts = source.split("fn _sorted(items: [text]) -> [text]:")
+        expect(sorter_parts.len()).to_equal(2)
+        val sorter = sorter_parts[1].split("fn _contains(items: [text], needle: text) -> bool:")[0]
+        expect(sorter.contains("next = next +")).to_equal(false)
+        expect(sorter.contains("_seal_sort_sift_down(out")).to_equal(true)
