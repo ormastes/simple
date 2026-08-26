@@ -992,3 +992,12 @@ The four raw client socket declarations in both QMP and SPM are now tagged
 owners; all existing connect/write/read/close calls and status checks remain in
 the same order and count. No allocation, copy, lookup, retry, or extra dispatch
 was added. Native receive lifting remains unverified and unsigned.
+## 2026-08-26 interpreter diagram-contract follow-up
+
+Twelve diagram interpreter handlers now enforce declared arity. Method args
+and return values accept only their declared text shape; wrong arrays/nil/types
+no longer become filtered empty args or ordinary absence. Interpreter string
+free validates its one integer handle before the intentional managed-memory
+no-op. Valid generation/tracing algorithms and allocations are unchanged.
+Source-reviewed but unverified and unsigned; raw Simple declarations and native
+pointer-width/lifting remain pending.

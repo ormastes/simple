@@ -1616,3 +1616,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Preserved every caller status branch and exact raw call count/order.
 - Added no allocation, copy, hash, lookup, lock, retry, or dynamic dispatch.
 - Native receive descriptor lifting remains explicitly unverified/unsigned.
+## 2026-08-26 interpreter diagram-contract follow-up
+
+- Enforced declared arity across twelve diagram interpreter handlers.
+- Removed undeclared array filtering and wrong-type/nil-to-absence conversion.
+- Validated the free-string handle before its interpreter managed-memory no-op.
+- Used one always-inlined arity helper; valid generation/tracing work, data
+  structures, allocations, and algorithmic complexity remain unchanged.
+- Raw Simple unsafe confinement and native pointer/return lifting remain
+  explicitly unverified and unsigned.
