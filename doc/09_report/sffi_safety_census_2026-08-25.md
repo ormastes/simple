@@ -431,3 +431,13 @@ The four opaque string-builder declarations remain explicitly tagged unsafe:
 provider inspection confirms zero/new, zero/push, nil/finish, and negative/len
 failure contracts that are not yet fully checked.  No per-line branch,
 allocation, copy, cache, lock, hash, boxing, or dispatch was added in this slice.
+
+### Compiler pass-receipt authority follow-up
+
+Pass-receipt emission no longer declares or calls raw environment or append
+SFFI.  It uses canonical nullable `env_get_opt` and always-inlined
+`file_append_text` facades.  When a sink is configured, a false append status
+now raises `E-SFFI-014` instead of silently returning a receipt line that was
+not persisted.  The path retains one lookup and one append, adding only the
+mandatory status branch with no retry, extra I/O, allocation, copy, cache,
+lock, hash, boxing, or dispatch table.

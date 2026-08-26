@@ -1958,6 +1958,14 @@ and unpromoted.
 - [x] Avoid adding unchecked or unmeasured per-line validation overhead.
 - [x] Add a ratchet separating removed environment authority from unsafe builder authority.
 
+### Completed compiler pass-receipt authority slice
+
+- [x] Remove raw environment and file-append declarations/calls.
+- [x] Route both operations through canonical always-inline facades.
+- [x] Fail explicitly when a configured receipt append returns false.
+- [x] Preserve one lookup and one append with no retry or extra I/O.
+- [x] Add a static authority, status-check, and performance-shape ratchet.
+
 ### Completed MIR target-context authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.
