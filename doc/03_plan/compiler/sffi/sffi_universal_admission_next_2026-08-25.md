@@ -430,3 +430,21 @@ does not label inline assembly safe or verified.
   before safe or critical promotion.
 - [ ] Retain cross-target assembler, OpenSBI/QEMU, illegal-instruction sabotage,
   latency, code-size, and compiler/emulator RSS evidence.
+
+## Canonical bare-metal MMIO tranche
+
+- [x] Collapse 15 duplicate noalloc declarations into six canonical raw MMIO
+  identities.
+- [x] Tag each canonical leaf `unsafe(ffi, raw_ptr)` and confine the raw call.
+- [x] Export inline wrappers so interrupt, allocator, syscall, and SBI paths add
+  no dispatch or allocation layer.
+- [x] Add a ratchet for declaration uniqueness, consumer bypass absence,
+  lexical authority, and hot-leaf performance shape.
+- [x] Reject negative, null, host-width-invalid, and misaligned addresses before
+  Rust interpreter volatile access; retain a real aligned read/write test.
+- [ ] Introduce typed, target-owned MMIO regions carrying width, alignment,
+  ordering, and device authority without per-access dynamic checks.
+- [ ] Bind native/interpreter ABI parity and exact loaded provider artifacts to
+  signed evidence before verified/critical promotion.
+- [ ] Retain cross-target volatile-access sabotage, code-shape, latency, and
+  compiler/emulator RSS evidence.

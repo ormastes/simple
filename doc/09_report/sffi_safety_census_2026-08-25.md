@@ -1852,3 +1852,28 @@ new edge cases. Optimizer analysis found no general-pattern or allocation
 opportunities; RV64 stride widening was hoisted once per range after its
 loop-invariant finding. These are useful source/interpreter results, not
 cross-target assembly, firmware, hardware, RSS, or signed-artifact evidence.
+
+### Canonical bare-metal MMIO authority
+
+Fifteen duplicate MMIO declarations across four noalloc consumers are reduced
+to six canonical `unsafe(ffi, raw_ptr)` declarations and six inline wrappers.
+The nine-row declaration reduction does not change provider-call count: each
+access remains one direct volatile read or write. No allocation, copy, lookup,
+lock, hash, signature check, retry, generic dispatch, or compatibility branch
+was added.
+
+The native and interpreter providers exist, but arbitrary-address validity,
+alignment, ordering, device ownership, ABI parity, and exact signed artifact
+identity remain unproved. These six leaves are unsafe-tagged, not safe or
+signed-admitted; whole-repository signed admission remains zero.
+
+The Rust interpreter now rejects non-positive, host-width-invalid, and
+misaligned addresses before volatile access, eliminating those immediate UB
+classes. The valid hosted path adds only scalar checks; error strings allocate
+only after rejection. Native bare-metal access remains branch-free and unsafe,
+because address zero and mapping policy are target-defined.
+
+The focused Rust MMIO test did not execute: `simple-runtime` currently fails
+first with unrelated `E0432` export drift in spin-loop, TLS, and UDP families.
+That blocker is recorded separately. The MMIO Rust change therefore has static
+ratchet/format evidence only and is not labeled runtime-verified.

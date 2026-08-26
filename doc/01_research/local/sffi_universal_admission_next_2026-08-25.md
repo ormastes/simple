@@ -5922,3 +5922,36 @@ Optimizer analysis reported no allocation or general-pattern finding; the one
 actionable per-line issue, RV64 stride widening, is now hoisted once per range.
 The available tool identified itself as a Rust bootstrap seed, so none of this
 is self-hosted or cross-target verification.
+
+## Canonical bare-metal MMIO checkpoint
+
+Interrupt, allocator, syscall, and SBI modules duplicated 15 declarations of
+the same six `rt_mmio_read/write_u8/u16/u32` identities. The providers are real
+volatile pointer leaves in the bare-metal C runtime and Rust interpreter, but
+an arbitrary address can fault, alias ordinary RAM, trigger device side
+effects, or violate alignment and ordering. Provider presence is not a safety
+or signed-artifact proof.
+
+One canonical no-allocation owner now holds the six declarations, each tagged
+`unsafe(ffi, raw_ptr)`, and exposes six inline wrappers with one lexical raw
+call. Four consumers import those wrappers; their 15 duplicate declarations
+and direct raw calls are removed. This reduces raw declaration identities by
+nine while keeping policy and address construction in Pure Simple.
+
+Inlining preserves one direct provider call per access. There is no added
+allocation, copy, name/registry lookup, generic dispatch, lock, hash, signature
+check, retry, or compatibility branch. Alignment/range/device authority remains
+the caller's unsafe obligation until typed MMIO regions and exact provider
+admission exist.
+
+The Rust interpreter provider also previously cast negative, null, and
+misaligned integers directly to volatile pointers. Its six u8/u16/u32 leaves
+now share one inline checked lift that rejects non-positive, host-width-invalid,
+and width-misaligned addresses before entering Rust `unsafe`. Error formatting
+allocates only on rejected calls; the valid interpreter path adds scalar
+comparisons, while native bare-metal remains branch-free.
+
+The focused Rust unit test is currently blocked before its target compiles by
+unrelated `simple-runtime` `E0432` export drift in spin-loop, TLS, and UDP
+families. No fallback package or feature exclusion was used, and the Rust MMIO
+provider is not labeled execution-verified.

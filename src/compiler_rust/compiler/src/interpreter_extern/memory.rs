@@ -1130,11 +1130,30 @@ pub fn rt_ptr_write_i16(args: &[Value]) -> Result<Value, CompileError> {
 /// doc/08_tracking/bug/render_spl_specs_cannot_execute_mmio_externs_2026-08-06.md.
 ///
 /// Callable from Simple as: `rt_mmio_read_u32(addr: u64) -> u32`
+#[inline]
+fn checked_mmio_addr(args: &[Value], alignment: usize, name: &str) -> Result<usize, CompileError> {
+    let raw = args[0].as_int()?;
+    if raw <= 0 {
+        return Err(CompileError::runtime(format!(
+            "{name} requires a positive non-null host address"
+        )));
+    }
+    let addr = usize::try_from(raw).map_err(|_| {
+        CompileError::runtime(format!("{name} address does not fit the host pointer width"))
+    })?;
+    if addr & (alignment - 1) != 0 {
+        return Err(CompileError::runtime(format!(
+            "{name} requires {alignment}-byte aligned address"
+        )));
+    }
+    Ok(addr)
+}
+
 pub fn rt_mmio_read_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_mmio_read_u32 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u32>(), "rt_mmio_read_u32")?;
     unsafe { Ok(Value::Int((addr as *const u32).read_volatile() as i64)) }
 }
 
@@ -1145,7 +1164,7 @@ pub fn rt_mmio_write_u32(args: &[Value]) -> Result<Value, CompileError> {
             "rt_mmio_write_u32 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u32>(), "rt_mmio_write_u32")?;
     let value = args[1].as_int()? as u32;
     unsafe { (addr as *mut u32).write_volatile(value) };
     Ok(Value::Nil)
@@ -1156,7 +1175,7 @@ pub fn rt_mmio_read_u16(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_mmio_read_u16 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u16>(), "rt_mmio_read_u16")?;
     unsafe { Ok(Value::Int((addr as *const u16).read_volatile() as i64)) }
 }
 
@@ -1167,7 +1186,7 @@ pub fn rt_mmio_write_u16(args: &[Value]) -> Result<Value, CompileError> {
             "rt_mmio_write_u16 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u16>(), "rt_mmio_write_u16")?;
     let value = args[1].as_int()? as u16;
     unsafe { (addr as *mut u16).write_volatile(value) };
     Ok(Value::Nil)
@@ -1178,7 +1197,7 @@ pub fn rt_mmio_read_u8(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_mmio_read_u8 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u8>(), "rt_mmio_read_u8")?;
     unsafe { Ok(Value::Int((addr as *const u8).read_volatile() as i64)) }
 }
 
@@ -1189,7 +1208,7 @@ pub fn rt_mmio_write_u8(args: &[Value]) -> Result<Value, CompileError> {
             "rt_mmio_write_u8 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u8>(), "rt_mmio_write_u8")?;
     let value = args[1].as_int()? as u8;
     unsafe { (addr as *mut u8).write_volatile(value) };
     Ok(Value::Nil)
@@ -1980,5 +1999,25 @@ mod tests {
         .unwrap();
         assert_eq!(written, 4);
         assert_eq!(destination, source);
+    }
+
+    #[test]
+    fn mmio_rejects_null_and_misaligned_addresses_before_volatile_access() {
+        assert!(rt_mmio_read_u8(&[Value::Int(0)]).is_err());
+        assert!(rt_mmio_write_u32(&[Value::Int(-1), Value::Int(1)]).is_err());
+        assert!(rt_mmio_read_u16(&[Value::Int(3)]).is_err());
+        assert!(rt_mmio_write_u32(&[Value::Int(6), Value::Int(1)]).is_err());
+
+        let mut value = 0x1234_5678u32;
+        let address = (&mut value as *mut u32) as usize as i64;
+        assert_eq!(
+            rt_mmio_read_u32(&[Value::Int(address)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            0x1234_5678
+        );
+        rt_mmio_write_u32(&[Value::Int(address), Value::Int(0x7654_3210)]).unwrap();
+        assert_eq!(value, 0x7654_3210);
     }
 }
