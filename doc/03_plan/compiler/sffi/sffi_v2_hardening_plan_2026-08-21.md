@@ -1523,3 +1523,10 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Retained and documented the layer-0 driver source raw owner as unsafe because
   facade import would violate compiler layering.
 - Status: source-reviewed, deliberately unverified for this sync.
+## 2026-08-26 lexer environment-write authority follow-up
+
+- Made canonical `env_set` always-inline and removed the lexer duplicate.
+- Preserved twenty-eight write sites, boolean status ABI, and ignored-result
+  behavior with one direct call and no allocation, copy, lookup, lock, or retry.
+- Reduced lexer raw declarations to the locally owned array-release boundary.
+- Status: source-reviewed, deliberately unverified for this sync.

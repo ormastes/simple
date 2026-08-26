@@ -8,7 +8,7 @@ registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
 llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
 selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
 
-for raw in rt_env_set rt_array_free; do
+for raw in rt_array_free; do
     [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
     [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
     grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
@@ -21,12 +21,17 @@ grep -A2 '^pub fn file_read_nullable(path: text) -> text?:' "$io_runtime" | grep
 ! grep -q '^fn _sffi_env_get(' "$module"
 grep -q '^pub fn env_get_nullable(key: text) -> text?:' "$io_runtime"
 grep -A2 '^pub fn env_get_nullable(key: text) -> text?:' "$io_runtime" | grep -q 'rt_env_get(key)'
+! grep -q '^extern fn rt_env_set(' "$module"
+! grep -q '^fn _sffi_env_set(' "$module"
+grep -B1 '^pub fn env_set(key: text, value: text) -> bool:' "$io_runtime" | grep -q '^@always_inline$'
+grep -q '^pub fn env_set(key: text, value: text) -> bool:' "$io_runtime"
+grep -A2 '^pub fn env_set(key: text, value: text) -> bool:' "$io_runtime" | grep -q 'rt_env_set(key, value)'
 
-[ "$(grep -c '^@unsafe(' "$module")" -eq 2 ]
-[ "$(grep -c '^@always_inline$' "$module")" -eq 2 ]
-[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 2 ]
+[ "$(grep -c '^@unsafe(' "$module")" -eq 1 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 1 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 1 ]
 for expected in file_read_nullable:2 env_get_nullable:13 \
-    _sffi_env_set:29 _sffi_array_free:5; do
+    env_set:28 _sffi_array_free:5; do
     owner=${expected%%:*}
     count=${expected##*:}
     [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
@@ -41,4 +46,4 @@ fi
 grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
 grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
 
-echo "compiler lexer SFFI authority audit: PASS (all raw calls confined; nullable reads truthful; character loop remains foreign-call-free)"
+echo "compiler lexer SFFI authority audit: PASS (one raw array-release owner confined; canonical nullable reads and writes retain direct-call shape; character loop remains foreign-call-free)"

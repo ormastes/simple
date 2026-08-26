@@ -915,3 +915,9 @@ use canonical always-inline `file_read_nullable`, retaining one ABI call and
 the same nil/empty lifting. The layer-0 driver source owner remains explicitly
 unsafe because importing the runtime facade there would violate layering.
 This slice is source-reviewed but unverified.
+## 2026-08-26 lexer environment-write authority follow-up
+
+The compiler lexer no longer redeclares `rt_env_set`; all twenty-eight writes
+use the canonical now-always-inline `env_set` owner with unchanged boolean ABI
+and ignored-result behavior. Array release is the lexer's sole remaining raw
+boundary. This slice is source-reviewed but unverified.
