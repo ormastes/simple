@@ -5,6 +5,26 @@
 use std.env.types.{rt_env_get, rt_env_get_i64, rt_env_remove, rt_env_vars}
 use std.io_runtime
 
+@always_inline
+fn _env_get_raw(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _env_get_i64_raw(key: text, default: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_env_get_i64(key, default)
+
+@always_inline
+fn _env_remove_raw(key: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_env_remove(key)
+
+@always_inline
+fn _env_vars_raw() -> [(text, text)]?:
+    unsafe(capabilities: [ffi]):
+        rt_env_vars()
+
 # ============================================================================
 # Core Environment Variable Operations
 # ============================================================================
@@ -16,7 +36,7 @@ fn env_get(key: text) -> text:
         env_get("HOME")  # "/home/user"
         env_get("NONEXISTENT")  # ""
     """
-    val value = rt_env_get(key)
+    val value = _env_get_raw(key)
     if value == nil:
         ""
     else:
@@ -36,7 +56,7 @@ fn env_get_or(key: text, default: text) -> text:
 
 fn env_get_i64(key: text, default: i64) -> i64:
     """Get and parse a decimal environment value, or return default."""
-    rt_env_get_i64(key, default)
+    _env_get_i64_raw(key, default)
 
 fn env_set(key: text, value: text) -> bool:
     """Set environment variable.
@@ -52,7 +72,7 @@ fn env_unset(key: text) -> bool:
     Example:
         env_unset("MY_VAR")  # true
     """
-    rt_env_remove(key)
+    _env_remove_raw(key)
 
 fn env_has(key: text) -> bool:
     """Check if environment variable exists.
@@ -61,19 +81,26 @@ fn env_has(key: text) -> bool:
         env_has("HOME")  # true
         env_has("NONEXISTENT")  # false
     """
-    val value = rt_env_get(key)
+    val value = _env_get_raw(key)
     if value == nil:
         false
     else:
         value != ""
 
+@unsafe(reason: "legacy environment-list API collapses snapshot allocation failure to an empty list", capabilities: [ffi])
 fn env_list() -> [(text, text)]:
     """Get all environment variables as list of (name, value) tuples.
 
     Example:
         env_list()  # [("HOME", "/home/user"), ("PATH", "/usr/bin"), ...]
     """
-    rt_env_vars()
+    _env_vars_raw() ?? []
+
+fn env_list_checked() -> Result<[(text, text)], text>:
+    val values = _env_vars_raw()
+    if values == nil:
+        return Err("rt_env_vars failed to allocate an environment snapshot")
+    Ok(values)
 
 fn env_clear():
     """Clear all environment variables (dangerous, use with caution)."""

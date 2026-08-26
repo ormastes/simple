@@ -1711,3 +1711,14 @@ and unpromoted.
 - [x] Keep legacy empty/non-positive sentinel spellings explicitly unsafe.
 - [x] Preserve direct always-inline raw owners and strengthen the existing
   system authority ratchet; no admission or lookup work enters the hot path.
+
+#### Completed production slice: sync/async environment compatibility (2026-08-26)
+
+- [x] Tag all nine extern-only `std.env.types` raw exports as FFI-unsafe while
+  preserving the compiler's special declaration-module topology.
+- [x] Correct nullable lookup, snapshot, home, cwd, and hostname declarations.
+- [x] Confine raw calls to 17 always-inline owners across both sync and async
+  variable/path/platform lanes.
+- [x] Add checked snapshot APIs and mark legacy empty-list collapse unsafe.
+- [x] Ratchet the two lanes without introducing allocation, copying, maps,
+  locks, hashes, or dynamic dispatch.

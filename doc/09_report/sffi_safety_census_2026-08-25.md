@@ -122,3 +122,12 @@ home, environment-snapshot, and hostname raw returns are nullable; checked
 sentinels. Legacy total spellings retain their old empty/zero behavior only
 behind explicit unsafe annotations. The existing system authority ratchet was
 strengthened to pin these checked contracts and all direct lexical owners.
+
+The extern-only `std.env.types` compatibility surface remains present because
+the compiler has special import-registration handling for that module. All nine
+raw exports are now explicitly FFI-unsafe, and nullable lookup/snapshot/home/
+hostname provider results are typed accordingly. Seventeen direct call owners
+across the sync and async variable/path/platform implementations confine the
+raw operations. Both lanes expose a checked snapshot API; legacy list APIs are
+explicitly unsafe when they collapse allocation failure to `[]`. No conversion,
+lookup table, or dispatch layer was introduced.
