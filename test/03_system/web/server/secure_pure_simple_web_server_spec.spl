@@ -16,8 +16,9 @@ use std.spec.*
 use std.nogc_sync_mut.http_server.parser.{headers_decision, parse_request_line, request_line_without_terminator, RUNTIME_READ_LINE_CAP}
 use std.nogc_sync_mut.http_server.router.{Router, path_is_safe}
 use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, ConnectionAdmission, plaintext_development_capability, secure_server_policy_error}
-use std.nogc_sync_mut.http_server.response.{with_default_security_headers, serialize_response}
-use std.nogc_sync_mut.http_server.types.{HttpResponse}
+use std.nogc_sync_mut.http_server.response.{with_default_security_headers, serialize_response, serialize_response_for_method_connection}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.common.net.http_core.{response_body_framing_decision}
 use std.nogc_sync_mut.http_server.tls_server.{tls_server_config_new, tls_server_config_error, tls_server_accept, tls_conn_is_h2, tls_conn_is_http1}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 
@@ -76,6 +77,63 @@ describe "Secure Pure-Simple production web routing":
         expect(wire).to_contain("X-Content-Type-Options: nosniff")
         expect(wire).to_contain("X-Frame-Options: DENY")
         expect(wire.contains("Strict-Transport-Security")).to_equal(false)
+
+    it "AC-2 keeps bodyless responses aligned for connection reuse":
+        step("Verify: AC-2 Keep HEAD and status-forbidden response bodies off the wire")
+        # @req: REQ-WEB-SecuPureSimpWebServ-001
+        val payload = "selected-representation"
+        val ok = HttpResponse(status: HttpStatus.Ok,
+            headers: [("Transfer-Encoding", "chunked"), ("Trailer", "Digest")],
+            body: payload)
+        val head_wire = serialize_response_for_method_connection(ok, "HEAD", false)
+        expect(head_wire).to_contain("Content-Length: 23\r\n")
+        expect(head_wire.contains(payload)).to_equal(false)
+        expect(head_wire.contains("Transfer-Encoding:")).to_equal(false)
+        expect(head_wire.contains("Trailer:")).to_equal(false)
+        expect(head_wire).to_contain("Connection: keep-alive\r\n")
+
+        val no_content = HttpResponse(status: HttpStatus.NoContent,
+            headers: [("Content-Length", "999"), ("Trailer", "Digest")],
+            body: payload)
+        val no_content_wire = serialize_response_for_method_connection(
+            no_content, "GET", false)
+        expect(no_content_wire.contains(payload)).to_equal(false)
+        expect(no_content_wire.contains("Content-Length:")).to_equal(false)
+        expect(no_content_wire.contains("Trailer:")).to_equal(false)
+
+        val not_modified = HttpResponse(status: HttpStatus.NotModified,
+            headers: [], body: payload)
+        val not_modified_wire = serialize_response_for_method_connection(
+            not_modified, "GET", false)
+        expect(not_modified_wire).to_contain("Content-Length: 23\r\n")
+        expect(not_modified_wire.contains(payload)).to_equal(false)
+        val metadata_only = HttpResponse(status: HttpStatus.NotModified,
+            headers: [
+                ("Content-Length", "321"),
+                ("Keep-Alive", "timeout=999"),
+                ("Proxy-Connection", "keep-alive"),
+                ("Upgrade", "unsafe")
+            ], body: "")
+        val metadata_only_wire = serialize_response_for_method_connection(
+            metadata_only, "GET", false)
+        expect(metadata_only_wire).to_contain("Content-Length: 321\r\n")
+        expect(metadata_only_wire.contains("Keep-Alive:")).to_equal(false)
+        expect(metadata_only_wire.contains("Proxy-Connection:")).to_equal(false)
+        expect(metadata_only_wire.contains("Upgrade:")).to_equal(false)
+
+        val early = response_body_framing_decision("GET", 103, true)
+        expect(early.transfer_body).to_equal(false)
+        expect(early.emit_content_length).to_equal(false)
+        expect(early.emit_transfer_encoding).to_equal(false)
+        expect(early.emit_trailer_declaration).to_equal(false)
+        val reset_content = response_body_framing_decision("GET", 205, false)
+        expect(reset_content.transfer_body).to_equal(false)
+        expect(reset_content.emit_content_length).to_equal(true)
+        expect(reset_content.content_length_must_be_zero).to_equal(true)
+        val connect_tunnel = response_body_framing_decision("CONNECT", 200, true)
+        expect(connect_tunnel.transfer_body).to_equal(false)
+        expect(connect_tunnel.emit_content_length).to_equal(false)
+        expect(connect_tunnel.emit_transfer_encoding).to_equal(false)
 
     it "AC-3 closes a connection when TLS cannot be established":
         step("Verify: AC-3 closes a connection when TLS cannot be established")

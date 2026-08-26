@@ -594,23 +594,24 @@ pub class Worker:
             return
 
         var response = resp
+        var c = self.connections[fd]
+        val transfer_body = c.response_transfers_body(resp.status)
 
         # TLS connections must use portable-read for file bodies (sendfile bypasses encryption)
         # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
         # returns a corrupt payload under native codegen.
-        if self.tls_sessions.contains_key(fd):
+        if transfer_body and self.tls_sessions.contains_key(fd):
             if (worker_static_file_route(self.net_capabilities, resp) == "sendfile" or
                 worker_static_file_route(self.net_capabilities, resp) == "portable-read"):
                 response = worker_static_file_fallback_response(resp)
                 self.static_file_fallback_count = self.static_file_fallback_count + 1
-        else:
+        elif transfer_body:
             if worker_static_file_route(self.net_capabilities, resp) == "portable-read":
                 response = worker_static_file_fallback_response(resp)
                 self.static_file_fallback_count = self.static_file_fallback_count + 1
             elif worker_static_file_route(self.net_capabilities, resp) == "sendfile":
                 self.static_file_sendfile_count = self.static_file_sendfile_count + 1
 
-        var c = self.connections[fd]
         val keepalive_s = self.config.keepalive_timeout_ms / 1000
 
         # TLS encryption path: encrypt response bytes into TLS records
@@ -623,7 +624,7 @@ pub class Worker:
             self.submit_tls_send_bytes(fd, c.get_response_bytes_buf())
             return
 
-        if worker_static_file_route(self.net_capabilities, response) == "sendfile":
+        if transfer_body and worker_static_file_route(self.net_capabilities, response) == "sendfile":
             # Send headers first (text path), then chain sendfile on completion
             c.set_response(response, keepalive_s)
             self.connections[fd] = c

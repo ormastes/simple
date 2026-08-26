@@ -86,6 +86,66 @@ fn content_length_from_text(s: text) -> i32:
 # Header/body policy decision
 # =============================================================================
 
+# One protocol-tier-neutral response framing decision.  Serializers pass
+# whether the selected representation would use a transfer coding; the
+# decision never inspects or copies the representation.
+# This keeps HTTP/1 blocking, HTTP/1 event-driven, and HTTP/2 aligned when a
+# response is bodyless because of the request method or status.
+class ResponseBodyFramingDecision:
+    transfer_body: bool
+    emit_content_length: bool
+    content_length_must_be_zero: bool
+    emit_transfer_encoding: bool
+    emit_trailer_declaration: bool
+
+fn response_body_framing_decision(
+    request_method: text, status_code: i64, selected_chunked: bool
+) -> ResponseBodyFramingDecision:
+    val informational = status_code >= 100 and status_code < 200
+    val successful_connect = request_method == "CONNECT" and
+        status_code >= 200 and status_code < 300
+    val status_forbids_body = informational or status_code == 204 or
+        status_code == 205 or status_code == 304 or successful_connect
+    val head_response = request_method == "HEAD"
+    val transfer_body = not head_response and not status_forbids_body
+
+    # RFC 9110 permits representation metadata on HEAD and 304, but forbids
+    # Content-Length on 1xx and 204.  Transfer-Encoding is likewise forbidden
+    # on 1xx and 204; on HEAD/304 it may describe the selected representation.
+    val framing_fields_forbidden = informational or status_code == 204 or successful_connect
+    val emit_content_length = not framing_fields_forbidden
+    val emit_transfer_encoding = not framing_fields_forbidden and selected_chunked
+    val emit_trailer_declaration = emit_transfer_encoding
+    ResponseBodyFramingDecision(
+        transfer_body: transfer_body,
+        emit_content_length: emit_content_length,
+        content_length_must_be_zero: status_code == 205,
+        emit_transfer_encoding: emit_transfer_encoding,
+        emit_trailer_declaration: emit_trailer_declaration
+    )
+
+# Return one exact non-negative Content-Length declaration, or -1 when it is
+# absent, duplicated, malformed, or overflows i64.  Response serializers use
+# this only as HEAD/304 selected-representation metadata, never to frame bytes
+# that are not retained by the response owner.
+fn response_declared_content_length(headers: [(text, text)]) -> i64:
+    var found: i64 = -1
+    for header in headers:
+        if header.0.to_lower() == "content-length":
+            if found >= 0 or header.1 == "":
+                return -1
+            var value: i64 = 0
+            for ch in header.1.chars():
+                if ch < "0" or ch > "9":
+                    return -1
+                val digit = ch.to_i64() - "0".to_i64()
+                if value > 922337203685477580 or
+                        (value == 922337203685477580 and digit > 7):
+                    return -1
+                value = value * 10 + digit
+            found = value
+    found
+
 # body_decision inspects parsed headers and decides how the body must be
 # handled. Returns (err, content_length, is_chunked): err is "" when the
 # request is acceptable, otherwise a status-prefixed message (400/413/501).
@@ -558,7 +618,9 @@ fn validate_static_path(path: text) -> Result<text, text>:
     Ok(normalize_path(path))
 
 export MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE
-export content_length_from_text, header_field_name_is_token, body_decision, path_is_safe
+export content_length_from_text, header_field_name_is_token, header_field_line_decision
+export body_decision, request_authority_error, http_authority_valid, path_is_safe
+export ResponseBodyFramingDecision, response_body_framing_decision, response_declared_content_length
 export hex_chunk_size, decode_chunked_bounded, chunked_body_end_scan
 export match_route_pattern, extract_route_params
 export HttpLimits, http_limits_default

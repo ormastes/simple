@@ -31,12 +31,13 @@
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus, HttpMethod,
-    http_method_from_text, http_status_code, http_status_reason}
+    http_method_from_text, http_method_to_text, http_status_code, http_status_reason}
 use std.nogc_sync_mut.http_server.router.{Router}
 use std.nogc_sync_mut.http_server.response.{
     with_default_security_headers, response_header_name_is_token,
     response_header_value_is_safe
 }
+use std.common.net.http_core.{response_body_framing_decision, response_declared_content_length}
 use std.nogc_sync_mut.http.h2.h2_parser.{h2_parse_frame_header, H2FrameHeader}
 use std.nogc_sync_mut.http.h2.h2_writer.{h2_write_frame}
 use std.nogc_sync_mut.http.h2.h2_frame.{
@@ -132,7 +133,7 @@ fn h2_response_header_is_safe(name: text, value: text) -> bool:
     if name.starts_with(":") or not response_header_name_is_token(name):
         return false
     val normalized = name.to_lower()
-    response_header_value_is_safe(value) and normalized != "connection" and normalized != "keep-alive" and normalized != "proxy-connection" and normalized != "transfer-encoding" and normalized != "upgrade" and normalized != "content-length"
+    response_header_value_is_safe(value) and normalized != "connection" and normalized != "keep-alive" and normalized != "proxy-connection" and normalized != "transfer-encoding" and normalized != "trailer" and normalized != "upgrade" and normalized != "content-length"
 
 # =============================================================================
 # Frame type integer constants (avoids cross-module val import bug)
@@ -360,7 +361,8 @@ fn _emit_rst_stream(stream: TcpStream, stream_id: i64, error_code: i64) -> bool:
         Err(_): return false
 
 # Emit a full response: HEADERS frame (with HPACK) + optional DATA frame.
-fn _emit_response(stream: TcpStream, stream_id: i64, resp: HttpResponse, policy: H2ServerPolicy) -> bool:
+fn _emit_response(stream: TcpStream, stream_id: i64, request_method: text,
+                  resp: HttpResponse, policy: H2ServerPolicy) -> bool:
     val enc_state = hpack_encoder_new(4096, true)
     val status_code = http_status_code(resp.status)
     var hdr_list: [HpackHeader] = []
@@ -368,7 +370,17 @@ fn _emit_response(stream: TcpStream, stream_id: i64, resp: HttpResponse, policy:
     val body_len = resp.body.len()
     if body_len > policy.max_response_body:
         return false
-    hdr_list.push(HpackHeader(name: "content-length", value: "{body_len}", sensitive: false))
+    val framing = response_body_framing_decision(
+        request_method, status_code.to_i64(), false)
+    if framing.emit_content_length:
+        var selected_body_len = body_len
+        if selected_body_len == 0 and
+                (request_method == "HEAD" or status_code == 304):
+            val declared_length = response_declared_content_length(resp.headers)
+            if declared_length >= 0:
+                selected_body_len = declared_length
+        val framed_body_len = if framing.content_length_must_be_zero: 0 else: selected_body_len
+        hdr_list.push(HpackHeader(name: "content-length", value: "{framed_body_len}", sensitive: false))
     var has_ct = false
     for pair in resp.headers:
         val lower_name = pair.0.to_lower()
@@ -382,7 +394,7 @@ fn _emit_response(stream: TcpStream, stream_id: i64, resp: HttpResponse, policy:
     val enc_result = hpack_encode(hdr_list, enc_state)
     val hpack_bytes = enc_result.0
 
-    val has_body = body_len > 0
+    val has_body = framing.transfer_body and body_len > 0
     var h_flags: i64 = _flag_end_headers()
     if not has_body:
         h_flags = h_flags | _flag_end_stream()
@@ -774,7 +786,8 @@ fn _h2_dispatch_stream(tcp_stream: TcpStream, session: H2ServerSession, stream_i
     )
 
     val resp = with_default_security_headers(session.router.dispatch(req), false)
-    if not _emit_response(tcp_stream, stream_id, resp, policy):
+    if not _emit_response(tcp_stream, stream_id,
+            http_method_to_text(req.method), resp, policy):
         val _ = _emit_rst_stream(tcp_stream, stream_id, 2) # INTERNAL_ERROR
     return h2_session_remove_stream(session, stream_id)
 
