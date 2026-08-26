@@ -46,9 +46,9 @@ pub fn unsafe_ffi_deny_enabled() -> bool {
 
 #[inline]
 fn is_raw_ffi_name(module: &HirModule, name: &str) -> bool {
-    // Imported raw providers are not present in this module's local extern
-    // table. Preserve their FFI identity without a registry or hash lookup.
-    name.starts_with("rt_") || name.starts_with("spl_") || module.extern_fn_names.contains(name)
+    // HIR lowering registers local, imported, and aliased extern declarations
+    // in this set. Prefixes are naming conventions, not foreign identity.
+    module.extern_fn_names.contains(name)
 }
 
 fn check_stmts(
@@ -288,18 +288,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_imported_style_rt_call_without_local_extern_declaration() {
+    fn accepts_local_rt_prefixed_function_without_extern_identity() {
         let module = lower("fn rt_imported_probe() -> i64:\n    1\nfn run() -> i64:\n    rt_imported_probe()\n");
-        let violations = check_unsafe_ffi(&module);
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].callee, "rt_imported_probe");
+        assert!(check_unsafe_ffi(&module).is_empty());
     }
 
     #[test]
-    fn accepts_imported_style_rt_call_inside_unsafe() {
-        let module = lower(
-            "fn rt_imported_probe() -> i64:\n    1\nfn run() -> i64:\n    unsafe(capabilities: [ffi]):\n        rt_imported_probe()\n",
+    fn rejects_call_with_imported_extern_identity() {
+        let mut module = lower(
+            "fn spl_imported_probe() -> i64:\n    1\nfn run() -> i64:\n    spl_imported_probe()\n",
         );
-        assert!(check_unsafe_ffi(&module).is_empty());
+        module.extern_fn_names.insert("spl_imported_probe".to_owned());
+        let violations = check_unsafe_ffi(&module);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].callee, "spl_imported_probe");
     }
 }

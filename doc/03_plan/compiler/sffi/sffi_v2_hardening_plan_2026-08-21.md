@@ -1582,6 +1582,9 @@ Torch SFFI nor all SFFI may be described as verified safe.
   `raw_ptr`-only blocks.
 - Preserved nested outer `ffi` authority without allowing an inner unrelated
   capability block to erase it.
+- Replaced `rt_`/`spl_` prefix inference with the HIR extern-identity set, which
+  already includes imported externs and aliases; pure local prefixed functions
+  no longer acquire foreign authority accidentally.
 - Kept MIR/runtime representation unchanged; capability collection is linear in
   the already-parsed header and stores one small vector per unsafe block only
   during compilation.
