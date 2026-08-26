@@ -1333,3 +1333,11 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Preserve projection counts and statement-dispatch complexity.
 - [x] Add no admission, hashing, allocation, cache, lock, or extra dispatch.
 - [x] Record the tagged runtime provider as unsafe, unsigned, and unverified.
+
+### Completed MIR function/type-lowering authority slice
+
+- [x] Tag the sole tagged-value discriminant declaration `unsafe(ffi)`.
+- [x] Confine all 22 projections to one always-inline lexical owner.
+- [x] Preserve GPU/type dispatch projection and branch counts.
+- [x] Add no admission, hashing, allocation, cache, lock, or extra dispatch.
+- [x] Record the discriminant provider as unsafe, unsigned, and unverified.

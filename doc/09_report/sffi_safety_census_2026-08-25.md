@@ -685,3 +685,14 @@ nil before lowering it. Direct projection counts and statement dispatch
 complexity are unchanged, with no admission, hash, cache, lock, allocation,
 copy, boxing, generic marshalling, or additional dynamic dispatch. The tagged
 runtime provider remains unsafe, unsigned, and unverified.
+
+### MIR function/type-lowering authority follow-up
+
+MIR function and type lowering now tags its sole tagged-value discriminant
+primitive `unsafe(ffi)` and confines all 22 existing projections to one
+always-inlined lexical owner. GPU parameter classification, dictionary/named/
+optional type predispatch, inner optional diagnostics, and the unreachable-type
+diagnostic preserve exactly the same projection and branch counts. No cache,
+hash, signature check, lookup, lock, allocation, copy, boxing, generic
+marshalling, or extra dynamic dispatch was added. The raw discriminant provider
+remains explicitly unsafe, unsigned, and unverified.
