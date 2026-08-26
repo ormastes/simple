@@ -27,8 +27,7 @@ use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_entry_index, bootstrap_hir_module_name_at, bootstrap_hir_module_symbol_count, bootstrap_hir_module_symbol_at, bootstrap_hir_module_function_count, bootstrap_hir_module_function_at, bootstrap_hir_module_constant_count, bootstrap_hir_module_constant_at}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-extern fn rt_exit(code: i64)
-extern fn rt_string_len(value: text) -> i64
+use std.io_runtime.{exit}
 
 fn bootstrap_reject_fatal_mir_errors(lowering: MirLowering) -> bool:
     var rejected = false
@@ -56,13 +55,6 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
-
-fn _mir_text_index_of(value: text, needle: text) -> i64:
-    if needle == "":
-        return 0
-    if not value.contains(needle):
-        return -1
-    rt_string_len(value.split(needle)[0])
 
 fn bootstrap_mir_logical_module_name(path: text) -> text:
     # Delegates to the single shared derivation in 00.common — see
@@ -262,7 +254,7 @@ fn bootstrap_mir_modules_add(module: MirModule):
             case Some(init):
                 if init == nil:
                     eprint("bootstrap MIR static initializer is nil\n")
-                    rt_exit(1)
+                    exit(1)
                 else:
                     init_kind = bootstrap_mir_static_init_kind(init.value)
                     init_payload = bootstrap_mir_static_init_payload(init.value)
@@ -311,7 +303,7 @@ fn bootstrap_entry_hir_module_value() -> HirModule:
         case Some(hir_module): return hir_module
         case _:
             eprint("error: bootstrap entry HIR module was not set before MIR lowering\n")
-            rt_exit(1)
+            exit(1)
     HirModule(
         name: "",
         path: "",
@@ -399,7 +391,7 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         lowering.lower_const(const_)
         lowering.lower_static(const_)
     if bootstrap_reject_fatal_mir_errors(lowering):
-        rt_exit(1)
+        exit(1)
     val mir_module_index = _bootstrap_mir_module_count_value
     lowering.lower_runtime_module_initializers_named(module_name, constants, mir_module_index)
 
@@ -460,7 +452,7 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         # Function-body errors are recorded after the pre-loop constants check.
         # Reject them before partial MIR reaches the shared flat accumulator.
         if bootstrap_reject_fatal_mir_errors(lowering):
-            rt_exit(1)
+            exit(1)
         bootstrap_mir_functions_add(emitted_name, mir_fn, mir_module_index)
         for block in mir_fn.blocks:
             instruction_total = instruction_total + block.instructions.len()
@@ -487,7 +479,7 @@ fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: text, t
     var module_index = 0
     if entry_index < 0:
         eprint("error: bootstrap flat HIR entry module was not captured: {entry_module_name}\n")
-        rt_exit(1)
+        exit(1)
 
     val entry_function_count = bootstrap_hir_module_function_count(entry_index)
     eprint("[bootstrap-flat-entry] index={entry_index} modules={bootstrap_hir_module_count()} functions={entry_function_count}\n")
@@ -495,7 +487,7 @@ fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: text, t
     val (entry_module, entry_instruction_total) = bootstrap_lower_flat_hir_module_to_mir(entry_index, target_context, true)
     if entry_instruction_total == 0:
         eprint("error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)\n")
-        rt_exit(1)
+        exit(1)
     module_index = 0
     while module_index < bootstrap_hir_module_count():
         if module_index != entry_index:
@@ -624,7 +616,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
         # Check the payload explicitly and fail closed, loudly.
         if hir_module == nil:
             print "error[E-MIR-BOOTSTRAP-ENTRY-NIL]: the bootstrap entry HIR module is nil at MIR lowering -- the HIR phase produced no entry module (upstream: the phase-2 module set was lost before phase 3). Refusing to lower an empty program."
-            rt_exit(1)
+            exit(1)
         var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
         lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
         val entry_functions = hir_module.functions
@@ -653,7 +645,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
             lowering.lower_const(const_)
             lowering.lower_static(const_)
         if bootstrap_reject_fatal_mir_errors(lowering):
-            rt_exit(1)
+            exit(1)
         lowering.lower_runtime_module_initializers(hir_module, const_vals, module_index)
         var lowered_module = lowering.builder.module
         lowered_module.name = hir_module.name
@@ -679,7 +671,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
                 # The constants-only rejection above cannot see body errors.
                 # Fail before this function reaches either MIR accumulator.
                 if bootstrap_reject_fatal_mir_errors(lowering):
-                    rt_exit(1)
+                    exit(1)
                 bootstrap_mir_functions_add(bootstrap_name, mir_fn, module_index)
                 var blk_i = 0
                 while blk_i < mir_fn.blocks.len():
@@ -705,12 +697,12 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
         if real_instr_total == 0:
             eprint("error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)\n")
             eprint("error: refusing to emit a stub-only bootstrap binary; real Simple lowering produced no bodies\n")
-            rt_exit(1)
+            exit(1)
         bootstrap_mir_modules_add(lowering.builder.module)
         return lowering.builder.module
     eprint("error: bootstrap entry HIR module was not set before MIR lowering\n")
     eprint("error: refusing to emit a stub-only bootstrap binary\n")
-    rt_exit(1)
+    exit(1)
     MirModule(name: "", functions: {}, statics: {}, constants: {}, types: {})
 
 fn bootstrap_lower_extra_hir_module_to_mir(hir_module: HirModule) -> i64:

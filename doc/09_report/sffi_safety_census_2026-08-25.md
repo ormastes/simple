@@ -696,3 +696,15 @@ diagnostic preserve exactly the same projection and branch counts. No cache,
 hash, signature check, lookup, lock, allocation, copy, boxing, generic
 marshalling, or extra dynamic dispatch was added. The raw discriminant provider
 remains explicitly unsafe, unsigned, and unverified.
+
+### MIR bootstrap process-authority follow-up
+
+MIR bootstrap global and type registration removed two duplicate raw process
+exit declarations and now use the canonical exit owner at all twelve existing
+fatal sites. A raw string-length declaration and its unused split-based text
+index helper were deleted rather than wrapped. Normal bootstrap and lowering
+paths gain no call or branch, while fatal paths retain one exit call each; the
+dead helper removal also eliminates a latent two-scan split/allocation path.
+No admission, hashing, signature check, cache, lock, lookup, boxing, generic
+marshalling, or extra dispatch was added. This centralizes unsafe authority but
+does not make the underlying runtime provider signed or verified.

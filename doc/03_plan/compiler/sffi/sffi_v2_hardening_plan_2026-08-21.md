@@ -1341,3 +1341,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Preserve GPU/type dispatch projection and branch counts.
 - [x] Add no admission, hashing, allocation, cache, lock, or extra dispatch.
 - [x] Record the discriminant provider as unsafe, unsigned, and unverified.
+
+### Completed MIR bootstrap process-authority slice
+
+- [x] Remove duplicate raw exit declarations from both bootstrap modules.
+- [x] Route all twelve fatal sites through the canonical exit owner.
+- [x] Remove the raw string-length declaration and unused split-based helper.
+- [x] Preserve one exit call per fatal site and add no normal-path work.
+- [x] Add a static authority and fatal-call-count ratchet.
+- [x] Record the centralized runtime provider as unsigned and unverified.
