@@ -170,14 +170,6 @@ use os.kernel.fs.fat32.*
         if to_read == 0u64:
             return Ok(0u64)
 
-        # Walk the full chain from the file's start cluster.
-        val chain_result = self.read_cluster_chain(dev, h.start_cluster)
-        if chain_result.is_err():
-            return Err(EIO)
-        val chain = chain_result.unwrap()
-        if chain.len() == 0:
-            return Ok(0u64)
-
         val cluster_bytes = self.cluster_size.to_u64()
         val spc = self.sectors_per_cluster.to_u64()
         val bps = self.bytes_per_sector.to_u64()
@@ -187,9 +179,26 @@ use os.kernel.fs.fat32.*
         var cluster_idx: u64 = offset / cluster_bytes
         var byte_in_cluster: u64 = offset % cluster_bytes
 
+        # Validate the complete FAT chain before exposing any file bytes, just
+        # as read_cluster_chain did here before.  Retain only the cluster
+        # window that can contribute to this request: allocating the complete
+        # chain made a small positioned read of a large file allocate and copy
+        # one u32 per cluster.  This does not establish a mutation snapshot or
+        # lease; it deliberately preserves this method's existing single-call
+        # device traversal and fail-closed chain validation semantics.
+        val window_result = self._read_cluster_window(
+            dev, h.start_cluster, cluster_idx,
+            (byte_in_cluster + to_read + cluster_bytes - 1u64) / cluster_bytes)
+        if window_result.is_err():
+            return Err(EIO)
+        val chain = window_result.unwrap()
+        if chain.len() == 0:
+            return Ok(0u64)
+
         var copied: u64 = 0u64
-        while copied < to_read and cluster_idx.to_i32() < chain.len():
-            val cluster = chain[cluster_idx.to_i32()]
+        var window_idx = 0i32
+        while copied < to_read and window_idx < chain.len():
+            val cluster = chain[window_idx]
             # Compute the LBA of the first sector of this cluster.
             val first_sector = self.data_start_sector.to_u64() + (cluster - 2u32).to_u64() * spc
             # Within this cluster, start reading from byte_in_cluster.
@@ -207,10 +216,47 @@ use os.kernel.fs.fat32.*
                     byte_in_sec = byte_in_sec + 1u64
                 sec_off = sec_off + 1u64
                 byte_in_sec = 0u64
-            cluster_idx = cluster_idx + 1u64
+            window_idx = window_idx + 1
             byte_in_cluster = 0u64
 
         Ok(copied)
+
+    fn _read_cluster_window(
+        self, dev: BlockDevice, start: u32, first_index: u64, wanted: u64
+    ) -> Result<[u32], text>:
+        """Validate a complete FAT chain while retaining one read window.
+
+        The traversal intentionally has the same corruption and mirror checks
+        as read_cluster_chain.  It differs only in storage: callers needing
+        bytes from a bounded range do not need an allocated copy of every
+        preceding or trailing cluster.  No mount mutation exclusion is
+        implied; callers retain the ordinary read_at consistency contract.
+        """
+        if start < 2u32:
+            return Err("fat32: invalid start cluster {start}")
+        var window: [u32] = []
+        var current = start
+        var fuel = self.data_clusters
+        var index = 0u64
+        while current >= 2u32:
+            if fuel == 0u32:
+                return Err("fat32: cluster chain exceeds volume cluster count (cycle?)")
+            fuel = fuel - 1u32
+            if index >= first_index and window.len().to_u64() < wanted:
+                window.push(current)
+            val next_result = self._read_fat_entry(dev, current)
+            if next_result.is_err():
+                return next_result
+            val next = next_result.unwrap()
+            if next >= 0x0FFFFFF8u32:
+                return Ok(window)
+            if next == 0x0FFFFFF7u32:
+                return Err("fat32: bad-cluster marker in chain from {start}")
+            if next == 0x00000000u32:
+                return Err("fat32: free-cluster entry mid-chain from {start}")
+            current = next
+            index = index + 1u64
+        Ok(window)
 
     fn read(self, dev: BlockDevice, h: FileHandle, buf: [u8]) -> Result<u64, i32>:
         """Sequential compatibility read starting at h.offset.
