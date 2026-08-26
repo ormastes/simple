@@ -1541,6 +1541,21 @@ Torch SFFI nor all SFFI may be described as verified safe.
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
 
+## 2026-08-26 public RuntimeValue closure completion
+
+- Remove the unused public equality and print RuntimeValue wrappers rather
+  than adding interpreter dispatch solely to make asymmetric inventory appear
+  complete.
+- Keep native-backend lowering private to its existing backend owner.
+- Ratchet the canonical runtime owner to 11 both-lane contracts and the
+  compiler minimal facade to 20 both-lane contracts, with zero asymmetric or
+  providerless declarations in either scoped owner.
+- Preserve the hot path: this is deletion-only for runtime behavior and adds
+  no allocation, copy, lookup, hashing, branch, or dispatch.
+- Continue to classify retained SFFI as unsafe and unsigned until semantic
+  evidence and exact-artifact signature admission are operational.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
 ## 2026-08-26 providerless no-GC API removal
 
 - Remove `rt_gc_init`, `rt_gc_malloc`, and `rt_gc_collect` from the no-GC and

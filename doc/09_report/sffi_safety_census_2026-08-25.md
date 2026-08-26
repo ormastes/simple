@@ -1269,6 +1269,23 @@ facades. Provider coverage remains incomplete and WebSocket empty/failure
 ambiguity remains explicit, so the family is unsafe, unsigned, and unverified.
 Source-reviewed only; checks were not executed.
 
+## 2026-08-26 public RuntimeValue closure completion
+
+The remaining public `value_eq`, `value_print`, and `value_println` wrappers
+had native registrations but no interpreter providers and no Simple callers.
+They are removed from the canonical runtime owner, compiler minimal facade,
+re-exports, and public generator specifications instead of adding a second
+dispatch path for unused APIs. The scoped canonical owner is now 11 raw
+declarations with 11 both-lane providers and no asymmetric or providerless
+entries; the compiler minimal facade is 20/20 both-lane contracts.
+
+Backend-internal print/equality lowering remains owned by the native backend
+and is not promoted as a public safe wrapper by this change. Removing dead
+surface adds no calls, branches, allocations, copies, lookups, hashes, or
+dispatch. The retained SFFI remains unsafe and unsigned: provider parity is
+not semantic verification or signed artifact admission. Source-reviewed only;
+checks were not executed.
+
 ## 2026-08-26 providerless no-GC API removal
 
 The no-GC runtime is reference-counted and has no `rt_gc_init`,
