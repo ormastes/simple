@@ -105,14 +105,36 @@ fn rv64_patch_epilogue(block: MachBlock, frame_size: i64) -> MachBlock:
     insts.push(new_mach_inst(RV_OP_RET, []))
     MachBlock(label: block.label, insts: insts, block_id: block.block_id, offset: block.offset)
 
-fn rv64_patch_frame(func: MachFunction, frame_size: i64) -> MachFunction:
+fn rv64_patch_frame(func: MachFunction, frame_size: i64, outgoing_arg_size: i64) -> MachFunction:
     var blocks: [MachBlock] = []
     for i in 0..func.blocks.len():
         if i == 0:
             blocks.push(rv64_patch_prologue(func.blocks[i], frame_size))
         else:
             blocks.push(rv64_patch_epilogue(func.blocks[i], frame_size))
-    MachFunction(name: func.name, blocks: blocks, frame_size: frame_size, num_virtual_regs: func.num_virtual_regs, used_callee_saved: func.used_callee_saved)
+    MachFunction(name: func.name, blocks: blocks, frame_size: frame_size,
+        num_virtual_regs: func.num_virtual_regs, used_callee_saved: func.used_callee_saved,
+        outgoing_arg_size: outgoing_arg_size)
+
+fn rv64_call_stack_arg_size(argument_count: i64) -> i64:
+    if argument_count <= RV_ARG_REGS.len(): return 0
+    (argument_count - RV_ARG_REGS.len()) * RV64_WORD_SIZE
+
+fn rv64_function_outgoing_arg_size(func: MirFunction) -> i64:
+    var size = 0
+    for block in func.blocks:
+        for inst in block.instructions:
+            val candidate = match inst.kind:
+                case Call(_, _, args): rv64_call_stack_arg_size(args.len())
+                case CallIndirect(_, _, args, _): rv64_call_stack_arg_size(args.len())
+                case _: 0
+            if candidate > size: size = candidate
+        match block.terminator:
+            case CallTerminator(_, _, args, _, _, _, _):
+                val candidate = rv64_call_stack_arg_size(args.len())
+                if candidate > size: size = candidate
+            case _: ()
+    size
 
 # ============================================================================
 # Operand Lowering
@@ -280,7 +302,7 @@ fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
     val stack_align = rv64_linux_contract().stack_align_bytes
     if frame_size % stack_align != 0:
         frame_size = frame_size + (stack_align - (frame_size % stack_align))
-    mach_func = rv64_patch_frame(mach_func, frame_size)
+    mach_func = rv64_patch_frame(mach_func, frame_size, rv64_function_outgoing_arg_size(func))
 
     # Propagate context back
     val out_ctx = ISelContext(
