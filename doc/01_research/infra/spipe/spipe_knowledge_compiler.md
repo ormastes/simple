@@ -410,7 +410,7 @@ spipe://workspace/{workspace_id}/diagnostics
 
 The URI admission review found five requirements that are security invariants,
 not implementation conveniences. (1) A cursor receipt must bind the verifying
-authority/key epoch, snapshot/revision, view, normalized selector/path, and
+authority/key epoch, base/authority snapshot UIDs and revision, view, normalized selector/path, and
 effective authorization scope. (2) Resolution must reject selector remapping,
 including attempts to reuse a receipt or legacy alias in a foreign workspace.
 (3) The verifier must be a branded, real signed `AuthorizationPort`, not
@@ -2909,7 +2909,8 @@ mismatch.
 
 `CanonicalReadReceiptV1` has exactly `{receiptVersion, authorityKeyId,
 authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
-projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+projectUidOrNull, targetKind, targetUid, baseSnapshotUid, authoritySnapshotUid,
+revisionId, viewKind,
 normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
 pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
 issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1` has the identical
@@ -2960,7 +2961,8 @@ until the following port is delivered and tested.
 `createSnapshotAuthorityPortV1({ workspaceRegistry, snapshotStore,
 targetInventoryStore })`; it returns opaque `SnapshotAuthorityViewV1` values
 and rejects structural substitutes. A view is bound to exactly
-`{workspaceUid, projectUidOrNull, worktreeUid, snapshotUid, revisionId}` and
+`{workspaceUid, projectUidOrNull, worktreeUid, baseSnapshotUid,
+authoritySnapshotUid, revisionId}` and
 to a verified immutable manifest digest. It exposes only:
 
 ```text
@@ -2989,9 +2991,15 @@ include a deterministic inventory of artifact, section, trace, diagnostics,
 and directory projection entries sufficient to answer these operations without
 repository scanning.
 
+`SnapshotAuthorityViewV1` exposes neither locators nor an alias index: those
+remain authority-private and are consumed only through the resolving methods
+above. A directory inventory entry seals its ordered child identity list and
+the allowed page-bound contract, so a later page cannot substitute children,
+order, or bounds under an otherwise valid authority root.
+
 The sole resolver sequence is: parse/normalize URI once; resolve the exact
 workspace (including its worktree) in `WorkspaceRegistry`; open and validate
-the receipt-named snapshot as an untrusted candidate through
+the receipt-named base/authority snapshot pair as untrusted candidates through
 `SnapshotAuthorityPortV1`; resolve a legacy alias through the sealed authority
 view, if present; prove the canonical target/directory in that view; derive
 `ExpectedReadBindingV1`, including `authorityInstanceUid` and
@@ -3015,13 +3023,15 @@ recomputed from canonical bytes excluding the digest field.
 
 The authority seal is non-cyclic. Existing `baseSnapshotUid` remains the
 content-addressed identity of the pre-existing base tuple. A separate,
-content-addressed `AuthorityManifestV1` has `snapshotUid` and commits exactly
+content-addressed `AuthorityManifestV1` has `authoritySnapshotUid` and commits exactly
 `{baseSnapshotUid, targetInventoryRoot, workspaceUid, projectUidOrNull,
-worktreeUid, revisionId, scopeKind, contributingProjectRoots}`. Receipts bind this authority `snapshotUid`,
-not the base tuple UID. `openBoundSnapshot` recomputes inventory bytes/root,
-then AuthorityManifest bytes/UID, and rejects a missing, swapped, or tampered
-root before returning a view. Existing snapshots without an authority manifest
-are pre-Wave-5a inputs, not authority evidence.
+worktreeUid, revisionId, scopeKind, contributingProjectRoots}`. Read bindings,
+grants, and receipts carry both immutable `baseSnapshotUid` and content-addressed
+`authoritySnapshotUid`: the former opens the exact SnapshotStore tuple and the
+latter selects the matching AuthorityManifest/inventory. `openBoundSnapshot`
+recomputes inventory bytes/root, then AuthorityManifest bytes/UID, and rejects
+a missing, swapped, or tampered root before returning a view. Existing snapshots
+without an authority manifest are pre-Wave-5a inputs, not authority evidence.
 
 Workspace-root/view/trace/diagnostics use a distinct
 `scopeKind=workspace_aggregate` manifest. It has `projectUidOrNull=null` and
@@ -3040,7 +3050,7 @@ weaken the current project-snapshot schema.
 
 The resolver order supersedes the shorthand above: parse once; resolve the
 exact workspace/worktree; ask SnapshotAuthority to open the receipt-named
-snapshot/revision only as an untrusted candidate and validate it against the
+base/authority snapshot pair and revision only as untrusted candidates and validate them against the
 registry and sealed manifest; for a legacy URI, resolve its sealed alias only
 to obtain a canonical candidate and then call `resolveCanonicalTarget` to
 prove that candidate's membership; for a canonical URI, prove its target
@@ -3054,8 +3064,10 @@ neither authorization nor target proof, and authorization cannot precede that
 proof. Receipt text never supplies an accepted target. A
 legacy read receipt has no `worktreeUid`; its verified opaque grant receives
 that trusted value together with `authorityInstanceUid` and
-`authorityManifestDigest` from the sealed `ExpectedReadBindingV1`, while the
-cursor receipt signs the worktree. Those authority claims are never derived by
+`authorityManifestDigest` from the sealed `ExpectedReadBindingV1`; its
+`baseSnapshotUid` and `authoritySnapshotUid` are accepted only after exact
+receipt-to-binding equality, and the cursor receipt signs all of those bindings.
+Those authority claims are never derived by
 a cursor, URI, or projection adapter. Every failure coalesces to the existing
 bounded public denial.
 
@@ -3070,10 +3082,12 @@ composition-root port, not a generic signer or a second authority root.
 Canonical-read verification produces an opaque `VerifiedReadGrantV1`. Although
 the compatibility read receipt itself lacks `worktreeUid`, the grant contains
 that claim together with `authorityInstanceUid` and `authorityManifestDigest`
-only because `AuthorizationPortV1` copies all three from the sealed
+only because `AuthorizationPortV1` copies those three additions from the sealed
 `ExpectedReadBindingV1` supplied after SnapshotAuthority target proof. Cursor
-issue derives its complete binding from this grant and signs the worktree. This
-removes the unsafe alternative of a later adapter deriving worktree identity.
+issue derives its complete binding from this grant and signs the worktree. Its
+base/authority snapshot fields are present only after the receipt's two fields
+equal the sealed binding. This removes the unsafe alternative of a later adapter
+deriving worktree or snapshot identity.
 
 Key rotation is durable policy, not a cache replacement. The one logical policy
 is persisted through an append-only policy/key/issuer/rotation/revocation record
@@ -3099,10 +3113,17 @@ composition root admits only branded interfaces:
 ```text
 WorkspaceRegistryV1.resolveExactWorkspaceWorktreeV1({workspaceUid,worktreeUid})
 SnapshotStoreV1.openExactSnapshotV1({workspaceUid,projectUidOrNull,worktreeUid,
-  snapshotUid,revisionId,registryRevisionId})
+  baseSnapshotUid,revisionId,registryRevisionId})
 TargetInventoryStoreV1.publishAuthorityInventoryV1(ProductionInventoryBuildV1)
 TargetInventoryStoreV1.openPublishedAuthorityInventoryV1(ExactAuthorityBindingV1)
 ```
+
+`ExactAuthorityBindingV1` is closed over `{workspaceUid, projectUidOrNull,
+worktreeUid, baseSnapshotUid, authoritySnapshotUid, revisionId}`. The
+SnapshotStore receives only `baseSnapshotUid`; the inventory store receives the
+complete binding and uses `authoritySnapshotUid` to locate the matching
+content-addressed authority manifest. Neither port may infer one identity from
+the other.
 
 `openBoundSnapshot` performs the exact registry lookup, exact snapshot open,
 and published-manifest open, then revalidates the registry and snapshot
@@ -3112,7 +3133,9 @@ substitute. `KnowledgeCompiler`'s production snapshot-commit path is the sole
 inventory writer: it publishes project roots and the exact registry-selected
 **complete** aggregate contributor set, then the matching authority manifest.
 Request adapters cannot write, omit unavailable contributors, lazily add query
-results, or select roots.
+results, or select roots. Publishing requires a branded, non-forgeable
+`AuthorityInventoryPublishPermitV1` minted only by that commit transaction;
+strings, structural objects, and a caller-selected aggregate are denied.
 
 Directories are sealed targets. Their requested limit is `1..100`; a page has
 at most 100 entries, 200 Markdown lines, and approximately 6,000 tokens, with

@@ -118,7 +118,8 @@ queued double emission, or `event_queue_full`.
 - Protocol operations: `spipe_list`, `spipe_read`, `spipe_search`, `spipe_resolve`, `spipe_trace`, `spipe_diagnostics`.
 - URI admission: `AuthorizationPortV1`, `CanonicalReadReceiptV1`, and
   `CursorReceiptV1`. Both receipt contracts bind authority key/epoch,
-  workspace, project-or-null, snapshot, revision, view, normalized path and
+  workspace, project-or-null, `baseSnapshotUid`, `authoritySnapshotUid`,
+  revision, view, normalized path and
   selector/filter digest, effective scope, ordering version, and page limit.
   The composition root alone creates the branded signed verifier and opaque
   verified grants; handlers may not use structural verifier objects, remap a
@@ -301,7 +302,7 @@ violates this evidence boundary.
 
 **Depends on:** Waves 3–4. **Owners:** D.  
 **Deliverables:** authoritative `spipe://` resolver; lifecycle/feature/component/layer/matrix/trace/project/status/diagnostic projections; bounded MCP list/read/search/resolve/trace/diagnostic tools and resources; legacy stdio plus a stateless MCP 2026 HTTP implementation held disabled until its Wave 0 transport/auth/cache threat gates pass; deterministic pagination/cache hints; `.spipe/view/` materializer; editor-provider skeleton.  
-**Exit gates:** model navigates without canonical paths; each artifact-representation file maps to exactly one canonical artifact UID, while directory indexes, search pages, trace matrices, diagnostics, and other aggregate outputs carry deterministic synthetic projection UIDs bound to the immutable snapshot UID and query/view parameters; writes fail closed; outputs are deterministic, paginated, and bounded; private data never receives public cache scope; unchanged materializations are not rewritten; HTTP cannot be enabled without path/auth/cache negative tests passing. A cursor must be a signed receipt whose authority/snapshot/revision/view/selector/scope/page-limit bindings match the independently authorized request exactly; legacy aliases cannot remap foreign workspaces; every verifier is an admitted branded `AuthorizationPortV1`; and the positive plus hostile URI/receipt/cursor/public-error matrix in the system-test plan must pass.
+**Exit gates:** model navigates without canonical paths; each artifact-representation file maps to exactly one canonical artifact UID, while directory indexes, search pages, trace matrices, diagnostics, and other aggregate outputs carry deterministic synthetic projection UIDs bound to immutable snapshot identity and query/view parameters; writes fail closed; outputs are deterministic, paginated, and bounded; private data never receives public cache scope; unchanged materializations are not rewritten; HTTP cannot be enabled without path/auth/cache negative tests passing. A cursor must be a signed receipt whose authority/base-snapshot/authority-snapshot/revision/view/selector/scope/page-limit bindings match the independently authorized request exactly; legacy aliases cannot remap foreign workspaces; every verifier is an admitted branded `AuthorizationPortV1`; and the positive plus hostile URI/receipt/cursor/public-error matrix in the system-test plan must pass.
 
 ### Wave 6 — Transactional refactoring and repair
 
@@ -953,7 +954,9 @@ normal/highest-capability model. AC-4 remains open.
 W5A-A owns a non-cyclic seal: `TargetInventoryManifestV1` binds the existing
 base snapshot UID, and a separate content-addressed `AuthorityManifestV1`
 authority snapshot UID commits the base UID plus inventory root. Receipts bind
-the authority snapshot. The sealed inventory owns normalized legacy alias
+both `baseSnapshotUid` and `authoritySnapshotUid`: the base UID opens the exact
+immutable snapshot, while the authority UID selects the sealed inventory. The
+sealed inventory owns normalized legacy alias
 mappings, so the frozen authority API includes
 `resolveCanonicalAlias(view, alias) -> CanonicalTargetCandidateV1`, followed
 by `resolveCanonicalTarget` proof before receipt verification; external
@@ -997,8 +1000,8 @@ revalidates exact registry and snapshot revisions after published-manifest open.
 
 | Lane | Additional owned deliverable | Admission evidence |
 |---|---|---|
-| W5A-A | production commit publisher and complete aggregate roots | atomic visibility; clean/incremental artifact/section/directory/aggregate parity |
-| W5A-B | bounded directory page `1..100`, <=100 entries, <=200 lines/~6k tokens | stable order and authenticated continuation |
+| W5A-A | non-forgeable production commit publisher and complete aggregate roots | atomic visibility; clean/incremental artifact/section/directory/aggregate parity; strings/structural permits deny |
+| W5A-B | bounded directory page `1..100`, <=100 entries, <=200 lines/~6k tokens | sealed child identity/order/page bounds and authenticated continuation |
 | W5C-A | fsynced policy directory; monotonic CAS single-policy append-only policy/key/issuer/rotation/revocation family | restart plus create/write/fsync/rename/CAS faults |
 | W5A-C/W5C-D | independent real-port oracle | W5A-16…20 and W5C-11…12 PASS |
 
@@ -1033,7 +1036,7 @@ The only projection operations are
 The inbound cursor is verified against the same opaque read grant before list;
 the returned deterministic next position is sent to `issueCursorReceiptV1`
 only after list. `VerifiedReadGrantV1` carries a sealed `ExpectedReadBindingV1`'s
-trusted worktree UID, authority-instance UID, and authority-manifest digest,
+trusted base-snapshot UID, authority-snapshot UID, worktree UID, authority-instance UID, and authority-manifest digest,
 despite its legacy read receipt not serializing the worktree field. The
 canonical schemas and the only durable key-policy state machine are
 architecture §21; no `lastSortKey`, `pageRequest`, or adapter-created grant is
@@ -1057,7 +1060,7 @@ slice is accepted.
 
 | Lane | Exclusive ownership | Published boundary | Gate before downstream work |
 |---|---|---|---|
-| W5A-A Snapshot authority | `src/core`, `src/storage`, `src/workspace` integration owner | branded `SnapshotAuthorityPortV1`, opaque `SnapshotAuthorityViewV1`, inventory manifest | workspace/project/worktree/snapshot/revision and digest checks plus target membership |
+| W5A-A Snapshot authority | `src/core`, `src/storage`, `src/workspace` integration owner | branded `SnapshotAuthorityPortV1`, opaque `SnapshotAuthorityViewV1`, inventory manifest | workspace/project/worktree/base-snapshot/authority-snapshot/revision and digest checks plus target membership |
 | W5A-B Projection | `src/view` | branded `ProjectionPortV1` consuming authority views, proven targets, and opaque verified grants | no raw store, path inference, scan, refresh, or adapter-created grant |
 | W5A-C Evidence | focused unit/integration fixtures and system-plan mapping | W5A-01 through W5A-15 oracle evidence | independent highest-capability PASS |
 | W5-D URI/MCP/materializer | `src/view`, `mcp` | resolver/resources/tools adapters | waits for all W5A gates; a sealed alias yields only a candidate, authority proves its canonical target, then receipt authorization occurs |
@@ -1069,7 +1072,11 @@ The integration owner freezes these exact methods before sidecars work:
 `ProjectionPortV1.render(authorityView,canonicalTarget,verifiedReadGrant)`, and
 `ProjectionPortV1.list(authorityView,directoryTarget,verifiedReadGrant,verifiedCursorGrantOrNull)`.
 The authority binding is exactly `{workspaceUid,
-projectUidOrNull, worktreeUid, snapshotUid, revisionId}`. The final reviewer
+projectUidOrNull, worktreeUid, baseSnapshotUid, authoritySnapshotUid,
+revisionId}`. `baseSnapshotUid` opens the exact immutable SnapshotStore tuple;
+`authoritySnapshotUid` selects the matching content-addressed authority
+manifest/inventory; the exact inventory-open binding carries both and neither
+identity may be inferred from the other. The final reviewer
 must reject structural substitutes, project-only snapshot reads, missing
 manifest target inventory, and any URI rendering before target proof. This is
 a read-only prerequisite and does not authorize an HTTP or write feature.
@@ -1080,8 +1087,8 @@ canonical `contributingProjectRoots` field is the full ordered manifest of
 `{projectUid, baseSnapshotUid, authoritySnapshotUid, targetInventoryRoot}`;
 it is committed by both inventory and authority manifests, forbidden for a
 project scope, and permits an explicit empty aggregate only. Resolver adapters
-first open and verify the receipt-named snapshot only as an untrusted
-candidate; a legacy alias yields only a canonical candidate, which must pass
+first open and verify the receipt-named base/authority snapshot pair only as
+untrusted candidates; a legacy alias yields only a canonical candidate, which must pass
 sealed `resolveCanonicalTarget` membership proof; only then verify the receipt
 against an `ExpectedReadBindingV1` created from that proof, including its
 `authorityInstanceUid` and `authorityManifestDigest`. `worktreeUid` stays out
@@ -1105,7 +1112,8 @@ cross-instance genuine-brand mixing before W5-D begins.
    fields against its direct proven target or reauthorizes/fails closed.
    Freeze exactly `CanonicalReadReceiptV1{receiptVersion, authorityKeyId,
    authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
-   projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+   projectUidOrNull, targetKind, targetUid, baseSnapshotUid,
+   authoritySnapshotUid, revisionId, viewKind,
    normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
    pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
    issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1`, verified

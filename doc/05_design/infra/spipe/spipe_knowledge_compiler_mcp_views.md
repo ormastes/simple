@@ -119,7 +119,7 @@ spipe://project/{project}/section/{section_uid}
 The workspace-root resource has exactly the trailing-slash form shown above;
 `spipe://workspace/{workspace}` is not a synonym and is rejected as malformed.
 No URI family permits an implicit selector remap: a request selects the named
-workspace, project, snapshot/revision, view, and scope, and all later checks
+workspace, project, base/authority snapshot pair and revision, view, and scope, and all later checks
 must bind those exact values. In particular, a legacy alias, cursor, or receipt
 for one workspace may not resolve a same-named project or view in a foreign
 workspace.
@@ -208,8 +208,9 @@ The required same-port extension is `issueCursorReceiptV1(readGrant,
 `rotateCursorReceiptKeyV1(request, clockNowMs)`, and
 `applyDueCursorReceiptKeyTransitionsV1(clockNowMs)`. It is not currently
 admitted merely because canonical-read verification exists. The read grant is
-opaque and carries the sealed `ExpectedReadBindingV1`'s trusted `worktreeUid`,
-`authorityInstanceUid`, and `authorityManifestDigest`; cursor issuance derives
+opaque and carries the sealed `ExpectedReadBindingV1`'s trusted
+`baseSnapshotUid`, `authoritySnapshotUid`, `worktreeUid`, `authorityInstanceUid`,
+and `authorityManifestDigest`; cursor issuance derives
 all other binding fields from it, not from an adapter request.
 
 MIME types are `inode/directory` for directory resources, `text/markdown` for
@@ -581,7 +582,8 @@ read-only projection. Their exact operations are:
 
 ```text
 SnapshotAuthorityPortV1.openBoundSnapshot(
-  {workspaceUid, projectUidOrNull, worktreeUid, snapshotUid, revisionId}
+  {workspaceUid, projectUidOrNull, worktreeUid, baseSnapshotUid,
+   authoritySnapshotUid, revisionId}
 ) -> Result<SnapshotAuthorityViewV1, SnapshotAuthorityError>
 SnapshotAuthorityPortV1.resolveCanonicalTarget(
   view, {targetKind, targetUid}
@@ -604,7 +606,8 @@ ProjectionPortV1.list(authorityView, directoryTarget, verifiedReadGrant, verifie
 `CanonicalTargetCandidateV1` contains only normalized canonical kind/UID and
 an alias-index digest; it is deliberately not a `CanonicalTargetV1` and cannot
 be passed to ProjectionPort. `openBoundSnapshot` validates registry workspace/project/worktree ownership,
-immutable snapshot UID/revision equality, and a manifest digest before it
+exact `baseSnapshotUid`/revision equality, exact `authoritySnapshotUid` manifest
+selection, and a manifest digest before it
 returns an opaque view. The manifest inventory has canonical entries for
 artifacts, sections, trace/diagnostic aggregates, and virtual directory
 mappings. The target and directory operations must prove membership against
@@ -613,9 +616,13 @@ the binding/digest equality check and refuses a target or view from another
 authority instance. It never scans repository paths, creates identities, or
 refreshes indexes.
 
+The opaque view exposes neither locators nor alias-index entries. A directory
+entry seals ordered child identities plus the page-bound contract; list code may
+only return the admitted sequence under that exact order and bound.
+
 `ResourceResolver` performs this sequence: (1) parse and normalize once; (2)
 resolve the named workspace and worktree exactly; (3) open the receipt-named
-authority snapshot only as an untrusted candidate; (4) a legacy alias resolves
+base/authority snapshot pair only as untrusted candidates; (4) a legacy alias resolves
 through that view's sealed alias index only to a canonical candidate, which is
 then passed to `resolveCanonicalTarget`, while a canonical URI proves its
 target/directory directly; (5) create the trusted `ExpectedReadBindingV1` from
@@ -632,10 +639,10 @@ Wave 5a acceptance uses this matrix before any URI implementation is admitted:
 
 | Case | Required observation |
 |---|---|
-| Correct workspace/worktree/snapshot/revision and artifact/section | Target renders from one matching manifest inventory entry |
+| Correct workspace/worktree/base-snapshot/authority-snapshot/revision and artifact/section | Target renders from one matching manifest inventory entry |
 | Correct receipt but absent or kind-mismatched UID | Denial before ProjectionPort call |
-| Same snapshot UID in foreign workspace/worktree | Denial before inventory access |
-| Current project with stale revision or manifest digest | Denial before inventory access |
+| Same base or authority snapshot UID in foreign workspace/worktree | Denial before inventory access |
+| Independently changed base snapshot, authority snapshot, revision, or manifest digest | Denial before inventory access |
 | Duck-typed authority/projection substitute | Construction or invocation rejects |
 | Legacy alias | Alias yields a canonical candidate, sealed membership proof succeeds, then the canonical target is freshly authorized |
 | Clean rebuild versus incremental update | Equal inventory manifest and projection bytes |
@@ -652,9 +659,11 @@ workspaceUid, projectUidOrNull, worktreeUid, baseSnapshotUid, revisionId,
 entries, aliasIndex, projectionRoot, contributingProjectRoots, rootDigest}`.
 `rootDigest` is recomputed
 over canonical bytes excluding itself. A separate content-addressed
-`AuthorityManifestV1.snapshotUid` commits the base snapshot UID, inventory
-root, scope tuple, and `contributingProjectRoots`; receipts bind that authority
-snapshot UID. This avoids a
+`AuthorityManifestV1.authoritySnapshotUid` commits the base snapshot UID,
+inventory root, scope tuple, and `contributingProjectRoots`. Read bindings,
+grants, and receipts carry both `baseSnapshotUid` (the exact immutable
+SnapshotStore open) and `authoritySnapshotUid` (the authority
+manifest/inventory lookup). This avoids a
 snapshot/inventory hash cycle. Authority validates both canonical roots before
 a view is returned; missing, swapped, or tampered root rejects.
 
@@ -668,7 +677,7 @@ reordered roots fail admission. The registry selects that aggregate only for
 the exact workspace/worktree/revision.
 
 The resolver does: parse; delegate exact workspace/worktree lookup and opening
-of the receipt's snapshot/revision as an untrusted candidate to SnapshotAuthority,
+of the receipt's base/authority snapshot pair and revision as untrusted candidates to SnapshotAuthority,
 which validates its sealed inventory and revalidates exact revisions;
 for an alias, resolve only a canonical candidate then prove it with
 `resolveCanonicalTarget`; for a canonical URI, prove its target directly;
@@ -705,10 +714,19 @@ Only branded composition-root `WorkspaceRegistryV1`, `SnapshotStoreV1`, and
 `TargetInventoryStoreV1` may implement this design. Valid worktree UIDs are
 `W-<opaque-base32>` only. The exact operations are
 `WorkspaceRegistryV1.resolveExactWorkspaceWorktreeV1({workspaceUid,worktreeUid})`,
-`SnapshotStoreV1.openExactSnapshotV1({workspaceUid,projectUidOrNull,worktreeUid,snapshotUid,revisionId,registryRevisionId})`,
+`SnapshotStoreV1.openExactSnapshotV1({workspaceUid,projectUidOrNull,worktreeUid,baseSnapshotUid,revisionId,registryRevisionId})`,
 `TargetInventoryStoreV1.publishAuthorityInventoryV1(build)`, and
 `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1(exactBinding)`.
-`publishAuthorityInventoryV1` belongs only to the production commit flow.
+`exactBinding` is the closed `{workspaceUid, projectUidOrNull, worktreeUid,
+baseSnapshotUid, authoritySnapshotUid, revisionId}` tuple: SnapshotStore opens
+only `baseSnapshotUid`, while the inventory store uses `authoritySnapshotUid`
+to locate the matching content-addressed authority manifest. Neither identity
+is inferred from the other.
+`publishAuthorityInventoryV1` belongs only to the production commit flow and
+requires its branded, non-forgeable `AuthorityInventoryPublishPermitV1`; strings,
+structural substitutes, and caller-selected aggregate roots deny. That
+transaction selects all and only complete project roots for the exact registry
+revision.
 `openBoundSnapshot` calls only `resolveExactWorkspaceWorktreeV1`, then
 `openExactSnapshotV1`, then `openPublishedAuthorityInventoryV1`, and revalidates
 registry plus snapshot revision before returning a view. The production KnowledgeCompiler

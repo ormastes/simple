@@ -1520,21 +1520,21 @@ raw `ImmutableSnapshotStore` or a duck-typed substitute cannot satisfy it.
 
 | ID | Setup/action | Required oracle |
 |---|---|---|
-| W5A-01 | Open one exact workspace/project/worktree/snapshot/revision tuple | Opaque authority view has the matching binding and verified manifest digest |
+| W5A-01 | Open one exact workspace/project/worktree/base-snapshot/authority-snapshot/revision tuple | Opaque authority view has both matching snapshot identities and verified manifest digest |
 | W5A-02 | Resolve artifact and section IDs in that view | Each exists in exactly one matching manifest inventory entry before rendering |
 | W5A-03 | Use absent UID or a valid UID with the wrong kind | Bounded denial and zero ProjectionPort render/list calls |
-| W5A-04 | Reuse snapshot UID across a foreign workspace/worktree | Bounded denial before inventory access |
-| W5A-05 | Use stale revision, changed manifest digest, or unavailable snapshot | Bounded denial before inventory access |
-| W5A-06 | Pass structural/duck-typed authority or projection objects | Constructor/invocation rejects; no fallback is accepted |
+| W5A-04 | Reuse either base or authority snapshot UID across a foreign workspace/worktree | Bounded denial before inventory access |
+| W5A-05 | Use stale revision, changed manifest digest, unavailable base snapshot, or unavailable authority snapshot | Bounded denial before inventory access |
+| W5A-06 | Pass structural/duck-typed authority or projection objects; inspect an opaque authority view for locator or alias-index access | Constructor/invocation rejects; no fallback is accepted; opaque view reveals neither locator nor alias index |
 | W5A-07 | Resolve `spipe://skill` or another legacy alias | Alias yields only a canonical candidate; the sealed authority proves that target, then fresh authorization is verified, before any ProjectionPort call |
 | W5A-08 | Generate inventory by clean rebuild and equivalent incremental update | Manifest inventory and rendered projection bytes are identical |
-| W5A-09 | List a bounded virtual directory | Every child is inventory-proved; deterministic order, cursor, and receipt bindings hold |
+| W5A-09 | List a bounded virtual directory and attempt child/order/page-bound substitution | Every child is inventory-proved; sealed deterministic order and page bounds, cursor, and receipt bindings hold |
 | W5A-10 | Exercise malformed/hidden/foreign/mismatch paths | Same bounded public class, no canonical path or inventory disclosure |
 | W5A-11 | Build aggregate from clean rebuild and equivalent incremental update | Byte-identical ordered `contributingProjectRoots`, inventory root, authority tuple, and projection bytes |
 | W5A-12 | Remove one otherwise valid aggregate contributor | Denial before target lookup or ProjectionPort call |
 | W5A-13 | Add an otherwise valid extra contributor or substitute one contributor root | Denial before target lookup or ProjectionPort call |
 | W5A-14 | Present the same contributor records in non-canonical order | Denial before target lookup or ProjectionPort call |
-| W5A-15 | Create `ExpectedReadBindingV1` only from a proven authority view, canonical target/directory, and normalized request; independently mismatch authority instance or manifest digest | Construction/verification denies structural or mismatched input before `AuthorizationPortV1` or ProjectionPort call; the closed tuple preserves both authority claims |
+| W5A-15 | Create `ExpectedReadBindingV1` only from a proven authority view, canonical target/directory, and normalized request; independently mismatch base snapshot, authority snapshot, authority instance, or manifest digest | Construction/verification denies structural or mismatched input before `AuthorizationPortV1` or ProjectionPort call; the closed tuple preserves both snapshot and authority claims |
 
 The eventual MCP system spec uses `step("Browse virtual knowledge views")` and
 `check_spipe_virtual_view_safety`; its fail-fast helper remains fail-fast until
@@ -1559,8 +1559,9 @@ workspace-root, trace, diagnostics, and directory aggregate cases use the
 defined null-project `workspace_aggregate` scope; (d) project scope rejects
 null project while aggregate scope rejects a supplied project; (e) two genuine
 branded authority instances/views/targets cannot be cross-mixed; and (f) each
-`ExpectedReadBindingV1` field, including `authorityInstanceUid` and
-`authorityManifestDigest`, is mutated independently. The worktree negative
+`ExpectedReadBindingV1` field, including `baseSnapshotUid`,
+`authoritySnapshotUid`, `authorityInstanceUid`, and `authorityManifestDigest`,
+is mutated independently. The worktree negative
 uses a valid receipt whose snapshot tuple belongs to another worktree, proving
 the receipt's intentionally absent worktree field is enforced transitively
 rather than silently ignored; genuine branded cross-instance and
@@ -1588,8 +1589,8 @@ duck-typed grant cannot PASS.
 
 | ID | Setup/action | Required oracle |
 |---|---|---|
-| W5C-01 | Verify an authorized read after sealed authority proof, then issue a cursor | `ExpectedReadBindingV1` and opaque read grant contain exactly the sealed `worktreeUid`, `authorityInstanceUid`, and `authorityManifestDigest` claims; cursor signs all three and every other closed field |
-| W5C-02 | Mutate `authorityKeyId`, `authorityKeyEpoch`, `authorityInstanceUid`, `authorityManifestDigest`, workspace, project, worktree, snapshot, revision, target, view, path, selector, scope, order, limit, position, policy, issuer, epoch, or time field independently | Denial before ProjectionPort; same public bounded class |
+| W5C-01 | Verify an authorized read after sealed authority proof, then issue a cursor | `ExpectedReadBindingV1` and opaque read grant contain exactly the sealed `baseSnapshotUid`, `authoritySnapshotUid`, `worktreeUid`, `authorityInstanceUid`, and `authorityManifestDigest` claims; cursor signs all five and every other closed field |
+| W5C-02 | Mutate `authorityKeyId`, `authorityKeyEpoch`, `baseSnapshotUid`, `authoritySnapshotUid`, `authorityInstanceUid`, `authorityManifestDigest`, workspace, project, worktree, revision, target, view, path, selector, scope, order, limit, position, policy, issuer, epoch, or time field independently | Denial before ProjectionPort; same public bounded class |
 | W5C-03 | Substitute Trust, Edge, canonical-read, wrong algorithm, unknown issuer/key, forged receipt, or structural verifier/grant | Domain/brand/allowlist/signature denial; no fallback or disclosure |
 | W5C-04 | Use exact-before, exact-at, and exact-after expiry/revocation; request expiry beyond read grant or TTL | Only `issued <= now < expires` and current durable epoch pass; issue rejects overshoot |
 | W5C-05 | Restart with durable policy and KeyProvider, then verify/issue valid, expired, revoked, and foreign-policy cursors | Pre/post restart parity; no in-memory state; missing active private handle fails closed |
@@ -1610,7 +1611,7 @@ or stale targets.
 |---|---|---|
 | W5A-16 | Supply `WT-*`, path-derived, or malformed worktree UID | Reject before registry/store access; only `W-<opaque-base32>` is accepted |
 | W5A-17 | Change registry or snapshot revision between open and final revalidation | Bounded denial; no view, grant, or ProjectionPort call |
-| W5A-18 | Publish project and aggregate through production publisher | Reader sees either no manifest or fully recomputable roots; aggregate has all and only selected complete contributors |
+| W5A-18 | Publish project and aggregate through production publisher; supply string/structural permit or caller-selected aggregate | Reader sees either no manifest or fully recomputable roots; aggregate has all and only selected complete contributors; only the non-forgeable publisher permit succeeds |
 | W5A-19 | Clean rebuild versus equivalent incremental commit for artifact, section, directory, aggregate | Byte-identical roots, pages, and projection bytes |
 | W5A-20 | Request limits 0, 101, 1, and 100 | Invalid denies; valid page <=100 entries, <=200 lines/~6k tokens, authenticated continuation |
 | W5C-11 | Crash at initial policy-directory create and at write/fsync/rename/CAS of each policy, key, issuer, rotation, and revocation record | Restart sees prior complete state or one complete monotonic state, never partial/ambiguous; no acknowledgement precedes durable state |

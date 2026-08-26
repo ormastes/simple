@@ -114,13 +114,15 @@ applyDueCursorReceiptKeyTransitionsV1(clock_now_ms)
 `ExpectedReadBindingV1` (`expected_binding`) is an authority-created closed
 tuple of authority key/epoch, **authority instance UID**, **authority manifest
 digest**, normalized alias URI-or-null, canonical URI, workspace UID, project
-UID-or-null, **worktree UID**, target kind/UID, snapshot ID, revision ID, view kind,
+UID-or-null, **worktree UID**, target kind/UID, immutable **base snapshot UID**,
+content-addressed **authority snapshot UID**, revision ID, view kind,
 normalized logical path, normalized selector/filter digest, effective scope
 digest, ordering version, page limit, and policy version. The signed legacy
 `CanonicalReadReceiptV1` deliberately lacks a worktree field for compatibility;
 on successful verification the port copies the sealed expected binding into the
-opaque `VerifiedReadGrantV1`. That grant's trusted worktree, authority-instance,
-and authority-manifest claims are therefore not derived by cursor, URI, or
+opaque `VerifiedReadGrantV1`. That grant's trusted base-snapshot,
+authority-snapshot, worktree, authority-instance, and authority-manifest claims
+are therefore not derived by cursor, URI, or
 projection code. The complete receipt, grant,
 cursor, and durable-rotation schemas are frozen in §21. A parser/projection
 module receives only verified grants; it cannot create a receipt, widen a
@@ -1331,7 +1333,8 @@ read under an alias-only grant.
 
 `CanonicalReadReceiptV1` has exactly `{receiptVersion, authorityKeyId,
 authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
-projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+projectUidOrNull, targetKind, targetUid, baseSnapshotUid, authoritySnapshotUid,
+revisionId, viewKind,
 normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
 pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
 issuerKeyId, revocationEpoch, signature}`. Earlier prose that described a
@@ -1401,7 +1404,7 @@ ResourceResolver
 ```
 
 The binding is exactly `{workspaceUid, projectUidOrNull, worktreeUid,
-snapshotUid, revisionId}`. `openBoundSnapshot` verifies all five fields against
+baseSnapshotUid, authoritySnapshotUid, revisionId}`. `openBoundSnapshot` verifies all six fields against
 the registry and immutable manifest, validates the manifest digest, and
 returns an opaque view. `resolveCanonicalAlias` returns only an unrenderable
 canonical candidate; `resolveCanonicalTarget` then proves
@@ -1411,6 +1414,11 @@ from normalized view/path/selector data. Each result carries the manifest
 digest and binding for ProjectionPort's defensive equality check. A missing or
 ambiguous mapping is fail-closed; no source-tree scan, default workspace, or
 project-only lookup is permitted on the request path.
+
+`SnapshotAuthorityViewV1` is opaque in the strict sense: it exports neither a
+content/section locator nor alias-index entries. Directory inventory records
+seal ordered child identities and their page-bound contract, so ProjectionPort
+cannot swap a child, order, or page bound after authority admission.
 
 This is a virtual capsule boundary: the inventory format is private to the
 authority service, while the port contracts are stable common interfaces. Its
@@ -1425,9 +1433,11 @@ The authority view has a non-cyclic content-addressed seal.
 `TargetInventoryManifestV1` bytes bind the pre-existing `baseSnapshotUid`,
 scope, workspace/project-or-null/worktree/revision, sorted target entries,
 sealed alias index, projection root, and inventory root. A separate
-`AuthorityManifestV1` content-addressed `snapshotUid` commits the base snapshot
-UID plus inventory root and the same scope tuple. Receipts bind this authority
-snapshot UID; base snapshots remain unchanged input identity. Authority
+`AuthorityManifestV1` content-addressed `authoritySnapshotUid` commits the base
+snapshot UID plus inventory root and the same scope tuple. Read bindings,
+grants, and receipts bind both the authority snapshot UID and the unchanged
+base snapshot UID: the former selects the sealed authority manifest/inventory,
+the latter opens the exact immutable SnapshotStore tuple. Authority
 recomputes inventory then authority-manifest bytes/IDs before exposing a view.
 Missing, swapped, or tampered inventory is therefore a denial, not a
 recoverable index miss.
@@ -1443,7 +1453,7 @@ its non-null project UID. This bridges existing project-owned snapshots without
 letting a URI assert a null-project read.
 
 The precise resolver call order is: parse; call `openBoundSnapshot` with the
-receipt-named authority snapshot/revision as an *untrusted candidate*;
+receipt-named base/authority snapshot pair and revision as *untrusted candidates*;
 SnapshotAuthority performs exact registry workspace/worktree lookup internally,
 opens the exact snapshot and published inventory, and revalidates both revisions;
 and verify its sealed inventory; a legacy alias yields only a canonical
@@ -1475,7 +1485,8 @@ not an implementation.
 
 `CanonicalReadReceiptV1` remains exactly `{receiptVersion, authorityKeyId,
 authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
-projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+projectUidOrNull, targetKind, targetUid, baseSnapshotUid, authoritySnapshotUid,
+revisionId, viewKind,
 normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
 pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
 issuerKeyId, revocationEpoch, signature}`. Its only verification result is the
@@ -1484,9 +1495,12 @@ verified receipt binding **plus** `{worktreeUid, authorityInstanceUid,
 authorityManifestDigest}` copied from the sealed `ExpectedReadBindingV1` passed
 to verification. Its complete closed tuple is the §3.1 authority key/epoch,
 authority instance UID, authority manifest digest, normalized alias URI-or-null,
-canonical URI, workspace/project/worktree UIDs, target kind/UID, snapshot/revision,
+canonical URI, workspace/project/worktree UIDs, target kind/UID, base/authority
+snapshot UIDs and revision,
 view kind, normalized logical path, selector/effective-scope digests, ordering,
-page limit, and policy version. `ExpectedReadBindingV1` is created only from the proven
+page limit, and policy version. Its base/authority snapshot claims are retained
+only after their exact receipt-to-binding equality check. `ExpectedReadBindingV1`
+is created only from the proven
 `SnapshotAuthorityViewV1`, canonical target/directory, and normalized request;
 it is not an adapter-owned object. Thus the grant's `worktreeUid` is trusted
 authority input even though it is intentionally not serialized in the legacy
@@ -1495,7 +1509,7 @@ read receipt.
 `CursorReceiptV1` is exactly `{receiptVersion, receiptKind, authorityKeyId,
 authorityKeyEpoch, authorityInstanceUid, authorityManifestDigest,
 normalizedAliasUriOrNull, canonicalUri, workspaceUid, projectUidOrNull,
-worktreeUid, targetKind, targetUid, snapshotUid, revisionId,
+worktreeUid, targetKind, targetUid, baseSnapshotUid, authoritySnapshotUid, revisionId,
 viewKind, normalizedLogicalPath, selectorDigest, effectiveScopeDigest,
 orderingVersion, pageLimit, pagePosition, policyVersion, issuedAtMs,
 expiresAtMs, receiptUid, issuerKeyId, algorithm, revocationEpoch, signature}`;
@@ -1608,7 +1622,10 @@ re-reads both exact revisions before returning a view; changed revisions deny.
 Only KnowledgeCompiler's production snapshot-commit transaction publishes
 inventories. It selects all and only complete project roots for the exact
 registry revision, atomically makes the project and aggregate inventories
-reader-visible, then publishes authority manifests. `listDirectoryTarget`
+reader-visible, then publishes authority manifests. Its publisher argument is
+a branded, non-forgeable `AuthorityInventoryPublishPermitV1` minted only by
+that transaction; strings, structural substitutes, and caller-selected
+aggregate roots deny. `listDirectoryTarget`
 permits request limits `1..100`, with <=100 entries, <=200 Markdown lines, and
 roughly <=6,000 tokens; continuation is authenticated and no unbounded
 directory projection exists. Authorization's child policy store fsyncs the
