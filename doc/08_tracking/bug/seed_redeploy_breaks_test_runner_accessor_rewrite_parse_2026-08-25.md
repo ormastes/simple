@@ -22,7 +22,6 @@ No spec or md doctest can be executed through the deployed `bin/simple` on this 
 ## Reproduce
 `bin/simple test test/fixtures/doctest/green.md` → exit 1 with the parse error;
 `/mnt/data/worktrees/goal-main-1/bin/release/x86_64-unknown-linux-gnu/simple test test/fixtures/doctest/green.md` → `SDoctest Results: 1 total, 1 passed`.
-<<<<<<< HEAD
 
 ## Bisect (2026-08-25)
 
@@ -145,5 +144,3 @@ should rebase onto these hunks rather than re-deploying its own build.
   block with and without `reason:`.
 - `test/01_unit/compiler/parser/unsafe_identifier_block_header_spec.spl` —
   Simple-level behavioural regression exercising the same headers.
-=======
->>>>>>> cb2487d098f (feat(llm_caret,imap): RFC 3501 FETCH parser, bounded mail reads, STARTTLS negotiation (transport blocked))
