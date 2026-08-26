@@ -1001,3 +1001,11 @@ free validates its one integer handle before the intentional managed-memory
 no-op. Valid generation/tracing algorithms and allocations are unchanged.
 Source-reviewed but unverified and unsigned; raw Simple declarations and native
 pointer-width/lifting remain pending.
+## 2026-08-26 diagram raw-declaration follow-up
+
+All twelve seed-standard-library diagram declarations are now tagged
+`unsafe(ffi)`, and the ten live call boundaries use explicit lexical unsafe.
+Free-string changed from truncating `i32` to pointer-width `i64`. The known
+non-NUL Simple text versus native C-string mismatch was not hidden by adding
+diagram functions to the unsound C-string lowering table. Call counts and
+diagram algorithms are unchanged. Source-reviewed but unverified and unsigned.

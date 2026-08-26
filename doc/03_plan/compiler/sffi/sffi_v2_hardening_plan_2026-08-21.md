@@ -1625,3 +1625,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
   structures, allocations, and algorithmic complexity remain unchanged.
 - Raw Simple unsafe confinement and native pointer/return lifting remain
   explicitly unverified and unsigned.
+## 2026-08-26 diagram raw-declaration follow-up
+
+- Tagged all twelve raw seed diagram declarations `unsafe(ffi)`.
+- Confined ten live calls to their existing higher-level lexical boundaries.
+- Corrected free-string handle width from `i32` to `i64`.
+- Refused the unsafe shortcut of adding diagram functions to C-string lowering;
+  native `(ptr,len)` adapters remain required before safe promotion.
+- Added no marshalling, allocation, copy, lookup, or dispatch on valid calls.
+- Status: source-reviewed, deliberately unverified and unsigned.
