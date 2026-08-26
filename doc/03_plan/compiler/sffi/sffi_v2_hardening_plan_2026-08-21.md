@@ -2203,3 +2203,17 @@ Torch SFFI nor all SFFI may be described as verified safe.
   Remaining production debt: 4,240 unsafe-tag gaps, 6,058 contract gaps, and
   zero signed-admitted declarations.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+#### Language-aware census reporting
+
+- Extend `sffi-contract-inventory.shs` to report declaration and `rt_` totals
+  per observed provider language, with unsafe-tagged, freshly signed-admitted,
+  and untouched counts kept as separate dimensions.
+- Correct the symbol summary terminology: it now distinguishes symbols whose
+  declarations are all unsafe-tagged from symbols with at least one unsafe-tag
+  gap. The former report called the latter `unsafe_tagged`, which inverted the
+  meaning and could mislead a migration review.
+- Language provenance remains observational; it never upgrades ABI safety or
+  cryptographic admission. Signed admission still requires a fresh verifier
+  join on provider, symbol, and exact source-signature identity.
+- Status: source-reviewed; the census was not executed in this tranche.

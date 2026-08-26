@@ -374,6 +374,33 @@ awk -F '\t' 'NR > 1 {
     }
 }' "$out" | sort >&2
 
+# Report provider-language provenance with the same safety/admission dimensions
+# as the global census. This answers "how many C/Rust/other boundaries remain"
+# without treating an implementation-language guess as ABI or signature proof.
+awk -F '\t' 'NR > 1 {
+    language = $3
+    declarations[language]++
+    if ($8 == "tagged") unsafe_tagged[language]++
+    if ($10 == "reverified") signed_admitted[language]++
+    if ($8 == "missing" && $9 == "missing" && $11 == "missing") untouched[language]++
+    if ($1 ~ /^rt_/) {
+        rt_declarations[language]++
+        if ($8 == "tagged") rt_unsafe_tagged[language]++
+        if ($10 == "reverified") rt_signed_admitted[language]++
+        if ($8 == "missing" && $9 == "missing" && $11 == "missing") rt_untouched[language]++
+    }
+} END {
+    for (language in declarations) {
+        printf "SFFI language stats: language=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+            language, declarations[language], unsafe_tagged[language] + 0, \
+            signed_admitted[language] + 0, untouched[language] + 0
+        if (rt_declarations[language] > 0)
+            printf "SFFI rt_language stats: language=%s total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \
+                language, rt_declarations[language], rt_unsafe_tagged[language] + 0, \
+                rt_signed_admitted[language] + 0, rt_untouched[language] + 0
+    }
+}' "$out" | sort >&2
+
 if [ -n "$symbols_out" ]; then
     source_signature_variants=$(awk -F '\t' 'NR > 1 && $10 == "source_signature_variants" { n++ } END { print n + 0 }' "$symbols_out")
     # `untouched` is a more precise subset of migration debt, not an exemption
@@ -382,27 +409,29 @@ if [ -n "$symbols_out" ]; then
     migration_required=$(awk -F '\t' 'NR > 1 && ($10 == "migration_required" || $10 == "untouched" || $10 == "admitted_migration_required") { n++ } END { print n + 0 }' "$symbols_out")
     awk -F '\t' 'NR > 1 {
         symbols++
-        if ($6 < $4) unsafe_tagged++
+        if ($6 == 0) all_declarations_unsafe_tagged++
+        else unsafe_tag_incomplete++
         if ($8 == $4) all_declarations_admitted++
         else if ($8 > 0) partially_admitted++
         if ($10 == "untouched") untouched++
         languages[$3]++
         if ($1 ~ /^rt_/) {
             rt_symbols++
-            if ($6 < $4) rt_unsafe_tagged++
+            if ($6 == 0) rt_all_declarations_unsafe_tagged++
+            else rt_unsafe_tag_incomplete++
             if ($8 == $4) rt_all_declarations_admitted++
             else if ($8 > 0) rt_partially_admitted++
             if ($10 == "untouched") rt_untouched++
             rt_languages[$3]++
         }
     } END {
-        printf "SFFI symbol stats: total=%d unsafe_tagged=%d all_declarations_admitted=%d partially_admitted=%d untouched=%d", \
-            symbols, unsafe_tagged + 0, all_declarations_admitted + 0, \
+        printf "SFFI symbol stats: total=%d all_declarations_unsafe_tagged=%d unsafe_tag_incomplete=%d all_declarations_admitted=%d partially_admitted=%d untouched=%d", \
+            symbols, all_declarations_unsafe_tagged + 0, unsafe_tag_incomplete + 0, all_declarations_admitted + 0, \
             partially_admitted + 0, untouched + 0
         for (language in languages) printf " language_%s=%d", language, languages[language]
         printf "\n"
-        printf "SFFI rt_symbol stats: total=%d unsafe_tagged=%d all_declarations_admitted=%d partially_admitted=%d untouched=%d", \
-            rt_symbols + 0, rt_unsafe_tagged + 0, rt_all_declarations_admitted + 0, \
+        printf "SFFI rt_symbol stats: total=%d all_declarations_unsafe_tagged=%d unsafe_tag_incomplete=%d all_declarations_admitted=%d partially_admitted=%d untouched=%d", \
+            rt_symbols + 0, rt_all_declarations_unsafe_tagged + 0, rt_unsafe_tag_incomplete + 0, rt_all_declarations_admitted + 0, \
             rt_partially_admitted + 0, rt_untouched + 0
         for (language in rt_languages) printf " language_%s=%d", language, rt_languages[language]
         printf "\n"

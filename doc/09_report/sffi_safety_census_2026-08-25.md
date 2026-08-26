@@ -1660,3 +1660,18 @@ declarations, 2,868 unsafe-tagged declarations,
 4,240 unsafe-tag gaps, 6,058 contract gaps, and zero signed-admitted
 declarations. `http_request` is the sole remaining providerless identity in
 this legacy network family. Source-reviewed only; checks were not executed.
+
+### Provider-language statistics correction
+
+The inventory now emits `SFFI language stats` and `SFFI rt_language stats`
+rows. Each language row independently reports total declarations,
+unsafe-tagged declarations, freshly signed-admitted declarations, and untouched
+declarations. The per-symbol summary also replaces the ambiguous historical
+`unsafe_tagged` field (which actually counted symbols with a gap) with
+`all_declarations_unsafe_tagged` and `unsafe_tag_incomplete`.
+
+This is reporting hardening only: detected C, Rust, external C ABI, or unknown
+provider provenance does not prove null safety, ABI correctness, or artifact
+identity. Admission remains zero unless the inventory freshly verifies and
+joins signed evidence for the exact provider/symbol/signature identity. The
+new report shape was source-reviewed but not executed in this tranche.
