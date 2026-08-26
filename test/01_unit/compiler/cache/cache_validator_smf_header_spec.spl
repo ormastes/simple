@@ -2,7 +2,7 @@ use compiler.backend.linker.smf_header.{SmfHeader}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.driver.cache.cache_validator.{read_smf_source_hash, validate_smf}
 use compiler.driver.cache.compile_options_hash.{compile_options_hash_zero}
-use compiler.driver.cache.cache_types.{CACHE_STALE}
+use compiler.driver.cache.cache_types.{CACHE_ERROR, CACHE_MISSING, CACHE_STALE}
 use std.io_runtime.{file_write_bytes, file_delete, file_read, getpid, hash_text}
 
 describe "SMF cache validator header layout":
@@ -39,6 +39,26 @@ describe "SMF cache validator header layout":
         expect(file_delete(source_path)).to_equal(true)
         expect(file_delete(smf_path)).to_equal(true)
 
+    it "reports a missing artifact when its source remains readable":
+        val suffix = "{getpid()}"
+        val smf_path = "/tmp/simple_cache_validator_missing_artifact_{suffix}.smf"
+        val source_path = "/tmp/simple_cache_validator_missing_artifact_{suffix}.spl"
+        file_delete(smf_path)
+        expect(file_write_bytes(source_path, [120])).to_equal(true)
+        val result = validate_smf(source_path, smf_path, compile_options_hash_zero())
+        expect(result.status).to_equal(CACHE_MISSING)
+        expect(file_delete(source_path)).to_equal(true)
+
+    it "reports an error when neither source nor artifact is readable":
+        val suffix = "{getpid()}"
+        val smf_path = "/tmp/simple_cache_validator_missing_both_{suffix}.smf"
+        val source_path = "/tmp/simple_cache_validator_missing_both_{suffix}.spl"
+        file_delete(source_path)
+        file_delete(smf_path)
+        val result = validate_smf(source_path, smf_path, compile_options_hash_zero())
+        expect(result.status).to_equal(CACHE_ERROR)
+        expect(result.reason).to_contain("failed to read source")
+
     it "routes one validation decision through one snapshot owner":
         val source = file_read("src/compiler/80.driver/cache/cache_validator.spl")
         val begin = source.index_of("fn validate_smf_with_deps")
@@ -57,3 +77,16 @@ describe "SMF cache validator header layout":
         expect(open_begin >= 0 and open_end > open_begin).to_equal(true)
         val open_body = source.substring(open_begin, open_end)
         expect(open_body.count("file_read_bytes(path)")).to_equal(1)
+
+    it "routes nullable source reads and existence probes through their exact owner":
+        val source = file_read("src/compiler/80.driver/cache/cache_validator.spl")
+        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}")
+        expect(source.count("file_read_nullable(")).to_equal(5)
+        expect(source.count("file_exists(")).to_equal(3)
+        expect(source.count("rt_file_read_text(")).to_equal(0)
+        expect(source.count("rt_file_exists(")).to_equal(0)
+        expect(source.count("file_read_nullable(source_path) ?? \"\"")).to_equal(5)
+
+        val missing_begin = source.index_of("if not file_exists(smf_path):")
+        val snapshot_begin = source.index_of("var smf_snapshot = SmfValidationSnapshot.open(smf_path)")
+        expect(missing_begin >= 0 and snapshot_begin > missing_begin).to_equal(true)
