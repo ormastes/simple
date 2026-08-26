@@ -1253,3 +1253,21 @@ authority audits now require one 26-declaration owner and two raw-free app
 facades. Provider coverage remains incomplete and WebSocket empty/failure
 ambiguity remains explicit, so the family is unsafe, unsigned, and unverified.
 Source-reviewed only; checks were not executed.
+
+## 2026-08-26 SQLite duplicate-boundary removal
+
+Both app SQLite modules are now high-level-only facades over the canonical
+Pure-Simple no-GC owner. This removes 54 duplicate raw declarations and more
+than one thousand lines of repeated connection, statement, query, transaction,
+and row-wrapper code. The live `app.io.context_ops` consumer retains its exact
+high-level types/functions; raw `rt_sqlite_*` handles are deliberately not
+re-exported from either app path. The canonical placeholder builder remains the
+single implementation. Export resolution adds no runtime wrapper call, query,
+allocation, lookup, copy, or dispatch. Existing SQLite audits now require one
+27-declaration/26-call owner and two raw-free facades.
+
+This is unsafe-surface minimization, not SQLite promotion. The legacy contract
+still has done/failure and nullable-text ambiguity, zero typed-native registry
+coverage, interpreter-only registrations, unsigned providers, and no admitted
+artifact evidence. PureDatabase remains the preferred native Simple database.
+Source-reviewed only; checks were not executed.

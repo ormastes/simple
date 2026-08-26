@@ -1875,3 +1875,18 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Keep the family unsafe until incomplete providers and WebSocket nullable/error
   contracts are replaced and exact artifacts receive signed admission.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 SQLite boundary deduplication
+
+- Replaced both app-local SQLite implementations (54 raw declarations and more
+  than one thousand repeated lines) with high-level-only facades over the
+  canonical Pure-Simple no-GC owner.
+- Preserved the live `app.io.context_ops` API while intentionally withholding
+  raw `rt_sqlite_*` handles from both app export surfaces.
+- Updated both SQLite audits to require one 27-declaration/26-call owner and two
+  export-only facades with no raw declarations, calls, or wrapper bodies.
+- Added no query-path call, allocation, lookup, copy, hash, or dispatch.
+- Keep PureDatabase preferred; migrate legacy SQLite done/error/null contracts
+  to typed status/out and require signed exact-artifact admission before any
+  safe promotion.
+- Status: source-reviewed, deliberately unverified and unsigned.
