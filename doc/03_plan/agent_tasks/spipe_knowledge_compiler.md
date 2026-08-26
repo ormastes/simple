@@ -592,3 +592,16 @@ license path; and independent lowercase coverage is weak for
 Next session fixes all static defects first and then runs one bounded full
 parity check on a capable pure-Simple runtime. No code is accepted, the
 analyzer prerequisite is still missing, and Wave 4 remains `IN PROGRESS`.
+
+### 10.7 Raw JavaScript RRF attempt closure
+
+No RRF source or test is accepted. The isolated two-file candidate reached the
+three-cycle cap with syntax `PASS`, focused `10/11`, and highest-capability
+`FAIL`. Resume only in a fresh scoped session from `/tmp/spkc-js-rrf-wt` or a
+clean reimplementation. The owner must first normalize caller input by reading
+each own data property once, reject accessors/proxies/hidden or symbol fields,
+retain exact validation-phase error precedence, and complete default, numeric,
+source-identity, and hostile-object oracles. Run the unchanged focused test at
+most once after those static gates pass. Raw RRF admission advances only part of
+REQ-SPKC-012/013 and cannot close AC-4 without identity dominance, graph
+candidate production, bounded adjustments, and integrated explanations.

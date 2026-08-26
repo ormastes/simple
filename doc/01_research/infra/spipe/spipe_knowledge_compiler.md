@@ -2358,3 +2358,21 @@ worktree at `/tmp/spipe-id-wave2-clean` pending a genuine self-hosted runtime.
 Before admission it still needs focused self-hosted check/test evidence, success
 coverage for every `KnowledgeUid` variant, and an early non-ASCII provisional-ID
 rejection case. No runtime PASS or implementation-complete claim is made.
+
+## 33. 2026-08-26 Raw JavaScript RRF Attempt
+
+The dependency-free raw-RRF boundary was frozen separately from exact-identity
+dominance, graph traversal, semantic retrieval, and post-fusion adjustments.
+Its two-file candidate correctly implemented ordinary fixed-point contribution
+math and deterministic ordering, but it is not admitted. The final permitted
+cycle produced syntax `PASS`, focused `10/11`, and highest-capability `FAIL`.
+
+The next fresh session must snapshot every caller property exactly once before
+validation and use only that immutable normalized input, preserve phase-specific
+errors instead of collapsing nested failures through an outer catch, reject
+symbol/non-enumerable/accessor properties under the closed request schema, and
+add hostile getter/proxy plus complete numeric/default/source-identity coverage.
+The remaining failed oracle also needs to identify `lexical` as the offending
+entry for reordered `[graph, lexical]`. Candidate files remain outside the
+shared worktree at `/tmp/spkc-js-rrf-wt`; they are `NOT-EVIDENCE`, and AC-4
+remains open.

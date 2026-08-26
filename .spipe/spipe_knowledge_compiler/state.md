@@ -18,6 +18,15 @@
 This summary supersedes older attempt-local status wording below; the history
 is retained as an append-only audit log and must not be read as current truth.
 
+- implementation-wave4-raw-rrf-stop: Froze a pure two-file JavaScript raw-RRF
+  kernel, excluding identity dominance, graph construction, semantic models,
+  and adjusted reranking. Ordinary math/order passed static review, but the
+  third and final cycle ended syntax PASS, focused 10/11, high review FAIL.
+  Blockers are accessor/proxy validation TOCTOU, collapsed error precedence,
+  incomplete closed-object validation, missing adversarial numeric/default
+  coverage, and one incorrect reordered-source oracle. No commit/push; retained
+  candidate `/tmp/spkc-js-rrf-wt` is `NOT-EVIDENCE`.
+
 ## Raw Request
 `$sp_dev imlldoc/01_research/infra/spipe/spipe_knowledge_compiler.md with pherallel agents with detail guide and higher model review. make design plan details. sync push often gh main`
 
