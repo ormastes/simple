@@ -307,10 +307,14 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
     # eagerly loads its transitive front-end graph before the shard can claim
     # one source file.  Fan-out equal to --threads therefore turns an innocent
     # `--threads 8` into eight multi-GiB resident heaps.  Keep the default
-    # within the two-process allocation budget for interpreter-mode bootstrap;
-    # a measured host may raise it explicitly.
+    # within the one-process allocation budget for interpreter-mode bootstrap;
+    # a measured host may raise it explicitly.  On the QEMU/container capture
+    # hosts, two otherwise healthy parse children reached roughly 1.86 GiB
+    # each and were OOM-killed together before completing their cache warm-up.
+    # One child keeps the cache process-isolated while leaving enough headroom
+    # for the supervising native-build process and the later renderer capture.
     val configured_cap = (env_get("SIMPLE_PARSE_SHARD_MAX") ?? "").to_i64() ?? 0
-    val default_cap = if (env_get("SIMPLE_EXECUTION_MODE") ?? "") == "interpret": 2 else: requested
+    val default_cap = if (env_get("SIMPLE_EXECUTION_MODE") ?? "") == "interpret": 1 else: requested
     val cap = if configured_cap > 0: configured_cap else: default_cap
     if requested > cap: cap else: requested
 
@@ -508,7 +512,7 @@ fn run_native_build_worker(args: [text]) -> i64:
     # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
-    if shard_count > 1:
+    if shard_count > 0:
         run_parse_shards(args, shard_count, simple_bin, native_build_timeout_ms(args))
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
