@@ -2167,3 +2167,12 @@ It is not a provider or ABI verification: two symbols have only test-stub
 definitions, and existing target providers disagree on field interpretation.
 The native-stub spec is blocked before examples by the bootstrap runner's
 unregistered `rt_hda_pci_probe_set_mode`, so no runtime PASS is claimed.
+
+### Debug ptrace/DWARF declaration consolidation (2026-08-26)
+
+Four debug consumers now import the canonical `std.sffi.debug` owner instead
+of redeclaring ptrace/DWARF externs, removing 46 duplicate raw declaration
+rows. The owner audit passes and all four files pass source checking. This
+changes no hot-call instructions or memory behavior. It does not verify the
+ptrace/DWARF ABI or provider: raw container/string ownership and signed
+admission remain absent.

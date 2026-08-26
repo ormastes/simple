@@ -673,3 +673,14 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
   numbering), add real x86_64 provider code, and bind it to an artifact.
 - [ ] Run the existing native-stub spec under a current admitted runtime; the
   bootstrap runner lacks its test-only provider.
+
+### Debug ptrace/DWARF owner consolidation
+
+- [x] Remove the 46 duplicate raw ptrace/DWARF declarations from four debug
+  frontend/mirror modules and import the canonical `std.sffi.debug` owner.
+- [x] Add an authority audit that keeps the eight ptrace declarations annotated
+  at the owner and rejects their reintroduction in the four consumer modules.
+- [x] Preserve hot-path behavior: the change is declaration elimination only,
+  with no wrapper call, allocation, copy, lookup, or dynamic dispatch.
+- [ ] Replace raw ptrace arrays/register maps and DWARF text/array returns with
+  typed owned/status contracts, then admit an exact signed provider artifact.

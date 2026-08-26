@@ -6327,3 +6327,17 @@ dispatch—and makes target/provider uncertainty visible. Source check and the
 authority audit pass. The native-stub spec cannot execute under the available
 bootstrap runner because `rt_hda_pci_probe_set_mode` is unregistered; this is a
 runtime-evidence blocker, not a pass. No provider is signed or verified.
+
+### Debug ptrace/DWARF declaration consolidation (2026-08-26)
+
+Four debug frontend/mirror modules redeclared the same ptrace and DWARF raw
+ABIs that already have the canonical `std.sffi.debug` owner. They now import
+that owner, removing 46 duplicate raw declaration rows without adding a call,
+allocation, copy, lookup, or dispatch. The new authority audit prevents the
+duplicates from returning; all four modules pass source checking and optimizer
+analysis reports only pre-existing local opportunities.
+
+This reduces unsafe surface duplication, not the remaining unsafe contract:
+ptrace memory/register containers and DWARF strings/arrays have no verified
+ownership/nullability/provider-admission evidence, and the family remains
+unsigned and critical-ineligible.
