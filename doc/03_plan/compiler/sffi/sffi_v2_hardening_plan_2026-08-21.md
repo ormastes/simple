@@ -1975,6 +1975,15 @@ and unpromoted.
 - [x] Preserve one lookup and the existing ordered candidate probes.
 - [x] Add a static authority and call-count ratchet.
 
+### Completed AOT driver-pipeline authority slice
+
+- [x] Remove raw environment, source-read, and hash declarations/calls.
+- [x] Route configuration and artifact operations through canonical facades.
+- [x] Reject unreadable source before hashing or manifest publication.
+- [x] Preserve nine lookups, one read, and one hash on success.
+- [x] Keep hash ownership always-inline and add no retry/extra I/O.
+- [x] Add a static authority, fail-closed, and call-count ratchet.
+
 ### Completed MIR target-context authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.

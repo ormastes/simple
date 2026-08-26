@@ -451,3 +451,13 @@ behind two always-inlined lexical `unsafe(ffi)` owners because the layer cannot
 import the higher I/O facade.  Runtime discovery retains one environment lookup
 and the same ordered candidate probes, with no additional allocation, copy,
 filesystem call, cache, lock, hash, boxing, or dispatch table.
+
+### AOT driver-pipeline authority follow-up
+
+The AOT pipeline no longer declares or calls raw environment, source-read, or
+text-hash SFFI.  It uses canonical `env_get_opt`, typed `file_read_result`, and
+always-inlined `hash_text` facades.  An unreadable source in the combined
+native+SMF output path now returns a compile error instead of hashing fabricated
+empty text into a successful manifest.  The successful path retains nine
+environment lookups, one source read, and one hash; failure adds no retry or
+extra I/O, and no cache, lock, boxing, or dispatch table was introduced.
