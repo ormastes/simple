@@ -1204,6 +1204,8 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Confine all calls to the existing always-inline scalar owner.
 - [x] Preserve one O(n) accumulation and exactly two roots per dense cosine.
 - [x] Add no hot-path work and add a static call-count ratchet.
+- [x] Remove the feature-vector builder's raw-symbol import and call.
+- [x] Preserve one root after its single O(n) weight accumulation.
 
 ### Completed compiler performance CLI authority slice
 

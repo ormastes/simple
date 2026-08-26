@@ -570,3 +570,8 @@ similarity routes both magnitude roots through that owner and still performs
 exactly two scalar provider calls after its single O(n) accumulation loop.  No
 validation branch, allocation, copy, cache, lock, hash, lookup, boxing, or
 dispatch table was added.
+
+The feature-vector builder no longer imports or calls the raw square-root
+symbol from `math_utils`; it consumes the confined always-inline owner.  Its
+shape remains one root after one O(n) frequency-weight accumulation, with no
+additional traversal or temporary collection.
