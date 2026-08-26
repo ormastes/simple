@@ -1634,3 +1634,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
   native `(ptr,len)` adapters remain required before safe promotion.
 - Added no marshalling, allocation, copy, lookup, or dispatch on valid calls.
 - Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 span-handle contract follow-up
+
+- Tagged all six untyped span-handle declarations `unsafe(ffi)`.
+- Enforced exact arity, non-negative/platform-sized fields, and `end >= start`.
+- Made handle allocation fail on ID overflow and release fail on unknown/double
+  free instead of reporting successful unit.
+- Preserved one registry operation per valid create/access/free and added no
+  lookup, allocation, copy, hash, retry, or traversal.
+- Typed native registry coverage remains absent; status is unverified/unsigned.

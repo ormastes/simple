@@ -1009,3 +1009,11 @@ Free-string changed from truncating `i32` to pointer-width `i64`. The known
 non-NUL Simple text versus native C-string mismatch was not hidden by adding
 diagram functions to the unsound C-string lowering table. Call counts and
 diagram algorithms are unchanged. Source-reviewed but unverified and unsigned.
+## 2026-08-26 span-handle contract follow-up
+
+All six span raw declarations are tagged `unsafe(ffi)` and remain unwrapped
+because `i64` cannot prove ownership. The interpreter provider now enforces
+exact arity, checked `usize` conversion, ordered ranges, checked handle-ID
+growth, and unknown/double-free errors. Valid create/access/free paths retain
+one registry insertion/lookup/removal; no extra registry pass or allocation was
+added. Interpreter-only, source-reviewed, unverified, and unsigned.
