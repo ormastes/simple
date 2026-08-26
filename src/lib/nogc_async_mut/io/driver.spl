@@ -358,6 +358,30 @@ class IoDriver:
             i = i + 1
         []
 
+    me _remove_send_bytes(op_id: i64):
+        """Release the byte owner for a completed or rejected send operation.
+
+        _bytes_pending_* is an operation-indexed table rather than a completion
+        queue.  Retaining an empty row after completion leaks table cardinality
+        and turns the linear lookup in _load_send_bytes into a request-lifetime
+        cost for every later write.
+        """
+        var i = 0
+        while i < self._bytes_pending_ids.len() and i < self._bytes_pending_data.len():
+            if self._bytes_pending_ids[i] == op_id:
+                # Pending byte rows are unordered.  Swap-delete keeps removal
+                # O(1) and allocation-free after the O(number of in-flight
+                # sends) lookup, which is important on the write completion
+                # path.
+                val last = self._bytes_pending_ids.len() - 1
+                if i != last:
+                    self._bytes_pending_ids[i] = self._bytes_pending_ids[last]
+                    self._bytes_pending_data[i] = self._bytes_pending_data[last]
+                self._bytes_pending_ids.pop()
+                self._bytes_pending_data.pop()
+                return
+            i = i + 1
+
     # ---- Network Operations ----
 
     me submit_accept(listen_fd: i64) -> i64:
@@ -610,6 +634,8 @@ class IoDriver:
             val oid = self._p_id[i]
 
             if fd < 0 and (ot == _OP_ACCEPT or ot == _OP_RECV or ot == _OP_SEND or ot == _OP_SEND_BYTES or ot == _OP_SENDFILE or ot == _OP_CLOSE or ot == _OP_UDP_RECV or ot == _OP_UDP_SEND):
+                if ot == _OP_SEND_BYTES:
+                    self._remove_send_bytes(oid)
                 self._complete_fd(oid, -1, 0, "", fd)
                 i = i + 1
                 continue
@@ -653,7 +679,7 @@ class IoDriver:
                     unsafe(capabilities: [ffi]):
                         bres = rt_io_tcp_write_bytes(fd, bdata)
                 if bres > 0 or (ev_has_results and send_ready):
-                    self._store_send_bytes(oid, [])
+                    self._remove_send_bytes(oid)
                     self._ev_complete_fd_interest(fd, oid)
                     self._complete_fd(oid, bres, 0, "", fd)
                     i = i + 1
