@@ -2127,3 +2127,22 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Keep all functions unsafe and unsigned until exact-artifact admission and
   cross-lane semantic evidence exist.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 network boundary checkpoint
+
+- Replace two GC 41-declaration network copies with compile-time export
+  facades; retain no wrapper hop or per-call allocation, lookup, copy, branch,
+  hash, lock, or dispatch.
+- Keep the current no-GC async resolution owner and the historical no-GC sync
+  surface temporarily; collapsing the latter would remove its TCP exports.
+- Treat its 18 providerless UDP/HTTP/URL declarations as unresolved safety
+  debt, not as implementations and not as candidates for cosmetic safe tags.
+- Next reroute URL encoding/decoding to the existing Pure-Simple owner, replace
+  HTTP with a typed live transport, and design UDP around scalar/status-out
+  runtime contracts rather than passing high-level `UdpSocket` objects across
+  the ABI.
+- Require exact-artifact signed admission only at provider load time; never add
+  signature checking, registry lookup, or hashing to the network hot path.
+- Remaining production debt after this pass: 4,274 unsafe-tag gaps, 6,076
+  contract gaps, and zero signed-admitted declarations.
+- Status: source-reviewed, deliberately unverified and unsigned.

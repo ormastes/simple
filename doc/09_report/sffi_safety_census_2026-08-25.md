@@ -1568,3 +1568,24 @@ copy from its common path rather than adding overhead. Long or malformed paths
 fail closed. Registration and source parity do not constitute signed admission
 or semantic verification; the boundary remains unsafe and unsigned.
 Source-reviewed only; checks were not executed.
+
+## 2026-08-26 network duplicate-boundary consolidation
+
+Two GC network compatibility modules each repeated the same 41 raw TCP, UDP,
+HTTP, URL, and utility declarations. They are now compile-time export facades
+over the currently authoritative no-GC async module, removing 82 production
+declarations and two independent ABI authorities. The no-GC sync copy is
+retained until its historical TCP export surface can be migrated without an
+API break. Export resolution adds no runtime call, allocation, copy, lookup,
+branch, hash, lock, or dispatch.
+
+This does not promote the retained network boundary. Its owner still contains
+18 providerless UDP/HTTP/URL declarations whose names are absent from both
+runtime registries; those interfaces can still fabricate nil in affected
+execution lanes and remain unsafe, unsigned, and unverified. The nineteenth
+declaration, `rt_file_write_bytes`, is backed but still lacks signed artifact
+admission. The network authority ratchet makes the two GC facades raw-free,
+records both remaining declaration owners, and reports the exact providerless
+set so consolidation cannot be misreported as safety. Production declarations
+fall from 7,220 to 7,138; unsafe-tag gaps fall from 4,356 to 4,274 and contract
+gaps from 6,110 to 6,076. Source-reviewed only; checks were not executed.
