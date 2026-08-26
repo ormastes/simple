@@ -1692,3 +1692,13 @@ and unpromoted.
   fabricate an empty dictionary or allocate a per-call conversion.
 - [x] Add a static ratchet for the single direct snapshot owner and the absence
   of duplicate raw lookup authority.
+
+#### Completed production slice: system-information contracts (2026-08-26)
+
+- [x] Declare hostname nullable and validate nil/empty results.
+- [x] Add typed `Result` APIs for PID, hostname, and available parallelism.
+- [x] Reject non-positive PID/CPU sentinels instead of treating them as valid
+  values in the checked API.
+- [x] Keep legacy infallible APIs explicitly unsafe for compatibility.
+- [x] Preserve one always-inline direct owner per provider; success performs
+  only its required check and no allocation, lookup, lock, or copy.

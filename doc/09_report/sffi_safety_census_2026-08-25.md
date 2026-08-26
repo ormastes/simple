@@ -107,3 +107,11 @@ representation. The snapshot remains explicitly unsafe because ownership and
 allocation failure are not proven. No dictionary conversion was added, so the
 fix removes a representation hazard without adding an allocation or copy.
 `scripts/audit/env-ops-sffi-authority.shs` pins this shape.
+
+The contained `io.sysinfo_ops` leaf now has checked `Result` APIs for PID,
+hostname, and available parallelism. Non-positive integer sentinels and
+nil/empty hostname results become typed errors. Existing infallible spellings
+remain for compatibility but are explicitly unsafe and preserve their legacy
+sentinels. Each provider is still called through one direct always-inline raw
+owner; success adds only the required comparison/null check and allocates
+nothing. `scripts/audit/sysinfo-ops-sffi-authority.shs` ratchets the shape.
