@@ -249,6 +249,30 @@ fn _field_has_token(data: [u8], start: u64, end: u64, expected: [u8]) -> bool:
         i = i + 1
     _token_equals_bytes(data, token_start, end, expected)
 
+fn _name_list_range_is_well_formed(data: [u8], start: u64, end: u64) -> bool:
+    """Validate a wire name-list before the fast path filters known names.
+
+    The fast parser deliberately discards unsupported names.  Validate first,
+    otherwise an empty or whitespace-only member adjacent to a known name
+    could disappear before negotiation sees it.
+    """
+    if start >= end:
+        return false
+    var previous_was_comma = true
+    var i = start
+    while i < end:
+        val byte = ssh_session_u8_at(data, i)
+        if byte == 0x2C:
+            if previous_was_comma:
+                return false
+            previous_was_comma = true
+        elif byte < 0x21 or byte > 0x7E:
+            return false
+        else:
+            previous_was_comma = false
+        i = i + 1
+    not previous_was_comma
+
 fn _known_kex_list(data: [u8], start: u64, end: u64) -> text:
     var out = ""
     if _field_has_token(data, start, end, [0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39, 0x2D, 0x73, 0x68, 0x61, 0x32, 0x35, 0x36]):
@@ -432,6 +456,16 @@ fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
     off = off + 4
     if off != data.len():
         return Err("trailing data")
+
+    if not _name_list_range_is_well_formed(data, kex.start, kex.end) or
+        not _name_list_range_is_well_formed(data, host.start, host.end) or
+        not _name_list_range_is_well_formed(data, enc_c2s.start, enc_c2s.end) or
+        not _name_list_range_is_well_formed(data, enc_s2c.start, enc_s2c.end) or
+        not _name_list_range_is_well_formed(data, mac_c2s.start, mac_c2s.end) or
+        not _name_list_range_is_well_formed(data, mac_s2c.start, mac_s2c.end) or
+        not _name_list_range_is_well_formed(data, comp_c2s.start, comp_c2s.end) or
+        not _name_list_range_is_well_formed(data, comp_s2c.start, comp_s2c.end):
+        return Err("malformed algorithm name-list")
 
     val kex_list = _known_kex_list(data, kex.start, kex.end)
     val host_list = _known_host_key_list(data, host.start, host.end)
