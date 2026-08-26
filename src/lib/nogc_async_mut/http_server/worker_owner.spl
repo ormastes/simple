@@ -78,7 +78,8 @@ use std.http_server.worker_wire.{
     is_dynamic_handler,
     worker_static_file_route,
     worker_static_file_fallback_response,
-    worker_sendfile_open_path_for_pending
+    worker_sendfile_open_path_for_pending,
+    tls_wire_to_bytes
 }
 use std.common.net.tls_application_record_stream_v1.{
     TlsApplicationRecordStreamV1,
@@ -125,7 +126,9 @@ pub class Worker:
     h2_connections: Dict<i64, H2Connection>
     op_to_fd: Dict<i64, i64>
     op_type: Dict<i64, i64>
+    transport_send_bytes: Dict<i64, [u8]>
     sendfile_pending: Dict<i64, (text, i64, i64)>
+    sendfile_progress: Dict<i64, (i64, i64)>
     sendfile_open_files: Dict<i64, i64>
     router: AsyncRouter
     pipeline: MiddlewarePipeline
@@ -207,7 +210,9 @@ pub class Worker:
             h2_connections: {},
             op_to_fd: {},
             op_type: {},
+            transport_send_bytes: {},
             sendfile_pending: {},
+            sendfile_progress: {},
             sendfile_open_files: {},
             router: router,
             pipeline: pipeline,
@@ -589,24 +594,33 @@ pub class Worker:
             self.connections[fd] = c
             val bytes = c.get_response_bytes()
             self.sendfile_pending[fd] = (response.body_file, response.body_offset, response.body_length)
-            val op = self.driver.submit_send(fd, bytes)
-            self.op_to_fd[op] = fd
-            self.op_type[op] = OP_SEND
+            self.submit_transport_send(fd, tls_wire_to_bytes(bytes))
         elif response.body_bytes.len() > 0:
             # Compressed or binary body — use bytes path to avoid text corruption
             c.set_response_bytes(response, keepalive_s)
             self.connections[fd] = c
             val buf = c.get_response_bytes_buf()
-            val op = self.driver.submit_send_bytes(fd, buf)
-            self.op_to_fd[op] = fd
-            self.op_type[op] = OP_SEND
+            self.submit_transport_send(fd, buf)
         else:
             c.set_response(response, keepalive_s)
             self.connections[fd] = c
             val bytes = c.get_response_bytes()
-            val op = self.driver.submit_send(fd, bytes)
-            self.op_to_fd[op] = fd
-            self.op_type[op] = OP_SEND
+            self.submit_transport_send(fd, tls_wire_to_bytes(bytes))
+
+    pub(package) me submit_transport_send(fd: i64, bytes: [u8]):
+        """Submit one owner-tracked transport write.
+
+        The I/O driver may complete a socket send after a short write. Keeping
+        the immutable payload under the Worker owner lets completion processing
+        submit only the remaining suffix, and lets close cancellation discard
+        that suffix before the descriptor can be reused.
+        """
+        if bytes.len() == 0:
+            return
+        val op = self.driver.submit_send_bytes(fd, bytes)
+        self.transport_send_bytes[op] = bytes
+        self.op_to_fd[op] = fd
+        self.op_type[op] = OP_SEND
 
     pub(package) me send_error(fd: i64, status: i64, msg: text, now: i64):
         """Send an error response and close."""
