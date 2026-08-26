@@ -471,3 +471,11 @@ only after the result tag is proven `Ok` or `Err`.  Canonical tags are computed
 once and reused, so the entry and catalog checks retain four total discriminant
 calls while corrupt tags fail with `E-SFFI-017`.  No allocation, copy, cache,
 lock, hash, boxing, extra payload call, or dispatch table was added.
+
+### Shared module-path naming authority follow-up
+
+Shared module-path naming no longer declares or calls raw `rt_string_len`.
+Its substring-position helper now uses the canonical text `index_of` operation
+directly and maps absence to the existing `-1` sentinel.  This removes the
+previous `contains` scan, split-array allocation, prefix-text allocation, and
+foreign length dispatch while preserving empty-needle and not-found behavior.

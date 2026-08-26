@@ -1993,6 +1993,14 @@ and unpromoted.
 - [x] Reuse canonical tags and preserve four discriminant calls.
 - [x] Add a static authority, validation, and call-count ratchet.
 
+### Completed shared module-path naming authority slice
+
+- [x] Remove the module-local raw `rt_string_len` declaration and call.
+- [x] Replace the redundant contains/split/length path with canonical text
+  `index_of` and preserve the existing `-1` not-found sentinel.
+- [x] Remove the split-array and prefix-text allocations from path identity.
+- [x] Add a static authority and allocation-shape ratchet.
+
 ### Completed MIR target-context authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.
