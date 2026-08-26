@@ -85,6 +85,7 @@ const EXTRA_KEEP: &[&str] = &[
     "sffi_regex_split",
     "sffi_regex_split_n",
     "native_http_send",
+    "rt_http_request_v2",
     "native_tcp_accept",
     "native_tcp_bind",
     "native_tcp_close",

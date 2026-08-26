@@ -1675,3 +1675,34 @@ provider provenance does not prove null safety, ABI correctness, or artifact
 identity. Admission remains zero unless the inventory freshly verifies and
 joins signed evidence for the exact provider/symbol/signature identity. The
 new report shape was source-reviewed but not executed in this tranche.
+
+### Lossless HTTP v2 contract closure
+
+The last providerless legacy network identity, the high-level-object
+`http_request`, is removed from both raw network owners. The canonical owner now
+calls a tagged `rt_http_request_v2` boundary implemented by native C and the
+Rust interpreter and retained by the native/JIT symbol registries. Its result
+preserves status reason, raw response headers, binary body bytes, and a distinct
+transport/contract error. HTTP error statuses are not converted to transport
+failure, malformed inputs fail before network I/O, request/response headers are
+bounded to 1 MiB/1,024 fields, status reason to 8 KiB, and body collection to
+64 MiB.
+
+The three identical 648-line HTTP modules are reduced to one canonical
+implementation plus two compile-time facades. Redirect work is performed only
+when requested by the client and capped by `max_redirects`. Ordinary requests
+perform no per-call admission, hash, signature, name lookup, generic dispatch,
+or compatibility-wrapper allocation. Native v1 callers do not pay for v2
+metadata; v2 performs only the allocations/copies required to return headers,
+reason, and body to the public response API.
+
+Estimated source counts are now 7,107 production declarations, 2,869
+unsafe-tagged declarations, 4,238 unsafe-tag gaps, 6,056 contract gaps, zero
+legacy network providerless identities, and zero signed-admitted declarations.
+This tranche is source-reviewed only; builds, lint, tests, and benchmarks were
+not executed.
+
+Native C deliberately rejects `https://` with a typed transport error because
+its core provider implements plain HTTP only; the Rust interpreter uses its TLS
+HTTP provider. HTTPS parity therefore remains open, but neither lane silently
+downgrades HTTPS or manufactures a successful response.

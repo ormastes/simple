@@ -2217,3 +2217,28 @@ Torch SFFI nor all SFFI may be described as verified safe.
   cryptographic admission. Signed admission still requires a fresh verifier
   join on provider, symbol, and exact source-signature identity.
 - Status: source-reviewed; the census was not executed in this tranche.
+
+#### Lossless HTTP v2 boundary and legacy providerless removal
+
+- Add `rt_http_request_v2(method, url, headers, body_bytes, timeout_ms)` with a
+  total `(status, reason, raw_headers, body_bytes, transport_error)` result in
+  native C and the Rust interpreter. Status `-1` is reserved for contract or
+  transport failure; HTTP 4xx/5xx remain ordinary typed responses.
+- Preserve arbitrary binary request/response bodies and the response reason and
+  headers that the v1 text tuple discarded. Bound response collection to
+  64 MiB, header metadata to 1 MiB/1,024 fields, and status reason to 8 KiB;
+  reject malformed header/body/timeout inputs before I/O.
+- Lift the raw tuple once in the canonical no-GC sync `HttpClient`, implement
+  configured redirect limits, and replace async/GC copies with compile-time
+  facades. Remove both providerless high-level-object `http_request` externs.
+- Hot path has no admission hash/signature/symbol lookup or generic dispatch.
+  The v2 lane adds only the response metadata/body allocations required by its
+  public API; legacy v1 callers do not allocate returned metadata.
+- Estimated production inventory after this source change: 7,107 declarations,
+  2,869 unsafe-tagged, 4,238 unsafe-tag gaps, 6,056 contract gaps, zero
+  providerless legacy network identities, and zero signed admission.
+- Status: source-reviewed, deliberately unverified and unsigned.
+- Native core C still supports `http://` only and returns a typed transport
+  error for `https://`; the interpreter provider uses ureq/TLS. Cross-lane
+  HTTPS parity remains a separate TLS-provider migration requirement, not a
+  reason to fabricate a response or silently downgrade the scheme.

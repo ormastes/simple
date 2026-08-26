@@ -603,6 +603,8 @@ int64_t rt_path_filename(int64_t path_value);
 int64_t  rt_path_extension(int64_t path_value);
 int64_t  rt_http_get(int64_t url);
 int64_t  rt_http_request(int64_t method, int64_t url, int64_t headers, int64_t body);
+int64_t  rt_http_request_v2(int64_t method, int64_t url, int64_t headers,
+                            int64_t body, int64_t timeout_ms);
 int64_t  rt_http_download(int64_t url, int64_t output_path);
 int64_t  rt_io_udp_bind(int64_t addr);
 int64_t  rt_io_udp_recv_from(int64_t fd, int64_t size);

@@ -443,6 +443,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);
+    insert_simple!("rt_http_request_v2", network::rt_http_request_v2);
     insert_simple!("native_is_tty", terminal::native_is_tty);
     insert_simple!("native_stderr", terminal::native_stderr);
     insert_simple!("rt_host_gpu_lane_event", host_gpu_lane::rt_host_gpu_lane_event);

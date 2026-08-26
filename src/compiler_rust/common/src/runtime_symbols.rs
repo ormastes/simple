@@ -2301,6 +2301,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // `SIMPLE_EXECUTION_MODE=jit` networking claim false and unfalsifiable.
     // See doc/08_tracking/bug/jit_cannot_resolve_native_socket_externs_2026-08-09.md
     "native_http_send",
+    "rt_http_request_v2",
     "native_tcp_accept",
     "native_tcp_bind",
     "native_tcp_close",

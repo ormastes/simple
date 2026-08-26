@@ -37,6 +37,18 @@ extern fn rt_http_request(
     body: text
 ) -> (i64, text, text)
 
+# Lossless v2 request. Raw response headers remain one CRLF-delimited text
+# block so the boundary performs one allocation rather than one allocation per
+# header; safe callers parse/lift it after transport success.
+@unsafe(reason: "raw method/URL/header-array/binary-body ABI; contract: status -1 exclusively denotes typed transport or validation failure", capabilities: [ffi])
+extern fn rt_http_request_v2(
+    method: text,
+    url: text,
+    headers: [text],
+    body: [u8],
+    timeout_ms: i64
+) -> (i64, text, text, [u8], text)
+
 # Download file
 @unsafe(reason: "raw URL/path text and runtime-owned status/byte-count/error tuple ABI", capabilities: [ffi])
 extern fn rt_http_download(url: text, output_path: text) -> (i64, i64, text)  # (status, bytes, error)
@@ -204,6 +216,14 @@ fn http_request_raw(method: text, url: text, headers_text: text, body: text) -> 
         headers = headers_text.split("\n")
     unsafe(capabilities: [ffi]):
         rt_http_request(method, url, headers, body)
+
+fn http_request_v2_raw(method: text, url: text, headers: [text], body: [u8],
+                       timeout_ms: i64) -> (i64, text, text, [u8], text):
+    """Lossless raw request tuple; callers must lift status/error and parse headers."""
+    if timeout_ms < 0:
+        return (-1, "", "", [], "HTTP timeout cannot be negative")
+    unsafe(capabilities: [ffi]):
+        rt_http_request_v2(method, url, headers, body, timeout_ms)
 
 struct HttpClient:
     handle: i64
@@ -525,4 +545,5 @@ fn http_is_server_error(response: HttpResponse) -> bool:
 # ============================================================================
 
 export HttpResponse, HttpClient, HttpServer, WebSocket
-export rt_http_get, rt_http_request, rt_http_download, http_request_raw, http_get
+export rt_http_get, rt_http_request, rt_http_request_v2, rt_http_download
+export http_request_raw, http_request_v2_raw, http_get

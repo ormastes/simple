@@ -8794,6 +8794,31 @@ static int64_t rt_http_tuple(int64_t status, const uint8_t* body, uint64_t body_
     return tuple;
 }
 
+static int64_t rt_http_v2_tuple(int64_t status,
+                                const uint8_t* reason, uint64_t reason_len,
+                                const uint8_t* headers, uint64_t headers_len,
+                                const uint8_t* body, uint64_t body_len,
+                                const char* error) {
+    int64_t tuple = rt_tuple_new(5);
+    if (tuple == rt_core_nil()) abort();
+    SplArray* body_array = rt_byte_array_new_len(body_len);
+    RtCoreArray* body_storage = rt_core_array_ptr(body_array);
+    if (!body_storage || (body_len > 0 && !body_storage->data)) abort();
+    if (body_len > 0) memcpy(body_storage->data, body, (size_t)body_len);
+    int64_t reason_value = rt_string_new(reason, reason_len);
+    int64_t headers_value = rt_string_new(headers, headers_len);
+    int64_t error_value = rt_string_new((const uint8_t*)(error ? error : ""),
+                                         error ? (uint64_t)strlen(error) : 0);
+    if (reason_value == rt_core_nil() || headers_value == rt_core_nil() ||
+        error_value == rt_core_nil()) abort();
+    rt_tuple_set(tuple, 0, rt_value_int(status));
+    rt_tuple_set(tuple, 1, reason_value);
+    rt_tuple_set(tuple, 2, headers_value);
+    rt_tuple_set(tuple, 3, (int64_t)(uintptr_t)body_array);
+    rt_tuple_set(tuple, 4, error_value);
+    return tuple;
+}
+
 static int64_t rt_http_download_tuple(int64_t status, uint64_t bytes, const char* error) {
     int64_t tuple = rt_tuple_new(3);
     if (tuple == rt_core_nil()) return rt_core_nil();
@@ -9074,6 +9099,32 @@ static int rt_http_has_header(const char* headers, size_t len, const char* name)
     return 0;
 }
 
+static int rt_http_header_has_token(const char* headers, size_t len,
+                                    const char* name, const char* token) {
+    size_t name_len = strlen(name);
+    size_t token_len = strlen(token);
+    const char* line = headers;
+    const char* end = headers + len;
+    while (line < end) {
+        const char* next = strstr(line, "\r\n");
+        if (!next || next > end) next = end;
+        if ((size_t)(next - line) > name_len &&
+            strncasecmp(line, name, name_len) == 0 && line[name_len] == ':') {
+            const char* value = line + name_len + 1;
+            while (value < next) {
+                while (value < next && (*value == ' ' || *value == '\t' || *value == ',')) value++;
+                const char* token_end = value;
+                while (token_end < next && *token_end != ',' && *token_end != ' ' && *token_end != '\t') token_end++;
+                if ((size_t)(token_end - value) == token_len &&
+                    strncasecmp(value, token, token_len) == 0) return 1;
+                value = token_end < next ? token_end + 1 : next;
+            }
+        }
+        line = next < end ? next + 2 : end;
+    }
+    return 0;
+}
+
 static int64_t rt_http_content_length(const char* headers, size_t len) {
     const char* line = headers;
     const char* end = headers + len;
@@ -9083,9 +9134,13 @@ static int64_t rt_http_content_length(const char* headers, size_t len) {
         if ((size_t)(next - line) >= 15 && strncasecmp(line, "Content-Length:", 15) == 0) {
             const char* value = line + 15;
             while (value < next && (*value == ' ' || *value == '\t')) value++;
+            if (value == next || *value < '0' || *value > '9') return -2;
             char* parse_end = NULL;
             unsigned long long parsed = strtoull(value, &parse_end, 10);
-            if (parse_end == value || parsed > (unsigned long long)INT64_MAX) return -1;
+            if (parse_end == value || parse_end > next ||
+                parsed > (unsigned long long)INT64_MAX) return -2;
+            while (parse_end < next && (*parse_end == ' ' || *parse_end == '\t')) parse_end++;
+            if (parse_end != next) return -2;
             return (int64_t)parsed;
         }
         line = next < end ? next + 2 : end;
@@ -9130,11 +9185,36 @@ static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
     *out = result; *out_len = used; return 1;
 }
 
+static int rt_http_token_char(unsigned char value) {
+    return ('0' <= value && value <= '9') || ('A' <= value && value <= 'Z') ||
+           ('a' <= value && value <= 'z') || strchr("!#$%&'*+-.^_`|~", value);
+}
+
 static int rt_http_method_is_token(const char* method) {
     if (!method || !*method) return 0;
     for (const unsigned char* p = (const unsigned char*)method; *p; p++) {
-        if (!(('0' <= *p && *p <= '9') || ('A' <= *p && *p <= 'Z') ||
-              ('a' <= *p && *p <= 'z') || strchr("!#$%&'*+-.^_`|~", *p))) return 0;
+        if (!rt_http_token_char(*p)) return 0;
+    }
+    return 1;
+}
+
+static int rt_http_headers_valid(RtCoreArray* headers) {
+    if (!headers || headers->len < 0 ||
+        (headers->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) ||
+        (headers->len > 0 && !headers->data) || headers->len > 1024) return 0;
+    uint64_t total_bytes = 0;
+    for (int64_t i = 0; i < headers->len; i++) {
+        RtCoreString* header = rt_core_as_string(((int64_t*)headers->data)[i]);
+        const char* separator = header ? memchr(header->data, ':', header->len) : NULL;
+        if (!header || !separator || separator == header->data ||
+            memchr(header->data, '\r', header->len) ||
+            memchr(header->data, '\n', header->len)) return 0;
+        if (header->len > 1024 * 1024 - total_bytes) return 0;
+        total_bytes += header->len;
+        for (const unsigned char* p = (const unsigned char*)header->data;
+             p < (const unsigned char*)separator; p++) {
+            if (!rt_http_token_char(*p)) return 0;
+        }
     }
     return 1;
 }
@@ -9142,8 +9222,15 @@ static int rt_http_method_is_token(const char* method) {
 static int rt_http_perform(const char* method, const char* url, RtCoreArray* headers,
                            const uint8_t* body, size_t body_len, int64_t timeout_ms,
                            int64_t* status_out,
-                           uint8_t** body_out, size_t* body_len_out, char* error, size_t error_cap) {
+                           uint8_t** body_out, size_t* body_len_out,
+                           uint8_t** reason_out, size_t* reason_len_out,
+                           uint8_t** headers_out, size_t* headers_len_out,
+                           char* error, size_t error_cap) {
     *status_out = -1; *body_out = NULL; *body_len_out = 0;
+    if (reason_out) *reason_out = NULL;
+    if (reason_len_out) *reason_len_out = 0;
+    if (headers_out) *headers_out = NULL;
+    if (headers_len_out) *headers_len_out = 0;
     int64_t deadline_ms = 0;
     if (timeout_ms > 0) {
         int64_t now = rt_time_now_monotonic_ms();
@@ -9277,26 +9364,83 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     const char* header_end = rt_http_header_end(response, received);
     if (!header_end) { free(response); snprintf(error, error_cap, "invalid HTTP response"); return 0; }
     int status = 0;
-    if (sscanf((const char*)response, "HTTP/%*s %d", &status) != 1) {
+    if (sscanf((const char*)response, "HTTP/%*s %d", &status) != 1 ||
+        status < 100 || status > 999) {
         free(response); snprintf(error, error_cap, "invalid HTTP status"); return 0;
     }
     const char* header_start = strchr((const char*)response, '\n');
     if (!header_start || header_start >= header_end) { free(response); snprintf(error, error_cap, "invalid HTTP headers"); return 0; }
     header_start++; size_t header_len = (size_t)(header_end - header_start);
+    const char* status_line_end = header_start - 1;
+    if ((reason_out && status_line_end - (const char*)response > 8192) ||
+        (headers_out && header_len > 1024 * 1024)) {
+        free(response); snprintf(error, error_cap, "HTTP response metadata too large"); return 0;
+    }
+    if (headers_out) {
+        size_t response_header_count = header_len > 0 ? 1 : 0;
+        for (size_t i = 0; i < header_len; i++) {
+            if (header_start[i] == '\n' && ++response_header_count > 1024) {
+                free(response); snprintf(error, error_cap, "too many HTTP response headers"); return 0;
+            }
+        }
+    }
+    size_t status_reason_len = 0;
+    const char* status_reason = NULL;
+    uint8_t* reason_copy = NULL;
+    uint8_t* headers_copy = NULL;
+    if (reason_out) {
+        const char* status_first_space = memchr(
+            response, ' ', (size_t)(status_line_end - (const char*)response));
+        status_reason = status_first_space
+            ? memchr(status_first_space + 1, ' ',
+                     (size_t)(status_line_end - status_first_space - 1))
+            : NULL;
+        if (status_reason) {
+            status_reason++;
+            const char* reason_end = status_line_end;
+            if (reason_end > status_reason && reason_end[-1] == '\r') reason_end--;
+            status_reason_len = (size_t)(reason_end - status_reason);
+            if (status_reason_len > 0) {
+                reason_copy = (uint8_t*)malloc(status_reason_len);
+                if (!reason_copy) { free(response); snprintf(error, error_cap, "out of memory"); return 0; }
+                memcpy(reason_copy, status_reason, status_reason_len);
+            }
+        }
+    }
+    if (headers_out && header_len > 0) {
+        headers_copy = (uint8_t*)malloc(header_len);
+        if (!headers_copy) { free(reason_copy); free(response); snprintf(error, error_cap, "out of memory"); return 0; }
+        memcpy(headers_copy, header_start, header_len);
+    }
     const uint8_t* payload = (const uint8_t*)header_end + 4;
     size_t payload_len = received - (size_t)(payload - response);
-    if (rt_http_has_header(header_start, header_len, "Transfer-Encoding") && strcasestr(header_start, "chunked")) {
+    if (rt_http_header_has_token(header_start, header_len,
+                                 "Transfer-Encoding", "chunked")) {
         uint8_t* decoded = NULL; size_t decoded_len = 0;
         if (!rt_http_decode_chunked(payload, payload_len, &decoded, &decoded_len)) {
-            free(response); snprintf(error, error_cap, "invalid chunked HTTP response"); return 0;
+            free(headers_copy); free(reason_copy); free(response);
+            snprintf(error, error_cap, "invalid chunked HTTP response"); return 0;
         }
         free(response); response = decoded; payload = response; payload_len = decoded_len;
     } else {
         int64_t declared = rt_http_content_length(header_start, header_len);
+        if (declared == -2) {
+            free(headers_copy); free(reason_copy); free(response);
+            snprintf(error, error_cap, "invalid HTTP Content-Length"); return 0;
+        }
+        if (declared >= 0 && (uint64_t)declared > payload_len) {
+            free(headers_copy); free(reason_copy); free(response);
+            snprintf(error, error_cap, "truncated HTTP response body"); return 0;
+        }
         if (declared >= 0 && (uint64_t)declared < payload_len) payload_len = (size_t)declared;
         memmove(response, payload, payload_len); payload = response;
     }
-    *status_out = status; *body_out = response; *body_len_out = payload_len; return 1;
+    *status_out = status; *body_out = response; *body_len_out = payload_len;
+    if (reason_out) *reason_out = reason_copy; else free(reason_copy);
+    if (reason_len_out) *reason_len_out = status_reason_len;
+    if (headers_out) *headers_out = headers_copy; else free(headers_copy);
+    if (headers_len_out) *headers_len_out = header_len;
+    return 1;
 }
 #endif
 
@@ -9308,7 +9452,8 @@ int64_t rt_http_get(int64_t url_value) {
 #else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
-                             &status, &body, &body_len, error, sizeof(error));
+                             &status, &body, &body_len, NULL, NULL, NULL, NULL,
+                             error, sizeof(error));
     int64_t result = ok ? rt_http_tuple(status, body, body_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(body); return result;
@@ -9329,7 +9474,8 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
     int ok = rt_http_perform(method->data, url->data, rt_core_as_array(headers_value),
                              body ? (const uint8_t*)body->data : NULL, body ? (size_t)body->len : 0,
                              timeout_ms,
-                             &status, &response, &response_len, error, sizeof(error));
+                             &status, &response, &response_len, NULL, NULL, NULL, NULL,
+                             error, sizeof(error));
     int64_t result = ok ? rt_http_tuple(status, response, response_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(response); return result;
@@ -9339,6 +9485,46 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
 int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers_value,
                         int64_t body_value) {
     return rt_http_request_with_timeout(method_value, url_value, headers_value, body_value, 0);
+}
+
+int64_t rt_http_request_v2(int64_t method_value, int64_t url_value,
+                           int64_t headers_value, int64_t body_value,
+                           int64_t timeout_ms) {
+    RtCoreString* method = rt_core_as_string(method_value);
+    RtCoreString* url = rt_core_as_string(url_value);
+    RtCoreArray* headers = rt_core_as_array(headers_value);
+    RtCoreArray* body = rt_core_as_array(body_value);
+    if (!method || !url || timeout_ms < 0 || !body ||
+        !(body->flags & RT_CORE_ARRAY_FLAG_BYTES) ||
+        body->len < 0 || (body->len > 0 && !body->data)) {
+        return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
+                                "invalid HTTP v2 argument");
+    }
+#if defined(_WIN32)
+    (void)headers; (void)headers_value; (void)timeout_ms;
+    return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
+                            "native HTTP is unavailable on Windows core runtime");
+#else
+    if (!rt_http_headers_valid(headers)) {
+        return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
+                                "invalid HTTP v2 headers");
+    }
+    int64_t status = -1;
+    uint8_t *reason = NULL, *response_headers = NULL, *response = NULL;
+    size_t reason_len = 0, response_headers_len = 0, response_len = 0;
+    char error[160] = {0};
+    int ok = rt_http_perform(method->data, url->data, headers,
+                             (const uint8_t*)body->data, (size_t)body->len,
+                             timeout_ms, &status, &response, &response_len,
+                             &reason, &reason_len, &response_headers,
+                             &response_headers_len, error, sizeof(error));
+    int64_t result = ok
+        ? rt_http_v2_tuple(status, reason, reason_len, response_headers,
+                           response_headers_len, response, response_len, "")
+        : rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0, error);
+    free(reason); free(response_headers); free(response);
+    return result;
+#endif
 }
 
 int64_t rt_http_client_request(int64_t client, int64_t method, int64_t url,
@@ -9359,7 +9545,8 @@ int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
 #else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
-                             &status, &body, &body_len, error, sizeof(error));
+                             &status, &body, &body_len, NULL, NULL, NULL, NULL,
+                             error, sizeof(error));
     if (ok) {
         FILE* file = fopen(output_path->data, "wb");
         if (!file) {

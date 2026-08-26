@@ -1420,6 +1420,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // native_http_send(request_ptr: i64, timeout_ns: i64) -> (response_ptr: i64, error_code: i64)
     RuntimeFuncSpec::new("native_http_send", &[I64, I64], &[I64, I64]),
+    // Lossless runtime-value tuple: status, reason, raw headers, body bytes, transport error.
+    RuntimeFuncSpec::new("rt_http_request_v2", &[I64, I64, I64, I64, I64], &[I64]),
     // =========================================================================
     // Coverage instrumentation operations
     // =========================================================================
