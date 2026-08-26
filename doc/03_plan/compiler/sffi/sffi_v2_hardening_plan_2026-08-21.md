@@ -1894,3 +1894,12 @@ and unpromoted.
 - [x] Confine the raw call to one always-inlined lexical owner.
 - [x] Preserve the loader's documented nil/empty behavior.
 - [x] Preserve one-read complexity and add a static ratchet.
+
+### Completed compiler cache file-stamp authority slice
+
+- [x] Keep all four filesystem declarations tagged `unsafe(ffi)`.
+- [x] Correct the digest result to nullable text.
+- [x] Correct the mtime failure contract to its zero sentinel.
+- [x] Confine raw calls to four always-inlined lexical owners.
+- [x] Reject failed size, mtime, and digest results before stamp creation.
+- [x] Preserve successful-path I/O complexity and add a static ratchet.

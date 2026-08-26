@@ -325,3 +325,13 @@ failure remains a typed absence at the boundary and is mapped to the loader's
 existing `nil` result; a valid empty manifest follows the same documented empty
 configuration path.  The loader retains exactly one read with no extra probe,
 retry, allocation, copy, lookup, lock, hash, or generic dispatch.
+
+### Compiler cache file-stamp authority follow-up
+
+The file-stamp cache now confines its four raw filesystem calls to
+always-inlined lexical `unsafe(ffi)` owners.  Its SHA-256 result is correctly
+nullable, and the measurement path rejects nil digests, negative sizes, and
+the runtime's actual zero mtime failure sentinel before constructing a stamp.
+The successful fast path retains the same existence/size/mtime probes, and the
+torn-read path retains the same metadata/hash call counts; no allocation,
+copy, lookup, lock, extra I/O, or generic dispatch was added.
