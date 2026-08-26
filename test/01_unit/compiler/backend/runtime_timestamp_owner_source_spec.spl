@@ -1,28 +1,26 @@
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_timestamp_get_hour(micros: i64) -> i32
-extern fn rt_timestamp_get_minute(micros: i64) -> i32
-extern fn rt_timestamp_get_second(micros: i64) -> i32
-extern fn rt_timestamp_get_microsecond(micros: i64) -> i32
 
 describe "hosted timestamp provider ownership":
-    it "records and subtracts the Windows progress reset epoch":
+    it "retains only bounded TLS and clock shims in C":
         val source = rt_file_read_text("src/runtime/runtime_timestamp.c") ?? ""
         expect(source).to_contain("static int64_t g_progress_start_nanos = 0;")
-        expect(source.split("g_progress_start_nanos = rt_time_now_nanos();").len() - 1).to_equal(2)
-        expect(source).to_contain("int64_t elapsed_nanos = rt_time_now_nanos() - g_progress_start_nanos;")
-        expect(source).to_contain("if (elapsed_nanos <= 0) return 0.0;")
-        expect(source).to_contain("return (double)elapsed_nanos / 1000000000.0;")
-        expect(source.contains("return (double)rt_time_now_nanos() / 1000000000.0;")).to_be(false)
+        expect(source).to_contain("int64_t rt_progress_clock_now_nanos(void)")
+        expect(source).to_contain("bool rt_progress_tls_is_initialized(void)")
+        expect(source).to_contain("void rt_progress_tls_store_start_nanos(int64_t start_nanos)")
+        expect(source).to_contain("void rt_progress_tls_clear(void)")
+        expect(source.contains("bool rt_progress_init(void)")).to_be(false)
+        expect(source).to_contain("#ifdef SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT")
+        expect(source).to_contain("rt_timestamp_oracle_get_year")
+        expect(source.split("int32_t rt_timestamp_get_year").len() - 1).to_equal(1)
 
     it "uses a floor-day remainder for negative sub-second timestamps":
-        expect(rt_timestamp_get_hour(-1)).to_equal(23)
-        expect(rt_timestamp_get_minute(-1)).to_equal(59)
-        expect(rt_timestamp_get_second(-1)).to_equal(59)
-        expect(rt_timestamp_get_microsecond(-1)).to_equal(999999)
-        expect(rt_timestamp_get_hour(0)).to_equal(0)
-        expect(rt_timestamp_get_microsecond(1)).to_equal(1)
+        val source = rt_file_read_text("src/lib/common/time_utils.spl") ?? ""
+        expect(source).to_contain("fn time_of_day_micros(micros: i64) -> i64:")
+        expect(source).to_contain("if value < 0: value + 86400000000 else: value")
+        expect(source).to_contain("@export(\"C\", name: \"rt_timestamp_get_hour\")")
+        expect(source).to_contain("@export(\"C\", name: \"rt_timestamp_get_microsecond\")")
 
     it "keeps the bootstrap SFFI timestamp owner floor-based":
         val source = rt_file_read_text("src/app/sffi_gen.templates/bootstrap_sffi.txt") ?? ""

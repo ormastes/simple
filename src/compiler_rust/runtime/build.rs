@@ -330,6 +330,9 @@ fn compile_c_runtime_sources() {
     // See the runtime_process_owned.c comment above: rt_free_deep lives in
     // runtime_native.c, which this crate does not compile.
     build.define("SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE", None);
+    // Bootstrap-only compatibility: the seed cannot link the canonical Pure
+    // Simple timestamp module. Stage4 never enables this provider.
+    build.define("SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT", None);
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
     } else {

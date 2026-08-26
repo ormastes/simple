@@ -1695,6 +1695,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_progress_get_elapsed_seconds", time::rt_progress_get_elapsed_seconds);
     insert_simple!("rt_progress_init", time::rt_progress_init);
     insert_simple!("rt_progress_reset", time::rt_progress_reset);
+    insert_simple!("rt_progress_clock_now_nanos", time::rt_progress_clock_now_nanos);
+    insert_simple!("rt_progress_tls_clear", time::rt_progress_tls_clear);
+    insert_simple!("rt_progress_tls_is_initialized", time::rt_progress_tls_is_initialized);
+    insert_simple!("rt_progress_tls_start_nanos", time::rt_progress_tls_start_nanos);
+    insert_simple!("rt_progress_tls_store_start_nanos", time::rt_progress_tls_store_start_nanos);
     insert_simple!(
         "rt_ps_torch_tensor_from_bits_1d",
         torch::rt_ps_torch_tensor_from_bits_1d
@@ -2052,6 +2057,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_timestamp_get_month", time::rt_timestamp_get_month);
     insert_simple!("rt_timestamp_get_second", time::rt_timestamp_get_second);
     insert_simple!("rt_timestamp_get_year", time::rt_timestamp_get_year);
+    insert_simple!("rt_timestamp_oracle_add_days", time::rt_timestamp_oracle_add_days);
+    insert_simple!("rt_timestamp_oracle_diff_days", time::rt_timestamp_oracle_diff_days);
+    insert_simple!("rt_timestamp_oracle_from_components", time::rt_timestamp_oracle_from_components);
+    insert_simple!("rt_timestamp_oracle_get_day", time::rt_timestamp_get_day);
+    insert_simple!("rt_timestamp_oracle_get_hour", time::rt_timestamp_get_hour);
+    insert_simple!("rt_timestamp_oracle_get_microsecond", time::rt_timestamp_get_microsecond);
+    insert_simple!("rt_timestamp_oracle_get_minute", time::rt_timestamp_get_minute);
+    insert_simple!("rt_timestamp_oracle_get_month", time::rt_timestamp_get_month);
+    insert_simple!("rt_timestamp_oracle_get_second", time::rt_timestamp_get_second);
+    insert_simple!("rt_timestamp_oracle_get_year", time::rt_timestamp_get_year);
     insert_simple!("rt_timestamp_iso8601", time::rt_timestamp_iso8601);
     insert_simple!("rt_tls13_aes128_gcm_decrypt", simd::rt_tls13_aes128_gcm_decrypt);
     insert_simple!("rt_tls13_aes128_gcm_encrypt", simd::rt_tls13_aes128_gcm_encrypt);

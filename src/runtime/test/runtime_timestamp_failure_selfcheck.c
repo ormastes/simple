@@ -17,8 +17,11 @@ static int rt_test_clock_gettime(clockid_t clock_id, struct timespec *value) {
 
 int main(void) {
     if (rt_time_now_seconds_f64() != -1.0) return 1;
-    if (rt_progress_init()) return 2;
-    if (rt_progress_reset()) return 3;
-    if (rt_progress_get_elapsed_seconds() != -1.0) return 4;
+    if (rt_progress_clock_now_nanos() != -1) return 2;
+    rt_progress_tls_store_start_nanos(42);
+    if (!rt_progress_tls_is_initialized()) return 3;
+    if (rt_progress_tls_start_nanos() != 42) return 4;
+    rt_progress_tls_clear();
+    if (rt_progress_tls_is_initialized()) return 5;
     return 0;
 }

@@ -1029,20 +1029,12 @@ struct Stage4CliCProviderSpec {
 }
 
 const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
-    "rt_progress_get_elapsed_seconds",
-    "rt_progress_init",
-    "rt_progress_reset",
+    "rt_progress_clock_now_nanos",
+    "rt_progress_tls_clear",
+    "rt_progress_tls_is_initialized",
+    "rt_progress_tls_start_nanos",
+    "rt_progress_tls_store_start_nanos",
     "rt_time_now_seconds_f64",
-    "rt_timestamp_add_days",
-    "rt_timestamp_diff_days",
-    "rt_timestamp_from_components",
-    "rt_timestamp_get_day",
-    "rt_timestamp_get_hour",
-    "rt_timestamp_get_microsecond",
-    "rt_timestamp_get_minute",
-    "rt_timestamp_get_month",
-    "rt_timestamp_get_second",
-    "rt_timestamp_get_year",
 ];
 
 const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
