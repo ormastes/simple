@@ -17,6 +17,8 @@ use os.kernel.fs.fat32.*
             reserved_sectors: 0u32,
             fat_size_sectors: 0u32,
             fat_count: 0u32,
+            fat_mirroring_enabled: true,
+            active_fat_index: 0u32,
             mutation_active: false,
             root_dir_data: []
         )
@@ -53,6 +55,12 @@ use os.kernel.fs.fat32.*
         self.reserved_sectors    = bpb.reserved_sectors.to_u32()
         self.fat_size_sectors    = bpb.fat_size_32
         self.fat_count           = bpb.num_fats.to_u32()
+        self.fat_mirroring_enabled = (bpb.ext_flags & 0x0080u16) == 0u16
+        self.active_fat_index = (bpb.ext_flags & 0x000Fu16).to_u32()
+        # With mirroring disabled ExtFlags selects exactly one active FAT.
+        # Reject malformed selectors instead of falling back to copy zero.
+        if self.fat_count == 0u32 or (not self.fat_mirroring_enabled and self.active_fat_index >= self.fat_count):
+            return Err(EIO)
         # Fuel for cluster-chain walk: total data sectors / sectors-per-cluster.
         # A valid chain can never contain more clusters than this.
         if bpb.total_sectors_32 > self.data_start_sector and self.sectors_per_cluster > 0u32:
@@ -403,10 +411,10 @@ use os.kernel.fs.fat32.*
             mtime: 0u64
         ))
 
-    fn _read_fat_entry(self, dev: BlockDevice, cluster: u32) -> Result<u32, text>:
-        """Read the 28-bit FAT32 entry for cluster from the FAT region on dev."""
+    fn _read_fat_entry_copy(self, dev: BlockDevice, copy: u32, cluster: u32) -> Result<u32, text>:
+        """Read one 28-bit FAT32 entry from the selected FAT copy."""
         val fat_offset = cluster * 4u32
-        val fat_sector = self.fat_start_sector.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
+        val fat_sector = self.fat_start_sector.to_u64() + copy.to_u64() * self.fat_size_sectors.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
         val entry_off  = (fat_offset % self.bytes_per_sector).to_i32()
         val sec_result = dev.read_sector(fat_sector)
         if sec_result.is_err():
@@ -417,6 +425,28 @@ use os.kernel.fs.fat32.*
                    (sec[entry_off + 1].to_u32() << 8)  |
                     sec[entry_off].to_u32()) & 0x0FFFFFFFu32
         Ok(raw)
+
+    fn _read_fat_entry(self, dev: BlockDevice, cluster: u32) -> Result<u32, text>:
+        """Read a FAT entry, requiring consensus across enabled mirrors.
+
+        A mirrored FAT volume must not silently choose copy zero when copies
+        diverge: allocation and chain traversal both fail closed before they
+        can extend or follow a potentially corrupt chain.  Non-mirrored
+        volumes retain the BPB-selected active-copy behavior.
+        """
+        if self.fat_count == 0u32:
+            return Err("fat32: volume has no FAT copies")
+        val selected = if self.fat_mirroring_enabled: 0u32 else: self.active_fat_index
+        val first = self._read_fat_entry_copy(dev, selected, cluster)?
+        if not self.fat_mirroring_enabled:
+            return Ok(first)
+        var copy = 1u32
+        while copy < self.fat_count:
+            val value = self._read_fat_entry_copy(dev, copy, cluster)?
+            if value != first:
+                return Err("fat32: mirrored FAT copies diverge at cluster {cluster}")
+            copy = copy + 1u32
+        Ok(first)
 
     fn read_cluster_chain(self, dev: BlockDevice, start: u32) -> Result<[u32], text>:
         """Walk FAT chain from start cluster; return ordered cluster list.
@@ -459,4 +489,3 @@ use os.kernel.fs.fat32.*
             # Valid next cluster; continue walk
             current = next
         Ok(chain)
-
