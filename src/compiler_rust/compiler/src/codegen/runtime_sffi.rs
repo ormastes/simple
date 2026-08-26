@@ -1327,26 +1327,32 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_io_tcp_write_text_read_exact_len", &[I64, I64], &[I64]),
     // rt_io_tcp_socket_create(family: i64) -> fd: i64
     RuntimeFuncSpec::new("rt_io_tcp_socket_create", &[I64], &[I64]),
-    // rt_io_tcp_set_reuseaddr(fd: i64, enabled: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_set_reuseaddr", &[I64, I64], &[I64]),
-    // rt_io_tcp_set_reuseport(fd: i64, enabled: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_set_reuseport", &[I64, I64], &[I64]),
-    // rt_io_tcp_set_nonblocking(fd: i64, enabled: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_set_nonblocking", &[I64, I64], &[I64]),
-    // rt_io_tcp_set_nodelay(fd: i64, enabled: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_set_nodelay", &[I64, I64], &[I64]),
-    // rt_io_tcp_bind_fd(fd: i64, addr_ptr: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_bind_fd", &[I64, I64], &[I64]),
-    // rt_io_tcp_listen(fd: i64, backlog: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_listen", &[I64, I64], &[I64]),
+    // TCP scalar status functions use the same bool ABI in C, Rust, and Simple.
+    RuntimeFuncSpec::new("rt_io_tcp_set_reuseaddr", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_reuseport", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_nonblocking", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_nodelay", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_bind_fd", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_listen", &[I64, I64], &[I8]),
     // rt_io_tcp_accept(fd: i64) -> client_fd: i64
     RuntimeFuncSpec::new("rt_io_tcp_accept", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_accept_timeout", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_bind", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_connect", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_connect_timeout", &[I64, I64], &[I64]),
     // rt_io_tcp_read(fd: i64, size: i64) -> array_ptr: i64
     RuntimeFuncSpec::new("rt_io_tcp_read", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_read_line", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_local_addr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_peer_addr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_write", &[I64, I64], &[I64]),
     // rt_io_tcp_write_text(fd: i64, data_ptr: i64) -> bytes_written: i64
     RuntimeFuncSpec::new("rt_io_tcp_write_text", &[I64, I64], &[I64]),
-    // rt_io_tcp_close(fd: i64) -> ok: i64
-    RuntimeFuncSpec::new("rt_io_tcp_close", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_tcp_flush", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_close", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_read_timeout", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_set_write_timeout", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_io_tcp_shutdown", &[I64, I64], &[I8]),
     // rt_event_loop_create() -> epfd: i64
     RuntimeFuncSpec::new("rt_event_loop_create", &[], &[I64]),
     // rt_event_loop_register(epfd: i64, fd: i64, interest: i64, token: i64, edge: i64) -> ok: i64
@@ -2241,6 +2247,78 @@ mod tests {
         let sig = spec.build_signature(crate::codegen::shared::platform_call_conv());
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.returns.len(), 1);
+    }
+
+    #[test]
+    fn tcp_configuration_uses_boolean_abi() {
+        for name in [
+            "rt_io_tcp_set_reuseaddr",
+            "rt_io_tcp_set_reuseport",
+            "rt_io_tcp_set_nonblocking",
+            "rt_io_tcp_set_nodelay",
+        ] {
+            let spec = spec_for(name).expect("TCP configuration runtime spec");
+            assert_eq!(spec.params, [I64, I8]);
+            assert_eq!(spec.returns, [I8]);
+        }
+        for name in ["rt_io_tcp_bind_fd", "rt_io_tcp_listen"] {
+            let spec = spec_for(name).expect("TCP descriptor runtime spec");
+            assert_eq!(spec.params, [I64, I64]);
+            assert_eq!(spec.returns, [I8]);
+        }
+    }
+
+    #[test]
+    fn tcp_flush_uses_boolean_abi() {
+        let spec = spec_for("rt_io_tcp_flush").expect("TCP flush runtime spec");
+        assert_eq!(spec.params, [I64]);
+        assert_eq!(spec.returns, [I8]);
+    }
+
+    #[test]
+    fn tcp_timeout_setters_use_scalar_boolean_abi() {
+        for name in ["rt_io_tcp_set_read_timeout", "rt_io_tcp_set_write_timeout"] {
+            let spec = spec_for(name).expect("TCP timeout runtime spec");
+            assert_eq!(spec.params, [I64, I64]);
+            assert_eq!(spec.returns, [I8]);
+        }
+    }
+
+    #[test]
+    fn tcp_shutdown_uses_boolean_abi() {
+        let spec = spec_for("rt_io_tcp_shutdown").expect("TCP shutdown runtime spec");
+        assert_eq!(spec.params, [I64, I64]);
+        assert_eq!(spec.returns, [I8]);
+    }
+
+    #[test]
+    fn tcp_connect_signatures_are_registered() {
+        assert_eq!(spec_for("rt_io_tcp_connect").unwrap().params, [I64]);
+        assert_eq!(
+            spec_for("rt_io_tcp_connect_timeout").unwrap().params,
+            [I64, I64]
+        );
+    }
+
+    #[test]
+    fn tcp_accept_timeout_signature_is_registered() {
+        let spec = spec_for("rt_io_tcp_accept_timeout").expect("TCP accept timeout runtime spec");
+        assert_eq!(spec.params, [I64, I64]);
+        assert_eq!(spec.returns, [I64]);
+    }
+
+    #[test]
+    fn udp_close_uses_boolean_abi() {
+        let spec = spec_for("rt_io_udp_close").expect("UDP close runtime spec");
+        assert_eq!(spec.params, [I64]);
+        assert_eq!(spec.returns, [I8]);
+    }
+
+    #[test]
+    fn udp_bind_uses_scalar_descriptor_abi() {
+        let spec = spec_for("rt_io_udp_bind").expect("UDP bind runtime spec");
+        assert_eq!(spec.params, [I64]);
+        assert_eq!(spec.returns, [I64]);
     }
 
     #[test]

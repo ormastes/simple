@@ -483,3 +483,26 @@ does not label inline assembly safe or verified.
 - [ ] Unblock Rust workspace exports and execute Rust/interpreter unit tests.
 - [ ] Bind admitted exact artifact and ABI registry to verified signatures;
   current signed-admitted count remains zero.
+## 2026-08-26 TCP/UDP ABI closure checkpoint
+
+- [x] Align C, Rust, Simple, and Cranelift TCP/UDP scalar status values on the
+  boolean/I8 ABI.
+- [x] Preserve negative descriptor/count sentinels and nullable owned read/
+  address returns; eliminate unsupported-platform fabricated zero values.
+- [x] Implement the C connect-timeout budget with nonblocking connect, poll,
+  `SO_ERROR`, and flag restoration.
+- [x] Reject invalid TCP family tags in C, Rust, and interpreter lanes.
+- [x] Keep successful read allocation count unchanged and add only failure-path
+  release; retain direct O(1) status leaves without lookup or dispatch.
+- [x] Deduplicate the production `rt_env_cwd` raw declaration through the
+  canonical `io_runtime` owner.
+- [ ] Repair checked ECDSA ownership in `src/lib/common/crypto/ecdsa_p256.spl`.
+- [ ] Remove raw RSA/Ed25519 verify declarations from the SSH session facade.
+- [ ] Admit exact provider artifacts through verified signature jobs; current
+  repository-wide signed-admitted count remains zero.
+
+Evidence: focused C syntax PASS with `_GNU_SOURCE`; UDP, TCP consumer, and
+network authority audits PASS; Simple owner check PASS; optimizer reports only
+generic low-confidence MIR opportunities.  The full C compilation guard is
+still blocked by the existing Linux seal-macro bug and a separate process
+runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.

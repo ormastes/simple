@@ -6009,3 +6009,41 @@ hashed bytes after pathname replacement. Load/path copies happen once during
 admission; boolean hot thunks allocate nothing and call the cached function
 pointer directly. The older checked integer bridge still allocates a two-value
 result array per call and remains a separately tracked performance migration.
+## TCP/UDP cross-lane scalar ABI checkpoint (2026-08-26)
+
+The refreshed owned-boundary census reports 13,009 SFFI declaration rows and
+11,352 `rt_` rows.  Of the `rt_` rows, 2,826 are explicitly unsafe-tagged,
+8,277 are untouched by the unsafe/contract/evidence migration, and zero are
+cryptographically admitted.  At symbol granularity there are 3,033 distinct
+`rt_` names: 1,433 have every declaration unsafe-tagged, 1,600 have incomplete
+tagging, 1,046 are untouched, and zero are admitted.  Provider provenance is
+mixed across C, C++, Rust exports, Rust interpreter implementations, system C,
+external C ABI, freestanding code, and 1,165 rows with no observed provider;
+the inventory does not mistake a language label for ABI or signature proof.
+
+Review of the network guard found a real C/Rust/Simple mismatch.  Rust and the
+canonical Simple declarations used scalar booleans for TCP/UDP status while
+the AOT C provider and codegen registry retained `int64_t`/I64 in the TCP
+family.  The C provider, header, and Cranelift registry now use `bool`/I8 for
+bind/listen, close/flush/shutdown, option setters, and UDP status operations.
+The interpreter rejects invalid family tags rather than selecting IPv4.  The
+C timeout connector now performs one nonblocking connect, `poll(POLLOUT)`, and
+`SO_ERROR` validation instead of ignoring the budget and blocking.
+
+Unsupported TCP reads and address queries now return the runtime nil sentinel;
+unsupported writes return `-1`, so platform absence cannot look like a valid
+empty transfer.  A failed hosted C read frees its already-created buffer and
+returns nil, while EOF remains a valid empty byte array.  No successful read
+allocation was added.
+
+Optimized object comparison against the exact pre-change tree showed scalar
+hot leaves shrinking (`close` -5 bytes, `set_nonblocking` -6,
+`set_nodelay` -13), with UDP connect/close unchanged.  `tcp_read` grew 44 bytes
+for validation and failure cleanup; both versions contain the same one
+successful-path array allocation, and the new version adds only failure-path
+release.  No malloc family, dynload, symbol lookup, map, lock, or generic
+dispatch was introduced.
+
+This checkpoint is unsafe-minimization and cross-lane source verification, not
+signed admission.  The global guard now clears network failures and remains
+red only for checked ECDSA facade ownership and raw SSH verification imports.

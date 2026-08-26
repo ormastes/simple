@@ -519,8 +519,15 @@ pub fn rt_io_tcp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_io_tcp_socket_create_interp(args: &[Value]) -> Result<Value, CompileError> {
     use socket2::{Domain, Protocol, Type};
-    // family: 0 = IPv4 (default), 1 = IPv6
-    let family = args.first().and_then(|v| v.as_int().ok()).unwrap_or(0);
+    // family: 0 = IPv4, 1 = IPv6. Unknown values are contract failures and
+    // must not silently select a provider family.
+    let family = args
+        .first()
+        .and_then(|value| value.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(0, "i64"))?;
+    if family != 0 && family != 1 {
+        return Ok(Value::Int(-1));
+    }
     let domain = if family == 1 { Domain::IPV6 } else { Domain::IPV4 };
     match socket2::Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
         Ok(socket) => Ok(Value::Int(allocate_socket(SocketHandle::RawSocket(socket)))),
@@ -1481,6 +1488,15 @@ mod tcp_read_contract_tests {
         let result = rt_io_tcp_read_interp(&[Value::Int(-1), Value::Int(16)])
             .expect("invalid descriptor is a provider result, not a bridge error");
         assert!(matches!(result, Value::Nil));
+    }
+
+    #[test]
+    fn tcp_socket_family_rejects_unknown_or_non_scalar_values() {
+        assert!(matches!(
+            rt_io_tcp_socket_create_interp(&[Value::Int(4)]),
+            Ok(Value::Int(-1))
+        ));
+        assert!(rt_io_tcp_socket_create_interp(&[Value::Bool(false)]).is_err());
     }
 
     #[test]

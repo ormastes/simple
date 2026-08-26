@@ -1932,3 +1932,41 @@ and other runtime contract drift. Signed admission is still zero. The checked
 integer call API also retains an existing per-call two-element array allocation;
 that performance debt is not introduced by the typed boolean thunks and remains
 open for a scalar status/out migration.
+
+### TCP/UDP scalar ABI and timeout closure (2026-08-26)
+
+The fresh inventory reports 13,009 SFFI declarations and 11,352 `rt_`
+declarations.  The `rt_` rows contain 2,826 unsafe-tagged, 8,277 untouched, and
+zero signed-admitted declarations.  Of 3,033 distinct `rt_` symbols, 1,433 are
+fully unsafe-tagged, 1,600 remain incomplete, 1,046 are untouched, and none are
+admitted.  Therefore all-SFFI safety and signing remain false.
+
+The AOT C TCP status ABI now matches Rust, Simple, and Cranelift: boolean
+parameters/returns are `bool`/I8 rather than integer truthiness.  The complete
+TCP declaration family is registered for native codegen.  UDP C declarations
+use the same semantic bool ABI.  Invalid family tags fail rather than selecting
+IPv4.  C connect timeout no longer discards its budget; it uses nonblocking
+connect, `poll(POLLOUT)`, `SO_ERROR`, and restores flags before returning a
+descriptor.  Unsupported-platform reads/addresses return nil and writes return
+`-1`, preserving empty EOF/datagram values separately from failure.
+
+The focused C syntax check passed with one unrelated comment warning.  TCP
+consumer, UDP, and network authority audits passed.  The global null/signature
+guard now reports only two missing checked ECDSA facade declarations and one
+raw SSH RSA/Ed25519 import; it remains FAIL and correctly blocks a global claim.
+The Simple environment-owner check passed using the bootstrap seed with its
+honest warning.  O3 optimizer analysis found ten generic low-confidence MIR
+bounds-check opportunities and no general allocation/copy opportunity.
+
+Optimized before/after object evidence: `rt_io_tcp_close` 18 -> 13 bytes,
+`set_nonblocking` 85 -> 79, `set_nodelay` 51 -> 38, UDP connect 211 -> 211,
+UDP close 13 -> 13.  TCP read is 351 -> 395 bytes because it validates negative
+sizes/allocation state and releases on provider failure.  Both versions retain
+one array creation on the successful path; the new call is failure-only free.
+No dynamic lookup or heap allocation was added to scalar hot leaves.
+
+The whole C guard remains FAIL for pre-existing `F_ADD_SEALS`/`F_SEAL_*`
+feature-macro drift and an unrelated `runtime_process.c` call-arity defect.
+Rust focused tests remain blocked earlier by the recorded runtime export drift.
+This tranche is source/syntax/contract checked and unsafe-minimized, but not a
+verified signed provider admission.
