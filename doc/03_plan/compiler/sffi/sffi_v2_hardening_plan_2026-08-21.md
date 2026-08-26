@@ -1949,6 +1949,14 @@ and unpromoted.
 - [x] Preserve lookup/call counts without caching or dispatch machinery.
 - [x] Add a static authority and performance-shape ratchet.
 
+### Completed MIR target-context authority slice
+
+- [x] Remove the module-local raw environment declaration and calls.
+- [x] Route both target reads through canonical nullable `env_get_opt`.
+- [x] Preserve one lookup and normalization per entrypoint.
+- [x] Eliminate local `unsafe(ffi)` authority without caching target state.
+- [x] Add a static authority and performance-shape ratchet.
+
 ### Completed shared backend-helper authority slice
 
 - [x] Remove raw environment and AVX2 declarations/calls.

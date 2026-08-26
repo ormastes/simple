@@ -412,3 +412,12 @@ Their five configuration reads use the canonical nullable, always-inlined
 always-inlined `std.simd.has_avx2` owner.  Call-site frequency and target-option
 construction remain unchanged, with no cache, allocation, copy, extra CPUID,
 lock, hash, boxing, or dispatch table added.
+
+### MIR target-context authority follow-up
+
+The MIR target-context provider no longer declares or calls raw environment
+SFFI.  Both target reads use the canonical nullable, always-inlined
+`env_get_opt` facade, eliminating local unsafe authority while retaining the
+provider's uncached semantics.  Each entrypoint keeps one lookup and the same
+trim/lower normalization, with no allocation beyond the existing normalized
+text, extra host/tool probe, cache, lock, hash, boxing, or dispatch table.
