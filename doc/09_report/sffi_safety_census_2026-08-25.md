@@ -1877,3 +1877,38 @@ The focused Rust MMIO test did not execute: `simple-runtime` currently fails
 first with unrelated `E0432` export drift in spin-loop, TLS, and UDP families.
 That blocker is recorded separately. The MMIO Rust change therefore has static
 ratchet/format evidence only and is not labeled runtime-verified.
+
+### Volatile MMIO owner and semihost UART
+
+Thirteen declarations in the production/freestanding OS MMIO owner and two in
+the semihost UART path moved from untagged debt to explicit `unsafe(ffi)` and
+`raw_ptr` authority. Thirteen OS raw calls and three semihost calls are now
+lexically confined. The eight hot OS read/write wrappers and eight unaliased
+entry-closure names are inline, with aliases reusing the owner wrapper; there is
+no extra runtime dispatch, allocation, copy, lookup, lock, or admission work.
+
+The hosted interpreter's eight volatile read/write entries now reject null,
+negative, host-width-invalid, and misaligned integer addresses before entering
+Rust unsafe code. The target C and Rust ABI leaves remain raw and cannot prove
+device mapping, ownership, ordering, or lifetime. These changes therefore
+reduce unsafe scope and immediate hosted UB, but do not make arbitrary-address
+MMIO safe.
+
+The focused authority ratchet and both bootstrap-seed Simple checks passed.
+Optimizer O3 reported only MIR opportunities and zero general/allocation
+patterns. The existing semihost transport spec passed 23/23 in 36 ms with no
+skip/drop, although it covers transport policy rather than physical UART MMIO.
+Rust execution is still blocked by `simple-runtime` export drift;
+whole-file formatting is also blocked by older unrelated drift in the shared
+provider file. Exact signed-artifact admission remains zero, so this tranche is
+unsafe-tagged and statically checked, not verified or signed.
+
+The refreshed repository-wide ratchet reports 11,356 `rt_` declarations:
+2,826 unsafe-tagged, 8,281 untouched, and 0 signed-admitted. Across every SFFI
+name it reports 13,011 declarations, 3,145 tagged, 9,461 untouched, and zero
+signed-admitted. The ratchet itself is not green because its checked-in baseline
+has 540 newly untagged and 3,435 stale entries after concurrent tree changes.
+The independent null/signature guard also fails on multiple existing families,
+including fabricated-zero dynload/symbol lookup, boolean/integer ABI coercion,
+TCP/UDP contracts, and missing checked crypto declarations. These failures are
+authoritative evidence that whole-SFFI safety and verification are incomplete.

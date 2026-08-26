@@ -5955,3 +5955,29 @@ The focused Rust unit test is currently blocked before its target compiles by
 unrelated `simple-runtime` `E0432` export drift in spin-loop, TLS, and UDP
 families. No fallback package or feature exclusion was used, and the Rust MMIO
 provider is not labeled execution-verified.
+
+## Volatile MMIO authority checkpoint
+
+The production/freestanding OS MMIO owner contained thirteen untagged raw
+volatile, barrier, and ARM cache declarations, and its wrappers called them
+without lexical unsafe authority. The semihost UART path duplicated two more
+untagged volatile declarations and three direct calls. All fifteen declarations
+are now explicitly `unsafe(ffi)` (and `raw_ptr` where an address is consumed),
+and every raw call is confined to the smallest wrapper block.
+
+The eight ordinary OS read/write wrappers and their eight entry-closure aliases
+are inline; aliases reuse the owner wrapper instead of adding a second raw-call
+site. There is still one provider call per MMIO access and no new allocation,
+copy, lookup, lock, generic dispatch, hash, signature check, or retry. The Rust
+interpreter's eight `rt_volatile_*` entries now reuse the checked address lift,
+rejecting null, negative, host-width-invalid, and misaligned addresses before
+volatile access. Native target providers remain deliberately unsafe and
+unsigned because target mapping/device ownership cannot be established from an
+integer address.
+
+Both touched Simple modules passed the available checker, but it identified
+itself as the Rust bootstrap seed. Optimizer O3 analysis found only MIR findings
+and no allocation/general pattern. A focused static ratchet passes. The Rust
+unit test remains blocked by the already-recorded runtime export drift, and
+whole-file `rustfmt --check` is blocked by unrelated existing formatting drift;
+neither provider family is promoted to verified or signed-admitted.

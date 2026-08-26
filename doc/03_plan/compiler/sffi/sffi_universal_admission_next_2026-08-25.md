@@ -448,3 +448,20 @@ does not label inline assembly safe or verified.
   signed evidence before verified/critical promotion.
 - [ ] Retain cross-target volatile-access sabotage, code-shape, latency, and
   compiler/emulator RSS evidence.
+
+## Volatile MMIO authority tranche
+
+- [x] Tag the thirteen production/freestanding OS volatile, fence, and ARM
+  cache declarations with explicit `ffi`/`raw_ptr` authority.
+- [x] Confine all OS raw calls and the semihost UART's three volatile calls to
+  minimal lexical unsafe blocks.
+- [x] Inline the ordinary OS MMIO wrappers and entry-closure aliases; route each
+  alias through its owner wrapper so call count remains one.
+- [x] Reject null, negative, host-width-invalid, and misaligned volatile
+  addresses in the hosted Rust interpreter before dereference.
+- [x] Add a focused source ratchet for tags, lexical calls, inline hot wrappers,
+  checked Rust lifts, and absence of admission/allocation work.
+- [ ] Repair unrelated Rust runtime export and whole-file formatting drift, then
+  execute the focused volatile sabotage unit test and formatting gate.
+- [ ] Establish target-owned MMIO ranges, exact ABI parity, signed provider
+  admission, cross-target code shape, latency, and peak RSS evidence.
