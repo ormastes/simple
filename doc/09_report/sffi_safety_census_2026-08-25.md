@@ -1269,6 +1269,26 @@ facades. Provider coverage remains incomplete and WebSocket empty/failure
 ambiguity remains explicit, so the family is unsafe, unsigned, and unverified.
 Source-reviewed only; checks were not executed.
 
+## 2026-08-26 providerless pointer-era value API retirement
+
+Eight more active declarations—raw string creation, type projection, release,
+four arithmetic operations, and less-than—had no C, Rust, or interpreter
+provider. Apparent consumers were unrelated name collisions plus one obsolete
+minimal-FFI sample. They were removed from both active owners, facades/exports,
+and the public interning specifications. The sample now exercises only tagged
+scalar constructors, predicates, and projections that have both registry
+lanes. Full Rust provider-construction fixtures remain internal to the
+generator and are not published into the Simple API.
+
+The canonical RuntimeValue owner is reduced from 25 to 17 declarations, with
+closure 11 both, 3 one-lane, and only the 3 GC functions providerless. The
+compiler-minimal facade is reduced from 34 to 26 declarations, with closure 20
+both, 3 native-only, 0 interpreter-only, and the same 3 GC functions
+providerless. No live runtime call was adapted, and the supported scalar path
+gains no allocation, copy, branch, lookup, hash, dispatch, or layout work.
+Remaining APIs are unsafe and unsigned. Source-reviewed only; checks were not
+executed.
+
 ## 2026-08-26 dead RuntimeValue inspection/clone removal
 
 Five additional providerless families—string/array/dictionary predicates,

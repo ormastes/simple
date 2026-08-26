@@ -1541,6 +1541,24 @@ Torch SFFI nor all SFFI may be described as verified safe.
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
 
+## 2026-08-26 providerless pointer-era value API retirement
+
+- Remove active raw string/type/free/arithmetic/less-than declarations and
+  wrappers after confirming there is no C, Rust, or interpreter provider and
+  no production consumer.
+- Remove their public interning specs while retaining internal full-generator
+  provider fixtures until that generator is separately redesigned.
+- Rewrite the obsolete minimal-FFI sample to cover only both-lane tagged scalar
+  constructors, predicates, and projections; preserve semantic booleans.
+- Reduce canonical closure to 11 both, 3 one-lane, 3 providerless and
+  compiler-minimal closure to 20 both, 3 native-only, 0 interpreter-only, 3
+  providerless.
+- Add no live allocation, copy, branch, lookup, hash, dispatch, or layout work.
+- Resolve the remaining GC trio by replacing live `gc_collect` users with the
+  actual memory-owner policy or by implementing one verified owner; never add
+  a no-op success fallback.
+- Status: source-reviewed, deliberately unverified and unsigned.
+
 ## 2026-08-26 dead RuntimeValue inspection/clone removal
 
 - Remove unused string/array/dictionary predicates, raw string projection, and
