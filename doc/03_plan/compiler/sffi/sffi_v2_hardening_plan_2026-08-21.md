@@ -1567,8 +1567,12 @@ Torch SFFI nor all SFFI may be described as verified safe.
   declarations without changing their direct call algorithms.
 - Ratchet exact provider signatures so future register-class drift fails a
   source audit.
-- Next minimize lexical unsafe scope around the raw bootstrap calls; declaration
-  tagging alone is not safe-wrapper verification.
+- First minimization slice complete: all four dynamic-Any operations and the
+  string parser's float constructor use private mandatory-inline lexical
+  unsafe thunks, with no direct raw calls in their semantic bodies.
+- Bootstrap string minimization complete: all 35 raw identities have one
+  mandatory-inline lexical unsafe thunk and no additional executable raw call;
+  pointer capabilities are confined to the thunks that carry raw pointers.
 - Remaining production debt: 4,431 unsafe-tag gaps, 6,185 contract gaps, zero
   signed-admitted declarations.
 

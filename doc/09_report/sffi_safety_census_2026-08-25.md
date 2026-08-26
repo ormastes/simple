@@ -1316,8 +1316,18 @@ This is zero-cost declaration authority plus an ABI correction; no lookup,
 allocation, copy, branch, lock, or generic dispatch is added. The production
 census moves to 2,828 unsafe-tagged declarations, 4,431 unsafe-tag gaps, and
 6,185 contract gaps. The `rt_*` subset has 3,287 unsafe-tag gaps and 5,015
-contract gaps. Lexical confinement of the bootstrap implementation's raw calls
-is still pending and these artifacts remain unsigned and unverified.
+contract gaps. These artifacts remain unsigned and unverified.
+
+The four dynamic-Any raw operations are now each confined to one private
+mandatory-inline lexical unsafe thunk, and the corrected string-parser float
+constructor uses the same pattern. Arithmetic, comparison, and parsing bodies
+no longer call those raw symbols directly. Mandatory inlining preserves the
+direct scalar call shape; no allocation, branch, lookup, copy, or dispatch is
+introduced. The confinement pass now covers all 35 bootstrap string
+declarations as well: every raw identity has exactly one executable call,
+inside its matching private mandatory-inline thunk. Pointer-bearing thunks
+request `raw_ptr`; tagged-scalar thunks request only `ffi`. Semantic string
+code contains no direct raw call.
 
 ## 2026-08-26 public RuntimeValue closure completion
 
