@@ -70,19 +70,17 @@
    `driver_hir_pipeline_lowering.spl`: the seed could not resolve
    `compiler.semantics.const_fold` (E1034). A bounded fetch/check of
    `origin/main` at `e35d34f9eeda1b899abd439c56aa8ecec674a1cf` found no fix. The
-   defect was repaired on isolated branch
-   `work/fix/local-20260826-002-stage2-const-fold-import`, reviewed independently
-   twice, verified by the focused quarantine spec (2/2), and submitted to
-   protected `main` as PR #25. Parallel diagnosis found the later link failures
-   were also partial snapshot regressions. Six isolated repairs were composed
-   and xhigh-reviewed; exact stack commit `9c0e666fc9c` admitted Stage 2 with
-   provenance/sanity receipts and artifact SHA-256
-   `7e2ee2daa645306cd2ce6636a62cecc4d280afb6efe98897b90da115b0f68e8e`.
-   Publishing that dependent stack was correctly blocked by a pre-existing
-   clean-tree lint parse failure. The independent grammar fix passed the full
-   pre-push chain and is submitted to protected `main` as PR #26. The stack
-   must be restacked and submitted only after #25/#26 integration; no direct
-   protected-ref update or hook bypass is permitted.
+   defect and six related snapshot regressions were repaired in isolated lanes.
+   Fragmented PRs #25/#26 are superseded by current-main PR #29. Its exact
+   seven-fix closure admitted Stage 2 with provenance/sanity receipts and
+   artifact SHA-256
+   `a9c1b931648146c0ccf4f289dd2ab6176e1fd90b0db605338c84bacb406238b1`.
+   The same reviewed fixes were backported to beta PR #28. Its first admission
+   correctly rejected a stale `1.0.0-RC` verifier literal; after binding every
+   Stage 2/3 sanity consumer to canonical `release/version.sdn`, the second
+   focused cycle admitted artifact SHA-256
+   `609c9685ed03f752239de4dc20aba4d5baa97ecb6c6183fb994e9ea1fc76f071`.
+   Neither result updates a protected ref directly.
 2. The GitHub policy configuration row is now PASS, but configuration is not a
    beta release receipt. Exact signed beta promotion, immutable publication of
    its admitted assets, artifact attestations, and byte-identical npm registry

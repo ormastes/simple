@@ -111,12 +111,15 @@ verify-evidence-required
   and exact branch commit `36f0aeb00c9` is submitted to protected `main` as PR
   #25. Parallel isolated fixes repaired the independently exposed snapshot
   clobbers. Their xhigh-reviewed integration stack at `9c0e666fc9c` admits
-  Stage 2; provenance/sanity pass and the artifact SHA-256 is
-  `7e2ee2daa645306cd2ce6636a62cecc4d280afb6efe98897b90da115b0f68e8e`.
-  Stack publication was fail-closed by `main`'s multiline lint parse defect;
-  the separate grammar fix passed the complete pre-push chain and is PR #26.
-  Restack/publish waits for protected integration of #25/#26. No release-line
-  backport is yet eligible. The live GitHub policy baseline now passes with
+  Stage 2. Those fragmented submissions are superseded by current-main PR #29,
+  whose exact seven-fix closure also admits Stage 2 with artifact SHA-256
+  `a9c1b931648146c0ccf4f289dd2ab6176e1fd90b0db605338c84bacb406238b1`.
+  The reviewed beta backports are now present on PR #28. Its first Stage 2
+  admission failed closed because the receipt verifier still expected legacy
+  `1.0.0-RC`; the canonical authority repair now derives `1.0.0-rc.1` from
+  `release/version.sdn`, and the focused second cycle admits artifact SHA-256
+  `609c9685ed03f752239de4dc20aba4d5baa97ecb6c6183fb994e9ea1fc76f071`.
+  The live GitHub policy baseline now passes with
   seven rulesets, the declared environments, and immutable releases enabled.
   Stage 3/4, the clean whole suite, exact signed beta promotion, candidate
   publication, and byte-identical npm receipts are still required.
