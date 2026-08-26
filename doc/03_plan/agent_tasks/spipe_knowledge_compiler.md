@@ -965,6 +965,29 @@ normal/highest-capability model. AC-4 remains open.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### 10.20 Fresh three-blocker ABI repair lane (2026-08-26)
+
+**Scope:** exactly the five canonical knowledge-compiler documents; no product
+code or tests. **Merge owner:** `/root`. **Final reviewer:** an independent
+highest-capability reviewer after a separate implementation-readiness review.
+
+1. Freeze the executor result union so generic `{code}` excludes
+   `unauthorized`; require the sole unauthorized arm to carry a private exact
+   seven-enum tombstone reason, persist it in the bridge, and redact it from
+   every public result.
+2. Freeze the sole page/replay order: request structural/type/cap checks;
+   reservation; cursor identity/decode/verify/binding/liveness; replay or fresh
+   work. The bridge alone tombstones every post-reservation cursor failure using
+   the existing ordered reason table; no executor/store double ownership.
+3. State the exact required `requestedLimit`/`requested_limit` range as positive
+   safe integer `1..1000` in all session, request, wire, executor, result,
+   evidence, and cap maps. Require oracle cases for 0/1/1000/1001/noninteger
+   and reserve-before-cursor call traces.
+
+**Exit gate:** static scope/contradiction checks plus both reviews PASS. This is
+not product readiness: provider implementation/admission, Wave 4, AC-4, and
+the integrated pipeline stay open.
+
 ### 10.17 Cursor-authority mapping and provider handoff (2026-08-26)
 
 1. **Representation decision — frozen.** After reservation, an unclassified

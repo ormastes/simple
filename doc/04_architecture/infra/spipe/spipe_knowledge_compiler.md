@@ -1191,3 +1191,27 @@ candidate cap. A fresh architecture session must define a structurally
 disjoint executor-error union, one reserve/cursor order with a single
 tombstone owner, and `requestedLimit` in `1..1000`. Provider readiness,
 implementation/admission, Wave 4, AC-4, and pipeline admission remain open.
+
+### 17.11 Fresh authority-bridge correction candidate (2026-08-26)
+
+The architecture now freezes three repair constraints for the synchronous
+in-process bridge. First, its executor failure algebra is structurally
+disjoint: the generic `{code}` branch excludes `unauthorized`; the only
+unauthorized branch has exact private `{code:"unauthorized",tombstoneReason}`
+data, where the reason is one of the existing seven store reasons and never
+crosses the public boundary. The bridge owns persistence/redaction; the
+executor owns no evidence-store mutation.
+
+Second, every page path performs only closed-shape/type/capability checks before
+the one atomic reservation. Cursor identity, decoding, signature verification,
+binding, generation, policy, and liveness checks are all post-reservation for
+both fresh and replay branches. The bridge maps their first established fact
+through the existing ordered tombstone table and makes exactly one tombstone
+attempt; malformed/oversized cursors remain pre-reservation errors. Third,
+`requestedLimit` is a fixed required positive safe integer `1..1000` in every
+bridge/wire/executor/page/replay contract, while cursors deliberately do not
+bind its per-page value.
+
+This candidate retains bounded-store and public-error contracts and is not
+provider implementation/admission evidence. Wave 4, AC-4, and pipeline
+admission remain open pending static and independent high-capability review.

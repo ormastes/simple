@@ -1637,7 +1637,8 @@ Those method names intentionally match the ports already captured by
  providerGeneration, analyzerIdentity, scoreContractVersion,
  workspaceUid, snapshotId, authorizationScopeDigest, lexicalRoot,
  policyHash, policyVersion, transportKeyId,transportAuthorityId,
- transportAuthorityGeneration,transportRevocationGeneration,deadlineMs}
+ transportAuthorityGeneration,transportRevocationGeneration,deadlineMs,
+ requestedLimit:{minimum:1,maximum:1000}}
 ```
 
 The adapter identity and four semantic identity fields must equal the literals
@@ -1695,7 +1696,7 @@ different algorithm or padded/base64 spelling is `incompatible_contract`.
 `lexicalEvidenceStore` is a closed synchronous capability:
 
 ```text
-reserveOperationV1({operationKey,inputDigest,kind,observedAtMs})
+reserveOperationV1({operationKey,inputDigest,kind})
   -> {status:"reserved",operationKey,reservationToken}
    | {status:"replay",operationKey,receiptUid,recordDigest}
    | {status:"tombstoned",operationKey,receiptUid,recordDigest,reason,
@@ -1738,6 +1739,11 @@ the bridge first persists `interrupted` and then returns public
 enum coercion. A specific expiry, revocation, binding, authority-generation,
 policy, or record-corruption classification established first retains
 precedence.
+
+`observedAtMs` on a tombstone is the post-reservation trusted start observation.
+Only an `interrupted` tombstone caused by failure of that first observation may
+use `observedAtMs:null`; no other tombstone may use null. A reservation has no
+timestamp because it is intentionally created before any clock/liveness call.
 
 #### 17.7.2 Existing lexical-source request records
 
@@ -1877,11 +1883,22 @@ logicalRoot,queryHash,observedAtMs,expiresAtMs}` and returns that full frozen
 receipt. `issued_at_ms` must equal `observedAtMs`; `expires_at_ms` must equal
 `expiresAtMs`, which is `observedAtMs + min(deadlineMs,30000)`.
 `verifyTransportQueryReceiptV1` accepts
-`{receipt,expected,observedAtMs}` and returns exactly
-`{receiptId,decision,keyId,authorityId,authorityGeneration,policyVersion,
-policyDigest,revocationGeneration,issuedAtMs,expiresAtMs}`. `decision` must be
-`verified`; identity, generation, root, policy, scope, time, and revocation
-must match the expected session. A `qr-*` value is never a `D-*` value.
+`{receipt,expected,observedAtMs}` and returns exactly one deeply frozen closed
+decision member:
+
+```text
+{decision:"verified",receiptId,keyId,authorityId,authorityGeneration,
+ policyVersion,policyDigest,revocationGeneration,issuedAtMs,expiresAtMs}
+{decision:"rejected",reason}
+```
+
+The rejected member has exactly `reason`, which is one of `invalid_signature`,
+`expired`, `revoked`, `binding_mismatch`, `authority_generation_changed`, or
+`policy_changed`. Identity, generation, root, policy, scope, time, and
+revocation must match the expected session for the verified member. A thrown
+value, thenable, unknown field/reason, mutable result, or other shape is a
+verifier malfunction, not a rejected member. A `qr-*` value is never a `D-*`
+value.
 The response echo is equal only when the restricted canonical bytes of the
 complete closed receipt are identical to those issued; object identity and a
 partial field comparison are insufficient.
@@ -2325,3 +2342,178 @@ design session must make the executor-error union structurally disjoint,
 choose one reserve/cursor order and tombstone owner, and specify
 `requestedLimit` as `1..1000`. Provider readiness/implementation/admission,
 Wave 4, AC-4, and the integrated pipeline remain open.
+
+### 17.14 Fresh provider ABI correction — executable contract candidate (2026-08-26)
+
+This section supersedes only the conflicting executor-failure, verifier-result,
+reservation timestamp, cursor-order, and `requestedLimit` wording in Sections
+17.7.1, 17.7.2, 17.7.3, 17.7.8, and 17.7.9. The exact provider-session
+capability now advertises its fixed request-limit interval, and reservation is
+intentionally timestamp-free so no liveness operation precedes it. It preserves
+the previously frozen transport/evidence authority, signed-record, bounded
+store, canonical-byte, public-error, and non-admission contracts except for
+those narrow representational corrections. It is a documentation candidate,
+not provider implementation or admission evidence.
+
+#### 17.14.1 Closed `requestedLimit` contract
+
+Every public page request, bridge page-operation preimage, wire-envelope
+payload, executor input payload, executor success result, signed page record,
+stored page projection, and page-replay result names the same semantic value:
+`requestedLimit` in camel-case records and `requested_limit` in wire records.
+It is a positive safe integer in the inclusive range **1..1000**. Its type and
+range are checked after the containing closed shape/scalar/canonical checks and
+before any authority, provider, signing, or store side effect. A valid-shaped
+integer outside that range is `limit_exceeded`; a non-integer, unsafe integer,
+absent field, or noncanonical representation is `invalid_request`. The same
+value must agree canonically across the bridge request, operation preimage,
+executor payload/result, returned page, signed `D-*`, and replay projection.
+The `qr-*` has no direct request-limit field: it cryptographically binds the
+restricted-canonical payload containing `requested_limit` through its exact
+`query_hash`, which the bridge recomputes. It is a per-page value: authenticated cursors intentionally do not
+bind it, so a subsequent page may use another value in `1..1000`.
+
+The immutable provider-session capability is therefore explicit (and is the
+same closed record stated in Section 17.7.1):
+
+```text
+{wireProtocol:{major:1,minor:1}, authorizedLexicalPage:true,
+ adapterIdentity:"spipe-authorized-lexical-provider-adapter-v1",
+ providerContractVersion:"spipe-search-provider/1.0",
+ providerImplementationDigest,providerGeneration,
+ analyzerIdentity:"spipe-unicode-lex-v1",scoreContractVersion:"bm25-fixed-v1",
+ workspaceUid,snapshotId,authorizationScopeDigest,lexicalRoot,
+ policyHash,policyVersion,transportKeyId,transportAuthorityId,
+ transportAuthorityGeneration,transportRevocationGeneration,deadlineMs,
+ requestedLimit:{minimum:1,maximum:1000}}
+```
+
+The final `requestedLimit` capability record is descriptive and frozen; it is
+not caller-configurable. The request/payload field remains mandatory for each
+call and must be within that exact advertised interval.
+
+#### 17.14.2 Structurally disjoint executor failure union
+
+`executeLexicalPageV11` returns either the existing closed success response or
+exactly one deeply frozen closed failure member. The union is discriminated by
+shape, not merely by a prose condition:
+
+```text
+{ok:false,error:{code}}
+{ok:false,error:{code:"unauthorized",tombstoneReason}}
+```
+
+In the first member, `code` is exactly one of `invalid_request`,
+`limit_exceeded`, `incompatible_contract`, `binding_mismatch`, `stale_cursor`,
+`provider_unavailable`, `snapshot_corrupt`, or `internal_error`; it **excludes
+`unauthorized`**. The second member has exactly the two shown error fields and
+is the only executor representation of `unauthorized`. Its private
+`tombstoneReason` is exactly one of the existing seven storage values:
+
+```text
+interrupted | expired | revoked | binding_mismatch |
+authority_generation_changed | policy_changed | record_corrupt
+```
+
+The executor emits the two-field unauthorized member only for a classified
+transport-receipt verifier rejection, with this exhaustive mapping:
+
+| verifier result | private `tombstoneReason` |
+|---|---|
+| invalid signature/canonical receipt | `record_corrupt` |
+| expired | `expired` |
+| revoked | `revoked` |
+| binding mismatch | `binding_mismatch` |
+| authority-generation drift | `authority_generation_changed` |
+| policy drift | `policy_changed` |
+
+A verifier throw, thenable, malformed result, or unclassified trusted
+cursor-authority malfunction is not an unauthorized member: it is the
+code-only `{ok:false,error:{code:"internal_error"}}` member. No other code may
+carry `tombstoneReason`. After reservation, the bridge validates this exact
+union. For its unauthorized member it persists the private reason, but returns
+only public `{code:"unauthorized"}`; the reason is never exposed to the
+lexical-source or MCP boundary. For code-only `internal_error`, an executor
+throw/thenable/malformed result, or unclassified cursor-authority malfunction,
+the bridge persists `interrupted` before returning public `internal_error`.
+The existing ordered tombstone classification takes priority whenever it has
+already established a more specific legal reason.
+
+#### 17.14.3 One page/replay/fresh order and one tombstone owner
+
+The bridge is the sole owner of store reservation and tombstoning. The executor
+never reserves, commits, tombstones, or calls the evidence store. For every
+page call, the following total order is normative; no prose, trace, or oracle
+may place `Cidentity` or `Cverify` before reservation:
+
+1. Validate the outer closed request and nested scalar/canonical shape;
+   enforce `requestedLimit` `1..1000`, query/cursor byte caps, and wire/page
+   independent caps. This pre-reservation stage may inspect cursor type and
+   raw UTF-8 length, but does not decode, authenticate, bind, or check liveness
+   of a non-null cursor.
+2. Validate negotiated protocol/session/capability identity and derive the
+   operation key/input digest from the raw canonical cursor text or null. These
+   are structural/capability checks only; no clock, authority, verifier,
+   workspace/snapshot/root/binding equivalence, or cursor liveness operation is
+   permitted before reservation.
+3. Call `reserveOperationV1` exactly once. A rejected/collision/tombstoned
+   reserve returns its existing public store result with no cursor-authority,
+   transport issuer/verifier, provider, evidence authority, commit, or
+   tombstone call.
+4. With `status:"reserved"` or `status:"replay"`, make the one start-clock
+   observation, then call cursor `identity()` and decode, canonical-reencode,
+   `verify`, and compare every cursor
+   session/workspace/snapshot/scope/root/binding/query/exclusion/generation/
+   policy field and cursor time. A null cursor completes this cursor stage after
+   `identity()` without a `verify` call. These checks occur before branch
+   execution, so both fresh and replay have identical cursor authority.
+5. For `status:"replay"`, resolve and re-verify the stored page record,
+   embedded `qr-*`, stored cursor continuity, expiry, authority, binding, and
+   projection; then make the end-clock/liveness check and return the retained
+   page. It issues no `qr-*`, executes no provider, signs nothing, and commits
+   nothing.
+6. For `status:"reserved"`, issue `qr-*`; execute the provider; independently
+   verify the echo; validate the complete returned page; authenticate any next
+   cursor; derive/sign/self-verify the page `D-*`; atomically commit; resolve
+   and re-verify; then make the end-clock/liveness check and return.
+
+Every failure from steps 4–6 is post-reservation and is tombstoned by the
+bridge before its public error is returned. The one ordered reason table is:
+
+| first established post-reservation fact | persisted reason | public outcome |
+|---|---|---|
+| elapsed cursor/receipt/page lifetime | `expired` | `stale_cursor` for inbound cursor; otherwise owning public code |
+| trusted current revocation decision | `revoked` | `unauthorized` for `qr-*`; otherwise owning public code |
+| workspace/snapshot/scope/root/binding/session/query/exclusion drift | `binding_mismatch` | `stale_cursor` for inbound cursor; otherwise owning public code |
+| key/authority generation drift | `authority_generation_changed` | `stale_cursor` for inbound cursor; otherwise owning public code |
+| policy version/digest drift | `policy_changed` | `stale_cursor` for inbound cursor; otherwise owning public code |
+| UID/digest/signature/canonical record/page/projection inconsistency | `record_corrupt` | classified `qr-*` verifier rejection is `unauthorized`; otherwise `snapshot_corrupt` or `evidence_unverified` at its page/D/store owner |
+| any remaining incomplete provider/authority/store work | `interrupted` | owning public code, or `internal_error` for an unclassified trusted failure |
+
+The first applicable row is final. An authenticated inbound cursor failure is
+public `stale_cursor`; a verifier-classified `qr-*` failure uses the disjoint
+unauthorized member and public redaction above. A pre-reservation malformed or
+oversized cursor is respectively `invalid_request` or `limit_exceeded` and
+creates no store entry. A later cursor failure cannot be reclassified as a
+pre-reservation validation failure.
+
+The page call oracle is consequently fixed: valid fresh and replay calls make
+one bridge reserve, then one start-clock observation, then one cursor
+`identity`; a non-null inbound cursor makes one cursor `verify` after that
+identity. Fresh success may additionally verify and sign only the outbound
+cursor after provider-page validation. Replay never issues, executes, signs, or
+commits. Any post-reservation cursor error calls exactly one bridge tombstone;
+cursor processing precedes fresh commit, so no commit result can own that
+cleanup. No executor trace may tombstone independently.
+
+#### 17.14.4 Required focused oracle rows
+
+The provider-page oracle must include one adversarial row each for: generic
+executor `unauthorized` shape rejection; unauthorized arm missing/adding a
+field; all six verifier-to-seven-enum mappings; private-reason redaction;
+malformed verifier result mapping to `internal_error` plus `interrupted`;
+`requestedLimit` values `0`, `1`, `1000`, `1001`, unsafe integer, and string;
+pre-reservation malformed/oversize cursor with no reserve; valid cursor failure
+after reserve with exactly one tombstone; replay cursor failure after reserve;
+and fresh/replay call counts proving `Cidentity`/`Cverify` follow reserve.
+These tests are required before implementation readiness can become PASS.

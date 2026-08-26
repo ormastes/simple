@@ -2793,3 +2793,24 @@ session must make the executor-error union structurally disjoint, freeze one
 reserve/cursor order with unambiguous tombstone ownership, and state
 `requestedLimit` as `1..1000`. Provider readiness and admission, Wave 4, AC-4,
 and the integrated pipeline remain open.
+
+### 39.9 Fresh ABI correction candidate (2026-08-26)
+
+The next provider-authority design candidate corrects the three recorded
+self-containment defects without changing the selected knowledge-compiler
+architecture or claiming product admission. It freezes a structurally disjoint
+executor-error union: the generic code-only member excludes `unauthorized`, and
+the sole `unauthorized` member carries a private seven-enum tombstone reason
+which is persisted but redacted from public results. It also makes
+`requestedLimit`/`requested_limit` a mandatory positive safe integer `1..1000`
+in the session capability, bridge request, wire payload, executor result, and
+signed/replayed page evidence.
+
+The page lifecycle is now one total order: structural/type/cap checks only;
+reserve; cursor identity/decode/verify/binding/liveness; replay or fresh work;
+end liveness. Thus every authentic cursor failure is post-reservation and the
+bridge, rather than the executor, performs exactly one ordered tombstone
+translation. The candidate retains the existing exact seven-reason precedence,
+canonical-byte caps, and public redaction boundary. It requires fresh static,
+implementation-readiness, and independent highest-capability review; provider
+implementation/admission, Wave 4, AC-4, and pipeline integration remain open.

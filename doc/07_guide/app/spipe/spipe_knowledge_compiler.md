@@ -1079,13 +1079,16 @@ same closed record plus final `authorized_lexical_page:true`; absent/false is
 not conforming. All semantic identity arrays, limits, and `optional_fields:[]`
 remain unchanged. Unknown versions or extra fields fail closed.
 
-For each fresh page the observable order is: a bridge start-clock observation;
-derive deterministic session/input/operation/request identity; atomically
-reserve; issue `qr-*`; provider
+For each fresh page the observable order is: validate closed structure, scalar
+values, negotiated capability, and fixed caps; derive deterministic
+session/input/operation/request identity from the raw bounded cursor text;
+atomically reserve; then make the bridge start-clock observation and perform
+cursor identity/decode/verification/binding/liveness; issue `qr-*`; provider
 verification and execution; exact canonical-byte receipt echo; independent
 bridge verification; provider page validation; full page `D-*` signature;
-atomic store; immediate resolve/re-verification; then projection. The page
-operation key is `lpo-<64 lowercase hex>` and its request ID is
+atomic store; immediate resolve/re-verification; then projection. No clock,
+authority, or cursor authentication operation is permitted before reservation.
+The page operation key is `lpo-<64 lowercase hex>` and its request ID is
 `req-lp-<the same 64 hex>`. An aggregate operation uses
 `lao-<64 lowercase hex>`.
 Immediately before success return, the bridge observes the clock again and
@@ -1292,3 +1295,21 @@ the candidate cap. In a fresh bounded session, make the executor-error union
 structurally disjoint, freeze one reserve/cursor order and tombstone owner, and
 state `requestedLimit` as `1..1000`. Keep provider readiness/implementation/
 admission, Wave 4, AC-4, and the integrated pipeline open.
+
+#### Three-blocker ABI repair operator guide (2026-08-26)
+
+Treat the provider bridge as the sole evidence-store owner. For any valid page
+call, check closed structure, scalar/canonical values, `requestedLimit`
+`1..1000`, and byte caps first; reserve next; only then call cursor identity or
+verify/decode/binding/liveness logic. A malformed or oversized cursor fails
+before reserve; every later cursor failure is mapped by the bridge to the first
+applicable existing tombstone reason and is redacted at the public boundary.
+
+The executor may return generic `{code}` only for codes other than
+`unauthorized`. Its only unauthorized result carries a private allowed
+tombstone reason; persist that reason but return only public `unauthorized`.
+Do not copy the reason into a lexical-source result, diagnostic, or MCP reply.
+Never let the executor reserve or tombstone. Replay follows the same
+post-reservation cursor checks and performs no issuer/provider/sign/commit
+work. This remains a contract candidate pending fresh static and independent
+review; it does not admit the provider, Wave 4, AC-4, or pipeline.
