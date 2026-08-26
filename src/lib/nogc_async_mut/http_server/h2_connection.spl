@@ -20,7 +20,7 @@
 #   - Priority / weighted scheduling
 #
 # Worker drains decoded requests via take_decoded_requests() and feeds
-# responses back via queue_h2_response(stream_id, resp).
+# responses back via queue_h2_response(stream_id, request_method, resp).
 
 use std.http.h2.h2_frame.{
     H2Frame, H2DataFrame, H2HeadersFrame, H2ContinuationFrame, H2SettingsFrame,
@@ -40,6 +40,7 @@ use std.common.hpack.decoder.{hpack_decode}
 use std.http_server.h2_request_headers.{h2_validate_request_headers}
 use std.http_server.h2_stream.{H2Stream, H2StreamState}
 use std.http_server.types.{HttpRequestData, HttpResponseData}
+use std.common.net.http_core.{response_body_framing_decision, response_declared_content_length}
 
 use std.common.string_core.{text_to_bytes}
 # ============================================================================
@@ -208,7 +209,7 @@ class H2Connection:
         """Drain and return all decoded H2 requests ready for processing.
 
         Each entry is (stream_id, request). Worker should call
-        queue_h2_response(stream_id, response) for each entry after
+        queue_h2_response(stream_id, request.method, response) for each entry after
         routing through the middleware/handler pipeline.
         """
         val out = self.pending_requests
@@ -221,7 +222,8 @@ class H2Connection:
             self.pending_writes.push(src[i])
             i = i + 1
 
-    pub(package) me queue_h2_response(stream_id: i64, resp: HttpResponseData):
+    pub(package) me queue_h2_response(stream_id: i64, request_method: text,
+                                     resp: HttpResponseData):
         # Build HPACK-encoded header block inline
         var hpack: [u8] = []
         val st = resp.status
@@ -238,29 +240,56 @@ class H2Connection:
             while si < ss_bytes.len():
                 hpack.push(ss_bytes[si])
                 si = si + 1
+        var selected_body_len = if resp.body_bytes.len() > 0:
+            resp.body_bytes.len()
+        elif resp.body.len() > 0:
+            resp.body.len()
+        else:
+            resp.body_length
+        if selected_body_len <= 0 and (request_method == "HEAD" or resp.status == 304):
+            val declared_length = response_declared_content_length(resp.headers)
+            if declared_length >= 0:
+                selected_body_len = declared_length
+        val framing = response_body_framing_decision(
+            request_method, resp.status, false)
+        if framing.emit_content_length:
+            val cl_name = text_to_bytes("content-length")
+            val framed_body_len = if framing.content_length_must_be_zero: 0 else: selected_body_len
+            val cl_value = text_to_bytes("{framed_body_len}")
+            hpack.push(0)
+            hpack.push(cl_name.len())
+            for byte in cl_name:
+                hpack.push(byte)
+            hpack.push(cl_value.len())
+            for byte in cl_value:
+                hpack.push(byte)
         var hi = 0
         while hi < resp.headers.len():
             val pair = resp.headers[hi]
-            val hn_bytes = text_to_bytes(pair.0)
-            val hv_bytes = text_to_bytes(pair.1)
-            hpack.push(0)
-            hpack.push(hn_bytes.len())
-            var ni = 0
-            while ni < hn_bytes.len():
-                hpack.push(hn_bytes[ni])
-                ni = ni + 1
-            hpack.push(hv_bytes.len())
-            var vi = 0
-            while vi < hv_bytes.len():
-                hpack.push(hv_bytes[vi])
-                vi = vi + 1
+            val lower_name = pair.0.lower()
+            if lower_name != "content-length" and lower_name != "transfer-encoding" and
+                    lower_name != "trailer" and lower_name != "connection" and
+                    lower_name != "keep-alive" and lower_name != "upgrade":
+                val hn_bytes = text_to_bytes(lower_name)
+                val hv_bytes = text_to_bytes(pair.1)
+                hpack.push(0)
+                hpack.push(hn_bytes.len())
+                var ni = 0
+                while ni < hn_bytes.len():
+                    hpack.push(hn_bytes[ni])
+                    ni = ni + 1
+                hpack.push(hv_bytes.len())
+                var vi = 0
+                while vi < hv_bytes.len():
+                    hpack.push(hv_bytes[vi])
+                    vi = vi + 1
             hi = hi + 1
 
         # Build body bytes
         var body_bytes: [u8] = []
-        if resp.body_bytes.len() > 0:
+        if framing.transfer_body and resp.body_bytes.len() > 0:
             body_bytes = resp.body_bytes
-        elif resp.body.len() > 0:
+        elif framing.transfer_body and resp.body.len() > 0:
             body_bytes = text_to_bytes(resp.body)
 
         # Write HEADERS frame: type=1, flags=END_HEADERS(4) [+END_STREAM(1) if no body]

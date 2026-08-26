@@ -32,6 +32,7 @@ use std.common.net.tls_application_record_stream_v1.{
     tls_application_record_sequence_can_advance_v1,
     tls_application_record_stream_new_v1
 }
+use std.common.net.http_core.{response_body_framing_decision}
 
 use std.http_server.worker_owner.{
     Worker, WorkerResourceSnapshot, OP_RECV, OP_SEND, OP_SENDFILE, OP_OPEN_SENDFILE,
@@ -602,9 +603,11 @@ impl Worker:
                     resp = self.inline_static_handler(location, request)
                 Err(e):
                     resp = build_not_found()
-            if resp.body_file.len() > 0:
+            val response_framing = response_body_framing_decision(
+                request.method, resp.status, false)
+            if response_framing.transfer_body and resp.body_file.len() > 0:
                 resp = worker_static_file_fallback_response(resp)
-            conn.queue_h2_response(stream_id, resp)
+            conn.queue_h2_response(stream_id, request.method, resp)
 
         # Drain any pending outbound frames (SETTINGS ACK, PING echo, responses)
         val out_bytes = conn.take_pending_writes()
