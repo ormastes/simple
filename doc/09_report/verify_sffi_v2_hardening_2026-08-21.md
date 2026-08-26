@@ -51,3 +51,16 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): no signed artifact-bound provider admission is
   established by this work. This follow-up does not change the overall FAIL
   status above.
+
+## Follow-up: advanced scalar math raw boundary (2026-08-26)
+
+- PASS (static): twelve fixed-`f64` declarations and thirteen calls in the
+  canonical advanced-math facade are explicitly and lexically `unsafe(ffi)`;
+  the guard confirms the Rust exports and no per-call admission machinery.
+- PASS (behavior): `math_advanced_spec.spl` executes 13/13 examples with zero
+  failures; NaN/infinity remain values rather than fabricated error signals.
+- PASS (performance review): direct scalar call shape is retained; optimizer
+  reports 25 MIR bounds-check opportunities and zero general patterns.
+- WARN: checks ran through the bootstrap seed, not a self-hosted production
+  binary. No signature or artifact-bound evidence was created, so global SFFI
+  admission remains FAIL.

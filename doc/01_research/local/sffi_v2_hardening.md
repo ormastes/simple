@@ -1539,3 +1539,19 @@ authority audit pass. Both optimizer reports identify only two pre-existing
 collection-capacity opportunities in conversion loops; no unsupported
 micro-optimization was applied. This is source-level containment and contract
 repair, not provider verification or signed admission.
+
+### Advanced scalar math boundary audit (2026-08-26)
+
+The canonical `std.nogc_sync_mut.io.math` facade has twelve fixed-`f64` Rust
+exports for logarithmic, inverse-trigonometric, hyperbolic, and rounding
+operations. The provider delegates each directly to Rust IEEE-754 operations;
+NaN and infinities are valid results, not null/error sentinels. A pure-Simple
+floor/ceil counterpart exists, but replacing the native scalar operation would
+add cast/branch work and risk a hot-path regression. The facade therefore keeps
+direct scalar calls, marks every raw declaration `unsafe(ffi)`, and places every
+call in a minimal lexical FFI scope. The static authority audit verifies all
+twelve declarations, thirteen call sites (including `math_round`), provider
+exports, and absence of per-call admission/lookup/hash/dispatch. The existing
+math specification passes 13/13; the optimizer reports no general pattern.
+This preserves values and performance shape but is not an artifact signature or
+semantic verification claim.

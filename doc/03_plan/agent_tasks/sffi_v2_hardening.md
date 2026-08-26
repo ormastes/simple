@@ -233,3 +233,12 @@ passing placeholder.
     provider admission remains zero. Next, migrate another ranked provider
     family or implement exact artifact-bound admission; do not call the global
     SFFI inventory safe or verified.
+43. Contain the canonical advanced scalar-math facade without replacing its
+    fixed-`f64` provider with a slower fallback. Require `unsafe(ffi)` on its
+    twelve declarations and lexical scopes on all thirteen calls, including the
+    round helper. Preserve NaN/infinity as valid IEEE-754 values and retain the
+    direct call shape; prohibit call-time admission, lookup, hashing, generic
+    dispatch, allocation, and copying. The static authority audit, source
+    check, 13-case math spec, and optimizer review pass under the bootstrap
+    seed. Signed admission remains zero; continue with a provider that has a
+    complete ABI/evidence path rather than labeling scalar containment verified.
