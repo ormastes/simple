@@ -300,7 +300,19 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
         return 0
     if native_build_streaming_surfaces(args):
         return 0      # streaming parse has no front-end parse cache to warm
-    native_build_shard_threads(args)
+    val requested = native_build_shard_threads(args)
+    if requested <= 0:
+        return 0
+    # A parse shard is a process, not a lightweight task: the seed interpreter
+    # eagerly loads its transitive front-end graph before the shard can claim
+    # one source file.  Fan-out equal to --threads therefore turns an innocent
+    # `--threads 8` into eight multi-GiB resident heaps.  Keep the default
+    # within the two-process allocation budget for interpreter-mode bootstrap;
+    # a measured host may raise it explicitly.
+    val configured_cap = (env_get("SIMPLE_PARSE_SHARD_MAX") ?? "").to_i64() ?? 0
+    val default_cap = if (env_get("SIMPLE_EXECUTION_MODE") ?? "") == "interpret": 2 else: requested
+    val cap = if configured_cap > 0: configured_cap else: default_cap
+    if requested > cap: cap else: requested
 
 # The driver selects the streaming-surfaces parse/lower path under exactly
 # this env + flag combination (driver_streaming_surface_enabled).
