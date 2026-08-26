@@ -257,3 +257,10 @@ passing placeholder.
     artifact missing registered `rt_counterpart_*` handlers. Do not claim the
     provider signed or globally verified until deployed-artifact parity and
     artifact-bound evidence are repaired.
+46. Keep SFFI evidence admission cryptographically precise: trust-store keys
+    scoped to a provider must be inspected as Ed25519 before raw signature
+    verification, so a trusted RSA/ECDSA key cannot silently change the stated
+    signature scheme. The dedicated contract fixture must admit a valid
+    Ed25519 provider and reject a trusted RSA key. This check is load-time-only
+    and must not add call-time work. It strengthens the future admission gate;
+    it does not create a provider artifact job or change the zero signed count.

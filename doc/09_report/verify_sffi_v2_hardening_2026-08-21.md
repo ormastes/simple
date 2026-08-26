@@ -86,3 +86,16 @@ a claim that SFFI v2 is complete.
   `rt_counterpart_open`/`rt_counterpart_probe_abi`; 7 of 8 focused examples
   fail before provider invocation. This is artifact parity, not a pass.
 - FAIL (global admission): no signed provider/evidence admission is established.
+
+## Follow-up: evidence-admission key algorithm policy (2026-08-26)
+
+- PASS (targeted contract): evidence admission accepts the valid provider-
+  scoped Ed25519 fixture and rejects a trusted RSA key before raw-signature
+  verification; existing artifact, report, trust, canonicalization, and
+  substituted-signature sabotage cases also pass.
+- PASS (performance scope): public-key inspection happens only during provider
+  admission. No SFFI call path, allocation, copy, registry lookup, hash, or
+  dispatch changed.
+- FAIL (global admission): this hardens the verifier but supplies no exact
+  signed provider artifact job, so the repository-wide signed-admitted count
+  remains zero and SFFI is not globally verified.

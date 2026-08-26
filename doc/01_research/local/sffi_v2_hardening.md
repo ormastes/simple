@@ -1583,3 +1583,19 @@ spec is blocked because the deployed bootstrap artifact lacks source-registered
 `rt_counterpart_*` handlers (7/8 examples fail before provider invocation).
 Optimizer review reports one pre-existing collection-capacity suggestion. This
 is not signed-provider admission or cross-lane verification.
+
+### Ed25519 evidence-admission algorithm policy (2026-08-26)
+
+The canonical evidence-admission verifier recomputes every artifact, source,
+build-input, compiler, ABI-registry, and verification-report digest, scopes the
+trust-store key to a provider, and checks a raw 64-byte signature. Its prior
+`pkeyutl -rawin` invocation nevertheless did not prove that the trusted public
+key was Ed25519, despite reporting an Ed25519 admission. The verifier now
+inspects the public-key algorithm first and rejects every non-Ed25519 key
+before signature processing. The focused contract test admits the normal
+Ed25519 fixture and rejects an otherwise trusted RSA key, along with its
+existing tamper, stale-report, trust-scope, canonicalization, and substituted
+signature cases. This is load-time-only admission work: it adds no per-call
+hashing, lookup, allocation, copy, loop, or dispatch. Repository-wide signed
+admission remains zero because no exact provider artifact job has yet been
+supplied.
