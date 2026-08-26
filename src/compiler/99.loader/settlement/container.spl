@@ -92,24 +92,6 @@ fn _insert_sorted_unique(values: [text], value: text) -> [text]:
         out.push(value)
     out
 
-fn _insert_sorted_unique_after(values: [text], value: text, processed: i64) -> [text]:
-    """Insert into the sorted, unprocessed suffix of a ready queue."""
-    var out: [text] = []
-    var index = 0i64
-    var inserted = false
-    for existing in values:
-        if index >= processed:
-            if existing == value:
-                return values
-            if not inserted and value < existing:
-                out.push(value)
-                inserted = true
-        out.push(existing)
-        index = index + 1
-    if not inserted:
-        out.push(value)
-    out
-
 # ============================================================================
 # Settlement Container
 # ============================================================================
@@ -334,18 +316,46 @@ impl SettlementContainer:
                 if in_degree.contains(dep_id):
                     in_degree[id] = in_degree[id] + 1
 
-        # Keep every ready set lexical so hash-map iteration cannot change the
-        # serialized settlement order across hosts.
-        var queue: [text] = []
+        # A lexical min-heap keeps hash-map iteration from changing serialized
+        # settlement order without copying the whole ready suffix per insert.
+        var ready: [text] = []
         for id in in_degree.keys():
             if in_degree[id] == 0:
-                queue = _insert_sorted_unique(queue, id)
+                ready.push(id)
+                var ready_index = ready.len() - 1
+                while ready_index > 0:
+                    val parent = (ready_index - 1) / 2
+                    if not (ready[ready_index] < ready[parent]):
+                        break
+                    val temporary = ready[parent]
+                    ready[parent] = ready[ready_index]
+                    ready[ready_index] = temporary
+                    ready_index = parent
 
         var sorted: [text] = []
-        var queue_cursor = 0i64
-        while queue_cursor < queue.len():
-            val current = queue[queue_cursor]
-            queue_cursor = queue_cursor + 1
+        while ready.len() > 0:
+            val current = ready[0]
+            val last = ready.len() - 1
+            if last == 0:
+                val _ = ready.pop()
+            else:
+                ready[0] = ready[last]
+                val _ = ready.pop()
+                var ready_index = 0i64
+                while true:
+                    if ready_index >= ready.len() / 2:
+                        break
+                    val left = ready_index * 2 + 1
+                    val right = left + 1
+                    var first = left
+                    if right < ready.len() and ready[right] < ready[left]:
+                        first = right
+                    if not (ready[first] < ready[ready_index]):
+                        break
+                    val temporary = ready[ready_index]
+                    ready[ready_index] = ready[first]
+                    ready[first] = temporary
+                    ready_index = first
             sorted.push(current)
 
             val entry = self.modules[current]
@@ -353,7 +363,16 @@ impl SettlementContainer:
                 if in_degree.contains(dependent_id):
                     in_degree[dependent_id] = in_degree[dependent_id] - 1
                     if in_degree[dependent_id] == 0:
-                        queue = _insert_sorted_unique_after(queue, dependent_id, queue_cursor)
+                        ready.push(dependent_id)
+                        var ready_index = ready.len() - 1
+                        while ready_index > 0:
+                            val parent = (ready_index - 1) / 2
+                            if not (ready[ready_index] < ready[parent]):
+                                break
+                            val temporary = ready[parent]
+                            ready[parent] = ready[ready_index]
+                            ready[ready_index] = temporary
+                            ready_index = parent
 
         if sorted.len() != self.modules.keys().len():
             # Circular dependency — find the cycle
