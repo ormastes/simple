@@ -1224,6 +1224,14 @@ Torch SFFI nor all SFFI may be described as verified safe.
   absence.
 - [x] Add no read or registry-scan work and add a static contract ratchet.
 
+### Completed duplicate-check incremental-write authority slice
+
+- [x] Remove the module-local raw file-write declaration and call.
+- [x] Delegate to canonical one-call `file_write_exact` after the existing
+  parent-directory setup and serialization.
+- [x] Preserve boolean failure reporting without retry or metadata probes.
+- [x] Add a static authority and one-write-shape ratchet.
+
 ### Completed compiler performance CLI authority slice
 
 - [x] Remove both duplicate raw `rt_get_args` declarations and calls.

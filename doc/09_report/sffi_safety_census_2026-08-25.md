@@ -586,6 +586,15 @@ has no current consumers, so the contract was corrected before runtime fan-out.
 There is no extra file read, registry scan, copy, cache, lock, hash, lookup,
 boxing layer, or dynamic dispatch.
 
+### Duplicate-check incremental-write authority follow-up
+
+Incremental duplicate-check caching no longer declares or calls raw
+`rt_file_write_text`; after its existing parent-directory creation and single
+serialization, it calls canonical `file_write_exact`.  The success path retains
+one write and the caller still reports false status.  No retry, metadata probe,
+extra serialization, allocation, copy, cache, lock, hash, lookup, boxing, or
+dispatch table was added.
+
 ### MDSOC layer-document read authority follow-up
 
 The layer documentation checker no longer declares or calls non-null raw
