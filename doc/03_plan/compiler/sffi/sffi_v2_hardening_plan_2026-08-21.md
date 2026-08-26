@@ -1745,3 +1745,11 @@ and unpromoted.
 - [x] Keep `SffiFileLock` as the safe exactly-once lock ownership surface.
 - [x] Preserve the raw direct-call cost model without lookup or allocation.
 - [x] Add a static source-shape ratchet for owner and call-site counts.
+### Completed JIT bridge single-owner slice
+
+- [x] Confirm `jit_ffi.spl` and `jit_sffi.spl` were byte-identical duplicates.
+- [x] Retain `jit_sffi.spl` as the sole implementation and SFFI owner.
+- [x] Replace `jit_ffi.spl` with an API-compatible wildcard re-export.
+- [x] Replace the canonical module's two local externs with shared typed owners.
+- [x] Remove duplicate parsing/lowering without adding runtime indirection.
+- [x] Add a static ratchet preventing raw externs from returning to the shim.

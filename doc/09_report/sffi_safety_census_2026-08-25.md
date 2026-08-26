@@ -156,3 +156,13 @@ sentinel checking alone cannot prove address bounds, lifetime, mapping identity,
 or exactly-once release.  The existing `SffiFileLock` resource wrapper remains
 the safe lock path.  The change adds no registry lookup, allocation, copy,
 hashing, or generic dispatch to these calls.
+### JIT bridge single-owner follow-up
+
+`app.io.jit_ffi` and `app.io.jit_sffi` were byte-identical 609-line modules,
+including duplicate raw file-read and directory-create declarations.  The
+former is now a seven-line compatibility re-export of the canonical
+`jit_sffi` owner.  This removes duplicate SFFI authority and avoids parsing and
+lowering a second implementation for legacy imports; it adds no runtime
+dispatch, lookup, or copy.  The canonical owner itself now uses the typed
+runtime file-result API and the shared directory owner, eliminating both local
+raw declarations rather than merely relocating them.
