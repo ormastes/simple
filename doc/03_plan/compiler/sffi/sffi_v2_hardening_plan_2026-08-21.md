@@ -1540,6 +1540,21 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Preserved the valid path's existing type match and one release dispatch; no
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+## 2026-08-26 SHA-1 return-contract follow-up
+
+- Aligned `finish(handle) -> text?` and `finish_bytes(handle) -> [u8]?` across
+  seed, interpreter, and native provider; removed the ignored out-pointer and
+  packed-integer declaration mismatches.
+- Native output is now a byte array rather than binary bytes tagged as text.
+- Removed packed-value casting and the `nil -> 0` fallback from scalar finish;
+  invalid/released handles fail closed and the scalar is a digest prefix.
+- Enforced exact interpreter arity, checked explicit prefix length, checked
+  handle growth, and checked native `u64 -> usize` conversion.
+- Preserved one payload pass/registry operation and avoided a second validity
+  lookup; scalar finish no longer formats/allocates a 40-byte hex string, and
+  native digest publication uses one packed-array bulk copy.
+- Status: source-reviewed, deliberately unverified and unsigned; SHA-1 is not
+  admitted for security use.
 ## 2026-08-26 XXH3 legacy-boundary follow-up
 
 - Tagged six raw XXH3 declarations `unsafe(ffi)` and confined their calls to

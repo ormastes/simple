@@ -43,28 +43,56 @@ fn text_arg<'a>(args: &'a [Value], index: usize, symbol: &str) -> Result<&'a str
     }
 }
 
-pub fn rt_sha1_new(_args: &[Value]) -> Result<Value, CompileError> {
-    let mut counter = SHA1_COUNTER.lock().unwrap();
+#[inline(always)]
+fn require_arity(args: &[Value], expected: usize, symbol: &str) -> Result<(), CompileError> {
+    if args.len() != expected {
+        return Err(CompileError::runtime(format!(
+            "{symbol}: expected {expected} arguments"
+        )));
+    }
+    Ok(())
+}
+
+pub fn rt_sha1_new(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 0, "rt_sha1_new")?;
+    let mut counter = SHA1_COUNTER
+        .lock()
+        .map_err(|_| CompileError::runtime("rt_sha1_new: counter lock poisoned".to_string()))?;
     let handle = *counter;
-    *counter += 1;
-    SHA1_STATE.lock().unwrap().insert(handle, Vec::new());
+    *counter = counter
+        .checked_add(1)
+        .ok_or_else(|| CompileError::runtime("rt_sha1_new: handle space exhausted".to_string()))?;
+    SHA1_STATE
+        .lock()
+        .map_err(|_| CompileError::runtime("rt_sha1_new: state lock poisoned".to_string()))?
+        .insert(handle, Vec::new());
     Ok(Value::Int(handle))
 }
 
 pub fn rt_sha1_write(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 3, "rt_sha1_write")?;
     let handle = int_arg(args, 0, "rt_sha1_write")?;
     let data = bytes_arg(args, 1, "rt_sha1_write")?;
+    let limit = usize::try_from(int_arg(args, 2, "rt_sha1_write")?)
+        .map_err(|_| CompileError::runtime("rt_sha1_write: len is outside usize range".to_string()))?;
+    if limit > data.len() {
+        return Err(CompileError::runtime(format!(
+            "rt_sha1_write: len {limit} exceeds payload length {}",
+            data.len()
+        )));
+    }
     let mut state = SHA1_STATE
         .lock()
         .map_err(|_| CompileError::runtime("rt_sha1_write: state lock poisoned".to_string()))?;
     let buf = state
         .get_mut(&handle)
         .ok_or_else(|| CompileError::runtime(format!("rt_sha1_write: invalid SHA-1 handle {handle}")))?;
-    buf.extend_from_slice(&data);
+    buf.extend_from_slice(&data[..limit]);
     Ok(Value::Nil)
 }
 
 pub fn rt_sha1_finish(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha1_finish")?;
     let handle = int_arg(args, 0, "rt_sha1_finish")?;
     let mut state = SHA1_STATE.lock().unwrap();
     if let Some(data) = state.remove(&handle) {
@@ -81,6 +109,7 @@ pub fn rt_sha1_finish(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_sha1_finish_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha1_finish_bytes")?;
     let handle = int_arg(args, 0, "rt_sha1_finish_bytes")?;
     let mut state = SHA1_STATE.lock().unwrap();
     if let Some(data) = state.remove(&handle) {
@@ -96,6 +125,7 @@ pub fn rt_sha1_finish_bytes(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_sha1_reset(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha1_reset")?;
     let handle = int_arg(args, 0, "rt_sha1_reset")?;
     let mut state = SHA1_STATE
         .lock()
@@ -108,6 +138,7 @@ pub fn rt_sha1_reset(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_sha1_free(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha1_free")?;
     let handle = int_arg(args, 0, "rt_sha1_free")?;
     if SHA1_STATE.lock().unwrap().remove(&handle).is_none() {
         return Err(CompileError::runtime(format!(
@@ -118,6 +149,7 @@ pub fn rt_sha1_free(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_sha1_finish_base64(args: &[Value]) -> Result<Value, CompileError> {
+    require_arity(args, 1, "rt_sha1_finish_base64")?;
     let handle = int_arg(args, 0, "rt_sha1_finish_base64")?;
     let mut state = SHA1_STATE.lock().unwrap();
     if let Some(data) = state.remove(&handle) {
@@ -240,8 +272,23 @@ mod tests {
 
     #[test]
     fn crypto_bridge_rejects_fabricated_inputs_and_invalid_handles() {
+        assert!(rt_sha1_new(&[Value::Nil]).is_err());
         assert!(rt_sha1_write(&[]).is_err());
         assert!(rt_sha1_write(&[Value::Int(1), Value::Int(0), Value::Int(4)]).is_err());
+        let handle = rt_sha1_new(&[]).unwrap().as_int().unwrap();
+        assert!(rt_sha1_write(&[
+            Value::Int(handle),
+            Value::text("abc"),
+            Value::text("3"),
+        ])
+        .is_err());
+        assert!(rt_sha1_write(&[
+            Value::Int(handle),
+            Value::text("abc"),
+            Value::Int(4),
+        ])
+        .is_err());
+        assert!(rt_sha1_finish_bytes(&[Value::Int(handle), Value::Nil]).is_err());
         assert!(rt_sha1_finish(&[Value::Int(i64::MAX)]).is_err());
         assert!(rt_sha1_reset(&[Value::Bool(false)]).is_err());
         assert!(rt_sha1_free(&[Value::Int(i64::MAX)]).is_err());

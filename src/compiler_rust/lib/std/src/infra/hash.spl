@@ -24,9 +24,9 @@ extern fn rt_sha1_new() -> i64
 @unsafe(reason: "legacy raw-pointer SHA-1 provider boundary", capabilities: [ffi])
 extern fn rt_sha1_write(hasher: i64, data: i64, len: i64)
 @unsafe(reason: "legacy raw-pointer SHA-1 provider boundary", capabilities: [ffi])
-extern fn rt_sha1_finish(hasher: i64) -> i64?
+extern fn rt_sha1_finish(hasher: i64) -> text?
 @unsafe(reason: "legacy raw-pointer SHA-1 provider boundary", capabilities: [ffi])
-extern fn rt_sha1_finish_bytes(hasher: i64, out: i64)
+extern fn rt_sha1_finish_bytes(hasher: i64) -> [u8]?
 @unsafe(reason: "legacy raw-pointer SHA-1 provider boundary", capabilities: [ffi])
 extern fn rt_sha1_reset(hasher: i64)
 @unsafe(reason: "legacy raw-pointer SHA-1 provider boundary", capabilities: [ffi])
@@ -101,11 +101,13 @@ struct Sha1Hasher:
     _handle: i64
 
     static fn new() -> Sha1Hasher:
-        val handle = rt_sha1_new()
+        val handle = unsafe(capabilities: [ffi]):
+            rt_sha1_new()
         return Sha1Hasher(_handle: handle)
 
     fn write(self, data: [u8]) -> Sha1Hasher:
-        rt_sha1_write(self._handle, data as i64, len(data))
+        unsafe(capabilities: [ffi]):
+            rt_sha1_write(self._handle, data as i64, len(data))
         return self
 
     fn write_u8(self, value: u8) -> Sha1Hasher:
@@ -123,25 +125,30 @@ struct Sha1Hasher:
         return self.write(bytes)
 
     fn finish(self) -> u64:
-        # `rt_sha1_finish` yields nil for an invalid/freed hasher handle; the
-        # declared `u64` is a non-optional contract, so fold it to 0 rather
-        # than aborting. The only call site is this one.
-        return (rt_sha1_finish(self._handle) ?? 0) as u64
+        val digest = self.finish_bytes()
+        var prefix = 0u64
+        for i in range(8):
+            prefix = (prefix << 8) | (digest[i] as u64)
+        return prefix
 
     fn finish_bytes(self) -> [u8]:
-        val out = [0u8; 20]
-        rt_sha1_finish_bytes(self._handle, out as i64)
-        return out
+        val digest = unsafe(capabilities: [ffi]):
+            rt_sha1_finish_bytes(self._handle)
+        if digest == nil:
+            panic("E-SFFI-SHA1-INVALID-HANDLE: finish on invalid or released hasher")
+        return digest.unwrap()
 
     fn finish_hex(self) -> text:
         val bytes = self.finish_bytes()
         return bytes_to_hex(bytes)
 
     fn reset(self):
-        rt_sha1_reset(self._handle)
+        unsafe(capabilities: [ffi]):
+            rt_sha1_reset(self._handle)
 
     fn free(self):
-        rt_sha1_free(self._handle)
+        unsafe(capabilities: [ffi]):
+            rt_sha1_free(self._handle)
 
     # =========================================================================
     # Helper Methods

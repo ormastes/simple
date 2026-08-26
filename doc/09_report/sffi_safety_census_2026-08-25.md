@@ -1036,3 +1036,19 @@ truncation hazard without adding another payload pass, registry lookup, lock,
 allocation, or copy. The legacy finish ABI still maps an invalid handle to `0`,
 which is also a valid digest; this family therefore remains explicitly unsafe,
 unverified, and unsigned until a status/out v2 ABI replaces it.
+## 2026-08-26 SHA-1 return-contract follow-up
+
+The seed `finish`/`finish_bytes` declarations now match both providers' typed
+text/one-argument packed-byte return ABIs instead of exposing packed bits or
+passing an ignored output pointer. The native
+provider returns a byte-array value rather than binary data mislabeled as text.
+The wrapper rejects nil with a stable panic and derives its `u64` from the first
+eight digest bytes instead of casting a packed runtime value or fabricating
+zero. Interpreter handlers enforce exact arity, explicit checked write length,
+and checked handle growth; native pointer length conversion is checked. Valid
+hashing retains one payload pass and one registry operation, while scalar
+finish reduces the prior hex-format allocation to the required 20-byte result.
+Native digest publication uses the packed-array bulk-copy owner rather than
+twenty element-dispatch calls.
+This remains source-reviewed, unverified, unsigned, and SHA-1 remains unsuitable
+for security decisions.
