@@ -2001,6 +2001,15 @@ and unpromoted.
 - [x] Remove the split-array and prefix-text allocations from path identity.
 - [x] Add a static authority and allocation-shape ratchet.
 
+### Completed frontend trace-policy authority slice
+
+- [x] Remove the module-local raw `rt_env_get` declaration and calls.
+- [x] Route the outer-scope snapshot and unscoped query through canonical
+  nullable `env_get_opt`.
+- [x] Preserve one lookup per outer scope, zero for nested scopes, and one for
+  an unscoped query.
+- [x] Preserve packed allocation-free state and add a static call-count ratchet.
+
 ### Completed MIR target-context authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.

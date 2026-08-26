@@ -479,3 +479,11 @@ Its substring-position helper now uses the canonical text `index_of` operation
 directly and maps absence to the existing `-1` sentinel.  This removes the
 previous `contains` scan, split-array allocation, prefix-text allocation, and
 foreign length dispatch while preserving empty-needle and not-found behavior.
+
+### Frontend trace-policy authority follow-up
+
+Frontend trace policy no longer declares or calls raw `rt_env_get`; both trace
+reads use the canonical nullable, always-inlined environment facade.  The
+outer-scope snapshot still performs one lookup and nested scopes perform none,
+while an unscoped query retains one lookup.  Its packed scalar state remains
+allocation-free, with no added cache, lock, copy, hash, boxing, or dispatch.
