@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   RRF_CONTRACT_V1,
   RRF_SCALE_V1,
@@ -8,9 +9,16 @@ import {
   RRF_DEFAULT_LIMIT_V1,
   RRF_MAX_SOURCES_V1,
   RRF_MAX_DOC_ID_BYTES_V1,
+  RRF_POOL_CONTRACT_V2,
+  RRF_ARITHMETIC_CONTRACT_V2,
+  RRF_MAX_SOURCE_K_V2,
+  RRF_MAX_POOL_HITS_V2,
+  RRF_MAX_PUBLIC_HITS_V2,
   unsignedUtf8CompareV1,
   fuseRrfRawV1,
+  fuseRrfCompletePoolV2,
 } from '../../../src/search/fusion.js';
+import { canonicalJson } from '../../../src/storage/canonical.js';
 
 function context(overrides = {}) {
   return {
@@ -40,6 +48,37 @@ function request(overrides = {}) {
 
 function expected(code, details = {}) {
   return { ok: false, error: { code, ...details } };
+}
+
+function digestV2(domain, value) {
+  return `sha256:${createHash('sha256').update(domain, 'utf8')
+    .update(canonicalJson(value), 'utf8').digest('hex')}`;
+}
+
+function sourceV2(name, ids, overrides = {}) {
+  const sourceIdentity = overrides.sourceIdentity ?? `${name}-v2`;
+  const candidateDigest = digestV2('spipe-rrf-source-pool-v1\0', {
+    name, sourceIdentity, documentIds: ids,
+  });
+  return {
+    name,
+    sourceIdentity,
+    complete: true,
+    candidateCount: ids.length,
+    candidateDigest,
+    candidates: ids.map((documentId) => ({ documentId })),
+    ...overrides,
+  };
+}
+
+function requestV2(overrides = {}) {
+  return {
+    context: context(),
+    k: 60,
+    sourceK: 1000,
+    sources: [sourceV2('lexical', ['a', 'b']), sourceV2('graph', ['b', 'a'])],
+    ...overrides,
+  };
 }
 
 test('exports the frozen raw-only contract constants and defaults', () => {
@@ -428,4 +467,81 @@ test('rank 1000 uses the frozen integer-floor contribution', () => {
   const last = result.value.hits.find((hit) => hit.documentId === 'id-0999');
   assert.equal(last.rawScoreUnits, 943_396);
   assert.equal(last.contributions[0].sourceRank, 1000);
+});
+
+test('exports the additive complete-pool v2 contract and hardcoded digest vector', () => {
+  assert.equal(RRF_POOL_CONTRACT_V2, 'rrf-complete-pool-v2');
+  assert.equal(RRF_ARITHMETIC_CONTRACT_V2, RRF_CONTRACT_V1);
+  assert.equal(RRF_MAX_SOURCE_K_V2, 1000);
+  assert.equal(RRF_MAX_POOL_HITS_V2, 3000);
+  assert.equal(RRF_MAX_PUBLIC_HITS_V2, 1000);
+  assert.deepEqual(fuseRrfCompletePoolV2({ ...requestV2(), limit: 1 }),
+    expected('invalid_request'));
+
+  const result = fuseRrfCompletePoolV2(requestV2());
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value.hits.map((hit) => hit.documentId), ['a', 'b']);
+  assert.equal(result.value.identity.complete, true);
+  assert.equal(result.value.identity.uniqueDocumentCount, 2);
+  assert.equal(result.value.identity.orderedSources[0].candidateDigest,
+    'sha256:f104ad2ba95dbb29d6e7fbccf47ce6a3c9d1a807db73a1aba3449161036dc0ac');
+  assert.equal(result.value.identity.sourcePoolDigest,
+    'sha256:555425d77a1822bc6f71c1f4fc7690c36d0347000080b6152e18e7dc222b36d5');
+  assert.equal(result.value.identity.rawFusionDigest,
+    'sha256:98b99df52621b61914291b34c7b0a6f95f94865a40babf43506d97bb19b84838');
+});
+
+test('returns the complete unique union through the 3000-hit boundary', () => {
+  const lexical = Array.from({ length: 1000 }, (_, index) => `l-${String(index).padStart(4, '0')}`);
+  const graph = Array.from({ length: 1000 }, (_, index) => `g-${String(index).padStart(4, '0')}`);
+  const semantic = Array.from({ length: 1000 }, (_, index) => `s-${String(index).padStart(4, '0')}`);
+  const result = fuseRrfCompletePoolV2(requestV2({
+    sources: [sourceV2('lexical', lexical), sourceV2('graph', graph), sourceV2('semantic', semantic)],
+  }));
+  assert.equal(result.ok, true);
+  assert.equal(result.value.hits.length, 3000);
+  assert.equal(result.value.identity.uniqueDocumentCount, 3000);
+  assert.equal(new Set(result.value.hits.map((hit) => hit.documentId)).size, 3000);
+  assert.equal(result.value.hits[0].rawScoreUnits, 16_393_442);
+  assert.equal(result.value.hits[2999].rawScoreUnits, 943_396);
+});
+
+test('enforces complete source envelopes and frozen v2 error precedence', () => {
+  const incomplete = sourceV2('lexical', ['bad'], { complete: false, candidateCount: 'bad' });
+  assert.deepEqual(fuseRrfCompletePoolV2(requestV2({
+    sources: [incomplete, sourceV2('graph', [])],
+  })), expected('incomplete_source_page', { source: 'lexical' }));
+
+  const badCount = sourceV2('lexical', ['bad'], { candidateCount: 2, candidateDigest: 'bad' });
+  badCount.candidates[0].documentId = '';
+  assert.deepEqual(fuseRrfCompletePoolV2(requestV2({
+    sources: [badCount, sourceV2('graph', [])],
+  })), expected('invalid_candidate_count', { source: 'lexical' }));
+
+  const tooMany = sourceV2('lexical', ['a', 'b']);
+  assert.deepEqual(fuseRrfCompletePoolV2(requestV2({
+    sourceK: 1, sources: [tooMany, sourceV2('graph', [])],
+  })), expected('too_many_candidates', { source: 'lexical' }));
+
+  const badCandidate = sourceV2('lexical', ['a'], { candidateDigest: 'bad' });
+  badCandidate.candidates[0].documentId = '';
+  assert.deepEqual(fuseRrfCompletePoolV2(requestV2({
+    sources: [badCandidate, sourceV2('graph', [])],
+  })), expected('invalid_document_id', { source: 'lexical', candidateIndex: 0 }));
+
+  const badDigest = sourceV2('lexical', ['a'], { candidateDigest: `sha256:${'0'.repeat(64)}` });
+  assert.deepEqual(fuseRrfCompletePoolV2(requestV2({
+    sources: [badDigest, sourceV2('graph', [])],
+  })), expected('candidate_digest_mismatch', { source: 'lexical' }));
+});
+
+test('supports a digest-bound empty complete pool without inventing public truncation', () => {
+  const result = fuseRrfCompletePoolV2(requestV2({
+    sources: [sourceV2('lexical', []), sourceV2('graph', [])],
+  }));
+  assert.equal(result.ok, true);
+  assert.equal(result.value.identity.uniqueDocumentCount, 0);
+  assert.deepEqual(result.value.hits, []);
+  assert.equal(Object.isFrozen(result.value.identity.orderedSources), true);
+  assert.equal(Object.isFrozen(result.value.hits), true);
 });

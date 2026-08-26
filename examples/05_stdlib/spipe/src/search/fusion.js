@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto';
+
+import { canonicalJson } from '../storage/canonical.js';
+
 export const RRF_CONTRACT_V1 = 'rrf-fixed-v1';
 export const RRF_SCALE_V1 = 1_000_000_000;
 export const RRF_DEFAULT_K_V1 = 60;
@@ -5,6 +9,11 @@ export const RRF_DEFAULT_SOURCE_K_V1 = 1000;
 export const RRF_DEFAULT_LIMIT_V1 = 1000;
 export const RRF_MAX_SOURCES_V1 = 3;
 export const RRF_MAX_DOC_ID_BYTES_V1 = 512;
+export const RRF_POOL_CONTRACT_V2 = 'rrf-complete-pool-v2';
+export const RRF_ARITHMETIC_CONTRACT_V2 = RRF_CONTRACT_V1;
+export const RRF_MAX_SOURCE_K_V2 = 1000;
+export const RRF_MAX_POOL_HITS_V2 = 3000;
+export const RRF_MAX_PUBLIC_HITS_V2 = 1000;
 
 const MAX_K = 10_000;
 const MAX_SOURCE_K = 1000;
@@ -20,6 +29,13 @@ const CONTEXT_FIELDS = Object.freeze([
 const REQUEST_FIELDS = Object.freeze(['context', 'k', 'sourceK', 'limit', 'sources']);
 const SOURCE_FIELDS = Object.freeze(['name', 'sourceIdentity', 'candidates']);
 const CANDIDATE_FIELDS = Object.freeze(['documentId']);
+const REQUEST_FIELDS_V2 = Object.freeze(['context', 'k', 'sourceK', 'sources']);
+const SOURCE_FIELDS_V2 = Object.freeze([
+  'name', 'sourceIdentity', 'complete', 'candidateCount', 'candidateDigest', 'candidates',
+]);
+const SOURCE_POOL_DOMAIN_V2 = 'spipe-rrf-source-pool-v1\0';
+const COMPLETE_SOURCE_SET_DOMAIN_V2 = 'spipe-rrf-complete-source-set-v1\0';
+const COMPLETE_OUTPUT_DOMAIN_V2 = 'spipe-rrf-complete-output-v1\0';
 
 function failure(code, details) {
   return Object.freeze({
@@ -148,6 +164,34 @@ function validBoundedString(value, maximumBytes) {
   if (typeof value !== 'string' || value.length === 0) return false;
   const bytes = utf8BytesV1(value);
   return bytes !== null && bytes.length <= maximumBytes;
+}
+
+function canonicalDigestV2(domain, value) {
+  return `sha256:${createHash('sha256')
+    .update(domain, 'utf8')
+    .update(canonicalJson(value), 'utf8')
+    .digest('hex')}`;
+}
+
+function candidateDigestV2(name, sourceIdentity, documentIds) {
+  return canonicalDigestV2(SOURCE_POOL_DOMAIN_V2, { name, sourceIdentity, documentIds });
+}
+
+function sourcePoolDigestV2(orderedSources) {
+  return canonicalDigestV2(COMPLETE_SOURCE_SET_DOMAIN_V2, orderedSources.map((source) => ({
+    name: source.name,
+    sourceIdentity: source.sourceIdentity,
+    complete: source.complete,
+    candidateCount: source.candidateCount,
+    candidateDigest: source.candidateDigest,
+  })));
+}
+
+function rawFusionDigestV2(identityWithoutDigest, hits) {
+  return canonicalDigestV2(COMPLETE_OUTPUT_DOMAIN_V2, {
+    identity: identityWithoutDigest,
+    hits,
+  });
 }
 
 function normalizeRequest(request) {
@@ -318,6 +362,177 @@ export function fuseRrfRawV1(request) {
         context,
       }),
       hits: Object.freeze(hits),
+    }),
+  });
+}
+
+export function fuseRrfCompletePoolV2(request) {
+  const root = dataRecordSnapshot(request, REQUEST_FIELDS_V2);
+  if (root === null) return failure('invalid_request');
+
+  const context = dataRecordSnapshot(root.context, CONTEXT_FIELDS);
+  if (context === null) return failure('invalid_context', { field: CONTEXT_FIELDS[0] });
+  const normalizedContext = {};
+  for (const field of CONTEXT_FIELDS) {
+    if (!validBoundedString(context[field], RRF_MAX_DOC_ID_BYTES_V1)) {
+      return failure('invalid_context', { field });
+    }
+    normalizedContext[field] = context[field];
+  }
+
+  const k = root.k === undefined ? RRF_DEFAULT_K_V1 : root.k;
+  if (!Number.isSafeInteger(k) || k < 1 || k > MAX_K) return failure('invalid_k');
+  const sourceK = root.sourceK === undefined ? RRF_DEFAULT_SOURCE_K_V1 : root.sourceK;
+  if (!Number.isSafeInteger(sourceK) || sourceK < 1 || sourceK > RRF_MAX_SOURCE_K_V2) {
+    return failure('invalid_source_k');
+  }
+
+  const sources = denseArraySnapshot(root.sources);
+  if (sources === null || sources.length < 2 || sources.length > RRF_MAX_SOURCES_V1) {
+    return failure('invalid_sources');
+  }
+  const sourceShapes = [];
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
+    const source = dataRecordSnapshot(sources[sourceIndex], SOURCE_FIELDS_V2);
+    if (source === null || typeof source.name !== 'string') {
+      return failure('invalid_source_identity', { source: undefined });
+    }
+    if (!validBoundedString(source.sourceIdentity, RRF_MAX_DOC_ID_BYTES_V1)) {
+      return failure('invalid_source_identity', { source: source.name });
+    }
+    sourceShapes.push(source);
+  }
+
+  const names = sourceShapes.map((source) => source.name);
+  if (!names.includes('lexical')) return failure('missing_required_source', { source: 'lexical' });
+  if (!names.includes('graph')) return failure('missing_required_source', { source: 'graph' });
+  let previousOrdinal = -1;
+  for (const name of names) {
+    const ordinal = SOURCE_ORDER.indexOf(name);
+    if (ordinal < 0 || ordinal < previousOrdinal) {
+      return failure('invalid_source_order', { source: name });
+    }
+    previousOrdinal = ordinal;
+  }
+  if (new Set(names).size !== names.length) return failure('duplicate_source');
+
+  const normalizedSources = [];
+  for (const source of sourceShapes) {
+    if (source.complete !== true) return failure('incomplete_source_page', { source: source.name });
+    if (!Number.isSafeInteger(source.candidateCount) || source.candidateCount < 0) {
+      return failure('invalid_candidate_count', { source: source.name });
+    }
+    const candidates = denseArraySnapshot(source.candidates);
+    if (candidates === null) return failure('invalid_candidate_page', { source: source.name });
+    if (source.candidateCount !== candidates.length) {
+      return failure('invalid_candidate_count', { source: source.name });
+    }
+    if (source.candidateCount > sourceK || source.candidateCount > RRF_MAX_SOURCE_K_V2) {
+      return failure('too_many_candidates', { source: source.name });
+    }
+
+    const normalizedCandidates = [];
+    const documentIds = [];
+    const seen = new Set();
+    for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+      const candidate = dataRecordSnapshot(candidates[candidateIndex], CANDIDATE_FIELDS);
+      if (candidate === null) {
+        return failure('invalid_candidate', { source: source.name, candidateIndex });
+      }
+      if (typeof candidate.documentId !== 'string' || candidate.documentId.length === 0) {
+        return failure('invalid_document_id', { source: source.name, candidateIndex });
+      }
+      const bytes = utf8BytesV1(candidate.documentId);
+      if (bytes === null) {
+        return failure('invalid_document_id', { source: source.name, candidateIndex });
+      }
+      if (bytes.length > RRF_MAX_DOC_ID_BYTES_V1) {
+        return failure('document_id_too_large', { source: source.name, candidateIndex });
+      }
+      if (seen.has(candidate.documentId)) {
+        return failure('duplicate_document_id', { source: source.name, candidateIndex });
+      }
+      seen.add(candidate.documentId);
+      documentIds.push(candidate.documentId);
+      normalizedCandidates.push(Object.freeze({ documentId: candidate.documentId }));
+    }
+    const expectedCandidateDigest = candidateDigestV2(
+      source.name, source.sourceIdentity, documentIds,
+    );
+    if (source.candidateDigest !== expectedCandidateDigest) {
+      return failure('candidate_digest_mismatch', { source: source.name });
+    }
+    normalizedSources.push(Object.freeze({
+      name: source.name,
+      sourceIdentity: source.sourceIdentity,
+      complete: true,
+      candidateCount: source.candidateCount,
+      candidateDigest: expectedCandidateDigest,
+      candidates: Object.freeze(normalizedCandidates),
+    }));
+  }
+
+  const accumulated = new Map();
+  for (const source of normalizedSources) {
+    for (let index = 0; index < source.candidates.length; index += 1) {
+      const { documentId } = source.candidates[index];
+      const sourceRank = index + 1;
+      const contributionUnits = Math.floor(RRF_SCALE_V1 / (k + sourceRank));
+      let record = accumulated.get(documentId);
+      if (record === undefined) {
+        if (accumulated.size >= RRF_MAX_POOL_HITS_V2) return failure('pool_too_large');
+        record = { documentId, rawScoreUnits: 0, contributions: [] };
+        accumulated.set(documentId, record);
+      }
+      const rawScoreUnits = record.rawScoreUnits + contributionUnits;
+      if (!Number.isSafeInteger(contributionUnits) || !Number.isSafeInteger(rawScoreUnits)) {
+        return failure('arithmetic_overflow');
+      }
+      record.rawScoreUnits = rawScoreUnits;
+      record.contributions.push(Object.freeze({
+        source: source.name,
+        sourceIdentity: source.sourceIdentity,
+        sourceRank,
+        contributionUnits,
+      }));
+    }
+  }
+
+  const ranked = Array.from(accumulated.values());
+  ranked.sort((left, right) => {
+    if (left.rawScoreUnits !== right.rawScoreUnits) return right.rawScoreUnits - left.rawScoreUnits;
+    return unsignedUtf8CompareV1(left.documentId, right.documentId);
+  });
+  const hits = Object.freeze(ranked.map((hit, index) => Object.freeze({
+    documentId: hit.documentId,
+    fusedRank: index + 1,
+    rawScoreUnits: hit.rawScoreUnits,
+    contributions: Object.freeze(hit.contributions),
+  })));
+  const orderedSources = Object.freeze(normalizedSources.map((source) => Object.freeze({
+    name: source.name,
+    sourceIdentity: source.sourceIdentity,
+    complete: source.complete,
+    candidateCount: source.candidateCount,
+    candidateDigest: source.candidateDigest,
+  })));
+  const identityWithoutDigest = Object.freeze({
+    contractVersion: RRF_POOL_CONTRACT_V2,
+    arithmeticContractVersion: RRF_ARITHMETIC_CONTRACT_V2,
+    k,
+    sourceK,
+    orderedSources,
+    context: Object.freeze(normalizedContext),
+    complete: true,
+    uniqueDocumentCount: hits.length,
+    sourcePoolDigest: sourcePoolDigestV2(orderedSources),
+  });
+  const rawFusionDigest = rawFusionDigestV2(identityWithoutDigest, hits);
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({
+      identity: Object.freeze({ ...identityWithoutDigest, rawFusionDigest }),
+      hits,
     }),
   });
 }

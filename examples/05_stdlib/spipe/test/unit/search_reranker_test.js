@@ -1,13 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   MAX_EVIDENCE_IDS,
   MAX_HITS,
   RERANK_CONTRACT_V1,
   RERANK_FIXED_POLICY_V1,
   RERANK_POLICY_V1,
+  RERANK_CONTRACT_V2,
+  MAX_POOL_HITS_V2,
+  MAX_OUTPUT_HITS_V2,
   createRrfBoundedRerankerV1,
+  createRrfBoundedRerankerV2,
 } from '../../src/search/rerank.js';
+import { fuseRrfCompletePoolV2 } from '../../src/search/fusion.js';
+import { canonicalJson } from '../../src/storage/canonical.js';
 
 const RAW_FUSION_DIGEST = `sha256:${'a'.repeat(64)}`;
 const EVIDENCE_DIGEST = `sha256:${'b'.repeat(64)}`;
@@ -88,6 +95,47 @@ function request(overrides = {}) {
 }
 
 function expectedError(code) { return { ok: false, error: { code } }; }
+
+function digestV2(domain, value) {
+  return `sha256:${createHash('sha256').update(domain, 'utf8')
+    .update(canonicalJson(value), 'utf8').digest('hex')}`;
+}
+
+function sourceV2(name, ids) {
+  const sourceIdentity = `${name}-v2`;
+  return {
+    name,
+    sourceIdentity,
+    complete: true,
+    candidateCount: ids.length,
+    candidateDigest: digestV2('spipe-rrf-source-pool-v1\0', {
+      name, sourceIdentity, documentIds: ids,
+    }),
+    candidates: ids.map((documentId) => ({ documentId })),
+  };
+}
+
+function rawPoolV2(sources) {
+  const result = fuseRrfCompletePoolV2({
+    context: {
+      workspaceId: 'workspace-a', snapshotId: 'snapshot-a',
+      authorizationScopeDigest: 'scope-a', queryReceipt: 'query-a',
+      analyzerIdentity: 'analyzer-a',
+    },
+    k: 60,
+    sourceK: 1000,
+    sources,
+  });
+  assert.equal(result.ok, true);
+  return result.value;
+}
+
+function evidenceV2(rawFusion, records, identityOverrides = {}) {
+  return evidence(records, {
+    rawFusionDigest: rawFusion.identity.rawFusionDigest,
+    ...identityOverrides,
+  });
+}
 
 test('exports the frozen authority-bound contract and requires a synchronous verifier capability', () => {
   assert.equal(RERANK_CONTRACT_V1, 'rrf-bounded-rerank-v1');
@@ -439,4 +487,143 @@ test('rejects independently mutable raw identity, context, source, hit, and cont
     assert.equal(result.ok, false);
     assert.ok(['invalid_raw_identity', 'invalid_raw_hit_page'].includes(result.error.code));
   }
+});
+
+test('exports the additive complete-pool reranker v2 contract', () => {
+  assert.equal(RERANK_CONTRACT_V2, 'rrf-bounded-rerank-v2');
+  assert.equal(MAX_POOL_HITS_V2, 3000);
+  assert.equal(MAX_OUTPUT_HITS_V2, 1000);
+  assert.throws(() => createRrfBoundedRerankerV2(), TypeError);
+  assert.throws(() => createRrfBoundedRerankerV2({ verifyEvidencePage: false }), TypeError);
+});
+
+test('reranks the full 2000-hit pool before public truncation and admits late promotion', () => {
+  const lexicalIds = Array.from(
+    { length: 1000 }, (_, index) => `l${String(index + 1).padStart(4, '0')}`,
+  );
+  const graphIds = Array.from(
+    { length: 1000 }, (_, index) => `g${String(index + 1).padStart(4, '0')}`,
+  );
+  const raw = rawPoolV2([sourceV2('lexical', lexicalIds), sourceV2('graph', graphIds)]);
+  assert.equal(raw.hits[1000].documentId, 'g0501');
+  assert.equal(raw.hits[1000].fusedRank, 1001);
+  assert.equal(raw.hits[1000].rawScoreUnits, 1_782_531);
+  const records = raw.hits.map((hit) => hit.documentId === 'g0501'
+    ? record(hit.documentId, {
+      acceptedTrace: {
+        distance: 1, evidenceEdgeUids: ['edge-g0501'], authorityReceiptUids: ['receipt-g0501'],
+      },
+      featureMatch: {
+        matched: true, queryClassificationUids: ['feature-query'],
+        artifactClassificationUids: ['feature-artifact'], evidenceEdgeUids: ['feature-edge'],
+      },
+      componentMatch: {
+        matched: true, queryClassificationUids: ['component-query'],
+        artifactClassificationUids: ['component-artifact'], evidenceEdgeUids: ['component-edge'],
+      },
+      recency: { documentRevisionEpochDay: 993, evidenceUid: 'recent-g0501' },
+    })
+    : record(hit.documentId));
+  let authorityCalls = 0;
+  const result = createRrfBoundedRerankerV2({ verifyEvidencePage(value) {
+    authorityCalls += 1;
+    return value.rawFusion === raw
+      && value.evidencePage.identity.rawFusionDigest === raw.identity.rawFusionDigest;
+  } }).rerankRrfCompletePoolV2({
+    rawFusion: raw,
+    evidencePage: evidenceV2(raw, records),
+    policy: RERANK_FIXED_POLICY_V1,
+    outputLimit: 1000,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(authorityCalls, 1);
+  assert.equal(result.value.identity.internalPoolCount, 2000);
+  assert.equal(result.value.hits.length, 1000);
+  const promoted = result.value.hits.find((hit) => hit.documentId === 'g0501');
+  assert.equal(promoted.adjustedScoreUnits, 2_192_512);
+  assert.equal(promoted.rerankExplanation.acceptedTrace.deltaUnits, 178_253);
+  assert.equal(promoted.rerankExplanation.featureMatch.deltaUnits, 71_301);
+  assert.equal(promoted.rerankExplanation.componentMatch.deltaUnits, 71_301);
+  assert.equal(promoted.rerankExplanation.recency.deltaUnits, 89_126);
+  assert.equal(promoted.finalRank, 793);
+});
+
+test('accepts 3000 complete raw hits and rejects a 3001-hit structural forgery', () => {
+  const lexical = Array.from({ length: 1000 }, (_, index) => `l-${String(index).padStart(4, '0')}`);
+  const graph = Array.from({ length: 1000 }, (_, index) => `g-${String(index).padStart(4, '0')}`);
+  const semantic = Array.from({ length: 1000 }, (_, index) => `s-${String(index).padStart(4, '0')}`);
+  const raw = rawPoolV2([
+    sourceV2('lexical', lexical), sourceV2('graph', graph), sourceV2('semantic', semantic),
+  ]);
+  const records = raw.hits.map((hit) => record(hit.documentId));
+  const reranker = createRrfBoundedRerankerV2({ verifyEvidencePage: () => true });
+  const accepted = reranker.rerankRrfCompletePoolV2({
+    rawFusion: raw,
+    evidencePage: evidenceV2(raw, records),
+    policy: RERANK_FIXED_POLICY_V1,
+    outputLimit: 1,
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.value.identity.internalPoolCount, 3000);
+
+  const forged = structuredClone(raw);
+  forged.identity.uniqueDocumentCount = 3001;
+  forged.hits.push(structuredClone(forged.hits[forged.hits.length - 1]));
+  deepFreeze(forged);
+  assert.deepEqual(reranker.rerankRrfCompletePoolV2({
+    rawFusion: forged,
+    evidencePage: evidenceV2(raw, records),
+    policy: RERANK_FIXED_POLICY_V1,
+    outputLimit: 1,
+  }), expectedError('invalid_raw_identity'));
+});
+
+test('fails closed on incomplete, count, source, raw, and evidence digest mismatches', () => {
+  const raw = rawPoolV2([sourceV2('lexical', ['a']), sourceV2('graph', ['b'])]);
+  const records = raw.hits.map((hit) => record(hit.documentId));
+  const reranker = createRrfBoundedRerankerV2({ verifyEvidencePage: () => true });
+  const run = (rawFusion, evidencePage = evidenceV2(rawFusion, records)) => reranker
+    .rerankRrfCompletePoolV2({
+      rawFusion, evidencePage, policy: RERANK_FIXED_POLICY_V1, outputLimit: 1,
+    });
+
+  const incomplete = structuredClone(raw);
+  incomplete.identity.complete = false;
+  deepFreeze(incomplete);
+  assert.deepEqual(run(incomplete), expectedError('incomplete_raw_pool'));
+
+  const wrongCount = structuredClone(raw);
+  wrongCount.identity.uniqueDocumentCount = 1;
+  deepFreeze(wrongCount);
+  assert.deepEqual(run(wrongCount), expectedError('raw_pool_count_mismatch'));
+
+  const wrongCandidateDigest = structuredClone(raw);
+  wrongCandidateDigest.identity.orderedSources[0].candidateDigest = `sha256:${'0'.repeat(64)}`;
+  deepFreeze(wrongCandidateDigest);
+  assert.deepEqual(run(wrongCandidateDigest), expectedError('raw_fusion_digest_mismatch'));
+
+  const wrongRawDigest = structuredClone(raw);
+  wrongRawDigest.identity.rawFusionDigest = `sha256:${'0'.repeat(64)}`;
+  deepFreeze(wrongRawDigest);
+  assert.deepEqual(run(wrongRawDigest), expectedError('raw_fusion_digest_mismatch'));
+
+  assert.deepEqual(run(raw, evidenceV2(raw, records, {
+    rawFusionDigest: `sha256:${'0'.repeat(64)}`,
+  })), expectedError('raw_fusion_digest_mismatch'));
+});
+
+test('requires public output limit 1..1000 and treats an empty complete pool as zero output', () => {
+  const raw = rawPoolV2([sourceV2('lexical', []), sourceV2('graph', [])]);
+  const page = evidenceV2(raw, []);
+  const reranker = createRrfBoundedRerankerV2({ verifyEvidencePage: () => true });
+  const make = (outputLimit) => ({
+    rawFusion: raw, evidencePage: page, policy: RERANK_FIXED_POLICY_V1, outputLimit,
+  });
+  assert.deepEqual(reranker.rerankRrfCompletePoolV2(make(0)), expectedError('invalid_output_limit'));
+  assert.deepEqual(reranker.rerankRrfCompletePoolV2(make(1001)), expectedError('invalid_output_limit'));
+  const accepted = reranker.rerankRrfCompletePoolV2(make(1));
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.value.identity.internalPoolCount, 0);
+  assert.equal(accepted.value.identity.outputLimit, 1);
+  assert.deepEqual(accepted.value.hits, []);
 });
