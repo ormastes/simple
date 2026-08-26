@@ -4,6 +4,132 @@
 # Exit 0 = clean, exit 1 = violations found.
 set -eu
 
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "ERROR: SHA-256 tool unavailable (need sha256sum or shasum)" >&2
+        return 1
+    fi
+}
+
+scan_forbidden_extension_files() {
+    {
+        find . -type f -name '*.py' \
+            -not -path './.git/*' \
+            -not -path './.jj/*' \
+            -not -path '*/vendor/*' \
+            -not -path '*/node_modules/*' \
+            -not -path '*/__pycache__/*' \
+            -not -path '*/build/*'
+        find . -type f \( -name '*.bash' -o -name '*.sh' \) \
+            -not -path './.git/*' \
+            -not -path './.jj/*' \
+            -not -path '*/vendor/*' \
+            -not -path '*/node_modules/*' \
+            -not -path '*/build/*' \
+            -not -path './scripts/bootstrap/bootstrap-from-scratch.sh' \
+            -not -path './scripts/bootstrap/bootstrap-seed.sh' \
+            -not -path './scripts/bootstrap/bootstrap-verify.sh'
+    } 2>/dev/null | LC_ALL=C sort -u
+}
+
+fingerprint_forbidden_extension_files() {
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        printf '%s  %s\n' "$(sha256_file "$file")" "$file"
+    done
+}
+
+classify_forbidden_extension_debt() {
+    current_file="$1"
+    baseline_file="$2"
+    new_file="$3"
+    stale_file="$4"
+    known_file="$5"
+    comm -23 "$current_file" "$baseline_file" > "$new_file"
+    comm -13 "$current_file" "$baseline_file" > "$stale_file"
+    comm -12 "$current_file" "$baseline_file" > "$known_file"
+}
+
+selftest_assert_equal() {
+    description="$1"
+    expected="$2"
+    actual="$3"
+    if [ "$expected" != "$actual" ]; then
+        echo "SELFTEST FAILED: $description (expected '$expected', got '$actual')"
+        SELFTEST_FAILURES=$((SELFTEST_FAILURES + 1))
+    fi
+}
+
+selftest() {
+    fixture_dir=$(mktemp -d) || return 1
+    mkdir -p "$fixture_dir/scripts/bootstrap" "$fixture_dir/vendor/pkg" "$fixture_dir/build/out"
+    printf 'print("known")\n' > "$fixture_dir/known.py"
+    printf '#!/bin/sh\n' > "$fixture_dir/new.sh"
+    printf '#!/bin/sh\n' > "$fixture_dir/allowed.shs"
+    printf '#!/bin/sh\n' > "$fixture_dir/scripts/bootstrap/bootstrap-seed.sh"
+    printf 'ignored\n' > "$fixture_dir/vendor/pkg/ignored.py"
+    printf 'ignored\n' > "$fixture_dir/build/out/ignored.py"
+
+    (cd "$fixture_dir" && scan_forbidden_extension_files) > "$fixture_dir/files"
+    SELFTEST_FAILURES=0
+    selftest_assert_equal "scanner finds exactly forbidden fixture paths" \
+        "./known.py ./new.sh" \
+        "$(tr '\n' ' ' < "$fixture_dir/files" | sed 's/ $//')"
+
+    printf './known.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
+        | LC_ALL=C sort > "$fixture_dir/baseline"
+    (cd "$fixture_dir" && fingerprint_forbidden_extension_files < "$fixture_dir/files") \
+        | LC_ALL=C sort > "$fixture_dir/current"
+    classify_forbidden_extension_debt "$fixture_dir/current" "$fixture_dir/baseline" \
+        "$fixture_dir/new" "$fixture_dir/stale" "$fixture_dir/known"
+    selftest_assert_equal "exact path/hash is known debt" 1 "$(wc -l < "$fixture_dir/known" | tr -d ' ')"
+    selftest_assert_equal "new forbidden path is rejected" "./new.sh" \
+        "$(sed -n 's/^[0-9a-f]*  //p' "$fixture_dir/new")"
+    selftest_assert_equal "unchanged baseline has no stale rows" 0 \
+        "$(wc -l < "$fixture_dir/stale" | tr -d ' ')"
+
+    printf 'print("modified")\n' > "$fixture_dir/known.py"
+    printf './known.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
+        | LC_ALL=C sort > "$fixture_dir/modified"
+    classify_forbidden_extension_debt "$fixture_dir/modified" "$fixture_dir/baseline" \
+        "$fixture_dir/modified_new" "$fixture_dir/modified_stale" "$fixture_dir/modified_known"
+    selftest_assert_equal "modified forbidden content is new debt" 1 \
+        "$(wc -l < "$fixture_dir/modified_new" | tr -d ' ')"
+    selftest_assert_equal "old content hash becomes stale" 1 \
+        "$(wc -l < "$fixture_dir/modified_stale" | tr -d ' ')"
+
+    printf 'print("known")\n' > "$fixture_dir/renamed.py"
+    printf './renamed.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
+        | LC_ALL=C sort > "$fixture_dir/substitution"
+    classify_forbidden_extension_debt "$fixture_dir/substitution" "$fixture_dir/baseline" \
+        "$fixture_dir/substitution_new" "$fixture_dir/substitution_stale" "$fixture_dir/substitution_known"
+    selftest_assert_equal "same-hash path substitution is new debt" "./renamed.py" \
+        "$(sed -n 's/^[0-9a-f]*  //p' "$fixture_dir/substitution_new")"
+    selftest_assert_equal "same-hash path substitution leaves stale debt" "./known.py" \
+        "$(sed -n 's/^[0-9a-f]*  //p' "$fixture_dir/substitution_stale")"
+
+    rm -rf "$fixture_dir"
+    if [ "$SELFTEST_FAILURES" -ne 0 ]; then
+        echo "check-repo-hygiene: SELFTEST FAILED ($SELFTEST_FAILURES assertion(s))"
+        return 1
+    fi
+    echo "check-repo-hygiene: selftest 8/8 fixtures correct"
+    return 0
+}
+
+if [ "${1:-}" = "--selftest-only" ]; then
+    selftest || exit 2
+    exit 0
+fi
+if [ "$#" -ne 0 ]; then
+    echo "ERROR: unknown argument: $1" >&2
+    exit 2
+fi
+
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -21,37 +147,67 @@ log_warning() {
 }
 
 # --- Check 1: Forbidden file types across entire repo ---
-# Python files: forbidden everywhere except vendor, node_modules, __pycache__
-PY_FILES=$(find . -name '*.py' \
-    -not -path './.git/*' \
-    -not -path './.jj/*' \
-    -not -path '*/vendor/*' \
-    -not -path '*/node_modules/*' \
-    -not -path '*/__pycache__/*' \
-    -not -path '*/build/*' \
-    2>/dev/null || true)
-if [ -n "$PY_FILES" ]; then
-    for f in $PY_FILES; do
-        log_violation "forbidden .py file: $f (convert to .spl or .shs)"
-    done
+# The tree has historical .py/.sh debt. Freeze it by exact path AND content hash:
+# count-only baselines allow an old offender to be replaced by a new one while the
+# total stays flat. New paths, renamed copies, and modified bytes must all fail.
+FORBIDDEN_BASELINE="scripts/check/repo_hygiene_forbidden_extensions_baseline.txt"
+FORBIDDEN_TMP=$(mktemp -d)
+trap 'rm -rf "$FORBIDDEN_TMP"' 0 1 2 3 15
+
+scan_forbidden_extension_files > "$FORBIDDEN_TMP/files"
+fingerprint_forbidden_extension_files < "$FORBIDDEN_TMP/files" \
+    | LC_ALL=C sort > "$FORBIDDEN_TMP/current"
+
+if [ ! -f "$FORBIDDEN_BASELINE" ]; then
+    log_violation "missing exact path/hash baseline: $FORBIDDEN_BASELINE"
+    : > "$FORBIDDEN_TMP/baseline"
+else
+    sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$FORBIDDEN_BASELINE" \
+        > "$FORBIDDEN_TMP/baseline_raw"
+    INVALID_BASELINE=$(grep -Ev '^[0-9a-f]{64}  \./[^[:cntrl:]]+$' \
+        "$FORBIDDEN_TMP/baseline_raw" || true)
+    if [ -n "$INVALID_BASELINE" ]; then
+        while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            log_violation "invalid forbidden-extension baseline row: $entry"
+        done <<EOF
+$INVALID_BASELINE
+EOF
+    fi
+    LC_ALL=C sort "$FORBIDDEN_TMP/baseline_raw" > "$FORBIDDEN_TMP/baseline"
+    DUPLICATE_BASELINE=$(uniq -d "$FORBIDDEN_TMP/baseline" || true)
+    if [ -n "$DUPLICATE_BASELINE" ]; then
+        while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            log_violation "duplicate forbidden-extension baseline row: $entry"
+        done <<EOF
+$DUPLICATE_BASELINE
+EOF
+    fi
 fi
 
-# Bash/shell files: forbidden everywhere except 3 bootstrap scripts
-BASH_FILES=$(find . \( -name '*.bash' -o -name '*.sh' \) \
-    -not -path './.git/*' \
-    -not -path './.jj/*' \
-    -not -path '*/vendor/*' \
-    -not -path '*/node_modules/*' \
-    -not -path '*/build/*' \
-    -not -path './scripts/bootstrap/bootstrap-from-scratch.sh' \
-    -not -path './scripts/bootstrap/bootstrap-seed.sh' \
-    -not -path './scripts/bootstrap/bootstrap-verify.sh' \
-    2>/dev/null || true)
-if [ -n "$BASH_FILES" ]; then
-    for f in $BASH_FILES; do
-        log_violation "forbidden .sh/.bash file: $f (rename to .shs)"
-    done
+classify_forbidden_extension_debt \
+    "$FORBIDDEN_TMP/current" "$FORBIDDEN_TMP/baseline" \
+    "$FORBIDDEN_TMP/new" "$FORBIDDEN_TMP/stale" "$FORBIDDEN_TMP/known"
+
+KNOWN_FORBIDDEN_COUNT=$(wc -l < "$FORBIDDEN_TMP/known" | tr -d ' ')
+if [ "$KNOWN_FORBIDDEN_COUNT" -gt 0 ]; then
+    log_warning "$KNOWN_FORBIDDEN_COUNT pre-existing forbidden-extension file(s) match the exact path/hash baseline"
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        echo "BASELINED DEBT: ${entry#*  } (sha256 ${entry%%  *})"
+    done < "$FORBIDDEN_TMP/known"
 fi
+
+while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    log_violation "new or modified forbidden-extension file: ${entry#*  } (sha256 ${entry%%  *})"
+done < "$FORBIDDEN_TMP/new"
+
+while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    log_violation "stale forbidden-extension baseline row: ${entry#*  } (remove it after debt cleanup; sha256 ${entry%%  *})"
+done < "$FORBIDDEN_TMP/stale"
 
 # --- Check 2: Stale .smf placeholders (179 bytes = empty stub) ---
 STALE_SMF=$(find src/ -name '*.smf' -size 179c 2>/dev/null | head -50 || true)
