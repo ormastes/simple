@@ -406,6 +406,20 @@ spipe://workspace/{workspace_id}/trace/{artifact_uid}
 spipe://workspace/{workspace_id}/diagnostics
 ```
 
+#### Admission correction: receipts, cursors, and root grammar
+
+The URI admission review found five requirements that are security invariants,
+not implementation conveniences. (1) A cursor receipt must bind the verifying
+authority/key epoch, snapshot/revision, view, normalized selector/path, and
+effective authorization scope. (2) Resolution must reject selector remapping,
+including attempts to reuse a receipt or legacy alias in a foreign workspace.
+(3) The verifier must be a branded, real signed `AuthorizationPort`, not
+structural duck typing. (4) acceptance evidence must include positive and
+hostile URI, receipt, cursor, and privacy-safe public-error matrices. (5) the
+workspace root has one canonical grammar: `spipe://workspace/{id}/`; the
+un-slashed form is malformed. These findings refine the original MCP design
+without changing the single-copy/virtual-view decision.
+
 The custom scheme is preferable to pretending every object is a local physical file. It makes project and artifact identity explicit and prevents path-root ambiguity. A compatibility alias may expose `file://`-style virtual resources for clients that require them, but the `spipe://` URI remains authoritative.
 
 ### 7.2 MCP resources
@@ -423,7 +437,6 @@ Resource templates:
 ```text
 spipe://project/{project}/artifact/{uid}
 spipe://workspace/{workspace}/view/{view}/{path}
-spipe://workspace/{workspace}/search/{query_hash}
 spipe://workspace/{workspace}/trace/{uid}
 ```
 
@@ -2884,21 +2897,23 @@ new lane. Wave 5 URI execution remains pending; this records the residual
 contract a fresh implementation must satisfy.
 
 Legacy aliases, including `spipe://skill`, are never authorization evidence.
-Resolve an alias to its canonical target first, then obtain a fresh canonical
-authorization receipt with exactly receipt version, normalized alias URI,
-canonical URI, workspace UID, project UID, target kind, target UID, snapshot
-UID, revision ID, principal-scope hash, policy version, decision, issued/expiry
-times, receipt UID, issuer key ID, revocation epoch, and signature. The read
-adapter verifies the signed `D-` record through `AuthorizationPort` (supported
-version/key, `spipe-uri-read-v1\0` canonical payload, `decision=allow`, live
-time window, and current revocation epoch) before it accepts a
-receipt only when every field equals the resolved target and pinned snapshot;
-it must reauthorize rather than reuse an alias receipt after any mismatch.
+Resolve an alias to its canonical target first, then obtain a fresh
+`CanonicalReadReceiptV1` using the sole exact ABI frozen immediately below. The
+read adapter verifies the signed `D-` record through `AuthorizationPort`
+(supported version/key, `spipe-uri-read-v1\0` canonical payload,
+`decision=allow`, live time window, and current revocation epoch) before it
+accepts a receipt only when every field equals the resolved target and pinned
+snapshot; it must reauthorize rather than reuse an alias receipt after any
+mismatch.
 
-`CanonicalReadReceiptV1` has exactly `{receiptVersion, normalizedAliasUri,
-canonicalUri, workspaceUid, projectUid, targetKind, targetUid, snapshotUid,
-revisionId, principalScopeHash, policyVersion, decision, issuedAtMs, expiresAtMs,
-receiptUid, issuerKeyId, revocationEpoch, signature}`.
+`CanonicalReadReceiptV1` has exactly `{receiptVersion, authorityKeyId,
+authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
+projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
+pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
+issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1` has the identical
+binding plus `lastSortKey`; both are verified solely by the branded signed
+`AuthorizationPort` contract.
 
 The resolver directly validates that the selected immutable snapshot exists,
 belongs to the requested workspace/project, carries the stated revision, and

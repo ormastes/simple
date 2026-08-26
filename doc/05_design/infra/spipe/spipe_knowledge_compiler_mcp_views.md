@@ -82,14 +82,20 @@ watch maintenance publish a new snapshot outside request handling.
 
 ## 3. Workspace Resolution
 
-Workspace identity is explicit and stable. Resolution precedence is:
+Workspace identity is explicit and stable. Resolution precedence applies only
+before a request has selected a URI family or presented an admission receipt:
 
 1. tool/resource workspace identifier;
 2. server configuration supplied at launch;
 3. `SPIPE_HOST_ROOT` compatibility environment value;
 4. one configured default workspace.
 
-There is no per-request current-working-directory inference. Startup resolves
+There is no per-request current-working-directory inference. Once a URI names a
+workspace, or a receipt/cursor binds one, the resolver uses that exact
+workspace; it never falls through to server configuration, environment, or a
+default workspace. Workspace-less project and legacy aliases are first resolved
+by the registry to one canonical workspace and then reauthorized in that exact
+workspace; ambiguity is a closed admission failure. Startup resolves
 and realpaths the module root, host root, canonical content roots, cache root,
 and materialization root. The registry binds workspace ID to project IDs,
 revision, worktree ID, visibility policy, and current snapshot ID.
@@ -106,6 +112,14 @@ spipe://workspace/{workspace}/diagnostics
 spipe://project/{project}/artifact/{artifact_uid}
 spipe://project/{project}/section/{section_uid}
 ```
+
+The workspace-root resource has exactly the trailing-slash form shown above;
+`spipe://workspace/{workspace}` is not a synonym and is rejected as malformed.
+No URI family permits an implicit selector remap: a request selects the named
+workspace, project, snapshot/revision, view, and scope, and all later checks
+must bind those exact values. In particular, a legacy alias, cursor, or receipt
+for one workspace may not resolve a same-named project or view in a foreign
+workspace.
 
 `view` is one of `lifecycle`, `feature`, `component`, `layer`, `matrix`,
 `trace`, `project`, `status`, or `diagnostics`. The legacy `spipe://skill`
@@ -163,10 +177,27 @@ lifecycle grouping, and trace gaps. Limits are:
 - no more than 200 Markdown lines or approximately 6,000 model tokens;
 - cursor pagination before either bound would be exceeded.
 
-A cursor is an opaque signed or integrity-checked encoding of snapshot ID,
-view identity, filters, effective authorization-scope digest, last sort key,
-and limit. Reuse against a different snapshot or effective scope returns
-`stale_cursor`; it never silently skips, duplicates, or discloses results.
+A cursor is an opaque, versioned `CursorReceiptV1`, signed by the same admitted
+receipt authority as reads. Its canonical signed payload binds **authority
+key/epoch**, workspace UID, project UID or null, snapshot ID, revision ID, view
+kind, normalized logical path, normalized filters, effective authorization
+scope digest, ordering version, last sort key, and the issued page limit. The
+next request independently resolves and authorizes the URI, then compares every
+binding before consulting the cursor position. A valid receipt with a different
+authority, workspace, snapshot, view, scope, selector, or limit is
+`stale_cursor`; it never silently skips, duplicates, remaps, or discloses
+results. Cursor verification never substitutes a current default workspace or
+current snapshot.
+
+`AuthorizationPort` is a branded, real signed-verifier boundary, not a
+structural JavaScript object or duck-typed callback. `createAuthorizationPort`
+returns an unforgeable branded instance after it loads an issuer/algorithm/key
+allowlist and verified key epoch. `verifyCanonicalReadReceiptV1(receipt,
+expectedBinding, clockNowMs)` verifies the brand, protocol version, canonical
+payload bytes, signature, issuer/key/epoch allowlist, revocation epoch,
+`issuedAtMs <= clockNowMs < expiresAtMs`, and exact expected binding. It returns
+only an opaque verified-read grant; parser, projection, and cursor modules
+cannot construct a grant or accept `{ verify() {} }` substitutes.
 
 MIME types are `inode/directory` for directory resources, `text/markdown` for
 rendered documents, and `application/vnd.spipe.sdn` for structured graph data.
@@ -194,12 +225,22 @@ inconsistently:
 The existing six tools and `spipe://skill` remain callable. New structured
 results include a human-readable text representation for legacy hosts.
 
-JSON-RPC failures preserve the request ID and distinguish parse error, invalid
-request, method not found, invalid parameters, stale cursor, unauthorized,
-not found, resource limit, and internal error. Notifications never receive a
-response. Partial stdio chunks and multiple messages per chunk are supported.
+JSON-RPC failures preserve the request ID and distinguish protocol-envelope
+errors (parse error, invalid request, method not found, invalid parameters,
+resource limit, and internal error). Every **read-admission** denial is instead
+the privacy-safe `not_found_or_unauthorized` class defined below. Notifications
+never receive a response. Partial stdio chunks and multiple messages per chunk
+are supported.
 Initialize negotiates a mutually supported version, processes `initialized`,
 and rejects requests that require initialization before lifecycle completion.
+
+All public read-family admission failures (`malformed_uri`, unknown workspace,
+foreign selector, receipt/signature failure, expired/revoked receipt, stale
+cursor, unauthorized, and hidden/not-found) map to one privacy-safe external
+`not_found_or_unauthorized` response class with the same bounded-work path.
+Server telemetry retains a closed internal reason code. This rule applies to
+both resources and tools and prevents an oracle for workspace/project/view
+existence.
 
 The protocol-neutral core supports legacy stdio and the target stateless MCP
 2026 transport. Transport-specific sessions, headers, or authorization never

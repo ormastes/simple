@@ -91,6 +91,28 @@ ports or parent-applied deltas.
 | `MaterializerSafeFilesystemPort` | Descriptor-relative generated-view mutations and durability |
 | `ClockPort` | Injectable time for TTL, staleness, and deterministic tests |
 
+`AuthorizationPort` is an authenticating composition-root service, not a
+shape-compatible object accepted from a handler. The composition root creates a
+branded `AuthorizationPortV1` only after loading its signature verifier,
+issuer/algorithm/key allowlist, and key/revocation epoch. It alone exposes:
+
+```text
+verifyCanonicalReadReceiptV1(receipt, expected_binding, clock_now_ms)
+  -> Result<VerifiedReadGrantV1, AdmissionFailure>
+signCursorReceiptV1(binding, page_position, expiry) -> CursorReceiptV1
+verifyCursorReceiptV1(receipt, expected_binding, clock_now_ms)
+  -> Result<VerifiedCursorGrantV1, AdmissionFailure>
+```
+
+`expected_binding` is a closed tuple of authority key/epoch, workspace UID,
+project UID-or-null, snapshot ID, revision ID, view kind, normalized logical
+path, normalized selector/filter digest, effective scope digest, ordering
+version, and page limit. A parser/projection module receives only verified
+grants; it cannot create a receipt, widen a selector, or choose a replacement
+workspace/snapshot. The root URI grammar is likewise closed: only
+`spipe://workspace/{workspace}/` denotes a workspace directory; the un-slashed
+form is malformed rather than normalized.
+
 Ports return typed capability or error results. No fallback may claim a
 capability it cannot provide exactly.
 
@@ -1279,23 +1301,23 @@ The URI-foundation candidate exhausted three independent review/fix cycles and
 is uncommitted and not admitted. Wave 5 URI execution remains pending. A new
 implementation starts from this architecture, not from the rejected code.
 
-`ResourceResolver` canonicalizes a legacy alias before authorization. Its
-receipt is bound to: receipt version, normalized alias URI, canonical URI,
-workspace UID, project UID, target kind, target UID, snapshot UID, revision ID,
-principal-scope hash, policy version, decision, issued/expiry times, and
-receipt UID, issuer key ID, revocation epoch, and signature. The internal
-`AuthorizationPort.verifyCanonicalTargetReceiptV1` allowlists version/key,
-verifies the signed `D-` payload (`spipe-uri-read-v1\0` plus canonical JSON),
-requires `decision=allow`, a live clock window, and the current revocation
-epoch before `ProjectionPort` compares
-all receipt fields with its resolved target and pinned `KnowledgeSnapshot`;
-any difference causes fresh authorization or a closed failure. Thus
-`spipe://skill` cannot be read under an alias-only grant.
+`ResourceResolver` canonicalizes a legacy alias before authorization. It calls
+only `AuthorizationPort.verifyCanonicalReadReceiptV1`, which allowlists the
+version/key, verifies the signed `D-` payload (`spipe-uri-read-v1\0` plus
+canonical JSON), requires `decision=allow`, a live clock window, and the
+current revocation epoch, then compares every field with the direct resolved
+target and pinned `KnowledgeSnapshot`; any difference causes fresh
+authorization or a closed failure. Thus `spipe://skill` cannot be read under
+an alias-only grant.
 
-`CanonicalReadReceiptV1` has exactly `{receiptVersion, normalizedAliasUri,
-canonicalUri, workspaceUid, projectUid, targetKind, targetUid, snapshotUid,
-revisionId, principalScopeHash, policyVersion, decision, issuedAtMs, expiresAtMs,
-receiptUid, issuerKeyId, revocationEpoch, signature}`.
+`CanonicalReadReceiptV1` has exactly `{receiptVersion, authorityKeyId,
+authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
+projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
+pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
+issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1` has that same
+binding plus `lastSortKey`; both use the sole verifier method names frozen in
+§3.1 and no `verifyCanonicalTargetReceiptV1` alias exists.
 
 Before authorization and rendering, the resolver directly verifies that the
 snapshot exists, is immutable, belongs to the selected workspace/project, has

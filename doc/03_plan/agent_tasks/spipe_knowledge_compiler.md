@@ -116,6 +116,14 @@ queued double emission, or `event_queue_full`.
 
 - Mutations: `RefactorPlan`, `TransactionReceipt`, `RebalanceProposal`, `PromotionCandidate`. `RefactorPlan` is the only mutation-plan contract name.
 - Protocol operations: `spipe_list`, `spipe_read`, `spipe_search`, `spipe_resolve`, `spipe_trace`, `spipe_diagnostics`.
+- URI admission: `AuthorizationPortV1`, `CanonicalReadReceiptV1`, and
+  `CursorReceiptV1`. Both receipt contracts bind authority key/epoch,
+  workspace, project-or-null, snapshot, revision, view, normalized path and
+  selector/filter digest, effective scope, ordering version, and page limit.
+  The composition root alone creates the branded signed verifier and opaque
+  verified grants; handlers may not use structural verifier objects, remap a
+  selector, default a workspace, or authorize one workspace with another's
+  receipt. `spipe://workspace/{workspace}/` is the sole workspace-root grammar.
 - Phase exchange: the task/research/architecture/spec/implement/refactor/verify/ship UID input/output records used by Wave 7. Their contracts freeze in Wave 0; harness generation remains a separate Wave 9 deliverable.
 - Manual flow helpers: `step("Index canonical knowledge artifacts")`, `step("Browse virtual knowledge views")`, `step("Search and trace artifacts")`, `step("Apply a transactional refactor")`, and `step("Audit tree balance and promotion candidates")`.
 - Setup/checkers: `setup_spipe_knowledge_fixture`, `check_spipe_knowledge_compiler`, `check_spipe_provider_parity`, `check_spipe_refactor_recovery`, `check_spipe_virtual_view_safety`.
@@ -293,7 +301,7 @@ violates this evidence boundary.
 
 **Depends on:** Waves 3–4. **Owners:** D.  
 **Deliverables:** authoritative `spipe://` resolver; lifecycle/feature/component/layer/matrix/trace/project/status/diagnostic projections; bounded MCP list/read/search/resolve/trace/diagnostic tools and resources; legacy stdio plus a stateless MCP 2026 HTTP implementation held disabled until its Wave 0 transport/auth/cache threat gates pass; deterministic pagination/cache hints; `.spipe/view/` materializer; editor-provider skeleton.  
-**Exit gates:** model navigates without canonical paths; each artifact-representation file maps to exactly one canonical artifact UID, while directory indexes, search pages, trace matrices, diagnostics, and other aggregate outputs carry deterministic synthetic projection UIDs bound to the immutable snapshot UID and query/view parameters; writes fail closed; outputs are deterministic, paginated, and bounded; private data never receives public cache scope; unchanged materializations are not rewritten; HTTP cannot be enabled without path/auth/cache negative tests passing.
+**Exit gates:** model navigates without canonical paths; each artifact-representation file maps to exactly one canonical artifact UID, while directory indexes, search pages, trace matrices, diagnostics, and other aggregate outputs carry deterministic synthetic projection UIDs bound to the immutable snapshot UID and query/view parameters; writes fail closed; outputs are deterministic, paginated, and bounded; private data never receives public cache scope; unchanged materializations are not rewritten; HTTP cannot be enabled without path/auth/cache negative tests passing. A cursor must be a signed receipt whose authority/snapshot/revision/view/selector/scope/page-limit bindings match the independently authorized request exactly; legacy aliases cannot remap foreign workspaces; every verifier is an admitted branded `AuthorizationPortV1`; and the positive plus hostile URI/receipt/cursor/public-error matrix in the system-test plan must pass.
 
 ### Wave 6 — Transactional refactoring and repair
 
@@ -971,18 +979,18 @@ normal/highest-capability reviewer.
    independent review/fix cycles. It is uncommitted and not admitted; do not
    reuse its code. Wave 5 URI execution remains pending.
 2. **Canonical alias gate.** The fresh owner resolves every legacy alias,
-   including `spipe://skill`, then issues a receipt bound to normalized alias
-   URI, canonical URI, workspace/project, kind/UID, snapshot/revision,
-   principal-scope hash, policy version, decision, issued/expiry times,
-   receipt UID, issuer key ID, revocation epoch, and signature. Verify the
-   signed `D-` receipt through `AuthorizationPort` (supported version/key,
-   canonical `spipe-uri-read-v1\0` payload, allow decision, live window,
-   revocation epoch) before every call compares all
+   including `spipe://skill`, then issues a receipt using the one exact v2 ABI
+   frozen below. Verify the signed `D-` receipt through `AuthorizationPort`
+   (supported version/key, canonical `spipe-uri-read-v1\0` payload, allow
+   decision, live window, revocation epoch) before every call compares all
    fields against its direct resolved target or reauthorizes/fails closed.
-   Freeze exactly `CanonicalReadReceiptV1{receiptVersion, normalizedAliasUri,
-   canonicalUri, workspaceUid, projectUid, targetKind, targetUid, snapshotUid,
-   revisionId, principalScopeHash, policyVersion, decision, issuedAtMs,
-   expiresAtMs, receiptUid, issuerKeyId, revocationEpoch, signature}`.
+   Freeze exactly `CanonicalReadReceiptV1{receiptVersion, authorityKeyId,
+   authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
+   projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+   normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
+   pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
+   issuerKeyId, revocationEpoch, signature}` and `CursorReceiptV1` with the
+   same binding plus `lastSortKey`.
 3. **Snapshot gate.** Directly validate immutable snapshot existence,
    workspace/project ownership, revision, and target membership; URI/query text
    is never authority.
@@ -999,6 +1007,17 @@ normal/highest-capability reviewer.
    root/view, artifact, section, trace, diagnostics, legacy alias after
    canonical reauthorization, and `spipe_search`; alias success must return the
    authorized canonical target, not an alias-only echo.
+6. **Fresh-v2 correction.** Before the new implementation starts, extend the
+   frozen receipt tuple to include authority key/epoch, view, normalized
+   selector/filter digest, ordering version, and page limit. Cursor receipts
+   use the same tuple plus page position and cannot be replayed against any
+   selector, including a foreign workspace. The composition root must reject
+   structural/duck-typed “verifiers”; only an opaque branded real signed
+   `AuthorizationPortV1` creates verified grants. The workspace-root success
+   case is exactly `spipe://workspace/{workspace}/`; its un-slashed form is a
+   hostile malformed case. Record one public `not_found_or_unauthorized`
+   response class for all read-admission denials, with private reason codes
+   only in telemetry. These are acceptance blockers, not optional hardening.
 
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.

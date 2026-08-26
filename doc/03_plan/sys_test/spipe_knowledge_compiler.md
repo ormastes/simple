@@ -123,6 +123,25 @@ scenarios include:
 - bind resource URIs, cursors, query hashes, cache entries, and mutation tokens
   to immutable snapshot identity, principal/policy version, filters, and
   analyzer version so pagination cannot drift across authorization or updates;
+- accept the one canonical workspace-root URI
+  `spipe://workspace/{workspace}/` and reject its un-slashed near miss;
+- use a branded signed `AuthorizationPortV1`, rejecting duck-typed verifiers,
+  invalid algorithm/issuer/key/epoch, malformed signature, expired/revoked
+  receipt, and receipt payloads whose authority/workspace/project/snapshot/
+  revision/view/normalized-path/selector/scope/ordering/page-limit binding
+  differs from the request;
+- accept one fully authorized canonical read and one next-page cursor in the
+  same complete authority/workspace/project/snapshot/revision/view/path/
+  selector/scope/ordering/page-limit tuple, then reject cursor reuse across
+  every bound field, a foreign workspace selector, legacy-alias remap, changed
+  ordering/version, and changed page limit. Cover cursor issuer/signature,
+  expiry, and revocation failure independently;
+- exercise raw/once-encoded/double-encoded traversal and separators, NUL,
+  controls, malformed percent escapes, Windows device/ADS forms, empty IDs,
+  duplicate query parameters, hostile receipt/cursor bytes, and every public
+  admission error. Assert identical public `not_found_or_unauthorized` class
+  and bounded content-free work for malformed, foreign-selector, receipt- or
+  cursor-failure, stale-cursor, hidden, unknown, and unauthorized targets;
 - materialize only changed read-only files under `.spipe/view/`;
 - complete legacy stdio initialization and a stateless MCP 2026 request;
 - start/connect, send `initialize`, send `notifications/initialized`, request
@@ -288,8 +307,9 @@ limit and limit-plus-one for: frame 1 MiB, headers 32 KiB, JSON depth 16,
 method 128 bytes, URI 8 KiB, query 4 KiB, decoded string 256 KiB, aggregate
 arguments 512 KiB, list 100, candidates 1,000, trace depth 8/nodes 2,000,
 response 1 MiB, generated manual 200 lines/about 6,000 tokens, and 16 in-flight
-requests. Expected typed failures are `frame_too_large`, `limit_exceeded`,
-`invalid_request`, `unauthorized`, or `stale_cursor`, before protected effects.
+requests. Expected typed protocol-envelope failures are `frame_too_large`,
+`limit_exceeded`, or `invalid_request`; any attempted read admission is the
+single public `not_found_or_unauthorized` class before protected effects.
 
 Provider cases additionally test: 128 query tokens, 64 Boolean clauses, depth
 8, 32 terms/phrase and 64 total phrase terms, 256 expansions, 32 filters, 64
