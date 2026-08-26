@@ -89,9 +89,10 @@ if [ -n "${SFFI_ADMISSION_JOBS:-}" ]; then
             "$manifest" "$signature" "$trust_store" "$artifact" \
             "$source_snapshot" "$build_input" "$compiler" "$abi_registry" \
             "$verification_report" "$receipt" >/dev/null
-        provider=$(awk -F '\t' '$1 == "provider_id" { print $2 }' "$receipt")
+        provider=$(awk -F '\t' '$1 == "provider_id" && NF == 2 { count++; value=$2 }
+            END { if (count == 1 && value != "") print value }' "$receipt")
         test -n "$provider" || {
-            echo "SFFI contract inventory: admitted job $job_index has no provider identity" >&2
+            echo "SFFI contract inventory: admitted job $job_index must have exactly one provider identity" >&2
             exit 2
         }
         # Symbol name alone is not an admission key: preserve the admitted ABI
@@ -203,6 +204,11 @@ xargs -0 -r -n 200 perl -MDigest::SHA=sha256_hex -0ne '
             last if !$found_start;
         }
         my $context = join("\n", @lines[$start .. $i]);
+        my $provider = "missing";
+        if ($context =~ /\@sffi\s*\([\s\S]*?\bprovider\s*:\s*"([^"]+)"/i) {
+            $provider = $1;
+            $provider =~ s/[\t\r\n]/ /g;
+        }
         my $unsafe = ($declaration =~ /\bunsafe\s+(?:extern\s+)?fn\b/ ||
                       $context =~ /\@unsafe\s*\([\s\S]*?capabilities\s*:\s*\[[^\]]*\bffi\b[^\]]*\]/i)
             ? "tagged" : "missing";
@@ -219,19 +225,20 @@ xargs -0 -r -n 200 perl -MDigest::SHA=sha256_hex -0ne '
             ? ($contract eq "missing" ? "unsafe_contract_missing" : "unsafe_contract_declared")
             : ($contract eq "missing" ? "unsafe_tag_and_contract_missing" : "unsafe_tag_missing");
         $file =~ s/^\Q$ENV{SFFI_ROOT}\E\/// if defined $ENV{SFFI_ROOT};
-        print join("\t", $symbol, $signature_hash, $file, $decl_start + 1,
+        print join("\t", $symbol, $provider, $signature_hash, $file, $decl_start + 1,
                    $unsafe, $contract, $evidence, $state), "\n";
     }
 ' <"$work/files.bin" >"$work/contracts-unsorted.tsv"
 sort -u "$work/contracts-unsorted.tsv" >"$work/contracts.tsv"
 
 if test -s "$work/admitted-symbols.tsv"; then
-    cut -f1,2 "$work/contracts.tsv" | sort -u >"$work/declared-identities.tsv"
-    cut -f1,2 "$work/admitted-symbols.tsv" | sort -u >"$work/admitted-identities.tsv"
+    awk -F '\t' '$2 != "missing" { print $1 "\t" $3 "\t" $2 }' \
+        "$work/contracts.tsv" | sort -u >"$work/declared-identities.tsv"
+    sort -u "$work/admitted-symbols.tsv" >"$work/admitted-identities.tsv"
     comm -23 "$work/admitted-identities.tsv" "$work/declared-identities.tsv" \
         >"$work/admitted-without-declaration.tsv"
     if test -s "$work/admitted-without-declaration.tsv"; then
-        echo 'SFFI contract inventory: admitted symbol/signature identities have no owned declaration:' >&2
+        echo 'SFFI contract inventory: admitted symbol/signature/provider identities have no owned declaration:' >&2
         sed -n '1,20p' "$work/admitted-without-declaration.tsv" >&2
         exit 2
     fi
@@ -239,7 +246,7 @@ fi
 
 awk -F '\t' 'BEGIN { OFS="\t" }
     FILENAME == ARGV[1] { if (FNR > 1) backing[$1]=$2; next }
-    FILENAME == ARGV[2] { admitted[$1 SUBSEP $2]++; next }
+    FILENAME == ARGV[2] { admitted[$1 SUBSEP $2 SUBSEP $3]++; next }
     {
         b = backing[$1] ? backing[$1] : "unknown"
         language = (b == "c_runtime_source_only") ? "c_or_cpp" : \
@@ -248,13 +255,14 @@ awk -F '\t' 'BEGIN { OFS="\t" }
             (b == "external_library_symbol") ? "external_c_abi" : \
             (b == "bare_exempt") ? "freestanding" : \
             (b == "in_deployed_binary") ? "linked_native_unknown" : "none_observed"
-        admission = admitted[$1 SUBSEP $2] ? "reverified" : "not_admitted"
-        print $1, b, language, $2, $3, $4, $5, $6, admission, $7, $8
+        admission = ($2 != "missing" && admitted[$1 SUBSEP $3 SUBSEP $2]) \
+            ? "reverified" : "not_admitted"
+        print $1, b, language, $2, $3, $4, $5, $6, $7, admission, $8, $9
     }
 ' "$work/backing.tsv" "$work/admitted-symbols.tsv" "$work/contracts.tsv" >"$work/joined.tsv"
 
 {
-    printf 'symbol\tbacking\tprovider_language\tsource_signature_sha256\tfile\tline\tunsafe_tag\tcontract\tcryptographic_admission\tevidence\tstate\n'
+    printf 'symbol\tbacking\tprovider_language\tprovider_id\tsource_signature_sha256\tfile\tline\tunsafe_tag\tcontract\tcryptographic_admission\tevidence\tstate\n'
     cat "$work/joined.tsv"
 } >"$out"
 
@@ -265,16 +273,16 @@ if [ -n "$symbols_out" ]; then
             if (!(symbol in backing)) backing[symbol]=$2
             if (!(symbol in language)) language[symbol]=$3
             declarations[symbol]++
-            signature_key=symbol SUBSEP $4
+            signature_key=symbol SUBSEP $5
             if (!(signature_key in seen_signature)) {
                 seen_signature[signature_key]=1
                 signatures[symbol]++
             }
-            if ($7 == "missing") unsafe_missing[symbol]++
-            if ($8 == "missing") contract_missing[symbol]++
-            if ($9 == "reverified") admitted[symbol]++
-            if ($10 == "missing") evidence_missing[symbol]++
-            if ($10 == "claim_present_unverified") evidence_claim[symbol]++
+            if ($8 == "missing") unsafe_missing[symbol]++
+            if ($9 == "missing") contract_missing[symbol]++
+            if ($10 == "reverified") admitted[symbol]++
+            if ($11 == "missing") evidence_missing[symbol]++
+            if ($11 == "claim_present_unverified") evidence_claim[symbol]++
         }
         END {
             print "symbol", "backing", "provider_language", "declarations", \
@@ -297,19 +305,19 @@ if [ -n "$symbols_out" ]; then
     ' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort; } >"$symbols_out"
 fi
 
-awk -F '\t' 'NR > 1 { count[$11]++ } END { for (state in count) print count[state], state }' "$out" \
+awk -F '\t' 'NR > 1 { count[$12]++ } END { for (state in count) print count[state], state }' "$out" \
     | sort -nr >&2
 
 awk -F '\t' 'NR > 1 {
     declarations++
-    if ($7 == "tagged") unsafe_tagged++
-    if ($9 == "reverified") signed_admitted++
-    if ($7 == "missing" && $8 == "missing" && $10 == "missing") untouched++
+    if ($8 == "tagged") unsafe_tagged++
+    if ($10 == "reverified") signed_admitted++
+    if ($8 == "missing" && $9 == "missing" && $11 == "missing") untouched++
     if ($1 ~ /^rt_/) {
         rt_declarations++
-        if ($7 == "tagged") rt_unsafe_tagged++
-        if ($9 == "reverified") rt_signed_admitted++
-        if ($7 == "missing" && $8 == "missing" && $10 == "missing") rt_untouched++
+        if ($8 == "tagged") rt_unsafe_tagged++
+        if ($10 == "reverified") rt_signed_admitted++
+        if ($8 == "missing" && $9 == "missing" && $11 == "missing") rt_untouched++
     }
 } END {
     printf "SFFI declaration stats: total=%d unsafe_tagged=%d signed_admitted=%d untouched=%d\n", \

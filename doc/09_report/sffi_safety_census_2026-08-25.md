@@ -20,8 +20,8 @@ count is correctly zero.
 | Contract documented | 1,044 | 398 |
 | Cryptographically verified and signed | 0 | 0 |
 | Untouched: no unsafe tag, contract, or evidence | 8,468 | 1,817 |
-| Unsafe but minimized to a narrow owner | 797 | 380 |
-| Unsafe and not minimized | 10,775 | measured by updated tool |
+| Unsafe tag plus declared contract | 797 | 380 |
+| Lexical unsafe minimization | not measured | not measured |
 | Symbols with multiple source-signature hashes | — | 264 |
 
 All 11,572 declaration rows remain fail-closed unsafe in the census. An unsafe
@@ -1078,6 +1078,20 @@ frame send/receive hot path. Wall-clock access now uses the canonical fail-close
 time facade, removing the final raw declaration from this module while retaining
 the same provider call and millisecond division. Source-reviewed but unverified;
 broader SFFI signing and admission remain absent.
+
+## 2026-08-26 provider-scoped census admission follow-up
+
+The inventory schema now records declaration `provider_id` from compiler-owned
+`@sffi` metadata and joins signed admission by `(symbol, canonical source
+signature hash, provider_id)`. A matching symbol/signature from another provider, or a
+declaration without provider identity, cannot inherit admission. The census
+also stops calling `unsafe` tag plus contract metadata “minimized”: that proves
+neither lexical call ownership nor call-site count. It reports contract-declared
+unsafe rows separately and emits `unsafe_minimization_status=not_measured`
+until an authoritative resolved-call graph supplies that evidence. This is an
+offline source/evidence-tool correction and adds zero runtime work, memory,
+lookup, hashing, or dispatch. Existing numerical tables remain the prior static
+snapshot and were not rerun under the no-verification instruction.
 ## 2026-08-26 Base64/Base64url contract follow-up
 
 Interpreter Base64/Base64url handlers now enforce exact arity, explicit bounded

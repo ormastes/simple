@@ -1540,6 +1540,19 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Preserved the valid path's existing type match and one release dispatch; no
   allocation, copy, hash, lookup, lock, retry, or extra traversal was added.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 provider-scoped census admission follow-up
+
+- Added declaration provider identity to the SFFI inventory schema.
+- Bound cryptographic admission to symbol + canonical source signature hash +
+  provider ID; missing/mismatched provider metadata fails closed.
+- Renamed annotation-derived “minimized” counts to contract-declared unsafe and
+  reports lexical minimization as `not_measured` until resolved-call evidence
+  exists.
+- Updated census contract and ratchet names without weakening their thresholds.
+- Tooling remains offline; no runtime hot path gains hashes, signature checks,
+  provider lookup, allocation, or dispatch.
+- Status: source-reviewed, deliberately unverified; census was not executed.
 ## 2026-08-26 UI WebSocket pure-Simple SHA-1 follow-up
 
 - Removed four app-local raw SHA-1 declarations and their fabricated `0`/empty
