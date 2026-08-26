@@ -1568,3 +1568,14 @@ Torch SFFI nor all SFFI may be described as verified safe.
   no allocation, copy, lookup, hash, lock, retry, or traversal was added.
 - Native typed-registry coverage remains absent, so these stay unverified and
   unsigned rather than being promoted as cross-lane safe.
+## 2026-08-26 memory-attribution contract follow-up
+
+- Enforced exact interpreter arity/types for enabled, set-owner, report, and
+  report-print.
+- Removed fabricated report limit `16` and wrong-type successful set-owner no-op.
+- Preserved valid owner-report generation, sorting, allocation, and printing.
+- Added a static lane-split ratchet: native set-owner is `(ptr,len)`, interpreter
+  is lifted text, and report functions remain without typed native registration.
+- Valid paths add only arity/type decisions before existing work; no provider
+  lookup, hash, lock, retry, or extra report traversal was added.
+- Status: source-reviewed, deliberately unverified and unsigned.

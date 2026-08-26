@@ -217,7 +217,12 @@ pub fn rt_mem_profile_features(_args: &[Value]) -> Result<Value, CompileError> {
 /// Whether per-owner allocation attribution is on (SIMPLE_MEM_ATTR=1).
 ///
 /// Callable from Simple as: `rt_mem_attr_enabled() -> i64`
-pub fn rt_mem_attr_enabled(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_attr_enabled(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_enabled requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_mem_attr_enabled()))
 }
 
@@ -226,9 +231,17 @@ pub fn rt_mem_attr_enabled(_args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_mem_attr_set_owner(name: text)`
 pub fn rt_mem_attr_set_owner(args: &[Value]) -> Result<Value, CompileError> {
-    if let Some(Value::Str(name)) = args.first() {
-        simple_runtime::value::heap::set_current_owner(name.as_ref());
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_set_owner requires 1 argument (name)",
+        ));
     }
+    let Value::Str(name) = &args[0] else {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_set_owner requires a text name",
+        ));
+    };
+    simple_runtime::value::heap::set_current_owner(name.as_ref());
     Ok(Value::Nil)
 }
 
@@ -236,10 +249,12 @@ pub fn rt_mem_attr_set_owner(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_mem_attr_report(n: i64) -> text`
 pub fn rt_mem_attr_report(args: &[Value]) -> Result<Value, CompileError> {
-    let n = match args.first() {
-        Some(Value::Int(n)) => (*n).max(0) as usize,
-        _ => 16,
-    };
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_report requires 1 argument (n)",
+        ));
+    }
+    let n = args[0].as_int()?.max(0) as usize;
     Ok(Value::Str(simple_runtime::value::heap::owner_report(n).into()))
 }
 
@@ -250,10 +265,12 @@ pub fn rt_mem_attr_report(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_mem_attr_report_print(n: i64)`
 pub fn rt_mem_attr_report_print(args: &[Value]) -> Result<Value, CompileError> {
-    let n = match args.first() {
-        Some(Value::Int(n)) => (*n).max(0) as usize,
-        _ => 16,
-    };
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_report_print requires 1 argument (n)",
+        ));
+    }
+    let n = args[0].as_int()?.max(0) as usize;
     println!("{}", simple_runtime::value::heap::owner_report(n));
     Ok(Value::Nil)
 }
@@ -1690,6 +1707,16 @@ mod tests {
             rt_heap_live_count_by_kind(&[Value::Int(i64::MAX)]),
             Ok(Value::Int(0))
         ));
+    }
+
+    #[test]
+    fn memory_attribution_handlers_reject_fabricated_defaults() {
+        assert!(rt_mem_attr_enabled(&[Value::Int(1)]).is_err());
+        assert!(rt_mem_attr_set_owner(&[]).is_err());
+        assert!(rt_mem_attr_set_owner(&[Value::Bool(false)]).is_err());
+        assert!(rt_mem_attr_report(&[]).is_err());
+        assert!(rt_mem_attr_report(&[Value::Bool(false)]).is_err());
+        assert!(rt_mem_attr_report_print(&[]).is_err());
     }
 
     // ========================================================================

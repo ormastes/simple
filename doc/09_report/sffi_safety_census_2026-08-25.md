@@ -951,3 +951,11 @@ instead of fabricated zero; genuine provider zero for out-of-range kinds is
 unchanged. Four zero-argument metrics reject extras. These diagnostic calls add
 no allocation or provider dispatch on valid paths. Source-reviewed but
 unverified, unsigned, and lacking native registry coverage.
+## 2026-08-26 memory-attribution contract follow-up
+
+Four Rust interpreter memory-attribution handlers now enforce exact arity and
+types. Report/report-print no longer fabricate `n = 16`; set-owner no longer
+turns missing/wrong values into a successful no-op; enabled rejects extras.
+Valid reporting allocation/sort behavior is unchanged. Native set-owner uses a
+separate `(ptr,len)` text ABI, while report functions still lack typed native
+registry coverage. Source-reviewed but unverified and unsigned.
