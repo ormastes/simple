@@ -1318,6 +1318,15 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - [x] Add no numeric workaround, second scan, cache, lock, or dispatch.
 - [x] Add a static authority and one-fetch ratchet.
 
+### Completed interpreter JIT state-authority slice
+
+- [x] Remove four raw file and PID declarations.
+- [x] Use typed reads, exact writes, canonical delete, and validated PID.
+- [x] Preserve one provider operation for every existing load/save/cleanup.
+- [x] Add no retry, metadata probe, allocation, cache, lock, or dispatch.
+- [x] Record repeated file I/O on `jit_record_call` as open measured-design debt.
+- [x] Add a static authority and operation-shape ratchet.
+
 ### Completed MIR bulk-ops flag spec authority slice
 
 - [x] Remove the spec-local raw environment setter declaration and calls.

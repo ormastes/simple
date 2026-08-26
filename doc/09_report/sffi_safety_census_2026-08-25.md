@@ -862,3 +862,14 @@ retains one `[text]` fetch, the same program/script-prefix skip, and the same
 single pass that builds `argv`; no numeric substitution, second fetch, scan,
 allocation beyond the existing argv copy, cache, hash, lock, lookup, boxing,
 marshalling, or dynamic dispatch was added.
+
+### Interpreter JIT state authority follow-up
+
+The file-backed interpreter JIT removed four raw file and PID declarations and
+now uses canonical typed read, exact write, delete, and validated PID owners.
+Every existing state load, save, and cleanup retains one provider operation;
+read failure still selects the default disabled state and no retry, metadata
+probe, allocation, copy, cache, hash, lock, lookup, boxing, marshalling, or
+dynamic dispatch was added. Source inspection also exposed pre-existing
+multiple state-file reads/writes during `jit_record_call`; that hot-path design
+debt is recorded separately and was not hidden behind an unmeasured cache.
