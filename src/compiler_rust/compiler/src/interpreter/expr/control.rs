@@ -352,7 +352,7 @@ pub(super) fn eval_control_expr(
             nodes: nodes.clone(),
             env: Arc::new(env.clone()),
         })),
-        Expr::UnsafeBlock(nodes) => {
+        Expr::UnsafeBlock(nodes, _) => {
             let (flow, last_value) =
                 super::super::exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
             match flow {
@@ -817,7 +817,7 @@ fn collect_free_vars_recursive(expr: &Expr, bound: &mut Vec<String>, vars: &mut 
             collect_free_vars_recursive(subject, bound, vars);
             collect_free_vars_arms(arms, bound, vars);
         }
-        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
             collect_free_vars_block(nodes, bound, vars);
         }
         // Literals and other expressions that don't contain variable references

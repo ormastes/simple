@@ -197,7 +197,7 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
         | ast::Expr::Await(expr)
         | ast::Expr::Spawn(expr)
         | ast::Expr::ContractOld(expr) => expr_uses_self(expr),
-        ast::Expr::DoBlock(nodes) | ast::Expr::UnsafeBlock(nodes) => nodes.iter().any(node_uses_self),
+        ast::Expr::DoBlock(nodes) | ast::Expr::UnsafeBlock(nodes, _) => nodes.iter().any(node_uses_self),
         _ => false,
     }
 }

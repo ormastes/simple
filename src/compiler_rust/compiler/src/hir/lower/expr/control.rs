@@ -1776,6 +1776,7 @@ impl Lowerer {
     pub(super) fn lower_unsafe_block(
         &mut self,
         statements: &[simple_parser::ast::Node],
+        capabilities: &[String],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         let block = simple_parser::ast::Block {
@@ -1788,7 +1789,10 @@ impl Lowerer {
             _ => TypeId::NIL,
         };
         Ok(HirExpr {
-            kind: HirExprKind::UnsafeBlock(block_stmts),
+            kind: HirExprKind::UnsafeBlock {
+                statements: block_stmts,
+                capabilities: capabilities.to_vec(),
+            },
             ty: result_ty,
         })
     }
@@ -3008,7 +3012,7 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
             collect_identifiers_recursive(subject, bound, identifiers);
             collect_identifiers_arms(arms, bound, identifiers);
         }
-        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
             collect_identifiers_block(nodes, bound, identifiers);
         }
         // Literals and other expressions that don't contain identifiers

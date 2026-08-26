@@ -194,7 +194,9 @@ impl Lowerer {
             Expr::Match { subject, arms } => self.lower_match(subject, arms, ctx),
             // Do block: do: statements... (block as expression)
             Expr::DoBlock(statements) => self.lower_do_block(statements, ctx),
-            Expr::UnsafeBlock(statements) => self.lower_unsafe_block(statements, ctx),
+            Expr::UnsafeBlock(statements, capabilities) => {
+                self.lower_unsafe_block(statements, capabilities, ctx)
+            }
             // Null coalescing: expr ?? default
             Expr::Coalesce { expr, default } => self.lower_coalesce(expr, default, ctx),
             // Existence check: expr.? (is present/non-empty)

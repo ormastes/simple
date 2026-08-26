@@ -1111,9 +1111,21 @@ stops at non-annotation source, and therefore adds bounded compile-time work
 without changing generated or runtime code. Regression specifications cover
 multiline declarations and helpers. Capability parsing now requires the exact
 `ffi` list token; `ffi` appearing only in reason text cannot grant authority.
-This was source-reviewed only; tests were
-not executed. Rust-seed HIR still erases the capability list from `UnsafeBlock`,
-so cross-compiler capability-specific minimization evidence remains incomplete.
+This was source-reviewed only; tests were not executed. At that point the
+Rust-seed HIR still erased the capability list from `UnsafeBlock`; the follow-up
+below closes that representation gap.
+
+## 2026-08-26 Rust-seed unsafe-capability retention follow-up
+
+Rust-seed parsing now retains the exact capability identifiers on unsafe AST
+blocks, HIR lowering preserves them, and the raw-FFI checker grants authority
+only when `ffi` is present. Bare unsafe blocks and `raw_ptr`-only scopes no
+longer satisfy foreign-call enforcement. MIR continues to erase the metadata,
+so generated code and runtime call paths are unchanged. Parser/HIR/checker
+regression cases cover retained `ffi`, empty bare blocks, and rejection of
+non-FFI scopes. Capability collection is one linear header-token pass with one
+small vector per unsafe block; there is no per-call runtime allocation. This
+slice was source-reviewed only and deliberately not executed.
 
 ## 2026-08-26 Base64/Base64url contract follow-up
 

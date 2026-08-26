@@ -35,7 +35,7 @@ pub(crate) fn eval_lambda_body(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     let nodes = match body {
-        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => nodes,
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => nodes,
         _ => return evaluate_expr(body, env, functions, classes, enums, impl_methods),
     };
     let block = Block {

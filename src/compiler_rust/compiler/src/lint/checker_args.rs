@@ -254,7 +254,7 @@ impl LintChecker {
                         check_expr(checker, elem, source_file, source_text);
                     }
                 }
-                Expr::DoBlock(stmts) | Expr::UnsafeBlock(stmts) => {
+                Expr::DoBlock(stmts) | Expr::UnsafeBlock(stmts, _) => {
                     for stmt in stmts {
                         check_stmt(checker, stmt, source_file, source_text);
                     }

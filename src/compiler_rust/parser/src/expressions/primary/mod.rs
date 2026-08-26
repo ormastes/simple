@@ -90,10 +90,28 @@ impl<'a> Parser<'a> {
         self.advance();
         self.expect(&TokenKind::LParen)?;
         let mut depth = 1usize;
+        let mut capabilities = Vec::new();
+        let mut capability_key_seen = false;
+        let mut in_capability_list = false;
         while depth > 0 {
-            match self.current.kind {
+            match &self.current.kind {
                 TokenKind::LParen => depth += 1,
                 TokenKind::RParen => depth -= 1,
+                TokenKind::LBracket if capability_key_seen => {
+                    in_capability_list = true;
+                }
+                TokenKind::RBracket if in_capability_list => {
+                    in_capability_list = false;
+                    capability_key_seen = false;
+                }
+                TokenKind::Identifier { name, .. } if in_capability_list => {
+                    capabilities.push(name.clone());
+                }
+                TokenKind::Identifier { name, .. }
+                    if depth == 1 && name == "capabilities" =>
+                {
+                    capability_key_seen = true;
+                }
                 TokenKind::Eof => {
                     return Err(ParseError::unexpected_token(
                         "')' in unsafe block header",
@@ -106,7 +124,8 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         self.expect(&TokenKind::Colon)?;
-        self.parse_block().map(|block| Expr::UnsafeBlock(block.statements))
+        self.parse_block()
+            .map(|block| Expr::UnsafeBlock(block.statements, capabilities))
     }
 
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {

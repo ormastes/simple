@@ -111,7 +111,10 @@ pub enum HirExprKind {
     Block(Vec<HirStmt>),
     /// Lexical unsafe authorization boundary. MIR lowers the contained block
     /// normally after semantic/safety passes have observed this marker.
-    UnsafeBlock(Vec<HirStmt>),
+    UnsafeBlock {
+        statements: Vec<HirStmt>,
+        capabilities: Vec<String>,
+    },
 
     // Memory operations
     Ref(Box<HirExpr>),

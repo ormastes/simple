@@ -153,7 +153,16 @@ fn check_expr(module: &HirModule, function: &str, expr: &HirExpr, in_unsafe: boo
                 check_expr(module, function, arg, in_unsafe, out);
             }
         }
-        HirExprKind::UnsafeBlock(stmts) => check_stmts(module, function, stmts, true, out),
+        HirExprKind::UnsafeBlock {
+            statements,
+            capabilities,
+        } => check_stmts(
+            module,
+            function,
+            statements,
+            in_unsafe || capabilities.iter().any(|capability| capability == "ffi"),
+            out,
+        ),
         HirExprKind::Block(stmts) => check_stmts(module, function, stmts, in_unsafe, out),
         HirExprKind::Binary { left, right, .. } => {
             check_expr(module, function, left, in_unsafe, out);
@@ -260,6 +269,22 @@ mod tests {
             "extern fn rt_probe() -> i64\nfn run() -> i64:\n    unsafe(capabilities: [ffi]):\n        rt_probe()\n",
         );
         assert!(check_unsafe_ffi(&module).is_empty());
+    }
+
+    #[test]
+    fn rejects_raw_extern_call_inside_non_ffi_unsafe_scope() {
+        let module = lower(
+            "extern fn rt_probe() -> i64\nfn run() -> i64:\n    unsafe(capabilities: [raw_ptr]):\n        rt_probe()\n",
+        );
+        let violations = check_unsafe_ffi(&module);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].callee, "rt_probe");
+    }
+
+    #[test]
+    fn rejects_raw_extern_call_inside_bare_unsafe_scope() {
+        let module = lower("extern fn rt_probe() -> i64\nfn run() -> i64:\n    unsafe:\n        rt_probe()\n");
+        assert_eq!(check_unsafe_ffi(&module).len(), 1);
     }
 
     #[test]

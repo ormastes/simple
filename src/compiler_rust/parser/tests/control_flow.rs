@@ -34,7 +34,7 @@ fn parse_capability_scoped_unsafe_block() {
     };
     assert!(matches!(
         &function.body.statements[0],
-        Node::Expression(simple_parser::ast::Expr::UnsafeBlock(_))
+        Node::Expression(simple_parser::ast::Expr::UnsafeBlock(_, _))
     ));
 }
 

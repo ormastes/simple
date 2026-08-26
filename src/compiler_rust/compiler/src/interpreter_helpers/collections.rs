@@ -464,7 +464,7 @@ pub(crate) fn eval_dict_for_each(
             // a silent no-op. Execute the statements directly against `env`
             // instead. A single-line body is an ordinary expression.
             match body.as_ref() {
-                Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+                Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
                     for node in nodes {
                         crate::interpreter::exec_node(node, env, functions, classes, enums, impl_methods)?;
                     }

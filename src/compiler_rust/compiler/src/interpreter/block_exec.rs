@@ -251,7 +251,7 @@ pub(crate) fn exec_block_fn(
         // For the last statement, if it's an expression, capture its value
         let is_last = i == len - 1;
         if is_last {
-            if let Node::Expression(Expr::UnsafeBlock(nodes)) = stmt {
+            if let Node::Expression(Expr::UnsafeBlock(nodes, _)) = stmt {
                 let (flow, value) = exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
                 match flow {
                     Control::Next => last_expr_value = value,

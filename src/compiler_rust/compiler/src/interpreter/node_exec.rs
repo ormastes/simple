@@ -369,7 +369,7 @@ pub(crate) fn exec_node(
         Node::Context(ctx_stmt) => exec_context(ctx_stmt, env, functions, classes, enums, impl_methods),
         Node::With(with_stmt) => exec_with(with_stmt, env, functions, classes, enums, impl_methods),
         Node::Expression(expr) => {
-            if let Expr::UnsafeBlock(nodes) = expr {
+            if let Expr::UnsafeBlock(nodes, _) = expr {
                 let (flow, _) = super::exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
                 return Ok(flow);
             }

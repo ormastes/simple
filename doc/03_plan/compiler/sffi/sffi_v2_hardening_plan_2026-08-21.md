@@ -1571,9 +1571,21 @@ Torch SFFI nor all SFFI may be described as verified safe.
   adding runtime work.
 - The scan is capped at 32 annotation lines per item and stops before ordinary
   source, preserving linear lint complexity and bounded transient state.
-- Remaining blocker: Rust-seed `UnsafeBlock` HIR retains no capability list, so
-  it cannot yet produce capability-specific minimization evidence.
+- At this slice, Rust-seed `UnsafeBlock` HIR retained no capability list; the
+  follow-up below closes that representation gap.
 - Status: source-reviewed, deliberately unverified; tests were not executed.
+
+## 2026-08-26 Rust-seed unsafe-capability retention follow-up
+
+- Extended unsafe AST/HIR blocks with compile-time capability identifiers.
+- Made raw-FFI checking require the exact `ffi` capability and reject bare or
+  `raw_ptr`-only blocks.
+- Preserved nested outer `ffi` authority without allowing an inner unrelated
+  capability block to erase it.
+- Kept MIR/runtime representation unchanged; capability collection is linear in
+  the already-parsed header and stores one small vector per unsafe block only
+  during compilation.
+- Added parser, HIR, and checker regression coverage; deliberately not executed.
 
 ## 2026-08-26 UI WebSocket pure-Simple SHA-1 follow-up
 

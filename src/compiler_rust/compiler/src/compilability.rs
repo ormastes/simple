@@ -829,7 +829,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
         }
 
         // DoBlock - a sequence of statements (used for BDD DSL colon-blocks)
-        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
             for node in nodes {
                 analyze_node(node, reasons, mode);
             }

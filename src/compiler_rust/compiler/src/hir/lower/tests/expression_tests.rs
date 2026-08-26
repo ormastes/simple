@@ -498,10 +498,14 @@ fn test_lower_danger_block_retains_boundary_and_tail_type() {
         panic!("Expected unsafe block expression");
     };
     assert_eq!(expr.ty, TypeId::I64);
-    let HirExprKind::UnsafeBlock(statements) = &expr.kind else {
+    let HirExprKind::UnsafeBlock {
+        statements,
+        capabilities,
+    } = &expr.kind else {
         panic!("Expected retained unsafe boundary, got {:?}", expr.kind);
     };
     assert_eq!(statements.len(), 2);
+    assert!(capabilities.is_empty());
     assert!(!format!("{statements:?}").contains("danger"));
 }
 
@@ -520,7 +524,10 @@ fn test_lower_value_bound_unsafe_block_retains_boundary_and_tail_type() {
         panic!("Expected value-bound unsafe expression");
     };
     assert_eq!(value.ty, TypeId::I64);
-    assert!(matches!(value.kind, HirExprKind::UnsafeBlock(_)));
+    let HirExprKind::UnsafeBlock { capabilities, .. } = &value.kind else {
+        panic!("Expected retained unsafe boundary");
+    };
+    assert_eq!(capabilities, &["ffi"]);
 }
 
 #[test]

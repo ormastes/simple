@@ -130,7 +130,7 @@ fn expr_kind(expr: &Expr) -> &'static str {
         Expr::If { .. } => "If",
         Expr::Match { .. } => "Match",
         Expr::DoBlock(_) => "DoBlock",
-        Expr::UnsafeBlock(_) => "UnsafeBlock",
+        Expr::UnsafeBlock(_, _) => "UnsafeBlock",
         Expr::Call { .. } => "Call",
         Expr::MethodCall { .. } => "MethodCall",
         Expr::FieldAccess { .. } => "FieldAccess",
