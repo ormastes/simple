@@ -17,6 +17,7 @@ use compiler.interp.execution.tiered_jit.{
     jit_hotspot_rebuild_choice,
     jit_hotspot_optimization_plan,
     jit_hotspot_rebuild_backend_name,
+    jit_hotspot_backend_plugin_facts,
     jit_hotspot_cost_allowed,
     jit_var_optimization_facts,
     jit_var_optimization_facts_none,
@@ -203,12 +204,52 @@ fn hot_checksum_profile(call_count: i64) -> FunctionProfile:
         var_facts: jit_var_optimization_facts_none()
     )
 
+fn mixed_source_profile(typed_mir: bool, safe_deopt: bool) -> FunctionProfile:
+    FunctionProfile(
+        name: "mixed_source",
+        call_count: 256,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn mixed_source(buf: [i64], i: i64) -> i64: while i < buf.len: return buf[i]",
+        typed_mir: typed_mir,
+        safe_deopt: safe_deopt,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
+    )
+
 fn hotspot_config() -> TieredJitConfig:
     TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
 
 use std.spec.step
 
 describe "Tiered JIT hotspot facts":
+    it "keeps mixed shared predicates from implying stronger source facts":
+        step("Classify a loop with indexed access but no index advance")
+        val facts = jit_hotspot_backend_plugin_facts(
+            mixed_source_profile(true, true), hotspot_config(), "cranelift")
+
+        step("Preserve exact fact order and reject advance-dependent facts")
+        expect(facts).to_equal([
+            "profile.hot_count", "typed_mir", "safe_deopt",
+            "loop_preheader", "cranelift_backend_available"
+        ])
+        expect(facts.contains("loop_canonical")).to_equal(false)
+        expect(facts.contains("vectorization_candidate")).to_equal(false)
+        expect(facts.contains("range_facts")).to_equal(false)
+        expect(facts.contains("bounded_scan_terminates")).to_equal(false)
+
+    it "does not classify source predicates when the profile is ineligible":
+        step("Reject source classification without typed MIR")
+        val facts = jit_hotspot_backend_plugin_facts(
+            mixed_source_profile(false, true), hotspot_config(), "cranelift")
+
+        step("Keep profile/backend facts while emitting no source-derived fact")
+        expect(facts).to_equal([
+            "profile.hot_count", "safe_deopt", "cranelift_backend_available"
+        ])
+        expect(facts.contains("loop_preheader")).to_equal(false)
+
     it "does not emit profile.hot_count below threshold":
         step("Verify: does not emit profile.hot_count below threshold")
         # @req: REQ-COMPILER-INTERPRETER-001
