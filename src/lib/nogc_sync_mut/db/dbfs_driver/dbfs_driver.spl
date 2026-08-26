@@ -638,6 +638,34 @@ impl DbFsDriver:
             return Err(FsError.IoError(code: 0))
         Ok(out)
 
+    fn _read_inode_range_from_device_locked(
+        inode_id: u64, file_offset: i64, length: i64
+    ) -> Result<[u8], FsError>:
+        """Read only a validated inode subrange while the DBFS owner is held."""
+        if self.arena_base < 0:
+            return Err(FsError.Unsupported)
+        if file_offset < 0 or length < 0:
+            return Err(FsError.InvalidArg)
+        val binding = dbfs_device_blob_binding_locked(self.inst_id, inode_id)
+        if not binding.exists or binding.offset < 0 or binding.length < 0:
+            return Err(FsError.Unsupported)
+        if file_offset > binding.length or length > binding.length - file_offset:
+            return Err(FsError.InvalidArg)
+        if binding.offset > 0x7FFFFFFFFFFFFFFF - file_offset:
+            return Err(FsError.TooLarge)
+        val bytes = dbfs_device_read_bytes_locked(
+            self.inst_id, self.arena_base, self.arena_block_count,
+            binding.offset + file_offset, length
+        )
+        if bytes.is_err():
+            return bytes
+        val out = match bytes:
+            Ok(value): value
+            Err(err): return Err(err)
+        if out.len() as i64 != length:
+            return Err(FsError.IoError(code: 0))
+        Ok(out)
+
     # --- capability / extension ---
 
     fn probe(cap: Capability) -> Option<Extension>:
