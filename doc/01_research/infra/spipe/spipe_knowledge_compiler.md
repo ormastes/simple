@@ -2897,12 +2897,13 @@ new lane. Wave 5 URI execution remains pending; this records the residual
 contract a fresh implementation must satisfy.
 
 Legacy aliases, including `spipe://skill`, are never authorization evidence.
-Resolve an alias to its canonical target first, then obtain a fresh
+Resolve an alias only to a canonical candidate, prove that candidate's target
+membership in the sealed authority view, then obtain a fresh
 `CanonicalReadReceiptV1` using the sole exact ABI frozen immediately below. The
 read adapter verifies the signed `D-` record through `AuthorizationPort`
 (supported version/key, `spipe-uri-read-v1\0` canonical payload,
 `decision=allow`, live time window, and current revocation epoch) before it
-accepts a receipt only when every field equals the resolved target and pinned
+accepts a receipt only when every field equals the proven target and pinned
 snapshot; it must reauthorize rather than reuse an alias receipt after any
 mismatch.
 
@@ -2937,3 +2938,111 @@ The suite also proves a positive canonical list/read/render for workspace
 root/view, artifact, section, trace, diagnostics, legacy alias after canonical
 reauthorization, and the `spipe_search` tool. Alias success renders only its
 authorized canonical target, never an alias-only echo.
+
+## 42. Wave 5 snapshot-authority and projection-port prerequisite (2026-08-26)
+
+<!-- codex-design -->
+
+The URI handoff's requirement to prove `targetKind` and `targetUid` membership
+in a pinned snapshot cannot be implemented against the current storage surface.
+`ImmutableSnapshotStore` is intentionally a project/revision-oriented,
+duck-typed metadata store: it has no authoritative per-snapshot target
+inventory, and it does not bind a read to the requested workspace and worktree.
+Consequently a resolver could verify a syntactically sound receipt but still
+have no admitted evidence that its claimed artifact or section belongs to the
+selected snapshot. Direct URI implementation is therefore **non-admitted**
+until the following port is delivered and tested.
+
+`SnapshotAuthorityPortV1` is a branded composition-root capability, not a
+`SnapshotStore` convenience wrapper. Its only constructor is
+`createSnapshotAuthorityPortV1({ workspaceRegistry, snapshotStore,
+targetInventoryStore })`; it returns opaque `SnapshotAuthorityViewV1` values
+and rejects structural substitutes. A view is bound to exactly
+`{workspaceUid, projectUidOrNull, worktreeUid, snapshotUid, revisionId}` and
+to a verified immutable manifest digest. It exposes only:
+
+```text
+openBoundSnapshot(binding) -> Result<SnapshotAuthorityViewV1, SnapshotAuthorityError>
+resolveCanonicalTarget(view, { targetKind, targetUid })
+  -> Result<CanonicalTargetV1, SnapshotAuthorityError>
+resolveCanonicalAlias(view, { normalizedAliasUri })
+  -> Result<CanonicalTargetCandidateV1, SnapshotAuthorityError>
+listDirectoryTarget(view, { viewKind, normalizedLogicalPath, selectorDigest })
+  -> Result<CanonicalDirectoryTargetV1, SnapshotAuthorityError>
+```
+
+`CanonicalTargetCandidateV1` contains only normalized canonical
+`{targetKind,targetUid}` and the alias-index digest; it is not renderable and
+cannot be accepted as a `CanonicalTargetV1`. `CanonicalTargetV1` contains the canonical kind/UID, immutable content or
+section locator, and source-manifest digest; it cannot be constructed by URI,
+MCP, or materializer adapters. `ProjectionPortV1` is separately branded and
+accepts only a `SnapshotAuthorityViewV1` plus a resolved canonical target. It
+may list/render deterministic read-only projections, but cannot open a raw
+snapshot, infer a target from a path, or refresh the index. The manifest must
+include a deterministic inventory of artifact, section, trace, diagnostics,
+and directory projection entries sufficient to answer these operations without
+repository scanning.
+
+The sole resolver sequence is: parse/normalize URI once; resolve the exact
+workspace (including its worktree) in `WorkspaceRegistry`; open and validate
+the receipt-named snapshot as an untrusted candidate through
+`SnapshotAuthorityPortV1`; resolve a legacy alias through the sealed authority
+view, if present; prove the canonical target/directory in that view; derive
+the expected binding; obtain and verify a fresh read receipt; then call
+`ProjectionPortV1`. Any unavailable workspace/worktree, manifest, revision,
+inventory item, or binding mismatch is the same bounded public denial class
+and reaches neither rendering nor a filesystem path. This inserts a Wave 5a
+authority/inventory delivery before URI, MCP, and materializer implementation;
+it does not weaken receipt verification or authorize a compatibility fallback.
+
+### 42.1 Admission repair: manifest seal, aggregate scope, and resolver order
+
+`TargetInventoryManifestV1` is the missing trust anchor. Its canonical bytes
+contain `{version, scopeKind, workspaceUid, projectUidOrNull, worktreeUid,
+baseSnapshotUid, revisionId, entries, aliasIndex, projectionRoot,
+contributingProjectRoots, rootDigest}`.
+`entries` contains artifact/section/aggregate/directory membership and each
+locator's content digest; `aliasIndex` maps normalized legacy aliases to one
+canonical kind/UID or records a deterministic ambiguity. `rootDigest` is
+recomputed from canonical bytes excluding the digest field.
+
+The authority seal is non-cyclic. Existing `baseSnapshotUid` remains the
+content-addressed identity of the pre-existing base tuple. A separate,
+content-addressed `AuthorityManifestV1` has `snapshotUid` and commits exactly
+`{baseSnapshotUid, targetInventoryRoot, workspaceUid, projectUidOrNull,
+worktreeUid, revisionId, scopeKind, contributingProjectRoots}`. Receipts bind this authority `snapshotUid`,
+not the base tuple UID. `openBoundSnapshot` recomputes inventory bytes/root,
+then AuthorityManifest bytes/UID, and rejects a missing, swapped, or tampered
+root before returning a view. Existing snapshots without an authority manifest
+are pre-Wave-5a inputs, not authority evidence.
+
+Workspace-root/view/trace/diagnostics use a distinct
+`scopeKind=workspace_aggregate` manifest. It has `projectUidOrNull=null` and
+its canonical schema includes the required `contributingProjectRoots` field:
+an ordered-by-canonical-project-UID list of exact
+`{projectUid, baseSnapshotUid, authoritySnapshotUid, targetInventoryRoot}`
+records. The field is required for this scope (including an explicit empty
+list when no projects contribute), forbidden for `scopeKind=project`, and is
+committed both in `TargetInventoryManifestV1` canonical bytes and in the
+matching `AuthorityManifestV1` authority tuple. Thus authority cannot select a
+different, missing, extra, or merely reordered set after a receipt is issued.
+A project scope instead has a non-null project UID. The registry alone
+creates/selects this aggregate manifest for an exact workspace/worktree/
+revision. Thus a null project is a defined aggregate scope, not an attempt to
+weaken the current project-snapshot schema.
+
+The resolver order supersedes the shorthand above: parse once; resolve the
+exact workspace/worktree; ask SnapshotAuthority to open the receipt-named
+snapshot/revision only as an untrusted candidate and validate it against the
+registry and sealed manifest; for a legacy URI, resolve its sealed alias only
+to obtain a canonical candidate and then call `resolveCanonicalTarget` to
+prove that candidate's membership; for a canonical URI, prove its target
+directly inside that authority view; derive `expectedBinding` solely from the
+proven view, target, and normalized request; verify the receipt against that
+binding; then invoke ProjectionPort. Alias resolution is neither authorization
+nor target proof, and authorization cannot precede that proof. Receipt text
+never supplies an accepted target. A
+receipt has no `worktreeUid`; this ABI remains frozen, and worktree binding is
+proved transitively by the verified snapshot/aggregate manifest tuple selected
+by the exact registry workspace/worktree record. Every failure coalesces to
+the existing bounded public denial.
