@@ -93,3 +93,41 @@ Mechanical failures were fixed and landed (`dddd834f996`, `c433e5d091d`,
     unverifiable in-tree (`hal_traits`); `Option.some/none` vs `Some/None`
     mismatch fixed in `bare/hal/uart.spl` regardless.
 22. Seed needs redeploy for the `feature` keyword (bdd_feature_group).
+
+## Wave 5 additions (~34 specs fixed)
+
+Landed shas — slice0 `7971f2bffbb` `6a02c0f8c4c` `745540b000e` `5c219ddf6d2`;
+slice1 `a41ef500f83` `64f8098101d` `11c816c21d9` `06fa37dc08f` `284ce63b0ac`;
+slice2 `dc58fec5f1b` `8da31723373`; slice3 `e5a7528f063` `46bb8524167`
+`1f3c1225f8b` `aa0fbd39bdf`.
+
+23. **Seed parser rejects multi-line `if` conditions** when a continuation line
+    starts with `self` or `_`, or when the body indent equals the continuation
+    indent. Workaround applied across the sweep was to hoist the condition into
+    a local `val`; that is a workaround, not a fix — the grammar should accept
+    the compact form. Needs a seed parser change.
+24. **Inline `unsafe(caps): expr` one-line body rejected.** Only the
+    block/indented form parses; the one-line colon form is a documented shape
+    that the seed does not accept.
+25. **"expected expression, found Dedent"** in three `src/os/port/*.spl` files.
+    Undiagnosed — the error points at a dedent with no obvious offending
+    construct; needs a reduced repro before it can be filed against a specific
+    grammar rule.
+26. **Free functions of the form `fn treesitter_*(self: TreeSitter)` do not
+    resolve as methods across module boundaries.** Method-call syntax on an
+    imported type only finds the flattened free fn when it is declared in the
+    same module, so cross-module call sites fail to resolve.
+27. **HIR→MIR lowering returns nil internals** for multi-function sources that
+    use `and`/`or`. Single-function sources lower correctly; the defect appears
+    only once more than one function is present, pointing at per-function state
+    reuse in the lowering pass.
+28. **Clobber `4edef8fab8e` also truncated 7 spec files to 1 byte.** Five have
+    been restored; two remain wiped and are recoverable from `26de1a115c3`.
+    This widens item 18 above: the clobber damaged tests as well as source.
+29. **MCP core tool set collapsed to 3 tools (expected 20).** In addition, the
+    `perf` command appears in both the help text and the dispatch table but has
+    no dispatch branch, so invoking it falls through silently.
+30. **`test_db.sdn` lock contention under concurrent lanes.** Parallel test
+    lanes contend on the shared results DB; sweeps running alongside other
+    sessions can stall or lose rows. Sweep verdicts should not depend on a
+    single shared writable DB file.

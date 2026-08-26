@@ -75,3 +75,33 @@ the recursion guards between simply and this repo.
 - Lessons: slice by sorted path so each agent owns coherent directories; make
   agents run specs in the foreground (one stalled waiting on a background
   batch); give each a private scratch dir (two collided on `out3/`).
+
+## Update 2026-08-26 (waves 3-5, sweep completion)
+
+- Wave 3 `676241b1db3` `9db7dbb836d` (16 specs); wave 4 (compiler tree, 19
+  specs + clobber restore) `97c30fce71e` `c8f1bf0c2c2` `bfe408434dd`
+  `179e18fc740` `45b92648ff8` `4345c8e197b` `8e9ef608092`.
+- Wave 5 (~34 specs, four slices): slice0 `7971f2bffbb` `6a02c0f8c4c`
+  `745540b000e` `5c219ddf6d2`; slice1 `a41ef500f83` `64f8098101d`
+  `11c816c21d9` `06fa37dc08f` `284ce63b0ac`; slice2 `dc58fec5f1b`
+  `8da31723373`; slice3 `e5a7528f063` `46bb8524167` `1f3c1225f8b`
+  `aa0fbd39bdf`.
+- Wave 5 defect classes were mostly *grammar*, not library: multi-line `if`
+  conditions the seed parser rejects when a continuation starts with `self`/`_`
+  or when body indent equals continuation indent; inline `unsafe(caps): expr`;
+  an undiagnosed "expected expression, found Dedent" in three
+  `src/os/port/*.spl`; cross-module `fn x_*(self: X)` method resolution;
+  HIR→MIR nil internals for multi-fn sources using `and`/`or`. Recorded as
+  items 23-30 in `doc/08_tracking/bug/unit_sweep_language_and_interpreter_gaps_2026-08-26.md`.
+- **Sweep-runner lesson (cost a whole session's worth of wall clock).**
+  `bin/simple test --json <many files>` silently **stops for good** at the
+  first spec that hangs — the 8,807-file sweep died at file 1,340
+  (`test/01_unit/app/ui/semantic_backend_helpers_spec.spl`) and every later
+  file simply never got a verdict. The fix is `--timeout <seconds>`, which
+  gives each file its own budget, emits an `UNVERIFIED <path>: TIMEOUT` line,
+  and **continues to the next file**. Do not add `--no-session-daemon`
+  alongside it: with both flags the runner processes only the FIRST path on
+  the command line and exits 0, which looks like a clean short run rather than
+  a broken one. Resume protocol when a sweep dies: diff the file list against
+  `^(PASS|FAIL) ` verdicts, and the first unverdicted file in original order is
+  the offender.
