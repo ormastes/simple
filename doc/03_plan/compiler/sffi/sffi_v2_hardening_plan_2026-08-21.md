@@ -1949,6 +1949,15 @@ and unpromoted.
 - [x] Preserve lookup/call counts without caching or dispatch machinery.
 - [x] Add a static authority and performance-shape ratchet.
 
+### Completed shared backend-helper authority slice
+
+- [x] Remove raw environment and AVX2 declarations/calls.
+- [x] Route five configuration reads through canonical `env_get_opt`.
+- [x] Route host AVX2 capability through canonical `std.simd.has_avx2`.
+- [x] Keep both canonical facades always-inline.
+- [x] Preserve call-site frequency without caching or extra CPUID work.
+- [x] Add a static authority and performance-shape ratchet.
+
 ### Completed LLVM target-selection authority slice
 
 - [x] Remove the module-local raw environment declaration and calls.

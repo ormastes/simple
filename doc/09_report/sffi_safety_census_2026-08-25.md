@@ -403,3 +403,12 @@ target-policy reads use the canonical nullable, always-inlined `env_get_opt`
 facade, removing the module's local unsafe authority.  The two entrypoints keep
 their existing single lookup and normalization work, with no cache, allocation,
 copy, additional host probe, lock, hash, boxing, or dispatch table added.
+
+### Shared backend-helper authority follow-up
+
+Shared backend helpers no longer declare or call raw environment or AVX2 SFFI.
+Their five configuration reads use the canonical nullable, always-inlined
+`env_get_opt` facade, and the host capability query uses the canonical
+always-inlined `std.simd.has_avx2` owner.  Call-site frequency and target-option
+construction remain unchanged, with no cache, allocation, copy, extra CPUID,
+lock, hash, boxing, or dispatch table added.
