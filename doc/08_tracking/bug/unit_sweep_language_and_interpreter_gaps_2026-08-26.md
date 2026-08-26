@@ -73,3 +73,23 @@ Mechanical failures were fixed and landed (`dddd834f996`, `c433e5d091d`,
 17. ROCm/HIP out-pointer results were read from the DynLib return status
     (fixed in `ffi_rocm`/`sffi_rocm`); missing externs `rt_font_load`,
     `rt_engine2d_pack_args_4`.
+
+## Wave 4 additions (compiler tree; `97c30fce71e` `c8f1bf0c2c2` `bfe408434dd` `179e18fc740` `45b92648ff8` `4345c8e197b` `8e9ef608092`)
+
+18. **Stale-snapshot clobber `4edef8fab8e`** ("snapshot current development
+    state", 624 files, -45k lines) deleted still-imported code:
+    `Sha256StreamV1`, `warning_phase.spl`, `driver_safety_severity.spl`,
+    ModuleSurface `semantic_hash`, driver entry-scan-cache API, lint-engine
+    internals. 7+2 files restored; ~600 files unaudited — see
+    `doc/08_tracking/bug/stale_snapshot_clobber_4edef8fab8e_2026-08-26.md`.
+    Lint-engine restore is entangled (fixes raw_rt_access, regresses
+    riscv_rtl `sort_by`) — documented, not landed.
+19. Interpolation holes inside `to_contain("...{x}...")` literals silently
+    interpolate — escape as `\{...\}` in source-contract specs.
+20. Flattened method → free fn (`OptimizationPass.new` →
+    `optimizationpass_new`) left stale call sites in
+    `optimization_passes.spl` (fixed).
+21. `std.bare.hal` resolves from a third stdlib root, so lib fixes there are
+    unverifiable in-tree (`hal_traits`); `Option.some/none` vs `Some/None`
+    mismatch fixed in `bare/hal/uart.spl` regardless.
+22. Seed needs redeploy for the `feature` keyword (bdd_feature_group).
