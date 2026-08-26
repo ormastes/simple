@@ -1860,3 +1860,18 @@ Torch SFFI nor all SFFI may be described as verified safe.
 - Next migrate raw-address callers to capability-correct MMIO owners and add
   signed admission while keeping verification off the MMIO hot path.
 - Status: source-reviewed, deliberately unverified and unsigned.
+
+## 2026-08-26 HTTP/WebSocket boundary deduplication
+
+- Replaced both app-local HTTP implementations (52 raw declarations and about
+  one thousand repeated lines) with export-only facades over the canonical
+  Pure-Simple no-GC sync owner.
+- Preserved the full API and live `app.io.http_ffi` consumer; canonical handle
+  validation is stricter for negative client/server/WebSocket handles.
+- Updated both HTTP authority audits to require one 26-declaration owner and two
+  app facades with no raw declarations, calls, or wrapper bodies.
+- Preserved 29 canonical provider calls and added no request-path allocation,
+  lookup, branch, copy, hash, or dispatch.
+- Keep the family unsafe until incomplete providers and WebSocket nullable/error
+  contracts are replaced and exact artifacts receive signed admission.
+- Status: source-reviewed, deliberately unverified and unsigned.

@@ -1237,3 +1237,19 @@ link/admission. This also removes one runtime availability branch per generic
 operation. Raw addresses remain caller-trusted, so the family is
 unsafe-minimized rather than memory-safe; providers remain unsigned and
 unverified. Source-reviewed only; checks were not executed.
+
+## 2026-08-26 HTTP/WebSocket duplicate-boundary removal
+
+Both app HTTP modules are now export-only facades over the canonical
+Pure-Simple no-GC HTTP/WebSocket owner. This removes 52 duplicate raw
+declarations and roughly one thousand lines of repeated request, client,
+server, WebSocket, URL, and status wrapper code while preserving the complete
+public API, including the live LLM Caret `app.io.http_ffi` caller. The canonical
+owner additionally rejects negative client/server/WebSocket handles rather than
+treating every nonzero integer as valid. Export resolution is compile-time, so
+request and WebSocket hot paths retain the same 29 provider calls with no added
+allocation, lookup, branch, copy, hash, or dispatch. Both existing HTTP
+authority audits now require one 26-declaration owner and two raw-free app
+facades. Provider coverage remains incomplete and WebSocket empty/failure
+ambiguity remains explicit, so the family is unsafe, unsigned, and unverified.
+Source-reviewed only; checks were not executed.
