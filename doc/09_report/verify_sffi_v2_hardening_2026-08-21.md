@@ -111,3 +111,18 @@ a claim that SFFI v2 is complete.
   upstream interpreter `u8` array-lifting defect, so it was not rerun here.
 - FAIL (global admission): this provides neither a signed artifact job nor
   cross-lane proof; global SFFI admission remains zero.
+
+## Follow-up: channel admission status (2026-08-26)
+
+- PASS (static): all six raw channel declarations and thirteen calls are
+  lexical `unsafe(ffi)`; the guard verifies the `i64` send status is retained
+  by Simple, interpreter, and both provider backends.
+- PASS (performance review): `try_send` replaces a closed-state query plus
+  ignored send with one direct status-returning send. Optimizer reports 19
+  MIR-only opportunities and zero general patterns.
+- WARN (verification): focused Rust unit compilation is blocked by unrelated
+  missing imports in `interpreter/expr/collections.rs`; the deployed bootstrap
+  executable retains the prior void result and its Simple spec therefore fails
+  one open-channel assertion. Neither is counted as a pass.
+- FAIL (global admission): channel providers remain unsigned and lack exact
+  artifact/cross-lane admission evidence.

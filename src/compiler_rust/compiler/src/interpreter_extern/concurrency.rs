@@ -601,7 +601,13 @@ pub fn rt_channel_send(args: &[Value]) -> Result<Value, CompileError> {
             }
         };
         let value = args[1].clone();
-        return registry.channel.channel_send(channel_id, value).map(|_| Value::Nil);
+        // The native channel ABI returns one only when the message entered the
+        // queue. Preserve that status in the interpreter instead of fabricating
+        // unit/nil for an admitted or rejected send.
+        return registry
+            .channel
+            .channel_send(channel_id, value)
+            .map(|admitted| Value::Int(i64::from(admitted)));
     }
 
     if args.len() != 2 {
@@ -623,13 +629,11 @@ pub fn rt_channel_send(args: &[Value]) -> Result<Value, CompileError> {
     if let Some((tx, _)) = channels.get(&channel_id) {
         let value = args[1].clone();
         if let Some(sender) = tx {
-            sender
-                .send(value)
-                .map_err(|_| CompileError::Runtime("Failed to send to channel".to_string()))?;
+            return Ok(Value::Int(i64::from(sender.send(value).is_ok())));
         }
-        Ok(Value::Nil)
+        Ok(Value::Int(0))
     } else {
-        Err(CompileError::Runtime(format!("Channel {} not found", channel_id)))
+        Ok(Value::Int(0))
     }
 }
 
@@ -864,7 +868,10 @@ mod tests {
     #[test]
     fn channel_close_preserves_buffered_messages() {
         let id = new_pure_std_channel();
-        rt_channel_send(&[Value::Int(id), Value::text("queued".to_string())]).expect("send");
+        assert!(matches!(
+            rt_channel_send(&[Value::Int(id), Value::text("queued".to_string())]).expect("send"),
+            Value::Int(1)
+        ));
         rt_channel_close(&[Value::Int(id)]).expect("close");
 
         let received = rt_channel_try_recv(&[Value::Int(id)]).expect("try recv");
@@ -883,7 +890,11 @@ mod tests {
             Value::Int(1)
         ));
 
-        rt_channel_send(&[Value::Int(id), Value::text("ignored".to_string())]).expect("send after close is ignored");
+        assert!(matches!(
+            rt_channel_send(&[Value::Int(id), Value::text("ignored".to_string())])
+                .expect("send after close is ignored"),
+            Value::Int(0)
+        ));
         let received = rt_channel_try_recv(&[Value::Int(id)]).expect("try recv");
         assert!(matches!(received, Value::Nil));
     }

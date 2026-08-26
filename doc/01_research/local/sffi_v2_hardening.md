@@ -1613,3 +1613,20 @@ loop, data-layout, or direct-call behavior was changed. The existing IEEE 1619
 KAT is still blocked upstream by interpreter `u8` array lifting, so this is
 boundary containment only—not behavioral cryptographic proof, artifact signing,
 or global SFFI verification.
+
+### Channel admission-status boundary repair (2026-08-26)
+
+The channel provider already defines `rt_channel_send` as `1` only for an
+admitted message and `0` for full, closed, disconnected, invalid, or
+non-transferable inputs. The Simple declaration discarded that result and
+`Channel.try_send` first queried closed state, then fabricated `true` after a
+rejected send. The declaration now carries the status, `try_send` consumes it
+directly, and all six raw channel declarations plus thirteen uses are lexical
+`unsafe(ffi)`. The Rust interpreter and both concurrent provider backends now
+preserve the same boolean admission result instead of laundering it through
+unit/nil. This removes the extra closed-state call from `try_send`; it adds no
+allocation, copy, lookup, hash, generic dispatch, or loop. The static guard and
+optimizer review pass (19 MIR-only, zero general patterns). Focused Rust tests
+are blocked by unrelated missing imports in `interpreter/expr/collections.rs`,
+and the deployed bootstrap binary remains stale, so this is not a completed
+cross-lane verification or signed-admission claim.

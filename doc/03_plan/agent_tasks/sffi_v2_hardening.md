@@ -270,3 +270,9 @@ passing placeholder.
     and guard the absence of per-call admission or generic dispatch. Preserve
     direct allocation and AES call shape; the pending interpreter `u8` lifting
     bug blocks XTS KAT evidence, and artifact-bound admission remains zero.
+48. Repair channel send-result propagation across Simple, interpreter, and
+    native provider paths. Preserve the `1` admitted / `0` rejected ABI instead
+    of manufacturing `true` after a rejected send; tag six raw declarations
+    and scope thirteen calls lexically. Remove the redundant closed-state query
+    from `try_send`, add no allocation/copy/lookup work, and keep unsigned
+    channel ownership explicitly unsafe until exact artifact evidence exists.
