@@ -359,3 +359,9 @@ passing placeholder.
     and the two stderr calls are lexical. Do not add work to the disabled-log
     integer-comparison fast path or turn a missing environment variable into a
     foreign-call success claim. Signing and provider verification remain absent.
+65. JWT and password-reset timestamp validation must use the shared integer
+    `rt_time_now_unix_micros` ABI, not the cross-lane-incompatible legacy
+    seconds symbol. Lift its negative sentinel to `Result`; all security
+    consumers must fail closed before expiry/token processing. Preserve one
+    clock read per operation, then require artifact-bound admission before
+    calling the provider verified.
