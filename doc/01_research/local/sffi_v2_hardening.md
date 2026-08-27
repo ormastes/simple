@@ -1747,3 +1747,21 @@ existing opportunities (42 MIR, four preallocation) for separate benchmarked
 work. `nil` still normalizes to empty pin/manifest content, so unreadable
 existing input remains an explicit unverified contract limitation; this change
 does not mark mark-sweep or global SFFI safe/signed.
+
+### Cache unreadable-input fail-closed repair (2026-08-27)
+
+The prior nullable read handling in cache admission and mark-sweep normalized
+an unreadable existing pins/manifest file to empty text. That could hide
+protected pins or treat a read failure as a malformed manifest eligible for
+trash. Both owners now keep normal missing-file behavior but fail closed on an
+unreadable existing pins file with `E-SFFI-CACHE-PINS-READ`, and mark-sweep
+fails closed on an unreadable existing manifest with
+`E-SFFI-CACHE-MANIFEST-READ`. The values are unwrapped only after the explicit
+nil guard; no empty fallback remains on those paths.
+
+Both authority audits and the affected two-file source check pass. Optimizer
+findings remain 22 (admission) and 46 (mark-sweep), unchanged from the prior
+review. The new branches execute only on foreign-read failure; normal paths
+retain their direct call shape and add no allocation, copy, loop, lookup, lock,
+or dispatch. This is fail-closed contract repair, not artifact signing or
+global provider verification.

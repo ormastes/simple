@@ -319,3 +319,7 @@ passing placeholder.
     facade. Do not infer safe pin/manifest semantics from `nil`-to-empty
     normalization; define typed unreadable-input outcomes before marking the
     cache GC verified or signed.
+57. Retain the cache unreadable-input fail-closed rule: existing pins reads
+    fail with `E-SFFI-CACHE-PINS-READ` and existing mark-sweep manifest reads
+    fail with `E-SFFI-CACHE-MANIFEST-READ`; normal absent pins remain empty.
+    Do not reintroduce `file_read_nullable(...) ?? ""` on either path.
