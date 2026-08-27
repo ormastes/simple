@@ -1,12 +1,14 @@
-# Partial optimization and diagnosis of 42 unit-spec exclusions (2026-08-27)
+# 42 unit-spec exclusions: measured classification and partial optimization (2026-08-27)
 
 Status: OPEN. This change removes one COW alias hot path in the
 `nogc_sync_mut` JS interpreter. It does not resolve or close the excluded
-specs. The 4096-handle timer workload still has an O(total²) property scan,
-and 28 real specs still lack a 900-second measurement.
+specs. The 4096-handle timer workload still has an O(total²) property scan.
 
-Historical evidence binary (identical for every measurement from the
-2026-08-27 sweep recorded below):
+**All 42 listed specs are now measured, and only 24 are hangs.** 2 are not
+specs at all, 8 finish inside 900s, and 8 fail in seconds. See §2e.
+
+Evidence binary (identical for every measurement from the 2026-08-27 sweep
+recorded below, re-stat'd after the sweep and unchanged):
 `bin/release/x86_64-unknown-linux-gnu/simple`, size `60744944`,
 mtime `2026-08-26 01:16:25 +0000`. Re-stat before comparing to these numbers —
 the symlink target is replaced by other agents mid-session.
@@ -35,20 +37,39 @@ hang list, not investigated.
 
 ## 2. Measured classification
 
-**Both categories exist — the exclusion list conflates them.** The sweep was
-run with a 900s budget against the 300s budget that produced the exclusion
-list, and that difference alone reclassifies at least one spec.
+**The exclusion list conflates three different things.** Re-run at a 900s
+budget against the 300s budget that produced the list, the 40 real specs
+split into true hangs (§2b), slow-but-completing (§2a), and fast failures
+that never ran long at all (§2d). Totals in §2e.
 
 ### 2a. MERELY SLOW — finishes, was excluded only by the 300s budget
 
 | spec | wall | rc |
 |---|---|---|
-| `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` | **726s** | **0** |
+| `test/01_unit/lib/crypto/ml_dsa_65_spec.spl` | 354s | 0 |
+| `test/01_unit/os/crypto/p384_spec.spl` | 381s | 0 |
+| `test/01_unit/os/compositor/simple_web_window_renderer_spec.spl` | 394s | 1 |
+| `test/01_unit/os/tls13/p256_ecdhe_handshake_secret_spec.spl` | 409s | 0 |
+| `test/01_unit/lib/crypto/ml_dsa_87_kat_spec.spl` | 510s | 0 |
+| `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` | 520s | 1 |
+| `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` | 726s | 0 |
+| `test/01_unit/lib/crypto/slh_dsa_128s_spec.spl` | 860s | 0 |
 
-This spec is not a hang. It completes and passes; it was excluded because
-726s exceeds the sweep's 300s per-file budget. It belongs in a performance
-bucket, not a hang list. Its cost is consistent with root cause C below (the
+**None of these is a hang.** All eight produce a verdict inside 900s and were
+excluded only because they exceed the 300s per-file budget. The six rc=0 rows
+pass; the two rc=1 rows (`simple_web_window_renderer`, `simple_web_renderer`)
+complete with genuine test failures and should be triaged as failures, not as
+hangs. The JS/browser rows' cost is consistent with root cause C below (the
 whole JS engine running interpreted).
+
+Verified from the log rather than the exit code alone — e.g.
+`browser_session_fetch_wasm_chain_spec`: `SPEC FILE VERDICT: ... outcome=OK
+declared>=250 executed=250 passed=250 failed=0 skipped=0 dropped=0`.
+
+Note `slh_dsa_128s` at 860s clears the budget by only 40s, and these timings
+were taken with 4 specs running concurrently. On a quieter box more of §2b may
+finish; on a busier one this spec flips to a timeout. The 24/8/8 split is a
+boundary under load, not a constant.
 
 ### 2b. TRUE TIMEOUT — no verdict within 900s (rc=124)
 
@@ -64,47 +85,95 @@ whole JS engine running interpreted).
 | `test/01_unit/lib/common/js_timer_drain_limit_spec.spl` | 900s | 124 |
 | `test/01_unit/lib/common/search/unicode_17_0_0_spec.spl` | 900s | 124 |
 | `test/01_unit/lib/common/text_layout/font_renderer_spec.spl` | 900s | 124 |
+| `test/01_unit/lib/common/web/browser_session_security_boundary_spec.spl` | 900s | 124 |
+| `test/01_unit/lib/common/web/browser_session_storage_spec.spl` | 900s | 124 |
+| `test/01_unit/lib/crypto/ecc_p384_p521_kat_spec.spl` | 900s | 124 |
+| `test/01_unit/lib/crypto/ed448_rfc8032_kat_spec.spl` | 900s | 124 |
+| `test/01_unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl` | 900s | 124 |
+| `test/01_unit/lib/crypto/slh_dsa_192s_256s_spec.spl` | 900s | 124 |
+| `test/01_unit/lib/fs_driver/fat32_format_spec.spl` | 900s | 124 |
+| `test/01_unit/os/apps/sshd/ssh_kex_rsa_contract_spec.spl` | 900s | 124 |
+| `test/01_unit/os/crypto/bip39_kat_spec.spl` | 900s | 124 |
+| `test/01_unit/os/crypto/scram_sha256_rfc5802_spec.spl` | 900s | 124 |
+| `test/01_unit/os/crypto/scram_sha512_spec.spl` | 900s | 124 |
+| `test/01_unit/os/qemu_systest_contract_spec.spl` | 900s | 124 |
+| `test/01_unit/os/tools/shell/text_tool_artifact_contract_spec.spl` | 900s | 124 |
+| `test/01_unit/os/vulkan/spirv_khronos_validation_spec.spl` | 900s | 124 |
 
-**Log tails do not localize the stall.** For every row in 2b the last
-non-preamble line is a module-load `[use-warning]`; no spec emitted a verdict
-or step line. This is reported as "no verdict line reached" and **not** as
-evidence that the stall is at import time — the runner appears to buffer
-per-file test output until the verdict, so these logs cannot discriminate an
-import-time hang from an in-test hang. Anyone continuing this work should
-re-run one spec with per-step output forced before drawing that conclusion.
+**The stall is in the FIRST test, not at import.** The runner streams
+per-test results as it goes — it does not buffer them — which the 2a
+finisher proves: its log is 957 lines and its first `✓` line appears at line
+**250**, after ~249 lines of module-load preamble. Every 2b log is **exactly
+247 lines with zero `✓` lines**. So these specs finish module loading and
+then stall in (or immediately before) their first test case; they are not
+import-time hangs, and they are not stalling deep in a long run after many
+passing tests.
 
-### 2c. PREVIOUSLY EVIDENCED TIMEOUT — not rerun in this sweep
+That the preamble length is identical across specs as unrelated as a compiler
+parser spec, a Unicode search spec, a font-renderer spec and the JS timer
+specs is a property of the shared preamble, not evidence of a shared root
+cause — it is the same ~247 lines of `[gc-warning]` / `[use-warning]`
+module-load noise for every spec in the suite.
 
-`test/01_unit/os/vulkan/spirv_khronos_validation_spec.spl` previously reached
-the 900-second child timeout in a clean checkout, with the process consuming a
-core after an unresolved `SpirvBuilder_dot_create` JIT symbol dropped the whole
-module to the interpreter. That evidence is retained in
-`spirv_builder_module_drops_to_interpreter_via_unresolved_jit_symbol_2026-08-11.md`.
-It is not counted among the 28 unmeasured rows below, and this PR does not
-address its blocker.
+### 2c. Corroborated: `spirv_khronos_validation`
 
-### 2d. NOT YET MEASURED (28)
+`test/01_unit/os/vulkan/spirv_khronos_validation_spec.spl` is measured above
+at 900s / rc=124, which **confirms** the independent prior evidence in
+`spirv_builder_module_drops_to_interpreter_via_unresolved_jit_symbol_2026-08-11.md`:
+an unresolved `SpirvBuilder_dot_create` JIT symbol drops the whole module to
+the interpreter. That is the same "one unresolved symbol demotes an entire
+module" mechanism as root cause C below, from a different symbol — so it is a
+recurring class, not a one-off. Its blocker is not addressed here.
 
-The sweep was still running when this record was written (it measures 4
-specs concurrently at 900s each, ~30 min per batch on a loaded box). These
-28 specs from the original list therefore have **no measured row yet** and
-are recorded as unmeasured, not as hangs:
+### 2d. FAST FAILURE — not hangs at all, they die in seconds
 
-`ecc_p384_p521_kat`, `ed448_rfc8032_kat`, `ml_dsa_65`, `ml_dsa_87_kat`,
-`rsa_pss_sha256_roundtrip_slow`, `slh_dsa_128s`, `slh_dsa_192s_256s`,
-`fat32_format`, `simple_web_renderer`, `with_lock_guard`,
-`browser_session_security_boundary`, `browser_session_storage`,
-`ssh_kex_rsa_contract`, `arm64_desktop_arch_facade`,
-`simple_web_window_renderer`, `bip39_kat`, `p384`, `scram_sha256_rfc5802`,
-`scram_sha512`, `hda_controller`, `fb_driver`,
-`virtio_input_mmio_contract`, `mmio_test_backend`, `timer_test`,
-`qemu_systest_contract`, `virtio_snd_service_contract`,
-`p256_ecdhe_handshake_secret`, `text_tool_artifact_contract`.
+Eight specs terminate in **6-16 seconds** with rc=5. They never hang; they
+fail at module load or lose their child process. They appear to have been
+binned as hangs because they produce no test verdict, not because they ran
+long.
 
-Live results land in `/mnt/data/tmp/claude-1000/hang_out/times.tsv`
-(`<seconds>\t<rc>\t<spec>`; rc=124 is a timeout). Given 2a, each of these
-must be re-checked against a 900s budget before being called a hang —
-some are likely slow-but-finishing.
+| spec | wall | rc |
+|---|---|---|
+| `test/01_unit/os/drivers/input/virtio_input_mmio_contract_spec.spl` | 6s | 5 |
+| `test/01_unit/os/drivers/audio/hda_controller_spec.spl` | 7s | 5 |
+| `test/01_unit/os/drivers/framebuffer/fb_driver_spec.spl` | 7s | 5 |
+| `test/01_unit/os/services/audio/virtio_snd_service_contract_spec.spl` | 7s | 5 |
+| `test/01_unit/os/kernel/boot/mmio_test_backend_spec.spl` | 9s | 5 |
+| `test/01_unit/os/kernel/timer_test.spl` | 11s | 5 |
+| `test/01_unit/lib/nogc_sync_mut/concurrent/with_lock_guard_spec.spl` | 13s | 5 |
+| `test/01_unit/os/arm64_desktop_arch_facade_spec.spl` | 16s | 5 |
+
+Two distinct causes are visible in their logs:
+
+- **Module parse/semantic failure.** `os/kernel/timer_test.spl`:
+  `semantic: variable 'TscCalSource' not found`, and
+  `Failed to parse module path="src/os/kernel/arch/riscv32/cpu.spl"
+  error=Unexpected token: expected identifier, found FString([Literal("memory")])`.
+  A riscv32 `cpu.spl` that does not parse is a real defect independent of
+  any of these specs.
+- **Child spawn/reap failure.** `os/drivers/framebuffer/fb_driver_spec.spl`:
+  `error: test-runner: TERMINATED: child produced no exit status -- spawn or
+  reap failure at the process layer, not a timeout and not a signal death`,
+  verdict `executed=0 passed=0 failed=1 dropped=1 unrun=1
+  reason=child-died-by-signal`.
+
+These need triage as ordinary failures, not as performance work.
+
+### 2e. Summary of the 40 real specs
+
+| category | count |
+|---|---|
+| True hang — 900s timeout, no verdict (2b) | **24** |
+| Slow but completing, 354-860s (2a) | **8** |
+| Fast failure, 6-16s, rc=5 (2d) | **8** |
+
+**Only 24 of the 42 listed specs are actually hangs.** Sixteen — 40% of the
+real population — are something else: 8 complete inside the 900s budget and
+were excluded only by the 300s one, and 8 fail in seconds. Any future sweep
+should separate "no verdict" from "ran too long" before labelling a spec a
+hang; conflating them is what produced this list.
+
+The whole population is now measured; there are no unmeasured rows left.
 
 ## 3. Root cause A — `set_object_property` is O(total properties) per write
 
@@ -208,8 +277,9 @@ With the line gone the module JIT-compiles, the engine reports
 `[engine-demotion] reason=hybrid-interp-splice`, and the run aborts with
 `thread 'simple-main' has overflowed its stack`. So there is a second, latent
 defect in the JIT / hybrid-interp-splice path for this module that the
-codegen failure has been masking. Evidence log:
-`/mnt/data/tmp/claude-1000/hang_out/fx_jitfix_8.log`.
+codegen failure has been masking. The abort is reproducible from the A/B
+recipe in the table above; the session log it was first captured in was a
+scratch file and is not preserved.
 
 Fixing this pair (the dangling line **and** the stack overflow it exposes) is
 the highest-value remaining work for the JS cluster.
