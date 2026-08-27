@@ -48,11 +48,11 @@ impl Worker:
         without constructing a second worker-side queue.  TLS ciphertext stays
         in WorkerTransportSendProgress until its original write completes.
         """
-        for oid in self.op_to_fd.keys():
-            if self.op_to_fd[oid] == fd and self.op_type.contains_key(oid):
-                if self.op_type[oid] == OP_SEND:
-                    return true
-        false
+        if not self.transport_send_op_by_fd.contains_key(fd): return false
+        val oid = self.transport_send_op_by_fd[fd]
+        self.op_to_fd.contains_key(oid) and self.op_to_fd[oid] == fd and
+            self.op_type.contains_key(oid) and self.op_type[oid] == OP_SEND and
+            self.transport_send_progress.contains_key(oid)
 
     pub(package) me flush_h2_pending_transport(fd: i64) -> bool:
         """Submit at most one H2-owned pending byte sequence for this fd.
@@ -86,6 +86,9 @@ impl Worker:
         # Clean up tracking maps
         self.op_to_fd.remove(op_id)
         self.op_type.remove(op_id)
+        if typ == OP_SEND and self.transport_send_op_by_fd.contains_key(fd) and
+            self.transport_send_op_by_fd[fd] == op_id:
+            self.transport_send_op_by_fd.remove(fd)
 
         # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
         # returns a corrupt payload under native codegen.
@@ -491,6 +494,7 @@ impl Worker:
                 self.op_to_fd.remove(oid)
                 self.op_type.remove(oid)
                 self.transport_send_progress.remove(oid)
+        self.transport_send_op_by_fd.remove(fd)
         if self.sendfile_open_files.contains_key(fd):
             val open_file = self.sendfile_open_files[fd]
             self.driver.submit_close(open_file)
@@ -566,6 +570,7 @@ impl Worker:
         self.op_to_fd = {}
         self.op_type = {}
         self.transport_send_progress = {}
+        self.transport_send_op_by_fd = {}
         self.sendfile_pending = {}
         self.sendfile_progress = {}
         self.sendfile_open_files = {}

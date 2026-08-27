@@ -162,6 +162,10 @@ pub class Worker:
     op_to_fd: Dict<i64, i64>
     op_type: Dict<i64, i64>
     transport_send_progress: Dict<i64, WorkerTransportSendProgress>
+    # One active socket-byte operation per fd.  This is deliberately keyed by
+    # fd so H2 drain decisions stay O(1) as the worker's global operation
+    # table grows.
+    transport_send_op_by_fd: Dict<i64, i64>
     sendfile_pending: Dict<i64, (text, i64, i64)>
     sendfile_progress: Dict<i64, (i64, i64)>
     sendfile_open_files: Dict<i64, i64>
@@ -246,6 +250,7 @@ pub class Worker:
             op_to_fd: {},
             op_type: {},
             transport_send_progress: {},
+            transport_send_op_by_fd: {},
             sendfile_pending: {},
             sendfile_progress: {},
             sendfile_open_files: {},
@@ -652,15 +657,26 @@ pub class Worker:
         """
         if bytes.len() == 0:
             return
+        # One Worker owns exactly one socket-byte write for a connection.
+        # Replacing the fd index here would orphan the first payload and allow
+        # a later response to overtake it, so an invariant breach fails closed.
+        if self.transport_send_inflight(fd):
+            self.close_wire_connection(fd)
+            return
         val op = self.driver.submit_send_bytes(fd, bytes)
         self.transport_send_progress[op] = WorkerTransportSendProgress.initial(bytes)
+        self.transport_send_op_by_fd[fd] = op
         self.op_to_fd[op] = fd
         self.op_type[op] = OP_SEND
 
     pub(package) me submit_transport_send_retry(fd: i64, progress: WorkerTransportSendProgress):
         """Submit the current bounded retry chunk for an owner-tracked send."""
+        if self.transport_send_inflight(fd):
+            self.close_wire_connection(fd)
+            return
         val op = self.driver.submit_send_bytes(fd, progress.current_chunk)
         self.transport_send_progress[op] = progress
+        self.transport_send_op_by_fd[fd] = op
         self.op_to_fd[op] = fd
         self.op_type[op] = OP_SEND
 
