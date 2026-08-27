@@ -1054,6 +1054,32 @@ selection, or fallback.
 Merge owner remains `/root`; an independent highest-capability review of the
 exact source diff is mandatory before commit.
 
+### 10.29 Authority trust/composition prerequisite (2026-08-27)
+
+This is a documentation-and-contract prerequisite to §10.28 source work, not a
+source admission.  The primary owner freezes `AuthorityResponseReceiptV1`, the
+single lexical composition root, the irreversible `sendStarted` state, and the
+response verifier before assigning protocol/client/service files.  It must
+prove that mutual IPC identity comes only from OS peer credentials or platform
+certificate facilities; environment, argv, globals, public DI, exported
+installers, caller secrets, and test authority are forbidden selectors.
+
+| Lane | Exact responsibility | Exclusion |
+|---|---|---|
+| A | response receipt closed schema, terminal/NoAdmission nullability, signature and request/connection binding | no store or backend implementation |
+| B | client pre-send/sendStarted/post-send state and resolve reuse tuple | no retry publish or local result |
+| C | sealed service/client/backend composition and private fixture process contract | no public test signer/verifier/store factory |
+| D | W5A-99..104 contract evidence | no W5A-65..93 durability/availability claim |
+
+The only valid test fixture is an independently built, lexically sealed private
+fixture process: tests request barriers and observations, while fixture-owned
+credentials, response issuer, verifier roots, durable-proof issuer, and backend
+selection remain unexported.  A source diff is ineligible for review if a public
+constructor, installer, DI slot, environment/argv/global selector, or synthetic
+test authority can create a valid response.  Merge owner is `/root`; a fresh
+independent highest-capability review must pass this prerequisite and exact diff
+before §10.28 implementation begins.
+
 ### 10.22 P2.5 bridge non-admission and P3 owner boundary (2026-08-27)
 
 This section supersedes every earlier task assignment, including the following

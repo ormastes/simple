@@ -2100,3 +2100,62 @@ lexically composed only: no public factory, test installer, dependency injection
 slot, environment/argv/global chooser, or Node filesystem/CAS fallback exists.
 F2 remains optional; activation requires the live tuple certification, byte
 parity, and commit checks of §21.11 for every command.
+
+### 21.13 Prerequisite sealed trust and response-composition boundary
+
+Before the non-admitted source slice can be reviewed for implementation, its
+composition root must make one further boundary explicit.  `AuthorityClientV1`,
+the authenticated IPC listener, `AuthorityServiceV1`, its response verifier,
+`DurableAuthorityStoreV1`, and optional `CertifiedAuthorityBackendV1` are one
+sealed lexical composition.  No ordinary module, command option, environment
+variable, process global, request field, exported installer, public dependency-
+injection slot, or test helper selects any member, credential, signer, verifier,
+store, or backend.  The client receives only an already-constructed opaque
+channel and verification handle; it cannot inspect credentials, replace a peer,
+or mint an authority-shaped response.  The service process obtains client peer
+identity from OS peer credentials or a platform certificate facility and obtains
+its own service credential and trusted verification roots only from the sealed
+composition root.  Caller-supplied identity text and capabilities remain
+untrusted claims until that binding has completed.
+
+The framed transport has an irreversible local `sendStarted` transition.  A
+failure before `sendStarted` (including connection acquisition or mutual-
+authentication failure) is the sole client path that may return local
+`ServiceTransportFailureV1`; it asserts only that the client did not hand the
+request to its authenticated channel.  Immediately before the first frame write,
+the client records `sendStarted(scopeDigest,idempotencyKey,requestDigest,
+connectionBindingDigest)`.  Every write, flush, cancellation, timeout, or peer
+failure after that transition is `IndeterminateDeliveryV1` until an
+authenticated, request-bound response is verified.  In particular, a failed
+write is not evidence that the service did not admit the request.  A received
+authenticated `CapabilityDeniedV1` is a service pre-admission outcome, not a
+client transport failure.
+
+Every definitive terminal/winner response and `NoAdmissionV1` travels in a
+canonical signed `AuthorityResponseReceiptV1`.  Its closed binding includes the
+wire header/version, response kind, service-instance UID, authority key ID and
+epoch, tenant UID, authenticated caller-subject digest, connection-binding
+digest, scope digest, request digest, idempotency key when the operation has
+one, decision and terminal digests-or-null, admission watermark-or-null,
+negative-index-proof digest-or-null, issue/expiry time, and signature.  A
+terminal/winner receipt binds non-null exact durable terminal/decision bytes and
+digests and forbids a negative proof; a `NoAdmissionV1` receipt binds the same
+request tuple plus non-null quorum watermark and signed immutable negative-index
+proof and forbids a terminal/winner.  The service verifies the durable terminal
+or negative proof against its admitted key epoch before signing; the client
+verifies the receipt signature, service identity, key epoch/revocation state,
+authenticated connection binding, caller subject, exact original request tuple,
+and response-kind nullability before returning a definitive result.  A stale,
+foreign-peer, cross-request, altered, expired, revoked, or malformed receipt is
+not a result: after `sendStarted` it remains `IndeterminateDeliveryV1` and may
+only be resolved with the same exact request tuple.
+
+Testability does not relax this boundary.  Codec tests may use public malformed
+data only.  Tests that need valid mutual-authentication or valid signatures run
+an independently built private fixture process whose credential roots, peer
+emulator, durable-proof issuer, and backend selection are lexically sealed in
+that fixture's composition root.  No test receives a public signer, verifier,
+store/backend factory, installer, synthetic authority, or public DI seam.  The
+fixture exposes observations and forced transport barriers, never authority
+construction.  It is first-slice contract evidence only and cannot stand in for
+a durable quorum service or satisfy W5A-65..93.

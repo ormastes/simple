@@ -1886,3 +1886,25 @@ the service availability NFR. They use no in-process durable-store substitute.
 
 W5A-94..98 are the only first-slice acceptance evidence. W5A-65..93 remain
 unexecuted future durable-service/certification schedules.
+
+### 22.11 Trust/composition prerequisite schedules
+
+W5A-99..104 are first-slice contract evidence only.  They do not execute a
+durable quorum store and cannot satisfy W5A-65..93 or NFR-SPKC-026/027.  Valid
+credentials, signatures, and negative proofs are issued only by a separately
+built private fixture process; the test harness receives barriers/observations,
+never a public signer, verifier, store/backend factory, installer, DI token, or
+synthetic authority.
+
+| ID | Fixture/boundary | Exact oracle |
+|---|---|---|
+| W5A-99 | attempt env/argv/global/caller-object/public-DI selection of client/service credential, verifier, store, backend, or fixture issuer | construction rejects before connection/request; no public authority-shaped object is obtainable. |
+| W5A-100 | fail mutual authentication or connection acquisition before the irreversible `sendStarted` barrier | local `ServiceTransportFailureV1`; fixture observes no accepted frame, request, receipt, or mutable evidence. |
+| W5A-101 | release `sendStarted`, then force write, flush, timeout, cancellation, or peer-close before a verified reply (one run per boundary) | only `IndeterminateDeliveryV1`; client never returns transport failure, local success, or NoAdmission. |
+| W5A-102 | deliver a valid signed terminal/winner and then alter service UID, key epoch/revocation, caller/connection binding, scope/key/request, terminal digest, expiry, or signature (one run per field) | unaltered response is definitive only when its exact original request tuple verifies; every alteration is post-send indeterminate and resolve remains same-tuple only. |
+| W5A-103 | issue a valid signed `NoAdmissionV1`, then alter/remove the quorum watermark, negative-index proof, request tuple, signature, or response nullability | only fully bound proof is definitive; every malformed/foreign proof remains indeterminate and leaks no admission inference. |
+| W5A-104 | attempt to obtain valid fixture credentials/signatures through the test harness rather than fixture-owned barriers | impossible by API/scope inspection; fixture can expose observations but no test authority or product DI seam. |
+
+W5A-99..104 are prerequisite gates for reviewing the first source slice.  They
+do not replace W5A-94..98; W5A-94..98 remain the initial codec/client/main
+coverage and W5A-65..93 remain future durable-service evidence.

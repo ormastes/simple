@@ -2720,3 +2720,49 @@ This slice tests only canonical codecs, the exactly-once P2 call sequence,
 capability/transport denial, lost-delivery representation, and fail-closed
 service main. It explicitly does not execute or satisfy W5A-65..93, and it
 does not claim any §21.11 deployment target.
+
+### 20.2 Sealed trust, send-state, and response-verification prerequisite
+
+The source slice has one lexical composition owner.  It alone binds the client
+channel, service listener, OS peer-credential/platform-certificate adapter,
+service credential, trusted verification roots, response verifier, durable
+store, and optional certified backend.  Product modules obtain only opaque
+already-bound handles.  There is no exported factory/installer, constructor
+argument, public DI token, test authority, environment/argv/global selector,
+or caller-provided signer/verifier/store/backend object.  This applies equally
+to Node and tests; normal Node has no substitute authority.
+
+`AuthorityClientV1.publish` uses the following exact state machine after its
+single P2 preflight: `prepared -> authenticated -> sendStarted -> awaitingReply
+-> definitive|indeterminate`.  `authenticated` means mutual peer/service
+identity and the connection binding have been verified.  Only a failure before
+`sendStarted` returns local `ServiceTransportFailureV1`; the transition is
+recorded immediately before the first framed write.  Once entered, all write,
+flush, timeout, cancellation, peer-close, and decoder failures are
+`IndeterminateDeliveryV1` unless the client verifies a definitive receipt.  A
+valid service `CapabilityDeniedV1` is decoded as a service pre-admission result
+even though it arrives after `sendStarted`.  `resolveAccepted` reuses the
+unchanged `{scopeDigest,idempotencyKey,requestDigest,connectionBindingDigest}`;
+it never tries another publish or changes scope/key/digest.
+
+`AuthorityResponseReceiptV1` is canonical signed data, not a transport-shaped
+object.  It binds `{header,responseKind,serviceInstanceUid,authorityKeyId,
+authorityKeyEpoch,tenantUid,callerSubjectDigest,connectionBindingDigest,
+scopeDigest,requestDigest,idempotencyKeyOrNull,decisionDigestOrNull,
+terminalDigestOrNull,admissionWatermarkOrNull,negativeIndexProofDigestOrNull,
+issuedAtMs,expiresAtMs,signature}`.  Terminal/winner responses require exact
+non-null decision/terminal bytes and digests and null negative-proof fields.
+`NoAdmissionV1` requires exact non-null quorum watermark and signed negative
+proof and null terminal/winner fields.  Before returning either, the client
+checks canonical bytes, signature/key epoch/revocation, service identity,
+authenticated connection and caller-subject binding, original request tuple,
+expiry, and the applicable durable terminal/proof binding.  Any failure keeps
+the post-send request indeterminate.
+
+Private test composition is a separate executable fixture, not public product
+injection: test code can request named barriers and read observations but cannot
+construct a peer credential, signer, verifier, durable proof, store, backend,
+or authority response.  Valid signed vectors originate inside that sealed
+fixture; public tests supply only invalid/malformed values.  This permits
+negative trust-boundary evidence without granting synthetic publication
+authority or claiming durable-service admission.
