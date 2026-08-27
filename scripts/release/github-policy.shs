@@ -27,7 +27,7 @@ review_plan() {
       environment_protection_rule_app_id,planned_ruleset_required_check,
       planned_environment_custom_protection,authorized_dispatcher,ruleset_profiles,
       environments,normal_mode,fallback_mode,fallback_reason,apply_live,
-      blocking_reason,privileged_self_review}' "$REVIEW_BROKER_FILE"
+      blocking_reason,owner_convergence_fallback,privileged_self_review}' "$REVIEW_BROKER_FILE"
 }
 
 review_ruleset_for_base() {
@@ -65,7 +65,9 @@ validate_review_receipt() {
       (.audit_receipt_sha256 | sha256) and
       ((.issued_at | fromdateiso8601) <= now) and
       ((.expires_at | fromdateiso8601) > now) and
-      (((.expires_at | fromdateiso8601) - (.issued_at | fromdateiso8601)) <= 86400) and
+      (if .mode == "owner_attested_fallback" then
+         ((.expires_at | fromdateiso8601) - (.issued_at | fromdateiso8601)) <= 600
+       else ((.expires_at | fromdateiso8601) - (.issued_at | fromdateiso8601)) <= 86400 end) and
       if .mode == "independent_verifier" then
         (keys | sort) == ((common_keys + ["review_receipt_sha256","verifier"]) | sort) and
         (.review_receipt_sha256 | sha256) and
@@ -142,6 +144,7 @@ self_review_ruleset_files() {
 environment_files() {
     printf '%s\n' \
         "$ROOT/.github/protected-integration-environment.json" \
+        "$ROOT/.github/owner-convergence-admission-environment.json" \
         "$ROOT/.github/release-environment.json" \
         "$ROOT/.github/npm-release-environment.json" \
         "$ROOT/.github/self-review-admission-environment.json"
@@ -477,6 +480,13 @@ validate_self_attested_apply_contract() {
         {protected_branches:true,custom_branch_policies:false}' \
       "$ROOT/.github/self-review-admission-environment.json" >/dev/null || {
         echo "github-policy: self-review-admission environment projection is invalid" >&2
+      return 1
+    }
+    jq -e '.wait_timer == 0 and .prevent_self_review == false and
+      .reviewers == [{type:"User",id:2378857}] and .deployment_branch_policy ==
+        {protected_branches:true,custom_branch_policies:false}' \
+      "$ROOT/.github/owner-convergence-admission-environment.json" >/dev/null || {
+        echo "github-policy: owner-convergence-admission environment projection is invalid" >&2
         return 1
     }
 }
@@ -548,6 +558,9 @@ apply_live() {
     gh api --method PUT "repos/$_repo/environments/self-review-admission" \
         --input "$_expected_root/environments/self-review-admission.json" >/dev/null
     echo "github-policy: APPLIED self-review-admission environment"
+    gh api --method PUT "repos/$_repo/environments/owner-convergence-admission" \
+        --input "$_expected_root/environments/owner-convergence-admission.json" >/dev/null
+    echo "github-policy: APPLIED owner-convergence-admission environment"
     for _file in \
         "$_expected_root/rulesets/spipe-vcs-v3-main.json" \
         "$_expected_root/rulesets/spipe-vcs-v3-release-lines.json"; do

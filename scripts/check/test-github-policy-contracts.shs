@@ -72,6 +72,12 @@ case $args in
       .deployment_branch_policy == {protected_branches:true,custom_branch_policies:false}' "$input" >/dev/null
     [ -z "${MOCK_APPLY_LOG:-}" ] || printf '%s\n' self-review-admission-environment >>"$MOCK_APPLY_LOG"
     ;;
+  "api --method PUT repos/"*"/environments/owner-convergence-admission --input "*)
+    input=${args##* --input }
+    jq -e '.wait_timer == 0 and .prevent_self_review == false and
+      .reviewers == [{type:"User",id:2378857}]' "$input" >/dev/null
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf '%s\n' owner-convergence-admission-environment >>"$MOCK_APPLY_LOG"
+    ;;
   "api --method PUT repos/"*"/rulesets/"*" --input "*)
     input=${args##* --input }
     name=$(jq -r '.name' "$input")
@@ -148,6 +154,7 @@ export MOCK_MODE MOCK_ACTOR MOCK_APPLY_LOG
 run_policy_in "$apply_root" apply-live --yes "$repo" >"$tmp/apply.out"
 [ "$(cat "$MOCK_APPLY_LOG")" = "workflow-permissions
 self-review-admission-environment
+owner-convergence-admission-environment
 ruleset:spipe-vcs-v3-main
 ruleset:spipe-vcs-v3-release-lines" ] || fail "self-attested apply mutated an unexpected projection"
 grep -E 'PASS live projection sha256 [0-9a-f]{64}$' "$tmp/apply.out" >/dev/null ||
@@ -232,6 +239,7 @@ MOCK_ROOT="$root" policy="$root/scripts/release/github-policy.shs"
 
 issued=$(date -u -d '1 minute ago' '+%Y-%m-%dT%H:%M:%SZ')
 expires=$(date -u -d '1 hour' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_expires=$(date -u -d '9 minutes' '+%Y-%m-%dT%H:%M:%SZ')
 required='[{"context":"Code Idiom & Structural Ratchet Gates","integration_id":15368},{"context":"SPipe Self Review Admission","integration_id":15368}]'
 jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
   --argjson required "$required" '
@@ -245,7 +253,7 @@ jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
 "$policy" verify-review "$tmp/independent.json" feature/release-hardening "$repo" \
   >"$tmp/review.out"
 
-jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
+jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$fallback_expires" \
   --argjson required "$required" '
   {schema:"spipe-review-admission/1",mode:"owner_attested_fallback",
    repository:$repo,pull_request_number:28,session_id:"feature/release-hardening",

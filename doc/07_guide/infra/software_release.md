@@ -196,19 +196,29 @@ SHA, exact required check identities, PASS verdict, review/audit digests, issue
 time, and an expiry no more than 24 hours later. A later push changes the current
 head and invalidates the receipt and status.
 
-Only when that verifier mechanism is unavailable may the repository owner use
-`mode=owner_attested_fallback`. It has the same exact bindings and additionally
-requires the literal reason `no eligible independent reviewer`, the provider
-owner identity, and a digest of the retained verifier-unavailability receipt.
-It is not an admin bypass, self-review, or permission to omit checks.
+Only when that verifier mechanism is unavailable may the repository owner
+explicitly dispatch `authority_class=owner_attested_actions` from trusted
+`main`, with `NO-VERIFY:OWNER-PROOF`. The dedicated
+`owner-convergence-admission` environment requires owner ID `2378857` and has
+`prevent_self_review=false`; protected-integration, release, and npm-release
+remain unchanged. The ten-minute receipt says `verification_performed=false`
+and `github_pr_approval_claimed=false`, retains the verifier-unavailability
+proof, and binds the exact run, workflow source commit/blob, live policy,
+rulesets, environment, PR/parents, candidate, manifest, forward ports, and
+required checks. Candidate admission fetches the exact run/artifact/digest and
+verifies its GitHub attestation against the trusted main workflow/ref while
+denying self-hosted runners. Candidate content is fetched as data and never
+executed. Same author/merger is accepted only in this fallback; normal external
+broker admission retains the inequality. This is not an admin bypass,
+self-review, or permission to omit checks.
 
 This candidate/release receipt is distinct from PR `SPipe Self Review
 Admission`. GitHub rulesets cannot natively express conditional model review
 versus owner attestation, and environment required reviewers cannot represent
 that alternative. Therefore the `SPipe Review Admission` App/custom-environment
-portion of `.github/review-admission-broker.json` remains fail-closed until its
-external signed protocol and dedicated App are configured. Existing
-protected-integration, release, and npm-release reviewers remain enabled.
+portion of `.github/review-admission-broker.json` remains the preferred route
+when its external signed protocol and dedicated App are configured. The owner
+fallback must prove that route unavailable and fails closed otherwise.
 
 Prepare one selected fix with `scripts/release/converge-reviewed-fix.shs`. The
 command requires a create-once `spipe-review-receipt/1` file bound to the exact

@@ -15,6 +15,14 @@ on:
         description: Exact convergence receipt artifact name
         required: true
         type: string
+      convergence_artifact_id:
+        description: Exact protected-integration artifact ID
+        required: true
+        type: string
+      convergence_artifact_digest:
+        description: Exact GitHub artifact digest (sha256:...)
+        required: true
+        type: string
       convergence_receipt_sha256:
         description: Expected SHA-256 of convergence-receipt.json
         required: true
@@ -160,10 +168,30 @@ jobs:
               .status == "experimental")' \
             build/release-contract/support-check.json >/dev/null
 
+      - name: Resolve exact protected-integration run and artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECEIPT_RUN_ID: ${{ inputs.convergence_run_id }}
+          RECEIPT_ARTIFACT: ${{ inputs.convergence_artifact }}
+          RECEIPT_ARTIFACT_ID: ${{ inputs.convergence_artifact_id }}
+          RECEIPT_ARTIFACT_DIGEST: ${{ inputs.convergence_artifact_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$RECEIPT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RECEIPT_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          artifact_digest=${RECEIPT_ARTIFACT_DIGEST#sha256:}
+          [[ "$artifact_digest" =~ ^[0-9a-f]{64}$ ]]
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RECEIPT_RUN_ID}" --jq .conclusion)" = success
+          artifacts=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RECEIPT_RUN_ID}/artifacts")
+          jq -e --arg name "$RECEIPT_ARTIFACT" --arg id "$RECEIPT_ARTIFACT_ID" \
+            --arg digest "sha256:$artifact_digest" '
+            [.artifacts[] | select((.id|tostring) == $id and .name == $name and
+              .digest == $digest and .expired == false)] | length == 1' <<<"$artifacts" >/dev/null
+
       - name: Download exact protected-integration convergence receipt
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.convergence_artifact }}
+          artifact-ids: ${{ inputs.convergence_artifact_id }}
           path: build/convergence-receipt
           run-id: ${{ inputs.convergence_run_id }}
           github-token: ${{ github.token }}
@@ -195,8 +223,24 @@ jobs:
             build/convergence-receipt/integration-evidence.json \
             build/convergence-receipt/review-admission-receipt.json \
             build/convergence-receipt/review-evidence.json \
+            build/convergence-receipt/verifier-unavailability-proof.json \
             build/convergence-receipt/reviewed-convergence-manifest.json; do
-            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" >/dev/null
+            authority_class=$(jq -er '.authority_class' "$receipt")
+            if test "$authority_class" = owner_attested_actions; then
+              run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
+              cert_identity="https://github.com/ormastes/simple/.github/workflows/pr-admission.yml@refs/heads/main"
+              gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow ormastes/simple/.github/workflows/pr-admission.yml \
+                --signer-digest "$run_head" --source-ref refs/heads/main \
+                --cert-identity "$cert_identity" --deny-self-hosted-runners \
+                --format json > build/convergence-receipt/attestation-verification.json
+              jq -e --arg identity "$cert_identity" \
+                'length > 0 and all(.[]; (.verificationResult.signature.certificate|tostring|contains($identity)))' \
+                build/convergence-receipt/attestation-verification.json >/dev/null
+            else
+              test "$authority_class" = external_broker
+              gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" >/dev/null
+            fi
           done
 
           test "$(sha256sum build/convergence-receipt/integration-evidence.json | awk '{print $1}')" = \
@@ -215,9 +259,23 @@ jobs:
 
           run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RECEIPT_RUN_ID}")
           test "$(jq -r '.conclusion' <<<"$run_json")" = success
-          test "$(jq -r '.head_sha' <<<"$run_json")" = "$COMMIT"
           test "$(jq -r '.event' <<<"$run_json")" = workflow_dispatch
           test "$(jq -r '.path' <<<"$run_json")" = .github/workflows/pr-admission.yml
+          authority_class=$(jq -er '.authority_class' "$receipt")
+          if test "$authority_class" = owner_attested_actions; then
+            run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
+            test "$(jq -r '.head_sha' <<<"$run_json")" = "$run_head"
+            test "$(jq -r '.head_branch' <<<"$run_json")" = main
+            test "$(jq -r '.actor.id' <<<"$run_json")" = 2378857
+            test "$(jq -r '.triggering_actor.id' <<<"$run_json")" = 2378857
+            live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+            test "$run_head" = "$live_main"
+            workflow_blob_sha=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/pr-admission.yml?ref=${run_head}" --jq .sha)
+            test "$workflow_blob_sha" = "$(jq -er '.workflow.workflow_blob_sha' build/convergence-receipt/review-evidence.json)"
+          else
+            test "$authority_class" = external_broker
+            test "$(jq -r '.head_sha' <<<"$run_json")" = "$COMMIT"
+          fi
 
           release_line=$(printf '%s\n' "$VERSION" | awk -F. '{print $1 "." $2}')
           release_ref="release/$release_line"
@@ -243,19 +301,25 @@ jobs:
           integration_head_sha=$(jq -r '.provider.integration_head_sha' "$receipt")
           inventory_head=$(jq -r '.provider.release_inventory_head_sha' "$receipt")
           jq -e --arg release_ref "$release_ref" --arg commit "$COMMIT" \
-            --arg base "$integration_base_sha" --arg head "$integration_head_sha" '
+            --arg base "$integration_base_sha" --arg head "$integration_head_sha" \
+            --arg authority "$authority_class" '
               .state == "closed" and .merged == true and .merged_at != null and
               .base.ref == $release_ref and .base.sha == $base and
               .head.sha == $head and .merge_commit_sha == $commit and
-              .user.login != .merged_by.login' <<<"$provider_pr" >/dev/null
+              (if $authority == "owner_attested_actions" then
+                 .user.id == 2378857 and .merged_by.id == 2378857
+               else .user.login != .merged_by.login end)' <<<"$provider_pr" >/dev/null
           jq -e --arg pr_number "$integration_pr_number" \
             --arg release_ref "$release_ref" --arg commit "$COMMIT" \
-            --arg base "$integration_base_sha" --arg head "$integration_head_sha" '
+            --arg base "$integration_base_sha" --arg head "$integration_head_sha" \
+            --arg authority "$authority_class" '
               .schema == "simple-release-provider-integration/1" and
               .pr.number == ($pr_number | tonumber) and .pr.merged == true and
               .pr.base_ref == $release_ref and .pr.base_sha == $base and
               .pr.head_sha == $head and .pr.merge_commit_sha == $commit and
-              .pr.author.login != .pr.merged_by.login' \
+              (if $authority == "owner_attested_actions" then
+                 .pr.author.id == 2378857 and .pr.merged_by.id == 2378857
+               else .pr.author.login != .pr.merged_by.login end)' \
             build/convergence-receipt/integration-evidence.json >/dev/null
           parents=$(git show -s --format='%P' "$COMMIT")
           test "$parents" = "$integration_base_sha $integration_head_sha"
@@ -302,28 +366,74 @@ jobs:
             "$session_id" "$GITHUB_REPOSITORY"
           review_receipt_sha256=$(sha256sum \
             build/convergence-receipt/review-admission-receipt.json | awk '{print $1}')
-          broker_app=$(jq -er '
-            select(.configured == true and .apply_live == true and
-              .implementation_status == "implemented_external_signed_broker" and
-              .signed_receipt_protocol == "implemented") |
-            .github_app_integration_id | select(type == "number" and . > 0)' \
-            .github/review-admission-broker.json)
-          jq -e --arg head "$integration_head_sha" \
-            --arg receipt_sha256 "$review_receipt_sha256" \
-            --arg mode "$(jq -r '.mode' build/convergence-receipt/review-admission-receipt.json)" \
-            --argjson broker_app "$broker_app" '
-              .schema == "simple-release-provider-review/2" and
-              .head_sha == $head and .mode == $mode and
-              .review_receipt_sha256 == $receipt_sha256 and
-              .broker_check.name == "SPipe Review Admission" and
-              .broker_check.app.id == $broker_app and
-              .broker_check.head_sha == $head and
-              .broker_check.status == "completed" and
-              .broker_check.conclusion == "success" and
-              (.audit_artifact.workflow_run_id | type == "number") and
-              (.audit_artifact.artifact_id | type == "number") and
-              (.audit_artifact.digest | test("^sha256:[0-9a-f]{64}$"))' \
-            build/convergence-receipt/review-evidence.json >/dev/null
+          proof=build/convergence-receipt/verifier-unavailability-proof.json
+          proof_sha256=$(sha256sum "$proof" | awk '{print $1}')
+          test "$proof_sha256" = "$(jq -er '.verifier_unavailability_proof_sha256' "$receipt")"
+          if test "$authority_class" = external_broker; then
+            broker_app=$(jq -er '
+              select(.configured == true and .apply_live == true and
+                .implementation_status == "implemented_external_signed_broker" and
+                .signed_receipt_protocol == "implemented") |
+              .github_app_integration_id | select(type == "number" and . > 0)' \
+              .github/review-admission-broker.json)
+            jq -e --arg head "$integration_head_sha" \
+              --arg receipt_sha256 "$review_receipt_sha256" \
+              --arg mode "$(jq -r '.mode' build/convergence-receipt/review-admission-receipt.json)" \
+              --argjson broker_app "$broker_app" '
+                .schema == "simple-release-provider-review/2" and
+                .authority_class == "external_broker" and .verification_performed == true and
+                .github_pr_approval_claimed == false and
+                .head_sha == $head and .mode == $mode and
+                .review_receipt_sha256 == $receipt_sha256 and
+                .broker_check.name == "SPipe Review Admission" and
+                .broker_check.app.id == $broker_app and
+                .broker_check.head_sha == $head and
+                .broker_check.status == "completed" and
+                .broker_check.conclusion == "success" and
+                (.audit_artifact.workflow_run_id | type == "number") and
+                (.audit_artifact.artifact_id | type == "number") and
+                (.audit_artifact.digest | test("^sha256:[0-9a-f]{64}$"))' \
+              build/convergence-receipt/review-evidence.json >/dev/null
+            jq -e '.schema == "simple-verifier-unavailability/1" and .applicable == false' \
+              "$proof" >/dev/null
+          else
+            test "$authority_class" = owner_attested_actions
+            test "$proof_sha256" = "$(jq -er '.verifier_unavailability_proof_sha256' build/convergence-receipt/review-evidence.json)"
+            jq -e '.authority_class == "owner_attested_actions" and
+              .verification_performed == false and .github_pr_approval_claimed == false' \
+              "$receipt" >/dev/null
+            jq -e --arg head "$integration_head_sha" --arg receipt "$review_receipt_sha256" \
+              --arg run "$RECEIPT_RUN_ID" '
+              .schema == "simple-release-provider-review/3" and
+              .authority_class == "owner_attested_actions" and
+              .mode == "owner_attested_fallback" and .head_sha == $head and
+              .review_receipt_sha256 == $receipt and
+              .verification_performed == false and .github_pr_approval_claimed == false and
+              .owner_attestation == "NO-VERIFY:OWNER-PROOF" and
+              (.workflow.run_id|tostring) == $run and
+              .workflow.path == ".github/workflows/pr-admission.yml" and
+              .workflow.ref == "refs/heads/main" and
+              .policy.environment == "owner-convergence-admission"' \
+              build/convergence-receipt/review-evidence.json >/dev/null
+            jq -e '.schema == "simple-verifier-unavailability/1" and
+              .reason == "no eligible independent reviewer" and
+              .external_broker_available == false and
+              .owner_attestation == "NO-VERIFY:OWNER-PROOF" and
+              .attestor == {type:"User",id:2378857} and
+              ((.expires_at|fromdateiso8601)-(.issued_at|fromdateiso8601)) <= 600 and
+              (.expires_at|fromdateiso8601) > now' "$proof" >/dev/null
+            run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
+            for binding in \
+              "environment_sha256:.github/owner-convergence-admission-environment.json" \
+              "config_sha256:.github/review-admission-broker.json" \
+              "main_ruleset_sha256:.github/rulesets/spipe-vcs-v3-main.json" \
+              "release_ruleset_sha256:.github/rulesets/spipe-vcs-v3-release-lines.json"; do
+              field=${binding%%:*}; path=${binding#*:}
+              expected=$(jq -er --arg field "$field" '.policy[$field]' build/convergence-receipt/review-evidence.json)
+              actual=$(git show "$run_head:$path" | sha256sum | awk '{print $1}')
+              test "$actual" = "$expected"
+            done
+          fi
           required_checks=$(jq -cS '
             [.rules[] | select(.type == "required_status_checks") |
              .parameters.required_status_checks[] | {context,integration_id}]' \
@@ -382,6 +492,12 @@ jobs:
             '.schema == "simple-release-convergence/3" and
              .producer == "protected_integration" and
              .inventory_origin == "protected_integration" and
+             (.authority_class == "external_broker" or
+              .authority_class == "owner_attested_actions") and
+             (if .authority_class == "owner_attested_actions" then
+                .verification_performed == false and .github_pr_approval_claimed == false
+              else .verification_performed == true and .github_pr_approval_claimed == false end) and
+             (.verifier_unavailability_proof_sha256 | test("^[0-9a-f]{64}$")) and
              .candidate_commit_sha == $commit and .release_ref == $release_ref and
              .main_head_sha == $main and .release_head_sha == $release and
              .provider.integration_merge_sha == $commit and
