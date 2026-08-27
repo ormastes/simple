@@ -528,9 +528,9 @@ a claim that SFFI v2 is complete.
 - PASS (tooling): `sffi-unsafe-backlog.shs` validates the ledger schema and
   emits each untagged owned Simple declaration with its location, symbol,
   conservative source raw-call estimate, signature fingerprint, and declared
-  contract/provider state. Its refreshed source-only run found 9,184 untagged
+  contract/provider state. Its refreshed source-only run found 9,177 untagged
   declaration rows; `rt_file_read_text` currently has the highest conservative
-  textual call estimate (3,242).
+  textual call estimate (3,237).
 - PASS (performance shape): this is an audit-time source scan only and has no
   runtime allocation, copying, call, dispatch, lookup, lock, or retry cost.
 - FAIL (global admission): the backlog deliberately reports no admission
