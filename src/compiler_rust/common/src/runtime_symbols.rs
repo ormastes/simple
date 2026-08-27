@@ -2085,7 +2085,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // the native struct-receiver guard, and dict insert) and DEFINED in the
     // runtime, but were never listed here. `runtime/build.rs` generates
     // RUNTIME_SYMBOL_ENTRIES purely from this list, so an unlisted symbol is
-    // never registered with the JIT -> "unresolved external symbol" at run
+    // never registered with the JIT -> unresolved external symbol at run
     // time and a silent fallback to the interpreter. Listing is the whole
     // registration mechanism; do not emit a call to a symbol absent here.
     "rt_dict_insert",
@@ -2212,6 +2212,27 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_weak_new",
     "rt_weak_upgrade",
     "rt_ws_mask_bytes",
+    // Codegen-reachable, unconditionally exported runtime projection. Keep
+    // this block lexicographically ordered so manifest updates are stable.
+    "rt_array_free_deep",
+    "rt_array_remove",
+    "rt_atomic_flag_load",
+    "rt_collection_remove",
+    "rt_cuda_memset_d32",
+    "rt_file_exists_probe_begin",
+    "rt_file_exists_probe_end",
+    "rt_find",
+    "rt_io_file_delete",
+    "rt_io_file_exists",
+    "rt_io_file_open",
+    "rt_mem_snapshot_close",
+    "rt_mem_snapshot_open",
+    "rt_mem_snapshot_record",
+    "rt_string_parse_int",
+    "rt_value_as_bool",
+    "rt_value_is_bool",
+    "rt_value_is_int",
+    "rt_value_is_nil",
     // ---- Codegen aliases (resolved via #[export_name] wrappers in runtime/src) ----
     // The compiler emits these Simple-facing names; the AOT loader rewrites them, but the
     // Cranelift JIT registers symbols by exact name, so each is exported as a real symbol
@@ -2296,7 +2317,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_selected_device_name",
     "rt_vulkan_submit_graphics_and_wait_fence",
     "rt_write_file",
-    // Native socket / HTTP externs. These are `#[no_mangle] extern "C"` in
+    // Native socket / HTTP externs. These use the no_mangle C ABI in
     // `simple_runtime` (`value/net_tcp.rs`, `value/net_udp.rs`) and are already
     // classified `Sys` by `symbol_tier_of` above and stubbed by the native
     // linker (`compiler/src/linker/native_binary/stubs.rs`) — but they were
@@ -2304,7 +2325,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // thing `register_runtime_symbols_from_provider`
     // (`compiler/src/codegen/jit.rs:387`) iterates. A symbol missing here is
     // never handed to `JITBuilder::symbol`, so any module declaring one failed
-    // Cranelift JIT compilation with "unresolved external symbol" and the WHOLE
+    // Cranelift JIT compilation with an unresolved external symbol and the WHOLE
     // module was silently demoted to the tree-walk interpreter. That made every
     // `SIMPLE_EXECUTION_MODE=jit` networking claim false and unfalsifiable.
     // See doc/08_tracking/bug/jit_cannot_resolve_native_socket_externs_2026-08-09.md
