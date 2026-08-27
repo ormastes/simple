@@ -436,3 +436,14 @@ a claim that SFFI v2 is complete.
 - Verified, signature-verified, and verified-and-signed rows are all zero.
   Source-only mode intentionally reports no provider identity/backing; it
   cannot be used to claim global admission or unsafe minimization.
+
+## Follow-up: app-I/O compatibility boundary containment (2026-08-27)
+
+- PASS (static/source): 11 remaining raw random/log/volatile declarations are
+  tagged and lexically confined. The four wrappers that accept raw pointer
+  ranges or addresses remain explicitly unsafe instead of exposing a false
+  safe API.
+- PASS (performance shape): scalar wrappers retain one direct call. The guard
+  rejects extra symbol occurrences and records no allocation/lookup layer.
+- FAIL (global admission): provider identity, artifact admission, signature,
+  and semantic verification remain absent at repository scope.

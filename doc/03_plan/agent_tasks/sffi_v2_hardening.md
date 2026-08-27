@@ -401,3 +401,8 @@ passing placeholder.
     snapshot/release lifetime cannot be represented as an ordinary native-safe
     ABI. The one Simple proof-of-concept caller must use a minimal lexical
     FFI scope; no allocation, lookup, lock, copy, or call is added to it.
+73. Keep the app-I/O compatibility hub's 11 remaining random/log/volatile
+    declarations lexically unsafe. Four pointer-bearing log/volatile wrappers
+    remain public unsafe APIs; scalar random/configuration wrappers remain
+    direct. Do not add marshaling, allocations, lookup, locks, retries, or an
+    extra dispatch to compatibility hot paths.
