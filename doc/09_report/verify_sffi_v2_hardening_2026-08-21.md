@@ -299,3 +299,14 @@ a claim that SFFI v2 is complete.
   verified-and-signed rows are all zero. The census is source evidence only;
   it cannot establish foreign ABI correctness, ownership, signed artifact
   identity, or semantic provider verification.
+
+## Follow-up: legacy unbacked SSH facade containment (2026-08-27)
+
+- PASS (static/source): all 23 `rt_ssh_*`/`rt_sftp_*` declarations and all 23
+  direct calls are explicitly unsafe; calls use minimal lexical FFI scopes.
+  The public wrappers remain unsafe because no provider contract exists.
+- PASS (performance shape): the source guard rejects explicit allocation,
+  dynamic lookup, or locking; direct provider call shape is unchanged.
+- FAIL (provider): no runtime implementation, interpreter registration, ABI
+  contract, provider artifact, trusted signature, or semantic evidence exists.
+  This legacy facade remains unsafe-only and cannot be called verified.

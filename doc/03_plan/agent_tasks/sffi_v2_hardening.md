@@ -343,3 +343,9 @@ passing placeholder.
     7,750 untouched rows. It has zero verified-and-signed rows. Use these
     scoped census values for progress reporting; they are not a substitute for
     ABI, ownership, artifact, signature, or semantic verification evidence.
+62. Keep the legacy SSH/SFTP client facade explicitly unsafe until it has a
+    real provider. Its 23 declared raw calls are unbacked and therefore remain
+    public unsafe wrappers, but each direct call must have a smallest lexical
+    `unsafe(ffi)` scope. Do not turn its ambiguous text, tuple, or boolean
+    values into safe APIs; no allocation, lookup, lock, or per-call admission
+    work is permitted while the facade is retained for compatibility.
