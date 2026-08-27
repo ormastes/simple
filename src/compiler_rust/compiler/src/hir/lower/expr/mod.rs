@@ -217,6 +217,8 @@ impl Lowerer {
             Expr::Try(inner) => self.lower_try(inner, ctx),
             // Force unwrap: expr! - unwrap or panic (lowered same as try for codegen)
             Expr::ForceUnwrap(inner) => self.lower_try(inner, ctx),
+            // Diverging coalesce fallback: expr ?? return default
+            Expr::UnwrapOrReturn { expr, default } => self.lower_unwrap_or_return(expr, default, ctx),
             // Range expression: start..end or start..=end
             Expr::Range { start, end, bound } => self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx),
             _ => {

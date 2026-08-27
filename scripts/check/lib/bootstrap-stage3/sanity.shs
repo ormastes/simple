@@ -3,6 +3,66 @@ bootstrap_stage3_sanity_fail() {
     return 1
 }
 
+# Print the one bootstrap product version admitted by the repository.  The SDN
+# authority owns the value; VERSION and the compiled bootstrap identity are
+# checked projections.  Keeping this parser here makes Stage 2 production,
+# resume, receipt verification, and manifest verification use one rule.
+bootstrap_stage3_canonical_version() (
+    bootstrap_stage3_version_root=$1
+    bootstrap_stage3_version_authority="$bootstrap_stage3_version_root/release/version.sdn"
+    bootstrap_stage3_version_projection="$bootstrap_stage3_version_root/VERSION"
+    bootstrap_stage3_version_identity="$bootstrap_stage3_version_root/src/app/cli/bootstrap_identity.spl"
+    for bootstrap_stage3_version_file in \
+        "$bootstrap_stage3_version_authority" \
+        "$bootstrap_stage3_version_projection" \
+        "$bootstrap_stage3_version_identity"; do
+        [ -f "$bootstrap_stage3_version_file" ] &&
+            [ ! -L "$bootstrap_stage3_version_file" ] || return 1
+    done
+    [ "$(grep -Ec '^[[:space:]]*schema:' \
+        "$bootstrap_stage3_version_authority")" = 1 ] || return 1
+    [ "$(grep -Ec '^[[:space:]]*schema:[[:space:]]*simple-release-version/1[[:space:]]*$' \
+        "$bootstrap_stage3_version_authority")" = 1 ] || return 1
+    bootstrap_stage3_version_semver=$(sed -n \
+        's/^[[:space:]]*semver:[[:space:]]*\([^[:space:]#][^[:space:]#]*\)[[:space:]]*$/\1/p' \
+        "$bootstrap_stage3_version_authority") || return 1
+    [ -n "$bootstrap_stage3_version_semver" ] || return 1
+    [ "$(grep -Ec \
+        '^[[:space:]]*semver:[[:space:]]*[^[:space:]#][^[:space:]#]*[[:space:]]*$' \
+        "$bootstrap_stage3_version_authority")" = 1 ] ||
+        return 1
+    printf '%s\n' "$bootstrap_stage3_version_semver" |
+        grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$' ||
+        return 1
+    [ "$(awk 'END { print NR }' "$bootstrap_stage3_version_projection")" = 1 ] ||
+        return 1
+    bootstrap_stage3_version_projected=$(sed -n '1p' \
+        "$bootstrap_stage3_version_projection") || return 1
+    [ "$bootstrap_stage3_version_projected" = "$bootstrap_stage3_version_semver" ] ||
+        return 1
+    [ "$(grep -Ec '^[[:space:]]*pub fn bootstrap_version[(][)] -> text:[[:space:]]*$' \
+        "$bootstrap_stage3_version_identity")" = 1 ] || return 1
+    bootstrap_stage3_version_compiled=$(awk '
+        /^[[:space:]]*pub fn bootstrap_version[(][)] -> text:[[:space:]]*$/ {
+            if (seen++) exit 2
+            if ((getline next_line) <= 0) exit 3
+            if (next_line !~ /^[[:space:]]*"[^"]*"[[:space:]]*$/) exit 4
+            sub(/^[[:space:]]*"/, "", next_line)
+            sub(/"[[:space:]]*$/, "", next_line)
+            print next_line
+            body_seen=1
+            next
+        }
+        body_seen && $0 !~ /^[[:space:]]*$/ { exit 5 }
+        END { if (!body_seen) exit 6 }
+    ' "$bootstrap_stage3_version_identity") || return 1
+    [ -n "$bootstrap_stage3_version_compiled" ] ||
+        return 1
+    [ "$bootstrap_stage3_version_compiled" = "$bootstrap_stage3_version_semver" ] ||
+        return 1
+    printf '%s\n' "$bootstrap_stage3_version_semver"
+)
+
 bootstrap_stage3_sanity_expect() {
     bootstrap_stage3_sanity_expect_key=$1
     bootstrap_stage3_sanity_expect_file=$2
@@ -22,8 +82,10 @@ bootstrap_stage3_sanity_expect() {
 }
 
 bootstrap_stage3_verify_sanity_evidence_receipt() (
+    [ "$#" = 3 ] || return 1
     bootstrap_stage3_sanity_file=$1
     bootstrap_stage3_sanity_candidate=$2
+    bootstrap_stage3_sanity_root=$3
     [ -f "$bootstrap_stage3_sanity_file" ] &&
         [ ! -L "$bootstrap_stage3_sanity_file" ] ||
         bootstrap_stage3_sanity_fail \
@@ -47,8 +109,27 @@ bootstrap_stage3_verify_sanity_evidence_receipt() (
         pass || return 1
     bootstrap_stage3_sanity_expect version_status \
         "$bootstrap_stage3_sanity_file" 0 || return 1
+    bootstrap_stage3_sanity_canonical=$(bootstrap_stage3_canonical_version \
+        "$bootstrap_stage3_sanity_root") || bootstrap_stage3_sanity_fail \
+"canonical release version authority is invalid under '$bootstrap_stage3_sanity_root'" ||
+        return 1
+    bootstrap_stage3_sanity_expected=$(bootstrap_stage3_manifest_value \
+        version_expected "$bootstrap_stage3_sanity_file" 2>/dev/null || true)
+    if [ -n "$bootstrap_stage3_sanity_expected" ]; then
+        bootstrap_stage3_sanity_expect version_expect_status \
+            "$bootstrap_stage3_sanity_file" 0 || return 1
+        bootstrap_stage3_sanity_expect version_match_status \
+            "$bootstrap_stage3_sanity_file" 0 || return 1
+        [ "$bootstrap_stage3_sanity_expected" = \
+            "$bootstrap_stage3_sanity_canonical" ] || bootstrap_stage3_sanity_fail \
+"field 'version_expected' was '$bootstrap_stage3_sanity_expected', canonical release version is '$bootstrap_stage3_sanity_canonical'" ||
+            return 1
+    else
+        bootstrap_stage3_sanity_expected=$bootstrap_stage3_sanity_canonical
+    fi
     bootstrap_stage3_sanity_expect version_output \
-        "$bootstrap_stage3_sanity_file" "simple-bootstrap 1.0.0-RC" || return 1
+        "$bootstrap_stage3_sanity_file" \
+        "simple-bootstrap $bootstrap_stage3_sanity_expected" || return 1
     bootstrap_stage3_sanity_expect unsupported_status \
         "$bootstrap_stage3_sanity_file" 1 || return 1
     bootstrap_stage3_sanity_expect frontend_smoke_status \
@@ -157,7 +238,7 @@ bootstrap_stage3_stage2_admission_identity() {
 }
 
 bootstrap_stage3_write_stage2_admission_receipt() (
-    [ "$#" = 8 ] || return 1
+    [ "$#" = 9 ] || return 1
     bootstrap_stage3_admission_receipt=$1
     bootstrap_stage3_admission_candidate=$2
     bootstrap_stage3_admission_source=$3
@@ -166,6 +247,7 @@ bootstrap_stage3_write_stage2_admission_receipt() (
     bootstrap_stage3_admission_args_sha=$6
     bootstrap_stage3_admission_sanity=$7
     bootstrap_stage3_admission_receiver=$8
+    bootstrap_stage3_admission_root=$9
     [ ! -e "$bootstrap_stage3_admission_receipt" ] || return 1
     for bootstrap_stage3_admission_file in \
         "$bootstrap_stage3_admission_candidate" \
@@ -181,7 +263,8 @@ bootstrap_stage3_write_stage2_admission_receipt() (
         grep -Eq '^[0-9a-f]{64}$' || return 1
     bootstrap_stage3_verify_sanity_evidence_receipt \
         "$bootstrap_stage3_admission_sanity" \
-        "$bootstrap_stage3_admission_candidate" || return 1
+        "$bootstrap_stage3_admission_candidate" \
+        "$bootstrap_stage3_admission_root" || return 1
     bootstrap_stage3_verify_receiver_evidence_receipt \
         "$bootstrap_stage3_admission_receiver" \
         "$bootstrap_stage3_admission_candidate" \
@@ -240,7 +323,7 @@ bootstrap_stage3_write_stage2_admission_receipt() (
 )
 
 bootstrap_stage3_verify_stage2_admission_receipt() (
-    [ "$#" = 8 ] || return 1
+    [ "$#" = 9 ] || return 1
     bootstrap_stage3_admission_receipt=$1
     bootstrap_stage3_admission_candidate=$2
     bootstrap_stage3_admission_source=$3
@@ -249,6 +332,11 @@ bootstrap_stage3_verify_stage2_admission_receipt() (
     bootstrap_stage3_admission_args_sha=$6
     bootstrap_stage3_admission_sanity=$7
     bootstrap_stage3_admission_receiver=$8
+    bootstrap_stage3_admission_root=$9
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$bootstrap_stage3_admission_sanity" \
+        "$bootstrap_stage3_admission_candidate" \
+        "$bootstrap_stage3_admission_root" || return 1
     [ -f "$bootstrap_stage3_admission_receipt" ] &&
         [ ! -L "$bootstrap_stage3_admission_receipt" ] || return 1
     for bootstrap_stage3_admission_key in schema status candidate_path \
@@ -336,7 +424,8 @@ bootstrap_stage3_verify_sanity_evidence() (
     bootstrap_stage3_sanity_path=$7
     bootstrap_stage3_verify_sanity_evidence_receipt \
         "$bootstrap_stage3_sanity_file" \
-        "$bootstrap_stage3_sanity_candidate" || return 1
+        "$bootstrap_stage3_sanity_candidate" \
+        "$bootstrap_stage3_sanity_root" || return 1
     for bootstrap_stage3_sanity_env_name in $(env | sed 's/=.*//'); do
         unset "$bootstrap_stage3_sanity_env_name"
     done
@@ -409,10 +498,14 @@ bootstrap_stage3_verify_sanity_evidence() (
         bootstrap_stage3_sanity_fail \
 "candidate '--version' exited $bootstrap_stage3_sanity_version_status: $bootstrap_stage3_sanity_version" ||
         return 1
+    bootstrap_stage3_sanity_expected=$(bootstrap_stage3_canonical_version \
+        "$bootstrap_stage3_sanity_root") || bootstrap_stage3_sanity_fail \
+"canonical release version authority is invalid under '$bootstrap_stage3_sanity_root'" ||
+        return 1
     [ "$bootstrap_stage3_sanity_version" = \
-        "simple-bootstrap 1.0.0-RC" ] ||
+        "simple-bootstrap $bootstrap_stage3_sanity_expected" ] ||
         bootstrap_stage3_sanity_fail \
-"candidate '--version' printed '$bootstrap_stage3_sanity_version', expected 'simple-bootstrap 1.0.0-RC'" ||
+"candidate '--version' printed '$bootstrap_stage3_sanity_version', expected 'simple-bootstrap $bootstrap_stage3_sanity_expected'" ||
         return 1
     bootstrap_stage3_sanity_unsupported_status=0
     bootstrap_stage3_sanity_unsupported=$(

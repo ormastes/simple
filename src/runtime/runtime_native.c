@@ -4095,7 +4095,7 @@ int64_t rt_unwrap_or_self(int64_t value) {
 }
 
 /* `.unwrap_or(default)` -- real method-call semantics: return the Ok/Some
- * payload, or `default`, for ANY enum receiver (Result, Option, ...), never
+ * payload, or `default`, for Result/Option receivers, never
  * trapping. Distinct from `rt_unwrap_or_self` above, which the `??`
  * nil-coalesce operator alone must keep using (only special-cases the
  * reserved Option enum_id 1, returns every other enum -- including Result --
@@ -4103,10 +4103,9 @@ int64_t rt_unwrap_or_self(int64_t value) {
  * silently returned the boxed `Result` enum for BOTH Ok and Err instead of
  * the payload / the default -- see
  * doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
- * Result has no reserved enum_id, so Ok/Err are identified by
- * discriminant-hash comparison against the canonical variant names, the same
- * technique the Cranelift codegen already uses for is_ok/is_err and the
- * sibling Rust-runtime `rt_unwrap_or_trap`/`rt_unwrap_or_value`. These are
+ * Result and Option have reserved compiler runtime IDs 0 and 1. The ID check
+ * is required because arbitrary user enums may also name variants Ok/Err and
+ * must remain opaque present values, matching the interpreter. Discriminants are
  * `std::collections::hash_map::DefaultHasher` values over the variant name,
  * masked to 32 bits -- fixed/deterministic, precomputed here to avoid
  * reimplementing SipHash in C. */
@@ -4114,19 +4113,23 @@ int64_t rt_unwrap_or_self(int64_t value) {
 #define RT_DISC_ERR  4200179024u
 #define RT_DISC_SOME 4053299545u
 #define RT_DISC_NONE 2371748697u
+#define RT_RESULT_ENUM_ID 0u
+#define RT_OPTION_ENUM_ID 1u
 
 int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
     RtCoreEnum* e = rt_core_as_enum(value);
     if (!e) return value; /* bare/flat-nullable payload convention */
 
-    if (e->enum_id == 1) { /* canonical Option */
-        if (e->discriminant == RT_DISC_SOME) return e->payload;
-        if (e->discriminant == RT_DISC_NONE) return default_val;
+    if (e->enum_id == RT_OPTION_ENUM_ID) {
+        if (e->discriminant == 0 || e->discriminant == RT_DISC_SOME) return e->payload;
+        if (e->discriminant == 1 || e->discriminant == RT_DISC_NONE) return default_val;
         return value;
     }
 
-    if (e->discriminant == RT_DISC_OK) return e->payload;
-    if (e->discriminant == RT_DISC_ERR) return default_val;
+    if (e->enum_id == RT_RESULT_ENUM_ID) {
+        if (e->discriminant == RT_DISC_OK) return e->payload;
+        if (e->discriminant == RT_DISC_ERR) return default_val;
+    }
 
     /* Arbitrary user enum: preserve the pre-existing "return self" fallback. */
     return value;
@@ -4137,7 +4140,9 @@ int8_t rt_is_none(int64_t value) {
      * Options use enum id 1 with ordinal Some=0 / None=1, so raw zero remains
      * a valid present payload and other enum types are never classified nil. */
     if (value == rt_core_nil()) return 1;
-    return rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1;
+    if (rt_enum_id(value) != RT_OPTION_ENUM_ID) return 0;
+    int64_t discriminant = rt_enum_discriminant(value);
+    return discriminant == 1 || discriminant == RT_DISC_NONE;
 }
 int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);

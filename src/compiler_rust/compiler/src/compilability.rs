@@ -897,9 +897,12 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             analyze_expr(fallback_fn, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
-        Expr::UnwrapOrReturn { expr: inner, .. } => {
+        Expr::UnwrapOrReturn { expr: inner, default } => {
             analyze_expr(inner, reasons, mode);
-            add_reason(reasons, FallbackReason::TryOperator);
+            analyze_expr(default, reasons, mode);
+            if mode != CompilabilityMode::AotNative {
+                add_reason(reasons, FallbackReason::TryOperator);
+            }
         }
 
         // Safe cast operators - require type checking at runtime
@@ -1431,6 +1434,35 @@ fn run_one() -> i64:
 
         let aot_results = parse_and_analyze_aot(source);
         assert!(aot_results.get("greet").unwrap().is_compilable());
+    }
+
+    #[test]
+    fn test_unwrap_or_return_flagged_hybrid_not_aot() {
+        let source = "fn choose(value: i64?) -> i64:\n    val unwrapped = value ?? return -1\n    return unwrapped\n";
+
+        let hybrid_results = parse_and_analyze(source);
+        let hybrid_status = hybrid_results.get("choose").unwrap();
+        assert!(hybrid_status.reasons().contains(&FallbackReason::TryOperator));
+
+        let aot_results = parse_and_analyze_aot(source);
+        let aot_status = aot_results.get("choose").unwrap();
+        assert!(
+            aot_status.is_compilable(),
+            "native HIR lowering must not become an interpreter call in AOT mode: {:?}",
+            aot_status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_unwrap_or_return_analyzes_fallback_expression() {
+        let source = "fn fallback() -> i64:\n    return 1\n\nfn choose(value: i64?) -> i64:\n    val unwrapped = value ?? return await fallback()\n    return unwrapped\n";
+        let results = parse_and_analyze_aot(source);
+        let status = results.get("choose").unwrap();
+        assert!(
+            status.reasons().contains(&FallbackReason::AsyncAwait),
+            "fallback subtree was skipped: {:?}",
+            status.reasons()
+        );
     }
 
     #[test]

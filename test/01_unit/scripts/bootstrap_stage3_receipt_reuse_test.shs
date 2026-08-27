@@ -6,6 +6,8 @@ facade="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_FACADE_PATH=$facade
 export BOOTSTRAP_STAGE3_FACADE_PATH
 . "$facade"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_VERSION_ROOT
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage3-receipt-reuse.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT INT TERM HUP
@@ -19,6 +21,7 @@ exit 99
 EOF
 chmod 700 "$candidate"
 candidate_sha=$(bootstrap_stage3_hash_file "$candidate")
+canonical_version=$(bootstrap_stage3_canonical_version "$root")
 
 sanity="$scratch/stage2-sanity.env"
 cat >"$sanity" <<EOF
@@ -26,7 +29,10 @@ schema=simple-bootstrap-sanity-evidence-v1
 status=pass
 candidate_sha256_before=$candidate_sha
 version_status=0
-version_output=simple-bootstrap 1.0.0-RC
+version_output=simple-bootstrap $canonical_version
+version_expected=$canonical_version
+version_expect_status=0
+version_match_status=0
 unsupported_status=1
 unsupported_output_sha256=0000000000000000000000000000000000000000000000000000000000000000
 frontend_smoke_status=0
@@ -34,7 +40,7 @@ frontend_smoke_bootstrap_mode_status=0
 frontend_smoke_output_sha256=0000000000000000000000000000000000000000000000000000000000000000
 candidate_sha256_after=$candidate_sha
 EOF
-bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$candidate"
+bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$candidate" "$root"
 [ ! -e "$marker" ] || {
     echo 'receipt verification executed the admitted Stage 2 candidate' >&2
     exit 1
@@ -42,7 +48,7 @@ bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$candidate"
 sed 's/^frontend_smoke_bootstrap_mode_status=0$/frontend_smoke_bootstrap_mode_status=1/' \
     "$sanity" >"$sanity.bootstrap-mode-tampered"
 if bootstrap_stage3_verify_sanity_evidence_receipt \
-    "$sanity.bootstrap-mode-tampered" "$candidate"; then
+    "$sanity.bootstrap-mode-tampered" "$candidate" "$root"; then
     echo 'sanity receipt accepted a failed bootstrap-mode frontend smoke' >&2
     exit 1
 fi
@@ -94,10 +100,10 @@ identity_changed=$(bootstrap_stage3_stage2_admission_identity \
 admission="$scratch/admission.env"
 bootstrap_stage3_write_stage2_admission_receipt \
     "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
-    "$tool_snapshot" "$args_sha" "$sanity" "$receiver"
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"
 bootstrap_stage3_verify_stage2_admission_receipt \
     "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
-    "$tool_snapshot" "$args_sha" "$sanity" "$receiver"
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"
 [ ! -e "$marker" ] || {
     echo 'admission receipt verification executed the Stage 2 candidate' >&2
     exit 1
@@ -107,7 +113,7 @@ cp -p "$candidate" "$candidate.saved"
 printf '# candidate tamper\n' >>"$candidate"
 if bootstrap_stage3_verify_stage2_admission_receipt \
     "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
-    "$tool_snapshot" "$args_sha" "$sanity" "$receiver"; then
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"; then
     echo 'admission receipt accepted a tampered candidate' >&2
     exit 1
 fi
@@ -121,7 +127,7 @@ mv "$admission.tampered.next" "$admission.tampered"
 if bootstrap_stage3_verify_stage2_admission_receipt \
     "$admission.tampered" "$candidate" "$source_snapshot" \
     "$runtime_snapshot" "$tool_snapshot" "$args_sha" "$sanity" \
-    "$receiver"; then
+    "$receiver" "$root"; then
     echo 'admission receipt accepted a tampered receipt' >&2
     exit 1
 fi
@@ -131,7 +137,7 @@ sed 's/^frontend_smoke_status=0$/frontend_smoke_status=1/' \
     "$sanity.saved" >"$sanity"
 if bootstrap_stage3_verify_stage2_admission_receipt \
     "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
-    "$tool_snapshot" "$args_sha" "$sanity" "$receiver"; then
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver" "$root"; then
     echo 'admission receipt reblessed tampered sanity evidence' >&2
     exit 1
 fi

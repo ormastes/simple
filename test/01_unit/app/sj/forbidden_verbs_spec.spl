@@ -45,25 +45,30 @@ describe "Forbidden Verbs - Force Push":
     it "forbids git push --force":
         val result = check_forbidden(["git", "push", "--force"])
         expect(result.allowed).to_equal(false)
-        expect(result.message).to_contain("force-push")
+        expect(result.message).to_contain("force")
 
     it "forbids git push -f":
         val result = check_forbidden(["git", "push", "-f"])
         expect(result.allowed).to_equal(false)
 
-    it "allows git push with --bookmark":
-        val result = check_forbidden(["git", "push", "--bookmark", "main"])
+    it "allows git push with an owned work bookmark":
+        val result = check_forbidden(["git", "push", "--bookmark", "work/fix/gh-12-parser"])
         expect(result.allowed).to_equal(true)
+
+    it "forbids git push with a protected bookmark":
+        expect(check_forbidden(["git", "push", "--bookmark", "main"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "--bookmark", "release/1.2"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "--bookmark", "candidate/v1.2.3/a001"]).allowed).to_equal(false)
 
 describe "Forbidden Verbs - Bare Push":
     it "forbids bare git push":
         val result = check_forbidden(["git", "push"])
         expect(result.allowed).to_equal(false)
-        expect(result.message).to_contain("ambiguous")
+        expect(result.message).to_contain("explicit owned work/*")
 
-    it "allows git push with --via-worktree":
+    it "forbids unscoped git push with --via-worktree":
         val result = check_forbidden(["git", "push", "--via-worktree"])
-        expect(result.allowed).to_equal(true)
+        expect(result.allowed).to_equal(false)
 
 describe "Forbidden Verbs - Bare Checkout":
     it "forbids bare git checkout":
@@ -135,11 +140,53 @@ describe "Forbidden Verbs - argument-scan edges":
     it "force-push is caught behind other flags":
         val result = check_forbidden(["git", "push", "origin", "main", "--force"])
         expect(result.allowed).to_equal(false)
-        expect(result.message).to_contain("force-push")
+        expect(result.message).to_contain("force")
 
-    it "a non-bare push with a rev is allowed":
+    it "a non-bare protected push is forbidden":
         val result = check_forbidden(["git", "push", "origin", "main"])
-        expect(result.allowed).to_equal(true)
+        expect(result.allowed).to_equal(false)
+
+    it "allows one explicit owned work ref or work destination refspec":
+        expect(check_forbidden(["git", "push", "origin", "work/fix/gh-12-parser"]).allowed).to_equal(true)
+        expect(check_forbidden(["git", "push", "origin", "HEAD:refs/heads/work/fix/gh-12-parser"]).allowed).to_equal(true)
+
+    it "rejects work-looking shell and ref traversal payloads":
+        expect(check_forbidden(["git", "push", "origin", "work/fix/x;git-tag-v1"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "origin", "work/fix/../main"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "origin", "work//fix/x"]).allowed).to_equal(false)
+
+describe "Protected refs - adversarial mutation spellings":
+    it "forbids protected push refspecs, deletion, force-with-lease, and bulk modes":
+        expect(check_forbidden(["git", "push", "origin", "HEAD:refs/heads/main"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "origin", ":refs/heads/release/1.2"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "origin", "+HEAD:refs/heads/candidate/v1.2.3/a001"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "origin", "refs/tags/v1.2.3"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "--delete", "origin", "main"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "--force-with-lease", "origin", "work/fix/gh-12-parser"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "--all", "origin"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "push", "--tags", "origin"]).allowed).to_equal(false)
+
+    it "forbids direct protected bookmark, branch, tag, and update-ref mutation":
+        expect(check_forbidden(["bookmark", "set", "main", "-r", "@-"]).allowed).to_equal(false)
+        expect(check_forbidden(["bookmark", "delete", "release/1.2"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "branch", "-D", "candidate/v1.2.3/a001"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "tag", "-d", "v1.2.3"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "update-ref", "refs/heads/main", "HEAD"]).allowed).to_equal(false)
+
+    it "forbids every raw mutation bypass while allowing raw observation":
+        expect(check_forbidden(["raw", "git", "push", "origin", "main"]).allowed).to_equal(false)
+        expect(check_forbidden(["raw", "git", "tag", "-d", "v1.2.3"]).allowed).to_equal(false)
+        expect(check_forbidden(["raw", "git", "update-ref", "refs/heads/main", "HEAD"]).allowed).to_equal(false)
+        expect(check_forbidden(["raw", "jj", "git", "push", "--bookmark", "main"]).allowed).to_equal(false)
+        expect(check_forbidden(["raw", "jj", "bookmark", "set", "main", "-r", "@-"]).allowed).to_equal(false)
+        expect(check_forbidden(["raw", "jj", "log", "-r", "main"]).allowed).to_equal(true)
+
+    it "denies untyped ref mutation even outside protected namespaces":
+        expect(check_forbidden(["git", "tag", "scratch-tag"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "branch", "scratch-branch"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "update-ref", "refs/heads/work/fix/x", "HEAD"]).allowed).to_equal(false)
+        expect(check_forbidden(["git", "tag", "--list"]).allowed).to_equal(true)
+        expect(check_forbidden(["git", "branch", "--show-current"]).allowed).to_equal(true)
 
     it "stash is forbidden regardless of trailing arguments":
         val result = check_forbidden(["git", "stash", "pop"])

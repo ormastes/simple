@@ -106,13 +106,90 @@ slice2 `dc58fec5f1b` `8da31723373`; slice3 `e5a7528f063` `46bb8524167`
     indent. Workaround applied across the sweep was to hoist the condition into
     a local `val`; that is a workaround, not a fix — the grammar should accept
     the compact form. Needs a seed parser change.
+    **FIXED 2026-08-27 — two defects, and the reported framing was misleading
+    on both.**
+    - *"expected Indent, found Self_/Underscore".* NOT an indentation defect.
+      When an `if`/`while` condition uses a multi-line operator continuation at
+      the SAME column as the body, the lexer emits no fresh `Indent` for the
+      body, so `header_continuation_is_equal_column` (`parser_helpers.rs`) asks
+      `is_statement_start()` whether the body's first token opens a statement.
+      That list (`parser_impl/core.rs`) contained `Identifier` and `Me` but
+      omitted `Self_` and `Underscore`, so a body beginning `self.x = …` fell
+      through to `expect(Indent)`. Any other leading token — an ordinary
+      identifier included — parsed fine, which is exactly why it read as an
+      indentation problem. Fixed by completing the token list; both callers
+      (the equal-column check and `parse_block_after_newline`'s flat-body
+      shape) genuinely want "can a statement start here", and `self.x = 1` /
+      `_ = f()` qualify, so this is not a grammar weakening. The "body indent
+      equals the continuation indent" clause in the original report is a
+      necessary condition, not the cause.
+    - *"expected identifier, found Newline" in the hoisted-`val` case*
+      (`authenticated_fs_exec_submission_service_v1.spl`, 3 sshd specs). The
+      recorded suspicion of a `.?` or `==`/`!=` continuation is WRONG. It is the
+      TYPE ANNOTATION that wraps: `var g_service_v1:` / newline /
+      `AuthenticatedFsExecUserServiceV1? = nil`. The trailing-colon continuation
+      now mirrors the trailing-`=` continuation `var_decl.rs` already accepted;
+      the consumed Indent's compensating Dedent is drained after the
+      initializer, since `= nil` sits on the continuation line. A colon whose
+      next line is not an indented type is put back, so genuinely malformed
+      input still produces the original diagnostic.
+    Gates: `parser/src/multiline_condition_self_body_test.rs` (7 tests, incl.
+    the previously-working shapes that hid the defect, and must-still-reject
+    cases for a type annotation with no type) and
+    `test/01_unit/language/multiline_condition_self_body_spec.spl` (5 green).
+    Full parser suite 319 green. All five product files named across items
+    23-25 now parse.
 24. **Inline `unsafe(caps): expr` one-line body rejected.** Only the
     block/indented form parses; the one-line colon form is a documented shape
     that the seed does not accept.
+    **FIXED 2026-08-27.** Cause: `parse_unsafe_block_primary`
+    (`parser/src/expressions/primary/mod.rs`) called `parse_block`, which
+    accepts only the indented form; the inline body then hit "expected Newline,
+    found Identifier". Routed the body through the existing
+    `parse_inline_or_block` helper, which handles both shapes and additionally
+    reconciles a pseudo-DEDENT left by a preceding condition continuation.
+    The 13-site block-form workaround in `src/os/kernel/boot/mmio_hardware.spl`
+    was reverted in the same change; that file now parses. Regression gates:
+    `parser/src/unsafe_inline_body_test.rs` (4 tests, incl. inline `unsafe`
+    inside `if`/`while` bodies and after a multi-line condition continuation,
+    plus must-still-reject cases for a missing colon and an unterminated
+    header) and `test/01_unit/language/unsafe_inline_body_spec.spl` (4 green).
+    Known pre-existing laxness left alone: `unsafe(caps):` with no body at all
+    is accepted both before and after this change.
 25. **"expected expression, found Dedent"** in three `src/os/port/*.spl` files.
     Undiagnosed — the error points at a dedent with no obvious offending
     construct; needs a reduced repro before it can be filed against a specific
     grammar rule.
+    **DIAGNOSED AND FIXED 2026-08-27 — it was TWO unrelated defects, not one.**
+    - *Grammar defect (2 of the 3 files:* `initramfs_validate.spl`,
+      `guest_toolchain_artifact_build_receipt.spl`*).* Minimal repro:
+      `val p = g() ??` newline `    return Err("m")`. `return` is usable as a
+      plain identifier in primary position, so the `??` fallback parser
+      (`parser/src/expressions/postfix.rs`, `DoubleQuestion` arm) read `return`
+      as a NAME and its operand as a no-paren call argument; on the multi-line
+      form that scan ran past the statement's Newline and died at the enclosing
+      block's DEDENT. A BARE `return` (no operand) parsed fine, which is what
+      hid it, and so did the same-line form. Fixed by building
+      `Expr::UnwrapOrReturn` — `expr ?? return X` simply IS
+      `expr unwrap or_return: X`, and that node already has diverging semantics
+      wired through the interpreter and every backend. (Building
+      `Expr::DoBlock([Return])` was tried first and is WRONG: a Coalesce default
+      is lazily evaluated, so it arrives as a thunk — "cannot convert function
+      to int".) Both shapes now share the same semantics.
+      **Sub-item, still open:** `??` with a `break`/`continue` fallback. There is
+      no loop-control counterpart to `UnwrapOrReturn`; it parses (as a bare
+      identifier, exactly as before this change) but has no defined runtime
+      behaviour. Deliberately out of scope, not regressed, not claimed fixed.
+    - *Not a grammar defect at all (the 3rd file,*
+      `qrb2210_adreno_vulkan_kernel_transport.spl`*).* Three `val cond_NNN =
+      not f(...)` hoist workarounds were left with a literal unbalanced extra
+      `)` (lines 207, 232, 257). Fixed as source. The trailing-comma theory
+      recorded earlier was correctly disproven — it was never a comma.
+    Gates: `parser/src/coalesce_diverging_fallback_test.rs` (4 tests, incl.
+    must-still-reject cases for `??` before `)` and `,`) and
+    `test/01_unit/language/coalesce_diverging_fallback_spec.spl` (4 green,
+    asserting runtime DIVERGENCE, not just parse acceptance). All three files
+    now parse.
 26. **Free functions of the form `fn treesitter_*(self: TreeSitter)` do not
     resolve as methods across module boundaries.** Method-call syntax on an
     imported type only finds the flattened free fn when it is declared in the

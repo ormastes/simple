@@ -1,6 +1,7 @@
 # JJ Sync - Full sync workflow with file count safety
 #
-# Implements: sj raw jj git fetch && sj raw jj rebase -d main@origin && sj bookmark set main -r @- && sj git push --bookmark main
+# Syncs only the current owned work/* bookmark. Protected targets are fetched
+# and used as rebase destinations, but are never moved or pushed here.
 # With file count safety guard: checks file count before/after rebase to detect unexpected file reduction.
 #
 # Usage: use app.jj.sync.{jj_sync, SyncResult}
@@ -64,20 +65,43 @@ fn run_step(step_name: text, sj_args: [text]) -> StepResult:
         exit_code: code
     )
 
-fn jj_sync(push: bool) -> SyncResult:
+fn current_work_bookmark() -> text:
+    val (stdout, _stderr, code) = run_sj(["raw", "jj", "log", "-r", "@-", "--no-graph", "-T", "bookmarks"])
+    if code != 0:
+        return ""
+    for raw in stdout.replace("*", "").split(" "):
+        val name = raw.trim()
+        if name.starts_with("work/"):
+            return name
+    ""
+
+fn sync_target_valid(target_ref: text) -> bool:
+    target_ref == "main" or target_ref.starts_with("release/")
+
+fn jj_sync(push: bool, target_ref: text) -> SyncResult:
     """Execute full jj sync workflow with file count safety
 
     Steps:
     1. Count files before sync
     2. sj raw jj git fetch
-    3. sj raw jj rebase -d main@origin
+    3. Rebase the current owned work/* bookmark onto the explicit protected target
     4. Count files after rebase (safety check)
-    5. sj bookmark set main -r @-
-    6. sj git push --bookmark main (if push=true)
+    5. Move only that work/* bookmark to the committed change
+    6. Push only that work/* bookmark (if push=true)
     """
     var steps: [StepResult] = []
     var file_count_warning = false
     var warning_message = ""
+
+    val work_branch = current_work_bookmark()
+    if work_branch == "" or not sync_target_valid(target_ref):
+        steps.push(StepResult(
+            step_name: "Validate isolated session",
+            success: false,
+            output: "Sync requires the current owned work/* bookmark and an explicit --target main|release/X.Y.",
+            exit_code: 1
+        ))
+        return SyncResult(success: false, steps: steps, file_count_before: 0, file_count_after: 0, file_count_warning: false, warning_message: "")
 
     # Step 1: Count files before
     val count_before = count_tracked_files()
@@ -108,15 +132,16 @@ fn jj_sync(push: bool) -> SyncResult:
             file_count_warning: false, warning_message: ""
         )
 
-    # Step 3: sj raw jj rebase -d main@origin
-    val rebase_result = run_step("sj raw jj rebase -d main@origin", ["raw", "jj", "rebase", "-d", "main@origin"])
+    # Step 3: rebase the session change; the protected target remains read-only.
+    val destination = target_ref + "@origin"
+    val rebase_result = run_step("sj raw jj rebase -d {destination}", ["raw", "jj", "rebase", "-d", destination])
     steps.push(rebase_result)
     if not rebase_result.success:
         # Rebase can fail if already up-to-date or conflicts; warn but continue
         if rebase_result.output.contains("Nothing changed"):
             # Already up to date, that's fine
             steps[steps.len() - 1] = StepResult(
-                step_name: "sj raw jj rebase -d main@origin (already up-to-date)",
+                step_name: "sj raw jj rebase -d {destination} (already up-to-date)",
                 success: true,
                 output: rebase_result.output,
                 exit_code: 0
@@ -161,14 +186,14 @@ fn jj_sync(push: bool) -> SyncResult:
             file_count_warning: true, warning_message: warning_message
         )
 
-    # Step 5: sj bookmark set main -r @-
-    val bookmark_result = run_step("sj bookmark set main -r @-", ["bookmark", "set", "main", "-r", "@-"])
+    # Step 5: move only the session-owned work bookmark.
+    val bookmark_result = run_step("sj bookmark set {work_branch} -r @-", ["bookmark", "set", work_branch, "-r", "@-"])
     steps.push(bookmark_result)
     if not bookmark_result.success:
         # Non-fatal: bookmark might not exist or might already be set
         if not bookmark_result.output.contains("error"):
             steps[steps.len() - 1] = StepResult(
-                step_name: "sj bookmark set main -r @- (warning)",
+                step_name: "sj bookmark set {work_branch} -r @- (warning)",
                 success: true,
                 output: bookmark_result.output,
                 exit_code: 0
@@ -176,7 +201,7 @@ fn jj_sync(push: bool) -> SyncResult:
 
     # Step 6: jj git push (if requested)
     if push:
-        val push_result = run_step("sj git push --bookmark main", ["git", "push", "--bookmark", "main"])
+        val push_result = run_step("sj git push --bookmark {work_branch}", ["git", "push", "--bookmark", work_branch])
         steps.push(push_result)
         if not push_result.success:
             return SyncResult(
@@ -195,23 +220,29 @@ fn run_sync(args: [text]) -> i64:
     """CLI entry point for jj sync
 
     Usage:
-      simple jj sync            - Fetch, rebase, set bookmark, push
-      simple jj sync --no-push  - Fetch and rebase only (no push)
-      simple jj sync --force    - Push even with file count warning
+      simple jj sync --target main
+      simple jj sync --target release/X.Y --no-push
     """
     var push = true
     var force = false
+    var target_ref = ""
 
-    for arg in args:
+    var i = 0i64
+    while i < args.len():
+        val arg = args[i]
         if arg == "--no-push":
             push = false
         elif arg == "--force":
             force = true
+        elif arg == "--target" and i + 1i64 < args.len():
+            target_ref = args[i + 1i64]
+            i = i + 1i64
+        i = i + 1i64
 
     print "Starting jj sync..."
     print ""
 
-    val result = jj_sync(push)
+    val result = jj_sync(push, target_ref)
 
     print result.display()
 

@@ -34,8 +34,12 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 ```
 
 ## Critical Rules
-- **jj** for VCS — commit: `jj commit -m "msg"` / preferred wrapper flow: `sj bookmark set main -r @- && sj git push --bookmark main`
-- **NEVER create branches** — work directly on `main`
+- **jj** for VCS — commit only session-owned paths on a unique `work/*` branch
+  in a unique linked worktree. Fetch GitHub before session creation and again
+  before protected integration.
+- **NEVER author on protected refs or the main worktree.** Push only the owned
+  work branch for review; the integration authority updates `main` or
+  `release/*` by exact-revision compare-and-swap.
 - **ALL code in `.spl`/`.shs`** — no Python/Bash (except 3 bootstrap scripts)
 - **NO inheritance** — use composition, traits, mixins. **Generics:** `<>` not `[]`
 - **NEVER skip** failing tests without approval. **NEVER convert TODO to NOTE** — implement or delete

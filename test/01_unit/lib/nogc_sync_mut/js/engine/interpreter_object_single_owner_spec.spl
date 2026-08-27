@@ -1,0 +1,61 @@
+# @req REQ-LIB-COMMON-001
+# @cover src/lib/nogc_sync_mut/js/engine/interpreter_object.spl
+
+use std.spec.*
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_object.*
+
+fn expect_string_property(
+    interpreter: JsInterpreter, object_id: i64, key: text, expected: text
+):
+    match interpreter.get_object_property(object_id, key):
+        JsValue.String(value):
+            expect(value).to_equal(expected)
+        _:
+            fail("expected string property {object_id}.{key}")
+
+describe "nogc_sync_mut JavaScript object-store single-owner mutation":
+    it "preserves object allocation, property isolation, and update semantics":
+        step("Allocate two distinct objects")
+        var interpreter = JsInterpreter.new(
+            Logger.new("object-store-single-owner", LogLevel.Error)
+        )
+        val first_id = interpreter.create_object()
+        val second_id = interpreter.create_object()
+
+        expect(first_id).to_equal(0)
+        expect(second_id).to_equal(1)
+        expect(interpreter.object_store.next_id).to_equal(2)
+        expect(interpreter.object_store.obj_proto_ids).to_equal([-1, -1])
+
+        step("Insert the same key on each object")
+        interpreter.set_object_property(
+            first_id, "name", JsValue.String(v: "first")
+        )
+        interpreter.set_object_property(
+            second_id, "name", JsValue.String(v: "second")
+        )
+        expect_string_property(interpreter, first_id, "name", "first")
+        expect_string_property(interpreter, second_id, "name", "second")
+        expect(interpreter.object_store.prop_keys.len()).to_equal(2)
+
+        step("Update one owner without appending or changing the other owner")
+        interpreter.set_object_property(
+            first_id, "name", JsValue.String(v: "updated")
+        )
+        expect_string_property(interpreter, first_id, "name", "updated")
+        expect_string_property(interpreter, second_id, "name", "second")
+        # Interpreter mode may retain a latest-wins entry while native/JIT
+        # updates in place. That representation is private; the observable
+        # value and parallel-array alignment are the semantic contract.
+        val stored_count = interpreter.object_store.prop_keys.len()
+        expect(stored_count).to_be_greater_than(1)
+        expect(stored_count).to_be_less_than(4)
+        expect(interpreter.object_store.prop_obj_ids.len()).to_equal(stored_count)
+        expect(interpreter.object_store.prop_values.len()).to_equal(stored_count)
+        expect(interpreter.object_store.prop_ref_tags.len()).to_equal(stored_count)
+        expect(interpreter.object_store.prop_ref_ids.len()).to_equal(stored_count)
+        expect(interpreter.object_store.prop_enumerables.len()).to_equal(stored_count)
+        expect(interpreter.object_store.prop_configurables.len()).to_equal(stored_count)

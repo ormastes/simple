@@ -25,15 +25,17 @@
    - Feature name and description
    - Key files added/modified
    - Test results summary
-4. Commit all changes: `jj commit -m "<type>(<scope>): <description>"`
-5. Push to remote and trigger PR creation + review:
+4. Commit only the files owned by this feature session:
+   `jj commit -m "<type>(<scope>): <description>" <owned-paths...>`
+5. Push the owned work branch and trigger protected integration review:
    ```
-   jj bookmark set main -r @-
-   env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
+   env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark <work-branch>
 
    # See "CLI Flags (3-Level Review wiring)" below for $TARGET / $REVIEW_LEVEL detection.
    /repo_and_pull_req push --target=$TARGET --level=$REVIEW_LEVEL
    ```
+   Never move or push `main`, `release/*`, `candidate/*`, or a release tag
+   directly from a feature session.
 6. Confirm verify already covered workflow/tooling, evidence-wrapper,
    generated-spec-shape, and verification-contract doc/process freshness.
    Do not repair stale guide, skill, command, or process links in ship; stop

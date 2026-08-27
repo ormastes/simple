@@ -672,6 +672,41 @@ fn test_value_position_match_arm_return_actually_returns() {
     );
 }
 
+#[test]
+fn test_unwrap_or_return_lowers_to_native_branch_and_real_return() {
+    let source = "fn fallback_code() -> i64:\n    return -1\n\nfn choose(value: i64?) -> i64:\n    val unwrapped = value ?? return fallback_code()\n    return unwrapped\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name == "choose").unwrap();
+    let hir_repr = format!("{:?}", function.body);
+
+    assert!(hir_repr.contains("LetIn"), "subject was not bound once: {hir_repr}");
+    assert!(hir_repr.contains("rt_is_none"), "optional absence was not tested: {hir_repr}");
+    assert!(hir_repr.contains("rt_unwrap_or_value"), "present optional was not unwrapped: {hir_repr}");
+    assert!(
+        hir_repr.contains("Return(Some") && hir_repr.contains("fallback_code"),
+        "fallback was not preserved as a real early return: {hir_repr}"
+    );
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(mir_repr.contains("rt_is_none"), "absence check did not reach MIR: {mir_repr}");
+    assert!(
+        mir_repr.contains("Return(Some(") && mir_repr.contains("fallback_code"),
+        "fallback return did not reach MIR: {mir_repr}"
+    );
+}
+
+#[test]
+fn test_unwrap_or_return_fallback_registers_implicit_self() {
+    let source = "class Picker:\n    fallback: i64\n\n    fn choose(value: i64?) -> i64:\n        val unwrapped = value ?? return self.fallback\n        return unwrapped\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name.ends_with("choose")).unwrap();
+    let hir_repr = format!("{:?}", function.body);
+
+    assert!(function.params.iter().any(|param| param.name == "self"), "{hir_repr}");
+    assert!(!hir_repr.contains("Global(\"self\")"), "{hir_repr}");
+}
+
 /// A `-> bool` body's tail is not always a single trailing `HirStmt::Expr`.
 /// `match` lowers to a chain of `HirStmt::If`, so the `.?` ends up as the last
 /// statement of a nested `then_block`. Coercing only the outermost statement

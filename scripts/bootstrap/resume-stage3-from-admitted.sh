@@ -17,7 +17,8 @@ output="$root/$source_output"
   bootstrap_stage3_error "OUTPUT_DIR is not a canonical existing directory: $output"
 
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
-export BOOTSTRAP_STAGE3_FACADE_PATH
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 planner_admission=${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}
@@ -123,12 +124,12 @@ else
   --runtime-path "$runtime" -o "$stage2")
 fi
 bootstrap_stage3_verify_sanity_evidence_receipt \
-  "$stage2_sanity" "$stage2"
+  "$stage2_sanity" "$stage2" "$root"
 bootstrap_stage3_verify_receiver_evidence_receipt \
   "$stage2_receiver" "$stage2" "$runtime_admitted" "$stage2_receiver_log"
 bootstrap_stage3_verify_stage2_admission_receipt \
   "$stage2_admission" "$admitted" "$source_before" "$runtime_admitted" \
-  "$tool_before" "$stage2_args" "$stage2_sanity" "$stage2_receiver"
+  "$tool_before" "$stage2_args" "$stage2_sanity" "$stage2_receiver" "$root"
 path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)
 cmp -s "$runtime_origin_before" "$runtime_origin_after"
 cmp -s "$runtime_origin_after" "$runtime_admitted"
@@ -272,6 +273,9 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
   src/app/cli/bootstrap_main.spl)
 
+bootstrap_planner_v2_verify_parent_compiler_binding \
+  "$planner_admission" "$stage2" "$admitted" || exit 64
+
 set +e
 bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   "$home" "$tmp" "$path" RUST_LOG=error LIBRARY_PATH= \
@@ -317,12 +321,21 @@ COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 bootstrap_stage_sanity() (
   candidate_sanity=$1 evidence=$2 sanity_home=$3 sanity_tmp=$4 sanity_path=$5
+  sanity_repo_root=$root
+  version_expect_status=0
+  version_expected=$(bootstrap_stage3_canonical_version "$sanity_repo_root") || \
+    version_expect_status=1
   for name in $(env | sed 's/=.*//'); do unset "$name"; done
   HOME=$sanity_home TMPDIR=$sanity_tmp PATH=$sanity_path LC_ALL=C LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
   evidence_tmp="$evidence.tmp.$$" frontend_log="$evidence_tmp.frontend"
   before=$(bootstrap_stage3_hash_file "$candidate_sanity")
   version_status=0; version=$(run_timeout 10 "$candidate_sanity" --version 2>&1) || version_status=$?
+  version_match_status=1
+  if [ "$version_expect_status" -eq 0 ] && \
+    [ "$version" = "simple-bootstrap $version_expected" ]; then
+    version_match_status=0
+  fi
   unsupported_status=0
   unsupported=$(run_timeout 10 "$candidate_sanity" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1) || unsupported_status=$?
   frontend_status=0
@@ -339,12 +352,16 @@ bootstrap_stage_sanity() (
   fi
   after=$(bootstrap_stage3_hash_file "$candidate_sanity")
   sanity_status=fail
-  if [ "$version_status" -eq 0 ] && [ "$version" = "simple-bootstrap 1.0.0-RC" ] && \
+  if [ "$version_status" -eq 0 ] && [ "$version_expect_status" -eq 0 ] && \
+    [ "$version_match_status" -eq 0 ] && \
     [ "$unsupported_status" -eq 1 ] && case "$unsupported" in *"unknown command 'run'"*) true;; *) false;; esac && \
     [ "$frontend_status" -eq 0 ] && [ "$before" = "$after" ]; then sanity_status=pass; fi
   { echo schema=simple-bootstrap-sanity-evidence-v1; echo status="$sanity_status"; \
     echo candidate_sha256_before="$before"; echo version_status="$version_status"; \
-    echo version_output="$version"; echo unsupported_status="$unsupported_status"; \
+    echo version_output="$version"; echo version_expected="$version_expected"; \
+    echo version_expect_status="$version_expect_status"; \
+    echo version_match_status="$version_match_status"; \
+    echo unsupported_status="$unsupported_status"; \
     printf 'unsupported_output_sha256=%s\n' "$(printf %s "$unsupported" | bootstrap_stage3_hash_stream)"; \
     echo frontend_smoke_status="$frontend_status"; \
     echo frontend_smoke_bootstrap_mode_status="$frontend_bootstrap_status"; \

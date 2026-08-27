@@ -83,3 +83,27 @@ resolve any residual callable-owner ambiguity and the profiler/global-static
 interaction. Rebuild and admit Stage 2 and run one canonical Stage-3
 continuation. The surface-freeze and nested-pattern failures are cleared; do
 not re-investigate them unless new evidence points there.
+
+## Reconfirmed 2026-08-27, and it now masks the 261/713 wall
+
+With `dynamic.spl` reverted so Stage 2 builds (see
+`sffi_out_param_capability_violation_blocks_stage2_2026-08-27.md`), the
+resulting Stage-2 binary dies EARLIER than the previously recorded wall:
+
+    [build] surface_freeze unknown/unknown step 1/6 +139641ms dt=621ms complete
+    [ERROR] phase 2 FAILED (1 recorded error(s))
+    Segmentation fault (core dumped)
+    rc=139
+
+**Zero** `ambiguous explicit callable dependency` errors and **no**
+`[build] hir N/713` line at all — it never reaches HIR. For comparison, two legs
+measured 2026-08-26 on an older tree both reached module **261/713** before
+failing.
+
+Consequence for anyone chasing the callable-dependency wall: it is currently
+**unreachable**, so a restore of that fix cannot be measured end-to-end until
+this phase-2 SEGV is fixed. The restore is content-verified only.
+
+Note the log prints `1 recorded error(s)` without the error text, then
+segfaults. The message is swallowed, which is its own defect — a phase that
+records an error should print it before dying.

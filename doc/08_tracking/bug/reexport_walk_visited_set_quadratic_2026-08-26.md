@@ -202,20 +202,3 @@ unblocked".
 `scripts/check/check-cow-alias-hotpath.shs` was widened (`acce8d3fd1`) — it had
 been anchored on the literal `self.` AND required the field as a call ARGUMENT,
 so this defect fell through both holes at once. Baseline 191 -> 943.
-
-### Final end-to-end numbers (both legs ran to completion)
-
-| | legA (unpatched) | legB (patched) | ratio |
-|---|---|---|---|
-| wall to exit | 25,190,210 ms (7.0 h) | 2,632,363 ms (43.9 min) | **9.57x** |
-| final module | 261/713 | 261/713 | same |
-| exit | RC=1 | RC=1 | same |
-
-Both legs stop at **exactly module 261 with the same RC**, which is the
-strongest available confirmation that the patch is decision-identical: it
-changes how long the walk takes and nothing about where it ends. The 9.57x
-end-to-end matches the 9.34-9.58x measured at intermediate indices, so the
-speedup is uniform rather than concentrated in one phase.
-
-It also isolates the real blocker beyond argument: the ambiguity wall at module
-261 is INDEPENDENT of this defect and is what actually stops Stage 3.

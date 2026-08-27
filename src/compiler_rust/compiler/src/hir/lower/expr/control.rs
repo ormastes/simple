@@ -2302,6 +2302,202 @@ impl Lowerer {
         })
     }
 
+    /// Lower `value ?? return fallback` to a native branch with a real early return.
+    pub(super) fn lower_unwrap_or_return(
+        &mut self,
+        expr: &Expr,
+        default: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // Kept in lock-step with codegen::shared::enum_runtime_type_id.
+        const RESULT_ENUM_ID: i64 = 0;
+
+        enum AbsentCheck {
+            None,
+            Err,
+            NoneOrErr,
+            Always,
+        }
+
+        let inner_hir = self.lower_expr(expr, ctx)?;
+        let subject_ty = inner_hir.ty;
+        // This is lowered now for validation/dependency collection, but emitted
+        // only below the absent branch so evaluation remains lazy at runtime.
+        let default_hir = self.lower_expr(default, ctx)?;
+
+        let (check, payload_ty, extract_enum_payload) =
+            match self.module.types.get(subject_ty).cloned() {
+            Some(HirType::Enum { name, .. }) if name == "Result" => {
+                (
+                    AbsentCheck::Err,
+                    self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
+                    true,
+                )
+            }
+            Some(HirType::Enum { name, .. }) if name == "Option" => {
+                (
+                    AbsentCheck::None,
+                    self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
+                    true,
+                )
+            }
+            Some(HirType::Pointer { inner, .. }) => {
+                // A nullable scalar/string remains a tagged RuntimeValue after
+                // unwrapping. Object-like values keep their concrete type so
+                // following field/member lookup still has layout provenance.
+                let payload_ty = if matches!(
+                    inner,
+                    TypeId::BOOL
+                        | TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::F32
+                        | TypeId::F64
+                        | TypeId::CHAR
+                        | TypeId::STRING
+                ) {
+                    TypeId::ANY
+                } else {
+                    inner
+                };
+                (AbsentCheck::None, payload_ty, false)
+            }
+            Some(HirType::Nil) => (AbsentCheck::Always, TypeId::ANY, false),
+            Some(HirType::Any) | None => (AbsentCheck::NoneOrErr, TypeId::ANY, false),
+            // The interpreter treats every other value as already present.
+            _ => return Ok(inner_hir),
+            };
+
+        let subject_idx = ctx.locals.len();
+        ctx.add_local("$unwrap_or_return_subject".to_string(), subject_ty, Mutability::Immutable);
+        let subject_ref = HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: subject_ty,
+        };
+        let builtin_check = |name: &str, args: Vec<HirExpr>| HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: name.to_string(),
+                args,
+            },
+            ty: TypeId::BOOL,
+        };
+        let is_none = || builtin_check("rt_is_none", vec![subject_ref.clone()]);
+        let is_result = || HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::Eq,
+                left: Box::new(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_id".to_string(),
+                        args: vec![subject_ref.clone()],
+                    },
+                    ty: TypeId::I64,
+                }),
+                right: Box::new(HirExpr {
+                    kind: HirExprKind::Integer(RESULT_ENUM_ID),
+                    ty: TypeId::I64,
+                }),
+            },
+            ty: TypeId::BOOL,
+        };
+        let is_err = || {
+            let err_disc: i64 = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                "Err".hash(&mut hasher);
+                (hasher.finish() & 0xFFFF_FFFF) as i64
+            };
+            builtin_check(
+                "rt_enum_check_discriminant",
+                vec![
+                    subject_ref.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(err_disc),
+                        ty: TypeId::I64,
+                    },
+                ],
+            )
+        };
+        let is_result_err = || HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::And,
+                left: Box::new(is_result()),
+                right: Box::new(is_err()),
+            },
+            ty: TypeId::BOOL,
+        };
+        let condition = match check {
+            AbsentCheck::None => is_none(),
+            AbsentCheck::Err => is_result_err(),
+            AbsentCheck::NoneOrErr => HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::Or,
+                    left: Box::new(is_none()),
+                    right: Box::new(is_result_err()),
+                },
+                ty: TypeId::BOOL,
+            },
+            AbsentCheck::Always => HirExpr {
+                kind: HirExprKind::Bool(true),
+                ty: TypeId::BOOL,
+            },
+        };
+
+        let early_return = HirExpr {
+            kind: HirExprKind::Block(vec![crate::hir::HirStmt::Return(Some(default_hir))]),
+            ty: payload_ty,
+        };
+        let present = if extract_enum_payload {
+            // A statically typed Option/Result has already passed its absent
+            // check. Use the typed payload builtin so MIR applies the native
+            // scalar unboxing required by `payload_ty`. The generic helper must
+            // remain for Any/pointer values because it deliberately preserves
+            // arbitrary user enums and raw nullable values unchanged.
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_payload".to_string(),
+                    args: vec![subject_ref],
+                },
+                ty: payload_ty,
+            }
+        } else {
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_unwrap_or_value".to_string(),
+                    args: vec![
+                        subject_ref,
+                        HirExpr {
+                            kind: HirExprKind::Nil,
+                            ty: TypeId::NIL,
+                        },
+                    ],
+                },
+                ty: payload_ty,
+            }
+        };
+
+        Ok(HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(inner_hir),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(early_return),
+                        else_branch: Some(Box::new(present)),
+                    },
+                    ty: payload_ty,
+                }),
+            },
+            ty: payload_ty,
+        })
+    }
+
     /// Lower a try expression (expr?) to HIR
     ///
     /// The `?` operator unwraps a Result type:
@@ -2942,13 +3138,15 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
         | Expr::Try(expr)
         | Expr::ForceUnwrap(expr)
         | Expr::ExistsCheck(expr)
-        | Expr::UnwrapOrReturn { expr, .. }
         | Expr::Spread(expr)
         | Expr::DictSpread(expr)
         | Expr::OptionalChain { expr, .. } => {
             collect_identifiers_recursive(expr, bound, identifiers);
         }
-        Expr::UnwrapOr { expr, default } | Expr::CastOr { expr, default, .. } | Expr::Coalesce { expr, default } => {
+        Expr::UnwrapOr { expr, default }
+        | Expr::UnwrapOrReturn { expr, default }
+        | Expr::CastOr { expr, default, .. }
+        | Expr::Coalesce { expr, default } => {
             collect_identifiers_recursive(expr, bound, identifiers);
             collect_identifiers_recursive(default, bound, identifiers);
         }
