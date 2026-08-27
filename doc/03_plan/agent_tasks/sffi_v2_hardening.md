@@ -418,3 +418,8 @@ passing placeholder.
     counts only as a source estimate, never as backing, ABI proof, provider
     admission, or signature evidence. Preserve its linear source scan and use
     the metric to prioritize scope containment without adding call-time work.
+77. Keep SIMD text/index contracts unsafe until exact runtime provider
+    admission exists. The 20 declarations and 15 hot width/UTF-8 calls must
+    remain direct lexical scopes; positive index-handle checks and negative
+    search/index sentinels retain their current semantics with no extra copy,
+    lookup, allocation, lock, retry, or call.

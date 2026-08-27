@@ -479,3 +479,14 @@ a claim that SFFI v2 is complete.
 - FAIL (admission): lexical source scope does not prove loaded-provider ABI,
   ownership, artifact identity, verification receipt, or signature. The census
   still reports zero verified-and-signed rows.
+
+## Follow-up: SIMD text/index boundary containment (2026-08-27)
+
+- PASS (static/source): 20 raw SIMD text/index declarations are explicitly
+  unsafe, and all 15 hot WidthIndex/UTF-8 calls use direct lexical FFI scopes.
+  Existing positive-handle and negative-sentinel behavior is retained.
+- PASS (performance shape): the authority guard asserts the exact raw-call
+  count; no wrapper, copy, allocation, lookup, lock, retry, or extra call was
+  introduced to the hot text path.
+- FAIL (global admission): runtime source backing is not exact artifact-bound
+  ABI/ownership verification or trusted signature evidence.
