@@ -500,3 +500,8 @@ passing placeholder.
     or source input must exit nonzero before parsing. Preserve its normal one
     read per input and one parse per listed source with no retry, extra I/O,
     copies, lookup, locks, or duplicate parsing.
+95. Keep the minimal child test runner's source/coverage reads and procfs
+    resolver explicit lexical unsafe boundaries. Preserve its eleven direct
+    calls and outcome semantics; do not add result-object plumbing, retries,
+    extra I/O, copies, lookup, locks, or test execution/coverage passes until
+    its narrow helper APIs can carry typed provider failures.

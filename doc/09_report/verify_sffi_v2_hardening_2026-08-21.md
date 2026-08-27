@@ -683,3 +683,15 @@ a claim that SFFI v2 is complete.
   parsing. No runtime benchmark was run.
 - FAIL (global admission): the canonical file-read provider remains outside
   artifact-bound ABI/ownership verification and trusted-signature admission.
+
+## Follow-up: minimal child test-runner containment (2026-08-27)
+
+- PASS (static/source): the runner's raw file-text and procfs path declarations
+  are explicitly unsafe, and all eleven existing calls are lexical.
+- PASS (performance/semantics shape): direct call count and child-runner
+  boolean/integer outcome semantics are unchanged. No result-object plumbing,
+  retry, extra I/O, copy, lookup, lock, test execution, or coverage pass was
+  added. No runtime benchmark was run.
+- FAIL (global admission): both raw providers lack artifact-bound ABI,
+  ownership, verification, and trusted-signature evidence. They remain unsafe
+  until the narrow helper APIs can propagate typed provider failure.
