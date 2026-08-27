@@ -222,6 +222,20 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): no artifact-bound provider signature or semantic
   evidence exists. Global SFFI verification remains **FAIL**.
 
+## Follow-up: cache unreadable-input fail-closed repair (2026-08-27)
+
+- PASS (static/source): admission and mark-sweep no longer coerce unreadable
+  existing pins/manifests to empty text. They emit stable
+  `E-SFFI-CACHE-PINS-READ` and `E-SFFI-CACHE-MANIFEST-READ` fail-closed
+  diagnostics after the nullable-read guard. Both authority audits and the
+  affected two-file source check pass.
+- PASS (performance shape): normal absent-file and successful-read paths keep
+  their direct ABI shape. The failure branch adds no allocation, copy, loop,
+  lookup, lock, or dispatch; optimizer findings remain 22 and 46 respectively.
+- FAIL (global admission): this improves two cache owners only. No
+  artifact-bound provider signature or semantic evidence exists for the global
+  SFFI set, so verification remains **FAIL**.
+
 ## Follow-up: compiler mark-sweep raw-owner consolidation (2026-08-27)
 
 - PASS (static/source): seven raw mark-sweep contracts are unsafe-tagged and
