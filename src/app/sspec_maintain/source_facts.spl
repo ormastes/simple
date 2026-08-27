@@ -234,6 +234,10 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     var scenario_local_arithmetic = false
     var scenario_magic_expected: i64 = 0
     var scenario_bindings: Dict<text, text> = {}
+    # T3 (2026-08-27): names assigned from a file_read("src/...") inside the
+    # scenario; asserting <name>.contains(...) downstream is the same
+    # source-text pseudo-oracle as the direct expect(source.contains(...)).
+    var scenario_source_vars: [text] = []
     var scenario_requirement_ids: [text] = []
     var bound_requirement_ids: [text] = []
     var all_requirement_ids: [text] = []
@@ -296,10 +300,14 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             scenario_local_arithmetic = false
             scenario_magic_expected = 0
             scenario_bindings = {}
+            scenario_source_vars = []
             scenario_requirement_ids = []
         val (assigned_name, assigned_value) = _assignment(line)
         if current_line > 0 and assigned_name != "":
             scenario_bindings[assigned_name] = assigned_value
+            if assigned_value.contains("file_read(") and assigned_value.contains("src/") and
+                    not scenario_source_vars.contains(assigned_name):
+                scenario_source_vars.push(assigned_name)
         if current_line > 0 and line_lower.contains("step(\""):
             steps = steps + 1
             scenario_steps = scenario_steps + 1
@@ -358,9 +366,14 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         # GENERATED artifact (build output, tmp root) IS runtime observation
         # (2026-08-22): only flag when the read/assert targets src/ source or
         # an explicit source.contains oracle.
+        var reads_source_var = false
+        for source_var in scenario_source_vars:
+            if line_lower.contains("expect(" + source_var + ".contains(") or
+                    line_lower.contains("assert(" + source_var + ".contains("):
+                reads_source_var = true
         if current_line > 0 and (line_lower.contains("expect(source.contains(") or
                 line_lower.contains("assert(source.contains(") or
-                line_lower.contains("source text oracle") or
+                line_lower.contains("source text oracle") or reads_source_var or
                 ((line_lower.contains("expect(file_read(") or
                     line_lower.contains("assert(file_read(")) and
                     line_lower.contains("src/"))):
@@ -398,7 +411,11 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     lifecycle_paths.sort()
     SspecSourceFacts(path: path, source_hash: sha256_text(source),
         line_count: lines.len(),
-        has_purpose: lower.contains("purpose and audience") or lower.contains("## purpose"),
+        # T2 (2026-08-27): a Purpose heading alone is generated-adjacent; the
+        # manual-first bar requires user voice — a `"""` docstring — alongside
+        # (or instead of) the heading.
+        has_purpose: (lower.contains("purpose and audience") or
+            lower.contains("## purpose")) and _count_sub(source, "\"\"\"") > 0,
         has_placeholder_narrative: lower.contains("todo: describe") or
             lower.contains("todo: author") or
             lower.contains("description of this block") or lower.contains("lorem ipsum"),
