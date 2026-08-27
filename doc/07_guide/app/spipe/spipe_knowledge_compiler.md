@@ -1,6 +1,6 @@
 # SPipe Knowledge Compiler Operator Guide
 
-**Status:** Waves 1–3 accepted; Wave 4 partial; Waves 5–11 planned
+**Status:** Waves 1–3 accepted; sealed read-only projection and metadata-lexical slices admitted; Wave 4 partial; Waves 5–11 otherwise planned
 **Date:** 2026-08-26
 
 ## 0. Current capability and evidence matrix
@@ -20,6 +20,8 @@ operator instructions.
 | Complete-pool RRF v2 | Accepted foundation | Commit `32574ab884`; up to 3,000 declared complete, digest-bound internal candidates are reranked before the 1,000-hit public cap. Producer/search receipt binding and exposed orchestration remain open. |
 | Authority-bound exact identity | Accepted foundation | Commit `d1b601697f`; canonical UID/key/active-alias resolution over a receipt-bound authorized projection. Retrieval, graph traversal, fusion orchestration, and exposed search remain open. |
 | Pair-based reranker evidence v3 | Accepted foundation | Commit `f89b120be7`; ordered accepted-edge/receipt pairs preserve shared-receipt authority losslessly. Graph candidate generation and exposed search remain open. |
+| Projection Kernel V1 | Accepted narrow slice | Commit `6b7fc8b83f6`; strict `spipe://` URI parsing plus deterministic, cursor-bound list/read over a caller-authorized immutable inventory. It is a pure library, not MCP, a read-authorizer, a materializer, or a canonical-write path. |
+| SnapshotLexicalSearchV1 | Accepted narrow slice | Commit `6b7fc8b83f6`; fixed-point lexical discovery over sealed identifier, title, and classification metadata. Its logical root binds workspace, snapshot, authorization-scope digest, and metadata-index root; it is not full-text search or a provider bridge. |
 | Wave 4 provider/search integration | In progress | JSON, Unicode/analyzer, provider, DBFS, and parity candidates are rejected, blocked, or unverified unless a later accepted commit says otherwise. |
 | Virtual views/MCP 2026/refactor/rebalance/promotion/skill compiler/DB adapters | Planned | Waves 5–11; the corresponding commands in this guide are unavailable. |
 | Five system SSpecs and manuals | RED design scaffolds | Their fail-fast helpers are intentional. They are not runtime or release evidence. |
@@ -44,6 +46,48 @@ dependency-free JavaScript search provider, but today the dependency-free
 baseline is the identity/graph library only. A later configured Simple provider
 may add faster search, compiler symbols, duplication analysis, and database
 integration without changing observable contracts.
+
+### 1.1 Admitted read-only kernels
+
+The two admitted slices have deliberately small boundaries. A trusted caller
+must already have selected an immutable inventory and authorization scope;
+neither slice opens a snapshot, authenticates a caller, or determines what the
+caller may see.
+
+- `ProjectionKernelV1` accepts a deeply frozen inventory and a fixed workspace
+  plus authorization-scope hash. It parses only canonical `spipe://` URIs and
+  lists lifecycle, feature, component, layer, project, and status projections.
+  Pages are deterministically ordered, bounded to 100 entries, and their cursor
+  is bound to the workspace, snapshot, scope, view, path, page limit, and last
+  key. A read returns generated Markdown identifying one canonical artifact;
+  `write()` always rejects.
+- `SnapshotLexicalSearchV1` accepts only frozen metadata for UID, key, aliases,
+  title, kind, status, feature, component, layer, and project. It uses the
+  checked fixed-point lexical index to search identifier, title, and
+  classification fields. Its returned `logical_root` binds exactly the
+  workspace UID, snapshot UID, authorization-scope digest, contract, and
+  metadata-index root, so a result cannot be detached from the input scope.
+
+They do **not** provide MCP exposure, read authorization, materialization,
+full-text bodies, provider bridging, persistence or incremental indexing,
+trace/matrix views, authority publish/open, or a durable backend. The target
+CLI and MCP examples elsewhere in this guide remain future contracts unless a
+later accepted capability matrix entry says otherwise.
+
+The next authority prerequisite is also not implemented by either kernel: a
+sealed, mutually authenticated local-IPC composition must construct the
+authority client and response verifier from trusted OS peer credentials or a
+platform certificate facility. Every definitive terminal/winner response and
+every negative `NoAdmissionV1` proof must arrive in a signed receipt bound to
+wire header/version, response kind, service-instance UID, authority key
+ID/epoch, tenant UID, authenticated caller-subject digest, connection-binding
+digest, scope digest, request digest, idempotency key-or-null, issue/expiry,
+and the applicable outcome fields. A terminal/winner binds
+exact durable terminal and decision bytes/digests and forbids a negative proof;
+`NoAdmissionV1` instead binds the same request tuple plus a quorum watermark
+and signed immutable negative-index proof and forbids a terminal/winner. Until
+that composition and verifier are admitted, no operator may treat a transport
+result as canonical publish/open authority.
 
 ## 2. Audience
 
@@ -257,6 +301,27 @@ separate composition-root operation through `createAuthorizationPort` and a
 verified signed receipt; see `test/integration/knowledge_wave2_test.js` for the
 accepted fixture.
 
+#### 5.0.2 Admitted projection and metadata-lexical test commands
+
+These are the only current executable commands for the new read-only kernels;
+they exercise library contracts rather than an operator CLI, server, or mount.
+Run them from `examples/05_stdlib/spipe`:
+
+```sh
+npm run test:projection-kernel
+node --test test/unit/snapshot_lexical_search_test.js
+```
+
+`test/unit/projection_kernel_test.js` covers canonical URI rejection,
+deterministic collision-safe and cursor-bound listing, canonical artifact
+rendering, read-only rejection, and immutable-input enforcement.
+`test/unit/snapshot_lexical_search_test.js` covers metadata-only deterministic
+lexical search, frozen/closed input and snapshot binding, bounded non-cursor
+requests, and the absence of authority, filesystem, process, environment,
+network, or provider imports. These tests do not qualify release availability,
+MCP behavior, authorization, durable authority, full-text retrieval, or native
+provider conformance.
+
 ### 5.1 Index canonical knowledge artifacts
 
 Build a first snapshot for a new workspace:
@@ -282,6 +347,10 @@ results. A direct filesystem move may be recovered by UID, exact content hash,
 or Git rename evidence; ambiguous similarity recovery requires review.
 
 ### 5.2 Browse virtual knowledge views
+
+This is a target operator workflow, not a current CLI/MCP instruction. The
+admitted `ProjectionKernelV1` supplies only the pure URI/list/read kernel
+behind a future caller-authorized adapter; it does not expose these commands.
 
 List a virtual directory and read an artifact or generated directory index:
 
@@ -322,6 +391,10 @@ must use an explicit safe bind, authentication, origin policy, and bounded
 request/rate/parser/query budgets; it does not inherit trust from loopback.
 
 ### 5.3 Search and trace artifacts
+
+This is a target workflow. The admitted `SnapshotLexicalSearchV1` is a
+metadata-only library and does not expose `spipe search`, resolve, trace, or
+matrix commands.
 
 Resolve exact identity before guessing a path:
 
@@ -1335,8 +1408,9 @@ admission, Wave 4, AC-4, and the integrated pipeline open.
 
 ## 14. Wave 5 Virtual Knowledge Views: Operator Boundary (2026-08-26)
 
-Virtual knowledge is read from `spipe://workspace/<workspace>/view/...` or
-from model-callable `spipe_list`/`spipe_read`/`spipe_search`/`spipe_resolve`/
+The target virtual knowledge surface is read from
+`spipe://workspace/<workspace>/view/...` or from model-callable
+`spipe_list`/`spipe_read`/`spipe_search`/`spipe_resolve`/
 `spipe_trace`/`spipe_diagnostics`; it is not a writable alternate document
 tree. Directory pages are bounded and cursor-paginated. Preserve the supplied
 cursor unchanged for the same workspace, authorization scope, and snapshot;
@@ -1359,11 +1433,15 @@ The first slice remains legacy-stdio compatible and preserves the six existing
 tools plus `spipe://skill`. HTTP 2026, subscriptions, editor VFS, and OS mounts
 are later adapters and must not be enabled merely because a virtual URI works.
 
-### Wave 5 URI-foundation non-admission (2026-08-26)
+### Wave 5 URI foundation: kernel admitted, exposure not admitted (2026-08-26)
 
-The URI-foundation candidate exhausted its three review/fix cycles, is
-uncommitted, and is not admitted. Wave 5 URI execution remains pending. Do not
-reuse the candidate code.
+Commit `6b7fc8b83f6` admits the isolated pure `ProjectionKernelV1` URI parser
+and immutable-inventory list/read kernel. It is explicitly not the previously
+rejected URI exposure candidate: it performs no resource opening, read
+authorization, receipt verification, MCP routing, cache publication, or
+materialization. Consequently, Wave 5 URI *execution* and all external virtual
+view exposure remain pending. Do not represent the kernel as a server or reuse
+the rejected exposure candidate.
 
 For a legacy URI such as `spipe://skill`, resolve its canonical target first;
 then authorize that canonical target. The receipt must bind normalized alias
