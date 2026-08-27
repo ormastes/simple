@@ -874,12 +874,16 @@ Same proposal bytes replay one terminal; competing valid proposals for one
 scope/`G` choose one fenced winner and losers return that winner terminal.
 
 The mandatory order is durable objects/proposal/record/terminal and their parents,
-generation fence, `replaceCurrentIfExactV1(oldPointerBytes,oldPointerDigest)`,
+generation fence, `replaceCurrentIfExactV1(oldPointerBytes,oldPointerDigest,nextPointerBytes,nextPointerDigest)`,
 current-parent fsync, then visibility and acknowledgement. Objects/terminals
-are append-only; only `current` is atomically replaced. Node maps `EEXIST` to
-re-read/retry, `ENOENT` to missing-predecessor/re-read, `EACCES`/`EPERM` to
-deny, `EXDEV` to invalid mount, and `ENOTSUP`/`EOPNOTSUPP` to unsupported
-durable publication; any other errno is fatal. No rename fallback is allowed.
+are append-only; only `current` is atomically replaced. Only an admitted true
+host provider may turn `EEXIST` into validated raw mismatch evidence and a new
+fenced operation. `ENOENT`/missing `current` is a `no-current` mismatch/re-read
+only for paired-null `G=0`; at `G>0` it is fatal
+`SPK704 corrupt_successor_missing_current`, with no mismatch/winner, retry, or
+publication. Normal Node never re-reads or retries. `EACCES`/`EPERM` deny,
+`EXDEV` invalidates mount, `ENOTSUP`/`EOPNOTSUPP` is unsupported, and every
+other host error is fatal. No Node rename fallback is allowed.
 
 ### 12.8 Admission remediation matrix and implementation handoff
 
@@ -919,3 +923,62 @@ P3 remains sole owner of raw predecessor bytes+digest, equal replay, successor
 exact tuple verification, terminal/fence/current/open/recovery, and private
 test-seam containment. No adapter/factory/installer/lookalike transfers those
 powers to P2.5.
+
+### 12.10 HostReplaceCurrentCapabilityV1 composition-root boundary
+
+`CurrentPointerV1` is exactly UTF-8, whitespace-free
+`spipe-canonical-json-v1({"header":WireHeaderV1,"scope":ScopeBindingV1,
+"payload":{"kind":"current-pointer","generation":G,"recordDigest":R,
+"terminalDigest":T}})`, in that field order. `G` is one canonical unsigned
+JSON integer, and `R`/`T` are lower-case 64-hex SHA-256 strings. `currentBytes`
+are these raw bytes; `currentDigest` is SHA-256 of them. Decode must prove exact
+header literals, exact canonical scope bytes, and `G`; load `RecordV1` and
+`TerminalV1` and prove their canonical header/scope/G equality, `R` equals the
+record digest, `T` equals the terminal digest, and terminal `recordDigest == R`.
+No parsed equivalent or partial reference is valid.
+
+**Superseding exact host ABI.** For `G>0`, `expectedCurrentBytes` must decode
+as `CurrentPointerV1` with exactly the request `ScopeBindingV1` and generation
+`G-1`; `expectedCurrentDigest` must equal SHA-256 of those raw bytes. For `G=0`,
+both expected fields are paired null, and no other null pairing is valid.
+`nextPointerBytes` must decode as `CurrentPointerV1` with exactly the request
+scope and `G`; `nextPointerDigest` must equal SHA-256 of those raw bytes. A
+`replaced` response returns bytes/digest exactly equal to that canonical next
+pointer. A lost (`outcome:"mismatch"`) response returns one validated winner pointer bytes/digest, or
+explicit `no-current` only for `G=0`; no response may carry ambiguous binding.
+
+P3 obtains no replacement function from a caller. The private composition root
+owns `HostReplaceCurrentCapabilityV1` in a lexical `WeakMap` keyed by its journal
+owner; it cannot be imported, installed, environment/global/argv configured, or
+structurally imitated. Its sole operation is:
+
+```text
+replaceCurrentIfExactV1({scopeBytes,generation,
+  expectedCurrentBytesOrNull,expectedCurrentDigestOrNull,
+  nextPointerBytes,nextPointerDigest}) ->
+  {outcome:"replaced",currentBytes,currentDigest} |
+  {outcome:"mismatch",winnerPointerBytesOrNull,winnerPointerDigestOrNull}
+```
+
+All digest fields are SHA-256 of paired raw bytes. The provider rejects
+noncanonical scope/G, closed-pointer binding failure, or digest mismatch before
+mutation. `G=0` requires null/null expected fields; `G>0` requires both exact
+predecessor fields. It holds an exclusive `(scopeBytes,G)` fence, re-reads
+current inside it, does one true conditional replacement, and fsyncs current's
+parent before `replaced` is visible. P3 invokes it only after durable
+object/proposal/record/terminal files and parents: stage -> fence -> replacement
+-> current-parent fsync -> visible -> ack.
+
+`EEXIST` yields fresh validated raw-evidence `mismatch`. `ENOENT`/missing
+`current` yields paired-null `no-current` mismatch/re-read only at `G=0`; at
+`G>0` it is fatal `SPK704 corrupt_successor_missing_current`, never a mismatch
+or null winner, and makes no publication mutation. `EACCES`/`EPERM` deny;
+`EXDEV` invalidates layout; `ENOTSUP`/`EOPNOTSUPP` is unsupported; all other
+errors are fatal. No rename or user-space emulation is permitted. Normal Node
+`fs` lacks this operation and is unsupported before mutation; production P3
+positive flow cannot be wired until a true provider is admitted. Test-only
+native support is a private composition fixture selected by the same `WeakMap`,
+never a public or env/global/argv-injectable installer.
+Open/recovery follows the same closed map: an otherwise durable `G>0` record or
+terminal with absent `current` returns `SPK704`, never a genesis-style mismatch,
+and performs no repair, replacement, visibility, or acknowledgement.

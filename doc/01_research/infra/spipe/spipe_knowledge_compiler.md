@@ -3374,13 +3374,18 @@ objects + proposal + record + terminal file fsync -> parent fsync -> acquire gen
 ```
 
 `visible`/`ack` are forbidden before current-parent fsync. Object and terminal
-namespaces are append-only; `current` alone is atomically replaced. The Node
-journal needs an advertised `replaceCurrentIfExactV1` capability. On its chosen
-mount, `EEXIST` means competing claim/re-read; `ENOENT` missing expected
-predecessor/re-read; `EACCES`/`EPERM` deny; `EXDEV` invalid mount/layout; and
-`ENOTSUP`/`EOPNOTSUPP` required atomic-condition or directory-fsync unsupported.
-Any other Node errno is fatal. There is no rename fallback, guessed platform
-mapping, or acknowledgement without advertised capability and parent fsync.
+namespaces are append-only; `current` alone is atomically replaced. The P3
+journal acquires `HostReplaceCurrentCapabilityV1` only from its private lexical
+composition-root `WeakMap`, never from a caller. Only an admitted true host
+provider may translate `EEXIST` into fresh validated raw mismatch evidence and
+decide a new fenced operation. `ENOENT`/a missing `current` is a validated
+`no-current` mismatch/re-read only for paired-null `G=0` genesis; at `G>0` it
+is fatal `SPK704 corrupt_successor_missing_current`, never a null
+winner/mismatch/retry or publication. Normal Node never re-reads or retries.
+`EACCES`/`EPERM` deny; `EXDEV` invalidates mount/layout;
+`ENOTSUP`/`EOPNOTSUPP` means unsupported atomic condition or directory fsync;
+all other host errors are fatal. There is no Node rename fallback, guessed
+platform mapping, or acknowledgement without capability and parent fsync.
 
 W5A-28 is five forced independent-process schedules, not one generic CAS test:
 
@@ -3390,7 +3395,7 @@ W5A-28 is five forced independent-process schedules, not one generic CAS test:
 | W5A-28b | stale contender reaches fence after current changes, with its terminal already file+parent durable | stale predecessor rejects; no current-pointer or ack write, and its append-only terminal never becomes the visible winner |
 | W5A-28c | two byte-identical proposals meet at fence | one stored terminal byte sequence; both callers replay it |
 | W5A-28d | two valid different proposals share scope/`G` at fence | one replacement wins; loser returns winner terminal and cannot expose its proposal |
-| W5A-28e | SIGKILL before/after fence, replacement, current-parent fsync, and ack; restart with certificate, clock, and revocation changes | recovery validates certificate/time/revocation, exposes old-or-new only, and never reuses digest/generation/terminal |
+| W5A-28e | SIGKILL before/after fence, replacement, current-parent fsync, and ack; restart with certificate, clock, and revocation changes; remove `current` beneath an otherwise durable `G>0` successor | recovery exposes old-or-new only for valid pointer state; missing successor current is fatal `SPK704` with no repair/publication/ack; certificate/time/revocation validates and no digest/generation/terminal is reused |
 
 These schedules prove certificate rejection, clock-window failure, revocation
 failure, and no-reuse after recovery. They are the sole P3
@@ -3418,3 +3423,60 @@ bytes plus digest (null only at `G=0`), equal
 proposal replay, successor exact tuple validation, terminal/fence/current/open/
 recovery, and contained test seams. No later bridge may reintroduce a public
 factory/installer or rename fallback.
+
+### 43.8 Exact host capability required for P3 current replacement (2026-08-27)
+
+`CurrentPointerV1` is exactly UTF-8, whitespace-free
+`spipe-canonical-json-v1({"header":WireHeaderV1,"scope":ScopeBindingV1,
+"payload":{"kind":"current-pointer","generation":G,"recordDigest":R,
+"terminalDigest":T}})`, in that field order. `G` is one canonical unsigned
+JSON integer, and `R`/`T` are lower-case 64-hex SHA-256 strings. `currentBytes`
+are these raw bytes; `currentDigest` is SHA-256 of them. Decode must prove exact
+header literals, exact canonical scope bytes, and `G`; load `RecordV1` and
+`TerminalV1` and prove their canonical header/scope/G equality, `R` equals the
+record digest, `T` equals the terminal digest, and terminal `recordDigest == R`.
+No parsed equivalent or partial reference is valid.
+
+**Superseding exact host ABI.** For `G>0`, `expectedCurrentBytes` must decode
+as `CurrentPointerV1` with exactly the request `ScopeBindingV1` and generation
+`G-1`; `expectedCurrentDigest` must equal SHA-256 of those raw bytes. For `G=0`,
+both expected fields are paired null, and no other null pairing is valid.
+`nextPointerBytes` must decode as `CurrentPointerV1` with exactly the request
+scope and `G`; `nextPointerDigest` must equal SHA-256 of those raw bytes. A
+`replaced` response returns bytes/digest exactly equal to that canonical next
+pointer. A lost (`outcome:"mismatch"`) response returns one validated winner pointer bytes/digest, or
+explicit `no-current` only for `G=0`; no response may carry ambiguous binding.
+
+P3 cannot manufacture compare-and-replace from Node filesystem primitives. It
+needs one private composition-root `HostReplaceCurrentCapabilityV1`, held in a
+lexical `WeakMap` keyed by the private journal owner. No caller provider, public
+factory/installer, constructor field, environment/global/argv switch, or
+structural lookalike is an authority path.
+
+Its closed request is `{scopeBytes,generation,expectedCurrentBytesOrNull,
+expectedCurrentDigestOrNull,nextPointerBytes,nextPointerDigest}`;
+its only results are `{outcome:"replaced",currentBytes,currentDigest}` and
+`{outcome:"mismatch",winnerPointerBytesOrNull,winnerPointerDigestOrNull}`.
+Every digest is SHA-256 of its raw byte field. Before mutation it checks closed
+scope/G/pointer bindings and every byte/digest pair. Null/null is allowed only
+for `G=0`; both predecessor fields are required for `G>0`. Under an exclusive
+`(scopeBytes,G)` fence it re-reads and conditionally replaces current only on
+exact raw predecessor equality, then fsyncs its parent before `replaced`.
+Objects/proposal/record/terminal and parents are already durable; response
+visibility precedes acknowledgement only after that parent fsync.
+
+Inside the admitted true host provider only, `EEXIST` -> validated raw
+`mismatch` and a fresh fenced re-read. `ENOENT`/missing `current` -> paired-null
+`no-current` mismatch/re-read only at `G=0`; at `G>0` -> fatal
+`SPK704 corrupt_successor_missing_current` with no mismatch/winner, retry, or
+publication mutation. `EACCES`/`EPERM` -> deny; `EXDEV` -> invalid layout;
+`ENOTSUP`/`EOPNOTSUPP` -> unsupported; anything else -> fatal. No rename,
+link/unlink, write-then-compare, retry, or user-space lock substitutes. Normal
+Node `fs` lacks true conditional replacement of an existing directory entry, so
+P3 fails before mutation. A private native/test composition fixture alone may
+provide the operation for forced schedules; it is never an env/global/argv or
+public-installer seam. Production P3 positive flow remains blocked until a true
+host provider is admitted.
+Open/recovery has no special escape: a `G>0` durable successor whose `current`
+is absent returns `SPK704 corrupt_successor_missing_current`, not a no-current
+mismatch, and does not repair, publish, expose, or acknowledge a terminal.

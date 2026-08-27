@@ -1674,12 +1674,16 @@ every `G>0` input must echo exact old current-pointer bytes/digest.
 | W5A-28b | Advance current between stale contender validation and fence after contender terminal file+parent fsync | contender gets stale-predecessor denial and performs no current/ack write; its append-only terminal cannot become visible winner |
 | W5A-28c | Two processes submit byte-identical proposal; force both terminal file+parent fsync before same fence | one terminal byte sequence exists durably before replacement; both outcomes replay it |
 | W5A-28d | Two valid different proposals share scope and `G` at same fence | one winner terminal; loser returns that winner and never exposes a second winner |
-| W5A-28e | SIGKILL before/after fence, conditional replacement, current-parent fsync, and ack; restart under certificate/clock/revocation mutations | old-or-new only; invalid certificate/window/revocation denies; no object, generation, or terminal identifier is reused |
+| W5A-28e | SIGKILL before/after fence, conditional replacement, current-parent fsync, and ack; restart under certificate/clock/revocation mutations; remove `current` beneath an otherwise durable `G>0` successor | old-or-new only for valid pointer state; missing successor current is fatal `SPK704` with no repair/publication/ack; invalid certificate/window/revocation denies; no object, generation, or terminal identifier is reused |
 
 The setup asserts append-only object/terminal namespaces and mutable current
-only. Node capability cases are exact: `EEXIST`/`ENOENT` force re-read,
-`EACCES`/`EPERM` deny, `EXDEV` rejects mount layout, and
-`ENOTSUP`/`EOPNOTSUPP` marks durable publication unsupported; every other errno
+only. Only an admitted true host provider may report `EEXIST` as validated raw
+mismatch and start a fresh fenced operation. `ENOENT`/missing `current` may
+report paired-null `no-current` mismatch/re-read only at `G=0`; at `G>0` it
+must return fatal `SPK704 corrupt_successor_missing_current` with no
+mismatch/winner, retry, or publication mutation. Normal Node is unsupported
+before mutation and never re-reads/retries. `EACCES`/`EPERM` deny, `EXDEV` rejects
+mount layout, `ENOTSUP`/`EOPNOTSUPP` is unsupported, and every other host error
 is fatal. No fallback rename may be injected.
 
 ### 22.4 Ordered remediation gates (blocking test execution)
@@ -1711,7 +1715,49 @@ P3 oracle.
 | W5A-36 | Ask P2.5 to stage, fence, publish, replace `current`, open/recover, or mint test publication authority | Deny before filesystem mutation; P3 remains sole durable owner. |
 | W5A-37 | Supply a public journal/publisher factory, installer, constructor, structural lookalike, serialized brand, or synthetic test seam | Deny; no callable publication capability exists outside P3's composition root. |
 | W5A-38 | Disable P3's `replaceCurrentIfExactV1`, then request initial/successor P3 publication | Deny without rename fallback; no ack/current mutation. |
-| W5A-39 | Exercise P3 `G=0` with `expectedDigest:null`, then `G>0` with altered raw predecessor bytes/digest, equal replay, and altered successor tuple | Genesis accepts only exact null; altered inputs deny; equal bytes replay one terminal. |
+| W5A-39 | Exercise P3 `G=0` with paired `expectedCurrentBytes:null`/`expectedCurrentDigest:null`, then every mixed-null pair and every `G>0` null pair; also alter either raw predecessor bytes or digest, equal replay, and successor tuple. | Only paired null at genesis is accepted; mixed-null and non-genesis null deny before mutation; altered inputs deny; equal bytes replay one terminal. |
 
 W5A-36..39 prove containment only. W5A-28 and W5A-31..35 remain authoritative
 P3 terminal/fence/current/open/recovery evidence.
+
+### 22.6 Host conditional-replacement evidence
+
+`CurrentPointerV1` is exactly UTF-8, whitespace-free
+`spipe-canonical-json-v1({"header":WireHeaderV1,"scope":ScopeBindingV1,
+"payload":{"kind":"current-pointer","generation":G,"recordDigest":R,
+"terminalDigest":T}})`, in that field order. `G` is one canonical unsigned
+JSON integer, and `R`/`T` are lower-case 64-hex SHA-256 strings. `currentBytes`
+are these raw bytes; `currentDigest` is SHA-256 of them. Decode must prove exact
+header literals, exact canonical scope bytes, and `G`; load `RecordV1` and
+`TerminalV1` and prove their canonical header/scope/G equality, `R` equals the
+record digest, `T` equals the terminal digest, and terminal `recordDigest == R`.
+No parsed equivalent or partial reference is valid.
+
+**Superseding exact host ABI.** For `G>0`, `expectedCurrentBytes` must decode
+as `CurrentPointerV1` with exactly the request `ScopeBindingV1` and generation
+`G-1`; `expectedCurrentDigest` must equal SHA-256 of those raw bytes. For `G=0`,
+both expected fields are paired null, and no other null pairing is valid.
+`nextPointerBytes` must decode as `CurrentPointerV1` with exactly the request
+scope and `G`; `nextPointerDigest` must equal SHA-256 of those raw bytes. A
+`replaced` response returns bytes/digest exactly equal to that canonical next
+pointer. A lost (`outcome:"mismatch"`) response returns one validated winner pointer bytes/digest, or
+explicit `no-current` only for `G=0`; no response may carry ambiguous binding.
+
+`W5A-40` runs only through the private native/test composition fixture for
+`HostReplaceCurrentCapabilityV1`; no environment/global/argv/public installer
+may select it. It proves the exact request/response byte contract, SHA-256 pair
+validation, `G=0` null/null genesis, `G>0` non-null predecessor, and an
+exclusive `(scopeBytes,G)` fence with a forced re-read inside that fence.
+`W5A-41` forces exact-match, changed-byte, changed-digest, absent-genesis,
+present-genesis, and concurrent-contender schedules, proving only true exact
+conditional replacement reaches current-parent fsync/visibility/ack.
+`W5A-42` injects every mapped error and forces its generation: `EEXIST` yields
+validated raw-evidence `mismatch`; `ENOENT`/missing `current` yields paired-null
+`no-current` mismatch/re-read only for `G=0`, while identical absence at `G>0`
+yields fatal `SPK704 corrupt_successor_missing_current`—not a mismatch or null
+winner—and proves no retry, replacement, visibility, or acknowledgement.
+`EACCES`/`EPERM` deny; `EXDEV` invalidates layout; `ENOTSUP`/`EOPNOTSUPP` marks
+unsupported; every other error is fatal without retry, rename, link/unlink, or
+mutation. `W5A-43` runs normal Node and proves it
+is unsupported before any publication mutation, including `G=0`. These tests
+are P3 evidence, not a portable Node fallback or a P2.5 admission gate.

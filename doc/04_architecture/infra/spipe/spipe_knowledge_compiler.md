@@ -1825,10 +1825,15 @@ returns that winner terminal.
 The implementation port is `replaceCurrentIfExactV1`: object/proposal/record/
 terminal file+parent fsync, fence, conditional replacement, current-parent fsync,
 visible, ack. Objects and terminals are append-only; current alone is mutable.
-`EEXIST` means competing claim and `ENOENT` missing predecessor (re-read);
-`EACCES`/`EPERM` deny; `EXDEV` invalid mount; `ENOTSUP`/`EOPNOTSUPP` unsupported
-required durability; any other Node error is fatal. No fallback rename or
-synthetic capability publishes.
+Only an admitted true host provider may translate `EEXIST` into fresh validated
+raw mismatch evidence and decide a new fenced operation. `ENOENT`/a missing
+`current` is a validated `no-current` mismatch/re-read only for paired-null
+`G=0` genesis; at `G>0` it is the deterministic fatal
+`SPK704 corrupt_successor_missing_current` state, with no mismatch/winner,
+retry, replacement, visibility, or acknowledgement. Normal Node never
+re-reads or retries. `EACCES`/`EPERM` deny; `EXDEV` invalidates mount;
+`ENOTSUP`/`EOPNOTSUPP` means unsupported durability; all other host errors are
+fatal. No Node fallback rename or synthetic capability publishes.
 
 ### 21.9 P2.5 bridge containment and P3 exclusive owner
 
@@ -1853,3 +1858,66 @@ predecessor raw bytes/digest (null only at genesis), equal-input terminal
 replay, successor exact scope/tuple validation, append-only terminal plus
 fence/current durability, deep open/recovery validation, and private test
 seams. Those seams cannot become callable synthetic publication authority.
+
+### 21.10 P3 host conditional-current capability (2026-08-27)
+
+`CurrentPointerV1` is exactly UTF-8, whitespace-free
+`spipe-canonical-json-v1({"header":WireHeaderV1,"scope":ScopeBindingV1,
+"payload":{"kind":"current-pointer","generation":G,"recordDigest":R,
+"terminalDigest":T}})`, in that field order. `G` is one canonical unsigned
+JSON integer, and `R`/`T` are lower-case 64-hex SHA-256 strings. `currentBytes`
+are these raw bytes; `currentDigest` is SHA-256 of them. Decode must prove exact
+header literals, exact canonical scope bytes, and `G`; load `RecordV1` and
+`TerminalV1` and prove their canonical header/scope/G equality, `R` equals the
+record digest, `T` equals the terminal digest, and terminal `recordDigest == R`.
+No parsed equivalent or partial reference is valid.
+
+**Superseding exact host ABI.** For `G>0`, `expectedCurrentBytes` must decode
+as `CurrentPointerV1` with exactly the request `ScopeBindingV1` and generation
+`G-1`; `expectedCurrentDigest` must equal SHA-256 of those raw bytes. For `G=0`,
+both expected fields are paired null, and no other null pairing is valid.
+`nextPointerBytes` must decode as `CurrentPointerV1` with exactly the request
+scope and `G`; `nextPointerDigest` must equal SHA-256 of those raw bytes. A
+`replaced` response returns bytes/digest exactly equal to that canonical next
+pointer. A lost (`outcome:"mismatch"`) response returns one validated winner pointer bytes/digest, or
+explicit `no-current` only for `G=0`; no response may carry ambiguous binding.
+
+`HostReplaceCurrentCapabilityV1` is a **private lexical capability** of the P3
+composition root. A module-scoped `WeakMap` maps the journal's private owner to
+one admitted host provider; no constructor argument, exported factory/installer,
+environment variable, global, argv value, object shape, or structural brand can
+select or replace it. The public journal API does not expose the type or call.
+
+Its only operation is `replaceCurrentIfExactV1(request) -> response`.
+`request` has exactly `{scopeBytes,generation,expectedCurrentBytesOrNull,
+expectedCurrentDigestOrNull,nextPointerBytes,nextPointerDigest}`.
+`scopeBytes` is canonical `ScopeBindingV1`; every digest is lower-case SHA-256
+hex of its paired raw bytes; `generation` is canonical unsigned decimal `G`.
+The response is exactly `{outcome:"replaced",currentBytes,currentDigest}` or
+`{outcome:"mismatch",winnerPointerBytesOrNull,winnerPointerDigestOrNull}`.
+
+Before mutation, the provider validates canonical scope/G, every byte/digest
+pair, and replacement closed pointer bindings. Expected fields are null/null iff
+`G=0`; both are non-null iff `G>0`. It then takes one exclusive `(scopeBytes,G)`
+fence, re-reads `current` inside it, and conditionally replaces it only on exact
+absence or exact raw predecessor bytes/digest. It fsyncs the current parent
+before returning `replaced`. P3 calls it only after object/proposal/record/
+terminal and their parents are durable: stage -> fence -> exact replacement ->
+current-parent fsync -> visible -> acknowledgement.
+
+The errno map is closed: `EEXIST` returns fresh validated raw `mismatch`
+evidence. `ENOENT`/a missing `current` returns the paired-null `no-current`
+`mismatch` and permits a fresh fenced re-read **only** for `G=0`; for `G>0` it
+returns fatal `SPK704 corrupt_successor_missing_current`, never a null winner
+or mismatch response, and makes no publication mutation. `EACCES`/`EPERM`
+deny; `EXDEV` is invalid single-mount layout;
+`ENOTSUP`/`EOPNOTSUPP` mean unsupported publication; every other host/Node
+error is fatal. `rename`, link/unlink, write-then-compare, and a user-space lock
+are never substitutes. Node `fs` cannot conditionally replace an existing entry
+by exact old bytes, so normal Node is unsupported and P3 denies before any
+publication mutation, including genesis. A test provider may exist only in a
+private native/test composition fixture selected by the same lexical `WeakMap`;
+it is not env/global/argv/public-installer injectable or a Node fallback.
+Open/recovery applies the identical rule: a durable successor record/terminal
+for `G>0` with absent `current` fails closed as `SPK704` and publishes, repairs,
+or acknowledges nothing; it cannot be reclassified as a genesis winner.
