@@ -410,3 +410,7 @@ passing placeholder.
     are allocator/registry owned by the Rust interpreter, with throw consuming
     the handle. The evaluator's 18 existing error-only raw calls must remain
     in smallest lexical scopes; normal evaluation gains no work.
+75. Keep the interpreter AST facade unsafe-only. Its 29 registry-owned raw
+    handle declarations and all 14 proof-of-concept evaluator access/release
+    calls must retain lexical FFI scopes. Do not copy AST data, add lookups, or
+    alter the evaluator's direct access/release call count.

@@ -457,3 +457,13 @@ a claim that SFFI v2 is complete.
   expression evaluation retains its prior work and raw-call count.
 - FAIL (global admission): the interpreter registry/provider is not bound to a
   signed artifact, ABI contract, or verification receipt. It remains unsafe.
+
+## Follow-up: interpreter AST-handle lexical containment (2026-08-27)
+
+- PASS (static/source): the 29 raw AST-handle declarations were already
+  tagged, and all 14 proof-of-concept evaluator accesses/releases now use
+  smallest lexical FFI scopes.
+- PASS (performance shape): the evaluator preserves its exact direct AST
+  access/release count with no copies, allocation, lookup, lock, or retry.
+- FAIL (global admission): the interpreter registry remains outside
+  artifact-bound ABI/signature/verification admission and is unsafe-only.
