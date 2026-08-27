@@ -109,6 +109,20 @@ slice2 `dc58fec5f1b` `8da31723373`; slice3 `e5a7528f063` `46bb8524167`
 24. **Inline `unsafe(caps): expr` one-line body rejected.** Only the
     block/indented form parses; the one-line colon form is a documented shape
     that the seed does not accept.
+    **FIXED 2026-08-27.** Cause: `parse_unsafe_block_primary`
+    (`parser/src/expressions/primary/mod.rs`) called `parse_block`, which
+    accepts only the indented form; the inline body then hit "expected Newline,
+    found Identifier". Routed the body through the existing
+    `parse_inline_or_block` helper, which handles both shapes and additionally
+    reconciles a pseudo-DEDENT left by a preceding condition continuation.
+    The 13-site block-form workaround in `src/os/kernel/boot/mmio_hardware.spl`
+    was reverted in the same change; that file now parses. Regression gates:
+    `parser/src/unsafe_inline_body_test.rs` (4 tests, incl. inline `unsafe`
+    inside `if`/`while` bodies and after a multi-line condition continuation,
+    plus must-still-reject cases for a missing colon and an unterminated
+    header) and `test/01_unit/language/unsafe_inline_body_spec.spl` (4 green).
+    Known pre-existing laxness left alone: `unsafe(caps):` with no body at all
+    is accepted both before and after this change.
 25. **"expected expression, found Dedent"** in three `src/os/port/*.spl` files.
     Undiagnosed — the error points at a dedent with no obvious offending
     construct; needs a reduced repro before it can be filed against a specific

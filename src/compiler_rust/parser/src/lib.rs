@@ -50,6 +50,8 @@ mod recovery_bound_tests;
 #[cfg(test)]
 mod lt_index_hint_leak_tests;
 mod multiline_shapes_test;
+#[cfg(test)]
+mod unsafe_inline_body_test;
 mod rejoined_continuation_test;
 mod trailing_operator_single_line_body_test;
 mod try_probe_test;

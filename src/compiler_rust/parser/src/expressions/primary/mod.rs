@@ -124,7 +124,14 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         self.expect(&TokenKind::Colon)?;
-        self.parse_block()
+        // The body may be an indented block OR a one-line inline body
+        // (`unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_read_u64(addr)`),
+        // which is the documented compact shape used across
+        // `src/os/kernel/boot/mmio_hardware.spl`. `parse_block` accepts only the
+        // indented form and failed the inline one with "expected Newline, found
+        // Identifier"; `parse_inline_or_block` handles both and is a no-op
+        // difference for the indented form.
+        self.parse_inline_or_block()
             .map(|block| Expr::UnsafeBlock(block.statements, capabilities))
     }
 
