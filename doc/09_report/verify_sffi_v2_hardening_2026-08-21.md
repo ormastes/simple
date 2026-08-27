@@ -504,9 +504,9 @@ a claim that SFFI v2 is complete.
 
 ## Follow-up: small scalar math containment (2026-08-27)
 
-- PASS (static/source): noise, statistics, ML metrics, and vector-distance
-  owners explicitly tag four scalar-math declarations and scope nine existing
-  direct calls lexically.
+- PASS (static/source): noise, statistics, ML metrics, linear algebra, and
+  vector-distance owners explicitly tag five scalar-math declarations and
+  scope ten existing direct calls lexically.
 - PASS (performance shape): the static guard retains the existing call count
   and loop shape; no helper dispatch, allocation, copy, lookup, lock, retry,
   or additional provider call was added. No runtime benchmark was run.

@@ -429,9 +429,9 @@ passing placeholder.
     allocation, copy, lookup, lock, retry, or additional provider invocation;
     the source-shape check is containment evidence only, not ABI, artifact,
     signature, or semantic-provider verification.
-79. Keep noise, statistics, ML metrics, and vector-distance scalar math FFI
-    boundaries explicit. Their four declarations and nine direct calls must
-    retain lexical scopes and their existing loop/call shape. Do not introduce
+79. Keep noise, statistics, ML metrics, linear algebra, and vector-distance
+    scalar math FFI boundaries explicit. Their five declarations and ten direct
+    calls retain lexical scopes and their existing loop/call shape. Do not introduce
     helper dispatch, allocation, copying, lookup, locks, retries, or additional
     provider calls. Source-shape containment is not provider verification or
     signed artifact admission.
