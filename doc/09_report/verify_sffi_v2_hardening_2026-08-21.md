@@ -162,3 +162,16 @@ a claim that SFFI v2 is complete.
   observe provider language without an admitted binary. No exact signed
   provider artifact/evidence admission exists for the global set. Overall
   status is still **FAIL**.
+
+## Follow-up: canonical I/O ambiguous-return scopes (2026-08-27)
+
+- PASS (static/source): the canonical I/O owner has 28 lexical raw-call
+  scopes. Its authority audit specifically checks the four raw text/hash
+  facades that remain unsafe because their ABI cannot distinguish error and
+  ownership from a valid `text` result.
+- PASS (performance review): source check and full optimizer analysis pass.
+  The direct calls retain their result and execution shape; no allocation,
+  copy, loop, lookup, hash, or dispatch was added.
+- FAIL (global admission): lexical scope does not supply nullable/status-out
+  ABI, artifact-bound evidence, or a provider signature. The global SFFI
+  verification status remains **FAIL**.

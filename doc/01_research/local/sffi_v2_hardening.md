@@ -1668,3 +1668,15 @@ analysis finds no opportunity in the retired module. The change removes an
 invalid call path; it adds no hot-path allocation, copy, lookup, hash, loop, or
 dispatch. It remains a targeted containment repair, not evidence that the
 remaining inventory has artifact-bound signature or semantic proof.
+
+### Canonical I/O ambiguous-return scope repair (2026-08-27)
+
+The canonical `std.nogc_sync_mut.sffi.io` owner retains four deliberately
+unsafe facades for raw runtime-owned text/hash results: their ABI has no
+separate failure or ownership state, so they cannot be promoted to safe
+`text` APIs. Each raw call is now nevertheless inside a smallest lexical
+`unsafe(ffi)` scope. The authority audit ratchets all 28 lexical owners and
+checks these four direct call shapes. Source check and full optimizer analysis
+pass with no reported optimization opportunity. No return type, allocation,
+copy, loop, lookup, hash, or dispatch changed; this is visibility and boundary
+containment, not signed admission.
