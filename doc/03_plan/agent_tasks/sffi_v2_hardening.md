@@ -294,3 +294,7 @@ passing placeholder.
     stale compatibility callers must fail closed with
     `E-SFFI-ACTOR-LEGACY-ABI` and migrate to scheduler-owned pure-Simple actors.
     The static guard is a ratchet only; it does not count as provider signing.
+52. Keep ambiguous raw runtime-owned I/O text/hash facades explicitly unsafe,
+    but require a smallest lexical FFI scope for every direct raw call. Do not
+    coerce failure to empty text or add call-time validation work; migrate the
+    ABI to nullable/status-out before declaring these facade results safe.
