@@ -274,3 +274,28 @@ a claim that SFFI v2 is complete.
   boundary remains unverified.
 - FAIL (global admission): no artifact-bound provider signature or semantic
   evidence exists. Global SFFI verification remains **FAIL**.
+
+## Follow-up: dynamic Torch lexical authority (2026-08-27)
+
+- PASS (static/source): the optional libtorch facade has 61 direct raw calls,
+  each in a minimal lexical `unsafe(ffi)` expression; availability uses an
+  always-inline lexical owner. Result wrappers continue to reject nonpositive
+  handles rather than manufacturing a usable value.
+- PASS (performance shape): each result/constructor path retains one direct
+  provider call after validation. The source guard rejects explicit allocation,
+  copy, lookup, lock, and loop machinery in the facade.
+- FAIL (global admission): raw libtorch handles still have legacy ABI and
+  ownership limits, and no exact provider artifact, trusted signature, or
+  sanitizer/proof receipt was supplied. This module is contained but not
+  verified or signed.
+
+## Follow-up: live-backing source census refresh (2026-08-27)
+
+- PASS (inventory): `rt-safety-census.shs` reports 11,113 declaration rows,
+  2,966 distinct symbols, 3,123 unsafe-tagged rows, 922 unsafe rows with a
+  documented contract, 7,750 untouched rows, and 23,564 lexical call-site
+  estimates in this repository-owned census scope.
+- FAIL (global admission): verified rows, signature-verified rows, and
+  verified-and-signed rows are all zero. The census is source evidence only;
+  it cannot establish foreign ABI correctness, ownership, signed artifact
+  identity, or semantic provider verification.
