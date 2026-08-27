@@ -69,6 +69,7 @@ So each registry entry declares a mode:
 | 0 | Preflight: shell portability | `check-bootstrap-portability.shs` | run | Every bootstrap shell/Perl helper is parseable POSIX; process-lock behavioural tests; immutable bootstrap-authority publication |
 | 0 | Preflight: cache lane ownership | `check-cache-scope-ownership.shs` | run | A native build cache dir is not reused across lanes; `.cache_scope` marker matches the owning lane (has its own `--selftest`) |
 | 0 | Preflight: cache policy | `scripts/bootstrap/bootstrap-cache-policy.shs` | static | Cache scope/dir policy sourced by `bootstrap-from-scratch.sh` |
+| 0 | Preflight: speculative scheduler | `test/01_unit/scripts/bootstrap_scheduler_contract_test.shs` | run | DAG schema, overlap, leases, recursive invalidation, resource guard, and production override denial |
 | 1 | Seed: typed-reason receipt | `check-bootstrap-reason-receipt-guard.shs` | static | Bootstrap refuses to start without a typed-reason receipt |
 | 1 | Seed: planner admission bound | `verify-bootstrap-planner-admission-bound.shs` | static | A planner-admission-v2 receipt is well-formed and bounded before execution is attempted |
 | 2 | Stage 2 capability probe | `check-bootstrap-stage2-struct-receiver.shs` | static | A freshly built stage2 compiler can compile a struct-receiver method (fail-fast capability probe) |
@@ -126,6 +127,12 @@ work and is not done here.
 `check-bootstrap-stage2-struct-receiver.shs`,
 `check-bootstrap-essential-tools-smoke.shs`, `check-stage-log-diagnosable.shs`,
 `check-mcp-native-smoke.shs`, `check-freebsd-bootstrap-qemu.shs`.
+
+Coordinated `normal`/`full` runs additionally enter
+`bootstrap-strategy.sh`, which invokes the Stage-2 hello-world native-build
+qualification after smoke admission and before lineage/Stage-4 publication.
+See `bootstrap_speculative_scheduler.md`; the scheduler contract test is a
+fixture-based run gate, not a static-presence claim.
 
 Everything else in the table above — including
 `check-post-bootstrap-stage4-sspec.shs`,

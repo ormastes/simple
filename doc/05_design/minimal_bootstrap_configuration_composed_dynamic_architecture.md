@@ -100,6 +100,28 @@ Action key inputs are declarative and sorted. Environment inputs use an allowlis
 
 SCI has projection identities per section/consumer. App display changes invalidate app/catalog and composition-root identities but not interface schema or command projection identities.
 
+## Compatibility bootstrap scheduler slice
+
+The first scheduler slice is a shell recovery/control boundary above the
+existing stage engine, not a second compiler producer. Its frozen contracts are
+`simple-bootstrap-graph-v1`, `simple-bootstrap-generation-lease-v1`,
+`simple-bootstrap-task-receipt-v1`,
+`simple-bootstrap-failure-manifest-v1`, and
+`simple-bootstrap-invalidation-receipt-v1`.
+
+Stage-2 smoke admission is the speculative edge: the existing engine starts
+Stage 3 immediately, while the supervisor re-verifies the immutable admission
+and runs an independent hello-world native-build qualification with the
+resource remainder. Stage 3 remains quarantined. Lineage admission, Stage 4,
+deploy, and release require both task receipts under one unchanged lease.
+Parent failure or lease/source/policy drift recursively invalidates preserved
+descendants. One CPU slot or insufficient memory serializes qualification;
+resource pressure never authorizes oversubscription or a skipped gate.
+
+The pure-Simple scheduler later consumes the same contracts and replaces
+polling with typed stage events/idempotent steps. The shell recovery boundary
+and existing smoke/provenance/deploy gates remain.
+
 ## Diagnostics
 
 Stable categories include malformed image, unsupported required section, overlap/bounds/overflow, digest/signature failure, duplicate binding/interface, undeclared slot, unsafe path, capability denial, artifact missing, unsupported interface major, descriptor too short, unstable provider query, non-callable entry, generation pinned, unknown compatibility, and bootstrap reason required.

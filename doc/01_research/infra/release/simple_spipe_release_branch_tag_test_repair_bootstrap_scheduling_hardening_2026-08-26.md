@@ -170,6 +170,19 @@ Proposed commands include `simple check --discover-all`, `simple build --repair-
 
 ## Bootstrap scheduler redesign
 
+**Implementation update (2026-08-27):** the first compatibility-supervisor
+slice is implemented by `scripts/bootstrap/bootstrap-strategy.sh` and the typed
+`bootstrap-graph.sdn`/generation-lease/task/failure/invalidation receipts. It
+starts the existing Stage-3 child critical path at the existing immutable
+Stage-2 smoke-admission boundary while the supervisor runs an independent
+Stage-2 native-build qualification. Outputs remain quarantined, resource
+starvation serializes rather than oversubscribes, and late parent/stale-lease
+failures recursively invalidate preserved descendants. Stage production and
+trust checks remain owned by the existing engine. The remaining migration is
+typed engine events plus idempotent pure-Simple `bootstrap step` ownership;
+`clean-release` and `one-binary` isolated continuations remain explicitly on
+the legacy `adhoc` path rather than being simulated.
+
 Preserve the existing phase model and trust primitives: Rust seed/runtime authority; minimal phase-2 compiler; self-hosting phase 3; full CLI phase 4; UI/MCP/LSP tools; whole release tests; snapshots, receipts, parent/child hash binding, sanity probes, admitted immutable copies, rejected preservation, verified-stage constraints, private caches, resource evidence, deployment receipts, and rollback copies.
 
 Compiler states are Absent → Building → Built → SmokeAdmitted → Qualifying → Qualified → ReleaseAdmitted, with Rejected, Invalidated, Cancelled, and InfrastructureBlocked failure states. `SmokeAdmitted` verifies executable identity, stable hash, valid parent/source/runtime/tool receipts, a minimal compile/link/run fixture, no seed/stub/delegation violation, and publication to quarantined immutable storage.

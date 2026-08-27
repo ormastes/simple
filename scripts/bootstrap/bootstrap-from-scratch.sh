@@ -511,11 +511,37 @@ if [ -n "${resume_stage3_output}" ]; then
 fi
 
 if [ -n "${resume_stage4_output}" ]; then
+  scheduler_stage4_quarantine=${SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE:-0}
+  case "${scheduler_stage4_quarantine}" in 0|1) ;; *) exit 1 ;; esac
+  scheduler_lineage_admission=${SIMPLE_BOOTSTRAP_LINEAGE_ADMISSION:-}
+  scheduler_lineage_sha256=${SIMPLE_BOOTSTRAP_LINEAGE_ADMISSION_SHA256:-}
+  [ -n "${scheduler_lineage_admission}" ] &&
+    [ -n "${scheduler_lineage_sha256}" ] || {
+    echo "error: Stage 4 resume requires a scheduler lineage admission" >&2
+    exit 1
+  }
+  . "${bootstrap_early_repo_root}/scripts/bootstrap/bootstrap-scheduler-contract.shs"
+  [ "$(bootstrap_scheduler_hash_file "${scheduler_lineage_admission}" 2>/dev/null || true)" = \
+      "${scheduler_lineage_sha256}" ] || {
+    echo "error: scheduler lineage admission hash did not verify" >&2; exit 1;
+  }
+  scheduler_lineage_generation=$(bootstrap_scheduler_manifest_value generation \
+    "${scheduler_lineage_admission}") || exit 1
+  scheduler_lineage_lease_sha=$(bootstrap_scheduler_manifest_value lease_sha256 \
+    "${scheduler_lineage_admission}") || exit 1
+  scheduler_lineage_output=$(bootstrap_scheduler_manifest_value bootstrap_output \
+    "${scheduler_lineage_admission}") || exit 1
+  bootstrap_scheduler_verify_lineage_admission \
+    "${scheduler_lineage_admission}" "${scheduler_lineage_generation}" \
+    "${scheduler_lineage_lease_sha}" "${scheduler_lineage_output}" || {
+    echo "error: scheduler lineage admission did not re-verify" >&2; exit 1;
+  }
   [ -z "${resume_stage3_output}" ] && [ "${full_bootstrap}" -eq 0 ] &&
-    [ "${fresh_cache}" -eq 0 ] && [ "${release_tests}" -eq 0 ] &&
+    [ "${fresh_cache}" -eq 0 ] &&
     [ "${diagnostic_sweep}" -eq 0 ] && [ "${diagnostics_mode}" = off ] &&
-    [ "${deploy}" -eq 1 ] || {
-    echo "error: Stage 4 resume requires --deploy and excludes rebuild/release/diagnostic options" >&2
+    { [ "${deploy}" -eq 1 ] ||
+      [ "${scheduler_stage4_quarantine}" -eq 1 ]; } || {
+    echo "error: Stage 4 resume requires --deploy or the qualified scheduler quarantine authority and excludes rebuild/diagnostic options" >&2
     exit 1
   }
   case "${jobs}" in ''|1) jobs=1 ;; *) echo "error: Stage 4 resume permits only --jobs=1 (resume reuses the already-admitted stage-3 artifact and only relinks the full CLI; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
@@ -554,6 +580,15 @@ fi
 
 if [ "${deploy}" -eq 1 ] || [ "${bootstrap_mode}" = "one-binary" ]; then
   full_cli=1
+fi
+
+# A caller-controlled "supervised" environment marker is routing state, never
+# publication authority. Coordinated normal/full Stage 4 must enter through the
+# admitted resume above, where the immutable lineage receipt is re-verified.
+if [ "${bootstrap_strategy}" != adhoc ] && [ "${full_cli}" -eq 1 ] &&
+   [ -z "${resume_stage4_output}" ]; then
+  echo "error: coordinated Stage 4 requires scheduler lineage admission; use --strategy=adhoc only for the explicit legacy lane" >&2
+  exit 1
 fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -603,6 +638,11 @@ portable_lock_canonical_output "${output_dir}" || {
   exit 1
 }
 output_dir=${PORTABLE_LOCK_CANONICAL_OUTPUT}
+[ -z "${resume_stage4_output}" ] ||
+  [ "${output_dir}" = "${scheduler_lineage_output}" ] || {
+  echo "error: Stage 4 output differs from scheduler lineage admission" >&2
+  exit 1
+}
 bootstrap_lock_root="$(dirname -- "${output_dir}")/.simple-bootstrap-locks"
 bootstrap_lock_name="output-$(bootstrap_stage3_args_sha256 "${output_dir}")"
 portable_lock_acquire "${bootstrap_lock_root}" "${bootstrap_lock_name}" \

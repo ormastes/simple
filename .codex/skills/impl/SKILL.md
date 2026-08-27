@@ -208,6 +208,12 @@ Before declaring implementation complete, verify:
   the smallest named target/provider/SCI projection, retain its compatibility
   receipt, and reserve full bootstrap for typed incompatibility or explicit
   release/trust targets.
+- When that typed decision selects a full bootstrap, use the canonical
+  `bootstrap-from-scratch.sh --strategy=normal|full` entrypoint and inspect its
+  generation lease plus lineage/failure manifest. Never deploy an artifact from
+  a tainted/invalidated generation. `clean-release` and `one-binary` remain
+  explicit `adhoc` compatibility lanes until the isolated continuation exists;
+  see `doc/07_guide/tooling/bootstrap_speculative_scheduler.md`.
 - Focused pure-Simple compiler/interpreter/loader work may use an admitted Stage
   2 or 3 binary exactly as that guide permits: record path/hash/stage/provenance
   and commands, isolate output/cache, fail closed on unsupported commands, and
