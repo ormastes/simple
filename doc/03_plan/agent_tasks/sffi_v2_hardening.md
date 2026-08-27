@@ -414,3 +414,7 @@ passing placeholder.
     handle declarations and all 14 proof-of-concept evaluator access/release
     calls must retain lexical FFI scopes. Do not copy AST data, add lookups, or
     alter the evaluator's direct access/release call count.
+76. Keep the source-only SFFI census honest and useful: report lexical raw-call
+    counts only as a source estimate, never as backing, ABI proof, provider
+    admission, or signature evidence. Preserve its linear source scan and use
+    the metric to prioritize scope containment without adding call-time work.

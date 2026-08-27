@@ -467,3 +467,15 @@ a claim that SFFI v2 is complete.
   access/release count with no copies, allocation, lookup, lock, or retry.
 - FAIL (global admission): the interpreter registry remains outside
   artifact-bound ABI/signature/verification admission and is unsafe-only.
+
+## Follow-up: source-only unsafe-minimization census (2026-08-27)
+
+- PASS (tooling): source-only mode now performs one linear source scan for raw
+  calls inside lexical FFI capability blocks. It reports 1,873 observed calls
+  across 1,064 symbols and labels the result
+  `source_lexical_estimate_only`.
+- PASS (performance shape): the measurement is build/audit-time only; it adds
+  no runtime call-path allocation, lookup, lock, copy, branch, or dispatch.
+- FAIL (admission): lexical source scope does not prove loaded-provider ABI,
+  ownership, artifact identity, verification receipt, or signature. The census
+  still reports zero verified-and-signed rows.
