@@ -375,3 +375,8 @@ passing placeholder.
     compilation, report a negative timing sentinel on clock failure/regression,
     and never add invalid timing to the aggregate. This is a cold diagnostics
     path and does not establish signed provider admission.
+68. Dashboard statistics metadata uses the same shared integer wall-clock ABI.
+    A failed read stores the explicit `-1` non-success timestamp rather than
+    truncating it to epoch zero; collection still performs one read. Redis
+    time failure needs a separate command-protocol contract, so do not collapse
+    it into this metadata-only change.

@@ -366,3 +366,13 @@ a claim that SFFI v2 is complete.
   reads; no allocation, lookup, lock, retry, or hot call-path work was added.
 - FAIL (global admission): no signed runtime artifact or verification receipt
   exists, so the provider remains unsafe/unsigned globally.
+
+## Follow-up: dashboard statistics clock ABI repair (2026-08-27)
+
+- PASS (static/source): dashboard metadata uses the shared integer microsecond
+  clock in a lexical unsafe scope. A failed clock now records `-1`, not epoch
+  zero from integer division.
+- PASS (performance shape): collection retains one clock read and adds no
+  allocation, lookup, lock, retry, or copy.
+- FAIL (global admission): this source contract is not signed provider
+  evidence; global SFFI verification remains unavailable.
