@@ -72,7 +72,7 @@ impl HirLowering:
         if not scan.found_value_return:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or not scan.resolved_name.?:
-            if self.ambient_bootstrap_enabled():
+            if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                 # The bootstrap route has no whole-program inference pass.
                 # Preserve the value dynamically; Unit would discard it.
                 return HirType(kind: HirTypeKind.Any, span: fn_decl.span)
@@ -201,40 +201,15 @@ impl HirLowering:
                 lowered_elements = lowered_elements.push(
                     self.imported_surface_type(element, imported_module_name))
             return HirType(kind: HirTypeKind.Tuple(lowered_elements), span: type_.span)
-        if parser_type_kind_is_pointer(type_.kind):
-            val pointee = parser_type_kind_pointer_inner(type_.kind, type_)
-            return HirType(
-                kind: HirTypeKind.Ptr(
-                    self.imported_surface_type(pointee, imported_module_name),
-                    parser_type_kind_pointer_is_mutable(type_.kind)),
-                span: type_.span)
-        val union_members = parser_type_kind_union_members(type_.kind)
-        if union_members.len() > 0:
-            var projected_members: [HirType] = []
-            for member in union_members:
-                projected_members = projected_members.push(
-                    self.imported_surface_type(member, imported_module_name))
-            return HirType(kind: HirTypeKind.Union(projected_members), span: type_.span)
-        if parser_type_kind_is_array(type_.kind):
-            val nested_element = parser_type_kind_array_element(type_.kind, type_)
-            return HirType(
-                kind: HirTypeKind.Array(
-                    self.imported_surface_type(nested_element, imported_module_name),
-                    nil),
-                span: type_.span)
-        if parser_type_kind_is_function(type_.kind):
-            var projected_params: [HirType] = []
-            for fn_param in parser_type_kind_function_params(type_.kind):
-                projected_params = projected_params.push(
-                    self.imported_surface_type(fn_param, imported_module_name))
-            return HirType(
-                kind: HirTypeKind.Function(
-                    projected_params,
-                    self.imported_surface_type(
-                        parser_type_kind_function_return(type_.kind, type_),
-                        imported_module_name),
-                    []),
-                span: type_.span)
+        val array_element_name = parser_type_kind_array_element_name(type_.kind)
+        if array_element_name != "":
+            val raw_element_id = self.symbols.lookup_qualified_type_raw(
+                imported_module_name, array_element_name)
+            val element = if raw_element_id >= 0:
+                HirType(kind: HirTypeKind.Named(SymbolId(id: raw_element_id), []), span: type_.span)
+            else:
+                HirType(kind: self.lower_named_kind(array_element_name, [], type_.span), span: type_.span)
+            return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
         self.lower_type(type_)
 
     me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text) -> HirType:
@@ -303,25 +278,6 @@ impl HirLowering:
                     imported_module_name),
                 []),
             span: callable.span)
-
-    me imported_surface_projected_name_type(shape: text, type_name: text, imported_module_name: text, span: Span) -> HirType?:
-        if shape != "named" and shape != "named_array":
-            return nil
-        val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
-            imported_module_name, type_name)
-        var element: HirType = HirType(kind: HirTypeKind.Error, span: span)
-        if raw_symbol_id >= 0:
-            element = HirType(
-                kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []),
-                span: span)
-        else:
-            element = HirType(
-                kind: self.lower_named_kind(type_name, [], span), span: span)
-        var projected: HirType = element
-        if shape == "named_array":
-            projected = HirType(
-                kind: HirTypeKind.Array(element, nil), span: span)
-        Some(projected)
 
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:
